@@ -64,7 +64,6 @@ impl StepGqlError {
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends the marker of a GQL query that failed before it could be lowered; see
     /// [`StepGqlError`].
-    #[allow(dead_code)] // the GQL lowering (T9a) is the caller
     pub(crate) fn gql_error(self, error: TraverserError) -> Self {
         self.push_step(GraphStep::Filter(
             "gql:error",

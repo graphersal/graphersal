@@ -17,7 +17,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
 | `runtime.rs` | what the internal steps share at run time: `GqlElement` handles, `Binding` (slot -> current object / path label / `gql:project` column), the traverser-backed `Env` (`Row`), value conversions (an element column stays a live `TraverserValue::Vertex`/`Edge`), `eval_error` (evaluator error -> `TraverserError::Gql`, kind `Data` for class `22`, GQLSTATUS kept), the total `ORDER BY` order (`compare_order`; tests of all steps in `runtime/tests.rs`) |
-| `lower.rs` | the plan to `GraphStep`s: existing steps plus internal `gql:*` steps |
+| `lower.rs` | the plan to `GraphStep`s (existing builders plus internal `gql:*` builders; every fallible part first, an error becomes the `gql:error` marker) and the Rust entry points `GraphTraversalSource::gql` / `gql_with` (start step only); its module docs are the table of forms per construct; `as()` only for a binding read while it is not the current element (or a join / trail / branch reason of the plan); `$param` pushdown decided on the value; tests `tests/all/gql_tests.rs` (differential vs Rhai twins, profile, errors) |
 
 Files appear as their stage lands; this table is the target layout.
 

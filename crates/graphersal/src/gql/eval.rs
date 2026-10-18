@@ -57,9 +57,6 @@
 //! Errors are [`EvalError`]s carrying a GQLSTATUS ([`status`]), a message and the span of the
 //! offending expression; the step that runs the evaluator maps them into a `TraverserError`.
 
-// Used from the internal steps (T7) on; until then only the tests reach it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
@@ -224,6 +221,7 @@ impl<E> Value<E> {
     }
 
     /// The value as a property value; `element` turns an element reference into one.
+    #[cfg_attr(not(test), allow(dead_code, reason = "for stage 1b (aggregates, LET)"))]
     pub(crate) fn into_property(
         self,
         element: &mut impl FnMut(E) -> ElementProperty,

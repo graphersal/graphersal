@@ -38,9 +38,6 @@
 //! so a sort over mixed input is deterministic. `NULL` is the largest value: last ascending, first
 //! descending, as in Neo4j (ISO GQL leaves the default null order to the implementation).
 
-// Used from the GQL lowering (T9a) on; until then only the tests reach it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -134,6 +131,7 @@ pub(crate) fn labels_read<'a, S: GraphStorage + 'a>(
 
 /// A [`Scope`] for [`compile`](super::eval::compile): variable `names[slot]` is slot `slot`,
 /// parameters come from `parameter`.
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
 pub(crate) struct BindingScope<'a, F: Fn(&str) -> Option<ElementProperty>> {
     /// The variable name of each slot.
     pub(crate) names: &'a [CompactString],

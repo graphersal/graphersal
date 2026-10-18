@@ -67,7 +67,6 @@ impl<S: GraphStorage> StepGqlFilter<S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:filter(condition)`; see [`StepGqlFilter`].
-    #[allow(dead_code)] // the GQL lowering (T9a) is the caller
     pub(crate) fn gql_filter(
         self,
         query: Arc<str>,
@@ -83,7 +82,10 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:filter(condition)`; see [`StepGqlFilter`].
-    #[allow(dead_code)] // the GQL lowering (T9a) is the caller
+    #[allow(
+        dead_code,
+        reason = "used inside union branches from the edge patterns (T9b) on"
+    )]
     pub(crate) fn gql_filter(
         self,
         query: Arc<str>,

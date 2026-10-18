@@ -79,7 +79,6 @@ impl<S: GraphStorage> StepGqlProject<S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:project(columns)`; see [`StepGqlProject`].
-    #[allow(dead_code)] // the GQL lowering (T9a) is the caller
     pub(crate) fn gql_project(
         self,
         query: Arc<str>,

@@ -51,14 +51,6 @@
 //! dropped, a duplicate key in a map, a parameter that was not supplied. `22G02` for a negative
 //! `OFFSET` / `LIMIT` literal, `22G03` for one that is not an integer.
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "used from the planner (T8) and the lowering (T9a) on"
-    )
-)]
-
 use std::collections::HashMap;
 
 use super::ast::{
@@ -105,6 +97,10 @@ pub(crate) struct Binding {
 
 impl Binding {
     /// Whether the variable is written more than once (a join).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the tests; the planner decides joins")
+    )]
     pub(crate) fn joined(&self) -> bool {
         self.occurrences.len() > 1
     }
@@ -274,6 +270,7 @@ impl BoundQuery {
     }
 
     /// The binding of the variable `name`.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn lookup(&self, name: &str) -> Option<BindingId> {
         self.bindings
             .iter()
@@ -283,6 +280,13 @@ impl BoundQuery {
 }
 
 /// Binds `query` without checking parameter values (the caller checks them later).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "used by the tests; queries bind with their parameters"
+    )
+)]
 pub(crate) fn bind(query: &Query) -> Result<BoundQuery, TraverserError> {
     Binder::new(query)
         .run(None)

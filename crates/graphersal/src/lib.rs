@@ -25,7 +25,8 @@ pub mod changes;
 /// Error types and their diagnostic (`help()`) text.
 pub mod error;
 pub mod exec;
-// The GQL query language: internal until its entry point lands.
+// The GQL query language: internal; its entry points are `GraphTraversalSource::gql` and
+// `gql_with`.
 #[cfg(feature = "gql")]
 pub(crate) mod gql;
 // Graph storage, schema and indexes: internal; the public items are re-exported by the topic

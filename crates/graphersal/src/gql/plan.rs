@@ -32,11 +32,6 @@
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a
 //! scan. [`ANCHOR_VARIABLE`] is the reserved name of that anchor.
 
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "used from the lowering (T9a) on")
-)]
-
 use std::collections::BTreeSet;
 
 use super::ast::{BinaryOp, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal};
@@ -47,6 +42,7 @@ use super::lexer::Span;
 /// `gql()`): the empty string. No valid query can write it: a plain identifier is never empty
 /// and an empty back-quoted identifier is a lexical error, so the anchor never collides with a
 /// variable of the query.
+#[cfg_attr(not(test), allow(dead_code, reason = "the phase 2 anchor seam"))]
 pub(crate) const ANCHOR_VARIABLE: &str = "";
 
 /// The planned query (module docs).
@@ -67,11 +63,13 @@ pub(crate) struct LogicalPlan {
 
 impl LogicalPlan {
     /// Whether the binding `id` needs a path label (`as()`).
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn must_label(&self, id: BindingId) -> bool {
         self.labelling.get(id.0).is_some_and(Labelling::needed)
     }
 
     /// The bindings that need a path label, in id order.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn labelled(&self) -> Vec<BindingId> {
         (0..self.labelling.len())
             .map(BindingId)
@@ -154,6 +152,7 @@ pub(crate) struct ElementFilters {
 
 impl ElementFilters {
     /// Whether there is no conjunct at all.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_empty(&self) -> bool {
         self.pushed.is_empty() && self.residual.is_empty()
     }
@@ -189,6 +188,7 @@ pub(crate) struct Labelling {
 
 impl Labelling {
     /// Whether any reason holds.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn needed(&self) -> bool {
         self.read || self.join || self.trail || self.branch
     }

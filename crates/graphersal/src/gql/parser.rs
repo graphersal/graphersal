@@ -55,9 +55,6 @@
 //!   neither parsing nor any later recursive stage (binder, evaluator, `Drop`) can overflow the
 //!   stack, whatever the input.
 
-// Called from the lowering (T9a) on; until then only the tests reach it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, EdgePattern, Expr, ExprKind,

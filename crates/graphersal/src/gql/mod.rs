@@ -5,8 +5,11 @@
 //! traversal. ISO GQL is the normative spelling; common Cypher spellings are accepted as aliases.
 //! Version 1 is read-only.
 //!
-//! Planned stages, one unit each, testable alone (implemented so far: the lexer, the AST, the
-//! parser, the binder, the logical plan and the planner):
+//! The entry points are [`GraphTraversalSource::gql`](crate::GraphTraversalSource::gql) and
+//! [`GraphTraversalSource::gql_with`](crate::GraphTraversalSource::gql_with) (in `lower.rs`).
+//!
+//! Stages, one unit each, testable alone (edge patterns are lowered from the next part of stage
+//! 1a on; until then they fail as not supported yet):
 //!
 //! 1. **lexer** (`lexer.rs`): source text to tokens, each with a span (byte range, line, column);
 //!    its module docs fix the lexical rules (contextual keywords, the `--` comment rule, escapes);
@@ -21,7 +24,8 @@
 //!    classifies which conjuncts may be pushed into `has()`;
 //! 5. **planner** (`planner.rs`): the start node and expansion order, read only through
 //!    `GraphStorage` (statistics and the property indexes), deterministic;
-//! 6. **lowering**: the planned query to `GraphStep`s, existing steps plus internal `gql:*`
+//! 6. **lowering** (`lower.rs`, its module docs list the form of every construct): the planned
+//!    query to `GraphStep`s, existing steps plus internal `gql:*`
 //!    steps (`gql:filter`, `gql:project`, `gql:order`, the `gql:error` marker; their shared
 //!    run-time part is `runtime.rs`), handed to the optimizer like any other plan.
 
@@ -29,6 +33,7 @@ pub(crate) mod ast;
 pub(crate) mod bind;
 pub(crate) mod eval;
 pub(crate) mod lexer;
+pub(crate) mod lower;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod planner;

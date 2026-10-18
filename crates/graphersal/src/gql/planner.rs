@@ -42,11 +42,6 @@
 //! - A conjunct over zero or several bindings is an [`Op::Filter`] right after the operation
 //!   that binds the last binding it reads (one with no binding right after the first scan).
 
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "used from the lowering (T9a) on")
-)]
-
 use super::ast::EdgeDirection;
 use super::bind::{BindingId, BindingKind, BoundQuery};
 use super::plan::{
@@ -69,6 +64,7 @@ pub(crate) trait PlannerFacts {
 
 /// No facts at all: every count unknown, no index.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
 pub(crate) struct NoFacts;
 
 impl PlannerFacts for NoFacts {

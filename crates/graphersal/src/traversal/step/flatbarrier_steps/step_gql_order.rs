@@ -82,7 +82,6 @@ impl<S: GraphStorage> StepGqlOrder<S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:order(keys)`; see [`StepGqlOrder`].
-    #[allow(dead_code)] // the GQL lowering (T9a) is the caller
     pub(crate) fn gql_order(
         self,
         query: Arc<str>,
