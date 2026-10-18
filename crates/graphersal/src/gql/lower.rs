@@ -524,6 +524,10 @@ fn parameter<'p>(
         .map(|(_, value)| value)
 }
 
+/// The labels for the step that reaches an element (`None`: no label restriction there) and the
+/// steps that run on the element.
+type ElementSteps<S> = (Option<Vec<String>>, Vec<Instr<S>>);
+
 struct Lowering<'q> {
     query: &'q str,
     shared: Arc<str>,
@@ -661,7 +665,7 @@ impl<'q> Lowering<'q> {
         id: BindingId,
         filters: &ElementFilters,
         checks: Vec<Instr<S>>,
-    ) -> Result<(Option<Vec<String>>, Vec<Instr<S>>), TraverserError> {
+    ) -> Result<ElementSteps<S>, TraverserError> {
         let mut instrs = Vec::new();
         let labels = self
             .bound

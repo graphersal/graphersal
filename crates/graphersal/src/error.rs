@@ -8863,6 +8863,7 @@ mod tests {
             // An offset inside a character or past the end never panics.
             let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 8..1000, "x").into_error(query);
             assert!(matches!(err, TraverserError::Gql { offset: 7, .. }));
+            #[allow(clippy::reversed_empty_ranges)] // a reversed span on purpose
             let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 1000..3, "x").into_error(query);
             assert!(matches!(
                 err,

@@ -465,12 +465,12 @@ fn bulk_passes_through_every_step() {
     let (query, parsed) = query("MATCH (n) RETURN n.lang = 'java', n.name AS name ORDER BY name");
     let (names, bindings) = slots(&[("n", Binding::Current)]);
     let condition = compiled(&parsed.ret.items[0].expr, &names);
-    let columns = vec![GqlColumn {
+    let columns = [GqlColumn {
         name: "name".into(),
         expr: compiled(&parsed.ret.items[1].expr, &names),
     }];
     let (order_names, order_bindings) = slots(&[("name", Binding::Column(0))]);
-    let keys = vec![GqlSortKey {
+    let keys = [GqlSortKey {
         expr: compiled(
             &parsed.order_by.as_ref().unwrap().items[0].expr,
             &order_names,

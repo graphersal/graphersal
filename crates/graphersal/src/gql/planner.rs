@@ -141,6 +141,9 @@ pub(crate) fn plan(
     Planner::new(bound, facts).run(anchor)
 }
 
+/// The order of a component's start: not the anchor's component, level, estimated size, binding id.
+type StartKey = (bool, u8, u64, BindingId);
+
 struct Planner<'q> {
     bound: &'q BoundQuery,
     facts: &'q dyn PlannerFacts,
@@ -198,7 +201,7 @@ impl<'q> Planner<'q> {
         let anchor = anchor.filter(|a| self.is_node(*a));
         // Each component with its start: the anchor's component first, then best start first
         // (level, estimated size, binding id).
-        let mut starts: Vec<((bool, u8, u64, BindingId), Vec<BindingId>)> = self
+        let mut starts: Vec<(StartKey, Vec<BindingId>)> = self
             .components()
             .into_iter()
             .map(|nodes| {

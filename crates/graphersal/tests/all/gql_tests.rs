@@ -281,8 +281,8 @@ fn several_patterns_are_a_cartesian_product() {
             .map(|row| {
                 format!(
                     "{}-{}",
-                    texts(&[row.clone()], "a")[0],
-                    texts(&[row.clone()], "s")[0]
+                    texts(std::slice::from_ref(row), "a")[0],
+                    texts(std::slice::from_ref(row), "s")[0]
                 )
             })
             .collect(),
@@ -886,7 +886,7 @@ mod differential {
                 r#"g.E().project("t", "w").by(__.label()).by("weight")"#.into(),
             ),
             (
-                "MATCH (a)<-[e]-(b) RETURN b.name AS b, e.weight AS w, a.name AS a".into(),
+                "MATCH (a)<-[e]-(b) RETURN b.name AS b, e.weight AS w, a.name AS a",
                 r#"g.E().project("b", "w", "a").by(__.outV().values("name")).by("weight").by(__.inV().values("name"))"#.into(),
             ),
             // Inline edge properties and edge WHERE (pushed and residual).

@@ -654,9 +654,9 @@ impl<'a> Lexer<'a> {
     /// Consumes digits of `radix`, with `_` allowed between two digits.
     fn digits(&mut self, radix: u32) {
         while let Some(c) = self.peek() {
-            if c.is_digit(radix) {
-                self.bump();
-            } else if c == '_' && self.peek_nth(1).is_some_and(|d| d.is_digit(radix)) {
+            if c.is_digit(radix)
+                || (c == '_' && self.peek_nth(1).is_some_and(|d| d.is_digit(radix)))
+            {
                 self.bump();
             } else {
                 return;

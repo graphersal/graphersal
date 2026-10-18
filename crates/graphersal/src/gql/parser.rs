@@ -386,24 +386,23 @@ impl<'a> Parser<'a> {
             format!("unexpected {}", describe(token)),
         )
         .expected(expected.iter().copied());
-        if token.kind == TokenKind::Ident {
-            if let Some(suggestion) = suggest_keyword(token.text, expected) {
-                builder = builder.suggestion(suggestion);
-            }
+        if token.kind == TokenKind::Ident
+            && let Some(suggestion) = suggest_keyword(token.text, expected)
+        {
+            builder = builder.suggestion(suggestion);
         }
         // A keyword written in lower or mixed case where a name could stand is likely meant as a
         // name (`order`, `end`); upper case is likely a misplaced clause.
-        if let TokenKind::Keyword(_) = token.kind {
-            if token.text != token.text.to_ascii_uppercase()
-                && expected
-                    .iter()
-                    .any(|e| *e == "an expression" || *e == "a variable")
-            {
-                builder = builder.alternative(format!(
-                    "{} is a keyword; to use it as a name, write it back-quoted: `{}`",
-                    token.text, token.text
-                ));
-            }
+        if let TokenKind::Keyword(_) = token.kind
+            && token.text != token.text.to_ascii_uppercase()
+            && expected
+                .iter()
+                .any(|e| *e == "an expression" || *e == "a variable")
+        {
+            builder = builder.alternative(format!(
+                "{} is a keyword; to use it as a name, write it back-quoted: `{}`",
+                token.text, token.text
+            ));
         }
         Box::new(builder)
     }
@@ -895,25 +894,24 @@ impl<'a> Parser<'a> {
     fn filler(&mut self, close: &TokenKind, close_text: &'static str) -> PResult<Filler> {
         let variable = self.pattern_variable()?;
         let token = self.peek();
-        if let TokenKind::Keyword(k) = token.kind {
-            if variable.is_none() && !matches!(k, Keyword::Is | Keyword::Where) {
-                if let Some(e) = self.construct_error() {
-                    return Err(e);
-                }
-                {
-                    let b = err(
-                        GqlErrorKind::Syntax,
-                        token.span,
-                        format!("unexpected keyword {}", token.text),
-                    )
-                    .expected(["a variable", "`:`", "IS", "`{`", "WHERE", close_text])
-                    .alternative(format!(
-                        "{} is a keyword; to use it as a variable, write it back-quoted: `{}`",
-                        token.text, token.text
-                    ));
-                    return Err(Box::new(b));
-                }
+        if let TokenKind::Keyword(k) = token.kind
+            && variable.is_none()
+            && !matches!(k, Keyword::Is | Keyword::Where)
+        {
+            if let Some(e) = self.construct_error() {
+                return Err(e);
             }
+            let b = err(
+                GqlErrorKind::Syntax,
+                token.span,
+                format!("unexpected keyword {}", token.text),
+            )
+            .expected(["a variable", "`:`", "IS", "`{`", "WHERE", close_text])
+            .alternative(format!(
+                "{} is a keyword; to use it as a variable, write it back-quoted: `{}`",
+                token.text, token.text
+            ));
+            return Err(Box::new(b));
         }
         let labels = if self.eat(&TokenKind::Colon).is_some() || self.eat_kw(Keyword::Is).is_some()
         {
