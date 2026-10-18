@@ -368,5 +368,6 @@ traversal instead.
 ## Later
 
 Element- and label-level read security (a `Filtered<S, Policy>` storage decorator) and a
-`ReadOnly<S>` decorator are additive follow-ups; a future GQL/Cypher text front end uses the same
-authorizer.
+`ReadOnly<S>` decorator are additive follow-ups. [`g.gql()`](../gql/index.md) uses the same
+authorizer: a GQL query is lowered into ordinary steps before the check, so it is allowed or
+denied exactly like its Gremlin equivalent.

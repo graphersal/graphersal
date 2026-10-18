@@ -81,6 +81,7 @@ All off by default and strictly additive:
 | `io` | GraphSON 3.0 and GraphML import and export |
 | `display` | results rendered as tables |
 | `serde` | serialization of change sets and schemas, the JSON visualizer |
+| `gql` | GQL (ISO/IEC 39075) read queries: `MATCH ... WHERE ... RETURN ...` as a start step, Cypher spellings as aliases |
 | `persist` | snapshots, the journal and the Store; `persist-zstd` and `persist-zip` add zstd chunks and ZIP backups |
 | `alloc-tracking` | exact per-step memory figures in `profile()` (the binary installs the allocator) |
 

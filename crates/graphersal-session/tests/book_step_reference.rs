@@ -386,6 +386,7 @@ const SEE_ALSO: &[(&str, &str, &str)] = &[
     ("merge_v", "Upserts", "users_guide/upserts.md"),
     ("merge_e", "Upserts", "users_guide/upserts.md"),
     ("math", "Math Expressions", "users_guide/math.md"),
+    ("gql", "GQL Queries", "gql/index.md"),
     (
         "sack",
         "Sack and Operators",

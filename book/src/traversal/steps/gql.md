@@ -17,3 +17,7 @@ gql(arg1: string, arg2: any)
 ```rhai,graph=modern
 g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name", #{min: 30}).to_list()   // [#{"name": "josh"}, #{"name": "peter"}]
 ```
+
+## See also
+
+- [GQL Queries](../../gql/index.md)

@@ -38,7 +38,9 @@ are not implemented yet in [TinkerPop Compliance](../for_developers/tinkerpop_co
   `g.with(key, value)` ([Execution Options Reference](execution_options_reference.md)).
 - **No `g.tx()`.** Every traversal is one unit of work; a host can run a whole script as one unit
   ([Transactions](transactions.md)).
-- **No Cypher or GQL** front end yet; the multi-label storage is the groundwork for one.
+- **GQL reads only.** [`g.gql()`](../gql/index.md) runs ISO GQL read queries (Cypher spellings
+  as aliases) as a start step; aggregation, `OPTIONAL MATCH`, `WITH`, quantified edges and path
+  variables are not supported yet, and GQL writes are refused (use the Gremlin mutation steps).
 - **Saved queries only read** and are called at the start of a traversal (`g.query(..)`), not on
   incoming traversers ([Saved Queries](saved_queries.md)).
 
