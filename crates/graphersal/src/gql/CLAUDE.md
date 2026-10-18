@@ -29,6 +29,11 @@ Files appear as their stage lands; this table is the target layout.
   bounds its recursion (`MAX_DEPTH`) and every expression tree's height (`MAX_HEIGHT`), so later
   recursive stages recurse at most `MAX_HEIGHT` levels over the AST. Keep the recursive parser functions thin
   (rare arms in functions of their own): unoptimized builds give every temporary a stack slot.
+- **Bounded pattern size.** The binder refuses a `MATCH` clause with more than
+  `bind::MAX_MATCH_EDGES` (64) edge patterns (kind `Limit`, `54001`): the trail checks grow with
+  the square of a clause's edges, and every later stage with them. Keep every stage linear in
+  the pattern otherwise (no `contains` scans per edge or per step); measure a long pattern after
+  changing the planner, the lowering or the path analysis.
 - **Spans everywhere.** Every token and AST node carries byte range, line and column, so every
   later stage can point at the offending text (caret under the span, multi-line aware). Errors
   name the expected tokens, suggest "did you mean ..." and carry the GQLSTATUS code as a field.

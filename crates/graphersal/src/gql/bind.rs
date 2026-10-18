@@ -4,7 +4,8 @@
 //! [`bind`] (or [`bind_with_parameters`] when the supplied parameter names are known) never
 //! panics; every semantic error is a [`TraverserError::Gql`] of kind
 //! [`GqlErrorKind::Semantic`] with the span of the offending text and, for a misspelt name, a
-//! "did you mean" suggestion.
+//! "did you mean" suggestion; a `MATCH` clause past the pattern size limit is kind
+//! [`GqlErrorKind::Limit`] (see "Pattern size").
 //!
 //! # What it produces
 //!
@@ -50,6 +51,15 @@
 //! variable, a duplicate column name, an `ORDER BY` key reading a variable that `RETURN DISTINCT`
 //! dropped, a duplicate key in a map, a parameter that was not supplied. `22G02` for a negative
 //! `OFFSET` / `LIMIT` literal, `22G03` for one that is not an integer.
+//!
+//! # Pattern size (kind `Limit`, `54001`)
+//!
+//! One `MATCH` clause holds at most [`MAX_MATCH_EDGES`] edge patterns over all its
+//! comma-separated paths. Edge uniqueness checks every edge against every earlier edge of the
+//! same clause, so the plan grows with the square of a clause's edges; the limit keeps every
+//! query fast to prepare. It is checked here, before any other work on the clause (the parser
+//! itself is linear in a long path). Separate `MATCH` clauses are not limited together: edge
+//! uniqueness holds within one clause, and their cost adds up linearly.
 
 use std::collections::HashMap;
 
@@ -305,10 +315,38 @@ pub(crate) fn bind_with_parameters<'a>(
         .map_err(|e| e.into_error(&query.source))
 }
 
+/// The most edge patterns one `MATCH` clause may hold, over all its comma-separated paths
+/// (module docs, "Pattern size").
+///
+/// Every edge of a clause is checked against every earlier edge of the clause (edge
+/// uniqueness, one `where(P.neq(..))` per pair of edges whose labels may overlap), so a clause
+/// of `n` edges plans `n(n-1)/2` checks and the lowering, the optimizer and the path analysis
+/// are quadratic in `n`: in a debug build 400 edges took 0.3 s to prepare and run, 2000 edges
+/// 8 s. 64 edges (2016 checks) take a few milliseconds and lie far beyond any realistic
+/// pattern; a longer walk is a Gremlin `repeat()`.
+pub(crate) const MAX_MATCH_EDGES: usize = 64;
+
 type BResult<T> = Result<T, Box<GqlErrorBuilder>>;
 
 fn semantic(span: Span, message: impl Into<String>) -> GqlErrorBuilder {
     GqlErrorBuilder::new(GqlErrorKind::Semantic, span.start..span.end, message)
+}
+
+/// The error of a `MATCH` clause with more than [`MAX_MATCH_EDGES`] edge patterns, at the first
+/// edge past the limit.
+fn too_many_edges(span: Span) -> Box<GqlErrorBuilder> {
+    let b = GqlErrorBuilder::new(
+        GqlErrorKind::Limit,
+        span.start..span.end,
+        format!("the MATCH clause has more than {MAX_MATCH_EDGES} edge patterns"),
+    )
+    .alternative(
+        "split the pattern into several MATCH clauses that share a variable, for example \
+         MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness then holds \
+         within each clause only), or walk a long path with Gremlin repeat(), for example \
+         g.v().repeat(__.out()).times(100)",
+    );
+    Box::new(b)
 }
 
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
@@ -416,6 +454,14 @@ impl<'q> Binder<'q> {
     // ----- patterns -----
 
     fn declare_clause(&mut self, clause: usize, m: &MatchClause) -> BResult<BoundMatch> {
+        if let Some(edge) = m
+            .patterns
+            .iter()
+            .flat_map(|path| &path.steps)
+            .nth(MAX_MATCH_EDGES)
+        {
+            return Err(too_many_edges(edge.edge.span));
+        }
         let mut edges_here: Vec<BindingId> = Vec::new();
         let mut paths = Vec::with_capacity(m.patterns.len());
         for path in &m.patterns {

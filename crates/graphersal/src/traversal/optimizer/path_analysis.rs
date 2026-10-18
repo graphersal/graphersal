@@ -83,7 +83,31 @@ impl SmallLabelSet {
         if other.0.iter().all(|l| self.contains(l)) {
             return self.clone();
         }
-        SmallLabelSet::new(self.0.iter().chain(other.0.iter()).cloned())
+        // Both sides are sorted and deduplicated: one merge, linear (re-sorting the chain made a
+        // walk that adds one label per step quadratic in the labels).
+        let (a, b) = (&self.0[..], &other.0[..]);
+        let mut merged = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while let (Some(x), Some(y)) = (a.get(i), b.get(j)) {
+            match x.cmp(y) {
+                std::cmp::Ordering::Less => {
+                    merged.push(x.clone());
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(y.clone());
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(x.clone());
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        merged.extend(a.get(i..).unwrap_or_default().iter().cloned());
+        merged.extend(b.get(j..).unwrap_or_default().iter().cloned());
+        SmallLabelSet(Arc::from(merged))
     }
 
     fn without(&self, labels: &[CompactString]) -> SmallLabelSet {
@@ -340,8 +364,11 @@ impl PathAnalysis {
         }
         let produced = self.produced.borrow();
         let required = self.required.borrow();
+        // A set: a scan of `produced` per required label is quadratic in the labels.
+        let produced: std::collections::HashSet<&str> =
+            produced.iter().map(CompactString::as_str).collect();
         for (label, _step_name) in required.iter() {
-            if !produced.iter().any(|p| p == label) {
+            if !produced.contains(label.as_str()) {
                 return Err(Box::new(TraverserError::Value(
                     ValueError::UndeclaredLabel {
                         label: label.to_string(),

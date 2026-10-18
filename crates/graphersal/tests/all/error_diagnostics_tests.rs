@@ -7406,6 +7406,51 @@ mod gql {
     }
 
     #[test]
+    fn gql_match_past_the_edge_limit_suggests_clauses_or_repeat() {
+        // 65 edge patterns in one MATCH, one past the limit.
+        let query = format!("MATCH (a){}-[e]->(z) RETURN z", "-->()".repeat(64));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains("the MATCH clause has more than 64 edge patterns"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: split the pattern into several MATCH clauses that share a variable, for \
+                 example MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness \
+                 then holds within each clause only), or walk a long path with Gremlin repeat(), \
+                 for example g.v().repeat(__.out()).times(100). The query is larger than gql() \
+                 accepts."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_long_operator_chain_help_leads_with_the_in_advice() {
+        let terms: Vec<String> = (0..600).map(|i| format!("p.a{i} = 1")).collect();
+        let query = format!("MATCH (p) WHERE {} RETURN p", terms.join(" OR "));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains("Help: split long AND / OR chains, and test many alternatives with IN"),
+            "{report}"
+        );
+        assert!(
+            report.contains("The query is larger than gql() accepts."),
+            "{report}"
+        );
+        assert!(!report.contains("nests deeper"), "{report}");
+    }
+
+    #[test]
     fn gql_undefined_variable_suggests_the_declared_one() {
         let (err, report) = gql_failure(|g| {
             g.gql("MATCH (p:person)-[:knows]->(f) RETURN p.name, g.name")
