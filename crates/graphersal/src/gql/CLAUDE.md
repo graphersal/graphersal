@@ -10,7 +10,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 
 | File | Stage |
 |---|---|
-| `lexer.rs` | tokens with spans; comments `//`, `/* */`, `--`; back-quoted identifiers; case-insensitive keywords |
+| `lexer.rs` | tokens with spans; comments `//`, `/* */`, `--` (comment unless `-->`/`--(` or after `)` on the same line); back-quoted identifiers; contextual, case-insensitive keywords; its module docs are the lexical spec |
 | `ast.rs`, `parser.rs` | hand-written recursive descent to an AST that keeps the source text |
 | `bind.rs` | variables, scopes, `$param` references, column names, GQLSTATUS for semantic errors |
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |

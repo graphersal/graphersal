@@ -5,10 +5,11 @@
 //! traversal. ISO GQL is the normative spelling; common Cypher spellings are accepted as aliases.
 //! Version 1 is read-only.
 //!
-//! Planned stages, one unit each, testable alone (none is implemented yet):
+//! Planned stages, one unit each, testable alone (implemented so far: the lexer and the AST):
 //!
-//! 1. **lexer**: source text to tokens, each with a span (byte range, line, column);
-//! 2. **parser**: hand-written recursive descent to an AST that keeps every span and the source
+//! 1. **lexer** (`lexer.rs`): source text to tokens, each with a span (byte range, line, column);
+//!    its module docs fix the lexical rules (contextual keywords, the `--` comment rule, escapes);
+//! 2. **parser** (AST in `ast.rs`): hand-written recursive descent to an AST that keeps every span and the source
 //!    text, with bounded recursion depth and errors that name the expected tokens;
 //! 3. **binder**: variables, scopes, parameter references and column names, with GQLSTATUS codes
 //!    for semantic errors;
@@ -17,3 +18,6 @@
 //!    (statistics and the index catalog), deterministic;
 //! 6. **lowering**: the planned query to `GraphStep`s, existing steps plus internal `gql:*`
 //!    steps, handed to the optimizer like any other plan.
+
+pub(crate) mod ast;
+pub(crate) mod lexer;
