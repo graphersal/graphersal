@@ -1935,3 +1935,145 @@ mod compression_estimate {
         assert!(err.contains("Permission denied"), "{err}");
     }
 }
+
+/// `g.gql()` (feature `gql`) asks exactly what its Gremlin twin asks: the lowered plan is an
+/// ordinary plan, checked once before it runs. A read names the element kind (never a label,
+/// like every Gremlin read), so denying the reads of edges refuses an edge pattern and lets a
+/// node pattern through; `gql()` never asks for a write.
+#[cfg(feature = "gql")]
+mod gql {
+    use super::*;
+
+    /// Denies every read of edges (and of data of an unknown kind).
+    struct NoEdges;
+
+    impl Authorizer for NoEdges {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (Action::Read, Resource::Data { element, .. })
+                    if element != Some(ElementKind::Vertex) =>
+                {
+                    Err(Denied::new("edges are private"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// The requests `script` asks, allowed.
+    fn requests(graph: &Arc<Graph>, script: &str) -> Vec<String> {
+        let recorder = Arc::new(Recorder::default());
+        let _ =
+            run(graph, script, recorder.clone()).unwrap_or_else(|err| panic!("{script}: {err}"));
+        recorder.seen()
+    }
+
+    #[test]
+    fn a_denied_read_refuses_gql_like_its_gremlin_twin() {
+        let graph = modern();
+        // The Gremlin twin and the GQL query are refused with the same step and request.
+        for script in [
+            r#"g.V().hasLabel("person").out("knows").values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows]->(f) RETURN f.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        for script in [
+            r#"g.V().hasLabel("person").outE("knows").inV().values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN e.weight").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out_e", "Read Data(edge)");
+        }
+        // Refused before it runs, also when no row would reach the edge step.
+        let err = run(
+            &graph,
+            r#"g.gql("MATCH (p:nobody)-[:knows]->(f) RETURN f").toList()"#,
+            NoEdges,
+        )
+        .unwrap_err();
+        assert!(err.contains("edges are private"), "{err}");
+        // A node pattern reads vertices only: allowed, like its twin.
+        let names = run(
+            &graph,
+            r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS n ORDER BY n").select("n").toList()"#,
+            NoEdges,
+        )
+        .unwrap();
+        assert_eq!(names.into_array().unwrap().len(), 2);
+        // The Rust API asks the same.
+        let lock = graph.read();
+        let g = GraphTraversalSource::new(&*lock).with_authorizer(Arc::new(NoEdges));
+        let err = format_diagnostic(
+            &g.gql("MATCH (a)-[:created]->(s) RETURN s.name")
+                .to_list()
+                .unwrap_err(),
+        );
+        assert!(
+            err.contains("Permission denied for 'out' (Read Data(edge)): edges are private"),
+            "{err}"
+        );
+        let g = GraphTraversalSource::new(&*lock).with_authorizer(Arc::new(NoEdges));
+        assert_eq!(
+            g.gql("MATCH (s:software) RETURN s")
+                .to_list()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn gql_asks_the_same_requests_as_its_gremlin_twin() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN f.name").toList()"#,
+                r#"g.V().hasLabel("person").outE("knows").inV().values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (a)-[:created]-(b) RETURN b").toList()"#,
+                r#"g.V().both("created").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
+    #[test]
+    fn gql_never_asks_for_a_write() {
+        let graph = modern();
+        for query in [
+            "MATCH (p:person) WHERE p.age > 30 RETURN p.name ORDER BY p.name LIMIT 1",
+            "MATCH (a)-[e:knows]->(b), (b)-[:created]->(c) RETURN a, e, b, c",
+            "MATCH (a)-[:created]->(s)<-[:created]-(b) WHERE a <> b RETURN DISTINCT s.name",
+            "MATCH (a)-[e]-(b) RETURN element_id(e), labels(a), type(e)",
+            // Refused write clauses fail before anything is asked of the data.
+            "CREATE (p:person {name: 'x'})",
+            "MATCH (p) SET p.age = 1 RETURN p",
+            "MATCH (p) DETACH DELETE p",
+        ] {
+            let recorder = Arc::new(Recorder::default());
+            let script = format!("g.gql({query:?}).toList()");
+            let _ = run(&graph, &script, recorder.clone());
+            let seen = recorder.seen();
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+        // So a read-only host runs every GQL query, and the graph stays unchanged.
+        let rows = run(
+            &graph,
+            r#"g.gql("MATCH (a)-[:knows]->(b) RETURN a.name, b.name").toList()"#,
+            AccessPolicy::read_only(),
+        )
+        .unwrap();
+        assert_eq!(rows.into_array().unwrap().len(), 2);
+        assert_eq!(count(&graph), 6);
+        assert_eq!(graph.read().edge_count(), 6);
+    }
+}
