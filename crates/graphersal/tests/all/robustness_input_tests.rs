@@ -1,5 +1,6 @@
 //! Malformed-input robustness (CLAUDE.md rule 1): GraphML and GraphSON documents, schema JSON, serialized
-//! `ChangeSet` journals, `jpath(...)` strings, `UUID.fromString(...)` and script parameters.
+//! `ChangeSet` journals, `jpath(...)` strings, `UUID.fromString(...)`, script parameters and GQL
+//! query strings (feature `gql`, through the Rust entry and through Rhai).
 //!
 //! Each input family has a handwritten corpus of adversarial cases plus seeded byte/structure
 //! mutations of a valid document. Every case runs through [`guarded`] (own thread,
@@ -1030,4 +1031,317 @@ fn adversarial_parameters_never_panic() {
         }
     }
     fatal.assert_empty("parameters");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL query strings (feature `gql`), through the Rust entry and through Rhai
+// ---------------------------------------------------------------------------------------------
+
+/// Valid GQL queries of every construct of the supported subset, then refused and not yet
+/// supported ones: the base documents of the GQL mutations.
+#[cfg(feature = "gql")]
+const GQL_CORPUS: &[&str] = &[
+    "MATCH (p:person) RETURN p",
+    "MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name ORDER BY name DESC",
+    "MATCH (p:person|software) RETURN p.name, labels(p), element_id(p)",
+    "MATCH (p:!person) RETURN p",
+    "MATCH (p:%) RETURN p",
+    "MATCH (p:(person&!software)|software) RETURN *",
+    "MATCH (p {name: 'marko'}) RETURN p.age",
+    "MATCH (p:person {name: $name}) RETURN p.age",
+    "MATCH (a:person)-[:knows]->(b) RETURN a.name AS a, b.name AS b",
+    "MATCH (a)<-[e:created]-(b) RETURN a, e, b, type(e)",
+    "MATCH (a)-[e]-(b) RETURN element_id(e), a.name",
+    "MATCH (a)-->(b)<--(c) RETURN a, b, c",
+    "MATCH (a)--(b) RETURN DISTINCT a",
+    "MATCH (a)-[e:knows|created WHERE e.weight > 0.4]->(b) RETURN e.weight",
+    "MATCH (a)-[e {weight: 1.0}]->(b) RETURN a, b",
+    "MATCH (a)-[:knows]->(b), (b)-[:created]->(c) RETURN a.name, c.name",
+    "MATCH (a)-[:created]->(s) MATCH (b)-[:created]->(s) WHERE a <> b RETURN a, b, s",
+    "MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c",
+    "MATCH (a)-[:knows]->(a) RETURN a",
+    "MATCH (a), (b) RETURN a, b LIMIT 3",
+    "MATCH (p) RETURN p.name ORDER BY p.age, p.name DESC OFFSET 1 LIMIT 2",
+    "MATCH (p) RETURN p.name SKIP $o LIMIT $n",
+    "MATCH (p) WHERE p.age IS NULL OR p.age IS NOT NULL RETURN p",
+    "MATCH (p) WHERE NOT (p.age < 30) XOR p.name STARTS WITH 'm' RETURN p",
+    "MATCH (p) WHERE p.name ENDS WITH 'o' AND p.name CONTAINS 'ar' RETURN p",
+    "MATCH (p) WHERE p.age IN [27, 29, NULL] RETURN p",
+    "MATCH (p) WHERE p IS LABELED person RETURN p",
+    "MATCH (p) RETURN CASE WHEN p.age > 30 THEN 'old' ELSE 'young' END AS c",
+    "MATCH (p) RETURN CASE p.name WHEN 'marko' THEN 1 END",
+    "MATCH (p) RETURN p.age + 1, p.age - 1, p.age * 2, p.age / 2, p.age % 7, -p.age",
+    "MATCH (p) RETURN p.name || '!', upper(p.name), lower(p.name), char_length(p.name)",
+    "MATCH (p) RETURN coalesce(p.age, 0), size(labels(p)), cardinality([1, 2])",
+    "MATCH (p) RETURN [1, 2.5, 'x', TRUE, FALSE, NULL], {a: 1, b: [p.age]}",
+    "MATCH (p) RETURN 9223372036854775807 + 1",
+    "MATCH (p) RETURN 1 / 0, 1.0 / 0.0",
+    "MATCH (p) RETURN p.name + 1",
+    "MATCH (`weird name`) RETURN `weird name`",
+    "MATCH (p) // a comment\n/* a block */ -- another\nRETURN p",
+    "match (p:person) where p.age >= 29 return p.name as n order by n asc limit 1",
+    // Refused and not yet supported.
+    "CREATE (p:person {name: 'x'})",
+    "MATCH (p) SET p.age = 1 RETURN p",
+    "MATCH (p) DETACH DELETE p",
+    "MERGE (p:person)",
+    "MATCH (a)~[e]~(b) RETURN a",
+    "MATCH (a)<~(b) RETURN a",
+    "MATCH (p)",
+    "MATCH (p) RETURN id(p)",
+    "MATCH (p) RETURN count(p), sum(p.age), avg(p.age), collect(p.name)",
+    "OPTIONAL MATCH (p) RETURN p",
+    "MATCH (p) WITH p RETURN p",
+    "MATCH p = (a)-->(b) RETURN p",
+    "MATCH (a)-[*1..3]->(b) RETURN b",
+    "MATCH ((a)-->(b)){1,3} RETURN a",
+    "CALL db.labels()",
+    "MATCH (p) RETURN p UNION MATCH (q) RETURN q",
+    "MATCH (p) WHERE EXISTS { (p)-->() } RETURN p",
+    "UNWIND [1, 2] AS x RETURN x",
+    "MATCH (p) RETURN p.name ORDER BY p.nope LIMIT -1",
+    "MATCH (p) RETURN q",
+    "MATCH (p) RETURN p, p",
+    "",
+    "MATCH",
+    "RETURN 1",
+];
+
+/// Snippets the GQL mutations insert: keywords, brackets, operators, comments, quotes.
+#[cfg(feature = "gql")]
+const GQL_SNIPPETS: &[&[u8]] = &[
+    b"MATCH ",
+    b" RETURN ",
+    b" WHERE ",
+    b"(",
+    b")",
+    b"[",
+    b"]",
+    b"{",
+    b"}",
+    b"-[e]->",
+    b"<-",
+    b"~",
+    b"|",
+    b"&",
+    b"!",
+    b"%",
+    b" AND NOT ",
+    b"$n",
+    b"$",
+    b"'",
+    b"\"",
+    b"`",
+    b"/*",
+    b"--",
+    b"//",
+    b"\n",
+    b"\0",
+    b"\xff",
+    b" ORDER BY ",
+    b" LIMIT ",
+    b" CASE WHEN ",
+    b"element_id(",
+    b"9999999999999999999999",
+    b"1e309",
+    b"\xc3\xbc",
+];
+
+/// The tokens the GQL token soup is drawn from.
+#[cfg(feature = "gql")]
+const GQL_TOKENS: &[&str] = &[
+    "MATCH",
+    "RETURN",
+    "WHERE",
+    "ORDER",
+    "BY",
+    "LIMIT",
+    "OFFSET",
+    "SKIP",
+    "DISTINCT",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "XOR",
+    "IS",
+    "NULL",
+    "IN",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    ":",
+    ",",
+    ".",
+    "-",
+    "->",
+    "<-",
+    "--",
+    "-->",
+    "<--",
+    "~",
+    "*",
+    "/",
+    "+",
+    "=",
+    "<>",
+    "<",
+    ">=",
+    "|",
+    "&",
+    "!",
+    "%",
+    "p",
+    "q",
+    "e",
+    "person",
+    "knows",
+    "name",
+    "age",
+    "$n",
+    "$name",
+    "'x'",
+    "1",
+    "2.5",
+    "TRUE",
+    "element_id",
+    "labels",
+    "count",
+    "`",
+    "/*",
+    "//",
+    "\n",
+    "ü",
+];
+
+/// Runs `query` through `g.gql()` from Rust (rows, a count, the profile, the diagnostic in both
+/// spellings) and from Rhai, on the modern graph plus a self-loop and a `null` age.
+#[cfg(feature = "gql")]
+fn exercise_gql(query: String) -> Result<(), Outcome> {
+    guarded(WATCHDOG, move || {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let _ = graph
+            .traversal_mut()
+            .add_v("person")
+            .property("name", "nullage")
+            .property("age", ElementProperty::Null)
+            .iterate();
+        let _ = graph
+            .traversal_mut()
+            .v(None)
+            .has("name", "marko")
+            .as_("m")
+            .add_e("knows")
+            .from("m")
+            .iterate();
+        let params = [
+            ("n", ElementProperty::from(2)),
+            ("o", ElementProperty::from(1)),
+            ("name", ElementProperty::from("marko")),
+        ];
+        let results = [
+            graph.traversal().gql_with(&query, params.clone()).to_list(),
+            graph
+                .traversal()
+                .with("render.spelling", "camel")
+                .gql_with(&query, params.clone())
+                .to_list(),
+            graph
+                .traversal()
+                .gql_with(&query, params.clone())
+                .count()
+                .to_list(),
+        ];
+        for result in results {
+            if let Err(err) = result {
+                let _ = format_diagnostic(&err);
+                let _ = err.help();
+            }
+        }
+        match graph.traversal().gql_with(&query, params).profile() {
+            Ok(metrics) => {
+                let _ = metrics.to_string();
+            }
+            Err(err) => {
+                let _ = format_diagnostic(&err);
+            }
+        }
+        let graph = Arc::new(Graph::new(graph));
+        let script_params: HashMap<String, ElementProperty> =
+            [("q".to_string(), ElementProperty::from(query.as_str()))].into();
+        let _ = eval_value_with_limits(
+            graph,
+            r#"g.gql(q).toList();
+               g.gql(q, #{n: 2, o: 1, name: "marko"}).select("p").out().toList();
+               g.with("render.spelling", "camel").gql(q, #{n: -1}).toList();
+               g.gql(q, ()).count().next();
+               g.v().gql(q).toList();"#,
+            script_params,
+            &ScriptLimits::default(),
+        );
+    })
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_strings_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut texts: Vec<String> = GQL_CORPUS.iter().map(|s| s.to_string()).collect();
+    // Deep nesting and long chains: a bounded error, never a stack overflow.
+    texts.push(format!(
+        "MATCH (p) RETURN {}1{}",
+        "(".repeat(50_000),
+        ")".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (p) WHERE {}TRUE RETURN p",
+        "NOT ".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (p) WHERE {}TRUE RETURN p",
+        "p.age = 1 AND ".repeat(5_000)
+    ));
+    texts.push(format!("MATCH (p) RETURN {}1", "-".repeat(50_000)));
+    texts.push(format!(
+        "MATCH (p:{}person{}) RETURN p",
+        "(".repeat(20_000),
+        ")".repeat(20_000)
+    ));
+    texts.push(format!("MATCH (p:{}person) RETURN p", "!".repeat(50_000)));
+    texts.push(format!(
+        "MATCH (p) RETURN {}1{}",
+        "[".repeat(50_000),
+        "]".repeat(50_000)
+    ));
+    texts.push(format!("MATCH (p) RETURN {}", "{a: ".repeat(20_000)));
+    // A long path: the trail checks grow with the square of the edge count (every pair of edges
+    // whose labels may overlap gets one), so 300 hops stay well inside the watchdog.
+    texts.push(format!("MATCH {} RETURN *", "(a)-->".repeat(300) + "(b)"));
+    texts.push(format!("MATCH (p) RETURN 1{}", " + 1".repeat(20_000)));
+    texts.push(format!("MATCH (p) RETURN p /* {}", "x".repeat(100_000)));
+    let mut rng = Rng::new(0x6A1_0001);
+    for _ in 0..budget(150) {
+        let base = rng.pick(GQL_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(24);
+        let soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_TOKENS)).collect();
+        let joiner = if rng.chance(50) { " " } else { "" };
+        texts.push(soup.join(joiner));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL");
 }

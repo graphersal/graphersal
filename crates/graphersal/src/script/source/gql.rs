@@ -75,10 +75,7 @@ pub(crate) fn gql_not_at_start_error(query: &str, position: &str) -> TraverserEr
         0..query.len(),
         format!("gql() starts a traversal in this version; it cannot run {position}"),
     )
-    .alternative(
-        "start the traversal with it and continue with Gremlin steps after it, as in \
-         g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")",
-    )
+    .alternative(crate::gql::lower::start_with_gql(query))
     .into_error(query)
 }
 

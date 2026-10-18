@@ -7204,3 +7204,434 @@ fn a_dictionary_on_a_dedup_rule_help_names_the_fix() {
     assert!(help.contains(r#"25 for codec "dedup""#), "{help}");
     assert!(help.contains(r#"codec: "dedup""#), "{help}");
 }
+
+/// GQL diagnostics (feature `gql`): every error kind with its caret excerpt, GQLSTATUS and the
+/// `help()` that names the fix, and the camelCase rendering that leaves the GQL text alone.
+#[cfg(feature = "gql")]
+mod gql {
+    use graphersal::error::GqlErrorKind;
+    use graphersal::exec::Spelling;
+    use graphersal::prelude::*;
+
+    /// The failed GQL traversal of `build` on the modern graph: the error and its diagnostic.
+    fn gql_failure(
+        build: impl FnOnce(
+            GraphTraversalSource<'_, &TraversalGraph>,
+        ) -> Result<Vec<ElementProperty>, Box<TraverserError>>,
+    ) -> (Box<TraverserError>, String) {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        let err = build(locked.traversal()).expect_err("the GQL query must fail");
+        let report = format_diagnostic(&err);
+        (err, report)
+    }
+
+    /// The diagnostic of `g.gql(query)` on the modern graph.
+    fn gql_report(query: &str) -> String {
+        gql_failure(|g| g.gql(query).to_list()).1
+    }
+
+    /// The kind and GQLSTATUS of the GQL error at the root of `err`.
+    fn kind_and_status(err: &TraverserError) -> (GqlErrorKind, String) {
+        match err.root_cause() {
+            TraverserError::Gql {
+                kind, gqlstatus, ..
+            } => (*kind, gqlstatus.clone()),
+            other => panic!("expected a GQL error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn gql_syntax_error_on_line_two_lists_the_expected_tokens_under_a_caret() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person)\nWHERE p.age 30\nRETURN p.name")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Syntax, "42001".to_string())
+        );
+        // The diagnostic leads with the GQL error, not with the internal marker step.
+        assert!(
+            report.starts_with(
+                "Error: GQL syntax error at line 2, column 13: unexpected `30` (step #1 \
+                 'gql:error(\"42001\")' refused the query before the traversal ran)"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("Caused by: GQL"), "{report}");
+        assert!(
+            report.contains("  line 2:    WHERE p.age 30\n                         ^^"),
+            "the caret must sit under `30` on line 2: {report}"
+        );
+        assert!(report.contains("  expected:  MATCH, RETURN"), "{report}");
+        assert!(report.contains("  GQLSTATUS: 42001"), "{report}");
+        assert!(
+            report.contains(
+                "Help: Expected MATCH, RETURN at the marked position. Fix the query at the \
+                 marked position: a GQL read query is MATCH <pattern> [WHERE <condition>] \
+                 RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\")."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_misspelt_keyword_and_function_get_did_you_mean() {
+        let report = gql_report("MATCH (p:person) RETRUN p.name");
+        assert!(
+            report.contains(
+                "  query:        MATCH (p:person) RETRUN p.name\n                                 ^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: RETURN"), "{report}");
+        assert!(report.contains("Help: Did you mean RETURN? "), "{report}");
+
+        let report = gql_report("MATCH (p:person) RETURN lowr(p.name)");
+        assert!(report.contains("unknown function lowr()"), "{report}");
+        assert!(report.contains("  did you mean: lower()"), "{report}");
+        assert!(report.contains("Help: Did you mean lower()? "), "{report}");
+    }
+
+    #[test]
+    fn gql_write_clause_is_refused_with_the_gremlin_mutation_steps() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) SET p.old = true RETURN p")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Refused, "0A000".to_string())
+        );
+        assert!(
+            report.contains("SET writes to the graph; gql() is read-only"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: gql() is read-only; use the Gremlin mutation steps (add_v(), add_e(), \
+                 property(), drop(), merge_v())."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_undirected_edge_is_refused_with_the_either_direction_form() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a)~[e]~(b) RETURN a").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Refused);
+        assert!(
+            report.contains("  query:     MATCH (a)~[e]~(b) RETURN a\n                      ^"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: edges in Graphersal are directed; use -[e]- for either direction."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_missing_return_suggests_return_star() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person)").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax);
+        assert!(
+            report.contains("missing RETURN: a GQL query ends with a RETURN statement"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: end the query with a RETURN statement, such as RETURN * (every \
+                 variable) or RETURN p."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_cypher_id_names_element_id() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person) RETURN id(p)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Refused, "0A000".to_string())
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN id(p)\n                                     ^^"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("Help: use element_id(p), the element's id as a string."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_aggregate_not_yet_names_the_gremlin_step() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person) RETURN sum(p.age)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::NotYet, "0A000".to_string())
+        );
+        assert!(
+            report.contains("the aggregate function sum() is not yet supported"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: aggregate with Gremlin steps after gql(), for example \
+                 g.gql(\"MATCH (p:person) RETURN p.age AS age\").select(\"age\").sum()."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_nesting_past_the_bound_is_a_limit_error() {
+        let query = format!("MATCH (p) RETURN {}1{}", "(".repeat(2000), ")".repeat(2000));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(report.contains("the query nests deeper than"), "{report}");
+        assert!(
+            report.contains("Help: The query nests deeper than gql() accepts."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_undefined_variable_suggests_the_declared_one() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person)-[:knows]->(f) RETURN p.name, g.name")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the variable `g` is not defined"),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: p"), "{report}");
+        assert!(
+            report.contains(
+                "Help: Did you mean p? Declare every variable in a MATCH pattern before WHERE, \
+                 RETURN or ORDER BY uses it"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_missing_parameter_help_repeats_the_query() {
+        let report = gql_report("MATCH (p:person) RETURN p.name LIMIT $n");
+        assert!(
+            report.contains("the parameter `$n` has no value"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: pass it in the parameters of gql(), as in \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT $n\", #{n: value})."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_division_by_zero_fails_at_run_time_with_22012() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) RETURN 100 / (p.age - 29)")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22012".to_string())
+        );
+        // Raised by the row it failed on: located at the projecting step, not before the run.
+        assert!(
+            report.starts_with(
+                "Error: Step #1 'gql:project(\"100 / (p.age - 29)\")' execution failed"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("Caused by: GQL data exception at line 1, column 25: division by zero"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN 100 / (p.age - 29)\n                                     ^^^^^^^^^^^^^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  GQLSTATUS: 22012"), "{report}");
+        assert!(
+            report.contains("Help: A row of the data made the marked expression fail."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_bad_limit_parameter_names_a_runnable_value() {
+        let (err, report) = gql_failure(|g| {
+            g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "22G02".to_string())
+        );
+        assert!(
+            report.contains("LIMIT must be a non-negative integer, but $n is negative"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: give $n a value such as 10, as in \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT $n\", #{n: 10}). OFFSET and \
+                 LIMIT take a non-negative integer: a literal, or a $parameter given such a \
+                 value in the parameters of gql(), for example \
+                 g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2})."
+            ),
+            "{report}"
+        );
+        // The advice does not talk about undeclared variables.
+        assert!(!report.contains("Declare every variable"), "{report}");
+        // A literal of the wrong kind gets the same advice.
+        let report = gql_report("MATCH (p:person) RETURN p.name LIMIT 1.5");
+        assert!(
+            report.contains("OFFSET and LIMIT take a non-negative integer"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_after_other_steps_names_the_query_as_a_start() {
+        let (err, report) = gql_failure(|g| g.v(None).gql("MATCH (p) RETURN p").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet);
+        assert!(
+            report.contains(
+                "Help: start the traversal with it, as in g.gql(\"MATCH (p) RETURN p\"), and \
+                 write what the steps before it selected as the MATCH pattern and its WHERE \
+                 condition; Gremlin steps may follow it, as in \
+                 g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")."
+            ),
+            "{report}"
+        );
+    }
+
+    /// Under `render.spelling = camel` the GQL excerpt, the GQL message and the GQL functions
+    /// in the advice stay as written (`element_id(p)`, never `elementId(p)`), so the caret stays
+    /// under its span; the Gremlin steps of the advice and the plan are respelled.
+    #[test]
+    fn gql_text_is_not_respelled_under_camel_case() {
+        let camel = |query: &'static str| {
+            gql_failure(move |g| g.with("render.spelling", "camel").gql(query).to_list())
+        };
+        // Before the run (the marker).
+        let (err, report) = camel("MATCH (p:person) WHERE element_id(p) = '1' RETRUN p");
+        assert_eq!(err.spelling(), Spelling::Camel);
+        assert!(
+            report.contains(
+                "  query:        MATCH (p:person) WHERE element_id(p) = '1' RETRUN p\n                                                           ^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        // At run time (a row fails): the plan is respelled, the GQL text is not.
+        let (_, report) = camel("MATCH (p:person) RETURN element_id(p), 1 / (p.age - 29)");
+        assert!(
+            report.contains("v().hasLabel(\"person\").gql:project("),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN element_id(p), 1 / (p.age - 29)\n                                                    ^^^^^^^^^^^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        // The advice: GQL functions as written, Gremlin steps respelled.
+        let (err, _) = camel("MATCH (p:person) RETURN id(p)");
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with("use element_id(p), the element's id"),
+            "{help}"
+        );
+        let (err, _) = camel("CREATE (p:person)");
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("(addV(), addE(), property(), drop(), mergeV())"),
+            "{help}"
+        );
+    }
+
+    /// The same through Rhai: `g.with("render.spelling", "camel").gql(..)`.
+    #[test]
+    #[cfg(feature = "script")]
+    fn gql_text_is_not_respelled_under_camel_case_in_rhai() {
+        let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+        let report = crate::script_host::eval(
+            graph,
+            r#"g.with("render.spelling", "camel").gql("MATCH (p:person) RETURN element_id(p), char_length(p.name) / 0").toList()"#,
+        )
+        .expect_err("division by zero")
+        .to_string();
+        assert!(
+            report.contains("RETURN element_id(p), char_length(p.name) / 0\n"),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        assert!(!report.contains("charLength"), "{report}");
+    }
+
+    /// A parameter map of the wrong type names both forms of `gql()`.
+    #[test]
+    #[cfg(feature = "script")]
+    fn gql_argument_mismatch_help_names_the_parameter_map() {
+        for script in [
+            r#"g.gql("MATCH (p) RETURN p", 5)"#,
+            r#"g.gql("MATCH (p) RETURN p", #{x: g.v()})"#,
+        ] {
+            let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+            let report = crate::script_host::eval(graph, script)
+                .expect_err(script)
+                .to_string();
+            assert!(
+                report.contains("Argument mismatch for step 'gql'"),
+                "{report}"
+            );
+            assert!(
+                report.contains(
+                    "Help: gql() takes the query as a string and, optionally, the values of \
+                     its $parameters as a map from name to value, for example \
+                     g.gql(\"MATCH (p:person {name: $name}) RETURN p.age\", #{name: \
+                     \"marko\"})"
+                ),
+                "{report}"
+            );
+        }
+        // Both examples of the advice run.
+        let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+        let ages = crate::script_host::eval_value(
+            graph.clone(),
+            r#"g.gql("MATCH (p:person {name: $name}) RETURN p.age", #{name: "marko"}).to_list()"#,
+        )
+        .unwrap();
+        assert_eq!(ages.into_array().unwrap().len(), 1);
+        let names = crate::script_host::eval_value(
+            graph,
+            r#"let n = g.v().count().next(); g.gql("MATCH (p:person) RETURN p.name LIMIT $n", #{n: n}).to_list()"#,
+        )
+        .unwrap();
+        assert_eq!(names.into_array().unwrap().len(), 4);
+    }
+}

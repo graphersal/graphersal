@@ -947,8 +947,9 @@ impl<'q> Binder<'q> {
             format!("the parameter `${}` has no value", missing.name),
         )
         .alternative(format!(
-            "pass it in the parameters of gql(), as in g.gql(query, #{{{}: value}})",
-            missing.name
+            "pass it in the parameters of gql(), as in g.gql({}, #{{{}: value}})",
+            crate::value::literal::rhai_string(&self.query.source),
+            crate::gql::lower::rhai_map_key(&missing.name)
         ));
         if let Some(close) = suggest(&missing.name, supplied.iter().copied()) {
             error = error.suggestion(format!("${close}"));

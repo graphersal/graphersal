@@ -34,6 +34,12 @@ Files appear as their stage lands; this table is the target layout.
   name the expected tokens, suggest "did you mean ..." and carry the GQLSTATUS code as a field.
 - **ISO GQL is normative**; common Cypher spellings are accepted as aliases. A refused or not yet
   supported construct gets a targeted message naming the GQL form or the Gremlin alternative.
+- **Diagnostics** (`error.rs`): a failure of the `gql:error` marker leads with the GQL error
+  (`step_failed_message`, no `Caused by:` line); the message and excerpt of a GQL root cause are
+  never respelled under `render.spelling = camel`, and its `help()` respells the Gremlin steps
+  but keeps the GQL function names (`respell_keeping`, `parser::lookup_function`). Advice is
+  built from the failing query where it can be (`lower::start_with_gql`, the `$param` fixes).
+  Tests: `error_diagnostics_tests.rs` (`mod gql`), robustness `random_gql_strings_never_panic`.
 - **Read-only in version 1.** Write clauses are refused by the parser.
 - **Lower into the ordinary pipeline.** No separate executor: the lowering builds plans with the
   ordinary builders and lets the optimizer do pushdown. Never push a `<>` comparison down

@@ -1844,6 +1844,24 @@ fn step_table_covers_the_surface() {
     assert!(table.len() > 150, "only {} steps parsed", table.len());
 }
 
+/// The generator calls `gql(string)` and `gql(string, map)` too (feature `gql`): both arities
+/// come from the surface, so random query strings and parameter values reach the GQL parser,
+/// the lowering and the start-only check.
+#[test]
+#[cfg(feature = "gql")]
+fn step_table_covers_gql() {
+    let table = step_table();
+    let arities = table
+        .iter()
+        .find(|(name, _)| name == "gql")
+        .map(|(_, arities)| arities.clone())
+        .unwrap_or_default();
+    assert!(
+        arities.contains(&1) && arities.contains(&2),
+        "gql arities in the step table: {arities:?}"
+    );
+}
+
 /// A case's files stay in its own temporary directory: a relative name is written there, a path
 /// that leaves it is denied with a located diagnostic (so the denial is no finding), and nothing
 /// reaches the working directory.
