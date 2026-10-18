@@ -4154,6 +4154,35 @@ pub enum TraverserError {
         message: String,
     },
 
+    /// A GQL query (feature `gql`) that does not parse or bind, or that uses a construct
+    /// Graphersal refuses or does not support yet. Like a `math()` equation, the query is checked
+    /// before the traversal runs, even when no traverser reaches the step. `details()` shows the
+    /// offending source line with a caret under the span, the expected tokens, a "did you mean"
+    /// suggestion and the GQLSTATUS code; `help()` gives the fix for the kind.
+    #[cfg(feature = "gql")]
+    #[error("GQL {kind} at line {line}, column {column}: {message}")]
+    #[non_exhaustive]
+    Gql {
+        /// What went wrong.
+        kind: GqlErrorKind,
+        /// The rendered reason, such as ``unexpected `RETRUN` ``.
+        message: String,
+        /// Byte offset of the offending text in the query.
+        offset: usize,
+        /// 1-based line of the offending text (lines end at `\n`).
+        line: usize,
+        /// 1-based character column of the offending text in its line.
+        column: usize,
+        /// Width of the offending text in characters (at least 1), for the underline.
+        width: usize,
+        /// The five-character GQLSTATUS code (ISO/IEC 39075), such as `42001` for a syntax
+        /// error; see [`GqlErrorKind`] for the codes in use.
+        gqlstatus: String,
+        /// The query text, the expected tokens, the suggestion and the alternative (boxed, so
+        /// the error stays small).
+        context: Box<GqlErrorContext>,
+    },
+
     /// An error raised before any step ran and without a step to locate it at (an invalid or
     /// locked option, a denied `with("key")`), under a non-default `render.spelling`: the
     /// diagnostic of `source` respelled. Its message is that of `source`; see
@@ -4215,6 +4244,84 @@ pub enum MathErrorKind {
     DivisionByZero,
     /// An inconsistency of the expression engine itself, never caused by the equation.
     Internal,
+}
+
+/// The rarely read part of a [`TraverserError::Gql`] (feature `gql`): the query and what the
+/// diagnostic and `help()` are built from.
+#[cfg(feature = "gql")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GqlErrorContext {
+    /// The query as written.
+    pub query: String,
+    /// The tokens or constructs that would have been accepted at the error; may be empty.
+    pub expected: Vec<String>,
+    /// A close spelling of a misspelt keyword, function or variable ("did you mean ...").
+    pub suggestion: Option<String>,
+    /// The GQL form or the Gremlin alternative of a refused or not yet supported construct, in
+    /// canonical snake_case step spelling, such as "gql() is read-only; use the Gremlin mutation
+    /// steps add_v(), property(), drop() or merge_v()". `help()` leads with it.
+    pub alternative: Option<String>,
+}
+
+/// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
+///
+/// Each kind has a default GQLSTATUS code (ISO/IEC 39075, which derives its codes from the
+/// SQLSTATE of ISO/IEC 9075); a single error may carry a more specific code of the same class.
+/// The codes other than `42001` are **provisional** and may still change before the GQL support
+/// is complete:
+///
+/// | Kind | Default GQLSTATUS | Meaning of the code |
+/// |---|---|---|
+/// | [`Syntax`](Self::Syntax) | `42001` | invalid syntax |
+/// | [`Semantic`](Self::Semantic) | `42002` | invalid reference (provisional) |
+/// | [`Refused`](Self::Refused) | `0A000` | feature not supported (provisional) |
+/// | [`NotYet`](Self::NotYet) | `0A000` | feature not supported (provisional) |
+/// | [`Limit`](Self::Limit) | `54001` | statement too complex (provisional, SQLSTATE) |
+#[cfg(feature = "gql")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GqlErrorKind {
+    /// The query does not parse: an unexpected token, a missing keyword, an unclosed bracket.
+    Syntax,
+    /// The query parses but does not bind: an unknown or redeclared variable, a misplaced
+    /// parameter, a variable used as the wrong kind of element.
+    Semantic,
+    /// A construct `gql()` refuses for good: every write clause (`gql()` is read-only), the
+    /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL`), Cypher `id()`.
+    Refused,
+    /// A construct of a later version of the GQL support, such as `OPTIONAL MATCH` or
+    /// aggregation before they land.
+    NotYet,
+    /// The query exceeds a fixed bound of the parser, such as the nesting depth.
+    Limit,
+}
+
+#[cfg(feature = "gql")]
+impl GqlErrorKind {
+    /// The default GQLSTATUS code of this kind (the table on [`GqlErrorKind`]).
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
+    pub(crate) fn default_gqlstatus(self) -> &'static str {
+        match self {
+            GqlErrorKind::Syntax => "42001",
+            GqlErrorKind::Semantic => "42002",
+            GqlErrorKind::Refused | GqlErrorKind::NotYet => "0A000",
+            GqlErrorKind::Limit => "54001",
+        }
+    }
+}
+
+#[cfg(feature = "gql")]
+impl std::fmt::Display for GqlErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GqlErrorKind::Syntax => "syntax error",
+            GqlErrorKind::Semantic => "semantic error",
+            GqlErrorKind::Refused => "unsupported construct",
+            GqlErrorKind::NotYet => "construct not supported yet",
+            GqlErrorKind::Limit => "limit exceeded",
+        })
+    }
 }
 
 /// Renders an `UnsupportedCardinality` error.
@@ -4694,6 +4801,13 @@ impl TraverserError {
             TraverserError::MathExpression { expr, kind, .. } => {
                 Some(math_expression_help(expr, kind, None))
             }
+            #[cfg(feature = "gql")]
+            TraverserError::Gql { kind, context, .. } => Some(gql_help(
+                *kind,
+                &context.expected,
+                context.suggestion.as_deref(),
+                context.alternative.as_deref(),
+            )),
             TraverserError::Fail { .. } => Some(
                 "The query stopped on purpose: a traverser reached its fail() step. If that \
                  branch should not fail, remove fail() or guard it so that only unexpected \
@@ -4829,6 +4943,23 @@ impl DiagnosticError for TraverserError {
                 "equation".to_string(),
                 math_underline(expr, *column, *width),
             )],
+            #[cfg(feature = "gql")]
+            TraverserError::Gql {
+                line,
+                column,
+                width,
+                gqlstatus,
+                context,
+                ..
+            } => gql_details(
+                &context.query,
+                *line,
+                *column,
+                *width,
+                &context.expected,
+                context.suggestion.as_deref(),
+                gqlstatus,
+            ),
             _ => Vec::new(),
         }
     }
@@ -6351,6 +6482,230 @@ impl TraverserError {
             width: width.max(1),
             kind,
             message,
+        }
+    }
+}
+
+/// The most expected tokens `help()` lists; the `expected` detail lists them all.
+#[cfg(feature = "gql")]
+const GQL_HELP_EXPECTED: usize = 8;
+
+/// The `details()` of a [`TraverserError::Gql`]: the offending source line (labelled `query`
+/// for a one-line query, `line N` otherwise) with a caret line under the span, then the
+/// expected tokens, the suggestion and the GQLSTATUS code.
+#[cfg(feature = "gql")]
+fn gql_details(
+    query: &str,
+    line: usize,
+    column: usize,
+    width: usize,
+    expected: &[String],
+    suggestion: Option<&str>,
+    gqlstatus: &str,
+) -> Vec<(String, String)> {
+    let mut details = Vec::new();
+    let mut lines = query.split('\n');
+    let multi_line = query.trim_end_matches(['\n', '\r']).contains('\n');
+    if let Some(text) = lines.nth(line.saturating_sub(1)) {
+        // Tabs become spaces (one character each), so the caret stays under the span.
+        let text: String = text
+            .trim_end_matches('\r')
+            .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
+            .collect();
+        let line_chars = text.chars().count();
+        let (shown, shown_column) = math_window(&text, column);
+        // A span that runs past the end of its line is underlined up to the line's end.
+        let rest = (line_chars + 1).saturating_sub(column).max(1);
+        let width = width
+            .min(rest)
+            .clamp(1, crate::value::literal::MAX_LITERAL_CHARS);
+        let label = if multi_line {
+            format!("line {line}")
+        } else {
+            "query".to_string()
+        };
+        details.push((
+            label,
+            format!(
+                "{shown}\n{}{}",
+                " ".repeat(shown_column.saturating_sub(1)),
+                "^".repeat(width)
+            ),
+        ));
+    }
+    if !expected.is_empty() {
+        details.push(("expected".to_string(), expected.join(", ")));
+    }
+    if let Some(suggestion) = suggestion {
+        details.push(("did you mean".to_string(), suggestion.to_string()));
+    }
+    details.push(("GQLSTATUS".to_string(), gqlstatus.to_string()));
+    details
+}
+
+/// Advice for [`TraverserError::Gql`], per kind. The parser supplies the specific text (the
+/// suggestion, the GQL form or Gremlin alternative); this adds the generic fix around it.
+#[cfg(feature = "gql")]
+fn gql_help(
+    kind: GqlErrorKind,
+    expected: &[String],
+    suggestion: Option<&str>,
+    alternative: Option<&str>,
+) -> String {
+    let mut help = String::new();
+    if let Some(alternative) = alternative {
+        help.push_str(alternative.trim_end_matches('.'));
+        help.push_str(". ");
+    }
+    if let Some(suggestion) = suggestion {
+        help.push_str(&format!("Did you mean {suggestion}? "));
+    }
+    match kind {
+        GqlErrorKind::Syntax => {
+            if !expected.is_empty() {
+                let mut listed = expected
+                    .iter()
+                    .take(GQL_HELP_EXPECTED)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if expected.len() > GQL_HELP_EXPECTED {
+                    listed.push_str(", ...");
+                }
+                help.push_str(&format!("Expected {listed} at the marked position. "));
+            }
+            help.push_str(
+                "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
+                 [WHERE <condition>] RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\").",
+            );
+        }
+        GqlErrorKind::Semantic => help.push_str(
+            "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
+             it, for example g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), \
+             and give every $parameter a value in the parameters of gql().",
+        ),
+        GqlErrorKind::Refused if alternative.is_some() => help.push_str(
+            "gql() runs read queries (MATCH ... RETURN ...); write the rest of the query as \
+             Gremlin steps.",
+        ),
+        GqlErrorKind::Refused => help.push_str(
+            "Graphersal does not support this construct in gql(), which runs read queries \
+             (MATCH ... RETURN ...); write this part as Gremlin steps, for example \
+             g.v().has_label(\"person\").values(\"name\").",
+        ),
+        GqlErrorKind::NotYet => help.push_str(
+            "This construct comes in a later version of gql(); until then, write the query \
+             without it or as Gremlin steps.",
+        ),
+        GqlErrorKind::Limit => help.push_str(
+            "The query nests deeper than gql() accepts. Flatten it: remove redundant \
+             parentheses, and join conditions with AND / OR instead of nesting them.",
+        ),
+    }
+    help
+}
+
+/// A GQL error under construction (feature `gql`): the parser and binder fill it with byte
+/// offsets only and turn it into a [`TraverserError::Gql`] with [`Self::into_error`], which
+/// computes line, column and width from the query text.
+#[cfg(feature = "gql")]
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
+pub(crate) struct GqlErrorBuilder {
+    kind: GqlErrorKind,
+    span: std::ops::Range<usize>,
+    message: String,
+    expected: Vec<String>,
+    suggestion: Option<String>,
+    alternative: Option<String>,
+    gqlstatus: Option<&'static str>,
+}
+
+#[cfg(feature = "gql")]
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
+impl GqlErrorBuilder {
+    /// An error of `kind` for the bytes `span` of the query (an empty span, such as the end of
+    /// the input, is underlined with one caret).
+    pub(crate) fn new(
+        kind: GqlErrorKind,
+        span: std::ops::Range<usize>,
+        message: impl Into<String>,
+    ) -> Self {
+        GqlErrorBuilder {
+            kind,
+            span,
+            message: message.into(),
+            expected: Vec::new(),
+            suggestion: None,
+            alternative: None,
+            gqlstatus: None,
+        }
+    }
+
+    /// The tokens that would have been accepted, as shown to the user (`RETURN`, `)`).
+    pub(crate) fn expected<I, S>(mut self, expected: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.expected = expected.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// A close spelling for "did you mean ...".
+    pub(crate) fn suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// The GQL form or Gremlin alternative `help()` leads with (snake_case step names).
+    pub(crate) fn alternative(mut self, alternative: impl Into<String>) -> Self {
+        self.alternative = Some(alternative.into());
+        self
+    }
+
+    /// A GQLSTATUS code more specific than the kind's default.
+    pub(crate) fn gqlstatus(mut self, code: &'static str) -> Self {
+        self.gqlstatus = Some(code);
+        self
+    }
+
+    /// The [`TraverserError::Gql`] for `query`. An offset past the end or inside a character
+    /// is moved back to the nearest character boundary.
+    pub(crate) fn into_error(self, query: &str) -> TraverserError {
+        let floor = |mut at: usize| {
+            at = at.min(query.len());
+            while !query.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        let start = floor(self.span.start);
+        let end = floor(self.span.end.max(start));
+        let before = &query[..start];
+        let line = before.matches('\n').count() + 1;
+        let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+        let column = query[line_start..start].chars().count() + 1;
+        let width = query[start..end].chars().count().max(1);
+        TraverserError::Gql {
+            kind: self.kind,
+            message: self.message,
+            offset: start,
+            line,
+            column,
+            width,
+            gqlstatus: self
+                .gqlstatus
+                .unwrap_or_else(|| self.kind.default_gqlstatus())
+                .to_string(),
+            context: Box::new(GqlErrorContext {
+                query: query.to_string(),
+                expected: self.expected,
+                suggestion: self.suggestion,
+                alternative: self.alternative,
+            }),
         }
     }
 }
@@ -8308,6 +8663,230 @@ mod tests {
             } else {
                 panic!("Expected StepFailed variant");
             }
+        }
+    }
+
+    /// GQL errors (feature `gql`): line and column from byte offsets, the caret excerpt of the
+    /// offending line only, the expected tokens, the suggestion, the GQLSTATUS code and the
+    /// help per kind.
+    #[cfg(feature = "gql")]
+    mod gql {
+        use super::super::*;
+
+        fn report(err: &TraverserError) -> String {
+            format_diagnostic(err)
+        }
+
+        #[test]
+        fn single_line_syntax_error_underlines_the_token() {
+            let query = "MATCH (n:person) RETRUN n.name";
+            let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 17..23, "unexpected `RETRUN`")
+                .expected(["WHERE", "RETURN", ","])
+                .suggestion("RETURN")
+                .into_error(query);
+            let TraverserError::Gql {
+                line,
+                column,
+                width,
+                offset,
+                ref gqlstatus,
+                ..
+            } = err
+            else {
+                panic!("expected a Gql error");
+            };
+            assert_eq!((line, column, width, offset), (1, 18, 6, 17));
+            assert_eq!(gqlstatus, "42001");
+            assert_eq!(
+                err.to_string(),
+                "GQL syntax error at line 1, column 18: unexpected `RETRUN`"
+            );
+            assert_eq!(
+                report(&err),
+                "Error: GQL syntax error at line 1, column 18: unexpected `RETRUN`\n  \
+                 query:        MATCH (n:person) RETRUN n.name\n                \
+                 \x20                ^^^^^^\n  \
+                 expected:     WHERE, RETURN, ,\n  \
+                 did you mean: RETURN\n  \
+                 GQLSTATUS:    42001\n\
+                 Help: Did you mean RETURN? Expected WHERE, RETURN, , at the marked position. \
+                 Fix the query at the marked position: a GQL read query is MATCH <pattern> \
+                 [WHERE <condition>] RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\")."
+            );
+        }
+
+        #[test]
+        fn multi_line_query_shows_only_the_offending_line() {
+            let query = "MATCH (n:person)\n  WHERE n.age >\nRETURN n";
+            // The end of line 2 (an empty span after `>`).
+            let offset = query.find(">\n").map(|at| at + 1).unwrap_or(0);
+            let err = GqlErrorBuilder::new(
+                GqlErrorKind::Syntax,
+                offset..offset,
+                "expected an expression",
+            )
+            .into_error(query);
+            assert_eq!(
+                err.to_string(),
+                "GQL syntax error at line 2, column 16: expected an expression"
+            );
+            let details = err.details();
+            assert_eq!(details[0].0, "line 2");
+            assert_eq!(details[0].1, "  WHERE n.age >\n               ^");
+            assert!(!details[0].1.contains("MATCH"));
+            assert!(
+                !details
+                    .iter()
+                    .any(|(key, _)| key == "expected" || key == "did you mean")
+            );
+            assert_eq!(
+                details.last(),
+                Some(&("GQLSTATUS".to_string(), "42001".to_string()))
+            );
+            // No expected tokens: the help names none.
+            assert!(!err.help().unwrap_or_default().contains("Expected"));
+        }
+
+        #[test]
+        fn columns_count_characters_and_spans_stop_at_the_line_end() {
+            let query = "MATCH (ä:person)\nRETURN äb, x\nLIMIT 1";
+            let start = query.find('x').unwrap_or(0);
+            // A span running into the next line is underlined up to the end of its own line.
+            let err =
+                GqlErrorBuilder::new(GqlErrorKind::Semantic, start..query.len(), "unknown `x`")
+                    .suggestion("ä")
+                    .into_error(query);
+            let TraverserError::Gql { line, column, .. } = err else {
+                panic!("expected a Gql error");
+            };
+            assert_eq!((line, column), (2, 12));
+            assert_eq!(err.details()[0].1, "RETURN äb, x\n           ^");
+            assert!(
+                err.to_string()
+                    .starts_with("GQL semantic error at line 2, column 12")
+            );
+            assert!(report(&err).contains("GQLSTATUS:    42002"));
+            // An offset inside a character or past the end never panics.
+            let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 8..1000, "x").into_error(query);
+            assert!(matches!(err, TraverserError::Gql { offset: 7, .. }));
+            let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 1000..3, "x").into_error(query);
+            assert!(matches!(
+                err,
+                TraverserError::Gql {
+                    line: 3,
+                    column: 8,
+                    width: 1,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn long_lines_are_windowed_around_the_span() {
+            let query = format!("MATCH (n) WHERE {} RETURN n", "n.a = 1 AND ".repeat(20));
+            let start = query.find("RETURN").unwrap_or(0) + 7;
+            let err = GqlErrorBuilder::new(GqlErrorKind::Semantic, start..start + 1, "unknown")
+                .into_error(&query);
+            let excerpt = &err.details()[0].1;
+            let mut rows = excerpt.lines();
+            let shown = rows.next().unwrap_or_default();
+            let caret = rows.next().unwrap_or_default();
+            assert!(shown.starts_with('…'), "{shown}");
+            assert!(shown.chars().count() <= crate::value::literal::MAX_LITERAL_CHARS + 2);
+            // The caret stands under the `n` after RETURN.
+            let at = caret.chars().count() - 1;
+            assert_eq!(shown.chars().nth(at), Some('n'));
+            assert_eq!(shown.chars().nth(at.saturating_sub(7)), Some('R'));
+        }
+
+        #[test]
+        fn help_per_kind() {
+            let help = |builder: GqlErrorBuilder| {
+                builder
+                    .into_error("MATCH (n) CREATE (m) RETURN n")
+                    .help()
+                    .unwrap_or_default()
+            };
+            let refused = help(
+                GqlErrorBuilder::new(GqlErrorKind::Refused, 10..16, "CREATE is not supported")
+                    .alternative(
+                        "gql() is read-only; use the Gremlin mutation steps add_v(), \
+                         property(), drop() or merge_v()",
+                    ),
+            );
+            assert!(
+                refused.starts_with(
+                    "gql() is read-only; use the Gremlin mutation steps add_v(), property(), \
+                     drop() or merge_v(). gql() runs read queries"
+                ),
+                "{refused}"
+            );
+            let generic = help(GqlErrorBuilder::new(GqlErrorKind::Refused, 10..16, "no"));
+            assert!(
+                generic.contains("does not support this construct"),
+                "{generic}"
+            );
+            let not_yet = help(
+                GqlErrorBuilder::new(GqlErrorKind::NotYet, 0..5, "OPTIONAL MATCH")
+                    .alternative("Use coalesce() or optional() in Gremlin"),
+            );
+            assert!(not_yet.starts_with("Use coalesce() or optional() in Gremlin. "));
+            assert!(
+                not_yet.contains("comes in a later version of gql()"),
+                "{not_yet}"
+            );
+            let limit = help(GqlErrorBuilder::new(GqlErrorKind::Limit, 0..1, "too deep"));
+            assert!(limit.contains("nests deeper than gql() accepts"), "{limit}");
+            let semantic = help(
+                GqlErrorBuilder::new(GqlErrorKind::Semantic, 28..29, "unknown").suggestion("n"),
+            );
+            assert!(semantic.starts_with("Did you mean n? Declare every variable"));
+            // Many expected tokens: help lists the first ones, the detail all of them.
+            let tokens: Vec<String> = (0..12).map(|i| format!("T{i}")).collect();
+            let err = GqlErrorBuilder::new(GqlErrorKind::Syntax, 0..1, "bad")
+                .expected(tokens)
+                .into_error("x");
+            let text = err.help().unwrap_or_default();
+            assert!(
+                text.contains("Expected T0, T1, T2, T3, T4, T5, T6, T7, ... at"),
+                "{text}"
+            );
+            assert!(report(&err).contains("T11\n"));
+        }
+
+        #[test]
+        fn gqlstatus_defaults_per_kind_and_overrides() {
+            let status = |err: TraverserError| match err {
+                TraverserError::Gql { gqlstatus, .. } => gqlstatus,
+                _ => String::new(),
+            };
+            for (kind, code) in [
+                (GqlErrorKind::Syntax, "42001"),
+                (GqlErrorKind::Semantic, "42002"),
+                (GqlErrorKind::Refused, "0A000"),
+                (GqlErrorKind::NotYet, "0A000"),
+                (GqlErrorKind::Limit, "54001"),
+            ] {
+                assert_eq!(
+                    status(GqlErrorBuilder::new(kind, 0..1, "m").into_error("q")),
+                    code
+                );
+            }
+            let err = GqlErrorBuilder::new(GqlErrorKind::Semantic, 0..1, "m")
+                .gqlstatus("42004")
+                .into_error("q");
+            assert_eq!(status(err), "42004");
+        }
+
+        #[test]
+        fn help_is_respelled_under_camel_case() {
+            let mut err = GqlErrorBuilder::new(GqlErrorKind::Refused, 0..1, "m")
+                .alternative("use add_v() or merge_v()")
+                .into_error("CREATE (n)");
+            err.respell(crate::traversal::Spelling::Camel);
+            let help = err.help().unwrap_or_default();
+            assert!(help.starts_with("use addV() or mergeV(). "), "{help}");
         }
     }
 }
