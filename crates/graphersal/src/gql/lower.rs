@@ -179,8 +179,32 @@ fn not_at_start(query: &str) -> TraverserError {
         0..query.len(),
         "gql() starts a traversal in this version; it cannot follow other steps",
     )
-    .alternative("start the traversal with it, as in g.gql(\"MATCH (p:person) RETURN p\")")
+    .alternative(start_with_gql(query))
     .into_error(query)
+}
+
+/// The advice of a `gql()` that does not start the traversal, built from its `query`: start
+/// with it, express what the steps before it selected in the pattern, and continue with Gremlin
+/// steps after it.
+pub(crate) fn start_with_gql(query: &str) -> String {
+    format!(
+        "start the traversal with it, as in g.gql({}), and write what the steps before it \
+         selected as the MATCH pattern and its WHERE condition; Gremlin steps may follow it, as \
+         in g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")",
+        crate::value::literal::rhai_string(query)
+    )
+}
+
+/// `name` as the key of a Rhai object map literal: bare when it is an identifier, quoted
+/// otherwise (a back-quoted GQL parameter name may hold any character).
+pub(crate) fn rhai_map_key(name: &str) -> String {
+    let identifier = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if identifier {
+        name.to_string()
+    } else {
+        crate::value::literal::rhai_string(name)
+    }
 }
 
 /// One step of the lowered plan, every fallible part already done.
@@ -622,7 +646,7 @@ impl<'q> Lowering<'q> {
             span,
             "gql() cannot continue a traversal yet",
         )
-        .alternative("start the traversal with it, as in g.gql(\"MATCH (p:person) RETURN p\")")
+        .alternative(start_with_gql(self.query))
         .into_error(self.query)
     }
 
@@ -883,7 +907,11 @@ impl<'q> Lowering<'q> {
                 format!("{keyword} must be a non-negative integer, but ${name} is {what}"),
             )
             .gqlstatus(code)
-            .alternative(format!("give ${name} a value such as 10"))
+            .alternative(format!(
+                "give ${name} a value such as 10, as in g.gql({}, #{{{}: 10}})",
+                crate::value::literal::rhai_string(self.query),
+                rhai_map_key(name)
+            ))
             .into_error(self.query)
         };
         match parameter(self.params, name).map(|v| v.clone().into_logical()) {

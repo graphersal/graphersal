@@ -278,6 +278,37 @@ fn step_path(child: &Option<usize>, index: &Option<usize>, source: &TraverserErr
     format!("#{} ", segments.join("."))
 }
 
+/// The message of a [`TraverserError::StepFailed`]: `Step #2 'max()' execution failed`. A GQL
+/// query refused by its `gql:error` marker leads with the GQL error itself, since the marker is
+/// no step the user wrote and the query never ran.
+fn step_failed_message(
+    child_index: &Option<usize>,
+    step_index: &Option<usize>,
+    step_name: &str,
+    element_id: &Option<String>,
+    source: &TraverserError,
+) -> String {
+    let path = step_path(child_index, step_index, source);
+    let name = innermost_step_name(step_name, source);
+    #[cfg(feature = "gql")]
+    if let Some(gql) = gql_marker_cause(&name, source) {
+        return format!("{gql} (step {path}'{name}' refused the query before the traversal ran)");
+    }
+    let element = element_id
+        .as_ref()
+        .map(|id| format!(" for element ID '{id}'"))
+        .unwrap_or_default();
+    format!("Step {path}'{name}' execution failed{element}")
+}
+
+/// The GQL error a `gql:error` marker raised, when `name` is the marker and `source` leads to
+/// that error: its diagnostic leads with the GQL error and omits the `Caused by:` line.
+#[cfg(feature = "gql")]
+fn gql_marker_cause<'e>(name: &str, source: &'e TraverserError) -> Option<&'e TraverserError> {
+    let root = source.root_cause();
+    (name.starts_with("gql:error(") && matches!(root, TraverserError::Gql { .. })).then_some(root)
+}
+
 /// Returns the name of the innermost failing step of a nested step chain.
 fn innermost_step_name(step_name: &str, source: &TraverserError) -> String {
     match source {
@@ -2739,6 +2770,17 @@ impl DiagnosticError for ScriptError {
                  A list of labels is not accepted."
                     .to_string(),
             ),
+            ScriptError::ArgumentMismatch { step_name, .. } if step_name == "gql" => Some(
+                "gql() takes the query as a string and, optionally, the values of its \
+                 $parameters as a map from name to value, for example \
+                 g.gql(\"MATCH (p:person {name: $name}) RETURN p.age\", #{name: \"marko\"}); () \
+                 stands for no parameters. A parameter value is a plain value (a string, a \
+                 number, a boolean, a list, a map or ()), never a traversal or a closure: run the \
+                 traversal first and pass its result, for example \
+                 let n = g.v().count().next(); \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT $n\", #{n: n})."
+                    .to_string(),
+            ),
             ScriptError::ArgumentMismatch {
                 step_name, actual, ..
             } if actual.starts_with(TRAVERSAL_ARGUMENT) =>
@@ -3745,10 +3787,8 @@ pub enum TraverserError {
 
     /// A named step in the pipeline failed; wraps the underlying cause with its query position.
     #[error(
-        "Step {}'{}' execution failed{}",
-        step_path(.child_index, .step_index, .source),
-        innermost_step_name(.step_name, .source),
-        .element_id.as_ref().map(|id| format!(" for element ID '{id}'")).unwrap_or_default()
+        "{}",
+        step_failed_message(.child_index, .step_index, .step_name, .element_id, .source)
     )]
     #[non_exhaustive]
     StepFailed {
@@ -4809,8 +4849,14 @@ impl TraverserError {
                 Some(math_expression_help(expr, kind, None))
             }
             #[cfg(feature = "gql")]
-            TraverserError::Gql { kind, context, .. } => Some(gql_help(
+            TraverserError::Gql {
+                kind,
+                gqlstatus,
+                context,
+                ..
+            } => Some(gql_help(
                 *kind,
+                gqlstatus,
                 &context.expected,
                 context.suggestion.as_deref(),
                 context.alternative.as_deref(),
@@ -4902,6 +4948,15 @@ impl TraverserError {
 impl DiagnosticError for TraverserError {
     fn help(&self) -> Option<String> {
         let help = self.canonical_help()?;
+        #[cfg(feature = "gql")]
+        if matches!(self.root_cause(), TraverserError::Gql { .. }) {
+            // The GQL functions in the advice are GQL text; the Gremlin steps are respelled.
+            let gql_function = |name: &str| crate::gql::parser::lookup_function(name).is_some();
+            return Some(
+                crate::traversal::spelling::respell_keeping(&help, self.spelling(), gql_function)
+                    .into_owned(),
+            );
+        }
         Some(crate::traversal::spelling::respell(&help, self.spelling()).into_owned())
     }
 
@@ -4974,16 +5029,28 @@ impl DiagnosticError for TraverserError {
     /// Renders nested step failures as a single step trace followed by the root cause,
     /// instead of one `Caused by:` line per traversal level.
     fn diagnostic_body(&self) -> String {
+        let root = self.root_cause();
+        // A GQL error's message and source excerpt are GQL text: never respelled
+        // (`element_id(p)` stays as written, so the caret stays under its span).
+        #[cfg(feature = "gql")]
+        let gql_root = matches!(root, TraverserError::Gql { .. });
+        #[cfg(not(feature = "gql"))]
+        let gql_root = false;
         if let TraverserError::Spelled { spelling, source } = self {
             let body = source.diagnostic_body();
+            if gql_root {
+                return body;
+            }
             return crate::traversal::spelling::respell(&body, *spelling).into_owned();
         }
         let mut buf = format!("Error: {self}");
         push_details(&mut buf, &self.details());
 
-        let root = self.root_cause();
         if !std::ptr::eq(root, self) {
-            buf.push_str(&format!("\nCaused by: {root}"));
+            // The message of a `gql:error` marker's failure is the GQL error already.
+            if !(gql_root && self.to_string().starts_with(&root.to_string())) {
+                buf.push_str(&format!("\nCaused by: {root}"));
+            }
             push_details(&mut buf, &root.details());
         }
 
@@ -4993,7 +5060,11 @@ impl DiagnosticError for TraverserError {
             current = src.source();
         }
         // The stored plan frames are respelled already (`TraverserError::respell`); this brings
-        // the step names inside the root cause's own message in line with them.
+        // the step names inside the root cause's own message in line with them. A GQL root
+        // cause names no step, so its text is left as written.
+        if gql_root {
+            return buf;
+        }
         match crate::traversal::spelling::respell(&buf, self.spelling()) {
             std::borrow::Cow::Borrowed(_) => buf,
             std::borrow::Cow::Owned(respelled) => respelled,
@@ -6556,6 +6627,7 @@ fn gql_details(
 #[cfg(feature = "gql")]
 fn gql_help(
     kind: GqlErrorKind,
+    gqlstatus: &str,
     expected: &[String],
     suggestion: Option<&str>,
     alternative: Option<&str>,
@@ -6588,6 +6660,12 @@ fn gql_help(
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\").",
             );
         }
+        // Class 22 before the run: an OFFSET / LIMIT that is no non-negative integer.
+        GqlErrorKind::Semantic if gqlstatus.starts_with("22") => help.push_str(
+            "OFFSET and LIMIT take a non-negative integer: a literal, or a $parameter given \
+             such a value in the parameters of gql(), for example \
+             g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2}).",
+        ),
         GqlErrorKind::Semantic => help.push_str(
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it, for example g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), \

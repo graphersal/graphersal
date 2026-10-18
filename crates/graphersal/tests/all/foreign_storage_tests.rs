@@ -298,6 +298,83 @@ const CURATED: &[(Mode, &str)] = &[
     (Mode::Atomic, r#"g.addV("x").next(); g.mark("m")"#),
 ];
 
+/// GQL queries (feature `gql`): node scans, edges in either direction, joins of a repeated
+/// variable, trail checks, `ORDER BY` / `OFFSET` / `LIMIT`, parameters, a property index read
+/// by the planner (through `GraphStorage::property_indexes`) and errors before and during the run.
+#[cfg(feature = "gql")]
+const GQL_CURATED: &[&str] = &[
+    // Node patterns: labels, label expressions, inline properties, WHERE with NULLs.
+    r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name, p.age AS age").toList()"#,
+    r#"g.gql("MATCH (n:!person) RETURN n.name, n.lang, labels(n), element_id(n)").toList()"#,
+    r#"g.gql("MATCH (n:person|software {name: 'lop'}) RETURN n").select("n").values("name").toList()"#,
+    r#"g.gql("MATCH (n) WHERE n.age IS NULL OR n.age < 30 RETURN n.name, n.age, coalesce(n.age, -1)").toList()"#,
+    r#"g.gql("MATCH (n) RETURN *").select("n").id().toList()"#,
+    // Edges: each direction, abbreviated, either direction, edge properties and variables.
+    r#"g.gql("MATCH (a:person)-[e:knows]->(b) RETURN a.name, e.weight, b.name, type(e)").toList()"#,
+    r#"g.gql("MATCH (s:software)<-[:created]-(p) RETURN s.name, p.name").toList()"#,
+    r#"g.gql("MATCH (a)-[e]-(b) WHERE a.name = 'josh' RETURN b.name, element_id(e)").toList()"#,
+    r#"g.gql("MATCH (a)--(b) RETURN DISTINCT a.name").toList()"#,
+    r#"g.gql("MATCH (a)-[e:knows|created WHERE e.weight >= 0.5]->(b) RETURN a.name, b.name").toList()"#,
+    // Joins, comma patterns, several MATCH clauses, trail.
+    r#"g.gql("MATCH (a)-[:created]->(s)<-[:created]-(b) WHERE a <> b RETURN a.name, b.name, s.name").toList()"#,
+    r#"g.gql("MATCH (a)-[:knows]->(b), (b)-[:created]->(c) RETURN a.name, b.name, c.name").toList()"#,
+    r#"g.gql("MATCH (a:person) MATCH (a)-[:created]->(s) RETURN a.name, s.name").toList()"#,
+    r#"g.gql("MATCH (a)-[e1]-(b)-[e2]-(c) WHERE a.name = 'marko' RETURN b.name, c.name").toList()"#,
+    // ORDER BY, OFFSET, LIMIT, CASE, arithmetic, strings.
+    r#"g.gql("MATCH (p) RETURN p.name AS n, p.age AS a ORDER BY a DESC, n OFFSET 1 LIMIT 3").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN upper(p.name) || '!' AS n, CASE WHEN p.age > 30 THEN p.age * 2 ELSE p.age % 7 END AS x ORDER BY n").toList()"#,
+    // Parameters, and Gremlin steps after gql().
+    r#"g.gql("MATCH (p:person) WHERE p.age >= $min RETURN p ORDER BY p.age LIMIT $n", #{min: 29, n: 2}).select("p").out("created").values("name").toList()"#,
+    r#"g.gql("MATCH (p {name: $name})-[:knows]->(f) RETURN f.name AS f", #{name: "marko"}).select("f").fold().next()"#,
+    // A property index read by the planner: the same rows, and the plan reads the index on both.
+    r#"g.create_index(#{label: "person", key: "name"}); let q = "MATCH (p:person {name: $n})-[:created]->(s) RETURN s.name AS s"; [g.gql(q, #{n: "josh"}).toList(), g.gql(q, #{n: "josh"}).profile().to_string().contains("[index: vertex person.name]")]"#,
+    // Errors: before the run (syntax, refused write) and during it (division by zero).
+    r#"g.gql("MATCH (p:person) RETRUN p").toList()"#,
+    r#"g.gql("MATCH (p) SET p.x = 1 RETURN p").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN 100 / (p.age - 29)").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name LIMIT $n", #{n: -1}).toList()"#,
+    r#"g.v().gql("MATCH (p) RETURN p").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    for script in GQL_CURATED {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise GQL, not fail on the way: only the error cases fail.
+    let failing = GQL_CURATED
+        .iter()
+        .filter(|script| {
+            run_curated(reference(), Mode::Plain, script)
+                .result
+                .is_err()
+        })
+        .count();
+    assert_eq!(failing, 5, "only the five error cases fail");
+    let indexed = run_curated(reference(), Mode::Plain, GQL_CURATED[18]);
+    assert!(
+        indexed
+            .result
+            .as_deref()
+            .is_ok_and(|text| text.contains("ripple") && text.ends_with("true]")),
+        "{indexed:?}"
+    );
+}
+
 #[test]
 fn curated_scripts_give_the_same_result_on_both_storages() {
     let mut differences = Vec::new();
