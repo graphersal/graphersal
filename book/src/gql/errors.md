@@ -103,6 +103,7 @@ Comparisons never fail: comparing values of different kinds, or with `NULL`, is 
 | `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped |
 | `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
+| `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
 | `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition |
 | `22012` | data | division or `%` by zero |

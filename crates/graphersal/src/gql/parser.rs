@@ -810,7 +810,7 @@ impl<'a> Parser<'a> {
             let what = if self.nth(1).keyword() == Some(Keyword::Shortest) {
                 "shortest path search"
             } else {
-                "path search prefixes and match modes"
+                "a path search prefix or match mode"
             };
             return Err(self.not_yet(
                 span,
