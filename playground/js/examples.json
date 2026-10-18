@@ -78,6 +78,85 @@
     "script": "// Data terminals (to_list(), next()) return plain Rhai values you can compute with.\nlet people = g.v().has_label(\"person\").value_map(\"name\", \"age\").to_list();\nlet total = 0;\nlet oldest = \"\";\nlet max_age = 0;\nfor p in people {\n    let age = p.age[0];\n    total += age;\n    if age > max_age { max_age = age; oldest = p.name[0]; }\n}\n#{ people: people.len(), average_age: total / people.len(), oldest: oldest }"
   },
   {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Whom does each person know? (GQL)",
+    "script": "g.gql(\"MATCH (p:person)-[:knows]->(f:person) RETURN p.name AS who, f.name AS friend, f.age AS age ORDER BY age DESC\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Inline properties and an edge variable",
+    "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[e:knows]->(b) RETURN b.name AS friend, e.weight AS weight ORDER BY weight DESC\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "A $parameter: creators of software in one language",
+    "script": "g.gql(\"MATCH (p:person)-[:created]->(s:software) WHERE s.lang = $lang RETURN p.name AS person, s.name AS project ORDER BY person\", #{lang: \"java\"})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Multi-line query in a backtick string: co-creators",
+    "script": "// Backtick strings span lines; GQL strings use single quotes inside them.\ng.gql(`\n  MATCH (a:person)-[:created]->(s:software)<-[:created]-(b:person)\n  WHERE a.name < b.name\n  RETURN a.name AS one, b.name AS other, s.name AS project\n  ORDER BY project, one, other\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Label expression and string predicates",
+    "script": "g.gql(\"MATCH (v:person|software) WHERE v.name STARTS WITH 'j' OR v.name ENDS WITH 'p' RETURN v.name AS name, labels(v) AS labels ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "RETURN * with ORDER BY and LIMIT",
+    "script": "g.gql(\"MATCH (p:person)-[:created]->(s:software) RETURN * ORDER BY p.name, s.name LIMIT 3\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Paging with OFFSET (SKIP) and LIMIT",
+    "script": "g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age ORDER BY age OFFSET 1 LIMIT 2\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "NULL for a missing property (NULLs sort last)",
+    "script": "g.gql(\"MATCH (v) RETURN v.name AS name, v.age AS age ORDER BY age\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Either direction, with the edge label",
+    "script": "g.gql(\"MATCH (x {name: 'josh'})-[e]-(y) RETURN type(e) AS rel, y.name AS other ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Gremlin after GQL: continue from a row variable",
+    "script": "g.gql(\"MATCH (p:person {name: 'marko'}) RETURN p\")\n  .select(\"p\").out(\"created\").values(\"name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Gremlin after GQL: count the rows",
+    "script": "g.gql(\"MATCH (a:person)-[:knows]->(b:person) RETURN a, b\").count()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Profile a GQL query (the Gremlin plan it runs)",
+    "script": "g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name\").profile()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "A GQL syntax error (see the help text)",
+    "script": "g.gql(\"MATCH (p:person) RETRUN p.name\")",
+    "expect": "error"
+  },
+  {
     "group": "Generated test data (Fake)",
     "graph": "any",
     "title": "Fake(seed): a table of reproducible test people",

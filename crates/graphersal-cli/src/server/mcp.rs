@@ -444,7 +444,8 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
 const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
-traversals (Gremlin in Rhai syntax, see its description), `get_schema`/`statistics`/`graph_info` \
+traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL read queries (MATCH \
+... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects; see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
 stored in the graph; run one with `run_saved_query` {name, params} instead of writing it again. \
@@ -589,6 +590,29 @@ fn no_args() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
+const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like) read query \
+against the shared graph and return its rows as JSON: one JSON object per row, its keys the \
+RETURN columns in the order written (bounded like query's: at most max_rows rows, default 100; \
+a note says when something was cut). It runs the script g.gql(query, params) and never changes \
+the graph. No Rhai escaping is needed: pass the GQL text as it is.
+
+Supported (stage 1a): MATCH with comma-separated patterns of node patterns (v:Label {key: \
+value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label expressions \
+with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS WITH, ENDS \
+WITH, CONTAINS); RETURN (mandatory; expressions with AS aliases, DISTINCT, RETURN *); ORDER BY \
+(ASC/DESC; NULLs last ascending), OFFSET (or SKIP) and LIMIT; $name parameters read from \
+params (values, never spliced into the text). String literals use single quotes. A missing \
+property is NULL. Edges in one match are distinct (trail semantics). Vertices and edges in a \
+row come back as {id, label, properties}. Not yet supported (refused with a GQLSTATUS error \
+and a Help line): aggregation (count, sum, collect, GROUP BY), OPTIONAL MATCH, WITH / LET / \
+FILTER, quantified paths (->{1,3}, *), path variables, writes (INSERT, SET, DELETE, CREATE, \
+MERGE): use the query tool with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN \
+p\").select(\"p\").out(\"created\").
+
+Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
+f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; more in the group \
+\"GQL\" of the resource graphersal://examples (scripts g.gql(\"...\")).";
+
 fn all_tools() -> Vec<Tool> {
     let tool = |name, title, kind, description: &str, input| Tool {
         name,
@@ -611,6 +635,22 @@ fn all_tools() -> Vec<Tool> {
                     "max_rows": {"type": "integer", "minimum": 1, "description": "Most top-level results returned (default 100)."},
                 },
                 "required": ["script"],
+            }),
+        ),
+        tool(
+            "gql",
+            "Run a GQL query",
+            Kind::Read,
+            GQL_DESCRIPTION,
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The GQL read query (MATCH ... RETURN ...), as plain text."},
+                    "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
+                    "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Most rows returned (default 100)."},
+                },
+                "required": ["query"],
             }),
         ),
         tool(
@@ -1114,6 +1154,7 @@ fn run_tool(
 ) -> Result<String, String> {
     match name {
         "query" => query(context, caller, args),
+        "gql" => gql(context, caller, args),
         "get_schema" => {
             let text = context.call(|s| s.get_schema_text()).map_err(http_failed)?;
             Ok(if text == "null" {
@@ -1483,6 +1524,29 @@ fn query_tool_listings(context: &Context, read_only: bool) -> Result<Vec<Value>,
             }))
         })
         .collect())
+}
+
+/// The `gql` tool: the call text `g.gql(query, #{params})` (the query one Rhai string literal,
+/// the parameters Rhai literals) run like the `query` tool; read-only by construction, and under
+/// the read-only authorizer for a read-only caller like every script.
+fn gql(context: &Context, caller: &ToolCaller, args: &Value) -> Result<String, String> {
+    let text = str_arg(args, "query").ok_or("missing argument \"query\" (the GQL query to run)")?;
+    let params = match args.get("params") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => serde_json::from_str(text)
+            .map_err(|err| format!("argument \"params\" is not a JSON object: {err}"))?,
+        Some(other) => other.clone(),
+    };
+    let script = graphersal_session::queries::gql_call_text(text, &params)?;
+    let profile = args
+        .get("profile")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_rows = args
+        .get("max_rows")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_MAX_ROWS, |n| n.max(1) as usize);
+    run_result(run_script(context, caller, script, profile, max_rows)?)
 }
 
 /// The `query` tool: one run of the session (like the browser's Run), the answer as text.
@@ -2056,6 +2120,38 @@ fn examples_text(examples: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gql_is_a_reading_tool_offered_read_only() {
+        for read_only in [false, true] {
+            let tool = tools(read_only)
+                .into_iter()
+                .find(|t| t.name == "gql")
+                .expect("gql listed");
+            let listing = tool.listing(read_only);
+            assert_eq!(listing["annotations"]["readOnlyHint"], true, "{listing}");
+            assert_eq!(
+                listing["annotations"]["destructiveHint"], false,
+                "{listing}"
+            );
+            assert_eq!(listing["inputSchema"]["required"], json!(["query"]));
+            for key in ["query", "params", "profile", "max_rows"] {
+                assert!(
+                    listing["inputSchema"]["properties"][key].is_object(),
+                    "{key}"
+                );
+            }
+        }
+        for named in [
+            "OPTIONAL MATCH",
+            "RETURN *",
+            "graphersal://examples",
+            "\"GQL\"",
+        ] {
+            assert!(GQL_DESCRIPTION.contains(named), "{named}");
+        }
+        assert!(INSTRUCTIONS.contains("`gql`"));
+    }
 
     #[test]
     fn secrets_targets_and_sentences() {

@@ -83,6 +83,9 @@ tagged `graphersal`:
 g.v().has_label(\"person\").values(\"name\")
 ```
 
+A GQL query (the gql tool) goes into such a block as the script that runs it, \
+`g.gql(\"MATCH (p:person) RETURN p.name AS name\")`, so the user can run it in the playground.
+
 Write tables as GitHub-flavoured Markdown tables (a header row, a `|---|` separator row). Keep \
 answers short and say when a result was cut by the display limits.";
 
