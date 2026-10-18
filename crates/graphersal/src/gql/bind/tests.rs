@@ -538,3 +538,44 @@ fn binding_never_panics_on_parsed_queries() {
         }
     }
 }
+
+#[test]
+fn a_match_clause_holds_at_most_max_match_edges_edge_patterns() {
+    let path = |edges: usize| format!("(a){}-->(z)", "-->()".repeat(edges - 1));
+    // At the limit, in one path or spread over comma-separated paths.
+    ok(&format!("MATCH {} RETURN z", path(MAX_MATCH_EDGES)));
+    ok(&format!(
+        "MATCH {}, (z)-[e]->(y) RETURN y",
+        path(MAX_MATCH_EDGES - 1)
+    ));
+    // Separate clauses are not limited together.
+    ok(&format!(
+        "MATCH {} MATCH (z){}-->(y) RETURN y",
+        path(MAX_MATCH_EDGES),
+        "-->()".repeat(MAX_MATCH_EDGES - 1)
+    ));
+    // One edge past the limit: the error is at that edge, also when a later path brings it.
+    for query in [
+        format!("MATCH {} RETURN z", path(MAX_MATCH_EDGES + 1)),
+        format!("MATCH {}, (z)-[e]->(y) RETURN y", path(MAX_MATCH_EDGES)),
+        format!("MATCH {} RETURN z", path(5_000)),
+    ] {
+        let parsed = parse(&query).unwrap_or_else(|e| panic!("does not parse: {e}"));
+        let f = failure(&query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{f:?}");
+        assert_eq!(f.gqlstatus, "54001");
+        assert_eq!(
+            f.message,
+            format!("the MATCH clause has more than {MAX_MATCH_EDGES} edge patterns")
+        );
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("several MATCH clauses"),
+            "{alternative}"
+        );
+        assert!(alternative.contains("repeat()"), "{alternative}");
+    }
+    let query = format!("MATCH {}, (z)-[e]->(y) RETURN y", path(MAX_MATCH_EDGES));
+    let parsed = parse(&query).unwrap_or_else(|e| panic!("does not parse: {e}"));
+    assert_eq!(failure(&query, bind(&parsed)).text, "-[e]->");
+}

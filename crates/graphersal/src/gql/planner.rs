@@ -426,8 +426,19 @@ impl<'q> Planner<'q> {
         self.bind(start);
         self.place_filters();
         let mut current = start;
+        // Membership by binding id: `nodes.contains` per edge would be quadratic.
+        let mut in_component = vec![false; self.bound.bindings.len()];
+        for node in nodes {
+            if let Some(slot) = in_component.get_mut(node.0) {
+                *slot = true;
+            }
+        }
         let mut todo: Vec<usize> = (0..self.edges.len())
-            .filter(|&i| self.edges.get(i).is_some_and(|e| nodes.contains(&e.source)))
+            .filter(|&i| {
+                self.edges
+                    .get(i)
+                    .is_some_and(|e| in_component.get(e.source.0).copied().unwrap_or(false))
+            })
             .collect();
         loop {
             while let Some(pick) = self.pick(&todo, current) {

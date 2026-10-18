@@ -6684,6 +6684,10 @@ fn gql_help(
             "This construct comes in a later version of gql(); until then, write the query \
              without it or as Gremlin steps.",
         ),
+        // A size limit (an operator chain, a pattern) brings its own fix as the alternative.
+        GqlErrorKind::Limit if alternative.is_some() => {
+            help.push_str("The query is larger than gql() accepts.")
+        }
         GqlErrorKind::Limit => help.push_str(
             "The query nests deeper than gql() accepts. Flatten it: remove redundant \
              parentheses, and join conditions with AND / OR instead of nesting them.",

@@ -1312,3 +1312,59 @@ fn hops_merge_on_the_large_graph() {
     let result = lock.traversal().gql(query).to_list().unwrap();
     assert_eq!(result.len(), 10_000);
 }
+
+#[test]
+fn a_pattern_at_the_edge_limit_runs_quickly_and_one_past_it_is_refused() {
+    // A chain of 70 vertices: a 64-hop path starts at each of the first 6.
+    let mut graph = TraversalGraph::new();
+    let mut previous: Option<VertexHandle> = None;
+    for i in 0..70 {
+        let mut properties = PropertyMap::default();
+        properties.insert("name", ElementProperty::from(format!("v{i}")));
+        let v =
+            GraphStorage::insert_vertex(&mut graph, None, vec!["n".into()], properties).unwrap();
+        if let Some(from) = previous {
+            GraphStorage::insert_edge(
+                &mut graph,
+                None,
+                Some("next".into()),
+                from,
+                v,
+                PropertyMap::default(),
+            )
+            .unwrap();
+        }
+        previous = Some(v);
+    }
+    let path = |edge: &str, n: usize| format!("(a){}{edge}(z)", format!("{edge}()").repeat(n - 1));
+    // Generous bound (debug build, a loaded machine): it takes milliseconds; before the limit,
+    // 2000 hops took seconds and grew with the square of the hops.
+    let start = std::time::Instant::now();
+    let names = texts(
+        &rows(
+            &graph,
+            &format!("MATCH {} RETURN z.name AS name", path("-->", 64)),
+        ),
+        "name",
+    );
+    assert_eq!(sorted(names), ["v64", "v65", "v66", "v67", "v68", "v69"]);
+    // Either direction: the walk may turn back only over a new edge, which a chain lacks.
+    let both = rows(
+        &graph,
+        &format!("MATCH {} RETURN z.name AS name", path("-[:next]-", 64)),
+    );
+    assert_eq!(both.len(), 12);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    let (kind, status, message) = gql_error(
+        graph
+            .traversal()
+            .gql(&format!("MATCH {} RETURN z", path("-->", 65)))
+            .to_list(),
+    );
+    assert_eq!((kind, status.as_str()), (GqlErrorKind::Limit, "54001"));
+    assert_eq!(message, "the MATCH clause has more than 64 edge patterns");
+}
