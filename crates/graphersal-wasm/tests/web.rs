@@ -475,3 +475,68 @@ fn compression_rules_in_the_browser() {
     assert_eq!(json(&p.drop_compression("names").unwrap())["dropped"], true);
     assert_eq!(json(&p.info())["compressionRules"], 0);
 }
+
+/// Runs one GQL query through the browser session: it either answers (with `rows` rows) or is
+/// refused by the parser's nesting limits (GQLSTATUS 54001), never a stack overflow of the
+/// 1 MB wasm32 stack (debug build, the deepest frames).
+fn gql_within_limits(p: &mut Playground, query: &str, rows: Option<usize>) {
+    let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+    match rows {
+        Some(rows) => {
+            assert_eq!(r["ok"], true, "{query}: {r}");
+            assert_eq!(
+                r["execution"]["results"].as_array().unwrap().len(),
+                rows,
+                "{query}: {r}"
+            );
+        }
+        None => {
+            assert_eq!(r["ok"], false, "{query}: {r}");
+            assert!(r.to_string().contains("54001"), "{query}: {r}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn deeply_nested_gql_stays_within_the_wasm_stack() {
+    let mut p = modern();
+    let nest = |n: usize, inner: &str| format!("{}{inner}{}", "(".repeat(n), ")".repeat(n));
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("p.age = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let q = |predicate: &str| format!("MATCH (p:person) WHERE {predicate} RETURN p.name AS n");
+    // Parentheses: the deepest accepted nesting, and one past it.
+    gql_within_limits(&mut p, &q(&nest(120, "p.age > 1")), Some(4));
+    gql_within_limits(&mut p, &q(&nest(126, "p.age > 1")), Some(4));
+    gql_within_limits(&mut p, &q(&nest(127, "p.age > 1")), None);
+    // Flat OR chains: the tallest accepted operator tree, and one past it.
+    gql_within_limits(&mut p, &q(&ors(500)), Some(4));
+    gql_within_limits(&mut p, &q(&ors(510)), Some(4));
+    gql_within_limits(&mut p, &q(&ors(511)), None);
+    // Both at once: a tall tree under deep parentheses.
+    gql_within_limits(&mut p, &q(&nest(120, &ors(500))), Some(4));
+    // Other recursive forms at their deepest.
+    let nots = format!("{}p.age > 1", "NOT NOT ".repeat(60));
+    gql_within_limits(&mut p, &q(&nots), Some(4));
+    let minus = format!("p.age > {}1", "- ".repeat(126));
+    gql_within_limits(&mut p, &q(&minus), Some(4));
+    let lists = format!("size({}1{}) = 1", "[".repeat(125), "]".repeat(125));
+    gql_within_limits(&mut p, &q(&lists), Some(4));
+    let calls = format!(
+        "{}p.name{} IS NOT NULL",
+        "upper(".repeat(125),
+        ")".repeat(125)
+    );
+    gql_within_limits(&mut p, &q(&calls), Some(4));
+    let cases = format!(
+        "{}true{} = true",
+        "CASE WHEN true THEN ".repeat(120),
+        " END".repeat(120)
+    );
+    gql_within_limits(&mut p, &q(&cases), Some(4));
+    let labels = format!("MATCH (p:{}) RETURN p.name AS n", nest(126, "person"));
+    gql_within_limits(&mut p, &labels, Some(4));
+}

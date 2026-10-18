@@ -200,6 +200,7 @@
   - [get_query](traversal/steps/get_query.md)
   - [get_schema](traversal/steps/get_schema.md)
   - [glob_path](traversal/steps/glob_path.md)
+  - [gql](traversal/steps/gql.md)
   - [group](traversal/steps/group.md)
   - [group_count](traversal/steps/group_count.md)
   - [has](traversal/steps/has.md)

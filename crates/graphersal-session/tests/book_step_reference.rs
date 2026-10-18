@@ -34,7 +34,7 @@ the texts of crates/graphersal/src/script/register/docs.rs: change those and reg
 /// The steps and source methods of a traversal (receiver `traversal`), by category, in the order
 /// of the index. Every function of the catalogue must be in exactly one.
 const CATEGORIES: &[(&str, &[&str])] = &[
-    ("Start", &["v", "e", "inject"]),
+    ("Start", &["v", "e", "inject", "gql"]),
     (
         "Walking the graph",
         &[

@@ -4790,3 +4790,47 @@ fn a_compression_estimate_over_http_and_mcp_changes_nothing() {
     assert_eq!(changes(port)["version"], 0, "nothing was committed");
     assert_eq!(get(port, "/api/compression").json(), serde_json::json!([]));
 }
+
+/// GQL over HTTP runs on the dev server's session thread: the deepest nesting the parser accepts
+/// answers, one level more is refused with GQLSTATUS 54001 (never a stack overflow), and the
+/// rows keep the written column order.
+#[test]
+fn gql_runs_on_the_dev_server_session_thread() {
+    let ui = ui_dir("basic");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    let nested = |n: usize| {
+        format!(
+            r#"g.gql("MATCH (p:person) WHERE {}p.age > 1{} RETURN p.name AS n, p.age AS a")"#,
+            "(".repeat(n),
+            ")".repeat(n)
+        )
+    };
+    let body = serde_json::json!({ "script": nested(126), "options": {} });
+    let answer = post(port, "/api/execute", &body.to_string());
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert!(
+        answer.body.contains(r#"{"n":"marko","a":29}"#),
+        "{}",
+        answer.body
+    );
+    let r = answer.json();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        r["execution"]["results"].as_array().unwrap().len(),
+        4,
+        "{r}"
+    );
+    let r = execute(port, &nested(127));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(diagnostic(&r).contains("54001"), "{r}");
+    let ors = (0..510)
+        .map(|i| format!("p.age = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let r = execute(
+        port,
+        &format!(r#"g.gql("MATCH (p:person) WHERE {ors} RETURN p.name AS n")"#),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+}

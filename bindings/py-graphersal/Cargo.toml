@@ -22,7 +22,7 @@ doctest = false
 # `serde`: `Graph.dry_run` returns the serialized `ChangeSet` (with its type tags) as Python data.
 # `alloc-tracking`: `lib.rs` installs `TrackingAllocator` as the extension's global allocator, so
 # Memory profiles report exact (`tracked`) bytes and the memory budget reads the live Rust heap.
-graphersal = { workspace = true, features = ["io", "script", "serde", "persist", "alloc-tracking"] }
+graphersal = { workspace = true, features = ["io", "script", "gql", "serde", "persist", "alloc-tracking"] }
 pyo3 = { workspace = true, features = ["abi3-py310", "uuid"] }
 # Walks the serialized `ChangeSet` into Python dicts and lists (`Graph.dry_run`).
 serde_json = { workspace = true }
