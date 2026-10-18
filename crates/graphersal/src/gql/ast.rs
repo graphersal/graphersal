@@ -33,10 +33,6 @@ pub(crate) struct Query {
 
 impl Query {
     /// The source text of `span` (empty when the span does not fit the source, never a panic).
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "column names, used from the binder (T5) on")
-    )]
     pub(crate) fn text(&self, span: Span) -> &str {
         self.source.get(span.start..span.end).unwrap_or("")
     }

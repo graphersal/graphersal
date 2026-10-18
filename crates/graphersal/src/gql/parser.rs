@@ -2094,8 +2094,9 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row.last().copied().unwrap_or(0)
 }
 
-/// Whether `word` is close enough to `candidate` (case-insensitive) to suggest it.
-fn close_to(word: &str, candidate: &str) -> Option<usize> {
+/// Whether `word` is close enough to `candidate` (case-insensitive) to suggest it (also the
+/// binder's variable and parameter suggestions).
+pub(crate) fn close_to(word: &str, candidate: &str) -> Option<usize> {
     let distance = edit_distance(&word.to_ascii_lowercase(), &candidate.to_ascii_lowercase());
     let allowed = if candidate.chars().count() <= 4 { 1 } else { 2 };
     (distance > 0 && distance <= allowed).then_some(distance)

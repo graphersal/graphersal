@@ -6664,10 +6664,6 @@ impl GqlErrorBuilder {
     }
 
     /// A GQLSTATUS code more specific than the kind's default.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "specific codes from the binder (T5) on")
-    )]
     pub(crate) fn gqlstatus(mut self, code: &'static str) -> Self {
         self.gqlstatus = Some(code);
         self
