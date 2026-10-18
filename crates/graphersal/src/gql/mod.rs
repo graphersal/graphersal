@@ -13,6 +13,7 @@
 //! 2. **parser** (`parser.rs`, AST in `ast.rs`): hand-written recursive descent to an AST that
 //!    keeps every span and the source text, with bounded nesting and errors that name the
 //!    expected tokens; its module docs are the grammar of the supported subset;
+//!    the three-valued expression evaluator (`eval.rs`) runs its compiled expressions per row;
 //! 3. **binder**: variables, scopes, parameter references and column names, with GQLSTATUS codes
 //!    for semantic errors;
 //! 4. **plan**: the logical plan, a pattern graph plus a linear pipeline of operators;
@@ -22,5 +23,6 @@
 //!    steps, handed to the optimizer like any other plan.
 
 pub(crate) mod ast;
+pub(crate) mod eval;
 pub(crate) mod lexer;
 pub(crate) mod parser;
