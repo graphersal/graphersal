@@ -655,6 +655,51 @@ impl<E> Compiled<E> {
     pub(crate) fn span(&self) -> Span {
         self.span
     }
+
+    /// The slot, when the expression is exactly one variable (`RETURN p`): the internal steps
+    /// then pass the bound value through as it is, with no conversion.
+    pub(crate) fn as_variable(&self) -> Option<usize> {
+        match self.node {
+            Node::Variable(slot) => Some(slot),
+            _ => None,
+        }
+    }
+
+    /// Adds every slot the expression reads to `slots` (repeats included): what a step running
+    /// it declares to the path analysis. Recursive like `eval`, so at most about
+    /// `parser::MAX_DEPTH` levels deep.
+    pub(crate) fn variables(&self, slots: &mut Vec<usize>) {
+        match &self.node {
+            Node::Const(_) => {}
+            Node::Variable(slot) => slots.push(*slot),
+            Node::List(items) | Node::Call(_, items) => {
+                items.iter().for_each(|item| item.variables(slots));
+            }
+            Node::Map(entries) => entries.iter().for_each(|(_, value)| value.variables(slots)),
+            Node::Unary(_, operand) => operand.variables(slots),
+            Node::Chain(first, links) => {
+                first.variables(slots);
+                for link in links {
+                    match &link.op {
+                        LinkOp::Binary(_, right) => right.variables(slots),
+                        LinkOp::Property(_) | LinkOp::IsNull(_) | LinkOp::IsLabeled(_, _) => {}
+                    }
+                }
+            }
+            Node::Case(case) => {
+                if let Some(operand) = &case.operand {
+                    operand.variables(slots);
+                }
+                for (when, then) in &case.whens {
+                    when.variables(slots);
+                    then.variables(slots);
+                }
+                if let Some(result) = &case.else_result {
+                    result.variables(slots);
+                }
+            }
+        }
+    }
 }
 
 impl<E: Clone + PartialEq> Compiled<E> {

@@ -38,6 +38,7 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "value_map",
     "element_map",
     "project",
+    "gql:project",
     "constant",
     "unfold",
     "group",

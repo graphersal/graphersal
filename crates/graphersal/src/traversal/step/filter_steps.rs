@@ -6,6 +6,10 @@ mod step_cyclic_path;
 mod step_discard;
 mod step_drop;
 mod step_filter;
+#[cfg(feature = "gql")]
+mod step_gql_error;
+#[cfg(feature = "gql")]
+mod step_gql_filter;
 pub(crate) mod step_has;
 mod step_has_id;
 mod step_has_key;

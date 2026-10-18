@@ -18,6 +18,8 @@ mod step_difference;
 mod step_disjunct;
 mod step_element_map;
 mod step_format;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_project;
 pub(crate) mod step_id;
 mod step_identity;
 mod step_index;

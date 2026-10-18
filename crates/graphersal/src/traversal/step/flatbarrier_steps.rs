@@ -1,5 +1,7 @@
 pub(crate) mod step_barrier;
 pub(crate) mod step_dedup;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_order;
 mod step_limit;
 mod step_nearest;
 mod step_order;

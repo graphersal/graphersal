@@ -357,7 +357,11 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   for a read; a value-only step (`has`, `values`, `limit`, `count`, `inject`, `math`,
     ///   modulators, ...) works on what earlier steps produced, so `g.inject(1, 2).sum()` needs
     ///   no permission. An element handle held from an earlier, allowed run is read without a
-    ///   further request (`g.inject(v).values("name")`).
+    ///   further request (`g.inject(v).values("name")`). The internal GQL steps (`gql:filter`,
+    ///   `gql:project`, `gql:order`, the `gql:error` marker) are value-only too: they read the
+    ///   properties and labels of the elements the lowered `v()` / adjacency steps reached (and
+    ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
+    ///   exactly what its Gremlin equivalent asks.
     ///
     /// Labels of reads are not reported (label-level read security is a later storage
     /// decorator, see `book/src/users_guide/permissions.md`).
@@ -579,7 +583,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             | GraphStep::As(_, _)
             | GraphStep::Map("identity", _)
             | GraphStep::FlatBarrier(
-                "barrier" | "dedup" | "limit" | "order" | "range" | "sample" | "skip" | "tail",
+                "barrier" | "dedup" | "limit" | "order" | "range" | "sample" | "skip" | "tail"
+                | "gql:order",
                 _,
             ) => flow,
             GraphStep::Init(_, _)

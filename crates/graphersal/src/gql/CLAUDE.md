@@ -16,6 +16,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 | `eval.rs` | three-valued expression evaluator: `compile` once (names, constants, functions resolved), then `eval`/`truth` per row through the `Env` trait; its module docs fix the NULL, comparison, arithmetic and function semantics; left spines are loops (`Node::Chain`), so recursion stays within `MAX_DEPTH` |
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
+| `runtime.rs` | what the internal steps share at run time: `GqlElement` handles, `Binding` (slot -> current object / path label / `gql:project` column), the traverser-backed `Env` (`Row`), value conversions (an element column stays a live `TraverserValue::Vertex`/`Edge`), `eval_error` (evaluator error -> `TraverserError::Gql`, kind `Data` for class `22`, GQLSTATUS kept), the total `ORDER BY` order (`compare_order`; tests of all steps in `runtime/tests.rs`) |
 | `lower.rs` | the plan to `GraphStep`s: existing steps plus internal `gql:*` steps |
 
 Files appear as their stage lands; this table is the target layout.
@@ -41,3 +42,9 @@ Files appear as their stage lands; this table is the target layout.
   `TraversalGraph` internals, so it works on a host's own storage; its plan is deterministic.
 - **Internal steps are `gql:*` and `pub(crate)`**: one file per step in its category, with arms in
   `for_each_access`, `path_requirement()` where they read the path, and `gql:` in the profile.
+  Built: `gql:filter` (Filter, `filter_steps/step_gql_filter.rs`), `gql:project` (Map,
+  `map_steps/step_gql_project.rs`, in `MAP_PRODUCING_KINDS`), `gql:order` (FlatBarrier,
+  `flatbarrier_steps/step_gql_order.rs`), the `gql:error` marker (Filter, `plan_check`,
+  `filter_steps/step_gql_error.rs`). They ask no permission of their own (value-only, like
+  `has()`); their rendering puts GQL text in string literals so camelCase respelling leaves it
+  alone. Trail checks use `where(P.neq("e1"))`, no internal step.

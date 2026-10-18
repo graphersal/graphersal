@@ -4278,6 +4278,7 @@ pub struct GqlErrorContext {
 /// | [`Refused`](Self::Refused) | `0A000` | feature not supported (provisional) |
 /// | [`NotYet`](Self::NotYet) | `0A000` | feature not supported (provisional) |
 /// | [`Limit`](Self::Limit) | `54001` | statement too complex (provisional, SQLSTATE) |
+/// | [`Data`](Self::Data) | `22000` | data exception; an error carries the specific code: `22012` division by zero, `22003` numeric value out of range, `22G03` invalid value type |
 #[cfg(feature = "gql")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4295,6 +4296,11 @@ pub enum GqlErrorKind {
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
+    /// The query is valid, but evaluating an expression on a row of the data failed while the
+    /// traversal ran: a division by zero, a numeric overflow, an operand of the wrong kind
+    /// (`'a' + 1`, `type(v)` of a node). Unlike the other kinds it is raised at run time, by the
+    /// row it failed on.
+    Data,
 }
 
 #[cfg(feature = "gql")]
@@ -4306,6 +4312,7 @@ impl GqlErrorKind {
             GqlErrorKind::Semantic => "42002",
             GqlErrorKind::Refused | GqlErrorKind::NotYet => "0A000",
             GqlErrorKind::Limit => "54001",
+            GqlErrorKind::Data => "22000",
         }
     }
 }
@@ -4319,6 +4326,7 @@ impl std::fmt::Display for GqlErrorKind {
             GqlErrorKind::Refused => "unsupported construct",
             GqlErrorKind::NotYet => "construct not supported yet",
             GqlErrorKind::Limit => "limit exceeded",
+            GqlErrorKind::Data => "data exception",
         })
     }
 }
@@ -6602,6 +6610,12 @@ fn gql_help(
             "The query nests deeper than gql() accepts. Flatten it: remove redundant \
              parentheses, and join conditions with AND / OR instead of nesting them.",
         ),
+        GqlErrorKind::Data => help.push_str(
+            "A row of the data made the marked expression fail. Keep such rows away from it \
+             with a WHERE condition or a CASE expression, for example \
+             g.gql(\"MATCH (p:person) WHERE p.age <> 0 RETURN 100 / p.age\"), and compare \
+             values of one kind only (no implicit conversion between text and numbers).",
+        ),
     }
     help
 }
@@ -8874,6 +8888,38 @@ mod tests {
                 .gqlstatus("42004")
                 .into_error("q");
             assert_eq!(status(err), "42004");
+        }
+
+        #[test]
+        fn data_exception_keeps_its_code_and_names_the_guard() {
+            let query = "MATCH (p) RETURN 1 / p.age";
+            let err = GqlErrorBuilder::new(GqlErrorKind::Data, 17..26, "division by zero")
+                .gqlstatus("22012")
+                .into_error(query);
+            let TraverserError::Gql {
+                kind, gqlstatus, ..
+            } = &err
+            else {
+                panic!("not a GQL error: {err:?}");
+            };
+            assert_eq!(*kind, GqlErrorKind::Data);
+            assert_eq!(gqlstatus, "22012");
+            assert_eq!(
+                GqlErrorBuilder::new(GqlErrorKind::Data, 0..1, "m")
+                    .into_error("q")
+                    .to_string(),
+                "GQL data exception at line 1, column 1: m"
+            );
+            let help = err.help().unwrap_or_default();
+            assert!(
+                help.starts_with("A row of the data made the marked"),
+                "{help}"
+            );
+            assert!(
+                help.contains("WHERE p.age <> 0 RETURN 100 / p.age"),
+                "{help}"
+            );
+            assert!(report(&err).contains("22012"), "{}", report(&err));
         }
 
         #[test]

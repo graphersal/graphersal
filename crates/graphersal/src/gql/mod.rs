@@ -22,7 +22,8 @@
 //! 5. **planner** (`planner.rs`): the start node and expansion order, read only through
 //!    `GraphStorage` (statistics and the property indexes), deterministic;
 //! 6. **lowering**: the planned query to `GraphStep`s, existing steps plus internal `gql:*`
-//!    steps, handed to the optimizer like any other plan.
+//!    steps (`gql:filter`, `gql:project`, `gql:order`, the `gql:error` marker; their shared
+//!    run-time part is `runtime.rs`), handed to the optimizer like any other plan.
 
 pub(crate) mod ast;
 pub(crate) mod bind;
@@ -31,3 +32,4 @@ pub(crate) mod lexer;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod planner;
+pub(crate) mod runtime;
