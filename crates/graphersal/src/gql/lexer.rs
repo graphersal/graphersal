@@ -48,9 +48,6 @@
 //! - **Punctuation and operators:** `( ) [ ] { } : , . .. ;`, `| & ! % * + - / =`, `<> !=`
 //!   (both [`TokenKind::Ne`]), `< <= > >=`, `||`, `-> <-`, `~ ~> <~`.
 
-// Used from T4 on (the parser); remove then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fmt;
 
 /// A region of the source text: the byte range plus the 1-based line and column (in characters)

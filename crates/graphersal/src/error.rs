@@ -4300,7 +4300,6 @@ pub enum GqlErrorKind {
 #[cfg(feature = "gql")]
 impl GqlErrorKind {
     /// The default GQLSTATUS code of this kind (the table on [`GqlErrorKind`]).
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
     pub(crate) fn default_gqlstatus(self) -> &'static str {
         match self {
             GqlErrorKind::Syntax => "42001",
@@ -6612,7 +6611,6 @@ fn gql_help(
 /// computes line, column and width from the query text.
 #[cfg(feature = "gql")]
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
 pub(crate) struct GqlErrorBuilder {
     kind: GqlErrorKind,
     span: std::ops::Range<usize>,
@@ -6624,7 +6622,6 @@ pub(crate) struct GqlErrorBuilder {
 }
 
 #[cfg(feature = "gql")]
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the GQL parser"))]
 impl GqlErrorBuilder {
     /// An error of `kind` for the bytes `span` of the query (an empty span, such as the end of
     /// the input, is underlined with one caret).
@@ -6667,6 +6664,10 @@ impl GqlErrorBuilder {
     }
 
     /// A GQLSTATUS code more specific than the kind's default.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "specific codes from the binder (T5) on")
+    )]
     pub(crate) fn gqlstatus(mut self, code: &'static str) -> Self {
         self.gqlstatus = Some(code);
         self

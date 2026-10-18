@@ -11,7 +11,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 | File | Stage |
 |---|---|
 | `lexer.rs` | tokens with spans; comments `//`, `/* */`, `--` (comment unless `-->`/`--(` or after `)` on the same line); back-quoted identifiers; contextual, case-insensitive keywords; its module docs are the lexical spec |
-| `ast.rs`, `parser.rs` | hand-written recursive descent to an AST that keeps the source text |
+| `ast.rs`, `parser.rs` | hand-written recursive descent to an AST that keeps the source text; `parser.rs` module docs are the grammar and its decisions; `FUNCTIONS` there is the one function table (names, Cypher aliases, arity, scalar / aggregate) for every stage |
 | `bind.rs` | variables, scopes, `$param` references, column names, GQLSTATUS for semantic errors |
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
@@ -23,7 +23,10 @@ Files appear as their stage lands; this table is the target layout.
 
 - **Hand-written parser.** No parser generator, no new dependency (root rule 10).
 - **No panics on any input** (root rule 1): every failure is a `TraverserError`.
-- **Bounded recursion.** Deeply nested input yields an error, never a stack overflow.
+- **Bounded recursion.** Deeply nested input yields an error, never a stack overflow: the parser
+  bounds its recursion (`MAX_DEPTH`) and every expression tree's height (`MAX_HEIGHT`), so later
+  recursive stages recurse at most `MAX_HEIGHT` levels over the AST. Keep the recursive parser functions thin
+  (rare arms in functions of their own): unoptimized builds give every temporary a stack slot.
 - **Spans everywhere.** Every token and AST node carries byte range, line and column, so every
   later stage can point at the offending text (caret under the span, multi-line aware). Errors
   name the expected tokens, suggest "did you mean ..." and carry the GQLSTATUS code as a field.

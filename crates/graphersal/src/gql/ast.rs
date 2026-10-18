@@ -10,9 +10,6 @@
 //! pipeline of clauses), quantified edges and path variables (`p = ...`). Those are refused by the
 //! parser until then, so no node exists for them yet.
 
-// Used from T4 on (the parser); remove then.
-#![allow(dead_code)]
-
 use super::lexer::Span;
 
 /// A query: one or more `MATCH` clauses, then the result statement.
@@ -36,6 +33,10 @@ pub(crate) struct Query {
 
 impl Query {
     /// The source text of `span` (empty when the span does not fit the source, never a panic).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "column names, used from the binder (T5) on")
+    )]
     pub(crate) fn text(&self, span: Span) -> &str {
         self.source.get(span.start..span.end).unwrap_or("")
     }
@@ -106,7 +107,7 @@ pub(crate) enum EdgeDirection {
     Right,
     /// `<-[..]-`, `<--`.
     Left,
-    /// `-[..]-`, `--` (either direction; also Cypher `<-[..]->`, `<-->`).
+    /// `-[..]-`, `--`, `-` (either direction; also GQL `<-[..]->`, `<->` and Cypher `<-->`).
     Any,
 }
 
@@ -115,7 +116,8 @@ pub(crate) enum EdgeDirection {
 pub(crate) struct EdgePattern {
     /// The direction.
     pub(crate) direction: EdgeDirection,
-    /// Whether it is written without brackets (`-->`, `<--`, `--`, `->`, `<-`).
+    /// Whether it is written without brackets (`-->`, `<--`, `--`, `<-->`, `->`, `<-`, `-`,
+    /// `<->`).
     pub(crate) abbreviated: bool,
     /// The element variable.
     pub(crate) variable: Option<Identifier>,
@@ -339,6 +341,7 @@ pub(crate) struct CaseWhen {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CallArgs {
     /// `(*)`, as in `count(*)`.
+    #[allow(dead_code, reason = "count(*) is parsed from stage 1b (aggregates) on")]
     Star(Span),
     /// `(a, b, ...)`, possibly empty.
     Exprs(Vec<Expr>),
