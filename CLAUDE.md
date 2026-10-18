@@ -13,6 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `crates/graphersal/src/script/CLAUDE.md` | Rhai DSL layout, lowering, registration and docs, tokens, saved queries, script limits and permissions |
 | `crates/graphersal/src/persist/CLAUDE.md` | snapshots, WAL, recovery, versions/upgrades, Store, checkpoints, backups, rollback/attic, damage, single-file store |
 | `crates/graphersal/src/io/CLAUDE.md` | GraphSON and GraphML |
+| `crates/graphersal/src/gql/CLAUDE.md` | GQL query language (feature `gql`): stage layout, parser rules, lowering into the pipeline |
 | `crates/graphersal/tests/tinkerpop/CLAUDE.md` | TinkerPop conformance suite |
 | `crates/graphersal-cli/CLAUDE.md` | REPL, output rules, dev server, MCP, AI Chat, `embed-model` |
 | `crates/graphersal-session/CLAUDE.md` | session modules, any-storage session |
@@ -43,8 +44,9 @@ Nested files under `crates/graphersal/src/` are kept out of the published crate 
 - `persist`: the native lossless binary format, journal, recovery and the Store (`lz4_flex`, `crc32c`); `persist-zstd` adds zstd chunks, `persist-zip` ZIP backups. All build for wasm32 (`src/persist/CLAUDE.md`).
 - `alloc-tracking`: exact per-step memory figures for `.profile_with(ProfileType::Memory)` via `alloc_tracking::TrackingAllocator`, which the *binary* installs as its `#[global_allocator]`. Off for `graphersal` itself, but `graphersal-cli`, `graphersal-wasm` (wasm32 only) and `py-graphersal` build with it ON and install it: a small constant per-allocation cost (thread-local counters plus one relaxed global atomic, `alloc_tracking::global_live_bytes`, which the memory budget reads). Without it the `Mem` column is `MemorySource::Estimated`. A bare `.profile()` never collects memory data.
 - `model2vec`: the local-directory Model2Vec embedder, native only, never for wasm32 (`src/value/CLAUDE.md`).
+- `gql`: the ISO GQL read query language (hand-written parser, lowered into the ordinary pipeline), no dependencies, independent of `script`, builds for wasm32 (`src/gql/CLAUDE.md`).
 
-The acceptance feature set is `script,io,display,serde,persist` (the surface snapshot is taken with it; without `persist` the snapshot functions are filtered out of the comparison).
+The acceptance feature set is `script,io,display,serde,persist,gql` (the surface snapshot is taken with it; without `persist` the snapshot functions are filtered out of the comparison).
 
 The workspace is on Rust edition 2024 (MSRV 1.88). Doctests are merged into one binary per crate: a doctest must not rely on process-global state, env vars or `#[global_allocator]`; mark one that must stay separate with `standalone_crate`.
 
@@ -53,32 +55,32 @@ The workspace is on Rust edition 2024 (MSRV 1.88). Doctests are merged into one 
 ```bash
 cargo fmt   --all --check                       # rustfmt.toml: max_width = 100, stable options only
 cargo check --workspace --all-targets
-cargo test  --package graphersal --features script,io,display,serde,persist
+cargo test  --package graphersal --features script,io,display,serde,persist,gql
 # integration tests are ONE binary (crates/graphersal/tests/all/main.rs, one module per former file):
 # a single module (= former test file) / a single test
-cargo test  --package graphersal --features script,io,display,serde,persist --test all script_tests::
-cargo test  --package graphersal --features script,io,display,serde,persist --test all script_tests::<test_name_substring>
+cargo test  --package graphersal --features script,io,display,serde,persist,gql --test all script_tests::
+cargo test  --package graphersal --features script,io,display,serde,persist,gql --test all script_tests::<test_name_substring>
 # TinkerPop 3.8.2 Gherkin conformance suite (also part of the plain command above); every run
 # writes the full report to target/tinkerpop-report.md
-cargo test  --package graphersal --features script,io,display,serde,persist --test tinkerpop_features
-TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist --test tinkerpop_features   # rewrite the baseline AND the generated blocks of the compliance page
+cargo test  --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features
+TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features   # rewrite the baseline AND the generated blocks of the compliance page
 cargo test  --package graphersal-cli                          # CLI contract (tests/cli_tests.rs) and the dev server (tests/server_tests.rs, port 0)
 cargo test  --package graphersal-storage-tests                # GraphStorage conformance for TraversalGraph, its wrappers and Forwarding
 cargo test  --package graphersal --doc --features script,io
-RUSTDOCFLAGS="-D warnings" cargo doc --package graphersal --no-deps                                   # also with --features script,io,display,serde,persist
+RUSTDOCFLAGS="-D warnings" cargo doc --package graphersal --no-deps                                   # also with --features script,io,display,serde,persist,gql
 cargo bench -p graphersal --bench graph --features io,script,display,serde
 cargo bench -p graphersal --bench graph --features io,script,display,serde --no-run   # compile check only (the bench target requires these features)
-cargo llvm-cov --package graphersal --features script,io,display,serde,persist   # three-run recipe: book/src/for_developers/test_coverage.md; last measured numbers: same page
+cargo llvm-cov --package graphersal --features script,io,display,serde,persist,gql   # three-run recipe: book/src/for_developers/test_coverage.md; last measured numbers: same page
 # robustness: the fast fuzz budget runs in every `cargo test` (tests/all/robustness_*); the LONG budget is a release gate
 # (overflow checks kept in release; findings -> target/robustness-findings.txt; ROBUSTNESS_REPLAY=<seed> replays one case):
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=7 \
-  cargo test --release -p graphersal --features script,io,display,serde,persist --test all robustness_fuzz_tests::fuzz_long -- --ignored
-ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal --features script,io,display,serde,persist --test all robustness_input_tests::
+  cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_fuzz_tests::fuzz_long -- --ignored
+ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal --features script,io,display,serde,persist,gql --test all robustness_input_tests::
 # release gates too (fast budgets run in every `cargo test`); a failing case prints MERGE_FUZZ_REPLAY=<seed> / BACKUP_FUZZ_REPLAY=<seed>:
-MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,persist-zip --test all merge_checkpoint_fuzz_tests::
-BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,persist-zip --test all backup_fuzz_tests::
+MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,gql,persist-zip --test all merge_checkpoint_fuzz_tests::
+BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal --features script,io,display,serde,persist,gql,persist-zip --test all backup_fuzz_tests::
 # regenerated files (review the diff like code)
-GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,display,serde,persist --lib surface   # tests/snapshots/script_surface.txt
+GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,display,serde,persist,gql --lib surface   # tests/snapshots/script_surface.txt
 GRAPHERSAL_UPDATE_BOOK=1 cargo test -p graphersal-session --test book_step_reference                           # generated step reference
 ```
 
@@ -93,7 +95,7 @@ PYO3_PYTHON=$PWD/bindings/py-graphersal/.venv/bin/python cargo test -p py-graphe
 
 Feature hygiene check. Run it after touching `cfg(feature)` code or dependencies:
 ```bash
-for f in "--no-default-features" "--features script" "--features display" "--features serde" "--features io" "--features persist" "--features persist-zstd" "--features persist-zip" "--all-features" "--no-default-features --features script,serde,display"; do
+for f in "--no-default-features" "--features script" "--features display" "--features serde" "--features io" "--features persist" "--features persist-zstd" "--features persist-zip" "--features gql" "--all-features" "--no-default-features --features script,serde,display"; do
   cargo check --package graphersal $f || break; done
 ```
 
@@ -102,7 +104,8 @@ wasm32 (the browser playground must keep building). One-time: `rustup target add
 for f in "--no-default-features" "--no-default-features --features script" \
          "--no-default-features --features script,serde,display" "--no-default-features --features io" \
          "--no-default-features --features persist-zstd" "--no-default-features --features persist-zip" \
-         "--no-default-features --features script,io,display,serde,persist"; do
+         "--no-default-features --features gql" \
+         "--no-default-features --features script,io,display,serde,persist,gql"; do
   cargo check --package graphersal --target wasm32-unknown-unknown ${=f} || break; done
 ```
 Use `web_time::Instant`, never `std::time::Instant` (it panics on wasm32-unknown-unknown); do not add `std::thread`/`std::fs` use outside the `io` feature (on wasm32 `std::fs` returns errors; it must never panic); the exceptions are the parallel chunk decode of `persist` (`std::thread::scope`), `persist::FsDir` / `persist::SingleFileDir` (`std::fs`, `fd-lock`) and `vector::Model2Vec` (`std::fs`, feature `model2vec`), all `cfg(not(target_arch = "wasm32"))`; the Store itself never touches `std::fs` (it goes through `StoreDir`).

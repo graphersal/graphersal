@@ -25,6 +25,9 @@ pub mod changes;
 /// Error types and their diagnostic (`help()`) text.
 pub mod error;
 pub mod exec;
+// The GQL query language: internal until its entry point lands.
+#[cfg(feature = "gql")]
+pub(crate) mod gql;
 // Graph storage, schema and indexes: internal; the public items are re-exported by the topic
 // modules (`storage`, `schema`, `changes`, `auth`, `catalog`, `exec`).
 pub(crate) mod graph;

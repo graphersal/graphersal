@@ -10,7 +10,7 @@ Three runs separate what the hand-written tests cover from what only the TinkerP
 runs, otherwise the runs are merged:
 
 ```bash
-F=script,io,display,serde,persist
+F=script,io,display,serde,persist,gql
 IGN='(tests/|benches/)'
 
 # 1. everything: lib unit tests + tests/all + the TinkerPop suite
@@ -36,7 +36,7 @@ cargo llvm-cov report --package graphersal --ignore-filename-regex "$IGN" --html
 
 `--ignore-filename-regex '(tests/|benches/)'` removes the tests, the TinkerPop harness and the benches from the percentages, so only
 `crates/graphersal/src/` is measured. Never commit `target/`. The single command from `CLAUDE.md`
-(`cargo llvm-cov --package graphersal --features script,io,display,serde,persist`) is run 1 with a text report.
+(`cargo llvm-cov --package graphersal --features script,io,display,serde,persist,gql`) is run 1 with a text report.
 
 ## Reading the report
 

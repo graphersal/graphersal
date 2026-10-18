@@ -107,6 +107,10 @@ alloc-tracking = []
 # (pure Rust, `fancy-regex`). Native only: it is never enabled for wasm32 (the playground keeps
 # `hash-ngram/1`).
 model2vec = ["dep:model2vec-rs", "dep:tokenizers", "dep:safetensors", "dep:serde_json"]
+# The ISO GQL read query language (`src/gql/`): a hand-written lexer and parser whose queries are
+# lowered into the ordinary traversal pipeline. No dependencies, independent of `script`, builds
+# for wasm32.
+gql = []
 
 [[example]]
 name = "quick_start"
