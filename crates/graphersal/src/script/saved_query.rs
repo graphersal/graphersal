@@ -770,7 +770,7 @@ fn params_of(
 }
 
 /// A map argument (or `()` for none), for `operation`.
-fn optional_map(
+pub(super) fn optional_map(
     operation: &str,
     what: &str,
     value: Dynamic,

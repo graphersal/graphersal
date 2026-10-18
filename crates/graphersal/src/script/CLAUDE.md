@@ -12,7 +12,7 @@ A source holds `Arc<dyn AnyGraph>` (`ScriptGraphTraversalSource.g`; `None` = scr
 
 ## Lowering
 
-`convert.rs`'s `lower()` turns the `Step` AST into engine steps with the `AnonymousTraversal` builders for `g` (`ast_convert_to_gts`) and `__` (`ast_convert_to_anonymous`) alike: **a new step gets exactly one arm there.** The root differs in three hooks only: source steps (`Step::Source`: `withSack`, `withSideEffect`; inside `__` a marker failing with `TraverserError::SourceStepInChild`), a leading `mergeV()`/`mergeE()` (`merge_*_lowered(.., start)`), and a no-step `by()`/`from()`/`to()` naming `g` (`adopt_lowered`). A builder that differs at the root needs such a hook; `source_step_tests.rs` guards that `g.X` and `__.X` lower to the same plan.
+`convert.rs`'s `lower()` turns the `Step` AST into engine steps with the `AnonymousTraversal` builders for `g` (`ast_convert_to_gts`) and `__` (`ast_convert_to_anonymous`) alike: **a new step gets exactly one arm there.** The root differs in four hooks only: source steps (`Step::Source`: `withSack`, `withSideEffect`; inside `__` a marker failing with `TraverserError::SourceStepInChild`), a leading `mergeV()`/`mergeE()` (`merge_*_lowered(.., start)`), a no-step `by()`/`from()`/`to()` naming `g` (`adopt_lowered`), and a leading `gql()` (feature `gql`, `source/gql.rs`): `gql_start` lowers it with `GraphTraversalSource::gql_with` (it needs the storage) and `lower_onto` continues those steps; the builder refuses `gql()` on `__` or after non-source steps at the call (GQL error, kind `NotYet`), the `lower()` arm keeps a `gql:error` marker as a fallback. A builder that differs at the root needs such a hook; `source_step_tests.rs` guards that `g.X` and `__.X` lower to the same plan.
 
 ## Registration and docs
 

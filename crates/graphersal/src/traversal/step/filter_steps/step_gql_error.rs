@@ -74,6 +74,20 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     }
 }
 
+impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
+    /// Appends the marker of a GQL query that cannot run where it was written (the script
+    /// lowering of a `gql()` that is not the root's start step); see [`StepGqlError`].
+    #[cfg_attr(not(feature = "script"), allow(dead_code))]
+    pub(crate) fn gql_error(self, error: TraverserError) -> Self {
+        self.push_step(GraphStep::Filter(
+            "gql:error",
+            Box::new(StepGqlError {
+                error: std::sync::Arc::new(error),
+            }),
+        ))
+    }
+}
+
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlError {
     fn process(
         &self,

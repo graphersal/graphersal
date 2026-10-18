@@ -7,7 +7,8 @@
 //!
 //! The surface depends on the `io` and `serde` features (`file`, `export_graphml`,
 //! `property_json`, ...), so the snapshot is taken with both on (the acceptance feature set),
-//! and with `persist` (`export_snapshot`; filtered out of the comparison without it).
+//! and with `persist` (`export_snapshot`) and `gql` (`gql`), each filtered out of the comparison
+//! without its feature.
 
 use super::eval::RESERVED_PARAM_NAMES;
 use super::*;
@@ -16,6 +17,12 @@ use std::fmt::Write as _;
 
 /// Functions registered only with the `persist` feature (on when the snapshot is taken).
 const PERSIST_ONLY: &[&str] = &["export_snapshot", "exportSnapshot"];
+
+/// The lines of functions registered only with the `gql` feature (on when the snapshot is
+/// taken): the metadata entries, the signatures and the step name.
+fn gql_only(line: &str) -> bool {
+    line.contains("\"name\":\"gql\"") || line.starts_with("gql(") || line == "gql"
+}
 
 /// Path of the committed snapshot.
 const SNAPSHOT: &str = concat!(
@@ -156,6 +163,14 @@ fn registered_surface_matches_the_snapshot() {
         expected = expected
             .lines()
             .filter(|line| !PERSIST_ONLY.iter().any(|name| line.contains(name)))
+            .map(|line| format!("{line}\n"))
+            .collect();
+    }
+    if !cfg!(feature = "gql") {
+        // The snapshot is taken with `gql` on; without it `gql()` is not registered.
+        expected = expected
+            .lines()
+            .filter(|line| !gql_only(line))
             .map(|line| format!("{line}\n"))
             .collect();
     }

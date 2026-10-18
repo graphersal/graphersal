@@ -6,6 +6,10 @@ use super::*;
 
 mod dates;
 mod filter_map;
+#[cfg(feature = "gql")]
+mod gql;
+#[cfg(feature = "gql")]
+pub(crate) use gql::gql_not_at_start_error;
 mod navigation;
 mod side_effects;
 mod vectors;

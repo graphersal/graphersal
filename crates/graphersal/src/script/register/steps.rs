@@ -517,6 +517,12 @@ pub(super) fn register(registry: &mut Registry) {
         ScriptGraphTraversalSource::property_json,
     );
 
+    // One word: snake_case and camelCase are the same spelling.
+    #[cfg(feature = "gql")]
+    registry
+        .register_fn_as(&["gql"], ScriptGraphTraversalSource::gql)
+        .register_fn_as(&["gql"], ScriptGraphTraversalSource::gql_with);
+
     registry
         .register_fn("from", ScriptGraphTraversalSource::from_single)
         .register_fn("from", ScriptGraphTraversalSource::from_step)
