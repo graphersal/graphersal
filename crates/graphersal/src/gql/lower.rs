@@ -19,6 +19,16 @@
 //! | pushed conjunct (`plan::classify`) | `has(k, P.eq(v))` (never the bare value), `P.lt` / `P.lte` / `P.gt` / `P.gte`, `P.within([..])` (`NULL`s dropped), `TextP.starting_with` / `ending_with` / `containing`, `IS NOT NULL` as `has(k, P.neq(()))` |
 //! | `$param` operand | pushed only when its value fits the form (a non-null string, number or boolean; for `IN` a list of them, `NULL`s dropped; a string for the text forms), else `gql:filter` |
 //! | other conjuncts | `gql:filter(expr)`, after the element it reads is bound |
+//! | `-[e:T]->`, `<-[e:T]-` with nothing on the edge | `out("T")` / `in("T")` (also `-->` / `<--`, no labels), so `BarrierPushdown` and `lazy_barrier` apply |
+//! | `-[e:T {k: v} WHERE ..]->`, an edge read later, joined or trail-checked | `out_e("T")` (`in_e` for `<-`), then on the edge: the other label factors (`has_label`), the pushed conjuncts (`has(k, P..)`), the join / trail checks, `gql:filter` for label factors with `!` / `%` and residual conjuncts, `as("e")` only when a label is needed; then `in_v()` (`out_v()`) |
+//! | edge label `T`, `A\|B` | the labels of the adjacency step (the first `&` factor that is a label disjunction); other factors as for nodes, on the edge traverser |
+//! | either direction `-[e]-`, `--`, `-[:T]-` | `union(__.out_e(..)<edge steps>.in_v(), __.in_e(..).gql:not_self_loop()<edge steps>.out_v())`, `as("e")` in both branches; without edge steps `union(__.out(..), __.in_e(..).gql:not_self_loop().out_v())`. Never `both_e().other_v()` (it forces full paths) nor plain `both()` (a self-loop would match twice; GQL binds it once) |
+//! | target node `(b:L {k: v})` | after the hop: `has_label(L)`, the pushed `has()`, `gql:filter`, then `as("b")` only when a label is needed |
+//! | join: a node bound earlier (a cycle, a variable repeated across patterns) | `where(P.eq("x"))` right after the hop reaching it (Phase 0 Q3) |
+//! | an edge variable repeated in a later `MATCH` | `where(P.eq("e"))` on the edge traverser, no second `as("e")` |
+//! | branch: the next hop starts at an earlier binding | `select("x")`, then the hop |
+//! | trail (per `MATCH` clause) | `where(P.neq("e1"))` on the edge traverser for every earlier edge of the clause whose label set may overlap (anonymous edges get `#<id>` labels); skipped for disjoint label sets (Phase 0 Q8) |
+//! | merge point | `lazy_barrier()` right after a hop that yields vertices when the next hop continues from them (before the target's filters and `as()`); merges only traversers with equal path labels, so it is invisible (see below) |
 //! | several patterns / components | another `v()` per component (a Cartesian product, not optimized yet) |
 //! | `RETURN` / `RETURN *` | `gql:project(columns)` (written order, `NULL` columns kept) |
 //! | `DISTINCT` | `dedup()` after `gql:project` |
@@ -33,29 +43,45 @@
 //! expression reading the current element reads it directly (`Binding::Current`), with no path
 //! label at all, so `MATCH (p:person) RETURN p.name` records no path and keeps bulk merging.
 //!
+//! # Merge points (Phase 0 outcome 1)
+//!
+//! `LazyBarrierRule` never places a merge point across an `as()` or a filter, so the lowering
+//! places its own `lazy_barrier()` between two hops (the global rule stays unchanged, so Gremlin
+//! plans do not move). Merging is sound there: the merge key keeps traversers with different path
+//! labels apart, the step passes everything through under full paths, a sack merge operator or
+//! `bulk.one`, and it merges only where the next hop's fan-out pays for it. It pays off where the
+//! middle node is not read and no edge before it is labelled; a trail check against an earlier
+//! edge of the same `MATCH` (edges with overlapping label sets) labels that edge and keeps the
+//! traversers apart.
+//!
 //! # Not yet
 //!
-//! Edge patterns (`Op::Expand`, `Op::Join`) come with the next part of stage 1a; until then they
-//! fail with [`GqlErrorKind::NotYet`].
+//! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
+//! [`GqlErrorKind::NotYet`]; stage 1a never plans one.
 
 use std::sync::Arc;
 
-use super::ast::{BinaryOp, Expr, ExprKind, Identifier, LabelExpr, Literal, SortDirection};
+use super::ast::{
+    BinaryOp, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, SortDirection,
+};
 use super::bind::{BindingId, BoundQuery, Conjunct, Count, Predicate, bind_with_parameters};
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    LogicalPlan, Op, PushOp, PushOperand, Pushdown, ResultOp, Scan, and_factors, label_disjuncts,
+    ElementFilters, Expand, LogicalPlan, Op, PushOp, PushOperand, Pushdown, ResultOp, and_factors,
+    label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
+use crate::traversal::step::GraphStep;
+use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::value::{Number, P, PValue};
-use crate::{CompactString, ElementProperty, GraphTraversalSource};
+use crate::{AnonymousTraversal, ArgStrings, CompactString, ElementProperty, GraphTraversalSource};
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` patterns, `WHERE`,
@@ -185,6 +211,36 @@ enum Instr<S: GraphStorage> {
     Skip(usize),
     /// `limit(n)`.
     Limit(usize),
+    /// One pattern edge walked from the current vertex ([`Op::Expand`]); see [`Hop`].
+    Hop(Hop<S>),
+    /// `select(label)`: back to a binding labelled earlier (a branch of the pattern).
+    Select(BindingId),
+    /// `where(P.eq(label))`: the current element is the one bound earlier to the binding (a
+    /// join: a cycle closing, a node or edge variable repeated).
+    Same(BindingId),
+    /// `where(P.neq(label))`: the current edge differs from an earlier edge (trail).
+    Differs(BindingId),
+    /// A merge point (`lazy_barrier()`) right after a hop whose next hop walks `direction`
+    /// over `labels` (the step the merge point judges its fan-out with).
+    Merge {
+        direction: EdgeDirection,
+        labels: Option<Vec<String>>,
+    },
+}
+
+/// One walked pattern edge. The form is chosen at emission, once the labels are known: the
+/// vertex step (`out(labels)`, `in(labels)`) when nothing runs on the edge traverser, else the
+/// edge step, `steps` on the edge, then the vertex at the other end (`out_e(labels)..in_v()`,
+/// `in_e(labels)..out_v()`). Either direction is a `union` of both, the incoming branch without
+/// self-loops, so a self-loop matches once.
+struct Hop<S: GraphStorage> {
+    /// The direction as seen from the current vertex.
+    direction: EdgeDirection,
+    /// The labels of the adjacency step (`None`: any edge).
+    labels: Option<Vec<String>>,
+    /// The steps on the edge traverser: label factors, pushed `has()`, join and trail checks,
+    /// `gql:filter`s, the edge's `as()` placeholder.
+    steps: Vec<Instr<S>>,
 }
 
 /// The lowered query, ready to be emitted onto a source.
@@ -256,9 +312,135 @@ impl<S: GraphStorage> Lowered<S> {
                 }
                 Instr::Skip(n) => g.skip(n),
                 Instr::Limit(n) => g.limit(n),
+                Instr::Hop(hop) => self.hop(g, hop),
+                Instr::Select(id) => g.select(self.label(id)),
+                Instr::Same(id) => g.where_p(P::Eq(PValue::String(self.label(id)))),
+                Instr::Differs(id) => g.where_p(P::Neq(PValue::String(self.label(id)))),
+                Instr::Merge { direction, labels } => {
+                    let walk = AnonymousTraversal::<'g, S>::new();
+                    let mut walk = match direction {
+                        EdgeDirection::Right => walk.out(adjacency(&labels)),
+                        EdgeDirection::Left => walk.in_(adjacency(&labels)),
+                        EdgeDirection::Any => walk.both(adjacency(&labels)),
+                    };
+                    match walk.steps.pop() {
+                        Some(GraphStep::FlatMap(_, next)) => g.push_step(lazy_barrier_step(next)),
+                        _ => g,
+                    }
+                }
             };
         }
         g
+    }
+
+    /// The path label of binding `id`.
+    fn label(&self, id: BindingId) -> CompactString {
+        self.labels.get(id.0).cloned().unwrap_or_default()
+    }
+
+    /// Whether binding `id` gets `as()`.
+    fn is_labelled(&self, id: BindingId) -> bool {
+        self.labelled.get(id.0).copied().unwrap_or(false)
+    }
+
+    /// Emits a hop (see [`Hop`]).
+    fn hop<'g>(&self, g: GraphTraversalSource<'g, S>, hop: Hop<S>) -> GraphTraversalSource<'g, S>
+    where
+        S: 'g,
+    {
+        let labels = || adjacency(&hop.labels);
+        let on_edge = hop
+            .steps
+            .iter()
+            .any(|instr| !matches!(instr, Instr::Label(id) if !self.is_labelled(*id)));
+        if !on_edge {
+            return match hop.direction {
+                EdgeDirection::Right => g.out(labels()),
+                EdgeDirection::Left => g.in_(labels()),
+                EdgeDirection::Any => g.union(vec![
+                    AnonymousTraversal::new().out(labels()),
+                    AnonymousTraversal::new()
+                        .in_e(labels())
+                        .gql_not_self_loop()
+                        .out_v(),
+                ]),
+            };
+        }
+        let mut edge = AnonymousTraversal::<'g, S>::new();
+        for instr in hop.steps {
+            edge = self.edge_step(edge, instr);
+        }
+        let append = |mut t: AnonymousTraversal<'g, S>, steps: &[GraphStep<'g, S>]| {
+            for step in steps {
+                t = t.push_step(step.clone());
+            }
+            t
+        };
+        match hop.direction {
+            EdgeDirection::Right => {
+                let mut g = g.out_e(labels());
+                for step in edge.steps {
+                    g = g.push_step(step);
+                }
+                g.in_v()
+            }
+            EdgeDirection::Left => {
+                let mut g = g.in_e(labels());
+                for step in edge.steps {
+                    g = g.push_step(step);
+                }
+                g.out_v()
+            }
+            EdgeDirection::Any => {
+                let outgoing =
+                    append(AnonymousTraversal::new().out_e(labels()), &edge.steps).in_v();
+                let incoming = append(
+                    AnonymousTraversal::new().in_e(labels()).gql_not_self_loop(),
+                    &edge.steps,
+                )
+                .out_v();
+                g.union(vec![outgoing, incoming])
+            }
+        }
+    }
+
+    /// Emits one step on the edge traverser of a hop.
+    fn edge_step<'g>(
+        &self,
+        t: AnonymousTraversal<'g, S>,
+        instr: Instr<S>,
+    ) -> AnonymousTraversal<'g, S>
+    where
+        S: 'g,
+    {
+        match instr {
+            Instr::HasLabel(labels) => t.has_label(labels),
+            Instr::Has(key, predicate) => t.has_p(key, predicate),
+            Instr::Filter { condition, current } => {
+                t.gql_filter(Arc::clone(&self.query), condition, self.bindings(current))
+            }
+            Instr::Label(id) if self.is_labelled(id) => t.as_(self.label(id)),
+            Instr::Same(id) => t.where_p(P::Eq(PValue::String(self.label(id)))),
+            Instr::Differs(id) => t.where_p(P::Neq(PValue::String(self.label(id)))),
+            Instr::Label(_)
+            | Instr::Scan
+            | Instr::Project { .. }
+            | Instr::Dedup
+            | Instr::Order(_)
+            | Instr::Skip(_)
+            | Instr::Limit(_)
+            | Instr::Hop(_)
+            | Instr::Select(_)
+            | Instr::Merge { .. } => t,
+        }
+    }
+}
+
+/// The labels argument of an adjacency step.
+fn adjacency(labels: &Option<Vec<String>>) -> ArgStrings {
+    match labels {
+        Some(labels) => ArgStrings::List(labels.clone()),
+        None => ArgStrings::None,
     }
 }
 
@@ -369,11 +551,17 @@ impl<'q> Lowering<'q> {
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
         let mut current: Option<BindingId> = None;
-        for op in &self.plan.ops {
+        let ops = &self.plan.ops;
+        for (at, op) in ops.iter().enumerate() {
             match op {
                 Op::Scan(scan) => {
                     instrs.push(Instr::Scan);
-                    self.scan(scan, &mut instrs)?;
+                    let (labels, steps) = self.element(scan.binding, &scan.filters, Vec::new())?;
+                    if let Some(labels) = labels {
+                        instrs.push(Instr::HasLabel(labels));
+                    }
+                    instrs.extend(steps);
+                    instrs.push(Instr::Label(scan.binding));
                     current = Some(scan.binding);
                 }
                 Op::Filter(ids) => {
@@ -382,11 +570,32 @@ impl<'q> Lowering<'q> {
                     }
                 }
                 Op::Expand(expand) => {
-                    return Err(self.edges_not_yet(expand.edge));
+                    if !expand.from_current {
+                        instrs.push(Instr::Select(expand.from));
+                    }
+                    instrs.push(Instr::Hop(self.hop(expand)?));
+                    if let Some(next) = next_hop(ops, at) {
+                        instrs.push(Instr::Merge {
+                            direction: next.direction,
+                            labels: self.edge_labels(next),
+                        });
+                    }
+                    if !expand.to_bound {
+                        let (labels, steps) =
+                            self.element(expand.to, &expand.to_filters, Vec::new())?;
+                        if let Some(labels) = labels {
+                            instrs.push(Instr::HasLabel(labels));
+                        }
+                        instrs.extend(steps);
+                        instrs.push(Instr::Label(expand.to));
+                    }
+                    current = Some(expand.to);
                 }
-                Op::Join { binding } | Op::Anchor(Scan { binding, .. }) => {
-                    return Err(self.edges_not_yet(*binding));
+                Op::Join { binding } => {
+                    instrs.push(Instr::Same(*binding));
+                    current = Some(*binding);
                 }
+                Op::Anchor(scan) => return Err(self.anchor_not_yet(scan.binding)),
             }
         }
         let columns = self.result(current, &mut instrs)?;
@@ -401,8 +610,8 @@ impl<'q> Lowering<'q> {
         })
     }
 
-    /// The temporary error of an edge pattern (stage 1a part b lowers them).
-    fn edges_not_yet(&self, id: BindingId) -> TraverserError {
+    /// The error of the phase 2 anchor (a mid-traversal `gql()`), which stage 1a never plans.
+    fn anchor_not_yet(&self, id: BindingId) -> TraverserError {
         let span = self
             .bound
             .binding(id)
@@ -411,40 +620,38 @@ impl<'q> Lowering<'q> {
         GqlErrorBuilder::new(
             GqlErrorKind::NotYet,
             span,
-            "edge patterns are not supported by gql() yet",
+            "gql() cannot continue a traversal yet",
         )
-        .alternative(
-            "match the nodes with gql() and walk the edges with Gremlin steps, as in \
-             g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"knows\")",
-        )
+        .alternative("start the traversal with it, as in g.gql(\"MATCH (p:person) RETURN p\")")
         .into_error(self.query)
     }
 
-    /// The scan's label factors, pushed conjuncts, residual conjuncts and label placeholder.
-    fn scan<S: GraphStorage>(
+    /// The label factors and conjuncts of element `id` where it is bound: the first factor that
+    /// is a label disjunction (the scan's `has_label`, folded into `v(labels: ..)` by the
+    /// optimizer, or the labels of an edge's adjacency step), then the steps on the element: the
+    /// other label disjunctions as `has_label`, the pushed conjuncts as `has(k, P..)`, `checks`
+    /// (join and trail checks), the other label factors and the residual conjuncts as
+    /// `gql:filter`.
+    fn element<S: GraphStorage>(
         &self,
-        scan: &Scan,
-        instrs: &mut Vec<Instr<S>>,
-    ) -> Result<(), TraverserError> {
-        let id = scan.binding;
+        id: BindingId,
+        filters: &ElementFilters,
+        checks: Vec<Instr<S>>,
+    ) -> Result<(Option<Vec<String>>, Vec<Instr<S>>), TraverserError> {
+        let mut instrs = Vec::new();
         let labels = self
             .bound
             .binding(id)
             .map(|b| b.labels.as_slice())
             .unwrap_or_default();
         let factors = and_factors(labels);
-        // The scan labels first (the first factor that is a label disjunction), so the
-        // optimizer folds them into `v(labels: ..)`.
-        let scan_factor = factors.iter().position(|f| label_disjuncts(f).is_some());
-        if let Some(labels) = scan_factor
+        let first_factor = factors.iter().position(|f| label_disjuncts(f).is_some());
+        let first = first_factor
             .and_then(|at| factors.get(at))
-            .and_then(|f| label_disjuncts(f))
-        {
-            instrs.push(Instr::HasLabel(labels));
-        }
+            .and_then(|f| label_disjuncts(f));
         let mut label_filters = Vec::new();
         for (at, factor) in factors.iter().enumerate() {
-            if Some(at) == scan_factor {
+            if Some(at) == first_factor {
                 continue;
             }
             match label_disjuncts(factor) {
@@ -452,14 +659,15 @@ impl<'q> Lowering<'q> {
                 None => label_filters.push(*factor),
             }
         }
-        let mut residual = scan.filters.residual.clone();
-        for &c in &scan.filters.pushed {
+        let mut residual = filters.residual.clone();
+        for &c in &filters.pushed {
             match self.pushed(c)? {
                 Some((key, predicate)) => instrs.push(Instr::Has(key, predicate)),
                 None => residual.push(c),
             }
         }
         residual.sort_unstable();
+        instrs.extend(checks);
         for factor in label_filters {
             let condition = self.compile(&is_labeled(factor), Some(id.0), &[])?;
             instrs.push(Instr::Filter {
@@ -468,10 +676,44 @@ impl<'q> Lowering<'q> {
             });
         }
         for c in residual {
-            self.conjunct(c, Some(id), instrs)?;
+            self.conjunct(c, Some(id), &mut instrs)?;
         }
-        instrs.push(Instr::Label(id));
-        Ok(())
+        Ok((first, instrs))
+    }
+
+    /// The hop of an expansion: the edge's labels, filters, join and trail checks (Phase 0 Q3,
+    /// Q8) and its `as()` placeholder (none for an edge bound earlier, which is checked against
+    /// its label instead).
+    fn hop<S: GraphStorage>(&self, expand: &Expand) -> Result<Hop<S>, TraverserError> {
+        let id = expand.edge;
+        let mut checks = Vec::new();
+        if expand.edge_join {
+            checks.push(Instr::Same(id));
+        }
+        checks.extend(expand.trail.iter().map(|&other| Instr::Differs(other)));
+        let (labels, mut steps) = if expand.edge_join {
+            (None, checks)
+        } else {
+            self.element(id, &expand.edge_filters, checks)?
+        };
+        if !expand.edge_join {
+            steps.push(Instr::Label(id));
+        }
+        Ok(Hop {
+            direction: expand.direction,
+            labels,
+            steps,
+        })
+    }
+
+    /// The adjacency labels of an expansion's edge (the first label disjunction factor), as
+    /// [`Self::hop`] emits them.
+    fn edge_labels(&self, expand: &Expand) -> Option<Vec<String>> {
+        if expand.edge_join {
+            return None;
+        }
+        let labels = self.bound.binding(expand.edge)?.labels.as_slice();
+        and_factors(labels).into_iter().find_map(label_disjuncts)
     }
 
     /// `gql:filter` of conjunct `c` (skipped when it is constantly TRUE).
@@ -668,44 +910,7 @@ impl<'q> Lowering<'q> {
             .map(|l| l.join || l.trail || l.branch)
             .collect();
         labelled.resize(n, false);
-        let mut slots = Vec::new();
-        let mut mark = |slots: &mut Vec<usize>, current: Option<BindingId>| {
-            for slot in slots.drain(..) {
-                if slot < n
-                    && current != Some(BindingId(slot))
-                    && let Some(flag) = labelled.get_mut(slot)
-                {
-                    *flag = true;
-                }
-            }
-        };
-        for instr in instrs {
-            match instr {
-                Instr::Filter { condition, current } => {
-                    condition.variables(&mut slots);
-                    mark(&mut slots, *current);
-                }
-                Instr::Project { columns, current } => {
-                    for column in columns {
-                        column.expr.variables(&mut slots);
-                    }
-                    mark(&mut slots, *current);
-                }
-                Instr::Order(keys) => {
-                    for key in keys {
-                        key.expr.variables(&mut slots);
-                    }
-                    mark(&mut slots, None);
-                }
-                Instr::Scan
-                | Instr::HasLabel(_)
-                | Instr::Has(..)
-                | Instr::Label(_)
-                | Instr::Dedup
-                | Instr::Skip(_)
-                | Instr::Limit(_) => {}
-            }
-        }
+        mark_reads(instrs, n, &mut labelled);
         labelled
     }
 
@@ -806,4 +1011,64 @@ fn list_pvalues(value: &ElementProperty) -> Option<Vec<PValue>> {
         .filter(|item| !matches!(item, ElementProperty::Null))
         .map(scalar_pvalue)
         .collect()
+}
+
+/// Marks every binding an expression of `instrs` reads while it is not the current element.
+fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], n: usize, labelled: &mut [bool]) {
+    let mut slots = Vec::new();
+    let mark = |labelled: &mut [bool], slots: &mut Vec<usize>, current: Option<BindingId>| {
+        for slot in slots.drain(..) {
+            if slot < n
+                && current != Some(BindingId(slot))
+                && let Some(flag) = labelled.get_mut(slot)
+            {
+                *flag = true;
+            }
+        }
+    };
+    for instr in instrs {
+        match instr {
+            Instr::Filter { condition, current } => {
+                condition.variables(&mut slots);
+                mark(labelled, &mut slots, *current);
+            }
+            Instr::Project { columns, current } => {
+                for column in columns {
+                    column.expr.variables(&mut slots);
+                }
+                mark(labelled, &mut slots, *current);
+            }
+            Instr::Order(keys) => {
+                for key in keys {
+                    key.expr.variables(&mut slots);
+                }
+                mark(labelled, &mut slots, None);
+            }
+            Instr::Hop(hop) => mark_reads(&hop.steps, n, labelled),
+            Instr::Scan
+            | Instr::HasLabel(_)
+            | Instr::Has(..)
+            | Instr::Label(_)
+            | Instr::Dedup
+            | Instr::Skip(_)
+            | Instr::Limit(_)
+            | Instr::Select(_)
+            | Instr::Same(_)
+            | Instr::Differs(_)
+            | Instr::Merge { .. } => {}
+        }
+    }
+}
+
+/// The next expansion after `ops[at]` when it continues from the vertex `ops[at]` reached
+/// (only join checks and filters between them): the place of a merge point (Phase 0 outcome 1).
+fn next_hop(ops: &[Op], at: usize) -> Option<&Expand> {
+    for op in ops.get(at + 1..)? {
+        match op {
+            Op::Join { .. } | Op::Filter(_) => {}
+            Op::Expand(next) if next.from_current => return Some(next),
+            Op::Expand(_) | Op::Scan(_) | Op::Anchor(_) => return None,
+        }
+    }
+    None
 }

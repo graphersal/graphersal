@@ -8,7 +8,7 @@
 use graphersal::catalog::PropertyIndexDefinition;
 use graphersal::error::GqlErrorKind;
 use graphersal::prelude::*;
-use graphersal::storage::ElementKind;
+use graphersal::storage::{ElementKind, PropertyMap, VertexHandle};
 
 /// The modern graph plus persons with a stored `null` age, a float age, a string age, no age,
 /// and a second label.
@@ -830,4 +830,481 @@ mod differential {
             false,
         );
     }
+
+    const AB: &str = r#"select("a", "b").by("name")"#;
+    const ABC: &str = r#"select("a", "b", "c").by("name")"#;
+
+    #[test]
+    fn edge_patterns_match_their_twins() {
+        let graph = Arc::new(GraphSource::tinkerpop_modern());
+        let cases: Vec<(&str, String)> = vec![
+            // Directions, with and without an edge variable.
+            (
+                "MATCH (a:person)-[:knows]->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().hasLabel("person").as("a").out("knows").as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a:software)<-[e:created]-(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().hasLabel("software").as("a").in("created").as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[:knows]-(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").both("knows").as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[e:created]-(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").bothE("created").otherV().as("b").{AB}"#),
+            ),
+            // Abbreviated edges.
+            (
+                "MATCH (a {name: 'marko'})-->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().has("name", "marko").as("a").out().as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a {name: 'lop'})<--(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().has("name", "lop").as("a").in().as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a {name: 'josh'})--(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().has("name", "josh").as("a").both().as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[]->(b:software) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").out().hasLabel("software").as("b").{AB}"#),
+            ),
+            // The edge returned, its type and its properties.
+            (
+                "MATCH (a)-[e:created]->(b) RETURN e",
+                r#"g.E().hasLabel("created").project("e").by(__.identity())"#.into(),
+            ),
+            (
+                "MATCH ()-[e]->() RETURN type(e) AS t, e.weight AS w",
+                r#"g.E().project("t", "w").by(__.label()).by("weight")"#.into(),
+            ),
+            (
+                "MATCH (a)<-[e]-(b) RETURN b.name AS b, e.weight AS w, a.name AS a".into(),
+                r#"g.E().project("b", "w", "a").by(__.outV().values("name")).by("weight").by(__.inV().values("name"))"#.into(),
+            ),
+            // Inline edge properties and edge WHERE (pushed and residual).
+            (
+                "MATCH (a)-[e:created {weight: 0.4}]->(b) RETURN a.name AS a, b.name AS b",
+                format!(
+                    r#"g.V().as("a").outE("created").has("weight", P.eq(0.4)).inV().as("b").{AB}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[e WHERE e.weight >= 0.5]->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").outE().has("weight", P.gte(0.5)).inV().as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[e]->(b) WHERE e.weight <> 0.4 AND b.lang = 'java' RETURN a.name AS a, b.name AS b",
+                format!(
+                    r#"g.V().as("a").outE().has("weight", P.lt(0.4).or(P.gt(0.4))).inV().has("lang", "java").as("b").{AB}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[e]->(b) WHERE e.weight > 0.5 OR b.name = 'vadas' RETURN a.name AS a, b.name AS b",
+                format!(
+                    r#"g.V().as("a").outE().as("e").inV().as("b").or(__.select("e").has("weight", P.gt(0.5)), __.has("name", "vadas")).{AB}"#
+                ),
+            ),
+            // Edge label expressions.
+            (
+                "MATCH (a)-[:knows|created]->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").out("knows", "created").as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[e:!knows]->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").outE().not(__.hasLabel("knows")).inV().as("b").{AB}"#),
+            ),
+            (
+                "MATCH (a)-[e:%]->(b) RETURN a.name AS a, b.name AS b",
+                format!(r#"g.V().as("a").out().as("b").{AB}"#),
+            ),
+            // Multi-hop, branches, cycles.
+            (
+                "MATCH (a:person)-[:knows]->(b)-[:created]->(c) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().hasLabel("person").as("a").out("knows").as("b").out("created").as("c").{ABC}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[:knows]->(b), (a)-[:created]->(c) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").out("knows").as("b").select("a").out("created").as("c").{ABC}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[:created]->(c)<-[:created]-(b) WHERE a.name < b.name RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").out("created").as("c").in("created").as("b").where("a", P.lt("b")).by("name").{ABC}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[:knows]->(b)-[:created]->(c)<-[:created]-(a) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").out("knows").as("b").out("created").as("c").in("created").where(P.eq("a")).{ABC}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[:knows]->(b) MATCH (b)-[:created]->(c) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").out("knows").as("b").out("created").as("c").{ABC}"#
+                ),
+            ),
+            // Trail: within one MATCH an edge is bound once.
+            (
+                "MATCH (a)-[e1]-(b)-[e2]-(c) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").bothE().as("e1").otherV().as("b").bothE().as("e2").otherV().as("c").where("e1", P.neq("e2")).{ABC}"#
+                ),
+            ),
+            (
+                "MATCH (a)-[e1:knows]->(b) MATCH (a)-[e2:knows]->(c) RETURN a.name AS a, b.name AS b, c.name AS c",
+                format!(
+                    r#"g.V().as("a").out("knows").as("b").select("a").out("knows").as("c").{ABC}"#
+                ),
+            ),
+            // The same edge variable in two MATCH clauses is one edge.
+            (
+                "MATCH (a)-[e]->(b) MATCH (c)-[e]->(d) RETURN a.name AS a, d.name AS d",
+                r#"g.E().project("a", "d").by(__.outV().values("name")).by(__.inV().values("name"))"#.into(),
+            ),
+        ];
+        for (query, twin) in &cases {
+            same(&graph, query, twin, false);
+        }
+    }
+
+    #[test]
+    fn edge_patterns_on_the_large_graph_match_their_twins() {
+        let graph = Arc::new(GraphSource::large_110k());
+        same(
+            &graph,
+            "MATCH (a {level: '2'})-->()-->(c) RETURN element_id(a) AS a, element_id(c) AS c",
+            r#"g.V().has("level", "2").as("a").out().out().as("c").select("a", "c").by(__.id())"#,
+            false,
+        );
+        same(
+            &graph,
+            "MATCH (a {level: '3'})<--()<--(s) RETURN element_id(s) AS s",
+            r#"g.V().has("level", "3").in().in().project("s").by(__.id())"#,
+            false,
+        );
+        same(
+            &graph,
+            "MATCH (a {id: 'V_2_7'})--(b) RETURN element_id(b) AS b",
+            r#"g.V().has("id", "V_2_7").both().project("b").by(__.id())"#,
+            false,
+        );
+    }
+}
+
+// ----- edge patterns (expected rows written out) -----
+
+/// Vertices `x`, `y`, `z`; edges `x -l-> x` (a self-loop), `x -l-> y`, and a triangle
+/// `x -t-> y -t-> z -t-> x`.
+fn loops_and_triangle() -> TraversalGraph {
+    let mut graph = TraversalGraph::new();
+    for name in ["x", "y", "z"] {
+        graph
+            .traversal_mut()
+            .add_v("n")
+            .property("name", name)
+            .iterate()
+            .unwrap();
+    }
+    for (label, from, to) in [
+        ("l", "x", "x"),
+        ("l", "x", "y"),
+        ("t", "x", "y"),
+        ("t", "y", "z"),
+        ("t", "z", "x"),
+    ] {
+        graph
+            .traversal_mut()
+            .v(None)
+            .has("name", from)
+            .as_("f")
+            .v(None)
+            .has("name", to)
+            .add_e(label)
+            .from("f")
+            .iterate()
+            .unwrap();
+    }
+    graph
+}
+
+fn pairs(graph: &TraversalGraph, query: &str) -> Vec<String> {
+    let result = rows(graph, query);
+    let a = texts(&result, "a");
+    let b = texts(&result, "b");
+    sorted(
+        a.into_iter()
+            .zip(b)
+            .map(|(a, b)| format!("{a}{b}"))
+            .collect(),
+    )
+}
+
+#[test]
+fn a_self_loop_matches_once_in_either_direction() {
+    let graph = loops_and_triangle();
+    // Directed: the loop once, x->y once.
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (a)-[e:l]->(b) RETURN a.name AS a, b.name AS b"
+        ),
+        ["xx", "xy"]
+    );
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (a)<-[:l]-(b) RETURN a.name AS a, b.name AS b"
+        ),
+        ["xx", "yx"]
+    );
+    // Either direction: the loop once, x-y in both orientations.
+    for query in [
+        "MATCH (a)-[e:l]-(b) RETURN a.name AS a, b.name AS b",
+        "MATCH (a)-[:l]-(b) RETURN a.name AS a, b.name AS b",
+        "MATCH (a)-[e:l]-(b) RETURN a.name AS a, b.name AS b, e",
+    ] {
+        assert_eq!(pairs(&graph, query), ["xx", "xy", "yx"], "{query}");
+    }
+    // The cycle of length one.
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (a)-[:l]->(a) RETURN a.name AS a, a.name AS b"
+        ),
+        ["xx"]
+    );
+    assert_eq!(
+        pairs(&graph, "MATCH (a)-[:l]-(a) RETURN a.name AS a, a.name AS b"),
+        ["xx"]
+    );
+}
+
+#[test]
+fn triangles_close_on_the_bound_node() {
+    let graph = loops_and_triangle();
+    let result = rows(
+        &graph,
+        "MATCH (a)-[:t]->(b)-[:t]->(c)-[:t]->(a) RETURN a.name AS a",
+    );
+    assert_eq!(sorted(texts(&result, "a")), ["x", "y", "z"]);
+    // Either direction: every rotation in both orientations.
+    let result = rows(
+        &graph,
+        "MATCH (a)-[:t]-(b)-[:t]-(c)-[:t]-(a) RETURN a.name AS a, b.name AS b",
+    );
+    assert_eq!(result.len(), 6);
+    // A triangle written as two patterns sharing variables.
+    let result = rows(
+        &graph,
+        "MATCH (a)-[:t]->(b)-[:t]->(c), (c)-[:t]->(a) RETURN a.name AS a",
+    );
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
+fn trail_never_binds_one_edge_twice() {
+    let graph = TraversalGraph::tinkerpop_modern();
+    // Going back over the same edge is the only way to close these: no row.
+    assert!(rows(&graph, "MATCH (a)-[e1]-(b)-[e2]-(a) RETURN a.name AS a").is_empty());
+    assert!(rows(&graph, "MATCH (a)-[e1]->(b)<-[e2]-(a) RETURN a.name AS a").is_empty());
+    // Across MATCH clauses the edge may repeat (trail is per clause).
+    let result = rows(
+        &graph,
+        "MATCH (a)-[e1]-(b) MATCH (b)-[e2]-(a) RETURN a.name AS a, b.name AS b",
+    );
+    assert_eq!(result.len(), 12);
+    // The same edge variable in two clauses is the same edge, and RETURN e returns it.
+    let result = rows(
+        &graph,
+        "MATCH (a {name: 'marko'})-[e:knows]->(b) MATCH (c)-[e]->(d {name: 'josh'}) RETURN e, type(e) AS t",
+    );
+    assert_eq!(result.len(), 1);
+    assert!(matches!(column(&result[0], "e"), ElementProperty::Edge(_)));
+    assert_eq!(texts(&result, "t"), ["knows"]);
+}
+
+#[test]
+fn edge_patterns_record_only_the_labels_they_read() {
+    let graph = TraversalGraph::tinkerpop_modern();
+    // No edge variable needed: the vertex step, no label at all.
+    let text = profile(&graph, "MATCH (a:person)-[e:knows]->(b) RETURN b.name AS n");
+    assert!(has_step(&text, r#"out("knows")"#), "{text}");
+    assert!(!has_step(&text, "as("), "{text}");
+    // An edge filter runs on the edge traverser, still without a label.
+    let text = profile(
+        &graph,
+        "MATCH (a:person)-[e:knows WHERE e.weight > 0.6]->(b) RETURN b.name AS n",
+    );
+    assert!(has_step(&text, r#"out_e("knows")"#), "{text}");
+    assert!(has_step(&text, r#"has("weight", P.gt(0.6))"#), "{text}");
+    assert!(has_step(&text, "in_v()"), "{text}");
+    assert!(!has_step(&text, "as("), "{text}");
+    // A returned edge is labelled; the start node is not.
+    let text = profile(
+        &graph,
+        "MATCH (a:person)-[e:knows]->(b) RETURN e.weight AS w",
+    );
+    assert!(has_step(&text, r#"as("e")"#), "{text}");
+    assert!(!has_step(&text, r#"as("a")"#), "{text}");
+    // Either direction: a union, the edge labelled in both branches, never both_e().other_v().
+    let text = profile(
+        &graph,
+        "MATCH (a:person)-[e:knows]-(b) RETURN e.weight AS w",
+    );
+    assert!(has_step(&text, "union("), "{text}");
+    assert_eq!(text.matches(r#"\> as("e")"#).count(), 2, "{text}");
+    assert!(text.contains("gql:not_self_loop()"), "{text}");
+    assert!(!text.contains("other_v"), "{text}");
+    assert!(!text.contains("path: full"), "{text}");
+    // Trail checks only between edges whose labels may overlap.
+    let text = profile(
+        &graph,
+        "MATCH (a)-[:knows]->(b)-[:created]->(c) RETURN c.name AS c",
+    );
+    assert!(!text.contains("where("), "{text}");
+    let text = profile(&graph, "MATCH (a)-[:knows]->(b)-->(c) RETURN c.name AS c");
+    assert!(text.contains(r##"where(P.neq("#1"))"##), "{text}");
+    // A cycle: where(P.eq(..)) right after the expansion.
+    let text = profile(
+        &graph,
+        "MATCH (a)-[:knows]->(b)-[:created]->(c)<-[:created]-(a) RETURN c.name AS c",
+    );
+    assert!(has_step(&text, r#"where(P.eq("a"))"#), "{text}");
+    assert!(has_step(&text, r#"as("a")"#), "{text}");
+}
+
+#[test]
+fn the_start_node_is_the_most_selective_one() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    // Without an index: software (2 vertices) before person (4).
+    let text = profile(
+        &graph,
+        "MATCH (p:person)-[:created]->(s:software) RETURN p.name AS p",
+    );
+    let first = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("v("))
+        .unwrap_or_default();
+    assert!(first.contains(r#"v(labels: ["software"])"#), "{text}");
+    assert!(has_step(&text, r#"in("created")"#), "{text}");
+    // An indexed equality wins and the index serves it.
+    graph
+        .traversal_mut()
+        .create_index(
+            "person_name",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+        )
+        .unwrap();
+    let text = profile(
+        &graph,
+        "MATCH (s:software)<-[:created]-(p:person {name: 'josh'}) RETURN s.name AS s",
+    );
+    assert!(text.contains("[index: vertex person.name]"), "{text}");
+    assert!(has_step(&text, r#"out("created")"#), "{text}");
+    let result = rows(
+        &graph,
+        "MATCH (s:software)<-[:created]-(p:person {name: 'josh'}) RETURN s.name AS s",
+    );
+    assert_eq!(sorted(texts(&result, "s")), ["lop", "ripple"]);
+}
+
+/// The `lazy_barrier()` line of a profile: (in, out traversers, out bulk).
+fn merge_point(metrics: &TraversalMetrics) -> Option<(u64, u64, u64)> {
+    metrics
+        .metrics()
+        .iter()
+        .find(|m| m.name().starts_with("lazy_barrier"))
+        .map(|m| {
+            (
+                m.count_in(),
+                m.counts().traverser_count(),
+                m.counts().element_count(),
+            )
+        })
+}
+
+/// 5000 persons who each know one of 10 hubs; each hub created 3 things.
+fn hubs() -> TraversalGraph {
+    fn vertex(graph: &mut TraversalGraph, label: &str, name: String) -> VertexHandle {
+        let mut properties = PropertyMap::default();
+        properties.insert("name", ElementProperty::from(name));
+        GraphStorage::insert_vertex(graph, None, vec![label.into()], properties).unwrap()
+    }
+    fn edge(graph: &mut TraversalGraph, label: &str, from: VertexHandle, to: VertexHandle) {
+        GraphStorage::insert_edge(
+            graph,
+            None,
+            Some(label.into()),
+            from,
+            to,
+            PropertyMap::default(),
+        )
+        .unwrap();
+    }
+    let mut graph = TraversalGraph::new();
+    let mut hubs = Vec::new();
+    for h in 0..10 {
+        let hub = vertex(&mut graph, "hub", format!("hub{h}"));
+        for k in 0..3 {
+            let thing = vertex(&mut graph, "thing", format!("thing{h}.{k}"));
+            edge(&mut graph, "created", hub, thing);
+        }
+        hubs.push(hub);
+    }
+    for p in 0..5000 {
+        let person = vertex(&mut graph, "person", format!("p{p}"));
+        edge(&mut graph, "knows", person, hubs[p % 10]);
+    }
+    graph
+}
+
+#[test]
+fn hops_merge_equal_traversers_where_nothing_reads_the_middle() {
+    let graph = hubs();
+    let query = "MATCH (a:person)-[:knows]->()-[:created]->(s) RETURN s.name AS s";
+    let metrics = graph.traversal().gql(query).profile().unwrap();
+    // 5000 traversers on 10 hubs merge into 10 (bulk 5000) before the second hop.
+    assert_eq!(merge_point(&metrics), Some((5000, 10, 5000)), "{metrics}");
+    let merged = rows(&graph, query);
+    assert_eq!(merged.len(), 15_000);
+    let unmerged = graph
+        .traversal()
+        .with("bulk.merge", false)
+        .gql(query)
+        .to_list()
+        .unwrap();
+    assert_eq!(sorted(texts(&merged, "s")), sorted(texts(&unmerged, "s")));
+    // A middle that is read later is labelled and keeps its traversers apart.
+    let metrics = graph
+        .traversal()
+        .gql("MATCH (a:person)-[:knows]->(h)-[:created]->(s) RETURN a.name AS a, s.name AS s")
+        .profile()
+        .unwrap();
+    assert_eq!(merge_point(&metrics), Some((5000, 5000, 5000)), "{metrics}");
+}
+
+#[test]
+fn hops_merge_on_the_large_graph() {
+    let graph = GraphSource::large_110k();
+    let lock = graph.read();
+    // Two clauses (no trail check between them): 10000 traversers on 1000 middle vertices
+    // merge before the second hop.
+    let query = "MATCH (a {level: '3'})<--(m) MATCH (m)<--(s) RETURN element_id(s) AS s";
+    let metrics = lock.traversal().gql(query).profile().unwrap();
+    assert_eq!(
+        merge_point(&metrics),
+        Some((10_000, 1000, 10_000)),
+        "{metrics}"
+    );
+    let result = lock.traversal().gql(query).to_list().unwrap();
+    assert_eq!(result.len(), 10_000);
 }

@@ -17,7 +17,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
 | `runtime.rs` | what the internal steps share at run time: `GqlElement` handles, `Binding` (slot -> current object / path label / `gql:project` column), the traverser-backed `Env` (`Row`), value conversions (an element column stays a live `TraverserValue::Vertex`/`Edge`), `eval_error` (evaluator error -> `TraverserError::Gql`, kind `Data` for class `22`, GQLSTATUS kept), the total `ORDER BY` order (`compare_order`; tests of all steps in `runtime/tests.rs`) |
-| `lower.rs` | the plan to `GraphStep`s (existing builders plus internal `gql:*` builders; every fallible part first, an error becomes the `gql:error` marker) and the Rust entry points `GraphTraversalSource::gql` / `gql_with` (start step only); its module docs are the table of forms per construct; `as()` only for a binding read while it is not the current element (or a join / trail / branch reason of the plan); `$param` pushdown decided on the value; tests `tests/all/gql_tests.rs` (differential vs Rhai twins, profile, errors) |
+| `lower.rs` | the plan to `GraphStep`s (existing builders plus internal `gql:*` builders; every fallible part first, an error becomes the `gql:error` marker) and the Rust entry points `GraphTraversalSource::gql` / `gql_with` (start step only); its module docs are the table of forms per construct; `as()` only for a binding read while it is not the current element (or a join / trail / branch reason of the plan); `$param` pushdown decided on the value; edge hops choose their form at emission, once the labels are known; its own `lazy_barrier()` merge points between hops; tests `tests/all/gql_tests.rs` (differential vs Rhai twins, profile, errors) |
 
 Files appear as their stage lands; this table is the target layout.
 
@@ -44,7 +44,14 @@ Files appear as their stage lands; this table is the target layout.
   `for_each_access`, `path_requirement()` where they read the path, and `gql:` in the profile.
   Built: `gql:filter` (Filter, `filter_steps/step_gql_filter.rs`), `gql:project` (Map,
   `map_steps/step_gql_project.rs`, in `MAP_PRODUCING_KINDS`), `gql:order` (FlatBarrier,
-  `flatbarrier_steps/step_gql_order.rs`), the `gql:error` marker (Filter, `plan_check`,
-  `filter_steps/step_gql_error.rs`). They ask no permission of their own (value-only, like
-  `has()`); their rendering puts GQL text in string literals so camelCase respelling leaves it
-  alone. Trail checks use `where(P.neq("e1"))`, no internal step.
+  `flatbarrier_steps/step_gql_order.rs`), `gql:not_self_loop` (Filter, the incoming branch of an
+  either-direction edge, `filter_steps/step_gql_not_self_loop.rs`), the `gql:error` marker
+  (Filter, `plan_check`, `filter_steps/step_gql_error.rs`). They ask no permission of their own
+  (value-only, like `has()`); their rendering puts GQL text in string literals so camelCase
+  respelling leaves it alone. Trail checks use `where(P.neq("e1"))`, joins `where(P.eq("x"))`,
+  no internal step.
+- **Edge forms** (table in `lower.rs`): `out()`/`in()` when nothing runs on the edge, else
+  `out_e()..in_v()`; either direction is `union(out.., in_e().gql:not_self_loop()..)`, never
+  `both_e().other_v()` (full paths) or plain `both()` (a self-loop twice).
+- **Merge points:** the lowering places its own `lazy_barrier()` between hops; never change
+  `LazyBarrierRule` or another global rule for GQL (it would move existing Gremlin plans).

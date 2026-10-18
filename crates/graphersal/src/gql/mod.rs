@@ -8,8 +8,7 @@
 //! The entry points are [`GraphTraversalSource::gql`](crate::GraphTraversalSource::gql) and
 //! [`GraphTraversalSource::gql_with`](crate::GraphTraversalSource::gql_with) (in `lower.rs`).
 //!
-//! Stages, one unit each, testable alone (edge patterns are lowered from the next part of stage
-//! 1a on; until then they fail as not supported yet):
+//! Stages, one unit each, testable alone:
 //!
 //! 1. **lexer** (`lexer.rs`): source text to tokens, each with a span (byte range, line, column);
 //!    its module docs fix the lexical rules (contextual keywords, the `--` comment rule, escapes);
@@ -26,8 +25,9 @@
 //!    `GraphStorage` (statistics and the property indexes), deterministic;
 //! 6. **lowering** (`lower.rs`, its module docs list the form of every construct): the planned
 //!    query to `GraphStep`s, existing steps plus internal `gql:*`
-//!    steps (`gql:filter`, `gql:project`, `gql:order`, the `gql:error` marker; their shared
-//!    run-time part is `runtime.rs`), handed to the optimizer like any other plan.
+//!    steps (`gql:filter`, `gql:project`, `gql:order`, `gql:not_self_loop`, the `gql:error`
+//!    marker; their shared run-time part is `runtime.rs`), handed to the optimizer like any other
+//!    plan.
 
 pub(crate) mod ast;
 pub(crate) mod bind;
