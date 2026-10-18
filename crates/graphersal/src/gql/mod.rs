@@ -5,8 +5,8 @@
 //! traversal. ISO GQL is the normative spelling; common Cypher spellings are accepted as aliases.
 //! Version 1 is read-only.
 //!
-//! Planned stages, one unit each, testable alone (implemented so far: the lexer, the AST and the
-//! parser):
+//! Planned stages, one unit each, testable alone (implemented so far: the lexer, the AST, the
+//! parser, the binder, the logical plan and the planner):
 //!
 //! 1. **lexer** (`lexer.rs`): source text to tokens, each with a span (byte range, line, column);
 //!    its module docs fix the lexical rules (contextual keywords, the `--` comment rule, escapes);
@@ -15,9 +15,11 @@
 //!    expected tokens; its module docs are the grammar of the supported subset;
 //! 3. **binder** (`bind.rs`): variables, scopes, parameter references and column names, with GQLSTATUS codes
 //!    for semantic errors;
-//! 4. **plan**: the logical plan, a pattern graph plus a linear pipeline of operators;
-//! 5. **planner**: the start node and expansion order, read only through `GraphStorage`
-//!    (statistics and the index catalog), deterministic;
+//! 4. **plan** (`plan.rs`): the logical plan, per connected component of the pattern graph a scan
+//!    and expansions with join, trail and filter checks, then the result pipeline; it also
+//!    classifies which conjuncts may be pushed into `has()`;
+//! 5. **planner** (`planner.rs`): the start node and expansion order, read only through
+//!    `GraphStorage` (statistics and the property indexes), deterministic;
 //! 6. **lowering**: the planned query to `GraphStep`s, existing steps plus internal `gql:*`
 //!    steps, handed to the optimizer like any other plan.
 
@@ -25,3 +27,5 @@ pub(crate) mod ast;
 pub(crate) mod bind;
 pub(crate) mod lexer;
 pub(crate) mod parser;
+pub(crate) mod plan;
+pub(crate) mod planner;
