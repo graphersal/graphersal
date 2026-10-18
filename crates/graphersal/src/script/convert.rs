@@ -54,7 +54,32 @@ impl ScriptGraphTraversalSource {
                 graph = source.apply(graph);
             }
         }
-        graph.adopt_lowered(self.lower(true))
+        #[cfg(feature = "gql")]
+        let (graph, start) = self.gql_start(graph);
+        #[cfg(not(feature = "gql"))]
+        let start = AnonymousTraversal::new();
+        graph.adopt_lowered(self.lower_onto(true, start))
+    }
+
+    /// The root hook of `gql()`: a leading `Step::Gql` (source steps may come before it) is
+    /// lowered by [`GraphTraversalSource::gql_with`], which needs the storage (the planner reads
+    /// its statistics and index catalog); its steps start the body [`Self::lower_onto`]
+    /// continues, so the Gremlin steps written after `gql()` follow them.
+    #[cfg(feature = "gql")]
+    fn gql_start<'g, S: GraphStorage + 'g>(
+        &self,
+        mut graph: GraphTraversalSource<'g, S>,
+    ) -> (GraphTraversalSource<'g, S>, AnonymousTraversal<'g, S>) {
+        let mut start = AnonymousTraversal::new();
+        let leading = self
+            .steps
+            .iter()
+            .find(|step| !matches!(step, Step::Source(_)));
+        if let Some(Step::Gql(query, params)) = leading {
+            graph = graph.gql_with(query.as_str(), params.iter().cloned());
+            start.steps = std::mem::take(&mut graph.steps);
+        }
+        (graph, start)
     }
 
     /// Converts this script-level step pipeline into an [`AnonymousTraversal`], for use as a
@@ -67,8 +92,23 @@ impl ScriptGraphTraversalSource {
     /// The one lowering of the step AST, for the root traversal (`root`; its source steps are
     /// applied by [`Self::ast_convert_to_gts`]) and for a child traversal alike.
     pub(super) fn lower<'g, S: GraphStorage + 'g>(&self, root: bool) -> AnonymousTraversal<'g, S> {
-        let mut graph = AnonymousTraversal::new();
+        self.lower_onto(root, AnonymousTraversal::new())
+    }
+
+    /// [`Self::lower`] continuing `graph`, the steps a root hook already built (`gql()`).
+    fn lower_onto<'g, S: GraphStorage + 'g>(
+        &self,
+        root: bool,
+        mut graph: AnonymousTraversal<'g, S>,
+    ) -> AnonymousTraversal<'g, S> {
         let steps = self.fold_connectives(root);
+        // The position of the root's start step (source steps come first; folding connectives
+        // keeps it in place): a `gql()` there was lowered by `gql_start`.
+        #[cfg(feature = "gql")]
+        let leading = steps
+            .iter()
+            .find(|step| !matches!(step, Step::Source(_)))
+            .filter(|_| root);
         for step in steps.iter() {
             graph = match step {
                 Step::Source(source) => {
@@ -428,6 +468,19 @@ impl ScriptGraphTraversalSource {
                 }
                 #[cfg(feature = "serde")]
                 Step::PropertyJson(json) => graph.property_json(json.clone()),
+                // The root's leading `gql()` is already lowered (`gql_start`); anywhere else
+                // (the builder refuses it there already) it fails before the run.
+                #[cfg(feature = "gql")]
+                Step::Gql(query, _) => {
+                    if leading.is_some_and(|leading| std::ptr::eq(leading, step)) {
+                        graph
+                    } else {
+                        graph.gql_error(super::source::gql_not_at_start_error(
+                            query,
+                            "after other steps or inside __",
+                        ))
+                    }
+                }
                 Step::JsonPath(path) => graph.json_path(path.as_str()),
                 Step::GlobPath(pattern, options) => {
                     graph.glob_path_with(pattern.as_str(), options.convert_to_anonymous())

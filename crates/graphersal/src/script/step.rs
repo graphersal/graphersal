@@ -386,6 +386,10 @@ pub(super) enum Step {
     WithOption(crate::value::WithOptions, Option<crate::value::WithOptions>),
     #[cfg(feature = "serde")]
     PropertyJson(serde_json::Value),
+    /// `gql(query[, #{params}])`: a GQL read query with its parameter values; it starts the
+    /// root traversal (the builder refuses it elsewhere), see `convert.rs`.
+    #[cfg(feature = "gql")]
+    Gql(CompactString, Vec<(CompactString, ElementProperty)>),
     JsonPath(CompactString),
     /// `glob_path(pattern[, #{...}])` / `globPath(pattern[, #{...}])`; the pattern is compiled
     /// and `max_depth` validated by the Rust step.

@@ -168,8 +168,8 @@ impl DocIndex {
 
 /// Builds the [`DOCS`] table from `receiver name: summary, example => result;` entries.
 macro_rules! docs {
-    ($($receiver:literal $name:literal: $summary:literal, $example:literal => $result:expr;)*) => {
-        &[$(FnDoc {
+    ($($(#[$meta:meta])* $receiver:literal $name:literal: $summary:literal, $example:literal => $result:expr;)*) => {
+        &[$($(#[$meta])* FnDoc {
             receiver: $receiver,
             name: $name,
             summary: $summary,
@@ -419,6 +419,10 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "glob_path":
         "Walks the tree below each vertex along a glob pattern of edge names, like a file path (Graphersal extension, see the book page Step - glob_path).",
         "GraphSource::file_tree().v().has(\"name\", \"/\").glob_path(\"*\").values(\"name\").to_list()" => "[]";
+    #[cfg(feature = "gql")]
+    "traversal" "gql":
+        "Runs a GQL read query (MATCH, WHERE, RETURN, ORDER BY, OFFSET, LIMIT; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.",
+        "g.gql(\"MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name\", #{min: 30}).to_list()" => "[#{\"name\": \"josh\"}, #{\"name\": \"peter\"}]";
     "traversal" "group":
         "Groups the stream into a map: key by the first by(), values by the second by() (default: the elements); with a key it is a side effect.",
         "g.v().group().by(T.label).by(\"name\").next()" => "#{\"person\": [\"marko\", \"vadas\", \"josh\", \"peter\"], \"software\": [\"lop\", \"ripple\"]}";
