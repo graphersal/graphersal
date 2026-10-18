@@ -488,15 +488,19 @@ fn the_error_names_the_marker_step() {
 }
 
 #[test]
-fn edge_patterns_are_not_lowered_yet() {
+fn an_edge_variable_bound_twice_in_one_match_is_refused() {
     let graph = TraversalGraph::tinkerpop_modern();
-    let (kind, gqlstatus, _) = gql_error(
+    let (kind, gqlstatus, message) = gql_error(
         graph
             .traversal()
-            .gql("MATCH (a)-[:knows]->(b) RETURN b")
+            .gql("MATCH (a)-[e]->(b)-[e]->(c) RETURN a, b, c")
             .to_list(),
     );
-    assert_eq!((kind, gqlstatus.as_str()), (GqlErrorKind::NotYet, "0A000"));
+    assert_eq!(
+        (kind, gqlstatus.as_str()),
+        (GqlErrorKind::Semantic, "42002")
+    );
+    assert!(message.contains("more than one edge"), "{message}");
 }
 
 #[test]
