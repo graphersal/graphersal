@@ -1,5 +1,8 @@
-//! The scalar functions of stage 1c (design `ai/gql/2026-10-19-gql-1c-design.md`): a pure
-//! stage between the evaluator and the values, one file per family.
+//! The scalar functions of stage 1c: a pure stage between the evaluator and the values, one file
+//! per family. The user documentation is the book: `gql/subset.md` ("Functions", one table per
+//! family), `gql/semantics.md` ("Functions": the rules cited here as F1-F13, strict `CAST` vs
+//! lenient `toX`, rounding, where they differ from Neo4j) and `gql/aliases.md` ("Compatibility
+//! functions": the openCypher functions without a GQL counterpart).
 //!
 //! [`eval`](super::eval) evaluates every argument of a call (left to right; only `coalesce` is
 //! lazy, and it stays in the evaluator with the stage 1a functions) and hands the values to

@@ -1,11 +1,11 @@
-//! String functions (stage 1c task T3): `left`, `right`, `substring`, `trim` (strings and the SQL
+//! String functions (stage 1c): `left`, `right`, `substring`, `trim` (strings and the SQL
 //! `TRIM` forms), `btrim` / `ltrim` / `rtrim`, `replace`, `split`, `reverse`, `byte_length` /
 //! `octet_length`, `isEmpty`, `nullif`.
 //!
 //! The contract of a family file is in the module docs of `functions/mod.rs`; unit tests use
 //! the test `Env` and helpers of `functions/test_env.rs`.
 //!
-//! Rules (design `ai/gql/2026-10-19-gql-1c-design.md`, "Strings"):
+//! Rules (user documentation: the book, `gql/semantics.md`, "Strings: trim, split, replace"):
 //!
 //! - Every position, length and count is in characters (Unicode scalar values, F1). Results are
 //!   built from `chars()` iterators (never by slicing a string at a computed byte offset), and

@@ -28,8 +28,10 @@ The mandatory core of a GQL read query, by construct.
 | property reference `x.key` | supported | |
 | comparison, `AND` / `OR` / `NOT`, `IS [NOT] NULL` | supported | three-valued logic |
 | arithmetic `+ - * / %`, string concatenation `\|\|` | supported | |
-| simple and searched `CASE`, `COALESCE` | supported | `NULLIF` not yet |
-| `UPPER`, `LOWER`, `CHAR_LENGTH` / `CHARACTER_LENGTH` | supported | other string functions not yet |
+| simple and searched `CASE`, `COALESCE`, `NULLIF` | supported | |
+| `UPPER`, `LOWER`, `CHAR_LENGTH` / `CHARACTER_LENGTH`, `LEFT`, `RIGHT`, `TRIM(s)` | supported | `TRIM` removes spaces by default; `NORMALIZE` not yet |
+| `BYTE_LENGTH` / `OCTET_LENGTH` of a character string | supported | the number of UTF-8 bytes; Graphersal has no byte strings |
+| list trim `TRIM(list, n)` | supported | drops the last `n` items |
 | parameters `$name` | supported | values only, never text |
 | aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
 | `OPTIONAL MATCH` | supported | also as the first clause |
@@ -44,7 +46,7 @@ The mandatory core of a GQL read query, by construct.
 | ID | Feature | Status | Notes |
 |---|---|---|---|
 | G002 | different-edges match mode | partial | the semantics is the default and only mode; writing `DIFFERENT EDGES` is not accepted yet |
-| G004 | path variables | supported | `p = (a)-->(b)`, `path_length(p)` (Cypher `length`); `nodes()` / `relationships()` not yet |
+| G004 | path variables | supported | `p = (a)-->(b)`, `path_length(p)` (Cypher `length`); Cypher's `nodes(p)` / `relationships(p)` as [compatibility functions](aliases.md#compatibility-functions) |
 | G005 | path search prefix in a path pattern | not yet | `ANY`, `ALL`, `SHORTEST` prefixes |
 | G010 | explicit `WALK` keyword | not yet | |
 | G011 | advanced path modes: `TRAIL` | not yet | trail is the semantics of every `MATCH`; the keyword is not accepted yet |
@@ -65,16 +67,23 @@ The mandatory core of a GQL read query, by construct.
 | G100 | `ELEMENT_ID` function | supported | the id as a string; Cypher `elementId` alias |
 | G110 | `IS DIRECTED` predicate *(provisional)* | not yet | every edge is directed |
 | G111 | `IS LABELED` predicate | supported | Cypher `x:A` alias |
-| G112 | `IS SOURCE OF` / `IS DESTINATION OF` predicates *(provisional)* | not yet | |
+| G112 | `IS SOURCE OF` / `IS DESTINATION OF` predicates *(provisional)* | supported | `n IS [NOT] SOURCE OF e`, `n IS [NOT] DESTINATION OF e`: the stored direction of the edge; Cypher's `startNode(e)` / `endNode(e)` as compatibility functions |
 | G113 | `ALL_DIFFERENT` predicate *(provisional)* | not yet | |
 | G114 | `SAME` predicate *(provisional)* | not yet | |
 | G115 | `PROPERTY_EXISTS` predicate *(provisional)* | not yet | `x.key IS NOT NULL` tests a property |
 | GA03 | explicit ordering of nulls | not yet | `NULLS FIRST` / `NULLS LAST` |
 | GA04 | universal comparison *(provisional)* | no | comparing values of different kinds is `NULL` |
+| GA05 | cast specification | partial | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` and their synonyms (`INT`, `BIGINT`, `DOUBLE`, `VARCHAR`, `BOOL`, ...); the other target types (`DATE`, `LIST<..>`, `DECIMAL`, ...) not yet; strict: unconvertible text is `22018` |
 | GA07 | ordering by discarded binding variables *(provisional)* | supported | `ORDER BY` may read variables that `RETURN` does not return (not after `RETURN DISTINCT`) |
 | GB02 | double minus sign comments | supported | `-- ...`, with the edge rule of [Writing GQL in Rhai Strings](rhai_strings.md#comments) |
 | GB03 | double solidus comments | supported | `// ...` |
 | GE07 | Boolean `XOR` | supported | |
+| GF01 | enhanced numeric functions | supported | `ABS`, `FLOOR`, `CEIL` / `CEILING`, `SQRT`, `MOD`; an integer argument keeps its type |
+| GF02 | trigonometric functions *(provisional)* | not yet | Gremlin `math()` after `gql()` |
+| GF03 | logarithmic functions | supported | `EXP`, `LN`, `LOG10`, `LOG(base, x)` *(provisional)*, `POWER`; an argument outside the domain is an error (`2201E`, `2201F`), never `NaN` |
+| GF04 | enhanced path functions | partial | `PATH_LENGTH`; `ELEMENTS(p)` *(provisional)* not yet (Cypher's `nodes(p)` / `relationships(p)` instead) |
+| GF05 | multi-character trim functions | supported | `BTRIM`, `LTRIM`, `RTRIM` with an optional set of characters (default: the space) |
+| GF06 | explicit `TRIM` function | supported | `TRIM([LEADING \| TRAILING \| BOTH] [c] FROM s)`; `c` is one character (`22027` otherwise), the space by default |
 | GF12 | `CARDINALITY` function | supported | |
 | GF13 | `SIZE` function | supported | also on strings as the Cypher alias of `CHAR_LENGTH` |
 | GH02 | undirected edge patterns | no | Graphersal edges are directed; `-[e]-` matches either direction |
@@ -99,8 +108,9 @@ The mandatory core of a GQL read query, by construct.
 | GP01 | inline procedure *(provisional)* | not yet | `CALL { ... }` |
 | GP04 | named procedure calls *(provisional)* | no | vendor procedures (`CALL db.*`, `apoc.*`) are refused |
 
-Every feature not listed here is not supported. Cypher spellings that GQL does not have are on
-[Cypher Aliases](aliases.md).
+Every feature not listed here is not supported. Cypher spellings that GQL does not have, and the
+openCypher functions accepted without a GQL counterpart (`toInteger`, `substring`, `split`,
+`round`, `keys`, `nodes`, ...), are on [Cypher Aliases](aliases.md).
 
 ## Implementation-defined choices
 
@@ -122,5 +132,12 @@ where it has one):
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |
 | integer division | truncates toward zero; `%` takes the sign of the dividend |
 | integer overflow | an error (`22003`), never a wrap |
-| text and numbers | no implicit conversion: `'a' + 1` is an error (`22G03`) |
+| text and numbers | no implicit conversion: `'a' + 1` is an error (`22G03`); convert with `CAST(x AS STRING)` |
+| `CAST` of a float to `INTEGER`, of text with surrounding spaces | truncated toward zero; the spaces are skipped (provisional) |
+| `CAST` to `STRING` of a float, a boolean, a list or a map | Java's float text (`'1.0'`, `'1.0E7'`), `'true'` / `'false'`, Neo4j's list and map text (provisional) |
+| `CAST(x AS BOOLEAN)` of a number; of `'unknown'` | `22G03`; `NULL` (provisional) |
+| default character of `TRIM`, `BTRIM`, `LTRIM`, `RTRIM` | the space U+0020 only (provisional) |
+| `BTRIM` / `LTRIM` / `RTRIM` with characters | any character of the set is removed (Neo4j's semantics; provisional) |
+| functions and `NULL` | a `NULL` argument gives `NULL`, before the kinds are checked |
+| strings in functions | positions and lengths count characters (Unicode scalar values) |
 | GQLSTATUS codes | `42001` for syntax errors; the others provisional ([Errors](errors.md)) |

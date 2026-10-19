@@ -2399,8 +2399,10 @@ impl<'a> Parser<'a> {
             )
         };
         let b = err(GqlErrorKind::Refused, span, message).alternative(
-            "write what the function does as Gremlin steps after gql(), or use one of the GQL \
-             functions (element_id, labels, type, coalesce, upper, lower, char_length, size)",
+            "write what the function does as Gremlin steps after gql(), or use one of the gql() \
+             functions: conversions (CAST, toString, toInteger, ...), strings (substring, \
+             replace, split, btrim, upper, lower, ...), numbers (round, abs, sqrt, ...), lists \
+             and elements (head, last, range, keys, properties, nodes, ...)",
         );
         Box::new(b)
     }

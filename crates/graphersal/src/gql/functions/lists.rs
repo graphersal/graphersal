@@ -1,4 +1,4 @@
-//! Lists, elements and paths (stage 1c task T5): `head`, `last`, `tail`, GQL's list `trim(list, n)`,
+//! Lists, elements and paths: `head`, `last`, `tail`, GQL's list `trim(list, n)`,
 //! `range`, `keys`, `properties`, `startNode`, `endNode`, `nodes`, `relationships`, and the GQL
 //! predicates `IS [NOT] SOURCE OF` / `IS [NOT] DESTINATION OF`.
 //!

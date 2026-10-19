@@ -121,7 +121,8 @@ g.gql("MATCH (n) RETURN n.name AS n, n.age > 'a' AS cmp ORDER BY n LIMIT 2").to_
 
 `=` and `<>` also compare lists (item by item), maps (key by key) and elements (the same vertex
 or edge). No value is ever turned into text implicitly: `'a' + 1` is an error, not `'a1'`
-(Neo4j converts here; Graphersal does not).
+(Neo4j converts here; Graphersal does not). Convert explicitly: `'a' || toString(1)` or
+`'a' || CAST(1 AS STRING)` ([Conversions](#conversions-strict-cast-lenient-tox)).
 
 ## Aggregation
 
@@ -139,6 +140,10 @@ The aggregates follow GQL and, where the standard text could not be checked yet,
   so no row.
 - **Group order** is unspecified (today: the order in which the groups first appear); write
   `ORDER BY`.
+- **`GROUP BY`** after the `RETURN` items lists the grouping keys explicitly; grouping stays
+  implicit, so it changes nothing in the result. A key names a column (`GROUP BY name`) or, beyond
+  ISO GQL's references to variables, repeats an item's expression (`GROUP BY p.name` for
+  `RETURN p.name AS name, ...`).
 
 ```rhai,graph=modern
 g.gql("MATCH (n) RETURN count(n.age) AS ages, count(*) AS rows, collect_list(n.lang) AS langs").to_list()
@@ -215,6 +220,188 @@ g.gql("MATCH (n) RETURN coalesce(n.age, n.lang) AS v ORDER BY v").to_list()
 ```
 
 Gremlin's `order().by("age")` drops the vertices without `age`; `ORDER BY` keeps them.
+
+## Functions
+
+The functions ([The Supported Subset](subset.md#functions)) are pure: the same arguments always
+give the same result, so a `LET` or `WITH` name may stand for its expression anywhere. They
+follow these rules:
+
+- **Characters.** Every position and length counts characters (Unicode scalar values), never
+  bytes: `char_length('héllo')` is 5, `byte_length('héllo')` is 6, and `left`, `right`,
+  `substring`, `reverse` and `split(s, '')` never cut a character in two.
+- **`NULL` in, `NULL` out.** A function returns `NULL` when any argument is `NULL`, before it
+  checks the kinds, except `coalesce`, `nullif` and the `...OrNull` conversions. An unmatched
+  `OPTIONAL MATCH` therefore gives `NULL` through every function.
+- **Wrong kind is an error.** An argument of the wrong kind fails the query (`22G03`), never a
+  silent `NULL` (only the `...OrNull` conversions turn it into `NULL`). An argument that must be
+  an integer (`left`, `substring`, `range`, the precision of `round`, the `n` of the list
+  `trim`) does not take a float.
+- **No `NaN` or infinity from finite numbers.** `sqrt(-1)` (`2201F`), `ln(0)` (`2201E`) and an
+  `exp()` or `power()` that overflows (`22003`) are errors, like the arithmetic operators. A `NaN`
+  that is already stored passes through `abs`, `floor`, `ceil` and `round` unchanged, and
+  `sign(NaN)` is 0. Conversions are not arithmetic: `toFloat('NaN')` and `toFloat('Infinity')`
+  give the float values, as in Neo4j.
+- **Result types.** The GQL functions keep the argument's type: `abs`, `floor` and `ceil` of an
+  integer are integers. `round` (Cypher) is always a float, `sign` always an integer; `sqrt`,
+  `exp`, `ln`, `log`, `log10` and `power` are floats; `mod(a, b)` is exactly `a % b`.
+- **Bounded results.** A function whose result can be larger than its arguments (`range`,
+  `split`, `replace`, `toString` of a list or map, and the operator `||`) computes the size of the
+  result first and asks for it against `traversal.max_materialized_bytes` and the memory budget,
+  like `collect_list()`. A result that is too large fails the query with the limit error; it is
+  never cut short and never runs the process out of memory ([Errors](errors.md#scope-grouping-and-limits)).
+- **No plan change.** A condition with a function is evaluated by the GQL filter step and never
+  pushed into `has()` or a property index: `WHERE lower(n.name) = 'marko'` scans the label.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s:software {lang: 'none'}) RETURN p.name AS name, upper(s.name) AS u, toString(s) AS t, head(s.tags) AS h ORDER BY name LIMIT 1").to_list()
+// #{"h": (), "name": "josh", "t": (), "u": ()}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN left(n.name, 2.0) AS x")   // error: left() takes an integer length (22G03)
+```
+
+### Conversions: strict `CAST`, lenient `toX`
+
+GQL's `CAST` and Cypher's `toInteger` / `toFloat` / `toBoolean` / `toString` share one set of
+conversion rules and differ in what an unconvertible value gives:
+
+| Case | `CAST(x AS T)` | `toX(x)` | `toXOrNull(x)` |
+|---|---|---|---|
+| a text that is no value of the type (`'abc'` to INTEGER) | error `22018` | `NULL` | `NULL` |
+| a value of a kind the type does not take (`true` to FLOAT) | error `22G03` | error `22G03` | `NULL` |
+| a number out of range (`1.0e19` to INTEGER) | error `22003` | error `22003` | `NULL` |
+| a vertex, edge or path to STRING | error `22G03` | error `22G03` | error `22G03` |
+
+- **To INTEGER:** a float is truncated toward zero (`1.9` is 1, `-1.9` is -1); a text is a
+  decimal number, also with a fraction or an exponent, truncated the same way (`'1.9'` is 1,
+  `'1e3'` is 1000, computed exactly, without a float in between). `toInteger` also reads Cypher
+  integer literals (`'0x1F'` is 31, `'0o11'` is 9, `'1_000'` is 1000) and `true` / `false` as 1 /
+  0; `CAST` reads decimal text only, and a boolean is `22G03`.
+- **To FLOAT:** a decimal number, `'NaN'`, `'Infinity'`, `'-Infinity'`; `toFloat` also reads Cypher
+  literals. Java-only forms (`'1.5f'`, `'1d'`, hexadecimal floats) are not numbers.
+- **To BOOLEAN:** `'true'` and `'false'` in any letter case; `CAST` reads `'unknown'` as `NULL`;
+  `toBoolean` takes an integer too (0 is FALSE, every other integer TRUE), `CAST` does not.
+- **To STRING:** an integer, UUID or date gives the same text as Gremlin's `as_string()`; a float
+  always shows a decimal point or an exponent, in Neo4j's (Java's) form: `'1.0'`, `'3.2'`,
+  `'1.0E7'`, `'1.0E-4'`, `'1.5E20'` (plain decimal from 0.001 up to 10 000 000); booleans give
+  `'true'` / `'false'`; a list or map gives Neo4j's text (`'[1, a, true, null]'`,
+  `'{a: 1, b: hi}'`, strings unquoted).
+- **Surrounding blanks:** `CAST` skips spaces around the text; the Cypher forms skip every
+  character up to U+0020 (spaces, tabs, line breaks), as Java's `String.trim()` does, and
+  `toBoolean` any Java whitespace.
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toString(1.0) AS a, toString(1.5e20) AS b, toString(0.0001) AS c, toString(10000000.0) AS d").to_list()
+// #{"a": "1.0", "b": "1.5E20", "c": "1.0E-4", "d": "1.0E7"}
+g.inject(1.0).as_string().to_list()   // "1": Gremlin's text of a float
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toInteger('1.9') AS a, toInteger('0x1F') AS b, toIntegerOrNull('0x1F') AS c").to_list()   // #{"a": 1, "b": 31, "c": 31}
+g.inject("1.9").as_number(GType.LONG).to_list()   // error: Gremlin's as_number(GType.LONG) does not read a fraction in text
+g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST('0x1F' AS INTEGER) AS x")   // error: invalid character value for cast (22018)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toInteger(1.0e19) AS x")   // error: out of range for an INTEGER (22003)
+```
+
+### Rounding
+
+`round(x [, precision [, mode]])` follows Neo4j and always returns a float:
+
+- One argument, or `precision` 0 without a mode: Java's `Math.round`, a half rounds toward
+  positive infinity (`round(2.5)` is 3.0, `round(-2.5)` and `round(-2.5, 0)` are -2.0).
+- With a positive `precision`, or with a `mode`: the shortest decimal text of `x` is rounded
+  (Java's `BigDecimal.valueOf`), so `round(2.675, 2)` is 2.68 although the float 2.675 is a bit
+  below it. The default mode is `'HALF_UP'` (a half away from zero: `round(-1.55, 1)` is -1.6).
+- `mode` is one of `'UP'`, `'DOWN'`, `'CEILING'`, `'FLOOR'`, `'HALF_UP'`, `'HALF_DOWN'`,
+  `'HALF_EVEN'`, written in **upper case** (as Neo4j, which uses Java's mode names); any other
+  text, Java's `'UNNECESSARY'` included, is `22023`. A negative `precision` is `22023` too, and a
+  float `precision` `22G03`.
+- `NaN` and the infinities pass through. A number beyond the integer range is rounded as it is,
+  never clamped: `round(1.0e20)` is `1.0e20`.
+
+Gremlin's `math()` has no `round`; the logarithm of `math("log(_)")` is the natural one, the same
+as `ln(x)` and the one-argument `log(x)`. `log(2, x)` and `log(10, x)` are exact for powers of
+the base (`log(2, 1024)` is 10.0).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'marko'}) RETURN round(-1.5) AS a, round(-1.5, 0) AS b, round(-1.5, 0, 'HALF_UP') AS c, round(1.25, 1, 'HALF_EVEN') AS d").to_list()
+// #{"a": -1.0, "b": -1.0, "c": -2.0, "d": 1.2}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN log(2, 1024) AS a, log(10, 0.001) AS b").to_list()   // #{"a": 10.0, "b": -3.0}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN round(1.5, 0, 'half_up') AS x")   // error: round() has no rounding mode "half_up" (22023)
+```
+
+### Strings: trim, split, replace
+
+- **Trim.** Every GQL trim form removes the **space** (U+0020) when no character is given:
+  `TRIM(s)`, `TRIM(LEADING FROM s)`, `trim(s)`, `btrim(s)`, `ltrim(s)`, `rtrim(s)`. A tab or a
+  line break stays. `TRIM(c FROM s)` takes exactly one character `c` (`22027` otherwise);
+  `btrim(s, chars)`, `ltrim(s, chars)` and `rtrim(s, chars)` remove any character of the set
+  `chars` (`''` removes nothing). `trim(s, x)` with a string `s` is an error that names
+  `btrim(s, chars)`; `trim(list, n)` is GQL's list trim.
+- **Split.** Empty parts are kept: `split('a,,b,', ',')` is `['a', '', 'b', '']`, and
+  `split('', ',')` is `['']`. An empty delimiter splits into characters (`split('', '')` is
+  `['']`). With a list of delimiters the text is cut at the leftmost match, and when two
+  delimiters match at the same place the one listed first wins (`split('a--b', ['-', '--'])` is
+  `['a', '', 'b']`, `split('a--b', ['--', '-'])` is `['a', 'b']`); a list containing `''` splits
+  into characters, a `NULL` in the list gives `NULL`, and `[]` gives `[s]`.
+- **Replace.** Every non-overlapping occurrence, left to right. An empty `search` inserts the
+  replacement before every character and at the end (`replace('abc', '', '-')` is `'-a-b-c-'`,
+  Java's rule). The optional fourth argument `limit` (Neo4j 2025.06) replaces at most that many
+  occurrences, from the left (`0` changes nothing, a negative limit is `22023`).
+
+Gremlin's string steps differ in these places, so the same-named Gremlin step is a twin only
+for plain inputs:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'marko'}) RETURN split('a,,b', ',') AS s").to_list()   // #{"s": ["a", "", "b"]}
+g.inject("a,,b").split(",").to_list()   // ["a", "b"]: Gremlin drops the empty part
+g.gql("MATCH (n:person {name: 'marko'}) RETURN replace('abc', '', '-') AS r").to_list()   // #{"r": "-a-b-c-"}
+g.inject("abc").replace("", "-").to_list()   // "abc": Gremlin leaves the text unchanged
+g.gql("MATCH (n:person {name: 'marko'}) RETURN trim(' \t a \t ') AS t").to_list()   // the tabs stay: "\t a \t"
+g.inject(" \t a \t ").trim().to_list()   // "a": Gremlin's trim() removes all whitespace
+```
+
+### Elements and paths
+
+- **`startNode(e)` / `endNode(e)`** are the edge's stored source and target, independent of the
+  direction the pattern was written in: `MATCH (a)-[e]-(b)` binds `a` to either end, while
+  `startNode(e)` is always the source. `n IS SOURCE OF e` and `n IS DESTINATION OF e` test the
+  same (TRUE, FALSE, or `NULL` when an operand is `NULL`).
+- **`keys(x)` / `properties(x)`** of a vertex or edge list its properties in stored order; a
+  property stored as `null` is no key, as `x.key` reads it as `NULL` anyway. Labels never appear
+  (`labels(x)` lists them). `keys()` of a map keeps a key whose value is `NULL`
+  (`keys({a: 1, b: NULL})` is `['a', 'b']`, as in Neo4j); `properties()` of a map is the map.
+- **`nodes(p)` / `relationships(p)`** follow the path in the written order of the pattern; an
+  edge matched against its direction (`-[e]-`) keeps its stored direction. A zero-length path
+  gives one vertex and `[]`; the `NULL` path of an unmatched `OPTIONAL MATCH` gives `NULL`.
+
+```rhai,graph=modern
+g.gql("MATCH (a)<-[e:knows]-(b) RETURN a.name AS a, startNode(e).name AS s, endNode(e).name AS t ORDER BY a").to_list()
+// #{"a": "josh", "s": "marko", "t": "josh"}, #{"a": "vadas", "s": "marko", "t": "vadas"}
+g.gql("MATCH p = (a {name: 'marko'})-[*0..1]->(b) RETURN b.name AS b, size(nodes(p)) AS n, relationships(p) AS r ORDER BY n, b LIMIT 2").to_list()
+// #{"b": "marko", "n": 1, "r": []}, #{"b": "josh", "n": 2, "r": [e[2][1-knows->4]]}
+```
+
+### Where functions differ from Neo4j
+
+The [compatibility functions](aliases.md#compatibility-functions) keep Neo4j's meaning, and the
+GQL functions follow GQL. These are the places where a query gives a different answer than in
+Neo4j, each deliberate:
+
+| Neo4j | `gql()` | Why |
+|---|---|---|
+| `toInteger(1.0e19)` saturates to the largest integer; `toInteger(NaN)` is 0 | error `22003` | a silent wrong value is worse than an error; `toIntegerOrNull` gives `NULL` |
+| `toFloat('1e400')` is `Infinity` | error `22003` (`toFloatOrNull`: `NULL`) | the same rule for both targets |
+| `toString(n)` of a node, relationship or path gives vendor text (`'(:A:B)'`) | error `22G03` naming `element_id(x)`, `properties(x)` or `RETURN p` | Neo4j's element text is vendor-specific |
+| `CAST` does not exist (`toInteger` and friends are the alternatives) | GQL's strict `CAST`; it reads decimal text only, no Cypher literals (`'0x1F'`) | GQL is normative; the Cypher literals are `toInteger`'s |
+| `trim(s)`, `ltrim(s)`, `rtrim(s)` remove any whitespace | spaces only | GQL's `TRIM` removes spaces (to be checked against the ISO text) |
+| `floor(3)`, `ceil(3)` are floats | integers (they compare equal) | GQL keeps the argument's type |
+| `round(x, p)` takes a float `p`; `range()` takes floats | error `22G03` | an integer argument must be an integer |
+| a rounding mode outside Java's names fails with `22000`; `'UNNECESSARY'` is a mode | error `22023`; `'UNNECESSARY'` refused | the code is ours; `'UNNECESSARY'` fails whenever rounding is needed |
+| `round()` of a number beyond the integer range | the number itself, never saturated | |
+| `left('a', null)` raises an error (per the manual) | `NULL` | GQL's `NULL` rule |
+| `sqrt(-1)` is `NaN`, `ln(0)` is `-Infinity`, `exp(1000)` is `Infinity` | errors `2201F`, `2201E`, `22003` | no `NaN` or infinity from finite numbers (GQL requires the logarithm error too) |
+| `split(s, '')` splits UTF-16 code units | splits characters | an emoji stays one item |
+| range step 0, negative `round` precision: `22N38` / `22N03` | `22023` | the ISO / SQL-heritage code |
+
+`log(2, x)` and `log(10, x)` are exact for powers of the base, and `keys(map)` keeps keys whose
+value is `NULL`, both as in Neo4j.
 
 ## Ids are strings
 

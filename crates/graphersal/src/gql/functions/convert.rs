@@ -1,4 +1,4 @@
-//! Conversions (design K-D22, F10; stage 1c task T2): GQL `CAST(x AS INTEGER | FLOAT | STRING |
+//! Conversions (design K-D22, F10): GQL `CAST(x AS INTEGER | FLOAT | STRING |
 //! BOOLEAN)` (strict), Cypher `toInteger` / `toFloat` / `toBoolean` / `toString` (lenient) and
 //! their `...OrNull` forms, one core with a [`Mode`].
 //!

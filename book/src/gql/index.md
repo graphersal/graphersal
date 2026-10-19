@@ -41,7 +41,8 @@ its real output (a list is shown as its items, comma-separated, or one per line)
 This version supports GQL read queries: `MATCH` and `OPTIONAL MATCH`, `WHERE`, `LET`, `FILTER`,
 Cypher's `WITH`, `RETURN` with aggregation (`count`, `sum`, `avg`, `min`, `max`, `collect_list`),
 `ORDER BY`, `OFFSET`, `LIMIT`, node and edge patterns, quantified edges (`-[:knows]->{1,3}`), path
-variables, label expressions, expressions, functions and parameters
+variables, label expressions, expressions, parameters, the GQL scalar functions and the common
+openCypher ones (`toInteger`, `substring`, `split`, `round`, `keys`, `nodes(p)`, ...)
 ([The Supported Subset](subset.md)). Composite queries (`UNION`, `NEXT`), subqueries, `FOR`,
 shortest paths and quantified parenthesized paths come later; until then the error names the
 Gremlin step that does the same.
@@ -112,7 +113,9 @@ graph.query('g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p
 - [The Supported Subset](subset.md): clauses, patterns, label expressions, expressions,
   functions, parameters, and what is not supported yet.
 - [Semantics](semantics.md): trail matching, quantified edges and their limits, `OPTIONAL MATCH`,
-  `NULL` and three-valued logic, aggregation, `DISTINCT` equality, comparisons, ordering, ids.
+  `NULL` and three-valued logic, aggregation, `DISTINCT` equality, comparisons, ordering, the
+  rules of the functions (strict `CAST`, lenient `toInteger`, rounding, where they differ from
+  Neo4j), ids.
 - [Result Shape](result_shape.md): row maps, column names and their order, path values.
 - [Writing GQL in Rhai Strings](rhai_strings.md): quotes, multi-line queries, comments,
   parameters, and when the MCP tool is easier.

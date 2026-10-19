@@ -175,9 +175,16 @@ g.gql("MATCH p = (a {name: 'marko'})->{1,2}(b) RETURN b.name AS b, length(p) AS 
 // josh 1, lop 1, vadas 1, lop 2, ripple 2
 ```
 
-A path is a value: it compares (`p = q`), sorts, groups and goes into `collect_list()`. Cypher's
-`nodes(p)` and `relationships(p)` are not supported yet: return `p`, or name the elements and
-return them.
+A path is a value: it compares (`p = q`), sorts, groups and goes into `collect_list()`. The
+Cypher functions `nodes(p)` and `relationships(p)` return its vertices and its edges as lists
+([Lists, elements and paths](#lists-elements-and-paths)):
+
+```rhai,graph=modern
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) RETURN nodes(p) AS n, relationships(p) AS r ORDER BY b.name").to_list()
+// #{"n": [v[1], v[4]], "r": [e[2][1-knows->4]]}, #{"n": [v[1], v[2]], "r": [e[0][1-knows->2]]}
+g.v().has("name", "marko").out_e("knows").in_v().path().to_list()
+// [v[1], e[2][1-knows->4], v[4]], [v[1], e[0][1-knows->2], v[2]]
+```
 
 ## Label expressions
 
@@ -386,10 +393,12 @@ order of `NULL` and of values of different types.
 | property access | `n.name`, `m.key` on a map |
 | comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; not chainable (`a < b < c` is an error) |
 | logic | `AND`, `OR`, `XOR`, `NOT` |
-| predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED` |
+| predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
 | arithmetic | `+`, `-`, `*`, `/`, `%`, unary `-` and `+` |
 | concatenation | `\|\|` on two strings or two lists (Cypher `+`) |
 | conditional | simple `CASE x WHEN v THEN r ... ELSE d END` and searched `CASE WHEN cond THEN r ... END` |
+| conversion | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` ([Conversions](#conversions)) |
+| function calls | `name(args)` ([Functions](#functions)) |
 
 Precedence, loosest first: `OR`, `XOR`, `AND`, `NOT`, comparison, the predicates (`IS NULL`,
 `IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, unary minus, property access.
@@ -414,20 +423,26 @@ error, never a wrapped or infinite value ([Errors](errors.md#errors-while-the-qu
 
 ## Functions
 
+Function names are case-insensitive (`toInteger`, `TOINTEGER`). Every function returns `NULL`
+for a `NULL` argument (except `coalesce`, `nullif` and the `...OrNull` conversions, by their
+definition) and fails for an argument of the wrong kind (`22G03`), never with a silent `NULL`. A
+position or a length counts **characters** (Unicode scalar values), never bytes. The aggregates
+are listed under [Aggregation](#aggregation); [Semantics](semantics.md#functions) has the exact
+rules and where they differ from Neo4j and from the Gremlin steps of the same name.
+
+The functions come from two sources: the **GQL functions** (with their Cypher spellings as
+[aliases](aliases.md)), and a fixed list of openCypher **compatibility functions** that GQL has no
+counterpart for (`toInteger`, `substring`, `split`, `round`, `keys`, `nodes`, ...): they keep
+their Neo4j meaning ([Cypher Aliases](aliases.md#compatibility-functions)).
+
 | Function | Returns | Cypher alias |
 |---|---|---|
 | `element_id(x)` | the id of a vertex or edge, a string | `elementId(x)` |
 | `labels(x)` | a vertex's labels in stored order (primary first); an edge's label as a one-item list | |
 | `type(e)` | an edge's label; a vertex is an error (use `labels(v)`) | |
 | `coalesce(a, b, ...)` | the first argument that is not `NULL` | |
-| `upper(s)`, `lower(s)` | the string in upper / lower case | `toUpper(s)`, `toLower(s)` |
-| `char_length(s)`, `character_length(s)` | the number of characters | `size(s)` |
-| `size(list)`, `cardinality(list)` | the number of items | |
+| `nullif(a, b)` | `NULL` when `a = b` is TRUE, else `a` | same (`nullIf`) |
 | `path_length(p)` | the number of edges of a path | `length(p)` |
-
-Function names are case-insensitive. Every function returns `NULL` for a `NULL` argument and
-fails for an argument of the wrong kind. `size(e)` of a group variable counts its edges. The
-aggregates are listed under [Aggregation](#aggregation).
 
 ```rhai,graph=modern
 g.gql("MATCH (n) RETURN element_id(n) AS id, labels(n) AS labels ORDER BY id LIMIT 3").to_list()
@@ -436,9 +451,179 @@ g.gql("MATCH ()-[e]->() RETURN element_id(e) AS id, type(e) AS type, e.weight AS
 // #{"id": "0", "type": "knows", "w": 0.5}, #{"id": "1", "type": "created", "w": 0.4}
 g.gql("MATCH (n) RETURN n.name AS name, coalesce(n.age, n.lang) AS info ORDER BY name LIMIT 2").to_list()
 // #{"info": 32, "name": "josh"}, #{"info": "java", "name": "lop"}
-g.gql("MATCH (n:person) RETURN upper(n.name) AS up, char_length(n.name) AS len, size([1, 2, 3]) AS sz ORDER BY up LIMIT 1").to_list()
-// #{"len": 4, "sz": 3, "up": "JOSH"}
+g.gql("MATCH (n:person) RETURN n.name AS name, nullif(n.age, 29) AS age ORDER BY name").to_list()
+// #{"age": 32, "name": "josh"}, #{"age": (), "name": "marko"}, #{"age": 35, "name": "peter"}, #{"age": 27, "name": "vadas"}
 ```
+
+### Conversions
+
+GQL's `CAST` is **strict**: text that is not a value of the target type is an error (`22018`).
+The Cypher conversions are **lenient**: `toInteger`, `toFloat`, `toBoolean` give `NULL` for such
+text, and their `...OrNull` forms give `NULL` for a value of any unsupported kind too
+([Semantics](semantics.md#conversions-strict-cast-lenient-tox)).
+
+| Function | Converts | Unconvertible text | Wrong kind |
+|---|---|---|---|
+| `CAST(x AS INTEGER)` (`INT`, `INT64`, `BIGINT`, `SIGNED INTEGER`) | integer; float truncated toward zero; a decimal text (`'42'`, `' 1.9 '`, `'1e3'`) | error `22018` | error `22G03` (a boolean too) |
+| `CAST(x AS FLOAT)` (`FLOAT64`, `DOUBLE`, `DOUBLE PRECISION`, `REAL`) | number; a decimal text, `'NaN'`, `'Infinity'`, `'-Infinity'` | error `22018` | error `22G03` |
+| `CAST(x AS STRING)` (`VARCHAR`, `CHAR VARYING`) | any value except a vertex, edge or path | - | error `22G03` |
+| `CAST(x AS BOOLEAN)` (`BOOL`) | boolean; `'true'` / `'false'` in any case, `'unknown'` is `NULL` | error `22018` | error `22G03` (numbers too) |
+| `toInteger(x)` | as `CAST`, also `true` / `false` (1 / 0) and Cypher literals (`'0x1F'`, `'0o17'`, `'1_000'`) | `NULL` | error `22G03` |
+| `toFloat(x)` | as `CAST`, also Cypher literals | `NULL` | error `22G03` |
+| `toBoolean(x)` | as `CAST`, also integers (0 is FALSE, any other TRUE) | `NULL` | error `22G03` |
+| `toString(x)` | as `CAST(x AS STRING)` | - | error `22G03` |
+| `toIntegerOrNull(x)`, `toFloatOrNull(x)`, `toBooleanOrNull(x)`, `toStringOrNull(x)` | as their `toX` | `NULL` | `NULL` (a vertex, edge or path: still an error for `toStringOrNull`) |
+
+A float's text always shows that it is a float (`toString(1.0)` is `'1.0'`, Neo4j's form), while
+Gremlin's `as_string()` gives `"1"`; integers and booleans give the same text as `as_string()`.
+A list or a map converts to Neo4j's text form (`'[29, marko, 1.0, null]'`, `'{a: 1, b: marko}'`).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN n.name AS name, toString(n.age) AS a, toString(n.age / 10.0) AS b ORDER BY name").to_list()
+// #{"a": "32", "b": "3.2", "name": "josh"}, #{"a": "29", "b": "2.9", "name": "marko"}, #{"a": "35", "b": "3.5", "name": "peter"}, #{"a": "27", "b": "2.7", "name": "vadas"}
+g.v().has_label("person").values("age").as_string().order().to_list()   // "27", "29", "32", "35"
+g.gql("MATCH (n:person) RETURN toFloat(n.age) AS f ORDER BY f").to_list()   // #{"f": 27.0}, #{"f": 29.0}, #{"f": 32.0}, #{"f": 35.0}
+g.v().has_label("person").values("age").as_number(GType.DOUBLE).order().to_list()   // 27.0, 29.0, 32.0, 35.0
+g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST('42' AS INTEGER) AS i, CAST(' 1.5 ' AS FLOAT) AS f, CAST('TRUE' AS BOOLEAN) AS b, CAST(1.0 AS STRING) AS s").to_list()
+// #{"b": true, "f": 1.5, "i": 42, "s": "1.0"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toInteger(' 42 ') AS a, toInteger('1.9') AS b, toInteger('0x1F') AS c, toInteger('abc') AS d, toIntegerOrNull(true) AS e").to_list()
+// #{"a": 42, "b": 1, "c": 31, "d": (), "e": 1}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toBoolean(1) AS a, toBooleanOrNull(1.5) AS b, toFloat('1e3') AS c, toFloatOrNull([1]) AS d").to_list()
+// #{"a": true, "b": (), "c": 1000.0, "d": ()}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toString([n.age, n.name, 1.0, NULL]) AS l, toString({a: 1, b: n.name}) AS m").to_list()
+// #{"l": "[29, marko, 1.0, null]", "m": "{a: 1, b: marko}"}
+g.gql("MATCH (n:person) RETURN n.name || ' is ' || toString(n.age) AS s ORDER BY s LIMIT 2").to_list()
+// #{"s": "josh is 32"}, #{"s": "marko is 29"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST('abc' AS INTEGER) AS x")   // error: invalid character value for cast (22018)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toFloat(true) AS x")   // error: toFloat() takes a number or a string, not a boolean (22G03)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toString(n) AS x")   // error: toString() takes no vertex, edge or path (22G03)
+```
+
+`CAST` to a GQL type Graphersal has no values of yet (`DATE`, `LIST<..>`, `DECIMAL`, ...) is
+not supported yet; an unknown type name is a syntax error with a suggestion:
+
+```rhai,graph=modern
+g.gql("MATCH (n) RETURN CAST(n.age AS DATE) AS d")   // error: CAST to DATE is not yet supported
+g.gql("MATCH (n) RETURN CAST(n.age AS INTEGR) AS d")   // error: unknown type INTEGR in CAST, did you mean INTEGER
+```
+
+### Strings
+
+| Function | Returns | Cypher spelling |
+|---|---|---|
+| `upper(s)`, `lower(s)` | the string in upper / lower case | `toUpper(s)`, `toLower(s)` |
+| `char_length(s)`, `character_length(s)` | the number of characters | `size(s)` |
+| `byte_length(s)`, `octet_length(s)` | the number of UTF-8 bytes | |
+| `left(s, n)`, `right(s, n)` | the first / last `n` characters (the whole string when `n` is larger) | same |
+| `substring(s, start [, length])` | Cypher: `length` characters from the 0-based `start` (to the end without `length`); past the end `''` | compatibility function |
+| `TRIM([[LEADING \| TRAILING \| BOTH] [c] FROM] s)`, `trim(s)` | `s` without the character `c` (default: the space) at both ends, the start or the end; `c` is exactly one character | `trim(s)` |
+| `btrim(s [, chars])`, `ltrim(s [, chars])`, `rtrim(s [, chars])` | `s` without any character of the set `chars` (default: the space) at both ends / the start / the end | same |
+| `replace(s, search, replacement [, limit])` | every occurrence of `search` replaced, left to right; at most `limit` of them | compatibility function |
+| `split(s, delimiter)` | the list of the parts between the delimiters (a string or a list of strings); empty parts are kept | compatibility function |
+| `reverse(x)` | a string with its characters reversed, or a list with its items reversed | compatibility function |
+| `isEmpty(x)` | whether a string, list or map has no character / item / entry | compatibility function |
+
+A negative position or length is an error (`22011`), and a `TRIM` character that is not exactly
+one character is too (`22027`). The SQL form `SUBSTRING(s FROM a FOR b)` is not GQL; it fails
+with a hint to `substring(s, start, length)`.
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN left(n.name, 2) AS l, right(n.name, 2) AS r, substring(n.name, 1, 3) AS s, substring(n.name, 2) AS t ORDER BY l").to_list()
+// #{"l": "jo", "r": "sh", "s": "osh", "t": "sh"}, #{"l": "ma", "r": "ko", "s": "ark", "t": "rko"}, ... peter, vadas
+g.v().has_label("person").values("name").substring(1, 4).order().to_list()   // "ada", "ark", "ete", "osh"
+g.gql("MATCH (n:person) RETURN n.name AS name, replace(n.name, 'a', '4') AS r, split(n.name, 'a') AS s ORDER BY name").to_list()
+// #{"name": "josh", "r": "josh", "s": ["josh"]}, #{"name": "marko", "r": "m4rko", "s": ["m", "rko"]}, ... #{"name": "vadas", "r": "v4d4s", "s": ["v", "d", "s"]}
+g.v().has_label("person").values("name").replace("a", "4").order().to_list()   // "josh", "m4rko", "peter", "v4d4s"
+g.gql("MATCH (n:person {name: 'marko'}) RETURN reverse(n.name) AS r, reverse([1, 2, 3]) AS l, byte_length('héllo') AS b, char_length('héllo') AS c, isEmpty('') AS e").to_list()
+// #{"b": 6, "c": 5, "e": true, "l": [3, 2, 1], "r": "okram"}
+g.v().has("name", "marko").values("name").reverse().to_list()   // "okram"
+g.gql("MATCH (n:person {name: 'marko'}) RETURN trim('  a  ') AS a, TRIM(LEADING 'x' FROM 'xxaxx') AS b, TRIM(TRAILING FROM '  a  ') AS c, btrim('xyaxy', 'xy') AS d, ltrim('  a  ') AS e, rtrim('..a..', '.') AS f").to_list()
+// #{"a": "a", "b": "axx", "c": "  a", "d": "a", "e": "a  ", "f": "..a"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN split('a,,b,', ',') AS a, split('a-b;c', ['-', ';']) AS b, split('abc', '') AS c, replace('abc', '', '.') AS d, replace('aaa', 'a', 'b', 2) AS e").to_list()
+// #{"a": ["a", "", "b", ""], "b": ["a", "b", "c"], "c": ["a", "b", "c"], "d": ".a.b.c.", "e": "bba"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN substring(n.name, -1) AS x")   // error: substring() takes a start of 0 or more (22011)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN TRIM(BOTH 'ab' FROM 'abxab') AS x")   // error: TRIM(.. FROM ..) removes exactly one character (22027)
+g.gql("MATCH (n) RETURN SUBSTRING(n.name FROM 1 FOR 2) AS r")   // error: SUBSTRING(s FROM a FOR b) is SQL, not GQL
+```
+
+### Numbers
+
+| Function | Returns | Cypher spelling |
+|---|---|---|
+| `abs(x)` | the absolute value, of the argument's type | same |
+| `floor(x)`, `ceil(x)` / `ceiling(x)` | rounded down / up; an integer stays the integer | same |
+| `round(x [, precision [, mode]])` | rounded, always a float; `mode` one of `'UP'`, `'DOWN'`, `'CEILING'`, `'FLOOR'`, `'HALF_UP'` (the default), `'HALF_DOWN'`, `'HALF_EVEN'` | compatibility function |
+| `sign(x)` | -1, 0 or 1, an integer | compatibility function |
+| `sqrt(x)`, `exp(x)` | the square root, e to the power `x`; a float | same |
+| `ln(x)`, `log10(x)` | the natural / decimal logarithm; a float | `log(x)`, `log10(x)` |
+| `log(base, x)` | the logarithm to `base`; a float | |
+| `power(x, y)` | `x` to the power `y`; a float | (Cypher's `^` is not supported yet) |
+| `mod(a, b)` | the remainder, exactly as `a % b` | `a % b` |
+
+None of them makes `NaN` or an infinity from finite numbers: the square root of a negative
+number and `power()` of 0 to a negative power are errors (`2201F`), the logarithm of a number
+`<= 0` is an error (`2201E`), an overflow is `22003`. `round()` with one argument rounds a half
+toward positive infinity (`round(-2.5)` is `-2.0`, Java's and Neo4j's rule); with a precision it
+rounds the decimal text of the number (`round(2.675, 2)` is `2.68`).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN n.name AS name, sqrt(n.age) AS s ORDER BY name LIMIT 2").to_list()
+// #{"name": "josh", "s": 5.656854249492381}, #{"name": "marko", "s": 5.385164807134504}
+g.v().has_label("person").order().by("name").limit(2).values("age").math("sqrt(_)").to_list()   // 5.656854249492381, 5.385164807134504
+g.gql("MATCH (n:person {name: 'marko'}) RETURN abs(-3) AS a, abs(-2.5) AS b, floor(2.7) AS c, ceil(2.1) AS d, ceiling(3) AS e, sign(-0.5) AS f, mod(7, 3) AS g").to_list()
+// #{"a": 3, "b": 2.5, "c": 2.0, "d": 3.0, "e": 3, "f": -1, "g": 1}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN round(2.5) AS a, round(-2.5) AS b, round(2.675, 2) AS c, round(-1.55, 1) AS d, round(2.5, 0, 'HALF_EVEN') AS e, round(3) AS f").to_list()
+// #{"a": 3.0, "b": -2.0, "c": 2.68, "d": -1.6, "e": 2.0, "f": 3.0}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN exp(1) AS a, ln(1) AS b, log(100) AS c, log10(1000) AS d, log(2, 8) AS e, power(2, 10) AS f").to_list()
+// #{"a": 2.718281828459045, "b": 0.0, "c": 4.605170185988092, "d": 3.0, "e": 3.0, "f": 1024.0}
+g.inject(100).math("log(_)").to_list()   // 4.605170185988092
+g.gql("MATCH (n:person) RETURN round(avg(n.age), 1) AS mean").to_list()   // #{"mean": 30.8}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN ln(0) AS x")   // error: ln() of a number <= 0 (2201E)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN sqrt(-1) AS x")   // error: sqrt() of a negative number (2201F)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN round(1234.5, -2) AS x")   // error: round() needs a precision >= 0 (22023)
+```
+
+### Lists, elements and paths
+
+| Function | Returns | Cypher spelling |
+|---|---|---|
+| `size(list)`, `cardinality(list)` | the number of items (`size(e)` of a group variable counts its edges) | `size(list)` |
+| `head(list)`, `last(list)` | the first / last item; `NULL` for `[]` | compatibility function |
+| `tail(list)` | all items but the first | compatibility function |
+| `trim(list, n)` | the list without its last `n` items | |
+| `range(start, end [, step])` | the integers from `start` to `end` inclusive, by `step` (default 1) | compatibility function |
+| `keys(x)` | the property keys of a vertex or edge (a stored `null` is no key), or the keys of a map | compatibility function |
+| `properties(x)` | the properties of a vertex or edge as a map; a map itself | compatibility function |
+| `startNode(e)`, `endNode(e)` | the stored source / target vertex of the edge | compatibility function |
+| `n IS [NOT] SOURCE OF e`, `n IS [NOT] DESTINATION OF e` | whether `n` is the edge's source / target (a predicate) | |
+| `nodes(p)`, `relationships(p)` | the vertices / the edges of a path, in the path's order | compatibility function |
+
+`startNode(e)` is the edge's **stored** source, whatever direction the pattern was written in:
+in `(a)-[e]-(b)` the variable `a` may be either end. `range()` checks its size before it builds
+the list, so `range(0, 9223372036854775807)` is a limit error, never an out-of-memory
+([Errors](errors.md#scope-grouping-and-limits)).
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'marko'}) RETURN head([1, 2, 3]) AS h, last([1, 2, 3]) AS l, tail([1, 2, 3]) AS t, trim([1, 2, 3], 1) AS tr, range(1, 5) AS r, range(10, 0, -5) AS d, head([]) AS e").to_list()
+// #{"d": [10, 5, 0], "e": (), "h": 1, "l": 3, "r": [1, 2, 3, 4, 5], "t": [2, 3], "tr": [1, 2]}
+g.gql("MATCH (p:person)-[:created]->(s) WITH p, s ORDER BY s.name RETURN p.name AS name, head(collect(s.name)) AS first ORDER BY name").to_list()
+// #{"first": "lop", "name": "josh"}, #{"first": "lop", "name": "marko"}, #{"first": "lop", "name": "peter"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN keys(n) AS k, properties(n) AS p").to_list()   // #{"k": ["name", "age"], "p": #{"age": 29, "name": "marko"}}
+g.v().has("name", "marko").properties().key().fold().to_list()   // ["name", "age"]
+g.v().has("name", "marko").value_map().by(__.unfold()).to_list()   // #{"age": 29, "name": "marko"}
+g.gql("MATCH (a)-[e:knows]-(b) RETURN a.name AS a, b.name AS b, startNode(e).name AS s, endNode(e).name AS t ORDER BY a, b").to_list()
+// josh marko: s marko, t josh; marko josh: marko, josh; marko vadas: marko, vadas; vadas marko: marko, vadas
+g.e().has_label("knows").project("s", "t").by(__.out_v().values("name")).by(__.in_v().values("name")).to_list()
+// #{"s": "marko", "t": "vadas"}, #{"s": "marko", "t": "josh"}
+g.gql("MATCH (a)-[e:knows]-(b) RETURN a.name AS a, b.name AS b, a IS SOURCE OF e AS src ORDER BY a, b").to_list()
+// josh marko false, marko josh true, marko vadas true, vadas marko false
+g.gql("MATCH p = (a {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN b.name AS b, size(nodes(p)) AS n, size(relationships(p)) AS r, last(nodes(p)) = b AS same ORDER BY n, b").to_list()
+// josh 2 1 true, lop 2 1 true, vadas 2 1 true, lop 3 2 true, ripple 3 2 true
+g.gql("MATCH (n:person {name: 'marko'}) RETURN range(0, 9223372036854775807) AS r")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
+```
+
+List comprehensions (`[x IN nodes(p) | x.name]`) are not supported yet; take the items with
+`head()`, `last()` and `size()`, or unfold the list with Gremlin after `gql()`.
 
 ## Parameters
 
@@ -460,15 +645,15 @@ property index on `person.name` when one exists ([Plans and Performance](plans.m
 
 ## Not supported yet
 
-These are part of GQL and come in a later version. Each fails before the run with GQLSTATUS
-`0A000` and a message that names the construct and the Gremlin alternative.
+These are part of GQL (or Cypher constructs that LLMs and Cypher users write often) and come in
+a later version. Each fails before the run with GQLSTATUS `0A000` and a message that names the
+construct and the alternative.
 
 | Construct | Until then |
 |---|---|
 | `NEXT` | `WITH`, or Gremlin steps after `gql()` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
-| `nodes(p)`, `relationships(p)` | `RETURN p`, or name the elements: `MATCH p = (a)-[e]->(b) RETURN a, e, b` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
 | `UNION`, `EXCEPT`, `INTERSECT`, `EXISTS { }`, `CALL { }` subqueries | Gremlin `union()`, `where()` |
 | `FOR` (Cypher `UNWIND`) | Gremlin `unfold()` |
@@ -476,10 +661,21 @@ These are part of GQL and come in a later version. Each fails before the run wit
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | a query without `MATCH` (`RETURN 1`) | Gremlin `inject()` |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
+| list comprehensions `[x IN list \| ...]`, `any()` / `all()` / `none()` / `single()`, `reduce()` | `head()`, `last()`, `size()`, or Gremlin `unfold()` after `gql()` |
+| `exists(n.p)` | `n.p IS NOT NULL` |
+| the exponentiation operator `^` | `power(x, y)` |
+| trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
+| date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
+| list conversions `toIntegerList()`, `toStringList()`, ... | Gremlin `unfold()` and `as_number()` after `gql()` |
+| `normalize(s)` | store normalized text |
+| GQL's `elements(p)` | `nodes(p)` and `relationships(p)` |
+| statistical aggregates (`percentileCont()`, `stDev()`, ...) | `collect_list(x)`, then compute after `gql()` |
 
 ```rhai,graph=modern
 g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path patterns are not yet supported
 g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
-g.gql("MATCH p = (a)-[:knows]->(b) RETURN nodes(p) AS n ORDER BY b.name").to_list()   // #{"n": [v[1], v[4]]}, #{"n": [v[1], v[2]]}
-g.gql("MATCH p = (a)-[:knows]->(b) RETURN p ORDER BY b.name").select("p").unfold().to_list()   // v[1], e[2][1-knows->4], v[4], v[1], e[0][1-knows->2], v[2]
+g.gql("MATCH p = (a)-[:knows]->(b) RETURN [x IN nodes(p) | x.name] AS names")   // error: a list comprehension is not yet supported
+g.gql("MATCH p = (a)-[:knows]->(b) RETURN nodes(p) AS n ORDER BY b.name").select("n").unfold().values("name").to_list()   // "marko", "josh", "marko", "vadas"
+g.gql("MATCH (n:person) RETURN sin(n.age) AS s")   // error: sin() (a trigonometric function) is not yet supported
+g.gql("MATCH (n:person) RETURN n.name AS name, n.age AS a ORDER BY name").select("a").math("sin(_)").to_list()   // 0.5514266812416906, -0.6636338842129675, -0.428182669496151, 0.956375928404503
 ```

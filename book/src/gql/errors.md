@@ -95,6 +95,52 @@ Help: A row of the data made the marked expression fail. Keep such rows away fro
 Comparisons never fail: comparing values of different kinds, or with `NULL`, is `NULL`
 ([Semantics](semantics.md#comparisons-across-types)).
 
+`+` of a string and a number names the explicit conversions in its help:
+
+```text
+Help: Convert the number or boolean to text first, with toString(x) or CAST(x AS STRING), and join text with ||, as in g.gql("MATCH (p:person) RETURN p.name || ' is ' || toString(p.age) AS s"); or compute with numbers only, converting text with toInteger(x) or toFloat(x). ...
+```
+
+### Function errors
+
+A function fails on an argument it cannot take, with a GQLSTATUS that says why and a help line
+that leads with the fix for that function, then the general advice above:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN CAST(n.name AS INTEGER) AS x")   // error: invalid character value for cast (22018)
+g.gql("MATCH (n:person) RETURN substring(n.name, -1) AS x")   // error: substring() takes a start of 0 or more (22011)
+g.gql("MATCH (n:person) RETURN TRIM(BOTH 'ab' FROM n.name) AS x")   // error: TRIM(.. FROM ..) removes exactly one character (22027)
+g.gql("MATCH (n:person) RETURN ln(n.age - 29) AS x")   // error: ln() of a number <= 0 (2201E)
+g.gql("MATCH (n:person) RETURN sqrt(27 - n.age) AS x")   // error: sqrt() of a negative number (2201F)
+g.gql("MATCH (n:person) RETURN range(1, n.age, 0) AS x")   // error: range() step 0 (22023)
+g.gql("MATCH (n:person) RETURN toFloat(n.age > 30) AS x")   // error: toFloat() takes a number or a string, not a boolean (22G03)
+```
+
+```text
+Caused by: GQL data exception at line 1, column 30: invalid character value for cast: 'marko' is not an INTEGER (expected a decimal number, surrounding spaces allowed)
+  query:     MATCH (n:person) RETURN CAST(n.name AS INTEGER) AS x
+                                          ^^^^^^
+  GQLSTATUS: 22018
+Help: CAST is strict: text that is not a value of the target type fails the query. The Cypher conversions are lenient: toInteger(x), toFloat(x) and toBoolean(x) give NULL for such text, and toIntegerOrNull(x), toFloatOrNull(x) and toBooleanOrNull(x) give NULL for a value of any other kind too, as in g.gql("MATCH (p:person) RETURN p.name, toInteger(p.name) AS n"). A row of the data made the marked expression fail. ...
+```
+
+A function `gql()` knows but does not support gets a message with the reason and the
+alternative instead of "unknown function", and a misspelt name a suggestion:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN sin(n.age) AS x")   // error: sin() (a trigonometric function) is not yet supported
+g.gql("MATCH (n:person) RETURN rand() AS x")   // refused: rand() is not supported: a non-deterministic function
+g.gql("MATCH (n:person) RETURN n.age ^ 2 AS x")   // error: the exponentiation operator `^` is not yet supported
+g.gql("MATCH (n:person) RETURN toInt(n.age) AS x")   // error: unknown function toInt(), did you mean toInteger()
+```
+
+```text
+Error: GQL construct not supported yet at line 1, column 25: sin() (a trigonometric function) is not yet supported in this version (step #1 'gql:error("0A000")' refused the query before the traversal ran)
+  ...
+  GQLSTATUS: 0A000
+Help: Gremlin math() after gql(), for example g.gql("MATCH (n:person) RETURN n.age AS a").select("a").math("sin(_)"). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
+```
+
 ## Scope, grouping and limits
 
 The help of a semantic error explains the rule behind it. A variable that a `WITH` did not carry
@@ -127,22 +173,47 @@ Caused by: Resource limit 'traversal.max_traversers' exceeded (limit 3, reached 
 Help: The gql() query kept more traversers (rows in the making) alive between two steps than 'traversal.max_traversers' allows (3). Each path a quantified edge (-[:knows|created]->{1,}) matches is a traverser of its own (trail keeps them apart, so they do not merge), ... give it a lower upper bound, as in -[:knows|created]->{1,5}. ...
 ```
 
+A function whose result can be larger than its arguments (`range()`, `split()`, `replace()`,
+`toString()` of a list or map, `||`) checks the size of its result before it builds it, against
+`traversal.max_materialized_bytes` and the memory budget, like `collect_list()`. A result that is
+too large fails with the ordinary limit error (`ResourceLimitExceeded`, no GQLSTATUS: the option
+and its lock are the engine's), never with a shortened value; inside `gql()` its help names the
+growing functions, a bound for them and the `g.with(..).gql(..)` that raises the limit:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN range(0, 9223372036854775807) AS r")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
+g.with("traversal.max_materialized_bytes", 100).gql("MATCH (n:person) RETURN split(n.name, '') AS s")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
+```
+
+```text
+Caused by: Resource limit 'traversal.max_materialized_bytes' exceeded (limit 1073741824, reached 18446744073709551615)
+Help: The gql() query built a value larger than 'traversal.max_materialized_bytes' allows (1073741824 bytes); ... A function whose result can be larger than its arguments (range(), split(), replace(), || and toString() of a list or map) and the list of collect_list() are checked before they are built, so the query stops instead of running out of memory; the result is never cut short. Build smaller values: bound range() and replace() by the data, as in g.gql("MATCH (p:person) RETURN range(1, p.age / 10) AS r"), ... or raise the limit for the query, g.with("traversal.max_materialized_bytes", 2147483648).gql(..), ...
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY` |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)` |
 | `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet); also `gql()` after other steps |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number |
-| `22012` | data | division or `%` by zero |
-| `22003` | data | a numeric result out of range (integer overflow, also of `sum()`) |
+| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |
+| `22012` | data | division or `%` by zero, also `mod(a, 0)` |
+| `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
+| `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |
+| `22011` | data | a negative position or length in `substring()`, `left()`, `right()` |
+| `22027` | data | a `TRIM(c FROM s)` character `c` that is not exactly one character |
+| `2201E` | data | the logarithm of a number `<= 0`, or to a base `<= 0` or `1` (`ln`, `log`, `log10`) |
+| `2201F` | data | `sqrt()` of a negative number, `power()` of 0 to a negative power or of a negative number to a non-integer power |
+| `22023` | data | an argument outside the function's values: `range()` step 0, a negative `round()` precision or an unknown rounding mode, a negative `replace()` limit, a negative `n` in the list `trim(list, n)` |
 
 `42001` is fixed; the other codes are **provisional**: they follow the standard's classes and
-may still be refined before the GQL support is complete. Match on the kind
+may still be refined before the GQL support is complete. The function codes (`22018`, `22011`,
+`22027`, `2201E`, `2201F`, `22023`) are the ISO / SQL-heritage subclasses of class `22`; Neo4j
+reports the same failures with its own vendor subclasses (`22N38`, `22N03`, ...). Match on the kind
 (`GqlErrorKind`) in code, and treat the code as diagnostic information.
 
 ```rhai,graph=modern

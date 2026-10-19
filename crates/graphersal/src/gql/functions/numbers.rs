@@ -1,4 +1,4 @@
-//! Numeric functions (stage 1c task T4): `abs`, `floor`, `ceil` / `ceiling`, `round`, `sign`, `sqrt`,
+//! Numeric functions: `abs`, `floor`, `ceil` / `ceiling`, `round`, `sign`, `sqrt`,
 //! `exp`, `ln`, `log` (one argument: natural; two: GQL `LOG(base, x)`), `log10`, `power`, `mod`.
 //!
 //! The contract of a family file is in the module docs of `functions/mod.rs`; unit tests use
