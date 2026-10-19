@@ -14,7 +14,8 @@
 //!    its module docs fix the lexical rules (contextual keywords, the `--` comment rule, escapes);
 //! 2. **parser** (`parser.rs`, AST in `ast.rs`): hand-written recursive descent to an AST that
 //!    keeps every span and the source text, with bounded nesting and errors that name the
-//!    expected tokens; its module docs are the grammar of the supported subset; its expressions
+//!    expected tokens (stage 2d: composite queries of `UNION` / `NEXT` and `CALL { }` bodies);
+//!    its module docs are the grammar of the supported subset; its expressions
 //!    compile into the three-valued evaluator (`eval.rs`), which runs them per row, with the
 //!    stage 1c scalar functions in `functions/` (one file per family);
 //! 3. **binder** (`bind.rs`): variables, scopes, parameter references and column names, with GQLSTATUS codes

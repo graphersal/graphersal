@@ -79,8 +79,9 @@
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
-//! refused by the parser (`NEXT`, `UNION`, Cypher `COUNT { }`, quantified path patterns,
-//! shortest paths, ...) and the binder. A component that is not the root scan and has no
+//! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
+//! binder; stage 2d's `UNION`, `NEXT`, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
+//! subquery bodies parse and the binder refuses them until they are lowered. A component that is not the root scan and has no
 //! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation

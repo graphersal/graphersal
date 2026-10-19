@@ -183,7 +183,10 @@
 //! comprehension's `|` part too). `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable and a comprehension variable read inside a
-//! subquery (a pattern comprehension's body and `|` part included).
+//! subquery (a pattern comprehension's body and `|` part included). Also `NotYet`, before any
+//! other check, for what stage 2d parses ahead of binding it: a `UNION` / `NEXT` composition (at
+//! its first keyword), a `[OPTIONAL] CALL { }` stage, `COUNT { }`, `COLLECT { }` and a
+//! whole-query subquery body (at the subquery).
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -206,10 +209,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy,
-    Identifier, LabelExpr, LetClause, ListComprehension, Literal, MapEntry, MapLiteral,
-    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier,
-    Query, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, WithClause,
+    CallArgs, CallClause, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind,
+    ForClause, GroupBy, Identifier, LabelExpr, LetClause, ListComprehension, Literal, MapEntry,
+    MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem,
+    Quantifier, Query, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
+    WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -730,6 +734,75 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
     )
 }
 
+/// The "not yet" error of a `UNION` or `NEXT` composition (stage 2d: parsed, bound in a later
+/// task), at its first `UNION` or `NEXT` keyword.
+fn composite_not_yet(query: &Query) -> BResult<()> {
+    if query.is_linear() {
+        return Ok(());
+    }
+    if let Some(operand) = query.body.first.unions.first() {
+        return Err(not_yet(
+            operand.keyword,
+            "UNION",
+            "combine the results in Gremlin, for example \
+             g.v().union(__.has_label(\"person\"), __.has_label(\"software\"))",
+        ));
+    }
+    if let Some(next) = query.body.next.first() {
+        return Err(not_yet(
+            next.keyword,
+            "NEXT",
+            "chain Gremlin steps after gql(), for example \
+             g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")",
+        ));
+    }
+    Ok(())
+}
+
+/// The "not yet" error of a `CALL { }` subquery (stage 2d: parsed, bound in a later task).
+fn call_not_yet(clause: &CallClause) -> Box<GqlErrorBuilder> {
+    let what = if clause.optional.is_some() {
+        "OPTIONAL CALL { } (a subquery)"
+    } else {
+        "CALL { } (a subquery)"
+    };
+    not_yet(
+        clause.span,
+        what,
+        "run the inner query as its own gql() call, or write it as Gremlin steps",
+    )
+}
+
+/// The "not yet" error of the stage 2d subquery forms the parser accepts before they bind:
+/// `COUNT { }`, `COLLECT { }` and a whole-query body (`EXISTS { MATCH .. RETURN .. }`).
+fn subquery_not_yet(subquery: &SubqueryExpr) -> BResult<()> {
+    const WHOLE_QUERY: &str = "write the body as MATCH clauses with a WHERE, as in \
+         MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } \
+         RETURN p.name";
+    let (what, alternative) = match subquery.kind {
+        SubqueryKind::Count => (
+            "a COUNT { } subquery",
+            "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
+             MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
+             count(s). To test only whether the pattern matches (COUNT { .. } > 0), use \
+             EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN \
+             p.name",
+        ),
+        SubqueryKind::Collect if subquery.form != SubqueryForm::Comprehension => (
+            "a COLLECT { } subquery",
+            "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
+             as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
+             RETURN p.name, collect_list(s.name)",
+        ),
+        SubqueryKind::Exists | SubqueryKind::Collect if subquery.query.is_some() => (
+            "an EXISTS { } body that is a whole query (clauses other than MATCH)",
+            WHOLE_QUERY,
+        ),
+        SubqueryKind::Exists | SubqueryKind::Collect => return Ok(()),
+    };
+    Err(not_yet(subquery.span, what, alternative))
+}
+
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     Box::new(
         GqlErrorBuilder::new(
@@ -1031,6 +1104,8 @@ impl<'q> Binder<'q> {
     }
 
     fn run(mut self, supplied: Option<&[&str]>) -> BResult<BoundQuery> {
+        // Composite queries parse (stage 2d.T1) but bind in a later task.
+        composite_not_yet(self.query)?;
         // The pattern size of every clause first, before any other work.
         for m in &self.query.matches {
             if let Some(edge) = m
@@ -1084,6 +1159,7 @@ impl<'q> Binder<'q> {
                 }
                 Stage::With(with) => self.with_clause(with)?,
                 Stage::For(clause) => self.for_clause(clause)?,
+                Stage::Call(clause) => return Err(call_not_yet(clause)),
             }
         }
         let ret = &query.ret;
@@ -1990,6 +2066,7 @@ impl<'q> Binder<'q> {
                     kind: SubqueryKind::Collect,
                     form: SubqueryForm::Comprehension,
                     matches: vec![comprehension.body.clone()],
+                    query: None,
                     span: expr.span,
                 };
                 let index = self.subquery_with(ctx, &subquery, Some(&comprehension.map))?;
@@ -2584,6 +2661,7 @@ impl<'q> Binder<'q> {
         if let Some(index) = self.subqueries.iter().position(|s| s.span == subquery.span) {
             return Ok(index);
         }
+        subquery_not_yet(subquery)?;
         if self.subqueries.len() >= MAX_SUBQUERIES {
             return Err(too_many_subqueries(subquery.span));
         }

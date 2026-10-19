@@ -859,12 +859,6 @@ fn refused_constructs() {
 #[test]
 fn not_yet_supported_constructs() {
     let cases: &[(&str, &str, Option<&str>)] = &[
-        ("MATCH (n) RETURN n NEXT MATCH (m) RETURN m", "NEXT", None),
-        (
-            "MATCH (n) RETURN n UNION MATCH (m) RETURN m",
-            "UNION",
-            Some("union("),
-        ),
         (
             "MATCH (n) RETURN n EXCEPT MATCH (m) RETURN m",
             "EXCEPT",
@@ -874,11 +868,6 @@ fn not_yet_supported_constructs() {
             "MATCH (n) RETURN n INTERSECT MATCH (m) RETURN m",
             "INTERSECT",
             Some("union("),
-        ),
-        (
-            "MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n",
-            "COUNT {",
-            None,
         ),
         ("MATCH ((a)-->(b)){1,2} RETURN a", "((", Some("repeat(")),
         (
@@ -896,11 +885,6 @@ fn not_yet_supported_constructs() {
         ("MATCH (n) RETURN n ORDER BY n.x NULLS FIRST", "NULLS", None),
         ("MATCH (n) WHERE n.x IS TRUE RETURN n", "TRUE", None),
         ("CYPHER 25 MATCH (n) RETURN n", "CYPHER", None),
-        (
-            "MATCH (n) CALL { MATCH (m) RETURN m } RETURN n",
-            "CALL",
-            None,
-        ),
     ];
     for (query, text, alternative) in cases {
         let f = fail(query);
@@ -1219,6 +1203,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::Let(_) => "let",
             Stage::Filter(_) => "filter",
             Stage::For(_) => "for",
+            Stage::Call(_) => "call",
         })
         .collect()
 }
@@ -2675,17 +2660,13 @@ fn subquery_errors() {
             "{alternative}"
         );
     }
-    // Clauses other than MATCH inside a body: not yet (a nested query, stage 2d).
+    // Clauses other than MATCH inside a body that is not a whole query (stage 2d parses
+    // braced bodies ending in RETURN): not yet.
     for (query, text) in [
-        (
-            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) RETURN m } RETURN n",
-            "RETURN",
-        ),
         (
             "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH m } RETURN n",
             "WITH",
         ),
-        ("MATCH (n) WHERE EXISTS { RETURN 1 } RETURN n", "RETURN"),
         (
             "MATCH (n) WHERE EXISTS ( MATCH (n)-->(m) LIMIT 1 ) RETURN n",
             "LIMIT",
@@ -2697,10 +2678,6 @@ fn subquery_errors() {
         (
             "MATCH (n) WHERE EXISTS { OPTIONAL MATCH (n)-->() } RETURN n",
             "OPTIONAL MATCH",
-        ),
-        (
-            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) CALL { } } RETURN n",
-            "CALL",
         ),
         (
             "MATCH (n) WHERE EXISTS { MATCH (n)-->() UNION MATCH (n) } RETURN n",
@@ -2716,19 +2693,19 @@ fn subquery_errors() {
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
         assert_eq!(f.text, text, "{query}");
     }
-    let f = fail("MATCH (n) WHERE EXISTS { MATCH (n)-->(m) RETURN m } RETURN n");
+    let f = fail("MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH m } RETURN n");
     assert!(
         f.message
-            .contains("RETURN inside EXISTS { } (a nested query)"),
+            .contains("WITH in the body of EXISTS { } without RETURN"),
         "{}",
         f.message
     );
-    // COUNT { } stays refused (not approved, P0), naming OPTIONAL MATCH .. count().
-    let f = fail("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n");
-    assert_eq!(f.kind, GqlErrorKind::NotYet);
-    assert_eq!(f.text, "COUNT {");
-    let alternative = f.alternative.unwrap_or_default();
-    assert!(alternative.contains("count(s)"), "{alternative}");
+    // Whole-query bodies and COUNT { } parse since stage 2d (D23); the binder refuses them
+    // "not yet" until they lower (bind tests).
+    let s = subquery("EXISTS { MATCH (n)-->(m) RETURN m }");
+    assert!(s.matches.is_empty() && s.query.is_some());
+    let s = subquery("COUNT { (n)-->() }");
+    assert_eq!(s.kind, SubqueryKind::Count);
     // Syntax errors name what may stand there.
     for (query, text, expected) in [
         ("MATCH (n) WHERE EXISTS x RETURN n", "x", vec!["`{`", "`(`"]),
@@ -3302,4 +3279,585 @@ fn random_comprehensions_never_panic() {
         }
     }
     assert!(accepted > 0);
+}
+
+// ----- stage 2d: UNION, NEXT, CALL { }, COUNT / COLLECT { }, whole-query bodies -----
+
+/// The column texts of a linear query's `RETURN` (alias or expression text).
+fn returned(q: &Query, linear: &LinearQuery) -> Vec<String> {
+    linear
+        .ret
+        .items
+        .iter()
+        .map(|item| match &item.alias {
+            Some(alias) => alias.name.clone(),
+            None => q.text(item.expr.span).to_string(),
+        })
+        .collect()
+}
+
+/// The `CALL` clause of the stage at `i` of `linear`.
+fn call_at(linear: &LinearQuery, i: usize) -> &CallClause {
+    match linear.stages.get(i) {
+        Some(Stage::Call(call)) => call,
+        other => panic!("stage {i} is no CALL: {other:?}"),
+    }
+}
+
+#[test]
+fn a_linear_query_is_one_block_of_one_operand() {
+    let q = ok("MATCH (a) RETURN a");
+    assert!(q.is_linear());
+    assert!(q.body.first.unions.is_empty() && q.body.next.is_empty());
+    // The query dereferences to its only linear query.
+    assert_eq!(stage_kinds(&q), ["match"]);
+    assert_eq!(q.text(q.span), "MATCH (a) RETURN a");
+    assert_eq!(q.text(q.body.span), "MATCH (a) RETURN a");
+    assert!(q.importing.is_none());
+}
+
+#[test]
+fn union_operands_and_their_kinds() {
+    let q = ok("MATCH (a:person) RETURN a.name AS n \
+                UNION MATCH (b:software) RETURN b.name AS n \
+                UNION all MATCH (c) RETURN c.name AS n \
+                UNION DISTINCT RETURN 'x' AS n;");
+    assert!(!q.is_linear());
+    let block = &q.body.first;
+    let kinds: Vec<UnionKind> = block.unions.iter().map(|u| u.kind).collect();
+    assert_eq!(
+        kinds,
+        [UnionKind::Distinct, UnionKind::All, UnionKind::Distinct]
+    );
+    let keywords: Vec<&str> = block.unions.iter().map(|u| q.text(u.keyword)).collect();
+    assert_eq!(keywords, ["UNION", "UNION all", "UNION DISTINCT"]);
+    assert_eq!(returned(&q, &block.first), ["n"]);
+    assert_eq!(
+        q.text(block.unions[0].query.span),
+        "MATCH (b:software) RETURN b.name AS n"
+    );
+    // Each operand holds its own MATCH clauses; a later one may start without MATCH.
+    assert_eq!(block.unions[1].query.matches.len(), 1);
+    assert!(block.unions[2].query.stages.is_empty());
+    assert!(q.text(q.body.span).ends_with("RETURN 'x' AS n"));
+}
+
+#[test]
+fn order_by_offset_and_limit_belong_to_their_operand() {
+    let q = ok("MATCH (a) RETURN a.x AS x ORDER BY x LIMIT 1 \
+                UNION ALL MATCH (b) RETURN b.x AS x SKIP 1");
+    let block = &q.body.first;
+    assert!(block.first.order_by.is_some() && block.first.limit.is_some());
+    assert!(block.first.offset.is_none());
+    let second = &block.unions[0].query;
+    assert!(second.order_by.is_none() && second.offset.is_some() && second.limit.is_none());
+}
+
+#[test]
+fn next_binds_looser_than_union() {
+    let q = ok("MATCH (a) RETURN a.x AS x UNION MATCH (b) RETURN b.x AS x \
+                NEXT RETURN x ORDER BY x \
+                NEXT FILTER x > 1 RETURN x UNION ALL RETURN 0 AS x");
+    assert_eq!(q.body.first.unions.len(), 1);
+    assert_eq!(q.body.next.len(), 2);
+    let second = &q.body.next[0];
+    assert_eq!(q.text(second.keyword), "NEXT");
+    assert!(second.block.unions.is_empty());
+    assert!(second.block.first.stages.is_empty());
+    assert!(second.block.first.order_by.is_some());
+    let third = &q.body.next[1].block;
+    assert_eq!(stage_kinds_of(&third.first), ["filter"]);
+    assert_eq!(third.unions.len(), 1);
+    assert_eq!(third.unions[0].kind, UnionKind::All);
+    // Every clause may start the statement after NEXT.
+    for after in [
+        "MATCH (b) RETURN b",
+        "OPTIONAL MATCH (b) RETURN b",
+        "WITH a RETURN a",
+        "LET b = a RETURN b",
+        "FILTER a IS NOT NULL RETURN a",
+        "FOR x IN [1] RETURN x",
+        "UNWIND [1] AS x RETURN x",
+        "CALL { RETURN 1 AS one } RETURN one",
+        "OPTIONAL CALL (a) { RETURN a AS b } RETURN b",
+        "RETURN a",
+    ] {
+        let q = ok(&format!("MATCH (a) RETURN a NEXT {after}"));
+        assert_eq!(q.body.next.len(), 1, "{after}");
+    }
+}
+
+/// The stage kinds of one linear query.
+fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
+    linear
+        .stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::Match(i) if linear.matches[*i].optional => "optional",
+            Stage::Match(_) => "match",
+            Stage::With(_) => "with",
+            Stage::Let(_) => "let",
+            Stage::Filter(_) => "filter",
+            Stage::For(_) => "for",
+            Stage::Call(_) => "call",
+        })
+        .collect()
+}
+
+#[test]
+fn call_forms_and_scopes() {
+    let q = ok("MATCH (p:person), (s) \
+                CALL (p, `s`) { MATCH (p)-[:created]->(x) RETURN count(x) AS made } \
+                OPTIONAL CALL () { RETURN 1 AS one } \
+                CALL (*) { RETURN p.name AS name } \
+                CALL { MATCH (z) RETURN z } \
+                RETURN p, made, one, name, z");
+    assert_eq!(stage_kinds(&q), ["match", "call", "call", "call", "call"]);
+    let first = call_at(&q, 1);
+    assert!(first.optional.is_none());
+    match &first.scope {
+        CallScope::Variables { variables, span } => {
+            let names: Vec<&str> = variables.iter().map(|v| v.name.as_str()).collect();
+            assert_eq!(names, ["p", "s"]);
+            assert_eq!(q.text(*span), "(p, `s`)");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        q.text(first.span),
+        "CALL (p, `s`) { MATCH (p)-[:created]->(x) RETURN count(x) AS made }"
+    );
+    // The body holds its own MATCH clauses; the outer query only its own.
+    assert_eq!(first.body.first.first.matches.len(), 1);
+    assert_eq!(q.matches.len(), 1);
+    let second = call_at(&q, 2);
+    assert_eq!(second.optional.map(|s| q.text(s)), Some("OPTIONAL"));
+    assert!(q.text(second.span).starts_with("OPTIONAL CALL ()"));
+    assert!(
+        matches!(&second.scope, CallScope::Variables { variables, .. } if variables.is_empty())
+    );
+    assert!(matches!(call_at(&q, 3).scope, CallScope::All(span) if q.text(span) == "(*)"));
+    assert!(matches!(call_at(&q, 4).scope, CallScope::Implicit));
+    assert!(call_at(&q, 4).body.first.first.importing.is_none());
+}
+
+#[test]
+fn call_bodies_are_whole_queries_and_may_start_a_query() {
+    let q = ok("CALL { MATCH (a:person) RETURN a.name AS n \
+                UNION MATCH (b:software) RETURN b.name AS n \
+                NEXT RETURN n ORDER BY n LIMIT 1 } \
+                RETURN n");
+    let call = call_at(&q, 0);
+    assert_eq!(call.body.first.unions.len(), 1);
+    assert_eq!(call.body.next.len(), 1);
+    // Nested CALLs.
+    let q = ok("MATCH (a) CALL (a) { CALL (a) { RETURN a AS b } RETURN b AS c } RETURN c");
+    let inner = call_at(&call_at(&q, 1).body.first.first, 0);
+    assert!(
+        matches!(&inner.scope, CallScope::Variables { variables, .. } if variables[0].name == "a")
+    );
+    // A CALL inside an OPTIONAL MATCH flow and after WITH / FOR.
+    let q = ok("MATCH (a) OPTIONAL MATCH (a)-->(b) WITH a, b FOR x IN [1] \
+                CALL (b) { RETURN b AS c } RETURN c");
+    assert_eq!(
+        stage_kinds(&q),
+        ["match", "optional", "with", "for", "call"]
+    );
+}
+
+#[test]
+fn cypher_importing_with_becomes_the_scope() {
+    let q = ok("MATCH (a), (b) CALL { WITH a, b MATCH (a)-->(c) RETURN c \
+                UNION WITH * RETURN a AS c UNION RETURN 1 AS c } RETURN c");
+    let body = &call_at(&q, 1).body;
+    let importing = body
+        .first
+        .first
+        .importing
+        .as_ref()
+        .unwrap_or_else(|| panic!("no import"));
+    let names: Vec<&str> = importing
+        .variables
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    assert_eq!(names, ["a", "b"]);
+    assert!(importing.star.is_none());
+    assert_eq!(q.text(importing.span), "WITH a, b");
+    // The importing WITH is no clause of the body any more.
+    assert_eq!(stage_kinds_of(&body.first.first), ["match"]);
+    let star = body.first.unions[0].query.importing.as_ref();
+    assert!(star.is_some_and(|i| i.star.is_some() && i.variables.is_empty()));
+    assert!(body.first.unions[0].query.stages.is_empty());
+    assert!(body.first.unions[1].query.importing.is_none());
+    // Not an importing WITH: an alias, an expression, a tail, DISTINCT, `*` with items, a
+    // scope clause written, or a WITH after NEXT. Each stays a WITH clause of the body.
+    for body in [
+        "WITH a AS x RETURN x",
+        "WITH a, 1 AS one RETURN a",
+        "WITH a WHERE a.x > 1 RETURN a",
+        "WITH a ORDER BY a.x LIMIT 1 RETURN a",
+        "WITH DISTINCT a RETURN a",
+        "WITH *, a.x AS x RETURN x",
+        "RETURN a AS b NEXT WITH b RETURN b",
+    ] {
+        let q = ok(&format!("MATCH (a) CALL {{ {body} }} RETURN 1 AS z"));
+        let call = call_at(&q, 1);
+        assert!(call.body.first.first.importing.is_none(), "{body}");
+        let first = call
+            .body
+            .next
+            .first()
+            .map_or(&call.body.first.first, |n| &n.block.first);
+        assert_eq!(stage_kinds_of(first), ["with"], "{body}");
+    }
+    let q = ok("MATCH (a) CALL (a) { WITH a RETURN a AS b } RETURN b");
+    let call = call_at(&q, 1);
+    assert!(call.body.first.first.importing.is_none());
+    assert_eq!(stage_kinds_of(&call.body.first.first), ["with"]);
+}
+
+#[test]
+fn count_and_collect_subqueries_parse() {
+    for (src, kind, matches, query) in [
+        ("COUNT { (n)-->() }", SubqueryKind::Count, 1, false),
+        (
+            "count { MATCH (n)-->(m) WHERE m.x > 1 }",
+            SubqueryKind::Count,
+            1,
+            false,
+        ),
+        (
+            "COUNT { MATCH (n)-->(m) RETURN m }",
+            SubqueryKind::Count,
+            0,
+            true,
+        ),
+        (
+            "COLLECT { MATCH (n)-->(m) RETURN m.name }",
+            SubqueryKind::Collect,
+            0,
+            true,
+        ),
+        (
+            "collect { MATCH (n)-->(m) }",
+            SubqueryKind::Collect,
+            1,
+            false,
+        ),
+        (
+            "COLLECT { MATCH (n)-->(m) RETURN m.x AS x UNION MATCH (n)<--(m) RETURN m.x AS x }",
+            SubqueryKind::Collect,
+            0,
+            true,
+        ),
+        (
+            "EXISTS { MATCH (n)-->(m) WITH m WHERE m.x > 1 RETURN m }",
+            SubqueryKind::Exists,
+            0,
+            true,
+        ),
+        (
+            "EXISTS { OPTIONAL MATCH (n)-->(m) RETURN m }",
+            SubqueryKind::Exists,
+            0,
+            true,
+        ),
+        ("EXISTS { RETURN 1 }", SubqueryKind::Exists, 0, true),
+        (
+            "EXISTS { MATCH (n) CALL (n) { RETURN 1 AS one } RETURN one }",
+            SubqueryKind::Exists,
+            0,
+            true,
+        ),
+        // `WITH` after STARTS / ENDS is an operator, not a clause: a body of MATCH clauses.
+        (
+            "EXISTS { MATCH (n) WHERE n.name STARTS WITH 'a' }",
+            SubqueryKind::Exists,
+            1,
+            false,
+        ),
+        (
+            "EXISTS { MATCH (n) WHERE n.name ENDS WITH 'a' }",
+            SubqueryKind::Exists,
+            1,
+            false,
+        ),
+        // A nested body's clauses do not make the outer body a whole query.
+        (
+            "EXISTS { MATCH (n) WHERE EXISTS { MATCH (n) RETURN n } }",
+            SubqueryKind::Exists,
+            1,
+            false,
+        ),
+    ] {
+        let s = subquery(src);
+        assert_eq!(s.kind, kind, "{src}");
+        assert_eq!(s.form, SubqueryForm::Braces, "{src}");
+        assert_eq!(s.matches.len(), matches, "{src}");
+        assert_eq!(s.query.is_some(), query, "{src}");
+    }
+    let q = ok("MATCH (n) RETURN COUNT { (n)-->() } AS c");
+    let ExprKind::Subquery(s) = &q.ret.items[0].expr.kind else {
+        panic!("not a subquery");
+    };
+    assert_eq!(q.text(s.span), "COUNT { (n)-->() }");
+    // `count(..)` stays the aggregate, `count` a variable elsewhere.
+    let q = ok("MATCH (n) RETURN count(n) AS c");
+    assert!(matches!(
+        q.ret.items[0].expr.kind,
+        ExprKind::FunctionCall { .. }
+    ));
+    let q = ok("MATCH (count) RETURN count.x");
+    assert!(matches!(
+        q.ret.items[0].expr.kind,
+        ExprKind::Property { .. }
+    ));
+}
+
+#[test]
+fn whole_query_body_errors() {
+    // A body of other clauses than MATCH needs RETURN, named at its first such clause.
+    for (query, text) in [
+        (
+            "MATCH (n) WHERE COUNT { MATCH (n) WITH n } > 1 RETURN n",
+            "WITH",
+        ),
+        (
+            "MATCH (n) RETURN COLLECT { OPTIONAL MATCH (n)-->(m) } AS l",
+            "OPTIONAL MATCH",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) FOR x IN [1] } RETURN n",
+            "FOR",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { CALL { RETURN 1 AS o } } RETURN n",
+            "CALL",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("without RETURN"), "{}", f.message);
+    }
+    let f = fail("MATCH (n) WHERE COUNT { MATCH (n) WITH n } > 1 RETURN n");
+    assert!(f.message.contains("body of COUNT { }"), "{}", f.message);
+    // After RETURN inside a body: the tail, then `}`.
+    let f = fail("MATCH (n) WHERE EXISTS { MATCH (n) RETURN n x } RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "x");
+    assert!(f.expected.contains(&"`}`".to_string()), "{:?}", f.expected);
+    assert!(!f.expected.contains(&"end of input".to_string()));
+    // A later operand of a body needs RETURN.
+    let f = fail("MATCH (n) WHERE EXISTS { RETURN 1 AS x UNION MATCH (m) } RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.message.contains("missing RETURN"), "{}", f.message);
+    // COUNT ( ) is the function, and COUNT { needs a body.
+    let f = fail("MATCH (n) WHERE COUNT { } > 1 RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+}
+
+#[test]
+fn composite_and_call_errors() {
+    // UNION / NEXT before a RETURN.
+    for (query, text) in [
+        ("MATCH (p) UNION MATCH (q) RETURN q", "UNION"),
+        ("UNION MATCH (q) RETURN q", "UNION"),
+        ("MATCH (p) NEXT MATCH (q) RETURN q", "NEXT"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("must follow a complete query"),
+            "{}",
+            f.message
+        );
+        assert!(f.alternative.unwrap_or_default().contains("RETURN"));
+    }
+    // A missing operand.
+    let f = fail("MATCH (p) RETURN p UNION");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.expected, NEXT_CLAUSES);
+    // NEXT YIELD, EXCEPT, INTERSECT: not yet.
+    for (query, text) in [
+        ("MATCH (p) RETURN p NEXT YIELD p RETURN p", "NEXT YIELD"),
+        ("MATCH (n) RETURN n EXCEPT MATCH (m) RETURN m", "EXCEPT"),
+        (
+            "MATCH (n) RETURN n INTERSECT MATCH (m) RETURN m",
+            "INTERSECT",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    // IN TRANSACTIONS: refused, a write form.
+    for (query, text) in [
+        (
+            "MATCH (p) CALL (p) { RETURN 1 AS x } IN TRANSACTIONS RETURN p",
+            "IN TRANSACTIONS",
+        ),
+        (
+            "MATCH (p) CALL { RETURN 1 AS x } IN 3 CONCURRENT TRANSACTIONS OF 10 ROWS RETURN p",
+            "IN 3 CONCURRENT TRANSACTIONS",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.gqlstatus, "0A000");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("read-only"), "{}", f.message);
+    }
+    // A body without RETURN: refused (a unit subquery writes); an empty body: syntax.
+    let f = fail("MATCH (p) CALL (p) { MATCH (p)-->(x) } RETURN p");
+    assert_eq!(f.kind, GqlErrorKind::Refused);
+    assert_eq!(f.text, "}");
+    assert!(f.message.contains("without RETURN"), "{}", f.message);
+    let f = fail("MATCH (p) CALL { } RETURN p");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "}");
+    assert!(f.message.contains("empty"), "{}", f.message);
+    // Procedure calls stay refused, OPTIONAL CALL included.
+    for query in [
+        "CALL db.labels()",
+        "MATCH (n) OPTIONAL CALL db.x(n) RETURN n",
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.text, "CALL", "{query}");
+    }
+    // The scope clause takes variables or `*`.
+    for (query, text, expected) in [
+        (
+            "MATCH (p) CALL (1) { RETURN 1 AS x } RETURN x",
+            "1",
+            vec!["a variable", "`*`", "`)`"],
+        ),
+        (
+            "MATCH (p) CALL (p,) { RETURN 1 AS x } RETURN x",
+            ")",
+            vec!["a variable"],
+        ),
+        (
+            "MATCH (p) CALL (p q) { RETURN 1 AS x } RETURN x",
+            "q",
+            vec!["`,`", "`)`"],
+        ),
+        (
+            "MATCH (p) CALL (*, p) { RETURN 1 AS x } RETURN x",
+            ",",
+            vec!["`)`"],
+        ),
+        ("MATCH (p) CALL (p) RETURN p", "RETURN", vec!["`{`"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, expected, "{query}");
+    }
+    // An unclosed body; a token after the body's RETURN.
+    let f = fail("MATCH (p) CALL { RETURN 1 AS x");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.expected.contains(&"`}`".to_string()), "{:?}", f.expected);
+    // A CALL after RETURN.
+    let f = fail("MATCH (p) RETURN p CALL { RETURN 1 AS x }");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.message.contains("CALL after RETURN"), "{}", f.message);
+    // Inside an expression, CALL is no subquery.
+    let f = fail("MATCH (p) RETURN CALL { RETURN 1 AS x }");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "CALL");
+}
+
+#[test]
+fn nested_bodies_are_bounded() {
+    // Nesting: the parser's depth limit, never a stack overflow.
+    let mut call = "RETURN 1 AS x".to_string();
+    let mut exists = "(n)-->()".to_string();
+    let mut count = "(n)-->()".to_string();
+    for _ in 0..300 {
+        call = format!("CALL {{ {call} }} RETURN x");
+        exists = format!("EXISTS {{ MATCH (n) WHERE {exists} RETURN n }}");
+        count = format!("COUNT {{ MATCH (n) WITH n WHERE {count} > 0 RETURN n }}");
+    }
+    let deep = format!("{}1{}", "[x IN ".repeat(300), " | x]".repeat(300));
+    for query in [
+        call,
+        format!("MATCH (n) WHERE {exists} RETURN n"),
+        format!("MATCH (n) WHERE {count} > 0 RETURN n"),
+        format!("RETURN 1 AS x UNION RETURN {deep} AS x"),
+        format!("RETURN 1 AS x NEXT RETURN {deep} AS x"),
+        format!("CALL {{ RETURN {deep} AS x }} RETURN x"),
+    ] {
+        let f = fail(&query);
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{}", &query[..40]);
+    }
+    // A few levels parse.
+    ok("CALL { CALL { CALL { RETURN 1 AS x } RETURN x } RETURN x } RETURN x");
+}
+
+/// Random token sequences over the stage 2d forms: the parser never panics.
+#[test]
+fn random_composite_queries_never_panic() {
+    const TOKENS: &[&str] = &[
+        "MATCH (a)",
+        "MATCH (a)-->(b)",
+        "OPTIONAL",
+        "CALL",
+        "CALL (a)",
+        "CALL (*)",
+        "CALL ()",
+        "{",
+        "}",
+        "(",
+        ")",
+        "RETURN a",
+        "RETURN 1 AS x",
+        "RETURN *",
+        "UNION",
+        "UNION ALL",
+        "UNION DISTINCT",
+        "NEXT",
+        "YIELD",
+        "WITH a",
+        "WITH *",
+        "FILTER a",
+        "LET b = 1",
+        "FOR x IN [1]",
+        "IN",
+        "TRANSACTIONS",
+        "CONCURRENT",
+        "EXISTS",
+        "COUNT",
+        "COLLECT",
+        "WHERE",
+        "ORDER BY x",
+        "LIMIT 1",
+        ",",
+        ";",
+        "a",
+        "1",
+    ];
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for i in 0..4_000 {
+        let len = rng.below(40);
+        let mut query: Vec<&str> = (0..len).map(|_| TOKENS[rng.below(TOKENS.len())]).collect();
+        if i % 2 == 0 {
+            query.insert(0, "MATCH (a)");
+        }
+        let text = query.join(" ");
+        let _ = parse(&text);
+        if let Ok(parsed) = parse(&text) {
+            // Every operand of an accepted query ends in RETURN.
+            let block = &parsed.body.first;
+            assert!(
+                std::iter::once(&block.first)
+                    .chain(block.unions.iter().map(|u| &u.query))
+                    .all(|q| !q.ret.items.is_empty() || q.ret.star.is_some()),
+                "{text}"
+            );
+        }
+    }
 }

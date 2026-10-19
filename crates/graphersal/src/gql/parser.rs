@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 2c): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 2d): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -9,8 +9,12 @@
 //! # Grammar
 //!
 //! ```text
-//! query      := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?
-//! stage      := match | with | let | filter | for
+//! query      := composite ';'?
+//! composite  := block (NEXT block)*                 -- NEXT binds looser than UNION
+//! block      := linear (UNION (ALL | DISTINCT)? linear)*   -- ALL: a contextual word
+//! linear     := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)?
+//! stage      := match | with | let | filter | for | call
+//! call       := OPTIONAL? CALL ('(' (var (',' var)* | '*')? ')')? '{' composite '}'
 //! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
 //! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
 //! let        := LET var '=' expr (',' var '=' expr)*
@@ -33,13 +37,14 @@
 //! projection := DISTINCT? ('*' (',' item)* | item (',' item)*)
 //! item       := expr (AS name)?
 //! order_by   := ORDER BY expr (ASC|ASCENDING|DESC|DESCENDING)? (',' ...)*
-//! call       := name '(' (expr (',' expr)*)? ')'
+//! fcall      := name '(' (expr (',' expr)*)? ')'
 //!             | aggregate '(' DISTINCT? expr ')' | count '(' '*' ')'
 //!             | CAST '(' expr AS type ')'                 -- type: one or two words
 //!             | TRIM '(' (LEADING|TRAILING|BOTH)? expr? FROM expr ')'
 //! is_pred    := expr IS NOT? (NULL | LABELED labels | SOURCE OF expr | DESTINATION OF expr)
-//! exists     := EXISTS ('{' body '}' | '(' body ')')
+//! exists     := EXISTS ('{' body '}' | '(' body ')') | (COUNT | COLLECT) '{' body '}'
 //! body       := match+ | path (',' path)* (WHERE expr)?   -- MATCH without OPTIONAL (stage 2b)
+//!             | composite                                 -- braces only (stage 2d)
 //! pattern_pred := path                 -- where an expression stands; found by lookahead
 //! map_proj   := var '{' (proj_item (',' proj_item)*)? '}'     -- Cypher map projection
 //! proj_item  := '.' name | '.' '*' | var | name ':' expr
@@ -65,7 +70,7 @@
 //! - **`RETURN` is mandatory** (design D10); its absence is a syntax error whose alternative names
 //!   `RETURN *` and the query's own variables.
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
-//!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`Query::stages`] is then
+//!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`LinearQuery::stages`] is then
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
 //!   it is a plain filter of the unit row, so it is accepted like the others. A first token that
 //!   starts no clause expects every clause a query may start with (`MATCH`, `OPTIONAL MATCH`,
@@ -133,9 +138,9 @@
 //!   `EXISTS { pattern }`, one path, no `WHERE` of its own; that it introduces no named variable
 //!   is the binder's check). The body holds non-optional `MATCH` clauses only: `OPTIONAL MATCH`
 //!   and the other clauses (`WITH`, `RETURN`, `ORDER BY`, ..., a nested query) are "not yet
-//!   supported". Cypher 4 `exists(value)` (a token after `EXISTS (` that starts no body) is
-//!   refused for good, naming `n.p IS NOT NULL`; Cypher `COUNT { }` / `COLLECT { }` stay "not
-//!   yet supported". A subquery is one level taller than the tallest expression or label tree
+//!   supported" there; stage 2d reads a braced body with such clauses as a whole query (below).
+//!   Cypher 4 `exists(value)` (a token after `EXISTS (` that starts no body) is refused for
+//!   good, naming `n.p IS NOT NULL`. A subquery is one level taller than the tallest expression or label tree
 //!   of its body, so [`MAX_HEIGHT`] bounds the body with its host; names declared inside do
 //!   not feed the missing-`RETURN` alternative.
 //! - **Pattern-predicate lookahead.** At `(` where an expression stands, a bounded token scan
@@ -170,6 +175,34 @@
 //!   a variable item) keeps it a variable with a map projection, as `record {.name}`. So a
 //!   variable named `record` is read everywhere except before an empty projection or one that
 //!   starts with a `key: expr` item; there it is back-quoted, `` `record` {k: 1} ``.
+//! - **Composite queries** (stage 2d, design item 8): a [`Query`] is a [`CompositeQuery`] of
+//!   linear queries joined by `UNION [ALL | DISTINCT]` and chained by `NEXT` (`NEXT` binds looser:
+//!   `q1 UNION q2 NEXT q3` reads the union). `ORDER BY`, `OFFSET` and `LIMIT` belong to their own
+//!   operand. A bare `UNION` is `UNION DISTINCT`; whether the operands' columns agree and whether
+//!   `ALL` and `DISTINCT` are mixed is the binder's check. `UNION` or `NEXT` where no `RETURN`
+//!   ends the query before it is a syntax error naming the form; `NEXT YIELD`, `EXCEPT` and
+//!   `INTERSECT` are "not yet supported". The expected tokens after a clause and after `RETURN`
+//!   still list the stage 2a clauses only.
+//! - **`CALL { }`** ([`CallClause`]): `[OPTIONAL] CALL (a, b) { .. }`, `CALL () { .. }`, `CALL (*)
+//!   { .. }` and `CALL { .. }` without a scope clause (imports nothing, Neo4j Cypher 25), a
+//!   pipeline stage anywhere, also first. The body is a whole composite query ending in
+//!   `RETURN`; a body without `RETURN` (a unit subquery, which only writes) is refused, an empty
+//!   one a syntax error. Cypher's importing `WITH` (a `CALL` without a scope clause whose
+//!   operand of the body's first block starts with `WITH` of plain variables, or `*` alone, and
+//!   nothing else) moves into [`LinearQuery::importing`]; any other first `WITH` stays a clause
+//!   (the binder finds its unknown names). `IN [n CONCURRENT] TRANSACTIONS` after the body is
+//!   refused (a batched write); `CALL name(..)` stays a refused vendor procedure. Each body is
+//!   one [`MAX_DEPTH`] level.
+//! - **`COUNT { }`, `COLLECT { }` and whole-query bodies** (stage 2d, user decision D23; openCypher
+//!   compatibility forms): `COUNT` / `COLLECT` before `{` (contextual words, any case) start a
+//!   [`SubqueryExpr`] of kind [`SubqueryKind::Count`] / [`SubqueryKind::Collect`] with the
+//!   bodies of `EXISTS { }`. A braced body holding a clause other than `MATCH` at its own
+//!   bracket level (`OPTIONAL`, `WITH` that is not `STARTS WITH` / `ENDS WITH`, `LET`, `FILTER`,
+//!   `FOR`, `UNWIND`, `RETURN`, `CALL`; a bounded token scan, [`Parser::whole_query_body`]) is a
+//!   whole composite query ([`SubqueryExpr::query`]) and needs `RETURN` ("not yet supported"
+//!   without one, naming its first such clause); a body of `MATCH` clauses or a pattern list,
+//!   and every parenthesized body, keep the stage 2b tree and errors. The binder checks what each
+//!   kind accepts.
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -179,12 +212,14 @@
 
 use super::ast::BinaryOp;
 use super::ast::{
-    CallArgs, CaseExpr, CaseWhen, CastTarget, CountClause, EdgeDirection, EdgePattern, Endpoint,
-    Expr, ExprKind, FilterClause, ForClause, GroupBy, Identifier, LabelExpr, LabelExprKind,
-    LetBinding, LetClause, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection,
-    MatchClause, NodePattern, OrderBy, Ordinal, OrdinalKind, PathPattern, PatternComprehension,
-    PatternStep, ProjectionItem, Quantifier, Query, ReturnClause, ReturnItem, SortDirection,
-    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, WithClause,
+    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery, CountClause,
+    EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind, FilterClause, ForClause, GroupBy,
+    Identifier, ImportingWith, LabelExpr, LabelExprKind, LetBinding, LetClause, LinearQuery,
+    ListComprehension, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock,
+    NodePattern, OrderBy, Ordinal, OrdinalKind, PathPattern, PatternComprehension, PatternStep,
+    ProjectionItem, Quantifier, Query, QueryBlock, ReturnClause, ReturnItem, SortDirection,
+    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind,
+    UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -693,6 +728,21 @@ enum EdgeAhead {
     Weak,
 }
 
+/// Where a (composite) query is parsed: what ends it and what a body without `RETURN` means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    /// The whole query (ends at the end of input or `;`).
+    Top,
+    /// The body of a `CALL { }` (ends at `}`; it needs a `RETURN`).
+    Call,
+    /// A whole-query body of `EXISTS` / `COUNT` / `COLLECT` (ends at `}`), with the subquery's
+    /// kind for messages.
+    Subquery(SubqueryKind),
+}
+
+/// The body of a [`SubqueryExpr`]: `MATCH` clauses, or a whole query.
+type SubqueryBody = (Vec<MatchClause>, Option<Box<CompositeQuery>>);
+
 /// How many edges the pattern-predicate lookahead follows through a chain of weak edges before
 /// it decides on an expression (a pattern this long is refused by the binder anyway).
 const PREDICATE_LOOKAHEAD_EDGES: usize = 64;
@@ -911,10 +961,10 @@ impl<'a> Parser<'a> {
                 b = b.alternative(WRITE_ALTERNATIVE);
                 Some(Box::new(b))
             }
-            Keyword::Call if self.nth(1).kind == TokenKind::LBrace => not_yet(
-                "CALL { } (a subquery)",
-                "run the inner query as its own gql() call, or write it as Gremlin steps",
-            ),
+            // An inline `CALL { }` / `CALL (..) { }` where no clause stands: a plain syntax error.
+            Keyword::Call if matches!(self.nth(1).kind, TokenKind::LBrace | TokenKind::LParen) => {
+                None
+            }
             Keyword::Call | Keyword::Yield => refused(
                 format!("{text}: procedure calls are vendor extensions, not part of GQL"),
                 "write what the procedure does as Gremlin steps, for example \
@@ -929,12 +979,23 @@ impl<'a> Parser<'a> {
                 "",
             ),
             Keyword::Cypher => not_yet("a CYPHER version prefix", "remove the prefix"),
-            Keyword::Next => not_yet(
-                "NEXT",
-                "chain Gremlin steps after gql(), for example \
-                 g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")",
-            ),
-            Keyword::Union | Keyword::Except | Keyword::Intersect => not_yet(
+            Keyword::Next | Keyword::Union => {
+                let b = err(
+                    GqlErrorKind::Syntax,
+                    span,
+                    format!("{text} must follow a complete query that ends with RETURN"),
+                )
+                .alternative(if text == "NEXT" {
+                    "end the statement before NEXT with RETURN, for example \
+                     MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN s.name"
+                } else {
+                    "end each query of the UNION with RETURN, for example \
+                     MATCH (p:person) RETURN p.name AS name \
+                     UNION MATCH (s:software) RETURN s.name AS name"
+                });
+                Some(Box::new(b))
+            }
+            Keyword::Except | Keyword::Intersect => not_yet(
                 &text,
                 "combine the results in Gremlin, for example \
                  g.v().union(__.has_label(\"person\"), __.has_label(\"software\"))",
@@ -1008,53 +1069,214 @@ impl<'a> Parser<'a> {
 
     // ----- query and clauses -----
 
+    // The functions from `query` down to `return_clause` are thin and pass boxes (module rule
+    // "Bounded recursion"): their frames lie under every nested expression of the first linear
+    // query, so the large values are built in functions called after the deep part returns.
+
     fn query(&mut self) -> PResult<Query> {
+        let body = self.composite(Body::Top)?;
+        self.finish_query(body)
+    }
+
+    /// The end of the whole query after its statements: an optional `;`, then the end of input.
+    fn finish_query(&mut self, body: Box<CompositeQuery>) -> PResult<Query> {
+        self.eat(&TokenKind::Semicolon);
+        if !self.at(&TokenKind::Eof) {
+            return Err(self.after_query(&body, Body::Top));
+        }
+        Ok(Query {
+            source: self.src.to_string(),
+            body,
+        })
+    }
+
+    /// `block (NEXT block)*`: a whole query, at the top level or as a body.
+    fn composite(&mut self, ctx: Body) -> PResult<Box<CompositeQuery>> {
+        let first = self.block(ctx)?;
+        self.composite_rest(first, ctx)
+    }
+
+    /// The `NEXT` blocks of a [`CompositeQuery`] after its first block.
+    fn composite_rest(
+        &mut self,
+        first: Box<QueryBlock>,
+        ctx: Body,
+    ) -> PResult<Box<CompositeQuery>> {
+        let start = first.span;
+        let mut next = Vec::new();
+        while let Some(keyword) = self.eat_kw(Keyword::Next) {
+            if self.at_kw(Keyword::Yield) {
+                return Err(self.not_yet(
+                    keyword.to(self.peek().span),
+                    "NEXT YIELD",
+                    "leave YIELD out: the statement after NEXT reads every column the RETURN \
+                     before it returns, by name",
+                ));
+            }
+            let block = *self.block(ctx)?;
+            next.push(NextBlock { keyword, block });
+        }
+        Ok(Box::new(CompositeQuery {
+            first: *first,
+            next,
+            span: start.to(self.last),
+        }))
+    }
+
+    /// `linear (UNION [ALL | DISTINCT] linear)*`.
+    fn block(&mut self, ctx: Body) -> PResult<Box<QueryBlock>> {
+        let first = self.linear(ctx)?;
+        self.block_rest(first, ctx)
+    }
+
+    /// The rest of a [`QueryBlock`] after its first operand: `(UNION [ALL | DISTINCT] linear)*`.
+    fn block_rest(&mut self, first: Box<LinearQuery>, ctx: Body) -> PResult<Box<QueryBlock>> {
+        let start = first.span;
+        // The names of one operand are not in scope in the next (missing-RETURN advice).
+        let base = self.variables.len();
+        let mut unions = Vec::new();
+        while let Some(union) = self.eat_kw(Keyword::Union) {
+            let (kind, keyword) = if is_word(self.peek(), "ALL") {
+                (UnionKind::All, union.to(self.advance().span))
+            } else if let Some(distinct) = self.eat_kw(Keyword::Distinct) {
+                (UnionKind::Distinct, union.to(distinct))
+            } else {
+                (UnionKind::Distinct, union)
+            };
+            self.variables.truncate(base);
+            let query = *self.linear(ctx)?;
+            unions.push(UnionOperand {
+                kind,
+                keyword,
+                query,
+            });
+        }
+        Ok(Box::new(QueryBlock {
+            first: *first,
+            unions,
+            span: start.to(self.last),
+        }))
+    }
+
+    /// A linear query: the clause pipeline, `RETURN` and its tail.
+    fn linear(&mut self, ctx: Body) -> PResult<Box<LinearQuery>> {
+        // Thin on purpose (module rule "Bounded recursion"): every clause and every error is
+        // parsed in a function of its own, so this frame stays small under nested bodies.
         let start = self.peek().span;
         let mut matches = Vec::new();
         let mut stages = Vec::new();
-        loop {
-            match self.peek().keyword() {
-                Some(Keyword::Match | Keyword::Optional) => {
-                    let clause = self.match_clause()?;
-                    stages.push(Stage::Match(matches.len()));
-                    matches.push(clause);
-                    continue;
-                }
-                Some(keyword @ (Keyword::With | Keyword::Let | Keyword::Filter)) => {
-                    stages.push(self.pipeline_stage(keyword)?);
-                    continue;
-                }
-                Some(Keyword::For | Keyword::Unwind) => {
-                    stages.push(Stage::For(self.for_clause()?));
-                    continue;
-                }
-                _ => {}
-            }
-            if self.at_kw(Keyword::Return) {
-                break;
-            }
-            if stages.is_empty() {
-                return Err(self.unexpected(&NEXT_CLAUSES));
-            }
-            if matches!(self.peek().kind, TokenKind::Eof | TokenKind::Semicolon) {
-                return Err(self.missing_return());
-            }
-            if let Some(Keyword::Order | Keyword::Offset | Keyword::Skip | Keyword::Limit) =
-                self.peek().keyword()
-            {
-                if let Some(Stage::With(_)) = stages.last() {
-                    return Err(self.misplaced_with_tail());
-                }
-                return Err(self.not_yet(
-                    self.peek().span,
-                    &format!("{} before RETURN", self.peek().text.to_ascii_uppercase()),
-                    "write ORDER BY, OFFSET and LIMIT after RETURN, for example \
-                     MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT 2",
-                ));
-            }
-            return Err(self.after_stage(stages.last(), &matches));
+        // The first clause that is not a plain MATCH, for a subquery body without RETURN.
+        let mut other: Option<Span> = None;
+        while self.pipeline_clause(&mut matches, &mut stages, &mut other)? {}
+        if !self.at_kw(Keyword::Return) {
+            return Err(self.missing_clause(ctx, &stages, &matches, other));
         }
+        self.result_statement(start, matches, stages)
+    }
+
+    /// One clause of the pipeline before `RETURN`, when the current token starts one (`false`
+    /// otherwise). `other` records the keywords of the first clause that is not a plain `MATCH`.
+    fn pipeline_clause(
+        &mut self,
+        matches: &mut Vec<MatchClause>,
+        stages: &mut Vec<Stage>,
+        other: &mut Option<Span>,
+    ) -> PResult<bool> {
+        let keyword = self.peek().keyword();
+        let call = keyword == Some(Keyword::Call)
+            || (keyword == Some(Keyword::Optional) && self.nth(1).keyword() == Some(Keyword::Call));
+        if other.is_none() && (call || stage_keyword(keyword)) {
+            let mut span = self.peek().span;
+            if keyword == Some(Keyword::Optional) {
+                span = span.to(self.nth(1).span);
+            }
+            *other = Some(span);
+        }
+        let stage = match keyword {
+            _ if call => Stage::Call(Box::new(self.call_clause()?)),
+            Some(Keyword::Match | Keyword::Optional) => {
+                let clause = self.match_clause()?;
+                matches.push(clause);
+                Stage::Match(matches.len() - 1)
+            }
+            Some(keyword @ (Keyword::With | Keyword::Let | Keyword::Filter)) => {
+                self.pipeline_stage(keyword)?
+            }
+            Some(Keyword::For | Keyword::Unwind) => Stage::For(self.for_clause()?),
+            _ => return Ok(false),
+        };
+        stages.push(stage);
+        Ok(true)
+    }
+
+    /// The error at a token that continues no clause of the pipeline and is not `RETURN`.
+    fn missing_clause(
+        &self,
+        ctx: Body,
+        stages: &[Stage],
+        matches: &[MatchClause],
+        other: Option<Span>,
+    ) -> Box<GqlErrorBuilder> {
+        if self.at(&TokenKind::RBrace) {
+            match ctx {
+                Body::Call => return self.call_without_return(stages.is_empty()),
+                Body::Subquery(_) if other.is_none() && !stages.is_empty() => {
+                    return self.missing_return();
+                }
+                Body::Subquery(kind) => {
+                    if let Some(span) = other {
+                        let words: Vec<&str> = self.text(span).split_whitespace().collect();
+                        return body_without_return(
+                            span,
+                            &words.join(" ").to_ascii_uppercase(),
+                            kind,
+                        );
+                    }
+                }
+                Body::Top => {}
+            }
+        }
+        if stages.is_empty() {
+            return self.unexpected(&NEXT_CLAUSES);
+        }
+        if matches!(self.peek().kind, TokenKind::Eof | TokenKind::Semicolon) {
+            return self.missing_return();
+        }
+        if let Some(Keyword::Order | Keyword::Offset | Keyword::Skip | Keyword::Limit) =
+            self.peek().keyword()
+        {
+            if let Some(Stage::With(_)) = stages.last() {
+                return self.misplaced_with_tail();
+            }
+            return self.not_yet(
+                self.peek().span,
+                &format!("{} before RETURN", self.peek().text.to_ascii_uppercase()),
+                "write ORDER BY, OFFSET and LIMIT after RETURN, for example \
+                 MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT 2",
+            );
+        }
+        self.after_stage(stages.last(), matches)
+    }
+
+    /// `RETURN` and its tail, closing the linear query that started at `start`.
+    fn result_statement(
+        &mut self,
+        start: Span,
+        matches: Vec<MatchClause>,
+        stages: Vec<Stage>,
+    ) -> PResult<Box<LinearQuery>> {
         let ret = self.return_clause()?;
+        self.result_tail(start, matches, stages, ret)
+    }
+
+    /// `ORDER BY`, `OFFSET` and `LIMIT` after `ret`, closing the linear query.
+    fn result_tail(
+        &mut self,
+        start: Span,
+        matches: Vec<MatchClause>,
+        stages: Vec<Stage>,
+        ret: ReturnClause,
+    ) -> PResult<Box<LinearQuery>> {
         let order_by = if self.at_kw(Keyword::Order) {
             Some(self.order_by()?)
         } else {
@@ -1062,26 +1284,163 @@ impl<'a> Parser<'a> {
         };
         let offset = self.offset_clause()?;
         let limit = self.limit_clause()?;
-        let end = self.last;
-        self.eat(&TokenKind::Semicolon);
-        if !self.at(&TokenKind::Eof) {
-            return Err(self.after_return(
-                &ret,
-                order_by.is_some(),
-                offset.is_some(),
-                limit.is_some(),
-            ));
-        }
-        Ok(Query {
-            source: self.src.to_string(),
+        Ok(Box::new(LinearQuery {
             matches,
             stages,
             ret,
             order_by,
             offset,
             limit,
-            span: start.to(end),
+            importing: None,
+            span: start.to(self.last),
+        }))
+    }
+
+    /// The error for a token after a complete (composite) query or body: the tokens the last
+    /// result statement accepts, then the end of the query (or the closing `}` of a body).
+    fn after_query(&self, query: &CompositeQuery, ctx: Body) -> Box<GqlErrorBuilder> {
+        let block = query.next.last().map_or(&query.first, |next| &next.block);
+        let last = block
+            .unions
+            .last()
+            .map_or(&block.first, |operand| &operand.query);
+        let end = if ctx == Body::Top {
+            "end of input"
+        } else {
+            "`}`"
+        };
+        self.after_return(
+            &last.ret,
+            last.order_by.is_some(),
+            last.offset.is_some(),
+            last.limit.is_some(),
+            end,
+        )
+    }
+
+    /// The error for a `CALL` body that ends without `RETURN` (`empty`: holds no clause).
+    fn call_without_return(&self, empty: bool) -> Box<GqlErrorBuilder> {
+        let span = self.peek().span;
+        if empty {
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                "the CALL { } body is empty: it holds a query ending in RETURN",
+            )
+            .expected(NEXT_CLAUSES)
+            .alternative(
+                "write the subquery between the braces, for example MATCH (p:person) \
+                 CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made",
+            );
+            return Box::new(b);
+        }
+        let b = err(
+            GqlErrorKind::Refused,
+            span,
+            "a CALL { } body without RETURN (a unit subquery) only makes sense for writes; \
+             gql() is read-only",
+        )
+        .expected(["RETURN"])
+        .alternative(
+            "end the body with RETURN and the columns the query reads after it, for example \
+             MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } \
+             RETURN p.name, made",
+        );
+        Box::new(b)
+    }
+
+    /// `[OPTIONAL] CALL [(vars) | (*)] { query } [IN TRANSACTIONS ..]`, at `OPTIONAL` or `CALL`.
+    fn call_clause(&mut self) -> PResult<CallClause> {
+        let optional = self.eat_kw(Keyword::Optional);
+        let start = optional.unwrap_or(self.peek().span);
+        if !matches!(self.nth(1).kind, TokenKind::LParen | TokenKind::LBrace) {
+            // A procedure call (`CALL db.labels()`): refused by name at `CALL`.
+            return Err(self.unexpected(&["CALL"]));
+        }
+        self.advance();
+        let scope = if self.at(&TokenKind::LParen) {
+            self.call_scope()?
+        } else {
+            CallScope::Implicit
+        };
+        self.expect(&TokenKind::LBrace, &["`{`"])?;
+        self.enter()?;
+        let saved_variables = self.variables.len();
+        let result = self.composite(Body::Call);
+        self.variables.truncate(saved_variables);
+        self.leave();
+        let mut body = result?;
+        if self.eat(&TokenKind::RBrace).is_none() {
+            return Err(self.after_query(&body, Body::Call));
+        }
+        let span = start.to(self.last);
+        if let Some(e) = self.in_transactions() {
+            return Err(e);
+        }
+        if matches!(scope, CallScope::Implicit) {
+            importing_with(&mut body.first.first);
+            for operand in &mut body.first.unions {
+                importing_with(&mut operand.query);
+            }
+        }
+        Ok(CallClause {
+            optional,
+            scope,
+            body,
+            span,
         })
+    }
+
+    /// The variable scope clause `(a, b)`, `()` or `(*)` of a `CALL`, at its `(`.
+    fn call_scope(&mut self) -> PResult<CallScope> {
+        let open = self.advance().span;
+        if self.eat(&TokenKind::Star).is_some() {
+            self.expect(&TokenKind::RParen, &["`)`"])?;
+            return Ok(CallScope::All(open.to(self.last)));
+        }
+        let mut variables = Vec::new();
+        if self.eat(&TokenKind::RParen).is_none() {
+            loop {
+                match self.peek().kind {
+                    TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+                        let name = self.peek().name().unwrap_or("").to_string();
+                        let span = self.advance().span;
+                        variables.push(Identifier { name, span });
+                    }
+                    _ if variables.is_empty() => {
+                        return Err(self.unexpected(&["a variable", "`*`", "`)`"]));
+                    }
+                    _ => return Err(self.unexpected(&["a variable"])),
+                }
+                if self.eat(&TokenKind::Comma).is_none() {
+                    self.expect(&TokenKind::RParen, &["`,`", "`)`"])?;
+                    break;
+                }
+            }
+        }
+        Ok(CallScope::Variables {
+            variables,
+            span: open.to(self.last),
+        })
+    }
+
+    /// The refusal of Cypher's `IN [n CONCURRENT] TRANSACTIONS` after a `CALL` body (a batched
+    /// write), when the tokens start it.
+    fn in_transactions(&self) -> Option<Box<GqlErrorBuilder>> {
+        if !self.at_kw(Keyword::In) {
+            return None;
+        }
+        let end = (1..=3)
+            .map(|i| self.nth(i))
+            .take_while(|t| !matches!(t.kind, TokenKind::Eof))
+            .find(|t| is_word(t, "TRANSACTIONS"))?;
+        let b = err(
+            GqlErrorKind::Refused,
+            self.peek().span.to(end.span),
+            "CALL { } IN TRANSACTIONS commits writes in batches; gql() is read-only",
+        )
+        .alternative("remove IN TRANSACTIONS: a read-only subquery needs no batches");
+        Some(Box::new(b))
     }
 
     /// `OFFSET n` / `SKIP n`, when the current token starts it.
@@ -1149,7 +1508,7 @@ impl<'a> Parser<'a> {
             Some(Stage::For(clause)) if !clause.unwind && clause.ordinal.is_none() => {
                 vec!["WITH ORDINALITY", "WITH OFFSET"]
             }
-            Some(Stage::Filter(_) | Stage::For(_)) | None => Vec::new(),
+            Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
         self.unexpected(&expected)
@@ -1412,6 +1771,7 @@ impl<'a> Parser<'a> {
                         | Keyword::For
                         | Keyword::Unwind
                         | Keyword::Return
+                        | Keyword::Call
                 ) && !self.declared(self.nth(1).text)
             }
             _ => false,
@@ -1441,6 +1801,7 @@ impl<'a> Parser<'a> {
         has_order: bool,
         has_offset: bool,
         has_limit: bool,
+        end: &'static str,
     ) -> Box<GqlErrorBuilder> {
         let token = self.peek();
         let span = token.span;
@@ -1493,18 +1854,12 @@ impl<'a> Parser<'a> {
                 | Keyword::For
                 | Keyword::Unwind,
             ) => {
-                let mut b = err(
-                    GqlErrorKind::Syntax,
-                    span,
-                    format!(
-                        "{} after RETURN: RETURN ends the query",
-                        token.text.to_ascii_uppercase()
-                    ),
-                );
-                b = b.alternative(
-                    "put every MATCH before the one RETURN, or chain Gremlin steps after gql()",
-                );
-                return Box::new(b);
+                return self.clause_after_return();
+            }
+            Some(Keyword::Call)
+                if matches!(self.nth(1).kind, TokenKind::LParen | TokenKind::LBrace) =>
+            {
+                return self.clause_after_return();
             }
             _ => {}
         }
@@ -1522,8 +1877,23 @@ impl<'a> Parser<'a> {
         if !has_limit {
             expected.push("LIMIT");
         }
-        expected.push("end of input");
+        expected.push(end);
         self.unexpected(&expected)
+    }
+
+    /// The error for a clause after a complete result statement.
+    fn clause_after_return(&self) -> Box<GqlErrorBuilder> {
+        let token = self.peek();
+        let b = err(
+            GqlErrorKind::Syntax,
+            token.span,
+            format!(
+                "{} after RETURN: RETURN ends the query",
+                token.text.to_ascii_uppercase()
+            ),
+        )
+        .alternative("put every MATCH before the one RETURN, or chain Gremlin steps after gql()");
+        Box::new(b)
     }
 
     fn missing_return(&self) -> Box<GqlErrorBuilder> {
@@ -2700,7 +3070,9 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => self.map_expr(),
             TokenKind::Ident if self.record_ahead() => self.record_constructor(),
             TokenKind::Keyword(Keyword::Case) => self.case_expr(),
-            TokenKind::Keyword(Keyword::Exists) => self.exists_expr(),
+            // One arm for `EXISTS`, `COUNT {` and `COLLECT {`: every arm costs a stack slot of
+            // this recursive function.
+            _ if self.keyword_subquery_ahead() => self.keyword_subquery(),
             TokenKind::Ident | TokenKind::QuotedIdent(_) | TokenKind::Keyword(_)
                 if self.nth(1).kind == TokenKind::LParen =>
             {
@@ -2725,29 +3097,6 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::True) => ExprKind::Literal(Literal::Bool(true)),
             TokenKind::Keyword(Keyword::False) => ExprKind::Literal(Literal::Bool(false)),
             TokenKind::Keyword(Keyword::Null) => ExprKind::Literal(Literal::Null),
-            TokenKind::Ident
-                if self.nth(1).kind == TokenKind::LBrace
-                    && ["count", "collect"]
-                        .iter()
-                        .any(|n| n.eq_ignore_ascii_case(token.text)) =>
-            {
-                let alternative = if token.text.eq_ignore_ascii_case("count") {
-                    "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
-                     MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
-                     count(s). To test only whether the pattern matches (COUNT { .. } > 0), use \
-                     EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN \
-                     p.name"
-                } else {
-                    "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
-                     as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
-                     RETURN p.name, collect_list(s.name)"
-                };
-                return Err(self.not_yet(
-                    span.to(self.nth(1).span),
-                    &format!("a {} {{ }} subquery", token.text.to_ascii_uppercase()),
-                    alternative,
-                ));
-            }
             TokenKind::Ident | TokenKind::QuotedIdent(_) => ExprKind::Variable(Identifier {
                 name: token.name().unwrap_or("").to_string(),
                 span,
@@ -2882,22 +3231,31 @@ impl<'a> Parser<'a> {
             where_clause: None,
             span,
         };
-        self.subquery(SubqueryForm::PatternPredicate, vec![clause], span, inner)
+        let body = (vec![clause], None);
+        self.subquery(
+            SubqueryKind::Exists,
+            SubqueryForm::PatternPredicate,
+            body,
+            span,
+            inner,
+        )
     }
 
     /// The subquery expression of a parsed body whose own trees are at most `inner` high.
     fn subquery(
         &self,
+        kind: SubqueryKind,
         form: SubqueryForm,
-        matches: Vec<MatchClause>,
+        (matches, query): SubqueryBody,
         span: Span,
         inner: usize,
     ) -> PResult<(Expr, usize)> {
         let height = self.height(inner, span)?;
         let subquery = SubqueryExpr {
-            kind: SubqueryKind::Exists,
+            kind,
             form,
             matches,
+            query,
             span,
         };
         Ok((
@@ -2920,16 +3278,52 @@ impl<'a> Parser<'a> {
         if form == SubqueryForm::Parens && !self.subquery_body_ahead() {
             return Err(self.exists_on_value(keyword));
         }
+        self.subquery_after(SubqueryKind::Exists, form, keyword, &close, close_text)
+    }
+
+    /// Whether `EXISTS`, `COUNT {` or `COLLECT {` starts here.
+    fn keyword_subquery_ahead(&self) -> bool {
+        let token = self.peek();
+        token.keyword() == Some(Keyword::Exists)
+            || (self.nth(1).kind == TokenKind::LBrace && counted_kind(token).is_some())
+    }
+
+    /// `EXISTS ..`, or `COUNT { .. }` / `COLLECT { .. }` (openCypher compatibility forms, stage
+    /// 2d), at the word.
+    fn keyword_subquery(&mut self) -> PResult<(Expr, usize)> {
+        let Some(kind) = counted_kind(self.peek()) else {
+            return self.exists_expr();
+        };
+        let keyword = self.advance().span;
+        self.subquery_after(
+            kind,
+            SubqueryForm::Braces,
+            keyword,
+            &TokenKind::RBrace,
+            "`}`",
+        )
+    }
+
+    /// The subquery whose word (`EXISTS`, `COUNT`, `COLLECT`) is `keyword`, at its opening
+    /// bracket.
+    fn subquery_after(
+        &mut self,
+        kind: SubqueryKind,
+        form: SubqueryForm,
+        keyword: Span,
+        close: &TokenKind,
+        close_text: &'static str,
+    ) -> PResult<(Expr, usize)> {
         self.advance();
         self.enter()?;
         let saved_height = std::mem::replace(&mut self.inner_height, 0);
         let saved_variables = self.variables.len();
-        let result = self.subquery_body(form, &close, close_text);
+        let result = self.subquery_body(kind, form, close, close_text);
         let inner = std::mem::replace(&mut self.inner_height, saved_height);
         self.variables.truncate(saved_variables);
         self.leave();
-        let matches = result?;
-        self.subquery(form, matches, keyword.to(self.last), inner)
+        let body = result?;
+        self.subquery(kind, form, body, keyword.to(self.last), inner)
     }
 
     /// After `EXISTS (`: whether the next token can start a body (a pattern, `MATCH`, a clause
@@ -2989,14 +3383,19 @@ impl<'a> Parser<'a> {
         Box::new(b)
     }
 
-    /// The body of `EXISTS { .. }` / `EXISTS ( .. )` after its opening bracket, through `close`:
-    /// `MATCH` clauses, or a comma-separated pattern list with an optional `WHERE`.
+    /// The body of `EXISTS { .. }` / `EXISTS ( .. )` (`COUNT { .. }`, `COLLECT { .. }`) after
+    /// its opening bracket, through `close`: `MATCH` clauses, a comma-separated pattern list
+    /// with an optional `WHERE`, or in braces a whole query ending in `RETURN` (stage 2d).
     fn subquery_body(
         &mut self,
+        kind: SubqueryKind,
         form: SubqueryForm,
         close: &TokenKind,
         close_text: &'static str,
-    ) -> PResult<Vec<MatchClause>> {
+    ) -> PResult<SubqueryBody> {
+        if form == SubqueryForm::Braces && self.whole_query_body() {
+            return self.whole_query_subquery(kind);
+        }
         let mut matches = Vec::new();
         let block = matches!(
             self.peek().keyword(),
@@ -3007,7 +3406,7 @@ impl<'a> Parser<'a> {
                 if self.at_kw(Keyword::Optional) {
                     return Err(self.not_yet(
                         self.peek().span.to(self.nth(1).span),
-                        "OPTIONAL MATCH inside EXISTS",
+                        &format!("OPTIONAL MATCH inside {}", kind_name(kind)),
                         "leave the OPTIONAL MATCH out: an optional part never changes whether \
                          EXISTS finds a match",
                     ));
@@ -3015,7 +3414,7 @@ impl<'a> Parser<'a> {
                 matches.push(self.match_clause()?);
             }
         } else {
-            if let Some(e) = self.subquery_clause_error(form) {
+            if let Some(e) = self.subquery_clause_error(kind, form) {
                 return Err(e);
             }
             self.check_match_prefix()?;
@@ -3044,9 +3443,9 @@ impl<'a> Parser<'a> {
             });
         }
         if self.eat(close).is_some() {
-            return Ok(matches);
+            return Ok((matches, None));
         }
-        if let Some(e) = self.subquery_clause_error(form) {
+        if let Some(e) = self.subquery_clause_error(kind, form) {
             return Err(e);
         }
         let mut expected = Vec::new();
@@ -3060,9 +3459,81 @@ impl<'a> Parser<'a> {
         Err(self.unexpected(&expected))
     }
 
-    /// The "not yet" error for a clause other than `MATCH` inside a subquery body (a nested
-    /// query: stage 2d).
-    fn subquery_clause_error(&self, form: SubqueryForm) -> Option<Box<GqlErrorBuilder>> {
+    /// After the `{` of a subquery: whether its body is a whole query (stage 2d) rather than
+    /// `MATCH` clauses or a pattern list: a bounded token scan up to the closing `}` finds a
+    /// clause keyword other than `MATCH` at the body's own bracket level (`WITH` after `STARTS`
+    /// / `ENDS` is an operator). `ORDER BY`, `OFFSET`, `LIMIT`, `UNION` and `NEXT` without a
+    /// `RETURN` keep the stage 2b errors.
+    fn whole_query_body(&self) -> bool {
+        // The brackets open inside the body; a closing one that does not match (an unclosed
+        // group in a broken pattern) ends the scan: the stage 2b parse reports it.
+        let mut open: Vec<&TokenKind> = Vec::new();
+        let mut i = self.pos;
+        loop {
+            let token = self.token_at(i);
+            match &token.kind {
+                kind @ (TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => {
+                    open.push(kind);
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    let matching = match open.pop() {
+                        Some(TokenKind::LParen) => token.kind == TokenKind::RParen,
+                        Some(TokenKind::LBracket) => token.kind == TokenKind::RBracket,
+                        Some(_) => token.kind == TokenKind::RBrace,
+                        None => false,
+                    };
+                    if !matching {
+                        return false;
+                    }
+                }
+                TokenKind::Eof => return false,
+                TokenKind::Keyword(keyword) if open.is_empty() => match keyword {
+                    Keyword::Optional
+                    | Keyword::Let
+                    | Keyword::Filter
+                    | Keyword::For
+                    | Keyword::Unwind
+                    | Keyword::Return
+                    | Keyword::Call => return true,
+                    Keyword::With => {
+                        let operator = i.checked_sub(1).is_some_and(|before| {
+                            matches!(
+                                self.token_at(before).keyword(),
+                                Some(Keyword::Starts | Keyword::Ends)
+                            )
+                        });
+                        if !operator {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            i = match i.checked_add(1) {
+                Some(next) => next,
+                None => return false,
+            };
+        }
+    }
+
+    /// A whole-query body of `EXISTS` / `COUNT` / `COLLECT { .. }` after its `{`, through `}`.
+    fn whole_query_subquery(&mut self, kind: SubqueryKind) -> PResult<SubqueryBody> {
+        let ctx = Body::Subquery(kind);
+        let body = self.composite(ctx)?;
+        if self.eat(&TokenKind::RBrace).is_none() {
+            return Err(self.after_query(&body, ctx));
+        }
+        Ok((Vec::new(), Some(body)))
+    }
+
+    /// The "not yet" error for a clause other than `MATCH` inside a pattern body or a
+    /// parenthesized body (braces take a whole query, stage 2d).
+    fn subquery_clause_error(
+        &self,
+        kind: SubqueryKind,
+        form: SubqueryForm,
+    ) -> Option<Box<GqlErrorBuilder>> {
         let token = self.peek();
         let word = match token.keyword()? {
             Keyword::With
@@ -3075,12 +3546,13 @@ impl<'a> Parser<'a> {
             | Keyword::Skip
             | Keyword::Limit => token.text.to_ascii_uppercase(),
             Keyword::Order => "ORDER BY".to_string(),
+            Keyword::Call | Keyword::Union | Keyword::Next => token.text.to_ascii_uppercase(),
             _ => return None,
         };
         let open = if form == SubqueryForm::Parens {
-            "EXISTS ( )"
+            format!("{} ( )", kind_name(kind))
         } else {
-            "EXISTS { }"
+            format!("{} {{ }}", kind_name(kind))
         };
         Some(self.not_yet(
             token.span,
@@ -4021,6 +4493,99 @@ fn unsupported_function(
         )
     };
     Box::new(err(kind, span, message).alternative(unsupported.alternative))
+}
+
+/// The "not yet" error of a whole-query subquery body that ends without `RETURN`, at its first
+/// clause other than `MATCH` (`span`, its keywords `word`).
+fn body_without_return(span: Span, word: &str, kind: SubqueryKind) -> Box<GqlErrorBuilder> {
+    let b = err(
+        GqlErrorKind::NotYet,
+        span,
+        format!(
+            "{word} in the body of {} {{ }} without RETURN is not yet supported in this version",
+            kind_name(kind)
+        ),
+    )
+    .alternative(
+        "end the body with RETURN (a body of other clauses than MATCH is a whole query), or \
+         write only MATCH clauses, as in MATCH (p:person) WHERE EXISTS { MATCH \
+         (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name",
+    );
+    Box::new(b)
+}
+
+/// Whether `keyword` starts a pipeline clause other than `MATCH`, `RETURN` and `CALL`.
+fn stage_keyword(keyword: Option<Keyword>) -> bool {
+    matches!(
+        keyword,
+        Some(
+            Keyword::Optional
+                | Keyword::With
+                | Keyword::Let
+                | Keyword::Filter
+                | Keyword::For
+                | Keyword::Unwind
+        )
+    )
+}
+
+/// The word of a subquery kind, for messages.
+fn kind_name(kind: SubqueryKind) -> &'static str {
+    match kind {
+        SubqueryKind::Exists => "EXISTS",
+        SubqueryKind::Count => "COUNT",
+        SubqueryKind::Collect => "COLLECT",
+    }
+}
+
+/// The subquery kind a word before `{` names: `COUNT` or `COLLECT` (contextual words, any
+/// case).
+fn counted_kind(token: &Token<'_>) -> Option<SubqueryKind> {
+    if is_word(token, "COUNT") {
+        Some(SubqueryKind::Count)
+    } else if is_word(token, "COLLECT") {
+        Some(SubqueryKind::Collect)
+    } else {
+        None
+    }
+}
+
+/// Moves a Cypher importing `WITH` at the start of `query` (an operand of a `CALL { }` body
+/// without a scope clause) into [`LinearQuery::importing`]: a `WITH` of plain variables without
+/// aliases, or of `*` alone, with no `DISTINCT`, `ORDER BY`, `OFFSET`, `LIMIT` or `WHERE`. Any
+/// other first `WITH` stays a clause of the body.
+fn importing_with(query: &mut LinearQuery) {
+    let Some(Stage::With(with)) = query.stages.first() else {
+        return;
+    };
+    let plain = !with.distinct
+        && with.order_by.is_none()
+        && with.offset.is_none()
+        && with.limit.is_none()
+        && with.where_clause.is_none();
+    let variables: Option<Vec<Identifier>> = with
+        .items
+        .iter()
+        .map(|item| match (&item.expr.kind, &item.alias) {
+            (ExprKind::Variable(name), None) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let importing = match (plain, with.star, variables) {
+        (true, Some(star), Some(variables)) if variables.is_empty() => ImportingWith {
+            star: Some(star),
+            variables,
+            span: with.span,
+        },
+        (true, None, Some(variables)) if !variables.is_empty() => ImportingWith {
+            star: None,
+            variables,
+            span: with.span,
+        },
+        _ => return,
+    };
+    query.stages.remove(0);
+    query.importing = Some(importing);
 }
 
 /// Whether `token` is the contextual word `word` (an identifier, any case).

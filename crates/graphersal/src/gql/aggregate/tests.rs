@@ -93,7 +93,15 @@ fn string(text: &str) -> Value<El> {
 fn items(text: &str) -> Vec<Expr> {
     let query = format!("MATCH (n) RETURN {text}");
     match parse(&query) {
-        Ok(parsed) => parsed.ret.items.into_iter().map(|item| item.expr).collect(),
+        Ok(parsed) => parsed
+            .body
+            .first
+            .first
+            .ret
+            .items
+            .into_iter()
+            .map(|item| item.expr)
+            .collect(),
         Err(e) => panic!("{query:?} does not parse: {e}"),
     }
 }

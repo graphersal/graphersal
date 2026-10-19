@@ -2186,3 +2186,58 @@ fn a_projection_beside_an_aggregate_reads_only_grouping_keys() {
     // A comprehension variable is no grouping key and needs none.
     ok("MATCH (n) RETURN [x IN collect_list(n.a) WHERE x > 1 | x * 2] AS l");
 }
+
+/// Stage 2d.T1: the composite queries, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
+/// bodies parse; the binder refuses them "not yet" until they bind (2d.T2, 2d.T5c), at their
+/// keyword or their whole text.
+#[test]
+fn stage_2d_constructs_parse_and_are_not_yet_bound() {
+    for (query, text, what) in [
+        (
+            "MATCH (a) RETURN a.x AS x UNION ALL MATCH (b) RETURN b.x AS x",
+            "UNION ALL",
+            "UNION",
+        ),
+        (
+            "MATCH (a) RETURN a NEXT MATCH (a)-->(b) RETURN b",
+            "NEXT",
+            "NEXT",
+        ),
+        (
+            "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b",
+            "CALL (a) { MATCH (a)-->(b) RETURN b }",
+            "CALL { }",
+        ),
+        (
+            "MATCH (a) OPTIONAL CALL { WITH a RETURN a AS b } RETURN b",
+            "OPTIONAL CALL { WITH a RETURN a AS b }",
+            "OPTIONAL CALL { }",
+        ),
+        (
+            "MATCH (a) WHERE COUNT { (a)-->() } > 1 RETURN a",
+            "COUNT { (a)-->() }",
+            "COUNT { }",
+        ),
+        (
+            "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS names",
+            "COLLECT { MATCH (a)-->(b) RETURN b.name }",
+            "COLLECT { }",
+        ),
+        (
+            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) RETURN b } RETURN a",
+            "EXISTS { MATCH (a)-->(b) RETURN b }",
+            "EXISTS { } body that is a whole query",
+        ),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(what), "{query}: {}", f.message);
+        assert!(f.message.contains("not yet supported"), "{}", f.message);
+        assert!(f.alternative.is_some(), "{query}");
+    }
+    // A pattern comprehension and EXISTS with a body of MATCH clauses bind as before.
+    ok("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE b.x > 1 } RETURN [(a)-->(c) | c.x] AS l");
+}

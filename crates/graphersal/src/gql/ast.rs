@@ -6,13 +6,13 @@
 //!
 //! Stage 1a covers `MATCH` (comma-separated path patterns, optional `WHERE`), `RETURN`
 //! (`DISTINCT`, items with `AS`, `*`), `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`. Stage 1b adds the
-//! linear pipeline of clauses before `RETURN` ([`Query::stages`]: `[OPTIONAL] MATCH`, `WITH`,
+//! linear pipeline of clauses before `RETURN` ([`LinearQuery::stages`]: `[OPTIONAL] MATCH`, `WITH`,
 //! `LET`, `FILTER`), quantified edges ([`EdgePattern::quantifier`]), path variables
 //! ([`PathPattern::variable`]) and aggregate calls (an [`ExprKind::FunctionCall`] of an aggregate
 //! function, `DISTINCT` and `count(*)` included). A query written in the 1a subset has exactly
 //! the 1a tree: every `MATCH` a non-optional [`Stage::Match`], no path variable, no quantifier.
 //! Stage 2a adds `FOR` / Cypher `UNWIND` ([`Stage::For`]) and queries that start with `FOR`,
-//! `LET`, `WITH`, `FILTER` or `RETURN` (no `MATCH`: [`Query::stages`] may be empty or start
+//! `LET`, `WITH`, `FILTER` or `RETURN` (no `MATCH`: [`LinearQuery::stages`] may be empty or start
 //! with another stage).
 //! Stage 2b adds the `EXISTS` predicate and Cypher pattern predicates ([`ExprKind::Subquery`]:
 //! `EXISTS { MATCH .. }`, `EXISTS { pattern }`, `EXISTS ( .. )`, `(a)-[:T]->(b)` where an
@@ -21,15 +21,112 @@
 //! ([`ExprKind::MapProjection`], `v {.name, .*, x, k: expr}`), list comprehensions
 //! ([`ExprKind::ListComprehension`], `[x IN list WHERE cond | expr]`) and pattern comprehensions
 //! ([`ExprKind::PatternComprehension`], `[(a)-[:T]->(b) WHERE cond | expr]`).
+//! Stage 2d adds composite queries and inline subqueries: a [`Query`] is a [`CompositeQuery`],
+//! blocks of [`LinearQuery`] operands joined by `UNION [ALL | DISTINCT]` ([`QueryBlock`]),
+//! chained by `NEXT` ([`NextBlock`]), and a pipeline stage may be `[OPTIONAL] CALL (vars | *)
+//! { query }` ([`Stage::Call`], [`CallClause`]; Cypher's importing `CALL { WITH a .. }` as
+//! [`LinearQuery::importing`]). A linear query has exactly the tree of the stages before:
+//! [`Query`] dereferences to its first linear query, which is the whole query then.
 
 use super::lexer::Span;
 
-/// A query: a pipeline of clauses, then the result statement.
+/// A query: a [`CompositeQuery`] and the text it was parsed from. It dereferences to its first
+/// [`LinearQuery`], which is the whole query when [`Query::is_linear`] holds (every query of the
+/// stages before 2d).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Query {
     /// The query text as given (spans index into it).
     pub(crate) source: String,
-    /// Every `[OPTIONAL] MATCH` clause in text order ([`Stage::Match`] indexes into it).
+    /// The statements: one linear query, or `UNION` / `NEXT` compositions of several.
+    pub(crate) body: Box<CompositeQuery>,
+}
+
+impl Query {
+    /// The source text of `span` (empty when the span does not fit the source, never a panic).
+    pub(crate) fn text(&self, span: Span) -> &str {
+        self.source.get(span.start..span.end).unwrap_or("")
+    }
+
+    /// Whether the query is one linear query (no `UNION`, no `NEXT`).
+    pub(crate) fn is_linear(&self) -> bool {
+        self.body.is_linear()
+    }
+}
+
+impl std::ops::Deref for Query {
+    type Target = LinearQuery;
+
+    /// The first linear query (the whole query when it is linear).
+    fn deref(&self) -> &LinearQuery {
+        &self.body.first.first
+    }
+}
+
+/// `block (NEXT block)*` (stage 2d): the top level of a query and the body of a `CALL`. `NEXT`
+/// binds looser than `UNION`, so each block is a whole `UNION` chain.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompositeQuery {
+    /// The first block.
+    pub(crate) first: QueryBlock,
+    /// The `NEXT` blocks in text order, each reading the result of the one before.
+    pub(crate) next: Vec<NextBlock>,
+    /// From the first clause to the end of the last block (a trailing `;` excluded).
+    pub(crate) span: Span,
+}
+
+impl CompositeQuery {
+    /// Whether it is one linear query (no `UNION`, no `NEXT`).
+    pub(crate) fn is_linear(&self) -> bool {
+        self.next.is_empty() && self.first.unions.is_empty()
+    }
+}
+
+/// `linear (UNION [ALL | DISTINCT] linear)*` (stage 2d).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QueryBlock {
+    /// The first operand.
+    pub(crate) first: LinearQuery,
+    /// The further operands in text order, each with the `UNION` before it.
+    pub(crate) unions: Vec<UnionOperand>,
+    /// From the first operand to the end of the last.
+    pub(crate) span: Span,
+}
+
+/// One `UNION [ALL | DISTINCT] linear` of a [`QueryBlock`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UnionOperand {
+    /// Whether duplicates are kept (`UNION ALL`) or removed (`UNION`, `UNION DISTINCT`).
+    pub(crate) kind: UnionKind,
+    /// The keywords: `UNION`, `UNION ALL` or `UNION DISTINCT`.
+    pub(crate) keyword: Span,
+    /// The operand after them.
+    pub(crate) query: LinearQuery,
+}
+
+/// The set semantics of a `UNION`. Closed by definition: GQL's `UNION` has exactly these two
+/// forms (a bare `UNION` is `UNION DISTINCT`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnionKind {
+    /// `UNION` or `UNION DISTINCT`: duplicate records removed.
+    Distinct,
+    /// `UNION ALL`: every record kept.
+    All,
+}
+
+/// `NEXT block` (stage 2d): the block reads the records the block before returned.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NextBlock {
+    /// The `NEXT` keyword.
+    pub(crate) keyword: Span,
+    /// The block after it.
+    pub(crate) block: QueryBlock,
+}
+
+/// A linear query: a pipeline of clauses, then the result statement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LinearQuery {
+    /// Every `[OPTIONAL] MATCH` clause of this linear query in text order ([`Stage::Match`]
+    /// indexes into it; a `CALL` body holds its own).
     pub(crate) matches: Vec<MatchClause>,
     /// The clauses before `RETURN` in text order (empty for a query that is only a result
     /// statement). A 1a / 1b query starts with a [`Stage::Match`]; a 2a query may start with
@@ -44,15 +141,26 @@ pub(crate) struct Query {
     pub(crate) offset: Option<CountClause>,
     /// `LIMIT n`.
     pub(crate) limit: Option<CountClause>,
-    /// The whole query.
+    /// Cypher's importing `WITH` (stage 2d): set only on an operand of the first block of a
+    /// `CALL` body written without a variable scope clause ([`CallScope::Implicit`]) whose first
+    /// clause is `WITH` of plain variables or `*` alone (no alias, expression, `DISTINCT`,
+    /// `ORDER BY`, `OFFSET`, `LIMIT` or `WHERE`). That `WITH` is not in [`Self::stages`]: it
+    /// names the outer variables the operand imports.
+    pub(crate) importing: Option<ImportingWith>,
+    /// The whole linear query.
     pub(crate) span: Span,
 }
 
-impl Query {
-    /// The source text of `span` (empty when the span does not fit the source, never a panic).
-    pub(crate) fn text(&self, span: Span) -> &str {
-        self.source.get(span.start..span.end).unwrap_or("")
-    }
+/// Cypher's importing `WITH a, b` / `WITH *` at the start of a `CALL { }` body (an alias of the
+/// GQL variable scope clause `CALL (a, b) { }` / `CALL (*) { }`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ImportingWith {
+    /// `WITH *`: every variable in scope.
+    pub(crate) star: Option<Span>,
+    /// The imported variables in written order (empty with `*`).
+    pub(crate) variables: Vec<Identifier>,
+    /// From `WITH` to its last item.
+    pub(crate) span: Span,
 }
 
 /// A name as written: an identifier, a back-quoted identifier (unescaped) or a keyword used as a
@@ -68,7 +176,7 @@ pub(crate) struct Identifier {
 /// One clause of the pipeline before `RETURN`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Stage {
-    /// `[OPTIONAL] MATCH`: the index of the clause in [`Query::matches`].
+    /// `[OPTIONAL] MATCH`: the index of the clause in [`LinearQuery::matches`].
     Match(usize),
     /// `WITH ...` (Cypher's form of the GQL linear pipeline).
     With(Box<WithClause>),
@@ -78,6 +186,39 @@ pub(crate) enum Stage {
     Filter(FilterClause),
     /// `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET i]`, Cypher `UNWIND expr AS x`.
     For(ForClause),
+    /// `[OPTIONAL] CALL (vars | *) { query }` and Cypher `CALL { .. }` (stage 2d).
+    Call(Box<CallClause>),
+}
+
+/// `[OPTIONAL] CALL [(vars) | (*)] { query }`: an inline subquery run once per incoming row
+/// (stage 2d, design item 8).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CallClause {
+    /// `OPTIONAL CALL`: the `OPTIONAL` keyword.
+    pub(crate) optional: Option<Span>,
+    /// The variable scope clause.
+    pub(crate) scope: CallScope,
+    /// The body: a whole query ending in `RETURN` (the parser refuses a body without one).
+    pub(crate) body: Box<CompositeQuery>,
+    /// From `OPTIONAL` (or `CALL`) to the closing `}`.
+    pub(crate) span: Span,
+}
+
+/// The variable scope clause of a [`CallClause`]: which outer variables the body reads.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CallScope {
+    /// `CALL (a, b) { }`, `CALL () { }`: exactly these variables (none for `()`).
+    Variables {
+        /// The imported variables in written order.
+        variables: Vec<Identifier>,
+        /// From `(` to `)`.
+        span: Span,
+    },
+    /// `CALL (*) { }`: every variable in scope (the span of `(*)`).
+    All(Span),
+    /// `CALL { }` without a scope clause: imports nothing (Neo4j Cypher 25), except what a
+    /// Cypher importing `WITH` names ([`LinearQuery::importing`]).
+    Implicit,
 }
 
 /// `[OPTIONAL] MATCH pattern, pattern, ... [WHERE expr]`.
@@ -480,28 +621,38 @@ pub(crate) struct SubqueryExpr {
     pub(crate) form: SubqueryForm,
     /// The body: one or more non-optional `MATCH` clauses, each with its own `WHERE`. The
     /// pattern forms (`EXISTS { pattern, .. WHERE c }`, a pattern predicate) are one clause
-    /// whose span is the pattern list (and its `WHERE`).
+    /// whose span is the pattern list (and its `WHERE`). Empty when [`Self::query`] holds the
+    /// body.
     pub(crate) matches: Vec<MatchClause>,
-    /// From `EXISTS` to the closing bracket; for a pattern predicate the pattern.
+    /// A whole-query body (stage 2d): `{ .. }` holding other clauses than `MATCH` (`OPTIONAL
+    /// MATCH`, `WITH`, `LET`, `FILTER`, `FOR`, `CALL`, ...), ending in `RETURN`, possibly a
+    /// `UNION` / `NEXT` composition. `None` for a body of `MATCH` clauses only, which is
+    /// [`Self::matches`] exactly as in stage 2b.
+    pub(crate) query: Option<Box<CompositeQuery>>,
+    /// From `EXISTS` (`COUNT`, `COLLECT`) to the closing bracket; for a pattern predicate the
+    /// pattern.
     pub(crate) span: Span,
 }
 
-/// What a [`SubqueryExpr`] computes. Cypher's `COUNT { }` would be another kind; it is not
-/// supported yet (refused by the parser).
+/// What a [`SubqueryExpr`] computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubqueryKind {
     /// TRUE when the body has at least one match, else FALSE (never `NULL`).
     Exists,
-    /// The list of one value per match of the body (a [`PatternComprehension`], stage 2c): the
-    /// parser never writes it; the binder binds a pattern comprehension as a subquery of this
-    /// kind.
+    /// The list of one value per match of the body: a [`PatternComprehension`] (stage 2c; the
+    /// binder binds it as a subquery of this kind) or the openCypher `COLLECT { .. RETURN x }`
+    /// (stage 2d, [`SubqueryForm::Braces`]).
     Collect,
+    /// The openCypher `COUNT { .. }` (stage 2d): the number of matches (or of returned rows) of
+    /// the body.
+    Count,
 }
 
 /// The spelling of a [`SubqueryExpr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubqueryForm {
-    /// `EXISTS { MATCH .. }` or `EXISTS { pattern, .. [WHERE cond] }`.
+    /// `EXISTS { MATCH .. }` or `EXISTS { pattern, .. [WHERE cond] }`; also `COUNT { .. }` and
+    /// `COLLECT { .. }`.
     Braces,
     /// `EXISTS ( MATCH .. )` or `EXISTS ( pattern, .. [WHERE cond] )`.
     Parens,
@@ -783,8 +934,7 @@ mod tests {
             },
             span: span(17, 23),
         };
-        let query = Query {
-            source: source.into(),
+        let linear = LinearQuery {
             matches: vec![MatchClause {
                 optional: false,
                 patterns: vec![PathPattern {
@@ -820,8 +970,22 @@ mod tests {
             order_by: None,
             offset: None,
             limit: None,
+            importing: None,
             span: span(0, 23),
         };
+        let query = Query {
+            source: source.into(),
+            body: Box::new(CompositeQuery {
+                first: QueryBlock {
+                    first: linear,
+                    unions: Vec::new(),
+                    span: span(0, 23),
+                },
+                next: Vec::new(),
+                span: span(0, 23),
+            }),
+        };
+        assert!(query.is_linear());
         assert_eq!(query.text(item.span), "a.name");
         assert_eq!(query.text(query.matches[0].patterns[0].span), "(a)");
         assert_eq!(query.text(span(20, 99)), "");
