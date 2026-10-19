@@ -671,7 +671,24 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 ));
             }
         },
+        // The binder refuses them until 2c.T2 / 2c.T3 (`bind::not_yet_expression`).
+        ExprKind::MapProjection(_) => return Err(not_yet_2c("a map projection", span)),
+        ExprKind::ListComprehension(_) => {
+            return Err(not_yet_2c("a list comprehension", span));
+        }
+        ExprKind::PatternComprehension(_) => {
+            return Err(not_yet_2c("a pattern comprehension", span));
+        }
     })
+}
+
+/// The evaluator's refusal of a stage 2c expression the binder let through.
+fn not_yet_2c(what: &str, span: Span) -> EvalError {
+    EvalError::new(
+        status::NOT_SUPPORTED,
+        format!("{what} is not yet supported in this version"),
+        span,
+    )
 }
 
 #[inline(never)]

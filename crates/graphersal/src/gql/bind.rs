@@ -177,8 +177,8 @@ use std::rc::Rc;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy,
     Identifier, LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern,
-    OrderBy, OrdinalKind, Quantifier, Query, ReturnItem, SortDirection, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, WithClause,
+    OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, ReturnItem, SortDirection, Stage,
+    SubqueryExpr, SubqueryForm, SubqueryKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -736,10 +736,55 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
             }
         }
         ExprKind::FunctionCall { args, .. } => args.iter().for_each(f),
-        // The body of a subquery is a nested scope, bound on its own, not a child expression of
-        // this scope.
-        ExprKind::Subquery(_) => {}
+        ExprKind::MapProjection(projection) => {
+            f(&projection.target);
+            for item in &projection.items {
+                if let ProjectionItem::Entry(entry) = item {
+                    f(&entry.value);
+                }
+            }
+        }
+        ExprKind::ListComprehension(comprehension) => {
+            f(&comprehension.list);
+            if let Some(filter) = &comprehension.filter {
+                f(filter);
+            }
+            if let Some(map) = &comprehension.map {
+                f(map);
+            }
+        }
+        // The body of a subquery (a pattern comprehension too) is a nested scope, bound on its
+        // own, not a child expression of this scope.
+        ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
     }
+}
+
+/// The "not yet" refusal of a stage 2c expression (a map projection, a list or pattern
+/// comprehension), which the parser reads but the binder and the evaluator do not support yet
+/// (2c.T2 / 2c.T3); `None` for every other expression.
+fn not_yet_expression(expr: &Expr) -> Option<Box<GqlErrorBuilder>> {
+    let (what, alternative) = match &expr.kind {
+        ExprKind::MapProjection(_) => (
+            "a map projection (v {.name})",
+            "return the properties one by one, for example RETURN v.name AS name, or build the \
+             map with a record constructor, as in \
+             g.gql(\"MATCH (p:person) RETURN {name: p.name, age: p.age} AS m\")",
+        ),
+        ExprKind::ListComprehension(_) => (
+            "a list comprehension [x IN list | ...]",
+            "Gremlin unfold() and fold(), for example \
+             g.inject([1, 2, 3]).unfold().is(P.gt(1)).fold(), or FOR in gql(), as in \
+             g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN collect_list(x) AS l\")",
+        ),
+        ExprKind::PatternComprehension(_) => (
+            "a pattern comprehension [(a)-->(b) | b.name]",
+            "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), as in \
+             g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
+             collect_list(s.name) AS l\")",
+        ),
+        _ => return None,
+    };
+    Some(not_yet(expr.span, what, alternative))
 }
 
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
@@ -1905,6 +1950,13 @@ impl<'q> Binder<'q> {
                     refs.bindings.extend_from_slice(&bound.imports);
                 }
             }
+            ExprKind::MapProjection(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => {
+                if let Some(error) = not_yet_expression(expr) {
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -2255,6 +2307,15 @@ impl<'q> Binder<'q> {
             // The body is bound (and substituted) on its own ([`BoundQuery::subqueries`]); the
             // expression keeps the written subquery as a reference to it.
             ExprKind::Subquery(_) => return Ok((expr.clone(), Shape::LEAF)),
+            // `resolve` refuses them first (2c.T2 / 2c.T3 bind them).
+            ExprKind::MapProjection(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => {
+                return match not_yet_expression(expr) {
+                    Some(error) => Err(error),
+                    None => Ok((expr.clone(), shape_of(expr))),
+                };
+            }
         };
         Ok((
             Expr {

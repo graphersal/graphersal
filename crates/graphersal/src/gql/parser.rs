@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 2b): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 2c): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -41,6 +41,10 @@
 //! exists     := EXISTS ('{' body '}' | '(' body ')')
 //! body       := match+ | path (',' path)* (WHERE expr)?   -- MATCH without OPTIONAL (stage 2b)
 //! pattern_pred := path                 -- where an expression stands; found by lookahead
+//! map_proj   := var '{' (proj_item (',' proj_item)*)? '}'     -- Cypher map projection
+//! proj_item  := '.' name | '.' '*' | var | name ':' expr
+//! list_comp  := '[' var IN expr (WHERE expr)? ('|' expr)? ']'
+//! pattern_comp := '[' path (WHERE expr)? '|' expr ']'      -- path with an edge, `p =` allowed
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
@@ -49,9 +53,10 @@
 //! `IN`),
 //! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
 //! `a = b IS NULL` is `a = (b IS NULL)`) < additive (`+ - ||`) < multiplicative (`* / %`) <
-//! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`) <
-//! primary (literals, `[list]`, `{map}`, `$param`, variables, function calls, `CASE`, `( )`,
-//! `EXISTS { }` / `EXISTS ( )`, pattern predicates).
+//! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`, a map
+//! projection `v {..}`) < primary (literals, `[list]`, `{map}`, `$param`, variables, function
+//! calls, `CASE`, `( )`, `EXISTS { }` / `EXISTS ( )`, pattern predicates, list and pattern
+//! comprehensions).
 //! A minus directly before an integer or float literal is folded into the literal, so
 //! `-9223372036854775808` is `i64::MIN`; the same digits without the minus are out of range.
 //!
@@ -143,6 +148,21 @@
 //!   parenthesized expression. So `(a) - (b)` and `(a)-1` stay arithmetic, `(a)<-(b)` stays
 //!   `a < -b`, `(a) - [1]` stays list arithmetic; `(a)--(b)`, `(a)-->(b)` and `(a)-(b)-->(c)` are
 //!   patterns (Cypher's reading wins over `a - -b`, which is written without parentheses).
+//! - **Map projections and comprehensions** (stage 2c, design item 7; openCypher compatibility
+//!   forms, the GQL counterpart of a map projection is the record constructor `{k: expr}`): a
+//!   variable followed by `{` is a map projection ([`MapProjection`]; items `.key`, `.*`, a
+//!   variable, `key: expr`; a keyword as a variable item must be back-quoted). `[` followed by a
+//!   name and `IN` is a list comprehension ([`ListComprehension`]), so a list whose first item is
+//!   a membership test is written with parentheses, `[(x IN l), y]`. `[` followed by a path
+//!   pattern (the pattern-predicate lookahead, after an optional `p =`) whose end is followed by
+//!   `WHERE` or `|` is a pattern comprehension ([`PatternComprehension`]); without them the
+//!   bracket stays a list literal holding a pattern predicate, as in stage 2b. A token scan
+//!   ([`Parser::pattern_end`]) finds the pattern's end, no backtracking. Inside the list and the
+//!   `WHERE` of a comprehension, a `|` at the comprehension's own bracket level ends the part
+//!   instead of continuing a label expression (`[x IN l WHERE x:A | x.name]`); a label
+//!   alternative there is written in parentheses, `x:(A|B)`. Cypher's `all` / `any` / `none` /
+//!   `single(x IN l WHERE c)` and `reduce(..)` stay "not yet supported", naming the
+//!   comprehension form.
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -154,10 +174,10 @@ use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CastTarget, CountClause, EdgeDirection, EdgePattern, Endpoint,
     Expr, ExprKind, FilterClause, ForClause, GroupBy, Identifier, LabelExpr, LabelExprKind,
-    LetBinding, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy,
-    Ordinal, OrdinalKind, PathPattern, PatternStep, Quantifier, Query, ReturnClause, ReturnItem,
-    SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp,
-    WithClause,
+    LetBinding, LetClause, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection,
+    MatchClause, NodePattern, OrderBy, Ordinal, OrdinalKind, PathPattern, PatternComprehension,
+    PatternStep, ProjectionItem, Quantifier, Query, ReturnClause, ReturnItem, SortDirection,
+    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -532,7 +552,13 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "a list function that binds a variable inside the call",
         "test the items in Gremlin after gql(), for example \
          g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\"), or with FOR \
-         in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' RETURN DISTINCT n\")",
+         in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' RETURN DISTINCT n\"); \
+         a list comprehension counts the items a condition keeps (an item whose condition is \
+         NULL is not kept): all(x IN l WHERE c) as size([x IN l WHERE c]) = size(l), \
+         any(x IN l WHERE c) as size([x IN l WHERE c]) > 0, none(x IN l WHERE c) as \
+         size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1; \
+         reduce() folds a list: aggregate its items with FOR, as in \
+         g.gql(\"FOR x IN [1, 2, 3] RETURN sum(x) AS s\")",
     ),
     not_yet_function(
         &["elements"],
@@ -636,6 +662,12 @@ struct Parser<'a> {
     /// pattern filler since the innermost enclosing subquery began: the height of a
     /// [`SubqueryExpr`] is one more, so the `MAX_HEIGHT` bound covers its body too.
     inner_height: usize,
+    /// How many brackets (`(`, `[`, `{`) the consumed tokens leave open.
+    open: usize,
+    /// While the list or the `WHERE` of a comprehension is parsed: the [`Parser::open`] count
+    /// inside its `[`. A `|` at that level ends the part instead of continuing a label
+    /// expression.
+    bar_ends: Option<usize>,
 }
 
 /// How an edge ahead of a node pattern in an expression reads (the pattern-predicate lookahead).
@@ -682,6 +714,8 @@ impl<'a> Parser<'a> {
             pending_minus: None,
             variables: Vec::new(),
             inner_height: 0,
+            open: 0,
+            bar_ends: None,
         }
     }
 
@@ -701,6 +735,15 @@ impl<'a> Parser<'a> {
         let token = self.peek().clone();
         if self.pos < self.tokens.len() && token.kind != TokenKind::Eof {
             self.pos += 1;
+        }
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => {
+                self.open = self.open.saturating_add(1);
+            }
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                self.open = self.open.saturating_sub(1);
+            }
+            _ => {}
         }
         self.last = token.span;
         token
@@ -2042,7 +2085,7 @@ impl<'a> Parser<'a> {
 
     fn label_or(&mut self) -> PResult<(LabelExpr, usize)> {
         let (mut expr, mut height) = self.label_and()?;
-        while self.eat(&TokenKind::Pipe).is_some() {
+        while self.bar_ends != Some(self.open) && self.eat(&TokenKind::Pipe).is_some() {
             let (right, right_height) = self.label_and()?;
             let span = expr.span.to(right.span);
             height = self.height(height.max(right_height), span)?;
@@ -2552,7 +2595,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Property access `.key` and Cypher `:Label` after a primary.
+    /// Property access `.key`, Cypher `:Label` and a map projection `v {..}` after a primary.
     fn postfix(&mut self, mut expr: Expr, mut height: usize) -> PResult<(Expr, usize)> {
         loop {
             match self.peek().kind {
@@ -2594,11 +2637,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 TokenKind::LBrace if matches!(expr.kind, ExprKind::Variable(_)) => {
-                    return Err(self.not_yet(
-                        expr.span.to(self.peek().span),
-                        "a map projection (v {.name})",
-                        "return the properties one by one, for example RETURN v.name AS name",
-                    ));
+                    (expr, height) = self.map_projection(expr, height)?;
                 }
                 _ => return Ok((expr, height)),
             }
@@ -2780,7 +2819,11 @@ impl<'a> Parser<'a> {
     /// parse: `(a) - (b)` and `(a)<-(b)` stay arithmetic / a comparison, `(a)-->(b)`,
     /// `(a)--(b)`, `(a)-[:T]-(b)` and `(a)-(b)-->(c)` are patterns (module docs).
     fn pattern_ahead(&self) -> bool {
-        let mut i = self.pos;
+        self.pattern_ahead_at(self.pos)
+    }
+
+    /// [`Parser::pattern_ahead`] at token `i`.
+    fn pattern_ahead_at(&self, mut i: usize) -> bool {
         for _ in 0..=PREDICATE_LOOKAHEAD_EDGES {
             if self.token_at(i).kind != TokenKind::LParen {
                 return false;
@@ -3051,8 +3094,13 @@ impl<'a> Parser<'a> {
     }
 
     fn list(&mut self) -> PResult<(Expr, usize)> {
+        if self.list_comprehension_ahead() {
+            return self.list_comprehension();
+        }
+        if self.pattern_comprehension_ahead() {
+            return self.pattern_comprehension();
+        }
         let open = self.advance().span;
-        self.check_list_comprehension(open)?;
         let (items, height) = self.expr_list(&TokenKind::RBracket, &["`,`", "`]`"])?;
         let span = open.to(self.last);
         let height = self.height(height, span)?;
@@ -3065,21 +3113,252 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn check_list_comprehension(&self, open: Span) -> PResult<()> {
-        if matches!(
-            self.peek().kind,
-            TokenKind::Ident | TokenKind::QuotedIdent(_)
-        ) && self.nth(1).keyword() == Some(Keyword::In)
-        {
-            return Err(self.not_yet(
-                open,
-                "a list comprehension [x IN list | ...]",
-                "Gremlin unfold() and fold(), for example \
-                 g.inject([1, 2, 3]).unfold().is(P.gt(1)).fold(), or FOR in gql(), as in \
-                 g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN collect_list(x) AS l\")",
-            ));
+    // ----- stage 2c: map projections and comprehensions -----
+
+    /// At `{` after the variable `target`: the map projection `target {items}`.
+    fn map_projection(&mut self, target: Expr, height: usize) -> PResult<(Expr, usize)> {
+        self.enter()?;
+        let result = self.projection_items();
+        self.leave();
+        let (items, braces, items_height) = result?;
+        let span = target.span.to(braces);
+        let height = self.height(height.max(items_height), span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::MapProjection(Box::new(MapProjection {
+                    target,
+                    items,
+                    braces,
+                })),
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// The items of a map projection from its `{` through its `}`, the span of the braces and the
+    /// greatest height of the item values.
+    fn projection_items(&mut self) -> PResult<(Vec<ProjectionItem>, Span, usize)> {
+        let open = self.advance().span;
+        let mut items = Vec::new();
+        let mut height = 0;
+        if self.eat(&TokenKind::RBrace).is_some() {
+            return Ok((items, open.to(self.last), height));
         }
-        Ok(())
+        loop {
+            if let Some(dot) = self.eat(&TokenKind::Dot) {
+                if let Some(star) = self.eat(&TokenKind::Star) {
+                    items.push(ProjectionItem::AllProperties(dot.to(star)));
+                } else {
+                    let key = self.expect_name(&["a property name", "`*`"])?;
+                    items.push(ProjectionItem::Property(key));
+                }
+            } else {
+                let variable = matches!(
+                    self.peek().kind,
+                    TokenKind::Ident | TokenKind::QuotedIdent(_)
+                );
+                let key = self.expect_name(&["`.`", "a variable", "a key"])?;
+                if self.eat(&TokenKind::Colon).is_some() {
+                    let (value, value_height) = self.expr_bp(0)?;
+                    height = height.max(value_height);
+                    items.push(ProjectionItem::Entry(MapEntry { key, value }));
+                } else if variable {
+                    items.push(ProjectionItem::Variable(key));
+                } else {
+                    return Err(self.unexpected(&["`:`"]));
+                }
+            }
+            if self.eat(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBrace, &["`,`", "`}`"])?;
+        Ok((items, open.to(self.last), height))
+    }
+
+    /// At `[`: whether a list comprehension starts (a name, then `IN`).
+    fn list_comprehension_ahead(&self) -> bool {
+        matches!(
+            self.nth(1).kind,
+            TokenKind::Ident | TokenKind::QuotedIdent(_)
+        ) && self.nth(2).keyword() == Some(Keyword::In)
+    }
+
+    /// `[x IN list WHERE cond | expr]`, at `[`.
+    fn list_comprehension(&mut self) -> PResult<(Expr, usize)> {
+        let open = self.advance().span;
+        self.enter()?;
+        let saved_bar = self.bar_ends;
+        let result = self.comprehension_parts();
+        self.bar_ends = saved_bar;
+        self.leave();
+        let (comprehension, height) = result?;
+        let span = open.to(self.last);
+        let height = self.height(height, span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::ListComprehension(Box::new(comprehension)),
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// The parts of a list comprehension after its `[` through its `]`, with the greatest
+    /// height among them.
+    fn comprehension_parts(&mut self) -> PResult<(ListComprehension, usize)> {
+        let token = self.advance();
+        let variable = Identifier {
+            name: token.name().unwrap_or("").to_string(),
+            span: token.span,
+        };
+        self.advance();
+        self.bar_ends = Some(self.open);
+        let (list, mut height) = self.expr_bp(0)?;
+        let filter = if self.eat_kw(Keyword::Where).is_some() {
+            let (filter, filter_height) = self.expr_bp(0)?;
+            height = height.max(filter_height);
+            Some(filter)
+        } else {
+            None
+        };
+        let map = if self.eat(&TokenKind::Pipe).is_some() {
+            self.bar_ends = None;
+            let (map, map_height) = self.expr_bp(0)?;
+            height = height.max(map_height);
+            Some(map)
+        } else {
+            None
+        };
+        let expected: &[&str] = match (&filter, &map) {
+            (_, Some(_)) => &["`]`"],
+            (Some(_), None) => &["`|`", "`]`"],
+            (None, None) => &["WHERE", "`|`", "`]`"],
+        };
+        self.comprehension_close(expected)?;
+        Ok((
+            ListComprehension {
+                variable,
+                list,
+                filter,
+                map,
+            },
+            height,
+        ))
+    }
+
+    /// At `[`: whether a pattern comprehension starts: a path pattern (after an optional
+    /// `p =`) by the pattern-predicate lookahead, whose end is followed by `WHERE` or `|`.
+    fn pattern_comprehension_ahead(&self) -> bool {
+        let mut i = self.pos.saturating_add(1);
+        if matches!(
+            self.token_at(i).kind,
+            TokenKind::Ident | TokenKind::QuotedIdent(_)
+        ) && self.token_at(i.saturating_add(1)).kind == TokenKind::Eq
+        {
+            i = i.saturating_add(2);
+        }
+        if !self.pattern_ahead_at(i) {
+            return false;
+        }
+        self.pattern_end(i).is_some_and(|end| {
+            let token = self.token_at(end);
+            token.kind == TokenKind::Pipe || token.keyword() == Some(Keyword::Where)
+        })
+    }
+
+    /// The index after the path pattern whose first node pattern opens at token `i`, read as
+    /// [`Parser::path_pattern`] reads it (node groups, edges as [`Parser::edge_ahead`] reads
+    /// them, GQL quantifiers); `None` when the tokens there are no complete pattern. A token
+    /// scan, no parse: every step moves forward, so it ends.
+    fn pattern_end(&self, i: usize) -> Option<usize> {
+        if self.token_at(i).kind != TokenKind::LParen {
+            return None;
+        }
+        let mut end = self.skip_group(i)?;
+        while let Some((after, _)) = self.edge_ahead(end) {
+            let mut j = after;
+            match self.token_at(j).kind {
+                TokenKind::LBrace => j = self.skip_group(j)?,
+                TokenKind::Star | TokenKind::Plus => j = j.saturating_add(1),
+                _ => {}
+            }
+            if self.token_at(j).kind != TokenKind::LParen {
+                return None;
+            }
+            end = self.skip_group(j)?;
+        }
+        Some(end)
+    }
+
+    /// `[p = (a)-[:T]->(b) WHERE cond | expr]`, at `[`. Like a subquery, the names declared in
+    /// it do not feed the missing-`RETURN` alternative, and it is one level taller than the
+    /// tallest tree inside it.
+    fn pattern_comprehension(&mut self) -> PResult<(Expr, usize)> {
+        let open = self.advance().span;
+        self.enter()?;
+        let saved_height = std::mem::replace(&mut self.inner_height, 0);
+        let saved_variables = self.variables.len();
+        let saved_bar = self.bar_ends;
+        let result = self.pattern_comprehension_parts();
+        self.bar_ends = saved_bar;
+        let inner = std::mem::replace(&mut self.inner_height, saved_height);
+        self.variables.truncate(saved_variables);
+        self.leave();
+        let comprehension = result?;
+        let span = open.to(self.last);
+        let height = self.height(inner, span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::PatternComprehension(Box::new(comprehension)),
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// The parts of a pattern comprehension after its `[` through its `]`.
+    fn pattern_comprehension_parts(&mut self) -> PResult<PatternComprehension> {
+        let pattern = self.path_pattern()?;
+        self.bar_ends = Some(self.open);
+        let where_clause = if self.eat_kw(Keyword::Where).is_some() {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        let body = MatchClause {
+            optional: false,
+            span: pattern.span.to(self.last),
+            patterns: vec![pattern],
+            where_clause,
+        };
+        let expected: &[&str] = if body.where_clause.is_some() {
+            &["`|`"]
+        } else {
+            &["WHERE", "`|`"]
+        };
+        self.expect(&TokenKind::Pipe, expected)?;
+        self.bar_ends = None;
+        let map = self.expr()?;
+        self.comprehension_close(&["`]`"])?;
+        Ok(PatternComprehension { body, map })
+    }
+
+    /// The `]` closing a comprehension; a `|` in its place most likely ended a label
+    /// alternative too early (module docs), which the error explains.
+    fn comprehension_close(&mut self, expected: &[&str]) -> PResult<()> {
+        if self.eat(&TokenKind::RBracket).is_some() {
+            return Ok(());
+        }
+        let error = self.unexpected(expected);
+        if !self.at(&TokenKind::Pipe) {
+            return Err(error);
+        }
+        Err(Box::new((*error).alternative(
+            "a `|` in a comprehension ends its list or its WHERE condition; write a label \
+             alternative there in parentheses, as in [x IN l WHERE x:(A|B) | x.name]",
+        )))
     }
 
     /// Comma-separated expressions up to and including `close` (possibly none), with the

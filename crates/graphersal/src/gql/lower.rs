@@ -94,8 +94,8 @@ use std::sync::Arc;
 
 use super::aggregate::{AggregateCall, Aggregating, compile_aggregating};
 use super::ast::{
-    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, Quantifier,
-    SortDirection,
+    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
+    ProjectionItem, Quantifier, SortDirection,
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
@@ -2939,8 +2939,26 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
                 rename_aliases(source, within, renames);
             }
         },
-        // A subquery body is a scope of its own, bound and substituted by the binder
-        // (`BoundQuery::subqueries`); an alias never resolves inside it.
-        ExprKind::Subquery(_) => {}
+        ExprKind::MapProjection(projection) => {
+            rename_aliases(&mut projection.target, within, renames);
+            for item in &mut projection.items {
+                if let ProjectionItem::Entry(entry) = item {
+                    rename_aliases(&mut entry.value, within, renames);
+                }
+            }
+        }
+        ExprKind::ListComprehension(comprehension) => {
+            rename_aliases(&mut comprehension.list, within, renames);
+            if let Some(filter) = &mut comprehension.filter {
+                rename_aliases(filter, within, renames);
+            }
+            if let Some(map) = &mut comprehension.map {
+                rename_aliases(map, within, renames);
+            }
+        }
+        // A subquery body (a pattern comprehension too) is a scope of its own, bound and
+        // substituted by the binder (`BoundQuery::subqueries`); an alias never resolves inside
+        // it.
+        ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
     }
 }

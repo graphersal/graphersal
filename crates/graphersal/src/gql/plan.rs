@@ -72,7 +72,7 @@ use std::collections::BTreeSet;
 
 use super::ast::{
     BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal,
-    Quantifier, SubqueryKind, UnaryOp,
+    ProjectionItem, Quantifier, SubqueryKind, UnaryOp,
 };
 use super::bind::{BindingId, BindingKind, BoundQuery, Conjunct, Count, Predicate};
 use super::lexer::Span;
@@ -263,6 +263,20 @@ pub(crate) fn subqueries_in(expr: &Expr, mut f: impl FnMut(Span)) {
             }
             ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
             ExprKind::Subquery(sub) => f(sub.span),
+            ExprKind::MapProjection(projection) => {
+                stack.push(&projection.target);
+                stack.extend(projection.items.iter().filter_map(|item| match item {
+                    ProjectionItem::Entry(entry) => Some(&entry.value),
+                    _ => None,
+                }));
+            }
+            ExprKind::ListComprehension(comprehension) => {
+                stack.push(&comprehension.list);
+                stack.extend(comprehension.filter.as_ref());
+                stack.extend(comprehension.map.as_ref());
+            }
+            // A subquery of its own (stage 2c.T3), identified by its span.
+            ExprKind::PatternComprehension(_) => f(expr.span),
         }
     }
 }
@@ -884,9 +898,24 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
                 stack.extend(case.else_result.as_ref());
             }
             ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
+            ExprKind::MapProjection(projection) => {
+                stack.push(&projection.target);
+                for item in &projection.items {
+                    match item {
+                        ProjectionItem::Entry(entry) => stack.push(&entry.value),
+                        ProjectionItem::Variable(v) if v.name == key => return true,
+                        _ => {}
+                    }
+                }
+            }
+            ExprKind::ListComprehension(comprehension) => {
+                stack.push(&comprehension.list);
+                stack.extend(comprehension.filter.as_ref());
+                stack.extend(comprehension.map.as_ref());
+            }
             // A subquery may import the variable (stage 2b): conservatively it reads it (its
             // imports are in the conjunct's bindings; `lookup_form` refuses it anyway).
-            ExprKind::Subquery(_) => return true,
+            ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => return true,
         }
     }
     false

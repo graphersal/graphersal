@@ -17,6 +17,10 @@
 //! Stage 2b adds the `EXISTS` predicate and Cypher pattern predicates ([`ExprKind::Subquery`]:
 //! `EXISTS { MATCH .. }`, `EXISTS { pattern }`, `EXISTS ( .. )`, `(a)-[:T]->(b)` where an
 //! expression stands); the body holds `MATCH` clauses only.
+//! Stage 2c adds the openCypher list and map expressions: map projections
+//! ([`ExprKind::MapProjection`], `v {.name, .*, x, k: expr}`), list comprehensions
+//! ([`ExprKind::ListComprehension`], `[x IN list WHERE cond | expr]`) and pattern comprehensions
+//! ([`ExprKind::PatternComprehension`], `[(a)-[:T]->(b) WHERE cond | expr]`).
 
 use super::lexer::Span;
 
@@ -405,6 +409,65 @@ pub(crate) enum ExprKind {
     /// A subquery in an expression: `EXISTS { .. }`, `EXISTS ( .. )` or a Cypher pattern
     /// predicate (stage 2b).
     Subquery(Box<SubqueryExpr>),
+    /// `target {.key, .*, x, key: expr}`: a Cypher map projection (stage 2c).
+    MapProjection(Box<MapProjection>),
+    /// `[x IN list WHERE cond | expr]`: a Cypher list comprehension (stage 2c).
+    ListComprehension(Box<ListComprehension>),
+    /// `[(a)-[:T]->(b) WHERE cond | expr]`: a Cypher pattern comprehension (stage 2c).
+    PatternComprehension(Box<PatternComprehension>),
+}
+
+/// A map projection `target {items}` (stage 2c, design item 7): a map built from the
+/// properties of a vertex, an edge or a map, and from further entries.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MapProjection {
+    /// The projected value: a variable as written (the binder may substitute a `LET` / `WITH`
+    /// name by its expression).
+    pub(crate) target: Expr,
+    /// The items in written order (possibly none: `v {}`).
+    pub(crate) items: Vec<ProjectionItem>,
+    /// From `{` to `}`.
+    pub(crate) braces: Span,
+}
+
+/// One item of a [`MapProjection`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ProjectionItem {
+    /// `.key`: the target's property or entry `key`, under that key.
+    Property(Identifier),
+    /// `.*`: every property or entry of the target (the span of `.*`).
+    AllProperties(Span),
+    /// `x`: the variable's value under its name.
+    Variable(Identifier),
+    /// `key: expr`.
+    Entry(MapEntry),
+}
+
+/// A list comprehension `[x IN list WHERE cond | expr]` (stage 2c): the items of `list` for
+/// which `cond` is TRUE, each mapped through `expr`. `variable` is local to `filter` and `map`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ListComprehension {
+    /// The item variable.
+    pub(crate) variable: Identifier,
+    /// The list iterated over.
+    pub(crate) list: Expr,
+    /// The `WHERE` condition.
+    pub(crate) filter: Option<Expr>,
+    /// The expression after `|`; the item itself when absent.
+    pub(crate) map: Option<Expr>,
+}
+
+/// A pattern comprehension `[p = (a)-[:T]->(b) WHERE cond | expr]` (stage 2c): `expr` for every
+/// match of the pattern, as a list. Like a subquery (stage 2b), the names bound before it are
+/// imports and the new ones are local to it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PatternComprehension {
+    /// The pattern (one path with at least one edge, a path variable allowed) and its `WHERE`,
+    /// as one non-optional `MATCH` clause: the shape of a subquery body
+    /// ([`SubqueryExpr::matches`]). Its span covers the pattern and the `WHERE`.
+    pub(crate) body: MatchClause,
+    /// The expression after `|`.
+    pub(crate) map: Expr,
 }
 
 /// A subquery in an expression (stage 2b, design item 6): its body is bound as a nested query

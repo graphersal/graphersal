@@ -8785,6 +8785,33 @@ mod gql {
         }
     }
 
+    /// Until 2c.T2 / 2c.T3 the stage 2c expressions are refused "not yet", naming the form that
+    /// runs today, and the examples run.
+    #[test]
+    fn gql_stage_2c_expressions_name_the_form_of_today() {
+        for (query, keeps) in [
+            (
+                "MATCH (p:person) RETURN p {.name, .age}",
+                "or build the map with a record constructor, as in g.gql(\"MATCH (p:person) \
+                 RETURN {name: p.name, age: p.age} AS m\")",
+            ),
+            (
+                "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name]",
+                "collect the matches of the pattern with OPTIONAL MATCH and collect_list()",
+            ),
+            (
+                "RETURN [x IN [1, 2, 3] | x * 2]",
+                "Gremlin unfold() and fold()",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
+            let help = err.help().unwrap();
+            assert!(help.contains(keeps), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+    }
+
     // ----- stage 2b: help sweep (rule 6) -----
 
     /// The general advice of the subquery errors (`GqlHelpTopic::Subquery`).

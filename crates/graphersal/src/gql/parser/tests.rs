@@ -187,6 +187,49 @@ fn sexp(e: &Expr) -> String {
                 .join(" ");
             format!("({form} {clauses})")
         }
+        ExprKind::MapProjection(projection) => {
+            let items = projection
+                .items
+                .iter()
+                .map(|item| match item {
+                    ProjectionItem::Property(key) => format!(".{}", key.name),
+                    ProjectionItem::AllProperties(_) => ".*".to_string(),
+                    ProjectionItem::Variable(v) => v.name.clone(),
+                    ProjectionItem::Entry(entry) => {
+                        format!("({} {})", entry.key.name, sexp(&entry.value))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("(project {} {{{items}}})", sexp(&projection.target))
+        }
+        ExprKind::ListComprehension(c) => {
+            let mut out = format!("(for {} {}", c.variable.name, sexp(&c.list));
+            if let Some(filter) = &c.filter {
+                out.push_str(&format!(" (where {})", sexp(filter)));
+            }
+            if let Some(map) = &c.map {
+                out.push_str(&format!(" (map {})", sexp(map)));
+            }
+            out.push(')');
+            out
+        }
+        ExprKind::PatternComprehension(c) => {
+            let pattern = &c.body.patterns[0];
+            let mut out = format!(
+                "(collect {}{} edges",
+                pattern
+                    .variable
+                    .as_ref()
+                    .map_or(String::new(), |v| format!("{} = ", v.name)),
+                pattern.steps.len()
+            );
+            if let Some(w) = &c.body.where_clause {
+                out.push_str(&format!(" (where {})", sexp(w)));
+            }
+            out.push_str(&format!(" (map {}))", sexp(&c.map)));
+            out
+        }
         ExprKind::FunctionCall { name, args, .. } => match args {
             CallArgs::Star(_) => format!("{}(*)", name.name),
             CallArgs::Exprs(args) => format!(
@@ -848,8 +891,6 @@ fn not_yet_supported_constructs() {
             None,
         ),
         ("MATCH TRAIL (a)-->(b) RETURN a", "TRAIL (", None),
-        ("MATCH (n) RETURN [x IN n.list | x]", "[", Some("unfold()")),
-        ("MATCH (n) RETURN n {.name}", "n {", Some("v.name")),
         ("MATCH (n) RETURN n.list[0]", "[", None),
         ("MATCH (n) RETURN n ORDER BY n.x NULLS FIRST", "NULLS", None),
         ("MATCH (n) WHERE n.x IS TRUE RETURN n", "TRUE", None),
@@ -2812,6 +2853,421 @@ fn random_subquery_expressions_never_panic() {
                         stack.push(left);
                         stack.push(right);
                     }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(accepted > 0);
+}
+
+// ----- stage 2c: map projections, list and pattern comprehensions -----
+
+#[test]
+fn map_projection_forms() {
+    assert_eq!(
+        expr("n {.name, .*, m, `k`: n.age + 1}"),
+        "(project n {.name .* m (k (+ n.age 1))})"
+    );
+    assert_eq!(expr("n {}"), "(project n {})");
+    // A keyword is a name after `.` and before `:`; a back-quoted keyword is a variable item.
+    assert_eq!(
+        expr("n {.match, return: 1, `order`}"),
+        "(project n {.match (return 1) order})"
+    );
+    // Nested, inside other expressions, and followed by postfix operators.
+    assert_eq!(
+        expr("n {.a, f: m {.b}}"),
+        "(project n {.a (f (project m {.b}))})"
+    );
+    assert_eq!(expr("[n {.a}]"), "[(project n {.a})]");
+    assert_eq!(expr("n {.a}.a"), "(project n {.a}).a");
+    // Spans: the expression from the variable to `}`, the braces on their own.
+    let q = ok("MATCH (n) RETURN n {.name, k: 1} AS m");
+    let item = &q.ret.items[0].expr;
+    assert_eq!(q.text(item.span), "n {.name, k: 1}");
+    let ExprKind::MapProjection(p) = &item.kind else {
+        panic!("{item:?}");
+    };
+    assert_eq!(q.text(p.braces), "{.name, k: 1}");
+    let ProjectionItem::Property(key) = &p.items[0] else {
+        panic!("{p:?}");
+    };
+    assert_eq!(q.text(key.span), "name");
+    let q = ok("MATCH (n) RETURN n {.*} AS m");
+    let ExprKind::MapProjection(p) = &q.ret.items[0].expr.kind else {
+        panic!("not a projection");
+    };
+    let ProjectionItem::AllProperties(star) = &p.items[0] else {
+        panic!("{p:?}");
+    };
+    assert_eq!(q.text(*star), ".*");
+    // Only a variable is projected: after another expression `{` ends it.
+    let f = fail("MATCH (n) RETURN n.a {.b}");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "{");
+}
+
+#[test]
+fn map_projection_errors() {
+    for (query, text, expected) in [
+        (
+            "MATCH (n) RETURN n {.}",
+            "}",
+            &["a property name", "`*`"][..],
+        ),
+        ("MATCH (n) RETURN n {.a b}", "b", &["`,`", "`}`"]),
+        (
+            "MATCH (n) RETURN n {.a,}",
+            "}",
+            &["`.`", "a variable", "a key"],
+        ),
+        ("MATCH (n) RETURN n {match}", "}", &["`:`"]),
+        ("MATCH (n) RETURN n {k: }", "}", &["an expression"]),
+        (
+            "MATCH (n) RETURN n {1}",
+            "1",
+            &["`.`", "a variable", "a key"],
+        ),
+        ("MATCH (n) RETURN n {.a", "", &["`,`", "`}`"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        for e in expected {
+            assert!(
+                f.expected.iter().any(|x| x == e),
+                "{query}: {:?}",
+                f.expected
+            );
+        }
+    }
+}
+
+#[test]
+fn list_comprehension_forms() {
+    assert_eq!(
+        expr("[x IN n.l WHERE x > 1 | x * 2]"),
+        "(for x n.l (where (> x 1)) (map (* x 2)))"
+    );
+    assert_eq!(
+        expr("[x IN n.l WHERE x > 1]"),
+        "(for x n.l (where (> x 1)))"
+    );
+    assert_eq!(expr("[x IN n.l | x.a]"), "(for x n.l (map x.a))");
+    assert_eq!(expr("[x IN [1, 2]]"), "(for x [1 2])");
+    assert_eq!(expr("[`x y` IN [1] | `x y`]"), "(for x y [1] (map x y))");
+    // Nested comprehensions, and one inside a list literal.
+    assert_eq!(
+        expr("[x IN [y IN n.l | y + 1] WHERE x IN [z IN [1] | z]]"),
+        "(for x (for y n.l (map (+ y 1))) (where (in x (for z [1] (map z)))))"
+    );
+    // A list whose first item is a membership test is written with parentheses.
+    assert_eq!(expr("[(x IN n.l), 1]"), "[(in x n.l) 1]");
+    assert_eq!(expr("[1, x IN n.l]"), "[1 (in x n.l)]");
+    // Span: from `[` to `]`.
+    let q = ok("MATCH (n) RETURN [x IN n.l WHERE x > 1 | x] AS l");
+    assert_eq!(
+        q.text(q.ret.items[0].expr.span),
+        "[x IN n.l WHERE x > 1 | x]"
+    );
+    let ExprKind::ListComprehension(c) = &q.ret.items[0].expr.kind else {
+        panic!("not a comprehension");
+    };
+    assert_eq!(q.text(c.variable.span), "x");
+    assert_eq!(q.text(c.list.span), "n.l");
+}
+
+/// A `|` at the comprehension's own bracket level ends its list or `WHERE`; label
+/// alternatives are written in parentheses there and need none after the `|`.
+#[test]
+fn comprehension_bar_ends_label_expressions() {
+    assert_eq!(
+        expr("[x IN n.l WHERE x:A | x]"),
+        "(for x n.l (where (labeled x A)) (map x))"
+    );
+    assert_eq!(
+        expr("[x IN n.l WHERE x:(A|B) | x]"),
+        "(for x n.l (where (labeled x (| A B))) (map x))"
+    );
+    assert_eq!(
+        expr("[x IN n.l WHERE (x:A|B) | x]"),
+        "(for x n.l (where (labeled x (| A B))) (map x))"
+    );
+    assert_eq!(
+        expr("[x IN n.l | x:A|B]"),
+        "(for x n.l (map (labeled x (| A B))))"
+    );
+    assert_eq!(
+        expr("[x IN n.l WHERE x IS LABELED A | x]"),
+        "(for x n.l (where (labeled x A)) (map x))"
+    );
+    // Label alternatives outside a comprehension, and in a nested list, are unchanged.
+    assert_eq!(expr("n:A|B"), "(labeled n (| A B))");
+    assert_eq!(
+        expr("[x IN n.l WHERE [x:A|B] | x]"),
+        "(for x n.l (where [(labeled x (| A B))]) (map x))"
+    );
+    assert_eq!(
+        expr("[(a)-[:A|B]->(b) WHERE b:C | b]"),
+        "(collect 1 edges (where (labeled b C)) (map b))"
+    );
+    // An unparenthesized alternative in the WHERE: the error names the fix.
+    let f = fail("MATCH (n) RETURN [x IN n.l WHERE x:A|B | x]");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "|");
+    assert!(
+        f.alternative.unwrap_or_default().contains("x:(A|B)"),
+        "the hint names the parentheses"
+    );
+}
+
+#[test]
+fn list_comprehension_errors() {
+    for (query, text, expected) in [
+        (
+            "MATCH (n) RETURN [x IN n.l WHERE x > 1 x]",
+            "x",
+            &["`|`", "`]`"][..],
+        ),
+        (
+            "MATCH (n) RETURN [x IN n.l 1]",
+            "1",
+            &["WHERE", "`|`", "`]`"],
+        ),
+        ("MATCH (n) RETURN [x IN n.l | x x]", "x", &["`]`"]),
+        ("MATCH (n) RETURN [x IN | x]", "|", &["an expression"]),
+        (
+            "MATCH (n) RETURN [x IN n.l WHERE | x]",
+            "|",
+            &["an expression"],
+        ),
+        ("MATCH (n) RETURN [x IN n.l | ]", "]", &["an expression"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        for e in expected {
+            assert!(
+                f.expected.iter().any(|x| x == e),
+                "{query}: {:?}",
+                f.expected
+            );
+        }
+    }
+}
+
+#[test]
+fn pattern_comprehension_forms() {
+    assert_eq!(
+        expr("[(n)-[:knows]->(f) | f.name]"),
+        "(collect 1 edges (map f.name))"
+    );
+    assert_eq!(
+        expr("[(n)-->(f)<-[e]-(g) WHERE f.age > 30 | g]"),
+        "(collect 2 edges (where (> f.age 30)) (map g))"
+    );
+    assert_eq!(expr("[p = (n)-->() | p]"), "(collect p = 1 edges (map p))");
+    assert_eq!(
+        expr("[(n)-[:knows]->{1,2}(f) | f]"),
+        "(collect 1 edges (map f))"
+    );
+    assert_eq!(expr("[(n)-(m)-->(f) | f]"), "(collect 2 edges (map f))");
+    assert_eq!(
+        expr("[(n)-->(f) | [(f)-->(g) | g.name]]"),
+        "(collect 1 edges (map (collect 1 edges (map g.name))))"
+    );
+    // The body is one non-optional MATCH clause; spans.
+    let q = ok("MATCH (n) RETURN [p = (n)-[:knows]->(f) WHERE f.age > 1 | f.name] AS l");
+    let item = &q.ret.items[0].expr;
+    assert_eq!(
+        q.text(item.span),
+        "[p = (n)-[:knows]->(f) WHERE f.age > 1 | f.name]"
+    );
+    let ExprKind::PatternComprehension(c) = &item.kind else {
+        panic!("{item:?}");
+    };
+    assert!(!c.body.optional);
+    assert_eq!(c.body.patterns.len(), 1);
+    assert_eq!(q.text(c.body.span), "p = (n)-[:knows]->(f) WHERE f.age > 1");
+    assert_eq!(q.text(c.body.patterns[0].span), "p = (n)-[:knows]->(f)");
+    assert_eq!(q.text(c.map.span), "f.name");
+}
+
+/// Without `WHERE` or `|` after the pattern, a bracket keeps its stage 2b reading: a list
+/// literal whose items are pattern predicates and expressions.
+#[test]
+fn a_list_of_pattern_predicates_stays_a_list() {
+    assert_eq!(expr("[(n)-->()]"), "[(pattern (match 1))]");
+    assert_eq!(expr("[(n)-->(), 1]"), "[(pattern (match 1)) 1]");
+    assert_eq!(
+        expr("[(n)-->() AND n.a]"),
+        "[(and (pattern (match 1)) n.a)]"
+    );
+    assert_eq!(expr("[p = (n)-->()]"), "[(= p (pattern (match 1)))]");
+    // Arithmetic in parentheses stays arithmetic (the pattern-predicate lookahead).
+    assert_eq!(expr("[(n) - (m)]"), "[(- n m)]");
+    let f = fail("MATCH (n) RETURN [(n) - (m) | 1]");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "|");
+}
+
+#[test]
+fn pattern_comprehension_errors() {
+    for (query, text, expected) in [
+        ("MATCH (n) RETURN [(n)-->(f) WHERE f.a]", "]", &["`|`"][..]),
+        ("MATCH (n) RETURN [(n)-->(f) | ]", "]", &["an expression"]),
+        ("MATCH (n) RETURN [(n)-->(f) | f f]", "f", &["`]`"]),
+        (
+            "MATCH (n) RETURN [(n)-->(f) WHERE | f]",
+            "|",
+            &["an expression"],
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        for e in expected {
+            assert!(
+                f.expected.iter().any(|x| x == e),
+                "{query}: {:?}",
+                f.expected
+            );
+        }
+    }
+    // A pattern comprehension declares its own names: they do not feed the missing-RETURN
+    // alternative.
+    let f = fail("MATCH (a) WITH a, [(a)-->(zz) | zz] AS l");
+    assert!(f.message.starts_with("missing RETURN"), "{}", f.message);
+    let alternative = f.alternative.unwrap_or_default();
+    assert!(alternative.contains("RETURN a"), "{alternative}");
+    assert!(!alternative.contains("zz"), "{alternative}");
+}
+
+/// Cypher's quantifier predicates and `reduce` stay "not yet supported" (2c.P0, E18), naming
+/// the comprehension forms.
+#[test]
+fn quantifier_functions_stay_refused_naming_comprehensions() {
+    for call in [
+        "all(x IN n.l WHERE x > 1)",
+        "any(x IN n.l WHERE x > 1)",
+        "none(x IN n.l WHERE x > 1)",
+        "single(x IN n.l WHERE x > 1)",
+        "reduce(s = 0, x IN n.l | s + x)",
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("size([x IN l WHERE c]) = size(l)"),
+            "{call}: {alternative}"
+        );
+        assert!(alternative.contains("sum(x)"), "{call}: {alternative}");
+    }
+}
+
+#[test]
+fn comprehensions_and_projections_are_bounded() {
+    // Nesting: the parser's depth limit, never a stack overflow.
+    for (open, close) in [
+        ("[x IN ", " | x]"),
+        ("[x IN [1] WHERE ", " | x]"),
+        ("[(n)-->(m) | ", "]"),
+        ("[(n WHERE ", ")-->(m) | m]"),
+        ("n {k: ", "}"),
+    ] {
+        let query = format!(
+            "MATCH (n) RETURN {}1{}",
+            open.repeat(300),
+            close.repeat(300)
+        );
+        let f = fail(&query);
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{open}");
+    }
+    // Height: a comprehension and a projection are one level taller than their tallest part.
+    let tall = vec!["n.a"; MAX_HEIGHT - 2].join(" OR ");
+    ok(&format!("MATCH (n) RETURN [x IN [1] WHERE {tall}]"));
+    ok(&format!("MATCH (n) RETURN n {{k: {tall}}}"));
+    ok(&format!("MATCH (n) RETURN [(n)-->(m) WHERE {tall} | m]"));
+    for query in [
+        format!("MATCH (n) RETURN NOT [x IN [1] WHERE {tall}]"),
+        format!("MATCH (n) RETURN NOT n {{k: {tall}}}"),
+        format!("MATCH (n) RETURN NOT [(n)-->(m) WHERE {tall} | m]"),
+        format!("MATCH (n) RETURN NOT [(n)-->(m {{k: {tall}}}) | m]"),
+    ] {
+        let f = fail(&query);
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{}", &query[..60]);
+    }
+}
+
+/// Random expressions over the tokens of the stage 2c forms: the parser never panics, and every
+/// accepted pattern comprehension holds a pattern with an edge.
+#[test]
+fn random_comprehensions_never_panic() {
+    const TOKENS: &[&str] = &[
+        "[",
+        "[",
+        "]",
+        "]",
+        "(",
+        ")",
+        "{",
+        "}",
+        "x",
+        "n",
+        "IN",
+        "WHERE",
+        "|",
+        "|",
+        ".",
+        ".*",
+        ":",
+        ",",
+        "-->",
+        "-",
+        "<-",
+        "-[e]->",
+        "p =",
+        "1",
+        "n.l",
+        ":A",
+        "AND",
+        ">",
+        "x {",
+        "{.a}",
+        "k:",
+        "[x IN",
+        "[(n)-->(m)",
+    ];
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut accepted = 0;
+    for _ in 0..10_000 {
+        let len = 1 + (next() % 16) as usize;
+        let body: Vec<&str> = (0..len)
+            .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+            .collect();
+        let query = format!("MATCH (n) RETURN {}", body.join(" "));
+        if let Ok(q) = parse(&query) {
+            accepted += 1;
+            let mut stack: Vec<&Expr> = q.ret.items.iter().map(|i| &i.expr).collect();
+            while let Some(e) = stack.pop() {
+                match &e.kind {
+                    ExprKind::PatternComprehension(c) => {
+                        assert!(!c.body.patterns[0].steps.is_empty(), "{query}");
+                        stack.push(&c.map);
+                    }
+                    ExprKind::ListComprehension(c) => {
+                        stack.push(&c.list);
+                        stack.extend(c.filter.as_ref());
+                        stack.extend(c.map.as_ref());
+                    }
+                    ExprKind::List(items) => stack.extend(items),
                     _ => {}
                 }
             }

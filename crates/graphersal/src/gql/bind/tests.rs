@@ -1886,3 +1886,78 @@ fn body_conditions_mark_only_the_bodys_own_locals_read() {
     );
     assert!(local(&q, "a").read && local(&q, "b").read);
 }
+
+// ----- stage 2c: map projections and comprehensions (refused until 2c.T2 / 2c.T3) -----
+
+/// The parser reads the stage 2c expressions; the binder refuses them "not yet" wherever an
+/// expression stands, naming the form available today.
+#[test]
+fn stage_2c_expressions_are_not_yet_bound() {
+    for (query, text, alternative) in [
+        (
+            "MATCH (n) RETURN n {.name, k: 1}",
+            "n {.name, k: 1}",
+            "RETURN {name: p.name, age: p.age} AS m",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [1, 2] WHERE x > 1 | x]",
+            "[x IN [1, 2] WHERE x > 1 | x]",
+            "FOR x IN [1, 2, 3] FILTER x > 1",
+        ),
+        (
+            "MATCH (n) RETURN [(n)-->(m) | m.name]",
+            "[(n)-->(m) | m.name]",
+            "collect_list(s.name)",
+        ),
+        // Every place an expression stands.
+        (
+            "MATCH (n) WHERE size([x IN n.l | x]) > 0 RETURN n",
+            "[x IN n.l | x]",
+            "",
+        ),
+        (
+            "MATCH (n {k: [x IN [1] | x]}) RETURN n",
+            "[x IN [1] | x]",
+            "",
+        ),
+        ("MATCH (n WHERE n {.a} IS NULL) RETURN n", "n {.a}", ""),
+        (
+            "MATCH (n)-[e WHERE e {.a} IS NULL]->(m) RETURN n",
+            "e {.a}",
+            "",
+        ),
+        ("LET l = [(n)-->() | 1] RETURN l", "[(n)-->() | 1]", ""),
+        ("MATCH (n) WITH n {.a} AS m RETURN m", "n {.a}", ""),
+        ("FOR x IN [y IN [1] | y] RETURN x", "[y IN [1] | y]", ""),
+        ("MATCH (n) RETURN n ORDER BY n {.a}", "n {.a}", ""),
+        (
+            "MATCH (n) FILTER [x IN [1] WHERE x = 1] = [1] RETURN n",
+            "[x IN [1] WHERE x = 1]",
+            "",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WHERE [x IN [m] | x] = [] } RETURN n",
+            "[x IN [m] | x]",
+            "",
+        ),
+        ("MATCH (n) RETURN collect_list(n {.a})", "n {.a}", ""),
+        (
+            "MATCH (n) RETURN CASE WHEN true THEN [(n)-->(m) | m] END",
+            "[(n)-->(m) | m]",
+            "",
+        ),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("not yet supported"),
+            "{query}: {}",
+            f.message
+        );
+        let given = f.alternative.unwrap_or_default();
+        assert!(given.contains(alternative), "{query}: {given}");
+    }
+}
