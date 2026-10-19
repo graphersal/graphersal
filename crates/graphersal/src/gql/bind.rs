@@ -54,6 +54,10 @@
 //!   in scope in the order it entered the scope (design D10). A `WITH` item that is not a bare
 //!   variable needs `AS` (Neo4j's rule). A column holding an aggregate call is
 //!   [`Column::aggregate`]; the other columns are the grouping keys (implicit grouping).
+//! - **`GROUP BY`** of `RETURN` (ISO GQL) changes nothing in the plan: each key must name a
+//!   column without an aggregate (its name, or the text of its expression), every such column
+//!   must be listed, and `GROUP BY ()` needs every column to aggregate (42002 otherwise). With
+//!   keys and no aggregate, the result is one row per group: `DISTINCT`.
 //! - **`ORDER BY`** keys may name a column alias (an alias shadows a variable of the same name,
 //!   as in Neo4j) or read any variable in scope; a key whose text equals a column's expression
 //!   text is that column. After `DISTINCT` or an aggregation a key may only read returned
@@ -111,7 +115,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, Identifier,
+    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, GroupBy, Identifier,
     LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy,
     Quantifier, Query, ReturnItem, SortDirection, Stage, WithClause,
 };
@@ -823,7 +827,8 @@ impl<'q> Binder<'q> {
         }
         let ret = &query.ret;
         let columns = self.projection(ret.star, &ret.items, "RETURN")?;
-        let order_by = self.order_by(query.order_by.as_ref(), &columns, ret.distinct, "RETURN")?;
+        let distinct = ret.distinct || self.group_by(ret.group_by.as_ref(), &columns)?;
+        let order_by = self.order_by(query.order_by.as_ref(), &columns, distinct, "RETURN")?;
         let offset = self.count(query.offset.as_ref(), "OFFSET")?;
         let limit = self.count(query.limit.as_ref(), "LIMIT")?;
         self.parameters.sort_by_key(|p| p.span.start);
@@ -848,7 +853,7 @@ impl<'q> Binder<'q> {
             conjuncts: self.conjuncts,
             cross,
             columns,
-            distinct: ret.distinct,
+            distinct,
             order_by,
             offset,
             limit,
@@ -2068,6 +2073,81 @@ impl<'q> Binder<'q> {
             self.mark_read(&ids);
         }
         Ok((columns, names))
+    }
+
+    /// `GROUP BY` of `RETURN` (module docs): checks the keys against the columns; returns
+    /// whether the rows must be made distinct (keys listed and no column aggregates).
+    fn group_by(&self, group_by: Option<&GroupBy>, columns: &[Column]) -> BResult<bool> {
+        let Some(group_by) = group_by else {
+            return Ok(false);
+        };
+        let mut listed = vec![false; columns.len()];
+        for key in &group_by.keys {
+            let text = self.query.text(key.span);
+            let found = columns.iter().position(|c| {
+                let by_name = match &key.kind {
+                    ExprKind::Variable(var) => c.name == var.name,
+                    _ => c.name == text,
+                };
+                by_name || (!text.is_empty() && self.query.text(c.written) == text)
+            });
+            let Some(index) = found else {
+                return Err(semantic(
+                    key.span,
+                    format!(
+                        "`{text}` is not a RETURN item: GROUP BY lists the RETURN items without \
+                         an aggregate"
+                    ),
+                )
+                .alternative(format!(
+                    "return it as an item too (RETURN {text}, ...) and keep it in GROUP BY, or \
+                     remove it from GROUP BY"
+                ))
+                .topic(GqlHelpTopic::Grouping)
+                .into());
+            };
+            if columns.get(index).is_some_and(|c| c.aggregate) {
+                return Err(semantic(
+                    key.span,
+                    format!(
+                        "`{text}` is an aggregating RETURN item, and GROUP BY lists only the items \
+                         without an aggregate"
+                    ),
+                )
+                .alternative(format!("remove `{text}` from GROUP BY"))
+                .topic(GqlHelpTopic::Grouping)
+                .into());
+            }
+            if let Some(flag) = listed.get_mut(index) {
+                *flag = true;
+            }
+        }
+        let missing = columns
+            .iter()
+            .zip(&listed)
+            .find(|(c, listed)| !c.aggregate && !**listed);
+        if let Some((column, _)) = missing {
+            let name = &column.name;
+            let message = if group_by.keys.is_empty() {
+                format!(
+                    "GROUP BY () groups all rows into one, so every RETURN item must aggregate, \
+                     and `{name}` does not"
+                )
+            } else {
+                format!(
+                    "the RETURN item `{name}` has no aggregate, so it is a grouping key, and \
+                     GROUP BY does not list it"
+                )
+            };
+            return Err(semantic(column.span, message)
+                .alternative(format!(
+                    "add it to GROUP BY (GROUP BY ..., {name}), or remove GROUP BY: grouping is \
+                     implicit, the items without an aggregate are the keys"
+                ))
+                .topic(GqlHelpTopic::Grouping)
+                .into());
+        }
+        Ok(!group_by.keys.is_empty() && !columns.iter().any(|c| c.aggregate))
     }
 
     /// Implicit grouping: an aggregate item reads outside its aggregates only constants,

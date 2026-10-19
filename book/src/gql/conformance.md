@@ -92,7 +92,7 @@ The mandatory core of a GQL read query, by construct.
 | GQ12 | `ORDER BY` and page statement: `OFFSET` clause | partial | `OFFSET` / `SKIP` after `RETURN` and in `WITH`; the standalone statement form not yet |
 | GQ13 | `ORDER BY` and page statement: `LIMIT` clause | partial | `LIMIT` after `RETURN` and in `WITH`; the standalone statement form not yet |
 | GQ14 | complex expressions in sort keys *(provisional)* | supported | `ORDER BY element_id(e)`, `ORDER BY n.age * 2` |
-| GQ15 | `GROUP BY` clause *(provisional)* | not yet | grouping is implicit; a written `GROUP BY` is an error that says so |
+| GQ15 | `GROUP BY` clause *(provisional)* | supported | after the `RETURN` items, `GROUP BY ()` included; the keys must be the items without an aggregate (grouping is implicit, so it is optional); a key may also repeat an item's expression (`GROUP BY p.name`), beyond ISO's variable references |
 | GQ18 | scalar subqueries *(provisional)* | not yet | |
 | GQ20 | advanced linear composition with `NEXT` | not yet | chain Gremlin steps after `gql()` |
 | GQ21 | `OPTIONAL`: multiple `MATCH` statements *(provisional)* | not yet | one `OPTIONAL MATCH` per optional part is supported; the block form `OPTIONAL { MATCH ... MATCH ... }` is not |

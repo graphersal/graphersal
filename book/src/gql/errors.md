@@ -98,19 +98,19 @@ Comparisons never fail: comparing values of different kinds, or with `NULL`, is 
 ## Scope, grouping and limits
 
 The help of a semantic error explains the rule behind it. A variable that a `WITH` did not carry
-on, a value read outside an aggregate that is not a grouping key, and a written `GROUP BY` each
-name the fix:
+on, a value read outside an aggregate that is not a grouping key, and a `GROUP BY` that leaves out
+a grouping key each name the fix:
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) WITH p.name AS name RETURN p.age")   // error: the variable `p` is not in scope: the WITH before does not carry it
 g.gql("MATCH (p:person) RETURN p.name AS n, count(p.age) + p.age AS x")   // error: `p` is read outside an aggregate and is not a grouping key
-g.gql("MATCH (p:person) RETURN p.name, count(*) GROUP BY p.name")   // error: GROUP BY is not needed: grouping is implicit
+g.gql("MATCH (p:person) RETURN p.name AS n, p.age AS a, count(*) GROUP BY n")   // error: the RETURN item `a` has no aggregate, so it is a grouping key, and GROUP BY does not list it
 ```
 
 ```text
 Help: add `p` to the WITH items, as in WITH ..., p. WITH passes on only its columns: a variable it does not list is out of scope after it, so list every variable a later clause reads, ...
 Help: add `p` to the RETURN items (it then becomes a grouping key), or read it inside an aggregate, as in collect(p). A RETURN or WITH with an aggregate groups the rows by its other items (the grouping keys): ...
-Help: remove GROUP BY and list the keys as items next to the aggregates, as in MATCH (p:person)-[:created]->(s) RETURN p.name, count(s). ...
+Help: add it to GROUP BY (GROUP BY ..., a), or remove GROUP BY: grouping is implicit, the items without an aggregate are the keys. ...
 ```
 
 An unbounded quantifier that reaches `repeat.max_loops` or `traversal.max_traversers` fails with
@@ -131,8 +131,8 @@ Help: The gql() query kept more traversers (rows in the making) alive between tw
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` (grouping is implicit) |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a path or group variable bound twice |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY` |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice |
 | `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |

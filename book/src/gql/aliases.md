@@ -89,7 +89,7 @@ These look like Cypher but are GQL too, so they are not aliases: `:` before a la
 | `id(n)` | refused: an integer in Neo4j, Graphersal ids are strings; use `element_id(n)` |
 | `nodes(p)`, `relationships(p)` | not supported yet: GQL has no such functions; return `p`, or name the elements |
 | `UNWIND` | not supported yet (GQL's `FOR`) |
-| `GROUP BY` (not Cypher, but often written) | an error that explains it: grouping is implicit |
+| `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
 | `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE` | refused: `gql()` is read-only |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |
 | `a--1` (minus minus one) | a comment starts at `--` (GQL wins): `RETURN n.age--1 AS x` returns the column `n.age`; write `n.age - -1` |

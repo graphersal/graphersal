@@ -26,7 +26,8 @@
 //! label_or   := label_and ('|' label_and)*
 //! label_and  := label_not ('&' label_not)*
 //! label_not  := '!' label_not | name | '%' | '(' label_or ')'
-//! return     := RETURN projection
+//! return     := RETURN projection group_by?
+//! group_by   := GROUP BY ('(' ')' | expr (',' expr)*)   -- GROUP: a name, not a reserved word
 //! projection := DISTINCT? ('*' (',' item)* | item (',' item)*)
 //! item       := expr (AS name)?
 //! order_by   := ORDER BY expr (ASC|ASCENDING|DESC|DESCENDING)? (',' ...)*
@@ -55,6 +56,12 @@
 //! - **Result tail in GQL order:** `ORDER BY`, then `OFFSET` / `SKIP`, then `LIMIT`, each at most
 //!   once, as GQL and Neo4j write them. Another order is a syntax error naming the right one; the
 //!   standalone Cypher 25 forms before `RETURN` are "not yet supported".
+//! - **`GROUP BY`** (ISO GQL, stage 1c) follows the `RETURN` items, before `ORDER BY`. Grouping
+//!   stays implicit (the items without an aggregate are the keys); the binder checks that the
+//!   keys list exactly those items (by column name or by the item's expression text, a
+//!   convenience beyond ISO's variable references) and that `()` stands alone with aggregates
+//!   only. On `WITH` (Cypher, no ISO counterpart) it stays a syntax error explaining implicit
+//!   grouping.
 //! - **Label `IS` form:** `(v IS A)`, `[e IS T]` (GQL `<is label expression>`) are accepted beside
 //!   `:`; Cypher `:A:B` is an alias of `A&B` (plain names only, mixing with `| & !` is refused as
 //!   ambiguous). In expressions `v IS [NOT] LABELED A` and Cypher `v:A`.
@@ -105,10 +112,10 @@
 use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CastTarget, CountClause, EdgeDirection, EdgePattern, Endpoint,
-    Expr, ExprKind, FilterClause, Identifier, LabelExpr, LabelExprKind, LetBinding, LetClause,
-    Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern, PatternStep,
-    Quantifier, Query, ReturnClause, ReturnItem, SortDirection, SortItem, Stage, TrimSide, UnaryOp,
-    WithClause,
+    Expr, ExprKind, FilterClause, GroupBy, Identifier, LabelExpr, LabelExprKind, LetBinding,
+    LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern,
+    PatternStep, Quantifier, Query, ReturnClause, ReturnItem, SortDirection, SortItem, Stage,
+    TrimSide, UnaryOp, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -1161,6 +1168,20 @@ impl<'a> Parser<'a> {
     ) -> Box<GqlErrorBuilder> {
         let token = self.peek();
         let span = token.span;
+        if self.at_group_by() {
+            let b = err(
+                GqlErrorKind::Syntax,
+                span.to(self.nth(1).span),
+                "GROUP BY must come right after the RETURN items, before ORDER BY, OFFSET and \
+                 LIMIT",
+            )
+            .alternative(
+                "write GROUP BY directly after the items, for example \
+                 MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c GROUP BY n \
+                 ORDER BY c",
+            );
+            return Box::new(b);
+        }
         match token.keyword() {
             Some(Keyword::Order) if has_offset || has_limit => {
                 let mut b = err(
@@ -1881,10 +1902,47 @@ impl<'a> Parser<'a> {
     fn return_clause(&mut self) -> PResult<ReturnClause> {
         let start = self.expect_kw(Keyword::Return, &["RETURN"])?;
         let (distinct, star, items) = self.projection()?;
+        let span = start.to(self.last);
+        let group_by = if self.at_group_by() {
+            Some(self.group_by()?)
+        } else {
+            None
+        };
         Ok(ReturnClause {
             distinct,
             star,
             items,
+            group_by,
+            span,
+        })
+    }
+
+    /// Whether the current tokens are `GROUP BY` (`GROUP` is a name, not a reserved word).
+    fn at_group_by(&self) -> bool {
+        self.peek().kind == TokenKind::Ident
+            && self.peek().text.eq_ignore_ascii_case("GROUP")
+            && self.nth(1).keyword() == Some(Keyword::By)
+    }
+
+    /// `GROUP BY ('(' ')' | expr (',' expr)*)` (ISO GQL `<group by clause>`; the binder checks
+    /// the keys against the items).
+    fn group_by(&mut self) -> PResult<GroupBy> {
+        let start = self.advance().span;
+        self.expect_kw(Keyword::By, &["BY"])?;
+        let mut keys = Vec::new();
+        if self.at(&TokenKind::LParen) && self.nth(1).kind == TokenKind::RParen {
+            self.advance();
+            self.advance();
+        } else {
+            loop {
+                keys.push(self.expr()?);
+                if self.eat(&TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+        }
+        Ok(GroupBy {
+            keys,
             span: start.to(self.last),
         })
     }

@@ -7801,8 +7801,10 @@ mod gql {
     #[test]
     fn gql_group_by_explains_implicit_grouping() {
         for (query, text) in [
+            // Stage 1c accepts ISO GQL `GROUP BY` on RETURN; on WITH it stays explained.
             (
-                "MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) GROUP BY p.name",
+                "MATCH (p:person)-[:created]->(s) WITH p.name AS n, count(s) AS c GROUP BY n \
+                 RETURN n, c",
                 "GROUP BY",
             ),
             (
@@ -7844,6 +7846,31 @@ mod gql {
             .to_list()
             .unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    /// ISO GQL `GROUP BY` on RETURN (stage 1c): a key that is no plain item names the fix.
+    #[test]
+    fn gql_group_by_keys_name_the_fix() {
+        let query = "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, p.age AS a, count(s) \
+                     GROUP BY n";
+        let (err, report) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the RETURN item `a` has no aggregate"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "add it to GROUP BY (GROUP BY ..., a), or remove GROUP BY: grouping is implicit, \
+                 the items without an aggregate are the keys. "
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
     }
 
     #[test]

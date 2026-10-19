@@ -135,7 +135,7 @@
     "group": "GQL",
     "graph": "modern",
     "title": "Aggregates: count and collect_list per person (implicit grouping)",
-    "script": "// The columns without an aggregate (person) are the grouping key; there is no GROUP BY.\ng.gql(`\n  MATCH (p:person)-[:created]->(s:software)\n  RETURN p.name AS person, count(s) AS projects, collect_list(s.name) AS names\n  ORDER BY projects DESC, person\n`)"
+    "script": "// The columns without an aggregate (person) are the grouping key; GROUP BY is optional.\ng.gql(`\n  MATCH (p:person)-[:created]->(s:software)\n  RETURN p.name AS person, count(s) AS projects, collect_list(s.name) AS names\n  ORDER BY projects DESC, person\n`)"
   },
   {
     "group": "GQL",

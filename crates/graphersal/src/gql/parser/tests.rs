@@ -1735,13 +1735,13 @@ fn never_panics_on_1b_tokens_and_mutated_1b_queries() {
     }
 }
 
-/// `GROUP BY` names implicit grouping wherever it stands after the items.
+/// `GROUP BY` on `WITH` (no ISO counterpart) names implicit grouping (stage 1c accepts it on
+/// `RETURN`: `group_by_follows_the_return_items`).
 #[test]
 fn group_by_is_explained() {
     for query in [
-        "MATCH (a) RETURN a.x, count(*) GROUP BY a.x",
         "MATCH (a) WITH a.x AS x, count(*) AS c GROUP BY x RETURN x",
-        "MATCH (a) RETURN a GROUP BY",
+        "MATCH (a) WHERE a.x > 1 GROUP BY a.x RETURN a.x",
     ] {
         let f = fail(query);
         assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
@@ -1749,6 +1749,36 @@ fn group_by_is_explained() {
         assert!(f.message.contains("grouping is implicit"), "{}", f.message);
         assert!(f.alternative.unwrap().contains("RETURN p.name, count(s)"));
     }
+}
+
+/// ISO GQL `GROUP BY` after the `RETURN` items: keys, the empty grouping set, the place.
+#[test]
+fn group_by_follows_the_return_items() {
+    let query = ok("MATCH (a) RETURN a.x AS x, count(*) group by x, a.y ORDER BY x");
+    let group_by = query.ret.group_by.as_ref().unwrap();
+    let keys: Vec<String> = group_by.keys.iter().map(sexp).collect();
+    assert_eq!(keys, ["x", "a.y"]);
+    assert_eq!(query.text(group_by.span), "group by x, a.y");
+    assert_eq!(query.text(query.ret.span), "RETURN a.x AS x, count(*)");
+    assert!(query.order_by.is_some());
+    let query = ok("MATCH (a) RETURN count(*) GROUP BY ()");
+    assert!(query.ret.group_by.as_ref().unwrap().keys.is_empty());
+    assert!(ok("MATCH (a) RETURN a").ret.group_by.is_none());
+    // `group` stays a name elsewhere.
+    assert!(ok("MATCH (group) RETURN group").ret.group_by.is_none());
+    // After ORDER BY: the place is named.
+    let f = fail("MATCH (a) RETURN a.x, count(*) ORDER BY a.x GROUP BY a.x");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "GROUP BY");
+    assert!(
+        f.message.contains("right after the RETURN items"),
+        "{}",
+        f.message
+    );
+    // No key.
+    let f = fail("MATCH (a) RETURN a GROUP BY");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.expected.iter().any(|e| e == "an expression"), "{f:?}");
 }
 
 // ----- stage 1c: function forms -----

@@ -302,8 +302,12 @@ g.v().out("created").values("name").dedup().order().to_list()   // "lop", "rippl
 ## Aggregation
 
 `RETURN` and `WITH` items may aggregate. The items without an aggregate are the **grouping
-keys**: one row per distinct combination of their values (no `GROUP BY` is written; grouping is
-implicit, as in Cypher). Without keys the whole input is one group.
+keys**: one row per distinct combination of their values (grouping is implicit, as in Cypher).
+Without keys the whole input is one group. ISO GQL's `GROUP BY` may follow the `RETURN` items: it
+must list exactly the items without an aggregate (by column name, or by repeating the item's
+expression), changes nothing in the result, and `GROUP BY ()` is the single group of an
+all-aggregate `RETURN`; without any aggregate it gives one row per group, like `DISTINCT`. After
+`WITH` (Cypher) `GROUP BY` is an error that explains implicit grouping.
 
 | Aggregate | Returns | On no input |
 |---|---|---|
@@ -347,7 +351,8 @@ An aggregating `WITH` passes the groups on, and its `WHERE` filters them (SQL's 
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n WHERE n > 1 RETURN p.name AS name, n").to_list()   // #{"n": 2, "name": "josh"}
-g.gql("MATCH (p:person) RETURN p.name, count(*) GROUP BY p.name")   // error: GROUP BY is not needed: grouping is implicit
+g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS name, count(s) AS n GROUP BY name").to_list()   // the same rows as without GROUP BY
+g.gql("MATCH (p:person) WITH p.name AS n, count(*) AS c GROUP BY n RETURN n, c")   // error: GROUP BY is not needed: grouping is implicit
 g.gql("MATCH (p:person) WHERE count(p) > 1 RETURN p")   // error: an aggregate cannot be used in WHERE
 g.gql("MATCH (p:person) RETURN sum(p.name) AS s")   // error: sum() takes numbers, not a string (22G03)
 ```
@@ -460,7 +465,6 @@ These are part of GQL and come in a later version. Each fails before the run wit
 
 | Construct | Until then |
 |---|---|
-| `GROUP BY` | not needed: grouping is implicit ([Aggregation](#aggregation)); refused with a syntax error (`42001`) that says so |
 | `NEXT` | `WITH`, or Gremlin steps after `gql()` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
@@ -476,6 +480,6 @@ These are part of GQL and come in a later version. Each fails before the run wit
 ```rhai,graph=modern
 g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path patterns are not yet supported
 g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
-g.gql("MATCH p = (a)-[:knows]->(b) RETURN nodes(p)")   // error: nodes() over a path is not yet supported
+g.gql("MATCH p = (a)-[:knows]->(b) RETURN nodes(p) AS n ORDER BY b.name").to_list()   // #{"n": [v[1], v[4]]}, #{"n": [v[1], v[2]]}
 g.gql("MATCH p = (a)-[:knows]->(b) RETURN p ORDER BY b.name").select("p").unfold().to_list()   // v[1], e[2][1-knows->4], v[4], v[1], e[0][1-knows->2], v[2]
 ```

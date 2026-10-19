@@ -533,7 +533,19 @@ pub(crate) struct ReturnClause {
     pub(crate) star: Option<Span>,
     /// The explicit items in written order.
     pub(crate) items: Vec<ReturnItem>,
+    /// `GROUP BY ...` after the items (ISO GQL `<group by clause>`); grouping stays implicit,
+    /// the binder only checks that the keys are the items without an aggregate.
+    pub(crate) group_by: Option<GroupBy>,
     /// From `RETURN` to the last item.
+    pub(crate) span: Span,
+}
+
+/// `GROUP BY key, ...` or the empty grouping set `GROUP BY ()`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GroupBy {
+    /// The grouping keys in written order (empty: `()`): a column name or an item's expression.
+    pub(crate) keys: Vec<Expr>,
+    /// From `GROUP` to the last key.
     pub(crate) span: Span,
 }
 
@@ -649,6 +661,7 @@ mod tests {
                     alias: None,
                     span: span(17, 23),
                 }],
+                group_by: None,
                 span: span(10, 23),
             },
             order_by: None,

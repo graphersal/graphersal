@@ -710,3 +710,102 @@ mod differential {
         );
     }
 }
+
+// ----- GROUP BY (ISO GQL, stage 1c) -----
+
+/// A written `GROUP BY` on `RETURN` names the keys implicit grouping uses anyway: same rows,
+/// same plan as without it; without an aggregate it makes one row per group (`DISTINCT`).
+#[test]
+fn group_by_lists_the_implicit_keys() {
+    let graph = TraversalGraph::tinkerpop_modern();
+    let implicit = "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c";
+    let expected = ["n=josh c=2", "n=marko c=1", "n=peter c=1"];
+    for query in [
+        implicit.to_string(),
+        format!("{implicit} GROUP BY n"),
+        format!("{implicit} GROUP BY p.name"),
+        "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c group by n".into(),
+    ] {
+        check(&graph, &query, &["n", "c"], &expected);
+        assert_eq!(
+            steps(&profile(&graph, &query)),
+            steps(&profile(&graph, implicit)),
+            "{query}"
+        );
+    }
+    // Unaliased items, a variable key, several keys, ORDER BY after GROUP BY.
+    check(
+        &graph,
+        "MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) GROUP BY p.name",
+        &["p.name", "count(s)"],
+        &[
+            "p.name=josh count(s)=2",
+            "p.name=marko count(s)=1",
+            "p.name=peter count(s)=1",
+        ],
+    );
+    assert_eq!(
+        table(
+            &rows(
+                &graph,
+                "MATCH (p:person)-[:created]->(s) RETURN s.lang AS l, p.age > 30 AS old, \
+                 count(*) AS c GROUP BY l, old ORDER BY c DESC, old"
+            ),
+            &["l", "old", "c"],
+            true
+        ),
+        ["l=java old=true c=3", "l=java old=false c=1"]
+    );
+    // The empty grouping set: one group.
+    check(
+        &graph,
+        "MATCH (p:person)-[:created]->(s) RETURN count(s) AS c GROUP BY ()",
+        &["c"],
+        &["c=4"],
+    );
+    // No aggregate: one row per group (lop has three creators).
+    let query = "MATCH (p:person)-[:created]->(s) RETURN s.name AS s GROUP BY s";
+    check(&graph, query, &["s"], &["s=lop", "s=ripple"]);
+    assert_eq!(
+        steps(&profile(&graph, query)),
+        steps(&profile(
+            &graph,
+            "MATCH (p:person)-[:created]->(s) RETURN DISTINCT s.name AS s"
+        ))
+    );
+    check(
+        &graph,
+        "MATCH (p:person)-[:created]->(s) RETURN * GROUP BY p, s",
+        &["p"],
+        &["p=v[1]", "p=v[4]", "p=v[4]", "p=v[6]"],
+    );
+}
+
+#[test]
+fn group_by_keys_must_be_the_items_without_an_aggregate() {
+    let graph = TraversalGraph::tinkerpop_modern();
+    for (query, text) in [
+        (
+            "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c GROUP BY p",
+            "`p` is not a RETURN item",
+        ),
+        (
+            "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c GROUP BY c",
+            "`c` is an aggregating RETURN item",
+        ),
+        (
+            "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, p.age AS a, count(s) AS c \
+             GROUP BY n",
+            "the RETURN item `a` has no aggregate, so it is a grouping key, and GROUP BY does \
+             not list it",
+        ),
+        (
+            "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, count(s) AS c GROUP BY ()",
+            "GROUP BY () groups all rows into one",
+        ),
+    ] {
+        let (status, message) = gql_error(&graph, query);
+        assert_eq!(status, "42002", "{query}");
+        assert!(message.contains(text), "{query}: {message}");
+    }
+}
