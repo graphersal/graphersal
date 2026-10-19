@@ -24,7 +24,7 @@ Error: GQL syntax error at line 1, column 33: unexpected end of input (step #1 '
                                              ^
   expected:  an expression
   GQLSTATUS: 42001
-Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name") or g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n").
+Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name") or g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of a list, and a query may also start with FOR, LET, WITH, FILTER or RETURN, as in g.gql("FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age").
 ```
 
 The plan of a query that failed this way is the marker step `gql:error("<GQLSTATUS>")`, which
@@ -61,10 +61,10 @@ Error: GQL syntax error at line 1, column 18: unexpected `RETRUN` (step #1 'gql:
              ^^^^^^^^^^^^^^^^^^
   query:        MATCH (n:person) RETRUN n
                                  ^^^^^^
-  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN
+  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN
   did you mean: RETURN
   GQLSTATUS:    42001
-Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the marked position. ...
+Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN at the marked position. ...
 ```
 
 ## Errors while the query runs
@@ -159,6 +159,19 @@ Help: add `p` to the RETURN items (it then becomes a grouping key), or read it i
 Help: add it to GROUP BY (GROUP BY ..., a), or remove GROUP BY: grouping is implicit, the items without an aggregate are the keys. ...
 ```
 
+A `FOR` (or `UNWIND`) defines new names; reusing a name in scope, giving the item and its
+position one name, or using the position as a node is an error whose help says what `FOR`
+defines:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) FOR p IN [1] RETURN p")   // error: the variable `p` is already defined; FOR defines a new variable
+g.gql("FOR x IN [3, 1, 2] WITH OFFSET x RETURN x")   // error: `x` names both the item and its position
+```
+
+```text
+Help: choose another name, as in FOR p2 IN <list>. FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of the list, which it reads on the row before the FOR; the item x and, with WITH ORDINALITY i (from 1) or WITH OFFSET i (from 0), its position i are two new variables with names of their own; ...
+```
+
 An unbounded quantifier that reaches `repeat.max_loops` or `traversal.max_traversers` fails with
 the ordinary limit error (`RepeatLimitExceeded`, `ResourceLimitExceeded`; no GQLSTATUS), never with
 fewer rows. Its help is written for GQL: it names the quantified edge, an upper bound to give it
@@ -194,8 +207,8 @@ Help: The gql() query built a value larger than 'traversal.max_materialized_byte
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list |
 | `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |

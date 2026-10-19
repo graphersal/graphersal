@@ -8,11 +8,12 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
 ## The shape of a query
 
 ```text
-[OPTIONAL] MATCH <pattern> [, <pattern> ...] [WHERE <condition>]
-[ more clauses, in any order and number:
-  [OPTIONAL] MATCH ...
+[ clauses, in any order and number:
+  [OPTIONAL] MATCH <pattern> [, <pattern> ...] [WHERE <condition>]
   LET <name> = <expr> [, ...]
   FILTER [WHERE] <condition>
+  FOR <name> IN <list> [WITH ORDINALITY <name> | WITH OFFSET <name>]
+  UNWIND <list> AS <name>                     -- Cypher spelling of FOR
   WITH [DISTINCT] <item> [AS <name>], ...     -- or WITH *; Cypher
        [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>] ]
 RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *, mandatory; items may aggregate
@@ -23,7 +24,8 @@ RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *, mandatory; items m
 ```
 
 A pattern is a path of node and edge patterns, optionally named (`p = (a)-->(b)`); an edge may
-carry a quantifier (`-[:knows]->{1,3}`).
+carry a quantifier (`-[:knows]->{1,3}`). A query usually starts with `MATCH`, but it may start
+with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-without-match)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
 are case-sensitive. Line breaks are whitespace, so a query may span lines. Comments are `// ...`,
@@ -292,6 +294,64 @@ A `WITH` that only renames and computes values is as transparent as `LET`. One w
 an aggregate, `ORDER BY`, `OFFSET` or `LIMIT` builds its rows first; a later `MATCH` continues
 from the elements in its columns. The order a `WITH ... ORDER BY` makes is not kept by later
 clauses: sort again in the final `RETURN` ([Ordering](semantics.md#ordering)).
+
+## FOR and UNWIND
+
+`FOR x IN list` gives one row per item of the list, with the item bound to `x`; Cypher's
+`UNWIND list AS x` is the same clause ([Cypher Aliases](aliases.md)). The list is any expression
+over the row before the `FOR`: a literal, a `$parameter`, a property, a `collect_list()` column
+of a `WITH`, `nodes(p)`. Duplicates and `NULL` items give rows like any other item; a list
+inside the list stays one item. `WITH ORDINALITY i` also binds the item's position from 1,
+`WITH OFFSET i` from 0 (only after `FOR`). Gremlin's twin is `unfold()`.
+
+```rhai,graph=modern
+g.gql("FOR x IN [1, 2, 2] RETURN x ORDER BY x").to_list()   // #{"x": 1}, #{"x": 2}, #{"x": 2}
+g.inject([1, 2, 2]).unfold().order().to_list()   // 1, 2, 2
+g.gql("UNWIND [1, 2, 2] AS x RETURN x ORDER BY x").to_list()   // the same rows
+g.gql("FOR x IN [10, 20] WITH ORDINALITY i RETURN x, i ORDER BY i").to_list()   // #{"i": 1, "x": 10}, #{"i": 2, "x": 20}
+g.gql("FOR x IN [10, 20] WITH OFFSET i RETURN x, i ORDER BY i").to_list()   // #{"i": 0, "x": 10}, #{"i": 1, "x": 20}
+g.gql("FOR x IN [1, 2] FOR y IN [x, x * 10] RETURN x, y ORDER BY x, y").to_list()   // 1 1, 1 10, 2 2, 2 20
+```
+
+The most frequent use is "for each value in a list, find its vertex": an item compared in a
+property map or a `WHERE` equality. When an index or the element id serves that equality, each
+item is a direct lookup instead of a scan ([Plans and Performance](plans.md#for-and-the-correlated-lookup)).
+A name without a vertex gives no row:
+
+```rhai,graph=modern
+g.gql("FOR n IN $names WITH ORDINALITY i MATCH (p:person {name: n}) RETURN i, n, p.age AS age ORDER BY i", #{names: ["vadas", "marko", "nobody"]}).to_list()
+// #{"age": 27, "i": 1, "n": "vadas"}, #{"age": 29, "i": 2, "n": "marko"}
+g.gql("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS name ORDER BY id", #{ids: ["1", "3", "42"]}).to_list()
+// #{"id": "1", "name": "marko"}, #{"id": "3", "name": "lop"}
+```
+
+An item that is a vertex continues a pattern by its name, like a vertex column of a `WITH`
+(an item of another kind gives no row there):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WITH collect_list(p) AS ps FOR p IN ps MATCH (p)-[:created]->(s) RETURN p.name AS name, s.name AS sw ORDER BY name, sw").to_list()
+// josh lop, josh ripple, marko lop, peter lop
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) FOR n IN nodes(p) MATCH (n)-[:created]->(s) RETURN DISTINCT n.name AS who, s.name AS sw ORDER BY who, sw").to_list()
+// josh lop, josh ripple, marko lop
+```
+
+A `NULL` list gives no row and a value that is not a list gives one row of that value
+([Semantics](semantics.md#for-null-and-values-that-are-not-lists)). The item and the position
+are new names: a name already in scope, or the same name for both, is an error.
+
+## Queries without MATCH
+
+A query may start with `FOR`, `UNWIND`, `LET`, `WITH`, `FILTER` or `RETURN`. It then starts from
+one empty row (Gremlin's `inject(0)`): `RETURN` alone returns one row, `FILTER` keeps or drops
+it, `FOR` turns it into one row per item, and a later `MATCH` runs once for each row.
+
+```rhai,graph=modern
+g.gql("RETURN 1 + 2 AS three, upper('gql') AS up").to_list()   // #{"three": 3, "up": "GQL"}
+g.gql("RETURN count(*) AS c").to_list()   // #{"c": 1}: the one empty row
+g.gql("WITH 2 AS n RETURN n * n AS sq").to_list()   // #{"sq": 4}
+g.gql("FILTER $on RETURN 1 AS x", #{on: false}).to_list()   // no row
+g.gql("LET k = 30 MATCH (p:person) FILTER p.age > k RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
+```
 
 ## RETURN
 
@@ -623,7 +683,13 @@ g.gql("MATCH (n:person {name: 'marko'}) RETURN range(0, 9223372036854775807) AS 
 ```
 
 List comprehensions (`[x IN nodes(p) | x.name]`) are not supported yet; take the items with
-`head()`, `last()` and `size()`, or unfold the list with Gremlin after `gql()`.
+`head()`, `last()` and `size()`, walk the list with [`FOR`](#for-and-unwind) and collect again,
+or unfold the list with Gremlin after `gql()`.
+
+```rhai,graph=modern
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) FOR x IN nodes(p) RETURN b.name AS b, collect_list(x.name) AS names ORDER BY b").to_list()
+// #{"b": "josh", "names": ["marko", "josh"]}, #{"b": "vadas", "names": ["marko", "vadas"]}
+```
 
 ## Parameters
 
@@ -656,17 +722,15 @@ construct and the alternative.
 | quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
 | `UNION`, `EXCEPT`, `INTERSECT`, `EXISTS { }`, `CALL { }` subqueries | Gremlin `union()`, `where()` |
-| `FOR` (Cypher `UNWIND`) | Gremlin `unfold()` |
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
-| a query without `MATCH` (`RETURN 1`) | Gremlin `inject()` |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
-| list comprehensions `[x IN list \| ...]`, `any()` / `all()` / `none()` / `single()`, `reduce()` | `head()`, `last()`, `size()`, or Gremlin `unfold()` after `gql()` |
+| list comprehensions `[x IN list \| ...]`, `any()` / `all()` / `none()` / `single()`, `reduce()` | `head()`, `last()`, `size()`, `FOR x IN list` with `FILTER` and `collect_list()`, or Gremlin `unfold()` after `gql()` |
 | `exists(n.p)` | `n.p IS NOT NULL` |
 | the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
-| list conversions `toIntegerList()`, `toStringList()`, ... | Gremlin `unfold()` and `as_number()` after `gql()` |
+| list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |
 | `normalize(s)` | store normalized text |
 | GQL's `elements(p)` | `nodes(p)` and `relationships(p)` |
 | statistical aggregates (`percentileCont()`, `stDev()`, ...) | `collect_list(x)`, then compute after `gql()` |

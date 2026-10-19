@@ -182,6 +182,36 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "FOR over a $parameter list: one row per item",
+    "script": "// FOR x IN list (Cypher UNWIND list AS x) gives one row per item; a name with no person gives no row.\ng.gql(`\n  FOR n IN $names\n  MATCH (p:person {name: n})\n  RETURN n AS name, p.age AS age\n  ORDER BY name\n`, #{names: [\"vadas\", \"marko\", \"nobody\"]})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "FOR id IN $ids: vertices by element id",
+    "script": "// The element_id equality after FOR is a direct lookup by id (see .profile()), not a scan.\ng.gql(\"FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS name ORDER BY name\", #{ids: [\"1\", \"3\", \"42\"]})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "UNWIND a collected list (Cypher spelling)",
+    "script": "g.gql(`\n  MATCH (p:person)\n  WITH collect_list(p.name) AS names\n  UNWIND names AS name\n  RETURN name\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "empty",
+    "title": "FOR ... WITH ORDINALITY: the item's position from 1",
+    "script": "// WITH ORDINALITY counts from 1, WITH OFFSET from 0.\ng.gql(\"FOR x IN [10, 20, 30] WITH ORDINALITY i RETURN i, x, x * i AS weighted ORDER BY i\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "empty",
+    "title": "RETURN without MATCH: one row of expressions",
+    "script": "// A query may start with FOR, UNWIND, LET, WITH, FILTER or RETURN: it runs on one empty row.\ng.gql(\"RETURN 1 + 2 AS three, upper('gql') AS name, range(1, 3) AS list ORDER BY three\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Quantified edges {1,2}: reachable in one or two hops",
     "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
   },

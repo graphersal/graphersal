@@ -172,6 +172,45 @@ g.v().has_label("person").map(__.choose(__.has("age", P.gt(30)), __.constant(1),
 g.gql("MATCH (n) RETURN n.lang AS lang, count(*) AS c ORDER BY lang").to_list()   // #{"c": 2, "lang": "java"}, #{"c": 4, "lang": ()}
 ```
 
+## FOR: NULL and values that are not lists
+
+`FOR x IN list` (and `UNWIND list AS x`, one meaning for both spellings) gives one row per item
+in the list's order. For a list expression that is not a list, Graphersal follows Neo4j (the
+ISO text is still to be checked; GQL may make it a type error):
+
+- `NULL` (a missing property included) gives **no row**, like the empty list `[]`;
+- any other value that is not a list (a number, a string, a map, a vertex) gives **one row** of
+  that value.
+
+```rhai,graph=modern
+g.gql("FOR x IN null RETURN x").to_list()   // no row
+g.gql("FOR x IN 5 RETURN x").to_list()   // #{"x": 5}
+g.gql("MATCH (p:person) FOR t IN p.tags RETURN count(*) AS c").to_list()   // #{"c": 0}: no person has tags
+g.gql("FOR x IN [1, null, [2, 3]] RETURN x").to_list()   // #{"x": 1}, #{"x": ()}, #{"x": [2, 3]}: NULL items and nested lists are items
+```
+
+`WITH ORDINALITY i` numbers the items from **1**, `WITH OFFSET i` from **0**; both count the
+position in the list, not the row: the numbers start again for every row the `FOR` reads. A row
+keeps its multiplicity: a list item of a row that occurs twice gives two rows.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE p.age < 30 FOR x IN ['a', 'b'] WITH OFFSET i RETURN p.name AS name, x, i ORDER BY name, i").to_list()
+// marko a 0, marko b 1, vadas a 0, vadas b 1
+```
+
+## Lookups use GQL equality
+
+An item compared with a property or an element id (`FOR n IN $names MATCH (p:person {name: n})`,
+`WHERE element_id(n) = id`) may run as a direct lookup by id or index instead of a scan
+([Plans and Performance](plans.md#for-and-the-correlated-lookup)). The lookup keeps GQL's `=`
+exactly, whichever way it runs: `29.0` finds the age `29`, the string `'29'` does not, and a
+`NULL` item finds nothing.
+
+```rhai,graph=modern
+{ g.create_index(#{label: "person", key: "age"}); g.gql("FOR a IN [29.0, '27', null] MATCH (p:person {age: a}) RETURN a, p.name AS name").to_list() }   // #{"a": 29.0, "name": "marko"}
+g.gql("FOR a IN [29.0, '27', null] MATCH (p:person {age: a}) RETURN a, p.name AS name").to_list()   // the same row without the index
+```
+
 ## WITH: the order of its sub-clauses
 
 The sub-clauses of a `WITH` run in this order: the items (and their aggregation), `DISTINCT`,

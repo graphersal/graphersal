@@ -36,6 +36,8 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:filter("<condition>")` | a `WHERE` condition, or the part of it that cannot become `has()`, with GQL's three-valued logic |
 | `gql:order("<keys>")` | `ORDER BY` with GQL's `NULL` placement and type order; stable |
 | `gql:not_self_loop()` | keeps a self-loop from matching twice in an either-direction edge |
+| `gql:for("x IN <list>")` | `FOR` / `UNWIND`: one row per item of the list (`unfold()` with GQL's `NULL` rule); with an ordinal the row is the record of item and position |
+| `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`) |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 They exist only in plans of `gql()`; they are not DSL steps. Everything else in a GQL plan is an
@@ -188,7 +190,9 @@ has_label("person") [path: labels(s)]                           1      12       
 gql:project("a", "s")                                           1       8       8
 ```
 
-Connect patterns through a shared variable where the question allows it; the planner prefers
+A pattern after the first with an equality an id or index serves is the exception: it starts
+with a [`gql:lookup`](#for-and-the-correlated-lookup) instead of the second `v()`. Otherwise,
+connect patterns through a shared variable where the question allows it; the planner prefers
 connected patterns and starts the product at the smaller side. The same holds for a pattern
 after a `WITH` or inside an `OPTIONAL MATCH` that shares no variable with what came before, and
 for a leading `OPTIONAL MATCH` (its scan runs inside `optional()`).
@@ -231,6 +235,81 @@ gql:bind("p") [path: labels(#w1)]                               1       2       
 out("created") [path: labels(#w1)]                              1       2       3
 gql:project("name", "sw")                                       1       3       3
 ```
+
+## FOR and the correlated lookup
+
+`FOR` (and `UNWIND`) becomes one `gql:for` step; the item is the current object of each row, and
+`as("x")` labels it only when a later step reads it after the row moved on. A query that does not
+start with `MATCH` starts from one empty row, `inject(0)`:
+
+```rhai,graph=modern
+g.gql("FOR x IN [10, 20] WITH ORDINALITY i RETURN x, i").profile()
+```
+
+```text
+inject(0)                                                       1       0       1
+gql:for("x IN [10, 20] WITH ORDINALITY i")                      1       1       2
+gql:project("x", "i")                                           1       2       2
+```
+
+A `MATCH` after `FOR` runs once per row. Without help that is a scan per item, so a list of 1000
+names reads the whole label 1000 times:
+
+```rhai,graph=modern
+g.gql("FOR n IN $names MATCH (p:person {name: n}) RETURN n, p.age AS age", #{names: ["vadas", "marko", "nobody"]}).profile()
+```
+
+```text
+inject(0)                                                       1       0       1
+gql:for("n IN $names")                                          1       1       3
+as("n") [path: labels(n)]                                       1       3       3
+v() [path: labels(n)]                                           1       3      18
+has_label("person") [path: labels(n)]                           1      18      12
+gql:filter("name: n") [path: labels(n)]                         1      12       2
+gql:project("n", "age")                                         1       2       2
+```
+
+When an equality between the pattern's vertex and a value of the row can be answered directly,
+the planner starts the pattern with `gql:lookup` instead: by **element id** always
+(`element_id(n) = id`, either operand order), by a **property** (`{name: n}`, `n.name = x`) when
+a [property index](../users_guide/property_indexes.md) on that key exists for every label of the
+node. Each row then reads only the vertices the value finds:
+
+```rhai,graph=modern
+g.gql("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS name", #{ids: ["1", "3", "42"]}).profile()
+```
+
+```text
+inject(0)                                                       1       0       1
+gql:for("id IN $ids")                                           1       1       3
+as("id") [path: labels(id)]                                     1       3       3
+gql:lookup("(n)", "element_id(n) = id") [id] [path: label...    1       3       2
+gql:project("id", "name")                                       1       2       2
+```
+
+```rhai,graph=modern
+{ g.create_index(#{label: "person", key: "name"}); g.gql("FOR n IN $names MATCH (p:person {name: n}) RETURN n, p.age AS age", #{names: ["vadas", "marko", "nobody"]}).profile() }
+```
+
+```text
+inject(0)                                                       1       0       1
+gql:for("n IN $names")                                          1       1       3
+as("n") [path: labels(n)]                                       1       3       3
+gql:lookup("(p:person)", "name: n") [index: vertex person...    1       3       2
+has_label("person") [path: labels(n)]                           1       2       2
+gql:project("n", "age")                                         1       2       2
+```
+
+(The profile table cuts long step names; the full annotation is
+`[index: vertex person.name]`.) The lookup checks every vertex it finds with GQL's `=`, so it
+returns exactly the rows of the scan ([Semantics](semantics.md#lookups-use-gql-equality)); a
+`NULL` value finds nothing, and a value an index cannot serve (a list, `NaN`, a non-string id,
+a storage that reports no index) falls back to scanning the label. The same lookup starts any
+pattern that is not the first one: a second, disconnected pattern with an indexed equality
+(`MATCH (a:person {name: 'marko'}), (b:person) WHERE b.age = a.age + 3` with an index on
+`person.age`), or a `MATCH` after a `WITH`. The first pattern of a query is never a
+lookup: it is a scan the optimizer serves with the index as usual. Edges are not looked up
+(an equality on `element_id(e)` stays a filter).
 
 ## Aggregation
 

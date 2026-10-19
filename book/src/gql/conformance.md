@@ -36,7 +36,7 @@ The mandatory core of a GQL read query, by construct.
 | aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
 | `OPTIONAL MATCH` | supported | also as the first clause |
 | Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |
-| a query without `MATCH` (`RETURN 1`) | not yet | |
+| a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
 | data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
 | value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); path values; no byte strings |
@@ -97,7 +97,9 @@ The mandatory core of a GQL read query, by construct.
 | GQ06 | composite query: `INTERSECT DISTINCT` *(provisional)* | not yet | |
 | GQ08 | `FILTER` statement | supported | `FILTER [WHERE] <condition>` |
 | GQ09 | `LET` statement | supported | |
-| GQ10 | `FOR` statement: list value support | not yet | Gremlin `unfold()` |
+| GQ10 | `FOR` statement: list value support | supported | `FOR x IN <list>` (Cypher `UNWIND <list> AS x`), also as the first clause; a `NULL` list gives no row, a value that is not a list one row ([Semantics](semantics.md#for-null-and-values-that-are-not-lists)) |
+| GQ11 | `FOR` statement: `WITH ORDINALITY` *(provisional)* | supported | the position from 1 |
+| GQ24 | `FOR` statement: `WITH OFFSET` *(provisional)* | supported | the position from 0 |
 | GQ12 | `ORDER BY` and page statement: `OFFSET` clause | partial | `OFFSET` / `SKIP` after `RETURN` and in `WITH`; the standalone statement form not yet |
 | GQ13 | `ORDER BY` and page statement: `LIMIT` clause | partial | `LIMIT` after `RETURN` and in `WITH`; the standalone statement form not yet |
 | GQ14 | complex expressions in sort keys *(provisional)* | supported | `ORDER BY element_id(e)`, `ORDER BY n.age * 2` |
