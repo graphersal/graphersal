@@ -492,7 +492,7 @@ pub(crate) enum ResultOp {
     Aggregate,
     /// `RETURN DISTINCT`.
     Distinct,
-    /// `ORDER BY` [`BoundQuery::order_by`].
+    /// `ORDER BY` [`BoundLinear::order_by`](super::bind::BoundLinear::order_by).
     Order,
     /// `OFFSET` / `SKIP`.
     Offset(Count),

@@ -4909,7 +4909,7 @@ fn mcp_gql_tool_rows_params_errors_and_read_only() {
     );
     let (error, text) = mcp.call(
         "gql",
-        serde_json::json!({"query": "MATCH (p) RETURN p UNION MATCH (q) RETURN q"}),
+        serde_json::json!({"query": "MATCH (p) RETURN p EXCEPT MATCH (q) RETURN q"}),
     );
     assert!(error && text.contains("not yet supported"), "{text}");
     let (error, text) = mcp.call("gql", serde_json::json!({"params": {}}));

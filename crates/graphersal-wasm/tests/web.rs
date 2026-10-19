@@ -540,3 +540,50 @@ fn deeply_nested_gql_stays_within_the_wasm_stack() {
     let labels = format!("MATCH (p:{}) RETURN p.name AS n", nest(126, "person"));
     gql_within_limits(&mut p, &labels, Some(4));
 }
+
+/// Stage 2d: the deepest accepted nesting of `CALL { }` and whole-query subquery bodies
+/// (`bind::MAX_BODY_DEPTH`, 16), each with the tallest expression inside, stays within the 1 MB
+/// wasm32 stack; one level more is refused (54001). Until the lowering of these forms lands, the
+/// accepted ones answer "not yet supported" (0A000) after binding.
+#[wasm_bindgen_test]
+fn deeply_nested_gql_bodies_stay_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let calls = |levels: usize| {
+        let mut q = format!("WITH 1 AS x RETURN {} AS y", ors(500));
+        for _ in 0..levels {
+            q = format!("CALL {{ {q} UNION ALL RETURN 2 AS y }} RETURN y");
+        }
+        q
+    };
+    let bodies = |levels: usize| {
+        let mut q = format!("EXISTS {{ LET x = 1 FILTER {} RETURN x }}", ors(440));
+        for _ in 1..levels {
+            q = format!("EXISTS {{ MATCH (n) WITH n WHERE {q} RETURN n }}");
+        }
+        format!("MATCH (n) WHERE {q} RETURN n")
+    };
+    for (query, refused) in [
+        (calls(16), false),
+        (calls(17), true),
+        (bodies(16), false),
+        (bodies(17), true),
+    ] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        let text = r.to_string();
+        if refused {
+            assert!(text.contains("54001"), "{}: {text}", &query[..60]);
+        } else {
+            assert!(
+                r["ok"] == true || text.contains("0A000"),
+                "{}: {text}",
+                &query[..60]
+            );
+        }
+    }
+}

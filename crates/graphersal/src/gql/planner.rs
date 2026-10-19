@@ -370,6 +370,22 @@ impl<'q> Planner<'q> {
                     }));
                     current = None;
                 }
+                Segment::Call(_) | Segment::Rows(_) => {
+                    // Stage 2d: `bind::refuse_not_yet` refuses these before planning; the
+                    // planner gains their stages in 2d.T3. Their columns are bound after them.
+                    let outputs = match segment {
+                        Segment::Call(call) => call.outputs.as_slice(),
+                        Segment::Rows(rows) => rows.outputs.as_slice(),
+                        Segment::Match(_)
+                        | Segment::Optional(_)
+                        | Segment::With(_)
+                        | Segment::For(_) => &[],
+                    };
+                    for &output in outputs {
+                        self.bind(output);
+                    }
+                    current = None;
+                }
             }
         }
         self.mark_static();

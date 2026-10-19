@@ -81,7 +81,8 @@
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
 //! binder; stage 2d's `UNION`, `NEXT`, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
-//! subquery bodies parse and the binder refuses them until they are lowered. A component that is not the root scan and has no
+//! subquery bodies parse and bind, and `bind::refuse_not_yet` refuses them before planning
+//! until they are lowered. A component that is not the root scan and has no
 //! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
@@ -101,7 +102,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters,
+    SortKey, bind_with_parameters, refuse_not_yet,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -1204,6 +1205,7 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
+    refuse_not_yet(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -2296,7 +2298,11 @@ impl<'q> Lowering<'q> {
             .iter()
             .map(|segment| match segment {
                 Segment::With(with) => with.columns.iter().map(|c| c.variable).collect(),
-                Segment::Match(_) | Segment::Optional(_) | Segment::For(_) => Vec::new(),
+                Segment::Match(_)
+                | Segment::Optional(_)
+                | Segment::For(_)
+                | Segment::Call(_)
+                | Segment::Rows(_) => Vec::new(),
             })
             .chain(std::iter::once(
                 self.bound.columns.iter().map(|c| c.variable).collect(),
@@ -2625,7 +2631,9 @@ impl<'q> Lowering<'q> {
                     }
                     CompactString::from(label)
                 }
-                Segment::Match(_) | Segment::Optional(_) => CompactString::default(),
+                Segment::Match(_) | Segment::Optional(_) | Segment::Call(_) | Segment::Rows(_) => {
+                    CompactString::default()
+                }
             })
             .chain(std::iter::once({
                 let mut label = String::from("#r");

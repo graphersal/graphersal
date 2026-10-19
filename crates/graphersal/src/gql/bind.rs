@@ -37,7 +37,7 @@
 //!   (design E3: the lowering continues the pattern from it, a value of another kind gives no
 //!   row); the ordinal is always a number and never an element.
 //! - **Unit row (design M1, E4).** A query may start with `FOR`, `LET`, `WITH`, `FILTER` or
-//!   `RETURN` ([`BoundQuery::unit`]): it starts from one row that holds no binding, so its first
+//!   `RETURN` ([`BoundLinear::unit`]): it starts from one row that holds no binding, so its first
 //!   expressions read only constants and parameters (`RETURN *` with no variable in scope is
 //!   still an error).
 //! - **Substitutions (decision C1).** `LET x = expr` and a `WITH` that only projects are not
@@ -82,6 +82,7 @@
 //! - **Parameters:** every `$name` reference with its span, in text order.
 //! - **Subqueries (stage 2b, design M2):** `EXISTS { .. }`, `EXISTS ( .. )` and Cypher pattern
 //!   predicates; see "Subqueries".
+//! - **Composite queries and `CALL` (stage 2d):** [`BoundQuery::body`], see "Composite queries".
 //!
 //! # Scope
 //!
@@ -157,6 +158,50 @@
 //! subquery anywhere else in an expression as a child of the `gql:*` step evaluating it (the
 //! hook, `runtime::SubqueryHost`, stage 2b.T5).
 //!
+//! # Composite queries (stage 2d)
+//!
+//! Every linear query is bound as a pipeline ([`BoundLinear`]: its segments, in
+//! [`BoundQuery::segments`] with every other pipeline's, listed in
+//! [`BoundLinear::pipeline`], and its result statement); [`BoundQuery`] dereferences to the
+//! first, which is the whole query when it is linear (every query of the stages before, bound
+//! exactly as before). Bindings, clauses, conjuncts and subqueries stay one table each for the
+//! whole query, so a body reads an outer binding by its id. The `MATCH` clauses are numbered
+//! in binding order over every pipeline, the clauses of `MATCH`-only subquery bodies after them.
+//!
+//! - **`UNION` (design E15).** Each operand of a block has a scope of its own (a name of one
+//!   operand is unknown in the next, the same name a new binding). Every operand returns the
+//!   same column names in any order; the columns of the later operands are reordered to the
+//!   first operand's order before their `ORDER BY` binds, so a sort key's column index is the
+//!   block's. `ORDER BY` / `OFFSET` / `LIMIT` belong to their operand. One kind per block:
+//!   `UNION ALL` beside `UNION` / `UNION DISTINCT` is 42002 ([`BoundBlock::distinct`]).
+//! - **`NEXT` (design E19).** Chained linear queries `q1 NEXT q2` are one pipeline: the `RETURN`
+//!   of `q1` is bound exactly like a `WITH` of its items, `ORDER BY`, `OFFSET`, `LIMIT` (a
+//!   projecting one a substitution, a materializing one a [`Segment::With`]; an item needs no
+//!   `AS`, its name is its text; `GROUP BY` is checked as on a `RETURN`), `RETURN *` like
+//!   `WITH *`. A block after a `UNION` block, or a `UNION` block after `NEXT`, starts each
+//!   operand with a [`Segment::Rows`]: the records of the block before as new column bindings
+//!   ([`Binding::column`]), a node or edge where every operand returns one in that column, else
+//!   a value ([`BoundComposite::next`]).
+//! - **`CALL` (design item 8).** `[OPTIONAL] CALL (a, b) { body }` imports exactly the named
+//!   variables, `CALL (*)` every name in scope, `CALL { }` nothing unless an operand of its
+//!   first block starts with a Cypher importing `WITH a, b` / `WITH *`
+//!   ([`LinearQuery::importing`]); each operand of the body's first block starts with those
+//!   names in scope (a `LET` / `WITH` name keeps its substitution), a block after `NEXT` with
+//!   the rows before. Reading another outer name inside is 42002 naming the scope clause. The
+//!   body is a [`BoundComposite`] of its own pipelines; [`BoundCall::imports`] are the outer
+//!   bindings it reads (in a pattern, a condition, a column, a sort key, a `FOR` list or a
+//!   nested body), marked read at the `CALL`. Its result columns (the first operand's of its
+//!   last block) become new bindings of the [`Segment::Call`] ([`BoundCall::outputs`],
+//!   [`Binding::column`]; a node or edge column keeps its kind, so a later pattern continues
+//!   it), each a new name (42002 when in scope); the body's own names are invisible after it.
+//!   The `CALL` is a cut; an `OPTIONAL CALL`'s columns may be `NULL` ([`Binding::optional`]).
+//! - **Whole-query subquery bodies.** `EXISTS { .. }`, `COUNT { .. }` and `COLLECT { .. }` with
+//!   clauses other than `MATCH` ([`BoundSubquery::query`]) bind as a composite whose operands
+//!   start with every name in scope around the subquery (correlation as in a `MATCH`-only
+//!   body: a written outer name is an import, a new name a local of the subquery). `COLLECT { }`
+//!   ends in a `RETURN` of exactly one column. A `COUNT { }` of `MATCH` clauses binds like
+//!   `EXISTS`.
+//!
 //! # Aggregates
 //!
 //! Aggregate calls stand in `RETURN` and `WITH` items only; a key of `ORDER BY` may hold one
@@ -180,13 +225,21 @@
 //! map, a parameter that was not supplied, a subquery local read outside its body, a new
 //! variable in a pattern predicate, a comprehension variable shadowing a name or read outside
 //! its comprehension, an aggregate inside a comprehension's `WHERE` / `|` part (a pattern
-//! comprehension's `|` part too). `22G02` for a negative `OFFSET` / `LIMIT` literal,
+//! comprehension's `|` part too); stage 2d: `UNION` operands with other column names (both
+//! sets named), `UNION ALL` mixed with `UNION [DISTINCT]` in one block, a name the `RETURN`
+//! before `NEXT` does not return, an outer name a `CALL` body does not import, a variable a
+//! `CALL` scope clause (or importing `WITH`) does not know or names twice, a `CALL` column whose
+//! name is in scope, a `CALL` body name read after it, a `COLLECT { }` without exactly one
+//! returned column. `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable and a comprehension variable read inside a
-//! subquery (a pattern comprehension's body and `|` part included). Also `NotYet`, before any
-//! other check, for what stage 2d parses ahead of binding it: a `UNION` / `NEXT` composition (at
-//! its first keyword), a `[OPTIONAL] CALL { }` stage, `COUNT { }`, `COLLECT { }` and a
-//! whole-query subquery body (at the subquery).
+//! subquery (a pattern comprehension's body and `|` part included).
+//!
+//! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies ahead of their
+//! planning and lowering; [`refuse_not_yet`] (which the lowering calls between binding and
+//! planning) refuses them with `NotYet`: a `UNION` / `NEXT` composition at its first keyword,
+//! else the first in text order of a `[OPTIONAL] CALL { }`, `COUNT { }`, `COLLECT { }` and a
+//! whole-query `EXISTS` body.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -201,6 +254,11 @@
 //! One query holds at most [`MAX_SUBQUERIES`] subqueries, nested ones included: each becomes a
 //! child traversal planned with its host.
 //!
+//! `CALL` bodies and whole-query subquery bodies nest at most [`MAX_BODY_DEPTH`] levels (the
+//! parser allows [`MAX_DEPTH`]): binding recurses through a few kilobytes of stack per level in
+//! an unoptimized build, and the deepest accepted query with the tallest expression inside
+//! must fit a 2 MiB thread (the wasm32 worker's 1 MiB with its smaller frames).
+//!
 //! A substituted expression keeps the parser's bounds (height [`MAX_HEIGHT`], nesting
 //! [`MAX_DEPTH`]), and one query substitutes at most [`MAX_SUBSTITUTED_NODES`] expression nodes
 //! in all, so chained `LET`s that double an expression each cannot grow it exponentially.
@@ -209,11 +267,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CallClause, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind,
-    ForClause, GroupBy, Identifier, LabelExpr, LetClause, ListComprehension, Literal, MapEntry,
-    MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem,
-    Quantifier, Query, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
-    WithClause,
+    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, CountClause,
+    EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr, LetClause,
+    LinearQuery, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection, MatchClause,
+    NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, QueryBlock, ReturnItem,
+    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -303,10 +361,16 @@ impl Binding {
         self.occurrences.len() > 1
     }
 
-    /// Whether it was first bound by an `OPTIONAL MATCH` of `segments` (it may be NULL).
+    /// Whether it was first bound by an `OPTIONAL MATCH` of `segments`, or returned by an
+    /// `OPTIONAL CALL` (it may be NULL).
     #[cfg_attr(not(test), allow(dead_code, reason = "read by the tests until T5"))]
     pub(crate) fn optional(&self, segments: &[Segment]) -> bool {
-        matches!(segments.get(self.segment), Some(Segment::Optional(_)))
+        match segments.get(self.segment) {
+            Some(Segment::Optional(_)) => true,
+            Some(Segment::Call(call)) => call.optional,
+            Some(Segment::Match(_) | Segment::With(_) | Segment::For(_) | Segment::Rows(_))
+            | None => false,
+        }
     }
 }
 
@@ -364,6 +428,140 @@ pub(crate) enum Segment {
     /// `FOR` / `UNWIND`: one row per item of its list (module docs). It has no conjuncts of its
     /// own.
     For(Box<BoundFor>),
+    /// `[OPTIONAL] CALL { }` (stage 2d): a cut whose returned columns enter the scope as new
+    /// bindings (module docs, "CALL"). It has no conjuncts of its own.
+    Call(Box<BoundCall>),
+    /// The first segment of a pipeline reading the records of the block before it (stage 2d,
+    /// design E19: `NEXT` after a `UNION` block, or a `UNION` block after `NEXT`): its columns
+    /// are new bindings (module docs, "Composite queries"). It has no conjuncts of its own.
+    Rows(Box<BoundRows>),
+}
+
+/// A bound `[OPTIONAL] CALL (..) { body }` (stage 2d).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundCall {
+    /// `OPTIONAL CALL`: a row without body results is kept, its returned names `NULL`.
+    pub(crate) optional: bool,
+    /// The body; its pipelines' segments are in [`BoundQuery::segments`] too.
+    pub(crate) body: Box<BoundComposite>,
+    /// The bindings declared before the `CALL` that the body reads (its imports, through the
+    /// variable scope clause or a Cypher importing `WITH`), sorted, without duplicates.
+    pub(crate) imports: Vec<BindingId>,
+    /// The binding of each returned column, in the column order of the body's result (the
+    /// first operand's order of its last block): new bindings standing for the columns of this
+    /// segment ([`Binding::column`]).
+    pub(crate) outputs: Vec<BindingId>,
+    /// The clause.
+    pub(crate) span: Span,
+}
+
+/// The records of the block before a pipeline, read as columns (stage 2d, [`Segment::Rows`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundRows {
+    /// The binding of each column of the block before, in its column order.
+    pub(crate) outputs: Vec<BindingId>,
+    /// The `NEXT` keyword that passes the records on.
+    pub(crate) span: Span,
+}
+
+/// A bound linear query: one pipeline and its result statement (a `UNION` operand, a block
+/// after `NEXT`, or the whole query). Chained linear queries `q1 NEXT q2` are desugared into
+/// one (design E19), `q1`'s `RETURN` becoming a `WITH`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundLinear {
+    /// Its segments in pipeline order (indexes into [`BoundQuery::segments`]). For a query
+    /// without `CALL`, `UNION`, `NEXT` and whole-query subquery bodies: every segment, in order.
+    pub(crate) pipeline: Vec<usize>,
+    /// The `RETURN` columns in order (of a `UNION` operand after the first: reordered to the
+    /// first operand's order, design E15).
+    pub(crate) columns: Vec<Column>,
+    /// `RETURN DISTINCT` (or a `GROUP BY` without aggregate).
+    pub(crate) distinct: bool,
+    /// The `ORDER BY` keys in priority order.
+    pub(crate) order_by: Vec<SortKey>,
+    /// `OFFSET` / `SKIP`.
+    pub(crate) offset: Option<Count>,
+    /// `LIMIT`.
+    pub(crate) limit: Option<Count>,
+    /// The pipeline starts without `[OPTIONAL] MATCH` (with `FOR`, `LET`, `WITH`, `FILTER`,
+    /// `CALL` or `RETURN`) and without a [`Segment::Rows`]: it starts from one unit row that
+    /// holds no binding (design M1). In a `CALL` body or a whole-query subquery body that row is
+    /// the outer row.
+    pub(crate) unit: bool,
+    /// From its first clause to the end of its result statement.
+    pub(crate) span: Span,
+}
+
+/// A bound `UNION` block: operands with the same column names (design E15).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundBlock {
+    /// The first operand (its column order is the block's).
+    pub(crate) first: BoundLinear,
+    /// The further operands in text order, each with the `UNION` before it.
+    pub(crate) unions: Vec<BoundUnion>,
+    /// The block.
+    pub(crate) span: Span,
+}
+
+impl BoundBlock {
+    /// Every operand in text order.
+    pub(crate) fn operands(&self) -> impl Iterator<Item = &BoundLinear> {
+        std::iter::once(&self.first).chain(self.unions.iter().map(|u| &u.operand))
+    }
+
+    /// Whether the block removes duplicate records (`UNION` / `UNION DISTINCT`; one kind per
+    /// block, design E15); `false` for one operand and for `UNION ALL`.
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered in stage 2d.T4"))]
+    pub(crate) fn distinct(&self) -> bool {
+        self.unions
+            .first()
+            .is_some_and(|u| u.kind == UnionKind::Distinct)
+    }
+}
+
+/// One `UNION [ALL | DISTINCT]` operand of a [`BoundBlock`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundUnion {
+    /// `UNION ALL` or `UNION [DISTINCT]` (the same for every operand of a block).
+    pub(crate) kind: UnionKind,
+    /// The keywords.
+    pub(crate) keyword: Span,
+    /// The operand.
+    pub(crate) operand: BoundLinear,
+}
+
+/// A bound composite query (stage 2d): the top level, a `CALL` body, a whole-query subquery
+/// body. Chained linear queries are already desugared (design E19), so every block in
+/// [`Self::next`] starts each of its operands with a [`Segment::Rows`] reading the block before.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundComposite {
+    /// The first block.
+    pub(crate) first: BoundBlock,
+    /// The further blocks, each after a `NEXT` (`first` or the block before is a `UNION`
+    /// block, or this one is).
+    pub(crate) next: Vec<BoundBlock>,
+    /// The whole composite.
+    pub(crate) span: Span,
+}
+
+impl BoundComposite {
+    /// The block whose records are the result.
+    pub(crate) fn last(&self) -> &BoundBlock {
+        self.next.last().unwrap_or(&self.first)
+    }
+
+    /// Whether it is one linear query (no `UNION` block, no `NEXT` left after desugaring).
+    #[cfg_attr(not(test), allow(dead_code, reason = "planned in stage 2d.T3"))]
+    pub(crate) fn is_linear(&self) -> bool {
+        self.next.is_empty() && self.first.unions.is_empty()
+    }
+
+    /// Every linear query in it, in text order (not those of nested bodies).
+    pub(crate) fn linears(&self) -> impl Iterator<Item = &BoundLinear> {
+        std::iter::once(&self.first)
+            .chain(&self.next)
+            .flat_map(BoundBlock::operands)
+    }
 }
 
 /// A bound `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]` (Cypher `UNWIND list AS x`).
@@ -435,6 +633,10 @@ pub(crate) struct BoundSubquery {
     pub(crate) map: Option<Expr>,
     /// The bindings [`Self::map`] reads (the body's locals and imports), sorted.
     pub(crate) map_bindings: Vec<BindingId>,
+    /// A whole-query body (stage 2d: `EXISTS { .. RETURN .. }`, `COUNT { .. }`, `COLLECT { ..
+    /// RETURN x }`), its locals bound in its own pipelines ([`Self::clauses`] empty then);
+    /// `None` for a body of `MATCH` clauses. `COLLECT { }` returns exactly one column.
+    pub(crate) query: Option<Box<BoundComposite>>,
 }
 
 /// Where a conjunct was written.
@@ -558,31 +760,32 @@ pub(crate) struct BoundQuery {
     pub(crate) bindings: Vec<Binding>,
     /// The `[OPTIONAL] MATCH` clauses.
     pub(crate) matches: Vec<BoundMatch>,
-    /// The pipeline before `RETURN`, cut into segments (module docs).
+    /// The pipeline before `RETURN`, cut into segments (module docs). Stage 2d: the segments of
+    /// every pipeline (each [`BoundLinear::pipeline`] lists its own); for a query without
+    /// `CALL`, `UNION`, `NEXT` and whole-query subquery bodies exactly its one pipeline.
     pub(crate) segments: Vec<Segment>,
     /// Every conjunct of every filter, in text order per clause.
     pub(crate) conjuncts: Vec<Conjunct>,
     /// Indexes into [`Self::conjuncts`] of those not listed on a binding (module docs).
     pub(crate) cross: Vec<usize>,
-    /// The `RETURN` columns in order.
-    pub(crate) columns: Vec<Column>,
-    /// `RETURN DISTINCT`.
-    pub(crate) distinct: bool,
-    /// The `ORDER BY` keys in priority order.
-    pub(crate) order_by: Vec<SortKey>,
-    /// `OFFSET` / `SKIP`.
-    pub(crate) offset: Option<Count>,
-    /// `LIMIT`.
-    pub(crate) limit: Option<Count>,
     /// Every parameter reference in text order.
     pub(crate) parameters: Vec<ParameterRef>,
-    /// The query starts without `[OPTIONAL] MATCH` (with `FOR`, `LET`, `WITH`, `FILTER` or
-    /// `RETURN`): it
-    /// starts from one unit row that holds no binding (design M1).
-    pub(crate) unit: bool,
     /// Every subquery in text order (a subquery before the ones nested in its body); module
     /// docs, "Subqueries".
     pub(crate) subqueries: Vec<BoundSubquery>,
+    /// The statements (stage 2d): one linear query, or `UNION` blocks chained by `NEXT`. The
+    /// query dereferences to its first linear query ([`BoundLinear`]: `columns`, `distinct`,
+    /// `order_by`, `offset`, `limit`, `unit`), the whole query when [`BoundComposite::is_linear`].
+    pub(crate) body: BoundComposite,
+}
+
+impl std::ops::Deref for BoundQuery {
+    type Target = BoundLinear;
+
+    /// The first linear query (the whole query when it is linear).
+    fn deref(&self) -> &BoundLinear {
+        &self.body.first.first
+    }
 }
 
 impl BoundQuery {
@@ -661,9 +864,47 @@ pub(crate) const MAX_SUBSTITUTED_NODES: usize = 100_000;
 /// beyond any written query and keep preparing a query fast.
 pub(crate) const MAX_SUBQUERIES: usize = 64;
 
+/// The most `CALL` bodies and whole-query subquery bodies (`EXISTS` / `COUNT` / `COLLECT` with
+/// clauses other than `MATCH`) one may nest in another (module docs, "Limits"). Binding (and
+/// every later stage) recurses once per level through frames of a few kilobytes in an
+/// unoptimized build; 16 levels lie far beyond any written query and keep the deepest query
+/// with the tallest expression inside within a 2 MiB thread stack (the wasm32 worker has 1
+/// MiB, with smaller frames).
+pub(crate) const MAX_BODY_DEPTH: usize = 16;
+
 /// The provisional segment of subquery `k`'s body while binding is `SUBQUERY_SEGMENTS + k`; the
 /// binder renumbers it past the query's own segments at the end ([`BoundSubquery::segment`]).
 const SUBQUERY_SEGMENTS: usize = usize::MAX / 2;
+
+/// The provisional id of the `k`-th clause of the `MATCH`-only subquery bodies while binding is
+/// `SUBQUERY_CLAUSES + k`; the binder renumbers it past the clauses of every pipeline at the
+/// end (for a query without `CALL`, `UNION`, `NEXT` and whole-query bodies: past the query's own
+/// clauses, as in stage 2b).
+const SUBQUERY_CLAUSES: usize = usize::MAX / 2;
+
+/// What binding a subquery body yields: its `MATCH` clauses (a body of `MATCH` clauses), the
+/// resolved `|` part of a pattern comprehension, a whole-query body with the names at the end
+/// of its pipelines.
+type SubqueryBody = (
+    Vec<usize>,
+    Option<Resolved>,
+    Option<(Box<BoundComposite>, Vec<String>)>,
+);
+
+/// The error of a `COLLECT { }` whose body does not end in a `RETURN` of exactly one column.
+fn collect_needs_one_column(span: Span) -> Box<GqlErrorBuilder> {
+    Box::new(
+        semantic(
+            span,
+            "COLLECT { } needs a body that ends in a RETURN of exactly one column",
+        )
+        .alternative(
+            "return the one value to collect, as in MATCH (p:person) RETURN COLLECT { MATCH \
+             (p)-[:created]->(s) RETURN s.name } AS names",
+        )
+        .topic(GqlHelpTopic::Subquery),
+    )
+}
 
 type BResult<T> = Result<T, Box<GqlErrorBuilder>>;
 
@@ -704,14 +945,6 @@ fn too_large(span: Span, what: &str) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// The prefix of `span` that holds a keyword of `len` ASCII characters.
-fn keyword_span(span: Span, len: usize) -> Span {
-    Span {
-        end: span.start.saturating_add(len).min(span.end),
-        ..span
-    }
-}
-
 /// The error of a query with more than [`MAX_SUBQUERIES`] subqueries, at the first one past the
 /// limit.
 fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
@@ -734,7 +967,36 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// The "not yet" error of a `UNION` or `NEXT` composition (stage 2d: parsed, bound in a later
+/// Refuses (kind `NotYet`, `0A000`) what stage 2d binds but no later stage runs yet (the
+/// planner and the lowering follow in tasks 2d.T3 to 2d.T5c): a `UNION` / `NEXT` composition (at
+/// its first keyword, before anything else), then the first in text order of a
+/// `[OPTIONAL] CALL { }`, a `COUNT { }`, a `COLLECT { }` and a whole-query `EXISTS { }` body.
+/// Called on a bound query before it is planned.
+pub(crate) fn refuse_not_yet(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
+    not_yet_in(query, bound).map_err(|e| e.into_error(&query.source))
+}
+
+fn not_yet_in(query: &Query, bound: &BoundQuery) -> BResult<()> {
+    composite_not_yet(query)?;
+    let calls = bound.segments.iter().filter_map(|segment| match segment {
+        Segment::Call(call) => Some((call.span, call_not_yet(call))),
+        Segment::Match(_)
+        | Segment::Optional(_)
+        | Segment::With(_)
+        | Segment::For(_)
+        | Segment::Rows(_) => None,
+    });
+    let subqueries = bound
+        .subqueries
+        .iter()
+        .filter_map(|s| subquery_not_yet(s).map(|error| (s.span, error)));
+    match calls.chain(subqueries).min_by_key(|(span, _)| span.start) {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The "not yet" error of a `UNION` or `NEXT` composition (stage 2d: bound, lowered in a later
 /// task), at its first `UNION` or `NEXT` keyword.
 fn composite_not_yet(query: &Query) -> BResult<()> {
     if query.is_linear() {
@@ -759,23 +1021,24 @@ fn composite_not_yet(query: &Query) -> BResult<()> {
     Ok(())
 }
 
-/// The "not yet" error of a `CALL { }` subquery (stage 2d: parsed, bound in a later task).
-fn call_not_yet(clause: &CallClause) -> Box<GqlErrorBuilder> {
-    let what = if clause.optional.is_some() {
+/// The "not yet" error of a `CALL { }` subquery (stage 2d: bound, lowered in a later task).
+fn call_not_yet(call: &BoundCall) -> Box<GqlErrorBuilder> {
+    let what = if call.optional {
         "OPTIONAL CALL { } (a subquery)"
     } else {
         "CALL { } (a subquery)"
     };
     not_yet(
-        clause.span,
+        call.span,
         what,
         "run the inner query as its own gql() call, or write it as Gremlin steps",
     )
 }
 
-/// The "not yet" error of the stage 2d subquery forms the parser accepts before they bind:
-/// `COUNT { }`, `COLLECT { }` and a whole-query body (`EXISTS { MATCH .. RETURN .. }`).
-fn subquery_not_yet(subquery: &SubqueryExpr) -> BResult<()> {
+/// The "not yet" error of the stage 2d subquery forms that bind before they run: `COUNT { }`,
+/// `COLLECT { }` and a whole-query body (`EXISTS { MATCH .. RETURN .. }`); `None` for the
+/// others.
+fn subquery_not_yet(subquery: &BoundSubquery) -> Option<Box<GqlErrorBuilder>> {
     const WHOLE_QUERY: &str = "write the body as MATCH clauses with a WHERE, as in \
          MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } \
          RETURN p.name";
@@ -798,9 +1061,9 @@ fn subquery_not_yet(subquery: &SubqueryExpr) -> BResult<()> {
             "an EXISTS { } body that is a whole query (clauses other than MATCH)",
             WHOLE_QUERY,
         ),
-        SubqueryKind::Exists | SubqueryKind::Collect => return Ok(()),
+        SubqueryKind::Exists | SubqueryKind::Collect => return None,
     };
-    Err(not_yet(subquery.span, what, alternative))
+    Some(not_yet(subquery.span, what, alternative))
 }
 
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
@@ -1030,6 +1293,82 @@ struct Resolved {
     shape: Shape,
 }
 
+/// Why a name left the scope (for the message of a later read).
+#[derive(Debug, Clone, Copy)]
+enum Dropper {
+    /// A `WITH` that does not carry it.
+    With,
+    /// A `RETURN` before `NEXT` that does not return it (design E19).
+    Next,
+}
+
+/// Where a name that is not in scope any more was bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    /// Inside an `EXISTS` body or a pattern predicate.
+    Subquery,
+    /// Inside a pattern comprehension.
+    Comprehension,
+    /// Inside a `CALL` body that does not return it.
+    Call,
+}
+
+/// What the operands of a composite's first block start from.
+#[derive(Clone, Copy)]
+enum Entry<'a> {
+    /// The query itself: nothing in scope.
+    Top,
+    /// A `CALL` body: the names of `outer` its variable scope clause (or a Cypher importing
+    /// `WITH`) imports.
+    Call {
+        scope: &'a CallScope,
+        outer: &'a Names,
+    },
+    /// A whole-query subquery body: every name in scope around it (`outer`).
+    Subquery { outer: &'a Names },
+}
+
+/// The records of a block read by the next one (design E19, [`Segment::Rows`]).
+struct RowsInput {
+    /// Each column's name (spanned by its item in the block's first operand) and kind.
+    columns: Vec<(Identifier, BindingKind)>,
+    /// The `NEXT` keyword.
+    keyword: Span,
+}
+
+/// How a pipeline starts.
+enum Start<'a> {
+    /// With these names in scope (none at the top, the imports of a `CALL` body, every outer
+    /// name in a whole-query subquery body).
+    Names(Names),
+    /// With the records of the block before as columns.
+    Rows(&'a RowsInput),
+}
+
+/// The binder state one pipeline owns (saved around a nested pipeline).
+struct PipelineState {
+    scope: Names,
+    dropped: HashMap<String, Dropper>,
+    hidden: HashMap<String, Hidden>,
+    open: Option<usize>,
+    pipeline: Vec<usize>,
+    bound_clauses: usize,
+    later_clauses: Vec<(usize, String)>,
+    later_in_body: Vec<String>,
+}
+
+/// Where the binder stood when a nested body started: everything past these counts was
+/// bound inside it.
+#[derive(Clone, Copy)]
+struct Marks {
+    binding: usize,
+    conjunct: usize,
+    segment: usize,
+    own: usize,
+    sub: usize,
+    subquery: usize,
+}
+
 struct Binder<'q> {
     query: &'q Query,
     bindings: Vec<Binding>,
@@ -1037,19 +1376,28 @@ struct Binder<'q> {
     scope: Names,
     /// Every name and key given to a binding so far (keys stay unique, C14).
     taken: HashSet<String>,
-    /// Names a `WITH` dropped from the scope, with that `WITH`'s keyword.
-    dropped: HashMap<String, Span>,
+    /// Names a `WITH` (or a `RETURN` before `NEXT`) dropped from the scope.
+    dropped: HashMap<String, Dropper>,
     /// The names of the `LET` being bound (its definitions cannot read them).
     pending_let: Vec<String>,
     conjuncts: Vec<Conjunct>,
     parameters: Vec<ParameterRef>,
     segments: Vec<Segment>,
+    /// The segments of the pipeline being bound, in order.
+    pipeline: Vec<usize>,
     /// The `Segment::Match` later plain clauses and filters join, while no cut came after it.
     open: Option<usize>,
     /// The last `MATCH` clause bound (`0` before the first).
     clause: usize,
-    /// How many `MATCH` clauses are bound.
+    /// How many `MATCH` clauses of the linear query being bound are bound.
     bound_clauses: usize,
+    /// The names each `MATCH` clause of the linear query being bound declares, with the
+    /// clause's index in it (for the "bound by a later MATCH clause" message).
+    later_clauses: Vec<(usize, String)>,
+    /// The `MATCH` clauses of every pipeline (the query's own, of `UNION` operands, `NEXT`
+    /// blocks, `CALL` bodies and whole-query subquery bodies), by clause id; `None` while a
+    /// clause is bound.
+    own: Vec<Option<BoundMatch>>,
     /// Expression nodes left to substitute.
     budget: usize,
     /// Every subquery bound or being bound, in text order (the placeholder of one being bound
@@ -1062,9 +1410,9 @@ struct Binder<'q> {
     /// The `MATCH` clauses whose path variables are not complete where a subquery body is
     /// bound (it stands in an inline filter of such a clause).
     incomplete_paths: Vec<usize>,
-    /// Names bound only inside a subquery body that is done, with whether that subquery is a
-    /// pattern comprehension (for the message).
-    hidden: HashMap<String, bool>,
+    /// Names bound only inside a subquery body or a `CALL` body that is done (for the
+    /// message).
+    hidden: HashMap<String, Hidden>,
     /// Names the later `MATCH` clauses of the subquery bodies being bound declare (innermost
     /// last), for the "bound by a later MATCH clause" message inside a body.
     later_in_body: Vec<String>,
@@ -1074,6 +1422,11 @@ struct Binder<'q> {
     /// The comprehension variables around a subquery body being bound: not readable inside it
     /// (not yet), named by the error.
     shelved_locals: Vec<Identifier>,
+    /// The scope around each `CALL` body being bound, innermost last (for the message of an
+    /// outer name the body does not import).
+    calls: Vec<Rc<Names>>,
+    /// How many `CALL` / whole-query subquery bodies enclose what is being bound.
+    body_depth: usize,
 }
 
 impl<'q> Binder<'q> {
@@ -1088,9 +1441,12 @@ impl<'q> Binder<'q> {
             conjuncts: Vec::new(),
             parameters: Vec::new(),
             segments: Vec::new(),
+            pipeline: Vec::new(),
             open: None,
             clause: 0,
             bound_clauses: 0,
+            later_clauses: Vec::new(),
+            own: Vec::new(),
             budget: MAX_SUBSTITUTED_NODES,
             subqueries: Vec::new(),
             subquery: None,
@@ -1100,79 +1456,19 @@ impl<'q> Binder<'q> {
             later_in_body: Vec::new(),
             locals: Vec::new(),
             shelved_locals: Vec::new(),
+            calls: Vec::new(),
+            body_depth: 0,
         }
     }
 
     fn run(mut self, supplied: Option<&[&str]>) -> BResult<BoundQuery> {
-        // Composite queries parse (stage 2d.T1) but bind in a later task.
-        composite_not_yet(self.query)?;
-        // The pattern size of every clause first, before any other work.
-        for m in &self.query.matches {
-            if let Some(edge) = m
-                .patterns
-                .iter()
-                .flat_map(|path| &path.steps)
-                .nth(MAX_MATCH_EDGES)
-            {
-                return Err(too_many_edges(edge.edge.span));
-            }
-        }
         let query = self.query;
-        let unit = !matches!(query.stages.first(), Some(Stage::Match(_)));
-        let mut matches = Vec::with_capacity(query.matches.len());
-        for stage in &query.stages {
-            match stage {
-                Stage::Match(index) => {
-                    let m = query
-                        .matches
-                        .get(*index)
-                        .filter(|_| *index == matches.len())
-                        .ok_or_else(|| {
-                            semantic(query.span, "internal error: MATCH stages out of order")
-                        })?;
-                    self.clause = *index;
-                    self.bound_clauses = index.saturating_add(1);
-                    let segment = if m.optional {
-                        self.open = None;
-                        self.segments.push(Segment::Optional(*index));
-                        self.segments.len() - 1
-                    } else {
-                        let segment = self.open_segment();
-                        if let Some(Segment::Match(clauses)) = self.segments.get_mut(segment) {
-                            clauses.push(*index);
-                        }
-                        segment
-                    };
-                    let bound = self.declare_clause(*index, m, segment)?;
-                    self.clause_filters(*index, m, &bound)?;
-                    matches.push(bound);
-                }
-                Stage::Let(clause) => self.let_clause(clause)?,
-                Stage::Filter(clause) => {
-                    let segment = self.open_segment();
-                    self.conjuncts_of(
-                        Ctx::refusing("in FILTER"),
-                        &clause.condition,
-                        ConjunctOrigin::Filter,
-                        segment,
-                    )?;
-                }
-                Stage::With(with) => self.with_clause(with)?,
-                Stage::For(clause) => self.for_clause(clause)?,
-                Stage::Call(clause) => return Err(call_not_yet(clause)),
-            }
-        }
-        let ret = &query.ret;
-        let columns = self.projection(ret.star, &ret.items, "RETURN")?;
-        let distinct = ret.distinct || self.group_by(ret.group_by.as_ref(), &columns)?;
-        let order_by = self.order_by(query.order_by.as_ref(), &columns, distinct, "RETURN")?;
-        let offset = self.count(query.offset.as_ref(), "OFFSET")?;
-        let limit = self.count(query.limit.as_ref(), "LIMIT")?;
+        let (body, _) = self.composite(&query.body, Entry::Top)?;
         self.parameters.sort_by_key(|p| p.span.start);
         if let Some(supplied) = supplied {
             self.check_parameters(supplied)?;
         }
-        self.finish_subqueries(&mut matches)?;
+        let matches = self.finish_clauses()?;
         let mut cross = Vec::new();
         for index in 0..self.conjuncts.len() {
             match self.local_binding(index) {
@@ -1190,46 +1486,50 @@ impl<'q> Binder<'q> {
             segments: self.segments,
             conjuncts: self.conjuncts,
             cross,
-            columns,
-            distinct,
-            order_by,
-            offset,
-            limit,
             parameters: self.parameters,
-            unit,
             subqueries: self.subqueries,
+            body: *body,
         })
     }
 
-    /// Appends the clauses of the subquery bodies to `matches` and renumbers the provisional
-    /// segments of the bodies past the query's own segments.
-    fn finish_subqueries(&mut self, matches: &mut Vec<BoundMatch>) -> BResult<()> {
+    /// The clauses of every pipeline, then those of the subquery bodies (renumbered past them);
+    /// the provisional segments of the bodies renumbered past every pipeline's segments.
+    fn finish_clauses(&mut self) -> BResult<Vec<BoundMatch>> {
+        let internal = || semantic(self.query.span, "internal error: a clause left unbound");
+        let mut matches = Vec::with_capacity(self.own.len() + self.sub_matches.len());
+        for m in std::mem::take(&mut self.own) {
+            matches.push(m.ok_or_else(internal)?);
+        }
+        let own = matches.len();
         let outer = self.segments.len();
-        let renumber = |segment: &mut usize| {
+        let segment = |segment: &mut usize| {
             if *segment >= SUBQUERY_SEGMENTS {
                 *segment = *segment - SUBQUERY_SEGMENTS + outer;
             }
         };
+        let clause = |clause: &mut usize| {
+            if *clause >= SUBQUERY_CLAUSES {
+                *clause = *clause - SUBQUERY_CLAUSES + own;
+            }
+        };
         for m in std::mem::take(&mut self.sub_matches) {
-            let mut m = m.ok_or_else(|| {
-                semantic(
-                    self.query.span,
-                    "internal error: a subquery clause left unbound",
-                )
-            })?;
-            renumber(&mut m.segment);
+            let mut m = m.ok_or_else(internal)?;
+            segment(&mut m.segment);
             matches.push(m);
         }
-        self.bindings
-            .iter_mut()
-            .for_each(|b| renumber(&mut b.segment));
-        self.conjuncts
-            .iter_mut()
-            .for_each(|c| renumber(&mut c.segment));
-        self.subqueries
-            .iter_mut()
-            .for_each(|s| renumber(&mut s.segment));
-        Ok(())
+        for b in &mut self.bindings {
+            segment(&mut b.segment);
+            clause(&mut b.clause);
+        }
+        for c in &mut self.conjuncts {
+            segment(&mut c.segment);
+            clause(&mut c.clause);
+        }
+        for s in &mut self.subqueries {
+            segment(&mut s.segment);
+            s.clauses.iter_mut().for_each(clause);
+        }
+        Ok(matches)
     }
 
     /// The binding a conjunct is listed on (module docs): its only binding, a node or edge of
@@ -1252,17 +1552,746 @@ impl<'q> Binder<'q> {
             .then_some(only)
     }
 
+    /// Appends `segment` to the segments and to the pipeline being bound; returns its index.
+    fn push_segment(&mut self, segment: Segment) -> usize {
+        let index = self.segments.len();
+        self.segments.push(segment);
+        self.pipeline.push(index);
+        index
+    }
+
+    /// Appends `segment`, which the caller numbered `expected` (its column bindings refer to
+    /// it); an internal error when something came between.
+    fn push_numbered(&mut self, segment: Segment, expected: usize, span: Span) -> BResult<()> {
+        if self.push_segment(segment) == expected {
+            Ok(())
+        } else {
+            Err(Box::new(semantic(
+                span,
+                "internal error: a segment out of order in the binder",
+            )))
+        }
+    }
+
     /// The open `Segment::Match`, opened when a cut came last.
     fn open_segment(&mut self) -> usize {
         match self.open {
             Some(segment) => segment,
             None => {
-                self.segments.push(Segment::Match(Vec::new()));
-                let segment = self.segments.len() - 1;
+                let segment = self.push_segment(Segment::Match(Vec::new()));
                 self.open = Some(segment);
                 segment
             }
         }
+    }
+
+    fn marks(&self) -> Marks {
+        Marks {
+            binding: self.bindings.len(),
+            conjunct: self.conjuncts.len(),
+            segment: self.segments.len(),
+            own: self.own.len(),
+            sub: self.sub_matches.len(),
+            subquery: self.subqueries.len(),
+        }
+    }
+
+    // ----- composite queries (stage 2d) -----
+
+    /// Binds `composite` (module docs, "Composite queries"); returns it with the names in scope
+    /// at the end of each of its pipelines (for the message of a later read outside it).
+    /// Recursion: one level per nested `CALL` / whole-query body, which the parser bounds by
+    /// `MAX_DEPTH`.
+    #[inline(never)]
+    fn composite(
+        &mut self,
+        composite: &CompositeQuery,
+        entry: Entry<'_>,
+    ) -> BResult<(Box<BoundComposite>, Vec<String>)> {
+        let mut bound: Vec<BoundBlock> = Vec::with_capacity(composite.next.len() + 1);
+        let mut names = Vec::new();
+        let mut at = 0;
+        while at <= composite.next.len() {
+            at = self.composite_block(composite, at, entry, &mut bound, &mut names)?;
+        }
+        let mut bound = bound.into_iter();
+        let first = bound.next().ok_or_else(|| {
+            Box::new(semantic(
+                composite.span,
+                "internal error: a query without a block",
+            ))
+        })?;
+        let composite = Box::new(BoundComposite {
+            first,
+            next: bound.collect(),
+            span: composite.span,
+        });
+        Ok((composite, names))
+    }
+
+    /// Binds the block of `composite` at `at` (`0`: the first, `k`: the one after the `k`-th
+    /// `NEXT`) onto `bound`, a `UNION` block or the chain of linear queries starting there
+    /// (design E19); returns the index after it.
+    #[inline(never)]
+    fn composite_block(
+        &mut self,
+        composite: &CompositeQuery,
+        at: usize,
+        entry: Entry<'_>,
+        bound: &mut Vec<BoundBlock>,
+        names: &mut Vec<String>,
+    ) -> BResult<usize> {
+        let block_at = |i: usize| match i.checked_sub(1) {
+            None => Some(&composite.first),
+            Some(k) => composite.next.get(k).map(|n| &n.block),
+        };
+        let Some(block) = block_at(at) else {
+            return Ok(at.saturating_add(1));
+        };
+        let rows = match (bound.last(), at.checked_sub(1)) {
+            (Some(before), Some(k)) => composite
+                .next
+                .get(k)
+                .map(|n| Box::new(self.rows_input(before, n.keyword))),
+            _ => None,
+        };
+        if !block.unions.is_empty() {
+            let union = self.union_block(block, entry, rows.as_deref(), names)?;
+            bound.push(union);
+            return Ok(at.saturating_add(1));
+        }
+        // Chained linear queries are one pipeline (design E19).
+        let mut chain = vec![&block.first];
+        let mut span = block.span;
+        let mut next = at.saturating_add(1);
+        while let Some(more) = block_at(next).filter(|b| b.unions.is_empty()) {
+            chain.push(&more.first);
+            span = span.to(more.span);
+            next = next.saturating_add(1);
+        }
+        let start = self.start(entry, rows.as_deref(), &block.first)?;
+        let (first, end) = self.linear_chain(&chain, start, None)?;
+        names.extend(end);
+        bound.push(BoundBlock {
+            first: *first,
+            unions: Vec::new(),
+            span,
+        });
+        Ok(next)
+    }
+
+    /// A `UNION` block (design E15): one kind of `UNION`, the same column names in every
+    /// operand, reordered to the first operand's order.
+    fn union_block(
+        &mut self,
+        block: &QueryBlock,
+        entry: Entry<'_>,
+        rows: Option<&RowsInput>,
+        names: &mut Vec<String>,
+    ) -> BResult<BoundBlock> {
+        self.check_union_kinds(block)?;
+        let start = self.start(entry, rows, &block.first)?;
+        let (first, end) = self.linear_chain(&[&block.first], start, None)?;
+        let first = *first;
+        names.extend(end);
+        let order: Vec<String> = first.columns.iter().map(|c| c.name.clone()).collect();
+        let mut unions = Vec::with_capacity(block.unions.len());
+        for operand in &block.unions {
+            let start = self.start(entry, rows, &operand.query)?;
+            let (bound, end) = self.linear_chain(&[&operand.query], start, Some(&order))?;
+            names.extend(end);
+            unions.push(BoundUnion {
+                kind: operand.kind,
+                keyword: operand.keyword,
+                operand: *bound,
+            });
+        }
+        Ok(BoundBlock {
+            first,
+            unions,
+            span: block.span,
+        })
+    }
+
+    /// One kind of `UNION` per block (design E15, 42002).
+    #[inline(never)]
+    fn check_union_kinds(&self, block: &QueryBlock) -> BResult<()> {
+        if let Some(kind) = block.unions.first().map(|u| u.kind)
+            && let Some(other) = block.unions.iter().find(|u| u.kind != kind)
+        {
+            let written = self.query.text(other.keyword);
+            return Err(semantic(
+                other.keyword,
+                format!(
+                    "{written} is mixed with {} in one query; every UNION between the same \
+                     results keeps duplicates (UNION ALL) or removes them (UNION, UNION \
+                     DISTINCT)",
+                    union_word(kind)
+                ),
+            )
+            .alternative(
+                "write the same kind between every operand, or combine the parts with NEXT, \
+                 as in RETURN 1 AS x UNION ALL RETURN 1 AS x NEXT RETURN x UNION RETURN 2 AS x",
+            )
+            .topic(GqlHelpTopic::Names)
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The records of `block` as the input of the block after `keyword` (design E19): each
+    /// column's name and kind (a node or edge when every operand returns one there).
+    fn rows_input(&self, block: &BoundBlock, keyword: Span) -> RowsInput {
+        let columns = block
+            .first
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, column)| {
+                let kind = self.block_column_kind(block, i);
+                let name = Identifier {
+                    name: column.name.clone(),
+                    span: column.span,
+                };
+                (name, kind)
+            })
+            .collect();
+        RowsInput { columns, keyword }
+    }
+
+    /// The kind of column `i` of `block`: a node or edge when every operand returns a node
+    /// (edge) variable there, else a value.
+    fn block_column_kind(&self, block: &BoundBlock, i: usize) -> BindingKind {
+        let mut kinds = block.operands().map(|operand| {
+            operand
+                .columns
+                .get(i)
+                .map_or(BindingKind::Value, |c| self.column_kind(c))
+        });
+        let first = kinds.next().unwrap_or(BindingKind::Value);
+        if kinds.all(|kind| kind == first) {
+            first
+        } else {
+            BindingKind::Value
+        }
+    }
+
+    /// The kind of the binding a column becomes: the element's kind for a node or edge
+    /// variable (not a group variable), else a value.
+    fn column_kind(&self, column: &Column) -> BindingKind {
+        column
+            .variable
+            .and_then(|id| self.bindings.get(id.0))
+            .filter(|b| !b.group)
+            .map_or(BindingKind::Value, |b| match b.kind {
+                BindingKind::Node => BindingKind::Node,
+                BindingKind::Edge => BindingKind::Edge,
+                BindingKind::Path | BindingKind::Value => BindingKind::Value,
+            })
+    }
+
+    /// How an operand of a composite's block starts: the rows of the block before, or the
+    /// names `entry` gives it.
+    fn start<'r>(
+        &self,
+        entry: Entry<'_>,
+        rows: Option<&'r RowsInput>,
+        operand: &LinearQuery,
+    ) -> BResult<Start<'r>> {
+        if let Some(rows) = rows {
+            return Ok(Start::Rows(rows));
+        }
+        let names = match entry {
+            Entry::Top => Names::default(),
+            Entry::Subquery { outer } => outer.clone(),
+            Entry::Call { scope, outer } => match scope {
+                CallScope::Variables { variables, .. } => imported(outer, variables),
+                CallScope::All(_) => outer.clone(),
+                CallScope::Implicit => match &operand.importing {
+                    None => Names::default(),
+                    Some(importing) if importing.star.is_some() => outer.clone(),
+                    Some(importing) => {
+                        self.check_imports(&importing.variables, "WITH")?;
+                        imported(outer, &importing.variables)
+                    }
+                },
+            },
+        };
+        Ok(Start::Names(names))
+    }
+
+    /// The variables a `CALL` imports must be in scope, each once (42002).
+    fn check_imports(&self, variables: &[Identifier], clause: &str) -> BResult<()> {
+        for (i, var) in variables.iter().enumerate() {
+            if self.scope.get(&var.name).is_none() {
+                return Err(self.undefined(Ctx::refusing("in CALL"), var));
+            }
+            if variables
+                .get(..i)
+                .unwrap_or(&[])
+                .iter()
+                .any(|v| v.name == var.name)
+            {
+                return Err(semantic(
+                    var.span,
+                    format!(
+                        "the variable `{}` is imported twice by this {clause}",
+                        var.name
+                    ),
+                )
+                .alternative(format!("name `{}` once", var.name))
+                .topic(GqlHelpTopic::Scope)
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Binds chained linear queries `q1 NEXT q2 ..` as one pipeline (design E19: each `RETURN`
+    /// before `NEXT` is bound as a `WITH`), from `start`; `align` holds the column names of a
+    /// `UNION`'s first operand (design E15). Returns it with the names in scope at its end.
+    #[inline(never)]
+    fn linear_chain(
+        &mut self,
+        chain: &[&LinearQuery],
+        start: Start<'_>,
+        align: Option<&[String]>,
+    ) -> BResult<(Box<BoundLinear>, Vec<String>)> {
+        let saved = Box::new(PipelineState {
+            scope: std::mem::take(&mut self.scope),
+            dropped: std::mem::take(&mut self.dropped),
+            hidden: std::mem::take(&mut self.hidden),
+            open: self.open.take(),
+            pipeline: std::mem::take(&mut self.pipeline),
+            bound_clauses: self.bound_clauses,
+            later_clauses: std::mem::take(&mut self.later_clauses),
+            later_in_body: std::mem::take(&mut self.later_in_body),
+        });
+        let result = self.linear_chain_in(chain, start, align);
+        let end: Vec<String> = self.scope.names().map(str::to_string).collect();
+        self.scope = saved.scope;
+        self.dropped = saved.dropped;
+        self.hidden = saved.hidden;
+        self.open = saved.open;
+        let pipeline = std::mem::replace(&mut self.pipeline, saved.pipeline);
+        self.bound_clauses = saved.bound_clauses;
+        self.later_clauses = saved.later_clauses;
+        self.later_in_body = saved.later_in_body;
+        let mut linear = result?;
+        linear.pipeline = pipeline;
+        Ok((linear, end))
+    }
+
+    fn linear_chain_in(
+        &mut self,
+        chain: &[&LinearQuery],
+        start: Start<'_>,
+        align: Option<&[String]>,
+    ) -> BResult<Box<BoundLinear>> {
+        let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+            return Err(Box::new(semantic(
+                self.query.span,
+                "internal error: an empty chain of linear queries",
+            )));
+        };
+        let unit = match start {
+            Start::Names(names) => {
+                self.scope = names;
+                !matches!(first.stages.first(), Some(Stage::Match(_)))
+            }
+            Start::Rows(rows) => {
+                self.rows_segment(rows)?;
+                false
+            }
+        };
+        for (i, linear) in chain.iter().enumerate() {
+            self.enter_linear(linear)?;
+            for stage in &linear.stages {
+                self.stage(linear, stage)?;
+            }
+            if i + 1 < chain.len() {
+                self.return_before_next(linear)?;
+            }
+        }
+        self.result_statement(last, align, unit, first.span.to(last.span))
+    }
+
+    /// The `RETURN` of the last linear query of a pipeline and its `ORDER BY`, `OFFSET`,
+    /// `LIMIT`.
+    #[inline(never)]
+    fn result_statement(
+        &mut self,
+        last: &LinearQuery,
+        align: Option<&[String]>,
+        unit: bool,
+        span: Span,
+    ) -> BResult<Box<BoundLinear>> {
+        let ret = &last.ret;
+        let mut columns = self.projection(ret.star, &ret.items, "RETURN")?;
+        if let Some(order) = align {
+            columns = self.align_columns(columns, order, ret.span)?;
+        }
+        let distinct = ret.distinct || self.group_by(ret.group_by.as_ref(), &columns)?;
+        let order_by = self.order_by(last.order_by.as_ref(), &columns, distinct, "RETURN")?;
+        let offset = self.count(last.offset.as_ref(), "OFFSET")?;
+        let limit = self.count(last.limit.as_ref(), "LIMIT")?;
+        Ok(Box::new(BoundLinear {
+            pipeline: Vec::new(),
+            columns,
+            distinct,
+            order_by,
+            offset,
+            limit,
+            unit,
+            span,
+        }))
+    }
+
+    /// Starts binding the clauses of `linear`: the pattern size of each clause first (before
+    /// any other work on it), and no comprehension variable around a subquery body declared
+    /// by one of them.
+    fn enter_linear(&mut self, linear: &LinearQuery) -> BResult<()> {
+        for m in &linear.matches {
+            if let Some(edge) = m
+                .patterns
+                .iter()
+                .flat_map(|path| &path.steps)
+                .nth(MAX_MATCH_EDGES)
+            {
+                return Err(too_many_edges(edge.edge.span));
+            }
+        }
+        if let Some(var) = linear
+            .matches
+            .iter()
+            .flat_map(declared_names)
+            .find(|var| self.shelved_locals.iter().any(|l| l.name == var.name))
+        {
+            return Err(local_in_subquery(var));
+        }
+        self.bound_clauses = 0;
+        self.later_clauses = linear
+            .matches
+            .iter()
+            .enumerate()
+            .flat_map(|(i, m)| declared_names(m).map(move |var| (i, var.name.clone())))
+            .collect();
+        Ok(())
+    }
+
+    /// The records of the block before as the first segment (design E19): each column a new
+    /// binding.
+    fn rows_segment(&mut self, rows: &RowsInput) -> BResult<()> {
+        let segment = self.segments.len();
+        let mut outputs = Vec::with_capacity(rows.columns.len());
+        for (column, (name, kind)) in rows.columns.iter().enumerate() {
+            let site = Site {
+                clause: self.clause,
+                segment,
+                kind: *kind,
+                group: false,
+            };
+            let reference = ColumnRef { segment, column };
+            outputs.push(self.new_binding(site, Some(name), name.span, None, Some(reference)));
+        }
+        let span = rows.keyword;
+        self.push_numbered(
+            Segment::Rows(Box::new(BoundRows { outputs, span })),
+            segment,
+            span,
+        )?;
+        self.open = None;
+        Ok(())
+    }
+
+    /// One stage of the pipeline of `linear`.
+    fn stage(&mut self, linear: &LinearQuery, stage: &Stage) -> BResult<()> {
+        match stage {
+            Stage::Match(index) => self.match_stage(linear, *index),
+            Stage::Let(clause) => self.let_clause(clause),
+            Stage::Filter(clause) => self.filter_stage(&clause.condition),
+            Stage::With(with) => self.with_clause(&WithParts::of(with)),
+            Stage::For(clause) => self.for_clause(clause),
+            Stage::Call(clause) => self.call_clause(clause),
+        }
+    }
+
+    /// `FILTER`: conjuncts of the open segment.
+    #[inline(never)]
+    fn filter_stage(&mut self, condition: &Expr) -> BResult<()> {
+        let segment = self.open_segment();
+        self.conjuncts_of(
+            Ctx::refusing("in FILTER"),
+            condition,
+            ConjunctOrigin::Filter,
+            segment,
+        )
+    }
+
+    /// `[OPTIONAL] MATCH`: clause `index` of `linear`.
+    #[inline(never)]
+    fn match_stage(&mut self, linear: &LinearQuery, index: usize) -> BResult<()> {
+        let index = &index;
+        {
+            let m = linear
+                .matches
+                .get(*index)
+                .filter(|_| *index == self.bound_clauses)
+                .ok_or_else(|| {
+                    semantic(linear.span, "internal error: MATCH stages out of order")
+                })?;
+            let clause = self.own.len();
+            self.own.push(None);
+            self.clause = clause;
+            self.bound_clauses = index.saturating_add(1);
+            let segment = if m.optional {
+                self.open = None;
+                self.push_segment(Segment::Optional(clause))
+            } else {
+                let segment = self.open_segment();
+                if let Some(Segment::Match(clauses)) = self.segments.get_mut(segment) {
+                    clauses.push(clause);
+                }
+                segment
+            };
+            let bound = self.declare_clause(clause, m, segment)?;
+            self.clause_filters(clause, m, &bound)?;
+            if let Some(slot) = self.own.get_mut(clause) {
+                *slot = Some(bound);
+            }
+        }
+        Ok(())
+    }
+
+    /// The `RETURN` of `linear` before `NEXT`, bound as a `WITH` of the same items (design
+    /// E19: projecting is a substitution, materializing a [`Segment::With`]).
+    fn return_before_next(&mut self, linear: &LinearQuery) -> BResult<()> {
+        let ret = &linear.ret;
+        self.with_clause(&WithParts {
+            distinct: ret.distinct,
+            star: ret.star,
+            items: &ret.items,
+            group_by: ret.group_by.as_ref(),
+            order_by: linear.order_by.as_ref(),
+            offset: linear.offset.as_ref(),
+            limit: linear.limit.as_ref(),
+            where_clause: None,
+            span: ret.span,
+            clause: "RETURN",
+            dropper: Dropper::Next,
+        })
+    }
+
+    /// The columns of a `UNION` operand after the first in the first operand's `order`
+    /// (design E15): the same names, else 42002 naming both sets.
+    fn align_columns(
+        &self,
+        columns: Vec<Column>,
+        order: &[String],
+        ret: Span,
+    ) -> BResult<Vec<Column>> {
+        let same = columns.len() == order.len()
+            && order.iter().all(|n| columns.iter().any(|c| c.name == *n));
+        if !same {
+            let list = |names: &mut dyn Iterator<Item = &str>| {
+                names
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let theirs = list(&mut columns.iter().map(|c| c.name.as_str()));
+            let first = list(&mut order.iter().map(String::as_str));
+            let detail = match order
+                .iter()
+                .find(|n| !columns.iter().any(|c| c.name == **n))
+            {
+                Some(missing) => format!("`{missing}` is missing"),
+                None => match columns.iter().find(|c| !order.contains(&c.name)) {
+                    Some(extra) => format!("`{}` is not a column of the first", extra.name),
+                    None => "the column counts differ".to_string(),
+                },
+            };
+            return Err(semantic(
+                ret,
+                format!(
+                    "the operands of UNION must return the same column names: the first \
+                     returns {first}, this one returns {theirs} ({detail})"
+                ),
+            )
+            .alternative(
+                "name the columns alike with AS in every operand (their order may differ), as \
+                 in MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN \
+                 s.name AS name",
+            )
+            .topic(GqlHelpTopic::Names)
+            .into());
+        }
+        let mut slots: Vec<Option<Column>> = columns.into_iter().map(Some).collect();
+        order
+            .iter()
+            .map(|name| {
+                slots
+                    .iter_mut()
+                    .find(|slot| slot.as_ref().is_some_and(|c| c.name == *name))
+                    .and_then(Option::take)
+            })
+            .collect::<Option<Vec<Column>>>()
+            .ok_or_else(|| Box::new(semantic(ret, "internal error: a UNION column not found")))
+    }
+
+    /// `[OPTIONAL] CALL (..) { body }` (module docs, "CALL"): the body bound as a composite
+    /// with the imported names in scope, its returned columns new bindings of a
+    /// [`Segment::Call`].
+    #[inline(never)]
+    fn call_clause(&mut self, clause: &CallClause) -> BResult<()> {
+        if let CallScope::Variables { variables, .. } = &clause.scope {
+            self.check_imports(variables, "CALL")?;
+        }
+        self.enter_body(clause.span)?;
+        let outer = Rc::new(self.scope.clone());
+        let marks = self.marks();
+        self.calls.push(Rc::clone(&outer));
+        let body = self.composite(
+            &clause.body,
+            Entry::Call {
+                scope: &clause.scope,
+                outer: &outer,
+            },
+        );
+        self.calls.pop();
+        self.body_depth = self.body_depth.saturating_sub(1);
+        let (body, names) = body?;
+        self.call_segment(clause, body, names, marks)
+    }
+
+    /// The [`Segment::Call`] of a bound `CALL` body: its imports and its returned columns.
+    #[inline(never)]
+    fn call_segment(
+        &mut self,
+        clause: &CallClause,
+        body: Box<BoundComposite>,
+        names: Vec<String>,
+        marks: Marks,
+    ) -> BResult<()> {
+        let imports = self.reads_since(marks, &body);
+        self.mark_read_here(&imports);
+        // The returned columns: new names of the outer scope.
+        let last = body.last();
+        let segment = self.segments.len();
+        let mut outputs = Vec::with_capacity(last.first.columns.len());
+        for (i, column) in last.first.columns.iter().enumerate() {
+            let name = Identifier {
+                name: column.name.clone(),
+                span: column.span,
+            };
+            if self.scope.get(&name.name).is_some() {
+                return Err(semantic(
+                    column.span,
+                    format!(
+                        "the CALL body returns `{}`, which is already defined outside it; a \
+                         returned name must be new",
+                        name.name
+                    ),
+                )
+                .alternative(format!(
+                    "rename the column inside the body, as in RETURN ... AS {}2",
+                    name.name
+                ))
+                .topic(GqlHelpTopic::Scope)
+                .into());
+            }
+            let site = Site {
+                clause: self.clause,
+                segment,
+                kind: self.block_column_kind(last, i),
+                group: false,
+            };
+            let reference = ColumnRef { segment, column: i };
+            outputs.push(self.new_binding(site, Some(&name), name.span, None, Some(reference)));
+        }
+        self.push_numbered(
+            Segment::Call(Box::new(BoundCall {
+                optional: clause.optional.is_some(),
+                body,
+                imports,
+                outputs,
+                span: clause.span,
+            })),
+            segment,
+            clause.span,
+        )?;
+        self.open = None;
+        for name in names {
+            if self.scope.get(&name).is_none() {
+                self.hidden.entry(name).or_insert(Hidden::Call);
+            }
+        }
+        Ok(())
+    }
+
+    /// The bindings older than `marks` that what was bound since reads (the imports of a
+    /// `CALL` body or a whole-query subquery body `body`), sorted, without duplicates.
+    fn reads_since(&self, marks: Marks, body: &BoundComposite) -> Vec<BindingId> {
+        let mut ids: Vec<BindingId> = Vec::new();
+        let elements = |m: &BoundMatch, ids: &mut Vec<BindingId>| {
+            for path in &m.paths {
+                ids.extend(path.variable);
+                ids.push(path.start);
+                ids.extend(path.steps.iter().flat_map(|step| [step.edge, step.node]));
+            }
+        };
+        for c in self.conjuncts.get(marks.conjunct..).unwrap_or(&[]) {
+            ids.extend_from_slice(&c.bindings);
+        }
+        for m in self.own.get(marks.own..).unwrap_or(&[]).iter().flatten() {
+            elements(m, &mut ids);
+        }
+        for m in self
+            .sub_matches
+            .get(marks.sub..)
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
+        {
+            elements(m, &mut ids);
+        }
+        for s in self.subqueries.get(marks.subquery..).unwrap_or(&[]) {
+            ids.extend_from_slice(&s.imports);
+            ids.extend_from_slice(&s.map_bindings);
+        }
+        let result = |columns: &[Column], keys: &[SortKey], ids: &mut Vec<BindingId>| {
+            ids.extend(columns.iter().flat_map(|c| c.bindings.iter().copied()));
+            ids.extend(keys.iter().flat_map(|k| k.bindings.iter().copied()));
+        };
+        for segment in self.segments.get(marks.segment..).unwrap_or(&[]) {
+            match segment {
+                Segment::For(f) => ids.extend_from_slice(&f.bindings),
+                Segment::With(with) => result(&with.columns, &with.order_by, &mut ids),
+                Segment::Call(call) => ids.extend_from_slice(&call.imports),
+                Segment::Match(_) | Segment::Optional(_) | Segment::Rows(_) => {}
+            }
+        }
+        for linear in body.linears() {
+            result(&linear.columns, &linear.order_by, &mut ids);
+        }
+        ids.retain(|id| id.0 < marks.binding);
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Marks `ids` read where they are read now: inside a subquery body only the body's own
+    /// locals (as for a conjunct there).
+    fn mark_read_here(&mut self, ids: &[BindingId]) {
+        let body = self.subquery;
+        let ids: Vec<BindingId> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                body.is_none() || self.bindings.get(id.0).is_some_and(|b| b.subquery == body)
+            })
+            .collect();
+        self.mark_read(&ids);
     }
 
     // ----- patterns -----
@@ -1785,15 +2814,18 @@ impl<'q> Binder<'q> {
             .ordinal
             .as_ref()
             .map(|o| (o.kind, column(self, &o.variable, FOR_ORDINAL)));
-        self.segments.push(Segment::For(Box::new(BoundFor {
-            variable,
-            list: list.expr,
-            bindings: list.refs.bindings,
-            ordinal,
-            unwind: clause.unwind,
-            span: clause.span,
-        })));
-        Ok(())
+        self.push_numbered(
+            Segment::For(Box::new(BoundFor {
+                variable,
+                list: list.expr,
+                bindings: list.refs.bindings,
+                ordinal,
+                unwind: clause.unwind,
+                span: clause.span,
+            })),
+            segment,
+            clause.span,
+        )
     }
 
     /// A `FOR` variable or ordinal must be a new name (42002 like `LET`).
@@ -1839,34 +2871,26 @@ impl<'q> Binder<'q> {
         }))
     }
 
-    fn with_clause(&mut self, with: &WithClause) -> BResult<()> {
-        let keyword = keyword_span(with.span, 4);
-        let (columns, names) = self.projection_named(with.star, &with.items, "WITH")?;
+    /// A `WITH`, or a `RETURN` before `NEXT` read as one (design E19).
+    fn with_clause(&mut self, with: &WithParts<'_>) -> BResult<()> {
+        let (columns, names) = self.projection_named(with.star, with.items, with.clause)?;
+        let distinct = with.distinct || self.group_by(with.group_by, &columns)?;
         let aggregated = columns.iter().any(|c| c.aggregate);
         let materializing = aggregated
-            || with.distinct
+            || distinct
             || with.order_by.is_some()
             || with.offset.is_some()
             || with.limit.is_some();
         if materializing {
-            let order_by =
-                self.order_by(with.order_by.as_ref(), &columns, with.distinct, "WITH")?;
-            let offset = self.count(with.offset.as_ref(), "OFFSET")?;
-            let limit = self.count(with.limit.as_ref(), "LIMIT")?;
+            let order_by = self.order_by(with.order_by, &columns, distinct, with.clause)?;
+            let offset = self.count(with.offset, "OFFSET")?;
+            let limit = self.count(with.limit, "LIMIT")?;
             let segment = self.segments.len();
             // The columns become new bindings in a scope of their own; the old scope is gone.
             let old = std::mem::take(&mut self.scope);
             let mut outputs = Vec::with_capacity(columns.len());
             for (index, (column, name)) in columns.iter().zip(&names).enumerate() {
-                let kind = column
-                    .variable
-                    .and_then(|id| self.bindings.get(id.0))
-                    .filter(|b| !b.group)
-                    .map_or(BindingKind::Value, |b| match b.kind {
-                        BindingKind::Node => BindingKind::Node,
-                        BindingKind::Edge => BindingKind::Edge,
-                        BindingKind::Path | BindingKind::Value => BindingKind::Value,
-                    });
+                let kind = self.column_kind(column);
                 let site = Site {
                     clause: self.clause,
                     segment,
@@ -1886,18 +2910,22 @@ impl<'q> Binder<'q> {
                 ));
             }
             let next = std::mem::replace(&mut self.scope, old);
-            self.segments.push(Segment::With(Box::new(BoundWith {
-                columns,
-                distinct: with.distinct,
-                order_by,
-                offset,
-                limit,
-                outputs,
-                span: with.span,
-            })));
+            self.push_numbered(
+                Segment::With(Box::new(BoundWith {
+                    columns,
+                    distinct,
+                    order_by,
+                    offset,
+                    limit,
+                    outputs,
+                    span: with.span,
+                })),
+                segment,
+                with.span,
+            )?;
             self.open = None;
-            self.replace_scope(next, keyword);
-            if let Some(where_clause) = &with.where_clause {
+            self.replace_scope(next, with.dropper);
+            if let Some(where_clause) = with.where_clause {
                 self.conjuncts_of(
                     Ctx::refusing("in the WHERE of WITH"),
                     where_clause,
@@ -1921,8 +2949,8 @@ impl<'q> Binder<'q> {
                 };
                 next.insert(name, symbol);
             }
-            self.replace_scope(next, keyword);
-            if let Some(where_clause) = &with.where_clause {
+            self.replace_scope(next, with.dropper);
+            if let Some(where_clause) = with.where_clause {
                 let segment = self.open_segment();
                 self.conjuncts_of(
                     Ctx::refusing("in the WHERE of WITH"),
@@ -1936,11 +2964,11 @@ impl<'q> Binder<'q> {
     }
 
     /// Makes `next` the scope; the names it drops are remembered for the error message.
-    fn replace_scope(&mut self, next: Names, keyword: Span) {
+    fn replace_scope(&mut self, next: Names, dropper: Dropper) {
         let old = std::mem::replace(&mut self.scope, next);
         for (name, _) in old.entries {
             if self.scope.get(&name.name).is_none() {
-                self.dropped.insert(name.name, keyword);
+                self.dropped.insert(name.name, dropper);
             }
         }
         for name in self.scope.names() {
@@ -1981,6 +3009,8 @@ impl<'q> Binder<'q> {
     /// Resolves every name in `expr` (recursion bounded by the parser's `MAX_HEIGHT`), records
     /// its parameters and checks its map literals and aggregate calls.
     fn resolve(&mut self, ctx: Ctx<'_>, expr: &Expr, refs: &mut Refs) -> BResult<()> {
+        // A thin dispatch (rare forms in functions of their own): one level of a tall
+        // expression costs small frames only.
         match &expr.kind {
             ExprKind::Literal(_) => {}
             ExprKind::Parameter(name) => self.parameters.push(ParameterRef {
@@ -1988,17 +3018,6 @@ impl<'q> Binder<'q> {
                 span: expr.span,
             }),
             ExprKind::Variable(var) => self.variable(ctx, var, refs)?,
-            ExprKind::List(items) => {
-                for item in items {
-                    self.resolve(ctx, item, refs)?;
-                }
-            }
-            ExprKind::Map(map) => {
-                check_map_keys(map)?;
-                for entry in &map.entries {
-                    self.resolve(ctx, &entry.value, refs)?;
-                }
-            }
             ExprKind::Property { target, key } => {
                 if let ExprKind::Variable(var) = &target.kind {
                     self.check_group_property(ctx, var, key)?;
@@ -2017,6 +3036,58 @@ impl<'q> Binder<'q> {
                 self.resolve(ctx, left, refs)?;
                 self.resolve(ctx, right, refs)?;
             }
+            ExprKind::FunctionCall { name, args, .. } => {
+                self.resolve_call(ctx, name, args, refs)?
+            }
+            ExprKind::List(_)
+            | ExprKind::Map(_)
+            | ExprKind::Case(_)
+            | ExprKind::Subquery(_)
+            | ExprKind::MapProjection(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => self.resolve_other(ctx, expr, refs)?,
+        }
+        Ok(())
+    }
+
+    /// A function call (an aggregate only where aggregates may stand).
+    #[inline(never)]
+    fn resolve_call(
+        &mut self,
+        ctx: Ctx<'_>,
+        name: &Identifier,
+        args: &CallArgs,
+        refs: &mut Refs,
+    ) -> BResult<()> {
+        let mut inner = ctx;
+        if is_aggregate(name) {
+            if let Aggregates::Refused(place) = ctx.aggregates {
+                return Err(misplaced_aggregate(name, place));
+            }
+            refs.aggregate.get_or_insert(name.span);
+            inner.aggregates = Aggregates::Refused("inside another aggregate");
+        }
+        for arg in args.iter() {
+            self.resolve(inner, arg, refs)?;
+        }
+        Ok(())
+    }
+
+    /// The forms [`Self::resolve`] does not handle itself.
+    #[inline(never)]
+    fn resolve_other(&mut self, ctx: Ctx<'_>, expr: &Expr, refs: &mut Refs) -> BResult<()> {
+        match &expr.kind {
+            ExprKind::List(items) => {
+                for item in items {
+                    self.resolve(ctx, item, refs)?;
+                }
+            }
+            ExprKind::Map(map) => {
+                check_map_keys(map)?;
+                for entry in &map.entries {
+                    self.resolve(ctx, &entry.value, refs)?;
+                }
+            }
             ExprKind::Case(case) => {
                 if let Some(operand) = &case.operand {
                     self.resolve(ctx, operand, refs)?;
@@ -2027,19 +3098,6 @@ impl<'q> Binder<'q> {
                 }
                 if let Some(else_result) = &case.else_result {
                     self.resolve(ctx, else_result, refs)?;
-                }
-            }
-            ExprKind::FunctionCall { name, args, .. } => {
-                let mut inner = ctx;
-                if is_aggregate(name) {
-                    if let Aggregates::Refused(place) = ctx.aggregates {
-                        return Err(misplaced_aggregate(name, place));
-                    }
-                    refs.aggregate.get_or_insert(name.span);
-                    inner.aggregates = Aggregates::Refused("inside another aggregate");
-                }
-                for arg in args.iter() {
-                    self.resolve(inner, arg, refs)?;
                 }
             }
             ExprKind::Subquery(subquery) => {
@@ -2074,6 +3132,16 @@ impl<'q> Binder<'q> {
                     refs.bindings.extend_from_slice(&bound.imports);
                 }
             }
+            ExprKind::Literal(_)
+            | ExprKind::Parameter(_)
+            | ExprKind::Variable(_)
+            | ExprKind::Property { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::IsNull { .. }
+            | ExprKind::IsLabeled { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::IsEndpoint { .. }
+            | ExprKind::FunctionCall { .. } => self.resolve(ctx, expr, refs)?,
         }
         Ok(())
     }
@@ -2246,16 +3314,36 @@ impl<'q> Binder<'q> {
             .topic(GqlHelpTopic::Scope)
             .into();
         }
-        if self.dropped.contains_key(name) {
-            return semantic(
-                var.span,
-                format!("the variable `{name}` is not in scope: the WITH before does not carry it"),
-            )
-            .alternative(format!(
-                "add `{name}` to the WITH items, as in WITH ..., {name}"
-            ))
-            .topic(GqlHelpTopic::Scope)
-            .into();
+        match self.dropped.get(name) {
+            Some(Dropper::With) => {
+                return semantic(
+                    var.span,
+                    format!(
+                        "the variable `{name}` is not in scope: the WITH before does not carry it"
+                    ),
+                )
+                .alternative(format!(
+                    "add `{name}` to the WITH items, as in WITH ..., {name}"
+                ))
+                .topic(GqlHelpTopic::Scope)
+                .into();
+            }
+            Some(Dropper::Next) => {
+                return semantic(
+                    var.span,
+                    format!(
+                        "the variable `{name}` is not in scope: the RETURN before NEXT does not \
+                         return it"
+                    ),
+                )
+                .alternative(format!(
+                    "add `{name}` to the RETURN items before NEXT, as in RETURN ..., {name} \
+                     NEXT ..."
+                ))
+                .topic(GqlHelpTopic::Scope)
+                .into();
+            }
+            None => {}
         }
         if self.later_in_body.iter().any(|n| n == name) {
             return semantic(
@@ -2271,8 +3359,22 @@ impl<'q> Binder<'q> {
             .topic(GqlHelpTopic::Subquery)
             .into();
         }
-        if let Some(&comprehension) = self.hidden.get(name) {
-            if comprehension {
+        if self.hidden.get(name) == Some(&Hidden::Call) {
+            return semantic(
+                var.span,
+                format!(
+                    "the variable `{name}` is not in scope: it is bound inside a CALL body, \
+                     which passes on only the columns of its RETURN"
+                ),
+            )
+            .alternative(format!(
+                "return it from the body, as in CALL {{ MATCH ({name}) RETURN {name} }}"
+            ))
+            .topic(GqlHelpTopic::Scope)
+            .into();
+        }
+        if let Some(&hidden) = self.hidden.get(name) {
+            if hidden == Hidden::Comprehension {
                 return semantic(
                     var.span,
                     format!(
@@ -2302,12 +3404,9 @@ impl<'q> Binder<'q> {
             .into();
         }
         let later = self
-            .query
-            .matches
-            .get(self.bound_clauses..)
-            .unwrap_or(&[])
+            .later_clauses
             .iter()
-            .any(|m| declares(m, name));
+            .any(|(clause, declared)| *clause >= self.bound_clauses && declared == name);
         if later {
             return semantic(
                 var.span,
@@ -2316,6 +3415,23 @@ impl<'q> Binder<'q> {
                 ),
             )
             .alternative("move the condition to the WHERE of that later MATCH clause")
+            .into();
+        }
+        if let Some(outer) = self.calls.last()
+            && outer.get(name).is_some()
+        {
+            return semantic(
+                var.span,
+                format!(
+                    "the variable `{name}` is not imported into the CALL body: a CALL body sees \
+                     only the variables its scope clause names"
+                ),
+            )
+            .alternative(format!(
+                "name it in the variable scope clause, as in CALL ({name}) {{ ... }}, or import \
+                 every variable with CALL (*) {{ ... }}"
+            ))
+            .topic(GqlHelpTopic::Scope)
             .into();
         }
         let in_scope = self
@@ -2334,10 +3450,151 @@ impl<'q> Binder<'q> {
     /// is bounded by the height of the written expression; each substitution is charged to the
     /// budget.
     fn substitute(&mut self, aliases: &[(String, usize)], expr: &Expr) -> BResult<(Expr, Shape)> {
+        // A thin dispatch: each form in a function of its own, so one level of a tall
+        // expression costs two small frames, not one frame holding every form's temporaries
+        // (unoptimized builds give each a stack slot).
+        match &expr.kind {
+            // The body is bound (and substituted) on its own ([`BoundQuery::subqueries`]); the
+            // expression keeps the written subquery as a reference to it. A pattern
+            // comprehension is bound (and its `|` part substituted) on its own like a
+            // subquery ([`BoundSubquery::map`]).
+            ExprKind::Literal(_)
+            | ExprKind::Parameter(_)
+            | ExprKind::Subquery(_)
+            | ExprKind::PatternComprehension(_) => Ok((expr.clone(), Shape::LEAF)),
+            ExprKind::Variable(var) => self.substitute_variable(aliases, var, expr),
+            ExprKind::Binary { .. } => self.substitute_binary(aliases, expr),
+            ExprKind::Unary { .. }
+            | ExprKind::Property { .. }
+            | ExprKind::IsNull { .. }
+            | ExprKind::IsLabeled { .. }
+            | ExprKind::IsEndpoint { .. } => self.substitute_operand(aliases, expr),
+            ExprKind::List(_) | ExprKind::Map(_) | ExprKind::Case(_) => {
+                self.substitute_collection(aliases, expr)
+            }
+            ExprKind::FunctionCall { .. } => self.substitute_call(aliases, expr),
+            ExprKind::MapProjection(_) => self.substitute_projection(aliases, expr),
+            ExprKind::ListComprehension(_) => self.substitute_comprehension(aliases, expr),
+        }
+    }
+
+    #[inline(never)]
+    fn substitute_binary(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let ExprKind::Binary { op, left, right } = &expr.kind else {
+            return Err(not_dispatched());
+        };
+        let (left, ls) = self.substitute(aliases, left)?;
+        let (right, rs) = self.substitute(aliases, right)?;
+        let kind = ExprKind::Binary {
+            op: *op,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            combine(&[(ls, false), (rs, true)]),
+        ))
+    }
+
+    /// The forms over one operand (and `IS [NOT] SOURCE / DESTINATION OF` over two).
+    #[inline(never)]
+    fn substitute_operand(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let (kind, shape) = match &expr.kind {
+            ExprKind::Unary { op, operand } => {
+                let (operand, s) = self.substitute(aliases, operand)?;
+                let kind = ExprKind::Unary {
+                    op: *op,
+                    operand: Box::new(operand),
+                };
+                (kind, combine(&[(s, true)]))
+            }
+            ExprKind::Property { target, key } => {
+                let (target, s) = self.substitute(aliases, target)?;
+                let kind = ExprKind::Property {
+                    target: Box::new(target),
+                    key: key.clone(),
+                };
+                (kind, combine(&[(s, false)]))
+            }
+            ExprKind::IsNull { operand, negated } => {
+                let (operand, s) = self.substitute(aliases, operand)?;
+                let kind = ExprKind::IsNull {
+                    operand: Box::new(operand),
+                    negated: *negated,
+                };
+                (kind, combine(&[(s, false)]))
+            }
+            ExprKind::IsLabeled {
+                operand,
+                labels,
+                negated,
+            } => {
+                let (operand, s) = self.substitute(aliases, operand)?;
+                let kind = ExprKind::IsLabeled {
+                    operand: Box::new(operand),
+                    labels: labels.clone(),
+                    negated: *negated,
+                };
+                (kind, combine(&[(s, false)]))
+            }
+            ExprKind::IsEndpoint {
+                operand,
+                edge,
+                end,
+                negated,
+            } => {
+                let (operand, os) = self.substitute(aliases, operand)?;
+                let (edge, es) = self.substitute(aliases, edge)?;
+                let kind = ExprKind::IsEndpoint {
+                    operand: Box::new(operand),
+                    edge: Box::new(edge),
+                    end: *end,
+                    negated: *negated,
+                };
+                (kind, combine(&[(os, false), (es, true)]))
+            }
+            ExprKind::Literal(_)
+            | ExprKind::Parameter(_)
+            | ExprKind::Variable(_)
+            | ExprKind::Binary { .. }
+            | ExprKind::List(_)
+            | ExprKind::Map(_)
+            | ExprKind::Case(_)
+            | ExprKind::FunctionCall { .. }
+            | ExprKind::Subquery(_)
+            | ExprKind::MapProjection(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => return Err(not_dispatched()),
+        };
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            shape,
+        ))
+    }
+
+    /// A list, a map, a `CASE`.
+    #[inline(never)]
+    fn substitute_collection(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
         let mut children = Vec::new();
         let kind = match &expr.kind {
-            ExprKind::Literal(_) | ExprKind::Parameter(_) => expr.kind.clone(),
-            ExprKind::Variable(var) => return self.substitute_variable(aliases, var, expr),
             ExprKind::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -2361,71 +3618,6 @@ impl<'q> Binder<'q> {
                     entries,
                     span: map.span,
                 })
-            }
-            ExprKind::Property { target, key } => {
-                let (target, s) = self.substitute(aliases, target)?;
-                children.push((s, false));
-                ExprKind::Property {
-                    target: Box::new(target),
-                    key: key.clone(),
-                }
-            }
-            ExprKind::Unary { op, operand } => {
-                let (operand, s) = self.substitute(aliases, operand)?;
-                children.push((s, true));
-                ExprKind::Unary {
-                    op: *op,
-                    operand: Box::new(operand),
-                }
-            }
-            ExprKind::IsNull { operand, negated } => {
-                let (operand, s) = self.substitute(aliases, operand)?;
-                children.push((s, false));
-                ExprKind::IsNull {
-                    operand: Box::new(operand),
-                    negated: *negated,
-                }
-            }
-            ExprKind::IsLabeled {
-                operand,
-                labels,
-                negated,
-            } => {
-                let (operand, s) = self.substitute(aliases, operand)?;
-                children.push((s, false));
-                ExprKind::IsLabeled {
-                    operand: Box::new(operand),
-                    labels: labels.clone(),
-                    negated: *negated,
-                }
-            }
-            ExprKind::Binary { op, left, right } => {
-                let (left, ls) = self.substitute(aliases, left)?;
-                let (right, rs) = self.substitute(aliases, right)?;
-                children.push((ls, false));
-                children.push((rs, true));
-                ExprKind::Binary {
-                    op: *op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                }
-            }
-            ExprKind::IsEndpoint {
-                operand,
-                edge,
-                end,
-                negated,
-            } => {
-                let (operand, os) = self.substitute(aliases, operand)?;
-                let (edge, es) = self.substitute(aliases, edge)?;
-                children.push((os, false));
-                children.push((es, true));
-                ExprKind::IsEndpoint {
-                    operand: Box::new(operand),
-                    edge: Box::new(edge),
-                    end: *end,
-                    negated: *negated,
-                }
             }
             ExprKind::Case(case) => {
                 let mut one = |this: &mut Self, e: &Expr| -> BResult<Expr> {
@@ -2454,136 +3646,194 @@ impl<'q> Binder<'q> {
                     else_result,
                 }))
             }
-            ExprKind::FunctionCall {
-                name,
-                distinct,
-                args,
-            } => {
-                let args = match args {
-                    CallArgs::Star(span) => CallArgs::Star(*span),
-                    CallArgs::Exprs(args) => {
-                        let mut out = Vec::with_capacity(args.len());
-                        for arg in args {
-                            let (e, s) = self.substitute(aliases, arg)?;
-                            children.push((s, true));
-                            out.push(e);
-                        }
-                        CallArgs::Exprs(out)
-                    }
-                    CallArgs::Cast {
-                        operand,
-                        target,
-                        target_span,
-                    } => {
-                        let (operand, s) = self.substitute(aliases, operand)?;
-                        children.push((s, true));
-                        CallArgs::Cast {
-                            operand: Box::new(operand),
-                            target: *target,
-                            target_span: *target_span,
-                        }
-                    }
-                    CallArgs::Trim {
-                        side,
-                        character,
-                        source,
-                    } => {
-                        let character = match character {
-                            Some(character) => {
-                                let (character, s) = self.substitute(aliases, character)?;
-                                children.push((s, true));
-                                Some(Box::new(character))
-                            }
-                            None => None,
-                        };
-                        let (source, s) = self.substitute(aliases, source)?;
-                        children.push((s, true));
-                        CallArgs::Trim {
-                            side: *side,
-                            character,
-                            source: Box::new(source),
-                        }
-                    }
-                };
-                ExprKind::FunctionCall {
-                    name: name.clone(),
-                    distinct: *distinct,
-                    args,
-                }
-            }
-            // The body is bound (and substituted) on its own ([`BoundQuery::subqueries`]); the
-            // expression keeps the written subquery as a reference to it.
-            ExprKind::Subquery(_) => return Ok((expr.clone(), Shape::LEAF)),
-            ExprKind::MapProjection(projection) => {
-                let (target, s) = self.substitute(aliases, &projection.target)?;
-                children.push((s, true));
-                let mut items = Vec::with_capacity(projection.items.len());
-                for item in &projection.items {
-                    items.push(match item {
-                        ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {
-                            item.clone()
-                        }
-                        // The key stays the written name; the value is substituted.
-                        ProjectionItem::Variable(var) => {
-                            let written = Expr {
-                                kind: ExprKind::Variable(var.clone()),
-                                span: var.span,
-                            };
-                            let (value, s) = self.substitute(aliases, &written)?;
-                            children.push((s, true));
-                            if value == written {
-                                item.clone()
-                            } else {
-                                ProjectionItem::Entry(MapEntry {
-                                    key: var.clone(),
-                                    value,
-                                })
-                            }
-                        }
-                        ProjectionItem::Entry(entry) => {
-                            let (value, s) = self.substitute(aliases, &entry.value)?;
-                            children.push((s, true));
-                            ProjectionItem::Entry(MapEntry {
-                                key: entry.key.clone(),
-                                value,
-                            })
-                        }
-                    });
-                }
-                ExprKind::MapProjection(Box::new(MapProjection {
-                    target,
-                    items,
-                    braces: projection.braces,
-                }))
-            }
-            // The variable is a local of the `WHERE` / `|` parts: it is in no scope, so
-            // `substitute_variable` leaves it as written.
-            ExprKind::ListComprehension(comprehension) => {
-                let mut one = |this: &mut Self, e: &Expr| -> BResult<Expr> {
-                    let (e, s) = this.substitute(aliases, e)?;
-                    children.push((s, true));
-                    Ok(e)
-                };
-                let list = one(self, &comprehension.list)?;
-                let filter = match &comprehension.filter {
-                    Some(filter) => Some(one(self, filter)?),
-                    None => None,
-                };
-                let map = match &comprehension.map {
-                    Some(map) => Some(one(self, map)?),
-                    None => None,
-                };
-                ExprKind::ListComprehension(Box::new(ListComprehension {
-                    variable: comprehension.variable.clone(),
-                    list,
-                    filter,
-                    map,
-                }))
-            }
-            // Bound (and its `|` part substituted) on its own like a subquery
-            // ([`BoundSubquery::map`]); the expression keeps it as a reference.
-            ExprKind::PatternComprehension(_) => return Ok((expr.clone(), Shape::LEAF)),
+            ExprKind::Literal(_)
+            | ExprKind::Parameter(_)
+            | ExprKind::Variable(_)
+            | ExprKind::Property { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::IsNull { .. }
+            | ExprKind::IsLabeled { .. }
+            | ExprKind::IsEndpoint { .. }
+            | ExprKind::FunctionCall { .. }
+            | ExprKind::Subquery(_)
+            | ExprKind::MapProjection(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => return Err(not_dispatched()),
         };
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            combine(&children),
+        ))
+    }
+
+    #[inline(never)]
+    fn substitute_call(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let ExprKind::FunctionCall {
+            name,
+            distinct,
+            args,
+        } = &expr.kind
+        else {
+            return Err(not_dispatched());
+        };
+        let mut children = Vec::new();
+        let args = match args {
+            CallArgs::Star(span) => CallArgs::Star(*span),
+            CallArgs::Exprs(args) => {
+                let mut out = Vec::with_capacity(args.len());
+                for arg in args {
+                    let (e, s) = self.substitute(aliases, arg)?;
+                    children.push((s, true));
+                    out.push(e);
+                }
+                CallArgs::Exprs(out)
+            }
+            CallArgs::Cast {
+                operand,
+                target,
+                target_span,
+            } => {
+                let (operand, s) = self.substitute(aliases, operand)?;
+                children.push((s, true));
+                CallArgs::Cast {
+                    operand: Box::new(operand),
+                    target: *target,
+                    target_span: *target_span,
+                }
+            }
+            CallArgs::Trim {
+                side,
+                character,
+                source,
+            } => {
+                let character = match character {
+                    Some(character) => {
+                        let (character, s) = self.substitute(aliases, character)?;
+                        children.push((s, true));
+                        Some(Box::new(character))
+                    }
+                    None => None,
+                };
+                let (source, s) = self.substitute(aliases, source)?;
+                children.push((s, true));
+                CallArgs::Trim {
+                    side: *side,
+                    character,
+                    source: Box::new(source),
+                }
+            }
+        };
+        let kind = ExprKind::FunctionCall {
+            name: name.clone(),
+            distinct: *distinct,
+            args,
+        };
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            combine(&children),
+        ))
+    }
+
+    #[inline(never)]
+    fn substitute_projection(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let ExprKind::MapProjection(projection) = &expr.kind else {
+            return Err(not_dispatched());
+        };
+        let mut children = Vec::new();
+        let (target, s) = self.substitute(aliases, &projection.target)?;
+        children.push((s, true));
+        let mut items = Vec::with_capacity(projection.items.len());
+        for item in &projection.items {
+            items.push(match item {
+                ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => item.clone(),
+                // The key stays the written name; the value is substituted.
+                ProjectionItem::Variable(var) => {
+                    let written = Expr {
+                        kind: ExprKind::Variable(var.clone()),
+                        span: var.span,
+                    };
+                    let (value, s) = self.substitute(aliases, &written)?;
+                    children.push((s, true));
+                    if value == written {
+                        item.clone()
+                    } else {
+                        ProjectionItem::Entry(MapEntry {
+                            key: var.clone(),
+                            value,
+                        })
+                    }
+                }
+                ProjectionItem::Entry(entry) => {
+                    let (value, s) = self.substitute(aliases, &entry.value)?;
+                    children.push((s, true));
+                    ProjectionItem::Entry(MapEntry {
+                        key: entry.key.clone(),
+                        value,
+                    })
+                }
+            });
+        }
+        let kind = ExprKind::MapProjection(Box::new(MapProjection {
+            target,
+            items,
+            braces: projection.braces,
+        }));
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            combine(&children),
+        ))
+    }
+
+    /// The variable is a local of the `WHERE` / `|` parts: it is in no scope, so
+    /// `substitute_variable` leaves it as written.
+    #[inline(never)]
+    fn substitute_comprehension(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let ExprKind::ListComprehension(comprehension) = &expr.kind else {
+            return Err(not_dispatched());
+        };
+        let mut children = Vec::new();
+        let mut one = |this: &mut Self, e: &Expr| -> BResult<Expr> {
+            let (e, s) = this.substitute(aliases, e)?;
+            children.push((s, true));
+            Ok(e)
+        };
+        let list = one(self, &comprehension.list)?;
+        let filter = match &comprehension.filter {
+            Some(filter) => Some(one(self, filter)?),
+            None => None,
+        };
+        let map = match &comprehension.map {
+            Some(map) => Some(one(self, map)?),
+            None => None,
+        };
+        let kind = ExprKind::ListComprehension(Box::new(ListComprehension {
+            variable: comprehension.variable.clone(),
+            list,
+            filter,
+            map,
+        }));
         Ok((
             Expr {
                 kind,
@@ -2661,7 +3911,12 @@ impl<'q> Binder<'q> {
         if let Some(index) = self.subqueries.iter().position(|s| s.span == subquery.span) {
             return Ok(index);
         }
-        subquery_not_yet(subquery)?;
+        if subquery.kind == SubqueryKind::Collect
+            && subquery.form == SubqueryForm::Braces
+            && subquery.query.is_none()
+        {
+            return Err(collect_needs_one_column(subquery.span));
+        }
         if self.subqueries.len() >= MAX_SUBQUERIES {
             return Err(too_many_subqueries(subquery.span));
         }
@@ -2700,9 +3955,11 @@ impl<'q> Binder<'q> {
             span: subquery.span,
             map: None,
             map_bindings: Vec::new(),
+            query: None,
         });
         // The nested scope: the names in scope now, plus the body's own (locals).
         let scope = self.scope.clone();
+        let marks = self.marks();
         let dropped = self.dropped.clone();
         let clause = self.clause;
         let parent = self.subquery.replace(index);
@@ -2716,29 +3973,34 @@ impl<'q> Binder<'q> {
         let shelved = self.shelved_locals.len();
         let locals = std::mem::take(&mut self.locals);
         self.shelved_locals.extend(locals.iter().cloned());
-        let body = self.subquery_body(subquery, segment).and_then(|clauses| {
-            // The `|` part sees the body's names; like a body condition it marks only the
-            // body's own locals read (an import is read by the host expression anyway).
-            let resolved = match map {
-                Some(map) => Some(self.expression(Ctx::refusing(IN_PATTERN_COMPREHENSION), map)?),
-                None => None,
-            };
-            if let Some(resolved) = &resolved {
-                let own: Vec<BindingId> = resolved
-                    .refs
-                    .bindings
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        self.bindings
-                            .get(id.0)
-                            .is_some_and(|b| b.subquery == Some(index))
-                    })
-                    .collect();
-                self.mark_read(&own);
-            }
-            Ok((clauses, resolved))
-        });
+        let body = match subquery.query.as_deref() {
+            Some(query) => self.whole_query_body(query, &scope),
+            None => self.subquery_body(subquery, segment).and_then(|clauses| {
+                // The `|` part sees the body's names; like a body condition it marks only the
+                // body's own locals read (an import is read by the host expression anyway).
+                let resolved = match map {
+                    Some(map) => {
+                        Some(self.expression(Ctx::refusing(IN_PATTERN_COMPREHENSION), map)?)
+                    }
+                    None => None,
+                };
+                if let Some(resolved) = &resolved {
+                    let own: Vec<BindingId> = resolved
+                        .refs
+                        .bindings
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            self.bindings
+                                .get(id.0)
+                                .is_some_and(|b| b.subquery == Some(index))
+                        })
+                        .collect();
+                    self.mark_read(&own);
+                }
+                Ok((clauses, resolved, None))
+            }),
+        };
         self.shelved_locals.truncate(shelved);
         self.locals = locals;
         if incomplete {
@@ -2748,11 +4010,23 @@ impl<'q> Binder<'q> {
         self.clause = clause;
         self.dropped = dropped;
         let inner = std::mem::replace(&mut self.scope, scope);
-        let (clauses, map) = body?;
-        for (name, _) in inner.entries {
-            if self.scope.get(&name.name).is_none() {
-                self.hidden
-                    .insert(name.name, subquery.form == SubqueryForm::Comprehension);
+        let (clauses, map, query) = body?;
+        let hidden = if subquery.form == SubqueryForm::Comprehension {
+            Hidden::Comprehension
+        } else {
+            Hidden::Subquery
+        };
+        let names = query
+            .as_ref()
+            .map_or(&[][..], |(_, names)| names.as_slice());
+        for name in inner
+            .entries
+            .into_iter()
+            .map(|(n, _)| n.name)
+            .chain(names.iter().cloned())
+        {
+            if self.scope.get(&name).is_none() {
+                self.hidden.insert(name, hidden);
             }
         }
         // Imports: every binding older than the body that the body (nested bodies included)
@@ -2783,11 +4057,22 @@ impl<'q> Binder<'q> {
         if let Some(map) = &map {
             imports.extend(map.refs.bindings.iter().copied().filter(outside));
         }
+        let query = match query {
+            Some((query, _)) => {
+                if subquery.kind == SubqueryKind::Collect && query.last().first.columns.len() != 1 {
+                    return Err(collect_needs_one_column(subquery.span));
+                }
+                imports = self.reads_since(marks, &query);
+                Some(query)
+            }
+            None => None,
+        };
         imports.sort_unstable();
         imports.dedup();
         if let Some(bound) = self.subqueries.get_mut(index) {
             bound.clauses = clauses;
             bound.imports = imports;
+            bound.query = query;
             if let Some(map) = map {
                 bound.map = Some(map.expr);
                 bound.map_bindings = map.refs.bindings;
@@ -2796,10 +4081,44 @@ impl<'q> Binder<'q> {
         Ok(index)
     }
 
+    /// A whole-query subquery body (stage 2d): a composite whose operands start with every
+    /// name of `outer` in scope; its new bindings are the subquery's locals.
+    #[inline(never)]
+    fn whole_query_body(&mut self, query: &CompositeQuery, outer: &Names) -> BResult<SubqueryBody> {
+        self.enter_body(query.span)?;
+        let body = self.composite(query, Entry::Subquery { outer });
+        self.body_depth = self.body_depth.saturating_sub(1);
+        let (bound, names) = body?;
+        Ok((Vec::new(), None, Some((bound, names))))
+    }
+
+    /// One more nested body ([`MAX_BODY_DEPTH`]); the caller leaves it.
+    fn enter_body(&mut self, span: Span) -> BResult<()> {
+        if self.body_depth >= MAX_BODY_DEPTH {
+            return Err(Box::new(
+                GqlErrorBuilder::new(
+                    GqlErrorKind::Limit,
+                    span.start..span.end,
+                    format!(
+                        "the query nests CALL {{ }} and subquery bodies deeper than \
+                         {MAX_BODY_DEPTH} levels"
+                    ),
+                )
+                .alternative(
+                    "un-nest the bodies: a CALL body may follow another in the same query, as \
+                     in CALL { .. RETURN a } CALL (a) { .. RETURN b }, and NEXT passes the \
+                     result of one query to the next",
+                ),
+            ));
+        }
+        self.body_depth += 1;
+        Ok(())
+    }
+
     /// The `MATCH` clauses of a subquery body, bound like the clauses of one `Segment::Match`
     /// (each with its own edge uniqueness, design E8); returns their indexes.
     fn subquery_body(&mut self, subquery: &SubqueryExpr, segment: usize) -> BResult<Vec<usize>> {
-        let base = self.query.matches.len();
+        let base = SUBQUERY_CLAUSES;
         let mut clauses = Vec::with_capacity(subquery.matches.len());
         let outer = self.later_in_body.len();
         for (i, m) in subquery.matches.iter().enumerate() {
@@ -3383,6 +4702,70 @@ impl<'q> Binder<'q> {
     }
 }
 
+/// The parts of a `WITH`, or of a `RETURN` before `NEXT` read as one (design E19).
+struct WithParts<'w> {
+    distinct: bool,
+    star: Option<Span>,
+    items: &'w [ReturnItem],
+    /// The `GROUP BY` of a `RETURN`.
+    group_by: Option<&'w GroupBy>,
+    order_by: Option<&'w OrderBy>,
+    offset: Option<&'w CountClause>,
+    limit: Option<&'w CountClause>,
+    where_clause: Option<&'w Expr>,
+    span: Span,
+    /// `WITH` or `RETURN` (for the messages).
+    clause: &'static str,
+    /// What drops the names it does not carry.
+    dropper: Dropper,
+}
+
+impl<'w> WithParts<'w> {
+    fn of(with: &'w WithClause) -> Self {
+        WithParts {
+            distinct: with.distinct,
+            star: with.star,
+            items: &with.items,
+            group_by: None,
+            order_by: with.order_by.as_ref(),
+            offset: with.offset.as_ref(),
+            limit: with.limit.as_ref(),
+            where_clause: with.where_clause.as_ref(),
+            span: with.span,
+            clause: "WITH",
+            dropper: Dropper::With,
+        }
+    }
+}
+
+/// The internal error of a substitution helper handed a form it does not handle.
+fn not_dispatched() -> Box<GqlErrorBuilder> {
+    Box::new(GqlErrorBuilder::new(
+        GqlErrorKind::Semantic,
+        0..0,
+        "internal error: an expression form substituted by the wrong helper",
+    ))
+}
+
+/// The names of `outer` that `variables` import, in written order (each checked to be there).
+fn imported(outer: &Names, variables: &[Identifier]) -> Names {
+    let mut names = Names::default();
+    for var in variables {
+        if let Some(symbol) = outer.get(&var.name) {
+            names.insert(var.clone(), symbol.clone());
+        }
+    }
+    names
+}
+
+/// `UNION ALL` or `UNION`.
+fn union_word(kind: UnionKind) -> &'static str {
+    match kind {
+        UnionKind::All => "UNION ALL",
+        UnionKind::Distinct => "UNION",
+    }
+}
+
 /// Where a pattern element is declared.
 #[derive(Clone, Copy)]
 struct Site {
@@ -3518,7 +4901,6 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// Whether the `MATCH` clause `m` declares `name` (a pattern element or path variable).
 /// The variables `m` names: path, node and edge variables of every path.
 fn declared_names(m: &MatchClause) -> impl Iterator<Item = &Identifier> {
     m.patterns.iter().flat_map(|path| {
@@ -3527,18 +4909,6 @@ fn declared_names(m: &MatchClause) -> impl Iterator<Item = &Identifier> {
                 .iter()
                 .flat_map(|s| s.edge.variable.iter().chain(&s.node.variable)),
         )
-    })
-}
-
-fn declares(m: &MatchClause, name: &str) -> bool {
-    let named = |v: &Option<Identifier>| v.as_ref().is_some_and(|v| v.name == name);
-    m.patterns.iter().any(|path| {
-        named(&path.variable)
-            || named(&path.start.variable)
-            || path
-                .steps
-                .iter()
-                .any(|s| named(&s.edge.variable) || named(&s.node.variable))
     })
 }
 
