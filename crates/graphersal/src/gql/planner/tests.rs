@@ -1144,3 +1144,366 @@ fn a_lookup_starts_a_component_only_where_an_id_or_index_serves_it() {
     );
     assert_eq!(stages(&b, &p), ["for labelled", "match: lookup n"]);
 }
+
+// ----- subqueries (stage 2b) -----
+
+/// One line per planned subquery body: `k@start: ops` (`start` the import the host stands on,
+/// `-` for none).
+fn subplans(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
+    p.subqueries
+        .iter()
+        .map(|s| {
+            format!(
+                "{}@{}: {}",
+                s.subquery,
+                s.current.map_or_else(|| "-".to_owned(), |c| name(b, c)),
+                ops_shape(b, p, &s.ops).join("; ")
+            )
+        })
+        .collect()
+}
+
+/// The element filters of the root scan.
+fn root_filters(p: &LogicalPlan) -> &ElementFilters {
+    match p.ops.first() {
+        Some(Op::Scan(s)) => &s.filters,
+        other => panic!("no scan first: {other:?}"),
+    }
+}
+
+/// The bindings with the `subquery` reason, by name.
+fn subquery_reads(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
+    (0..p.labelling.len())
+        .filter(|&i| p.labelling[i].subquery)
+        .map(|i| name(b, BindingId(i)))
+        .collect()
+}
+
+#[test]
+fn a_subquery_on_the_scanned_element_runs_last_on_it_without_a_label() {
+    // "Who has no ...": the body starts at the current element (no `select`, no label).
+    let q = "MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN count(*) AS c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan p"]);
+    assert_eq!(
+        root_filters(&p),
+        &ElementFilters {
+            pushed: vec![],
+            residual: vec![],
+            exists: vec![0],
+        }
+    );
+    assert_eq!(subplans(&b, &p), ["0@p: resume p; p-[_1]->_2"]);
+    assert!(labelled(&b, &p).is_empty());
+    // Design E11 on one element: pushed `has()`, residual `gql:filter`s (one holding a
+    // subquery under `OR` after the plain ones), the `EXISTS` children last, each in text order.
+    let q = "MATCH (p:person) WHERE EXISTS { (p)-->() } AND (p.x = 1 OR EXISTS { (p)<--() }) \
+             AND p.name STARTS WITH 'm' AND p.age + 1 > 3 AND NOT (p)-[:knows]->() RETURN p";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        root_filters(&p),
+        &ElementFilters {
+            pushed: vec![2],
+            residual: vec![3, 1],
+            exists: vec![0, 4],
+        }
+    );
+    assert_eq!(
+        subplans(&b, &p),
+        [
+            "0@p: resume p; p-[_1]->_2",
+            "1@p: resume p; p<-[_3]-_4",
+            "2@p: resume p; p-[_5]->_6"
+        ]
+    );
+}
+
+#[test]
+fn a_cross_subquery_conjunct_runs_after_the_other_filters_there() {
+    // Two imports: the host filter runs where both are bound (on `b`); the body starts at the
+    // current element and closes the pattern with a join on `a`.
+    let q = "MATCH (a:person), (b:software) WHERE (a)-[:created]->(b) AND a.age > b.x RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "scan b", "filter [1, 0]"]);
+    assert_eq!(subplans(&b, &p), ["0@b: resume b; b<-[_2]-a; join a"]);
+    assert!(reasons(&p, named(&b, "a")[0]).join);
+    // A subquery under `OR` (the expression hook) runs after the plain conjuncts, before the
+    // fast-path ones.
+    let q = "MATCH (a), (b) WHERE (a)-->(b) AND ((b)-->(a) OR a.x = 1) AND a.y = b.y RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "scan b", "filter [2, 1, 0]"]);
+}
+
+#[test]
+fn an_import_read_away_from_the_current_element_in_the_body_is_labelled() {
+    // `p` is read after the body moved on to `q`: the `subquery` reason. The binder no longer
+    // marks it read for a body condition (only the body's own locals).
+    let q = "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(q) WHERE q.age > p.age } RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@p: resume p; p-[_1]->q; filter [0]"]);
+    assert_eq!(subquery_reads(&b, &p), ["p"]);
+    let p_id = named(&b, "p")[0];
+    assert!(!reasons(&p, p_id).read);
+    assert!(b.binding(named(&b, "q")[0]).is_some_and(|q| q.read));
+    // A body condition on the import alone runs at the body's start, on the current element:
+    // no label at all.
+    let q = "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(q) WHERE p.age > 30 } RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@p: filter [0]; resume p; p-[_1]->q"]);
+    assert!(labelled(&b, &p).is_empty());
+    // The same condition when the host stands on another element: read away at the start,
+    // and the body moves to its import first.
+    let q = "MATCH (a), (b) WHERE EXISTS { MATCH (a)-->(c) WHERE a.x = b.x } RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "scan b", "filter [1]"]);
+    assert_eq!(subplans(&b, &p), ["0@b: filter [0]; resume ^a; a-[_2]->c"]);
+    assert_eq!(subquery_reads(&b, &p), ["a"]);
+    assert!(reasons(&p, named(&b, "a")[0]).resume);
+}
+
+#[test]
+fn nested_subqueries_plan_inside_their_parents_body() {
+    let q = "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE EXISTS { MATCH (b)-->(c) \
+             WHERE c.x = a.x } } RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a"]);
+    assert_eq!(root_filters(&p).exists, [2]);
+    // The inner host is a cross conjunct of the outer body (it imports `a` and `b`), placed
+    // where `b` is bound; the inner body starts there.
+    assert_eq!(
+        subplans(&b, &p),
+        [
+            "0@a: resume a; a-[_1]->b; filter [1]",
+            "1@b: resume b; b-[_3]->c; filter [0]"
+        ]
+    );
+    assert_eq!(subquery_reads(&b, &p), ["a"]);
+}
+
+#[test]
+fn a_body_is_planned_once_per_start() {
+    // A LET value read on the element and in RETURN (after the walk moved on): two starts.
+    let q = "MATCH (a) LET x = EXISTS { (a)-->() } MATCH (a)-->(b) WHERE x RETURN x AS y";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a-[_3]->b"]);
+    assert_eq!(root_filters(&p).exists, [0]);
+    assert_eq!(
+        subplans(&b, &p),
+        ["0@-: resume ^a; a-[_1]->_2", "0@a: resume a; a-[_1]->_2"]
+    );
+    assert!(reasons(&p, named(&b, "a")[0]).resume);
+    // The lowering finds a host's plan by the host's current element.
+    let (a, b_id) = (named(&b, "a")[0], named(&b, "b")[0]);
+    let found = |current| p.subquery_plan(&b, 0, current).map(|s| s.current);
+    assert_eq!(found(Some(a)), Some(Some(a)));
+    assert_eq!(found(Some(b_id)), Some(None));
+    assert_eq!(found(None), Some(None));
+    assert_eq!(p.subquery_plan(&b, 1, None), None);
+    // Read twice at the same position: one plan.
+    let q = "MATCH (a) LET x = EXISTS { (a)-->() } RETURN x AS y, x AS z";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@a: resume a; a-[_1]->_2"]);
+}
+
+#[test]
+fn subqueries_in_columns_sort_keys_lists_and_rows() {
+    // RETURN after an OPTIONAL MATCH: no current element, the import is read after the part.
+    let q = "MATCH (a) OPTIONAL MATCH (a)-->(b) RETURN EXISTS { (b)-->() } AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@-: resume ^b; b-[_3]->_4"]);
+    let r = reasons(&p, named(&b, "b")[0]);
+    assert!(r.resume && r.optional);
+    // A materializing WITH's WHERE runs on its row: the body moves to the column (gql:bind)
+    // and reads another column after leaving the row, so the row is labelled.
+    let q = "MATCH (a)-->(b) WITH a, b LIMIT 5 WHERE EXISTS { MATCH (a)-->(c) \
+             WHERE c.age > b.age } RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@-: resume ^a; a-[_5]->c; filter [0]"]);
+    assert_eq!(
+        stages(&b, &p),
+        ["with [Project, Limit(Literal(5))] filters [1] labelled"]
+    );
+    // Without the read after leaving it, the row needs no label.
+    let q = "MATCH (a)-->(b) WITH a, b LIMIT 5 WHERE EXISTS { (a)-->() } RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        ["with [Project, Limit(Literal(5))] filters [0]"]
+    );
+    // A column on the current element, a sort key (on the row map), a FOR list.
+    let q = "MATCH (a)-->(b) RETURN b, EXISTS { (a)-->(b) } AS e ORDER BY EXISTS { (b)-->() }";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        subplans(&b, &p),
+        [
+            "0@b: resume b; b<-[_3]-a; join a",
+            "1@-: resume ^b; b-[_4]->_5"
+        ]
+    );
+    let q = "MATCH (a) FOR x IN [EXISTS { (a)-->() }] RETURN x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(subplans(&b, &p), ["0@a: resume a; a-[_1]->_2"]);
+    // A query without MATCH: an uncorrelated body is a child-leading scan (with its pushdown),
+    // never a lookup, even where an index serves it.
+    let facts = Facts {
+        indexes: vec![("person", "name")],
+        ..Facts::default()
+    };
+    let q = "RETURN EXISTS { MATCH (n:person {name: 'x'}) } AS x";
+    let (b, p) = plan_with(q, &facts);
+    assert!(p.ops.is_empty());
+    assert_eq!(subplans(&b, &p), ["0@-: scan n"]);
+    match &p.subqueries[0].ops[0] {
+        Op::Scan(s) => assert_eq!(s.filters.pushed, [0]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn subquery_bodies_follow_the_segment_rules() {
+    let facts = Facts {
+        indexes: vec![("person", "name")],
+        ..Facts::default()
+    };
+    // A later unanchored component of a correlated body: a lookup where an index serves it.
+    let q = "MATCH (a:person) WHERE EXISTS { MATCH (a)-->(b), (c:person {name: a.name}) } \
+             RETURN 1 AS x";
+    let (b, p) = plan_with(q, &facts);
+    assert_eq!(subplans(&b, &p), ["0@a: resume a; a-[_1]->b; lookup c"]);
+    assert_eq!(subquery_reads(&b, &p), ["a"]);
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        subplans(&b, &p),
+        ["0@a: resume a; a-[_1]->b; scan c; filter [0]"]
+    );
+    // Trail per body clause only (design E8): `g` checks `f`, never the outer `e`.
+    let q = "MATCH (a)-[e]->(b) WHERE EXISTS { MATCH (a)-[f]->(c)-[g]->(d) } RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        subplans(&b, &p),
+        ["0@a: resume a; a-[f]->c; c-[g]->d trail!=f"]
+    );
+    // An outer edge bound again inside: an edge join.
+    let q = "MATCH (a)-[e]->(b) WHERE EXISTS { MATCH (b)<-[e]-(a) } RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        subplans(&b, &p),
+        ["0@b: resume b; b<-[e]-a edge_join; join a"]
+    );
+    assert!(reasons(&p, named(&b, "e")[0]).join);
+    // A host on an edge (its inline WHERE): the body reaches the edge with an edge join.
+    let q = "MATCH (a)-[e WHERE EXISTS { MATCH (x)-[e]->(:software) }]->(b) RETURN 1 AS x";
+    let (b, p) = plan_with(q, &NoFacts);
+    match &p.ops[1] {
+        Op::Expand(e) => assert_eq!(e.edge_filters.exists, [0]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(subplans(&b, &p), ["0@-: scan _4; _4<-[e]-x edge_join"]);
+}
+
+#[test]
+fn subquery_plans_are_deterministic_and_bind_every_local() {
+    let heads = [
+        "MATCH (a)-[e]->(b)",
+        "OPTIONAL MATCH (a)",
+        "MATCH (a)-[e]->{1,2}(b)",
+        "MATCH p = (a)-->(b)",
+        "FOR a IN [1]",
+        "MATCH (a) WITH a, count(*) AS c",
+        "MATCH (a:person {name: 'x'}), (b:person)",
+    ];
+    let preds = [
+        "EXISTS { MATCH (a)-->(c) }",
+        "EXISTS { (a)-[e]->(b) WHERE b.x = a.x }",
+        "NOT (a)-->(b)",
+        "EXISTS ((c)-->())",
+        "EXISTS { MATCH (a)-->(b) MATCH (b)-->(c) WHERE EXISTS { (c)-->(a) } }",
+        "EXISTS { MATCH q = (a)-->() WHERE path_length(q) > 1 }",
+        "EXISTS { MATCH (a)-->(c), (d:person {name: a.name}) WHERE d.x = c.x }",
+        "(a)-->() OR a.x = 1",
+    ];
+    let tails = [
+        "RETURN a",
+        "RETURN a, (a)-->() AS h ORDER BY h",
+        "RETURN count(*) + CASE WHEN (a)-->() THEN 1 END AS k",
+        "MATCH (c) WHERE EXISTS { (c)-->(a) } RETURN c",
+    ];
+    let facts = Facts {
+        indexes: vec![("person", "name")],
+        ..Facts::default()
+    };
+    let mut planned = 0;
+    for h in heads {
+        for pr in preds {
+            for t in tails {
+                for q in [
+                    format!("{h} WHERE {pr} {t}"),
+                    format!("{h} FILTER {pr} {t}"),
+                ] {
+                    let Ok(parsed) = parse(&q) else { continue };
+                    let Ok(b) = bind(&parsed) else { continue };
+                    for f in [&NoFacts as &dyn PlannerFacts, &facts] {
+                        let p = plan(&b, f, None);
+                        assert_eq!(p, plan(&b, f, None), "{q}");
+                        for s in &p.subqueries {
+                            let sub = &b.subqueries[s.subquery];
+                            let reached: Vec<BindingId> = s
+                                .ops
+                                .iter()
+                                .flat_map(|op| match op {
+                                    Op::Scan(x) | Op::Anchor(x) => vec![x.binding],
+                                    Op::Lookup(l) => vec![l.scan.binding],
+                                    Op::Resume(r) => vec![r.binding],
+                                    Op::Expand(e) => vec![e.edge, e.to],
+                                    Op::Join { .. } | Op::Filter(_) => vec![],
+                                })
+                                .collect();
+                            for local in b.bindings.iter().filter(|x| {
+                                x.segment == sub.segment
+                                    && matches!(x.kind, BindingKind::Node | BindingKind::Edge)
+                            }) {
+                                assert!(reached.contains(&local.id), "{q}: {:?}", local.name);
+                            }
+                            // Every body conjunct is placed exactly once.
+                            let mut placed: Vec<usize> = s
+                                .ops
+                                .iter()
+                                .flat_map(|op| match op {
+                                    Op::Filter(ids) => ids.clone(),
+                                    Op::Scan(x) | Op::Anchor(x) => element_ids(&x.filters),
+                                    Op::Lookup(l) => {
+                                        let mut ids = element_ids(&l.scan.filters);
+                                        ids.push(l.conjunct);
+                                        ids
+                                    }
+                                    Op::Expand(e) => {
+                                        let mut ids = element_ids(&e.edge_filters);
+                                        ids.extend(element_ids(&e.to_filters));
+                                        ids
+                                    }
+                                    Op::Resume(_) | Op::Join { .. } => vec![],
+                                })
+                                .collect();
+                            placed.sort_unstable();
+                            let own: Vec<usize> = (0..b.conjuncts.len())
+                                .filter(|&c| b.conjuncts[c].segment == sub.segment)
+                                .collect();
+                            assert_eq!(placed, own, "{q}");
+                        }
+                        planned += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(planned > 100, "{planned}");
+}
+
+fn element_ids(f: &ElementFilters) -> Vec<usize> {
+    f.pushed
+        .iter()
+        .chain(&f.residual)
+        .chain(&f.exists)
+        .copied()
+        .collect()
+}

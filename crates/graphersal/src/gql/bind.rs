@@ -57,7 +57,10 @@
 //!   away from its own position: a conjunct in [`BoundQuery::cross`] (over several bindings, or
 //!   over one binding of another segment), a `RETURN` / `WITH` column, an `ORDER BY` key. A
 //!   conjunct over the binding alone in its segment is evaluated where the binding is the
-//!   current element and does not set it. A repeated variable sets [`Binding::joined`]; whether
+//!   current element and does not set it. A condition inside a subquery body sets it only for
+//!   the body's own locals: where it reads an import depends on where the body runs (the
+//!   planner's `Labelling::subquery`), and the host expression reads the imports anyway. A
+//!   repeated variable sets [`Binding::joined`]; whether
 //!   the join needs a path label depends on the plan (continuing from the variable needs none,
 //!   closing a cycle does), so the planner decides.
 //! - **Columns.** In written order: the alias when given, else the expression text exactly as
@@ -121,8 +124,9 @@
 //! ([`BoundQuery::subquery_at`], by span); its AST body is not substituted and is never read
 //! after binding. Beside an aggregate a subquery may import only grouping keys.
 //!
-//! The planner and the lowering do not support subqueries yet: [`refuse_subqueries`] refuses
-//! a bound query holding one (kind `NotYet`, until stages 2b.T3 / T4).
+//! The planner plans every body with its host (`planner.rs`, "Subqueries"); the lowering does
+//! not support subqueries yet: [`refuse_subqueries`] refuses a bound query holding one (kind
+//! `NotYet`, until stage 2b.T4).
 //!
 //! # Aggregates
 //!
@@ -555,13 +559,6 @@ impl BoundQuery {
 
     /// The subquery written at `span` (the span of an [`ExprKind::Subquery`] in a stored
     /// expression): its index into [`Self::subqueries`].
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "read by the tests; the planner reads it from 2b.T3"
-        )
-    )]
     pub(crate) fn subquery_at(&self, span: Span) -> Option<usize> {
         self.subqueries.iter().position(|s| s.span == span)
     }
@@ -671,9 +668,9 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
-/// Refuses a bound query that holds a subquery: the binder binds them (stage 2b.T2), the
-/// planner and the lowering do not support them yet (stages 2b.T3 / T4). The error names the
-/// first subquery in the text.
+/// Refuses a bound query that holds a subquery: the binder binds them (stage 2b.T2) and the
+/// planner plans them (2b.T3), the lowering does not support them yet (2b.T4). The error names
+/// the first subquery in the text.
 pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
     match bound.subqueries.first() {
         Some(subquery) => Err(subquery_not_yet(subquery).into_error(&query.source)),
@@ -681,7 +678,7 @@ pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(),
     }
 }
 
-/// The refusal of a subquery until the planner and the lowering support it (stages 2b.T3 / T4).
+/// The refusal of a subquery until the lowering supports it (stage 2b.T4).
 fn subquery_not_yet(subquery: &BoundSubquery) -> Box<GqlErrorBuilder> {
     let what = match (subquery.kind, subquery.form) {
         (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => "EXISTS",
@@ -1547,7 +1544,18 @@ impl<'q> Binder<'q> {
         if self.local_binding(index).is_none()
             && let Some(conjunct) = self.conjuncts.get(index)
         {
-            let ids = conjunct.bindings.clone();
+            // Inside a subquery body only the body's own locals: whether an import is read
+            // away from the current element depends on where the body runs, which the planner
+            // decides (`Labelling::subquery`); the host expression reads the imports anyway.
+            let body = self.subquery;
+            let ids: Vec<BindingId> = conjunct
+                .bindings
+                .iter()
+                .copied()
+                .filter(|id| {
+                    body.is_none() || self.bindings.get(id.0).is_some_and(|b| b.subquery == body)
+                })
+                .collect();
             self.mark_read(&ids);
         }
     }

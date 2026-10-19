@@ -86,6 +86,29 @@
 //! - A quantified edge walked from its written target reverses its direction like a plain
 //!   one ([`Expand::reversed`]); its trail list holds the earlier edges as for a plain edge.
 //!
+//! # Subqueries (stage 2b, design M2, E7, E11)
+//!
+//! The bodies of `EXISTS` and pattern predicates ([`BoundQuery::subqueries`]) are planned after
+//! the outer plan, with their host's position known: a pass over the finished plan in execution
+//! order finds every host (a conjunct where it is placed: on an element, in an [`Op::Filter`],
+//! in the `WHERE` of a materializing `WITH` on its row; a `RETURN` / `WITH` column; an
+//! `ORDER BY` key, on the new row map; a `FOR` list) and the position it runs at (the current
+//! element, the row, the last `OPTIONAL MATCH` part before it). Each body is then planned like a
+//! later segment of its own clauses ([`super::plan::SubqueryPlan`]): its imports are bound
+//! before it, so its conjuncts over imports only (or none) run first, a component holding an
+//! import starts there ([`Op::Resume`]: from the host's current element when the body imports
+//! it, else by moving to the earliest import, `select` or `gql:bind`), an expansion reaching an
+//! import is a join (an imported edge an edge join), a body's first component holding no import
+//! is a child-leading [`Op::Scan`] (its pushdown and index apply), a later one may be an
+//! [`Op::Lookup`]. Trail holds per body clause (design E8). A body is planned once per start
+//! (the host's current element when it is a node the body imports, else none); a subquery
+//! nested in a body is hosted in that body's plan the same way (a worklist, no recursion).
+//!
+//! The fast path (design E11): a conjunct that is a top-level `EXISTS` / `NOT EXISTS`
+//! ([`SubqueryUse::Exists`]) runs last at its site: in [`ElementFilters::exists`] after the
+//! pushed and residual conjuncts of its element, at the end of its [`Op::Filter`]; a conjunct
+//! holding a subquery elsewhere ([`SubqueryUse::Hook`]) runs after the plain conjuncts there.
+//!
 //! # Labelling
 //!
 //! Besides the stage 1a reasons (read, join, trail, branch) the planner records: a later
@@ -94,14 +117,21 @@
 //! finished plan in execution order, every read of a pattern binding after an `OPTIONAL MATCH`
 //! part that ended after the binding was bound (`optional`; the witness of a part whose group
 //! variable is read after it too) and every read of a materializing `WITH` or `FOR` column after
-//! a later stage left its row ([`Materialize::labelled`], [`ForStage::labelled`]).
+//! a later stage left its row ([`Materialize::labelled`], [`ForStage::labelled`]). The same pass
+//! over every planned body at each of its host positions records those reasons for the reads
+//! inside it, and the `subquery` reason for an import a body condition reads while it is not
+//! the current element there.
 
 use super::ast::{EdgeDirection, Quantifier};
-use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Segment};
+use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Predicate, Segment};
+use std::collections::BTreeSet;
+
+use super::ast::Expr;
 use super::plan::{
     EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan, Lookup, LookupBy,
-    Materialize, Op, Pushdown, ResultOp, Resume, Scan, Stage, and_factors, classify_all,
-    element_filters, lookup_form, scan_labels,
+    Materialize, Op, Pushdown, ResultOp, Resume, Scan, Stage, SubqueryPlan, SubqueryUse,
+    and_factors, classify_all, element_filters, lookup_form, scan_labels, subqueries_in,
+    subquery_start,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -233,6 +263,10 @@ struct Planner<'q> {
     /// Per binding: the nodes and edges of a path variable's pattern (empty for the others);
     /// a path variable is bound once all of them are.
     path_elements: Vec<Vec<BindingId>>,
+    /// How each conjunct uses subqueries, by conjunct index.
+    uses: Vec<SubqueryUse>,
+    /// The subquery bodies planned so far.
+    subplans: Vec<SubqueryPlan>,
 }
 
 impl<'q> Planner<'q> {
@@ -281,6 +315,8 @@ impl<'q> Planner<'q> {
             pending: Vec::new(),
             walked: vec![Vec::new(); bound.matches.len()],
             path_elements,
+            uses: bound.conjuncts.iter().map(SubqueryUse::of).collect(),
+            subplans: Vec::new(),
         }
     }
 
@@ -294,7 +330,7 @@ impl<'q> Planner<'q> {
             match segment {
                 Segment::Match(clauses) => {
                     let anchor = anchor.filter(|_| index == 0);
-                    let ops = self.segment(index, clauses, current, anchor);
+                    let ops = self.segment(index, clauses, current, anchor, false);
                     current = current_after(&ops, current);
                     if index == 0 {
                         first = ops;
@@ -306,7 +342,8 @@ impl<'q> Planner<'q> {
                     }
                 }
                 Segment::Optional(clause) => {
-                    let ops = self.segment(index, std::slice::from_ref(clause), current, None);
+                    let ops =
+                        self.segment(index, std::slice::from_ref(clause), current, None, false);
                     stages.push(Stage::Optional {
                         segment: index,
                         ops,
@@ -334,6 +371,8 @@ impl<'q> Planner<'q> {
         }
         self.mark_static();
         self.mark_positions(&first, &mut stages);
+        let mut subqueries = std::mem::take(&mut self.subplans);
+        subqueries.sort_by_key(|p| (p.subquery, p.current));
         let result = result_ops(
             bound.aggregated(),
             bound.distinct,
@@ -348,17 +387,21 @@ impl<'q> Planner<'q> {
             labelling: self.labelling,
             pushdown: self.pushdown,
             anchor,
+            subqueries,
         }
     }
 
     /// Plans segment `index` of `clauses` (module docs): its components best start first, its
     /// conjuncts, the leftovers at the end. `current` is the current element when it starts.
+    /// `body`: the segment is a subquery body (its conjuncts over bound bindings only run at
+    /// its start, its first component when no import starts it is a child-leading scan).
     fn segment(
         &mut self,
         index: usize,
         clauses: &[usize],
         current: Option<BindingId>,
         anchor: Option<BindingId>,
+        body: bool,
     ) -> Vec<Op> {
         let bound = self.bound;
         self.pending = bound
@@ -367,7 +410,8 @@ impl<'q> Planner<'q> {
             .copied()
             .filter(|&c| bound.conjuncts.get(c).is_some_and(|cj| cj.segment == index))
             .collect();
-        if index > 0 {
+        let first = index == 0 && !body;
+        if !first {
             self.place_filters();
         }
         let n = bound.bindings.len();
@@ -437,8 +481,8 @@ impl<'q> Planner<'q> {
         starts.sort_unstable_by_key(|(key, _, _)| *key);
         for (k, ((_, _, _, start), how, nodes)) in starts.into_iter().enumerate() {
             // Every component but the root scan may start with a correlated lookup (module
-            // docs).
-            let root = index == 0 && k == 0;
+            // docs); a body's first component is a child-leading scan.
+            let root = (first || body) && k == 0;
             let lookup = (how == Start::Scan && !root)
                 .then(|| self.lookup(&nodes))
                 .flatten();
@@ -454,7 +498,8 @@ impl<'q> Planner<'q> {
         }
         // Conjuncts left over (none in a well-formed query: every binding is bound).
         if !self.pending.is_empty() {
-            let rest = std::mem::take(&mut self.pending);
+            let mut rest = std::mem::take(&mut self.pending);
+            rest.sort_by_key(|&c| (self.use_of(c), c));
             self.ops.push(Op::Filter(rest));
         }
         std::mem::take(&mut self.ops)
@@ -674,7 +719,7 @@ impl<'q> Planner<'q> {
         let Some(binding) = self.bound.binding(id) else {
             return ElementFilters::default();
         };
-        element_filters(&binding.predicates, &self.pushdown, |key| {
+        element_filters(&binding.predicates, &self.pushdown, &self.uses, |key| {
             scan.is_some_and(|labels| {
                 !labels.is_empty()
                     && labels
@@ -728,8 +773,16 @@ impl<'q> Planner<'q> {
         }
         self.pending = rest;
         if !ready.is_empty() {
+            // Design E11: conjuncts holding a subquery after the others, the fast-path
+            // `EXISTS` ones last.
+            ready.sort_by_key(|&c| (self.use_of(c), c));
             self.ops.push(Op::Filter(ready));
         }
+    }
+
+    /// How conjunct `c` uses subqueries.
+    fn use_of(&self, c: usize) -> SubqueryUse {
+        self.uses.get(c).copied().unwrap_or(SubqueryUse::None)
     }
 
     /// How much the node `id`'s own filters narrow (lower: more).
@@ -986,43 +1039,48 @@ impl<'q> Planner<'q> {
     }
 
     /// The labelling reasons that depend on where a read runs (module docs, "Labelling"): a
-    /// pass over the plan in execution order.
+    /// pass over the plan in execution order, which also finds the host of every subquery and
+    /// plans the bodies (module docs, "Subqueries").
     fn mark_positions(&mut self, first: &[Op], stages: &mut [Stage]) {
         let bound = self.bound;
         let mut at = Position::default();
         let mut reads = Vec::new();
-        for op in first {
-            self.op_reads(op, &mut at, &mut reads);
-        }
+        let mut hosts = Vec::new();
+        let mut current = None;
+        self.pipeline_reads(first, &mut current, &mut at, &mut reads, &mut hosts);
         for stage in stages.iter() {
             match stage {
                 Stage::Match { ops, .. } => {
-                    for op in ops {
-                        self.op_reads(op, &mut at, &mut reads);
-                    }
+                    self.pipeline_reads(ops, &mut current, &mut at, &mut reads, &mut hosts);
                 }
                 Stage::Optional { segment, ops, .. } => {
-                    for op in ops {
-                        self.op_reads(op, &mut at, &mut reads);
-                    }
+                    self.pipeline_reads(ops, &mut current, &mut at, &mut reads, &mut hosts);
                     at.optional = Some(*segment);
                     at.row = None;
+                    current = None;
                 }
                 Stage::Materialize(m) => {
                     if let Some(Segment::With(with)) = bound.segments.get(m.segment) {
+                        let here = at.host(current);
                         for column in &with.columns {
                             reads.extend_from_slice(&column.bindings);
+                            self.expr_hosts(&column.expr, here, &mut hosts);
                         }
+                        // `ORDER BY` runs on the new row map, read away from any row.
+                        let sorted = at.host(None).away();
                         for key in &with.order_by {
                             reads.extend_from_slice(&key.bindings);
+                            self.expr_hosts(&key.expr, sorted, &mut hosts);
                         }
                     }
                     self.read_all(&mut reads, &mut at);
                     at.row = Some(m.segment);
+                    current = None;
                     for &c in &m.filters {
                         if let Some(cj) = bound.conjuncts.get(c) {
                             reads.extend_from_slice(&cj.bindings);
                         }
+                        self.conjunct_hosts(c, at.host(None), &mut hosts);
                     }
                     self.read_all(&mut reads, &mut at);
                 }
@@ -1030,19 +1088,26 @@ impl<'q> Planner<'q> {
                     // The list is read on the row before the `FOR`.
                     if let Some(Segment::For(bound_for)) = bound.segments.get(f.segment) {
                         reads.extend_from_slice(&bound_for.bindings);
+                        self.expr_hosts(&bound_for.list, at.host(current), &mut hosts);
                     }
                     self.read_all(&mut reads, &mut at);
                     at.row = Some(f.segment);
+                    current = None;
                 }
             }
         }
+        let here = at.host(current);
         for column in &bound.columns {
             reads.extend_from_slice(&column.bindings);
+            self.expr_hosts(&column.expr, here, &mut hosts);
         }
+        let sorted = at.host(None).away();
         for key in &bound.order_by {
             reads.extend_from_slice(&key.bindings);
+            self.expr_hosts(&key.expr, sorted, &mut hosts);
         }
         self.read_all(&mut reads, &mut at);
+        self.plan_subqueries(hosts, &mut at);
         for stage in stages.iter_mut() {
             match stage {
                 Stage::Materialize(m) => m.labelled = at.rows.contains(&m.segment),
@@ -1057,6 +1122,195 @@ impl<'q> Planner<'q> {
                 }
                 Stage::Optional { .. } | Stage::Match { .. } => {}
             }
+        }
+    }
+
+    /// Records the reads of the match pipeline `ops` (starting with `current` as the current
+    /// element) and the hosts of the subqueries its conjuncts hold.
+    fn pipeline_reads(
+        &mut self,
+        ops: &[Op],
+        current: &mut Option<BindingId>,
+        at: &mut Position,
+        reads: &mut Vec<BindingId>,
+        hosts: &mut Vec<(usize, Host)>,
+    ) {
+        for op in ops {
+            self.op_hosts(op, *current, at, hosts);
+            self.op_reads(op, at, reads);
+            *current = current_after(std::slice::from_ref(op), *current);
+        }
+    }
+
+    /// The subqueries held by the conjuncts `op` places, each with the position its conjunct
+    /// runs at (`current`: the current element before `op`).
+    fn op_hosts(
+        &self,
+        op: &Op,
+        current: Option<BindingId>,
+        at: &Position,
+        hosts: &mut Vec<(usize, Host)>,
+    ) {
+        let mut on = |filters: &ElementFilters, id: BindingId| {
+            let here = at.host(Some(id));
+            let ids = filters
+                .pushed
+                .iter()
+                .chain(&filters.residual)
+                .chain(&filters.exists);
+            for &c in ids {
+                self.conjunct_hosts(c, here, hosts);
+            }
+        };
+        match op {
+            Op::Filter(ids) => {
+                for &c in ids {
+                    self.conjunct_hosts(c, at.host(current), hosts);
+                }
+            }
+            Op::Scan(s) | Op::Anchor(s) => on(&s.filters, s.binding),
+            // The lookup's own value holds no subquery (`plan::lookup_form`).
+            Op::Lookup(l) => on(&l.scan.filters, l.scan.binding),
+            Op::Expand(e) => {
+                on(&e.edge_filters, e.edge);
+                on(&e.to_filters, e.to);
+            }
+            Op::Resume(_) | Op::Join { .. } => {}
+        }
+    }
+
+    /// The subqueries conjunct `c` holds, hosted at `host`.
+    fn conjunct_hosts(&self, c: usize, host: Host, hosts: &mut Vec<(usize, Host)>) {
+        if self.use_of(c) == SubqueryUse::None {
+            return;
+        }
+        match self.bound.conjuncts.get(c).map(|cj| &cj.predicate) {
+            Some(Predicate::Expr(expr)) => self.expr_hosts(expr, host, hosts),
+            Some(Predicate::Property { value, .. }) => self.expr_hosts(value, host, hosts),
+            None => {}
+        }
+    }
+
+    /// The subqueries `expr` holds directly, hosted at `host`.
+    fn expr_hosts(&self, expr: &Expr, host: Host, hosts: &mut Vec<(usize, Host)>) {
+        let bound = self.bound;
+        subqueries_in(expr, |span| {
+            if let Some(k) = bound.subquery_at(span) {
+                hosts.push((k, host));
+            }
+        });
+    }
+
+    /// Plans the body of every hosted subquery (module docs, "Subqueries"), once per subquery
+    /// and start, and records the reads of each body at each host position (nested hosts
+    /// included: a worklist, no recursion).
+    fn plan_subqueries(&mut self, hosts: Vec<(usize, Host)>, at: &mut Position) {
+        let mut queue: std::collections::VecDeque<(usize, Host)> = hosts.into();
+        let mut seen: BTreeSet<(usize, Host)> = BTreeSet::new();
+        while let Some((k, mut host)) = queue.pop_front() {
+            host.current = subquery_start(self.bound, k, host.current);
+            if !seen.insert((k, host)) {
+                continue;
+            }
+            let planned = self
+                .subplans
+                .iter()
+                .position(|p| p.subquery == k && p.current == host.current);
+            let index = match planned {
+                Some(index) => index,
+                None => {
+                    self.plan_subquery(k, host.current);
+                    self.subplans.len().saturating_sub(1)
+                }
+            };
+            let ops = self
+                .subplans
+                .get(index)
+                .map(|p| p.ops.clone())
+                .unwrap_or_default();
+            let mut nested = Vec::new();
+            self.body_reads(k, &ops, host, at, &mut nested);
+            queue.extend(nested);
+        }
+    }
+
+    /// Plans subquery `k`'s body for a host on `current` (an import or `None`): its imports
+    /// are bound before it, its locals not yet (they may have been bound by a plan of the
+    /// same body for another start).
+    fn plan_subquery(&mut self, k: usize, current: Option<BindingId>) {
+        let bound = self.bound;
+        let Some(sub) = bound.subqueries.get(k) else {
+            return;
+        };
+        for b in &bound.bindings {
+            if b.segment == sub.segment
+                && let Some(slot) = self.bound_set.get_mut(b.id.0)
+            {
+                *slot = false;
+            }
+        }
+        for &clause in &sub.clauses {
+            if let Some(walked) = self.walked.get_mut(clause) {
+                walked.clear();
+            }
+        }
+        for &import in &sub.imports {
+            self.bind(import);
+        }
+        let ops = self.segment(sub.segment, &sub.clauses, current, None, true);
+        self.subplans.push(SubqueryPlan {
+            subquery: k,
+            current,
+            ops,
+        });
+    }
+
+    /// Records the reads of subquery `k`'s body `ops` run at `host`: the position reasons as
+    /// for the outer plan, and [`Labelling::subquery`] for an import a condition reads while it
+    /// is not the current element; collects the hosts of the subqueries nested in the body.
+    fn body_reads(
+        &mut self,
+        k: usize,
+        ops: &[Op],
+        host: Host,
+        at: &mut Position,
+        nested: &mut Vec<(usize, Host)>,
+    ) {
+        let bound = self.bound;
+        let Some(segment) = bound.subqueries.get(k).map(|s| s.segment) else {
+            return;
+        };
+        at.optional = host.optional;
+        at.row = host.row;
+        let mut current = host.current;
+        let mut reads = Vec::new();
+        let mut away = Vec::new();
+        for op in ops {
+            self.op_hosts(op, current, at, nested);
+            match op {
+                Op::Filter(ids) => {
+                    for &c in ids {
+                        if let Some(cj) = bound.conjuncts.get(c) {
+                            away.extend_from_slice(&cj.bindings);
+                        }
+                    }
+                }
+                Op::Lookup(l) => {
+                    if let Some(cj) = bound.conjuncts.get(l.conjunct) {
+                        away.extend(cj.bindings.iter().filter(|&&b| b != l.scan.binding));
+                    }
+                }
+                // Resume, branch and join targets have reasons of their own.
+                Op::Scan(_) | Op::Anchor(_) | Op::Resume(_) | Op::Expand(_) | Op::Join { .. } => {}
+            }
+            for id in away.drain(..) {
+                let import = bound.binding(id).is_some_and(|b| b.segment != segment);
+                if import && current != Some(id) {
+                    self.mark(id, |l| l.subquery = true);
+                }
+            }
+            self.op_reads(op, at, &mut reads);
+            current = current_after(std::slice::from_ref(op), current);
         }
     }
 
@@ -1134,6 +1388,35 @@ struct Position {
     rows: Vec<usize>,
     /// The `OPTIONAL MATCH` segments whose group variables are read after them.
     witnesses: Vec<usize>,
+}
+
+impl Position {
+    /// The position of a subquery host here, on `current`.
+    fn host(&self, current: Option<BindingId>) -> Host {
+        Host {
+            current,
+            row: self.row,
+            optional: self.optional,
+        }
+    }
+}
+
+/// Where a subquery's host runs: the body starts there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Host {
+    /// The current element (a body importing it starts there without moving).
+    current: Option<BindingId>,
+    /// The materializing `WITH` or `FOR` segment whose row is the current object.
+    row: Option<usize>,
+    /// The segment of the last `OPTIONAL MATCH` part that ended before it.
+    optional: Option<usize>,
+}
+
+impl Host {
+    /// The same position away from any row (an `ORDER BY` key, read on the new row map).
+    fn away(self) -> Host {
+        Host { row: None, ..self }
+    }
 }
 
 /// The current element after `ops` when it was `current` before (as the lowering tracks it).

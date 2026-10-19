@@ -29,7 +29,8 @@
 //! The conjuncts over one binding are not operations of their own: they belong to the element
 //! that binds it ([`ElementFilters`]: the scan's node, an expansion's edge or new node), split
 //! into those the lowering may push into `has()` ([`Pushdown`], the Phase 0 Q5 table, see
-//! [`classify`]) and the residual ones for `gql:filter`. A repeated binding gets its filters
+//! [`classify`]), the residual ones for `gql:filter` and the fast-path `EXISTS` ones (stage
+//! 2b). A repeated binding gets its filters
 //! (and its label expressions) once, where it is bound first; a conjunct of a later segment
 //! that reads a binding of an earlier one is an [`Op::Filter`] of that segment.
 //!
@@ -50,6 +51,19 @@
 //! whether the row needs its own label (`as("#w<k>")`, `as("x")` / `as("#f<k>")`) because a
 //! read comes after a later stage left the row.
 //!
+//! **Subqueries** (stage 2b, design M2, E7, E11). Each body of an `EXISTS` / pattern predicate
+//! ([`BoundQuery::subqueries`]) is planned after the outer plan, once per host position that
+//! matters ([`SubqueryPlan`], in [`LogicalPlan::subqueries`]): its imports are bound before it,
+//! so its components start at an import ([`Op::Resume`], from the host's current element when it
+//! is an import), reach imports through [`Op::Join`] / [`Expand::edge_join`], or start as a
+//! child-leading [`Op::Scan`] (a later unanchored component may be an [`Op::Lookup`]). A
+//! conjunct that is a top-level `EXISTS` or `NOT EXISTS` ([`SubqueryUse::Exists`], the fast
+//! path) runs last at its site (design E11): on an element in [`ElementFilters::exists`] after
+//! the pushed and residual conjuncts, in an [`Op::Filter`] after the other conjuncts there;
+//! a conjunct holding a subquery anywhere else ([`SubqueryUse::Hook`]) runs after the plain
+//! residual ones. An import read inside a body while it is not the current element there is
+//! labelled ([`Labelling::subquery`]).
+//!
 //! **Phase 2 seam.** The planner takes an optional anchor binding (always `None` in stage 1a):
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a
 //! scan. [`ANCHOR_VARIABLE`] is the reserved name of that anchor.
@@ -58,9 +72,9 @@ use std::collections::BTreeSet;
 
 use super::ast::{
     BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal,
-    Quantifier,
+    Quantifier, SubqueryKind, UnaryOp,
 };
-use super::bind::{BindingId, BoundQuery, Conjunct, Count, Predicate};
+use super::bind::{BindingId, BindingKind, BoundQuery, Conjunct, Count, Predicate};
 use super::lexer::Span;
 
 /// The reserved variable name of the phase 2 anchor (the incoming traverser of a mid-traversal
@@ -87,6 +101,9 @@ pub(crate) struct LogicalPlan {
     pub(crate) pushdown: Vec<Option<Pushdown>>,
     /// The phase 2 anchor binding (always `None` in stage 1a).
     pub(crate) anchor: Option<BindingId>,
+    /// The plans of the subquery bodies (stage 2b), one per subquery and start
+    /// ([`SubqueryPlan`]), sorted by subquery index then start; empty without subqueries.
+    pub(crate) subqueries: Vec<SubqueryPlan>,
 }
 
 impl LogicalPlan {
@@ -96,6 +113,24 @@ impl LogicalPlan {
         self.labelling.get(id.0).is_some_and(Labelling::needed)
     }
 
+    /// The plan of subquery `subquery`'s body for a host whose current element is `current`
+    /// (`None`: no element, a row; an edge or a node the body does not import plans as `None`).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the lowering from 2b.T4")
+    )]
+    pub(crate) fn subquery_plan(
+        &self,
+        bound: &BoundQuery,
+        subquery: usize,
+        current: Option<BindingId>,
+    ) -> Option<&SubqueryPlan> {
+        let start = subquery_start(bound, subquery, current);
+        self.subqueries
+            .iter()
+            .find(|p| p.subquery == subquery && p.current == start)
+    }
+
     /// The bindings that need a path label, in id order.
     #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn labelled(&self) -> Vec<BindingId> {
@@ -103,6 +138,136 @@ impl LogicalPlan {
             .map(BindingId)
             .filter(|&id| self.must_label(id))
             .collect()
+    }
+}
+
+/// The plan of one subquery body (module docs, "Subqueries"): its match pipeline when the host
+/// stands on `current`. A body is planned once per start: a host on a node the body imports
+/// lets the body start there without moving (`Op::Resume` from the current element), any other
+/// host (a row, no element, an edge, a node not imported) lets it start by moving to an import
+/// or with a child-leading scan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubqueryPlan {
+    /// The subquery (index into [`BoundQuery::subqueries`]).
+    pub(crate) subquery: usize,
+    /// The host's current element when it is a node the body imports, else `None`.
+    pub(crate) current: Option<BindingId>,
+    /// The body's match pipeline: its conjuncts over imports only (or none) first, then its
+    /// components (those starting at an import first), as for a later segment.
+    pub(crate) ops: Vec<Op>,
+}
+
+/// The start a body of `subquery` is planned for when its host stands on `current`: the
+/// element when it is a node the body imports (a body starts only at a node), else `None`.
+pub(crate) fn subquery_start(
+    bound: &BoundQuery,
+    subquery: usize,
+    current: Option<BindingId>,
+) -> Option<BindingId> {
+    let imports = bound
+        .subqueries
+        .get(subquery)
+        .map_or(&[][..], |s| &s.imports);
+    current.filter(|&c| {
+        imports.binary_search(&c).is_ok()
+            && bound
+                .binding(c)
+                .is_some_and(|b| b.kind == BindingKind::Node)
+    })
+}
+
+/// How a conjunct uses subqueries (module docs, "Subqueries").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SubqueryUse {
+    /// It holds none.
+    None,
+    /// It holds one in a position the expression evaluator answers (under `OR`, `CASE`, a
+    /// comparison, an inline property value, ...).
+    Hook,
+    /// It is a top-level `EXISTS` or `NOT EXISTS` (a pattern predicate too): the fast path, a
+    /// child that short-circuits, run last at its site (design E11).
+    Exists,
+}
+
+impl SubqueryUse {
+    /// How `conjunct` uses subqueries.
+    pub(crate) fn of(conjunct: &Conjunct) -> SubqueryUse {
+        let expr = match &conjunct.predicate {
+            Predicate::Property { value, .. } => {
+                return if holds_subquery(value) {
+                    SubqueryUse::Hook
+                } else {
+                    SubqueryUse::None
+                };
+            }
+            Predicate::Expr(expr) => expr,
+        };
+        if exists_conjunct(expr).is_some() {
+            SubqueryUse::Exists
+        } else if holds_subquery(expr) {
+            SubqueryUse::Hook
+        } else {
+            SubqueryUse::None
+        }
+    }
+}
+
+/// The subquery span and the negation of a top-level `EXISTS ..` / `NOT EXISTS ..` conjunct (a
+/// pattern predicate too); `None` for any other expression.
+pub(crate) fn exists_conjunct(expr: &Expr) -> Option<(Span, bool)> {
+    match &expr.kind {
+        ExprKind::Subquery(sub) if sub.kind == SubqueryKind::Exists => Some((sub.span, false)),
+        ExprKind::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => match &operand.kind {
+            ExprKind::Subquery(sub) if sub.kind == SubqueryKind::Exists => Some((sub.span, true)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `expr` holds a subquery (an explicit stack: no recursion).
+pub(crate) fn holds_subquery(expr: &Expr) -> bool {
+    let mut found = false;
+    subqueries_in(expr, |_| found = true);
+    found
+}
+
+/// Calls `f` with the span of every subquery `expr` holds directly (not those nested in their
+/// bodies, which are the bodies' own), in no particular order. An explicit stack: no recursion.
+pub(crate) fn subqueries_in(expr: &Expr, mut f: impl FnMut(Span)) {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExprKind::Variable(_) | ExprKind::Literal(_) | ExprKind::Parameter(_) => {}
+            ExprKind::List(items) => stack.extend(items),
+            ExprKind::Map(map) => stack.extend(map.entries.iter().map(|e| &e.value)),
+            ExprKind::Property { target, .. } => stack.push(target),
+            ExprKind::Unary { operand, .. }
+            | ExprKind::IsNull { operand, .. }
+            | ExprKind::IsLabeled { operand, .. } => stack.push(operand),
+            ExprKind::Binary { left, right, .. }
+            | ExprKind::IsEndpoint {
+                operand: left,
+                edge: right,
+                ..
+            } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            ExprKind::Case(case) => {
+                stack.extend(case.operand.as_ref());
+                for arm in &case.whens {
+                    stack.push(&arm.when);
+                    stack.push(&arm.then);
+                }
+                stack.extend(case.else_result.as_ref());
+            }
+            ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
+            ExprKind::Subquery(sub) => f(sub.span),
+        }
     }
 }
 
@@ -290,15 +455,19 @@ pub(crate) struct ElementFilters {
     /// Conjunct indexes the lowering pushes into `has()`, most selective first (an indexed key
     /// first, then equality, `IN`, text and range forms, `IS NOT NULL`).
     pub(crate) pushed: Vec<usize>,
-    /// Conjunct indexes for `gql:filter`, in text order.
+    /// Conjunct indexes for `gql:filter`, in text order, those holding a subquery
+    /// ([`SubqueryUse::Hook`]) after the others.
     pub(crate) residual: Vec<usize>,
+    /// The top-level `EXISTS` / `NOT EXISTS` conjuncts ([`SubqueryUse::Exists`], the fast
+    /// path), in text order: run last on the element (design E11).
+    pub(crate) exists: Vec<usize>,
 }
 
 impl ElementFilters {
     /// Whether there is no conjunct at all.
     #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_empty(&self) -> bool {
-        self.pushed.is_empty() && self.residual.is_empty()
+        self.pushed.is_empty() && self.residual.is_empty() && self.exists.is_empty()
     }
 }
 
@@ -346,6 +515,10 @@ pub(crate) struct Labelling {
     /// its elements' labels (plan mechanism 6); for a group variable the inner vertices are
     /// labelled too (`#gv<id>`). The only reason a materializing `WITH` column binding gets.
     pub(crate) path: bool,
+    /// An import of a subquery read by a condition inside its body while it is not the current
+    /// element there (after the body moved on, or at the start of a body whose host stands on
+    /// another element); stage 2b.
+    pub(crate) subquery: bool,
 }
 
 impl Labelling {
@@ -360,6 +533,7 @@ impl Labelling {
             || self.optional
             || self.group
             || self.path
+            || self.subquery
     }
 }
 
@@ -616,7 +790,8 @@ fn list_operand(expr: &Expr) -> Option<PushOperand> {
 /// What a lookup of the node `binding` (whose key, the name stored expressions use, is `key`)
 /// can read from `conjunct`: `element_id(n) = e` ([`LookupBy::Id`]) or `n.k = e` / an inline
 /// property `{k: e}` ([`LookupBy::Index`], the planner still checks the indexes), in either
-/// operand order, with `e` not reading the node. `None` for every other conjunct.
+/// operand order, with `e` not reading the node and holding no subquery (`gql:lookup` hosts
+/// none). `None` for every other conjunct.
 pub(crate) fn lookup_form<'c>(
     conjunct: &'c Conjunct,
     binding: BindingId,
@@ -628,7 +803,7 @@ pub(crate) fn lookup_form<'c>(
             key: property,
             value,
         } if *b == binding => {
-            if key.is_some_and(|key| mentions(value, key)) {
+            if holds_subquery(value) || key.is_some_and(|key| mentions(value, key)) {
                 return None;
             }
             Some((LookupBy::Index(property.name.clone()), value))
@@ -648,7 +823,7 @@ pub(crate) fn lookup_form<'c>(
                 .into_iter()
                 .find_map(|(side, other)| {
                     let by = lookup_side(side, key)?;
-                    (!mentions(other, key)).then_some((by, &**other))
+                    (!mentions(other, key) && !holds_subquery(other)).then_some((by, &**other))
                 })
         }
     }
@@ -713,7 +888,8 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
                 stack.extend(case.else_result.as_ref());
             }
             ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
-            // A subquery may import the variable (stage 2b): conservatively it reads it.
+            // A subquery may import the variable (stage 2b): conservatively it reads it (its
+            // imports are in the conjunct's bindings; `lookup_form` refuses it anyway).
             ExprKind::Subquery(_) => return true,
         }
     }
@@ -721,15 +897,19 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
 }
 
 /// Splits the conjuncts `ids` of one element into pushed (most selective first, `indexed` keys
-/// before the rest) and residual ones.
+/// before the rest), residual (those holding a subquery last) and fast-path `EXISTS` ones
+/// (`uses`: the [`SubqueryUse`] of every conjunct, by index).
 pub(crate) fn element_filters(
     ids: &[usize],
     pushdown: &[Option<Pushdown>],
+    uses: &[SubqueryUse],
     indexed: impl Fn(&str) -> bool,
 ) -> ElementFilters {
     let mut pushed: Vec<(u8, u8, usize)> = Vec::new();
     let mut residual = Vec::new();
+    let mut exists = Vec::new();
     for &id in ids {
+        let usage = uses.get(id).copied().unwrap_or(SubqueryUse::None);
         match pushdown.get(id).and_then(Option::as_ref) {
             Some(p) => {
                 let index_rank = if indexed(&p.key) && p.op != PushOp::NotNull {
@@ -739,14 +919,17 @@ pub(crate) fn element_filters(
                 };
                 pushed.push((index_rank, p.op.rank(), id));
             }
-            None => residual.push(id),
+            None if usage == SubqueryUse::Exists => exists.push(id),
+            None => residual.push((usage, id)),
         }
     }
     pushed.sort_unstable();
     residual.sort_unstable();
+    exists.sort_unstable();
     ElementFilters {
         pushed: pushed.into_iter().map(|(_, _, id)| id).collect(),
-        residual,
+        residual: residual.into_iter().map(|(_, id)| id).collect(),
+        exists,
     }
 }
 

@@ -1881,3 +1881,32 @@ fn binding_never_panics_on_stage_2b_queries() {
         }
     }
 }
+
+#[test]
+fn body_conditions_mark_only_the_bodys_own_locals_read() {
+    // A body condition reading an import does not set its read flag (the planner decides
+    // where the body reads it); the body's own locals read away are marked as usual.
+    let q = ok(
+        "MATCH (p) WHERE EXISTS { MATCH (p)-->(q), (r) WHERE q.x = p.x AND r.y = 1 } \
+                RETURN 1 AS x",
+    );
+    let read = |name: &str| local(&q, name).read;
+    assert!(!read("p"));
+    assert!(read("q"));
+    assert!(!read("r"));
+    // Nested: the inner host reads the outer body's local `b` (a cross conjunct of the outer
+    // body) and the query's `a`, which only the planner labels.
+    let q = ok(
+        "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE EXISTS { MATCH (b)-->(c) \
+                WHERE c.x = a.x } } RETURN 1 AS x",
+    );
+    assert!(!local(&q, "a").read);
+    assert!(local(&q, "b").read);
+    assert!(local(&q, "c").read);
+    // The host expression still reads the imports where it stands.
+    let q = ok(
+        "MATCH (a), (b) WHERE EXISTS { MATCH (a)-->(c) WHERE c.x = 1 } AND \
+                EXISTS { (b)-->(a) } RETURN 1 AS x",
+    );
+    assert!(local(&q, "a").read && local(&q, "b").read);
+}

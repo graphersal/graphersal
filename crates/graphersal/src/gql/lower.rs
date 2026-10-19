@@ -1002,9 +1002,9 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    // Bound since stage 2b.T2; planned and lowered from 2b.T3 / T4.
-    refuse_subqueries(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
+    // Bound since stage 2b.T2, planned since 2b.T3; lowered from 2b.T4.
+    refuse_subqueries(&parsed, &bound)?;
     Lowering::new(query, &bound, &plan, params).run()
 }
 
