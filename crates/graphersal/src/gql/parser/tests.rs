@@ -724,35 +724,6 @@ fn refused_constructs() {
 #[test]
 fn not_yet_supported_constructs() {
     let cases: &[(&str, &str, Option<&str>)] = &[
-        ("MATCH (n) RETURN count(*)", "count", Some("count()")),
-        (
-            "MATCH (n) RETURN count(DISTINCT n.x)",
-            "count",
-            Some("count()"),
-        ),
-        ("MATCH (n) RETURN sum(n.age)", "sum", Some("sum()")),
-        ("MATCH (n) RETURN AVG(n.age)", "AVG", Some("mean()")),
-        ("MATCH (n) RETURN min(n.age)", "min", Some("min()")),
-        ("MATCH (n) RETURN max(n.age)", "max", Some("max()")),
-        (
-            "MATCH (n) RETURN collect(n.name)",
-            "collect",
-            Some("fold()"),
-        ),
-        (
-            "MATCH (n) RETURN collect_list(n.name)",
-            "collect_list",
-            Some("fold()"),
-        ),
-        ("OPTIONAL MATCH (n) RETURN n", "OPTIONAL", Some("optional(")),
-        (
-            "MATCH (n) OPTIONAL MATCH (n)-->(m) RETURN m",
-            "OPTIONAL",
-            Some("optional("),
-        ),
-        ("MATCH (n) WITH n RETURN n", "WITH", None),
-        ("MATCH (n) LET x = 1 RETURN x", "LET", None),
-        ("MATCH (n) FILTER n.x > 1 RETURN n", "FILTER", Some("WHERE")),
         ("MATCH (n) RETURN n NEXT MATCH (m) RETURN m", "NEXT", None),
         (
             "MATCH (n) RETURN n UNION MATCH (m) RETURN m",
@@ -786,20 +757,6 @@ fn not_yet_supported_constructs() {
         ),
         ("FOR x IN [1] RETURN x", "FOR", Some("unfold()")),
         ("UNWIND [1] AS x RETURN x", "UNWIND", Some("unfold()")),
-        (
-            "MATCH (a)-[:knows]->{1,3}(b) RETURN b",
-            "{",
-            Some("repeat("),
-        ),
-        ("MATCH (a)-->*(b) RETURN b", "*", Some("repeat(")),
-        ("MATCH (a)-[e]->+(b) RETURN b", "+", Some("repeat(")),
-        (
-            "MATCH (a)-[:knows*1..3]->(b) RETURN b",
-            "*",
-            Some("repeat("),
-        ),
-        ("MATCH (a)-[*]->(b) RETURN b", "*", Some("repeat(")),
-        ("MATCH p = (a)-->(b) RETURN p", "p =", Some("path()")),
         ("MATCH ((a)-->(b)){1,2} RETURN a", "((", Some("repeat(")),
         (
             "MATCH shortestPath((a)-->(b)) RETURN a",
@@ -1126,5 +1083,479 @@ fn never_panics_on_random_token_sequences() {
         }
         let separator = if i % 3 == 0 { "" } else { " " };
         check(&query.join(separator));
+    }
+}
+
+// ----- stage 1b: the clause pipeline -----
+
+/// The kind of every stage, `match`/`optional` for a MATCH clause.
+fn stage_kinds(q: &Query) -> Vec<&'static str> {
+    q.stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::Match(i) if q.matches[*i].optional => "optional",
+            Stage::Match(_) => "match",
+            Stage::With(_) => "with",
+            Stage::Let(_) => "let",
+            Stage::Filter(_) => "filter",
+        })
+        .collect()
+}
+
+#[test]
+fn a_1a_query_is_a_pipeline_of_plain_match_stages() {
+    let q = ok("MATCH (a)-->(b), (b)<--(c) MATCH (c)--(d) RETURN *");
+    assert_eq!(q.stages, [Stage::Match(0), Stage::Match(1)]);
+    assert!(q.matches.iter().all(|m| !m.optional));
+    let path = &q.matches[0].patterns[0];
+    assert!(path.variable.is_none());
+    assert!(path.steps.iter().all(|s| s.edge.quantifier.is_none()));
+}
+
+#[test]
+fn optional_with_let_and_filter_form_the_pipeline() {
+    let q = ok("MATCH (a) OPTIONAL MATCH (a)-->(b) WHERE b.x > 1 \
+         WITH DISTINCT a, count(b) AS n ORDER BY n DESC SKIP 1 LIMIT 2 WHERE n > 0 \
+         LET x = n + 1, y = 2 FILTER WHERE x > 1 FILTER y = 2 \
+         MATCH (a)-->(c) RETURN a, x");
+    assert_eq!(
+        stage_kinds(&q),
+        [
+            "match", "optional", "with", "let", "filter", "filter", "match"
+        ]
+    );
+    assert_eq!(q.matches.len(), 3);
+    assert_eq!(q.stages[6], Stage::Match(2));
+    let optional = &q.matches[1];
+    assert_eq!(
+        q.text(optional.span),
+        "OPTIONAL MATCH (a)-->(b) WHERE b.x > 1"
+    );
+    assert_eq!(sexp(optional.where_clause.as_ref().unwrap()), "(> b.x 1)");
+    let Stage::With(with) = &q.stages[2] else {
+        panic!("{:?}", q.stages[2]);
+    };
+    assert!(with.distinct && with.star.is_none());
+    assert_eq!(with.items.len(), 2);
+    assert_eq!(with.items[1].alias.as_ref().unwrap().name, "n");
+    assert_eq!(sexp(&with.items[1].expr), "count(b)");
+    assert_eq!(
+        q.text(with.order_by.as_ref().unwrap().span),
+        "ORDER BY n DESC"
+    );
+    assert_eq!(q.text(with.offset.as_ref().unwrap().span), "SKIP 1");
+    assert_eq!(q.text(with.limit.as_ref().unwrap().span), "LIMIT 2");
+    assert_eq!(sexp(with.where_clause.as_ref().unwrap()), "(> n 0)");
+    assert_eq!(
+        q.text(with.span),
+        "WITH DISTINCT a, count(b) AS n ORDER BY n DESC SKIP 1 LIMIT 2 WHERE n > 0"
+    );
+    let Stage::Let(let_clause) = &q.stages[3] else {
+        panic!("{:?}", q.stages[3]);
+    };
+    assert_eq!(q.text(let_clause.span), "LET x = n + 1, y = 2");
+    assert_eq!(let_clause.bindings.len(), 2);
+    assert_eq!(let_clause.bindings[0].variable.name, "x");
+    assert_eq!(sexp(&let_clause.bindings[0].value), "(+ n 1)");
+    assert_eq!(q.text(let_clause.bindings[1].span), "y = 2");
+    let Stage::Filter(filter) = &q.stages[4] else {
+        panic!("{:?}", q.stages[4]);
+    };
+    assert_eq!(q.text(filter.span), "FILTER WHERE x > 1");
+    assert_eq!(sexp(&filter.condition), "(> x 1)");
+    let Stage::Filter(filter) = &q.stages[5] else {
+        panic!("{:?}", q.stages[5]);
+    };
+    assert_eq!(q.text(filter.span), "FILTER y = 2");
+    // The result statement is unchanged.
+    assert_eq!(q.ret.items.len(), 2);
+}
+
+#[test]
+fn with_forms_and_a_leading_optional_match() {
+    let q = ok("OPTIONAL MATCH (a) RETURN a");
+    assert_eq!(stage_kinds(&q), ["optional"]);
+    assert_eq!(q.text(q.matches[0].span), "OPTIONAL MATCH (a)");
+    let q = ok("optional match (a) with * return a");
+    assert_eq!(stage_kinds(&q), ["optional", "with"]);
+    let Stage::With(with) = &q.stages[1] else {
+        panic!()
+    };
+    assert!(with.star.is_some() && with.items.is_empty());
+    let q = ok("MATCH (a) WITH *, a.name AS name WITH name LIMIT $n RETURN name");
+    let Stage::With(with) = &q.stages[1] else {
+        panic!()
+    };
+    assert!(with.star.is_some());
+    assert_eq!(with.items[0].alias.as_ref().unwrap().name, "name");
+    let Stage::With(with) = &q.stages[2] else {
+        panic!()
+    };
+    assert_eq!(sexp(&with.limit.as_ref().unwrap().value), "$n");
+    assert!(with.order_by.is_none() && with.offset.is_none() && with.where_clause.is_none());
+    // `WITH ... WHERE` with no other tail.
+    let q = ok("MATCH (a) WITH a WHERE a.x = 1 RETURN a");
+    let Stage::With(with) = &q.stages[1] else {
+        panic!()
+    };
+    assert_eq!(sexp(with.where_clause.as_ref().unwrap()), "(= a.x 1)");
+    // Back-quoted LET variable.
+    let q = ok("MATCH (a) LET `the x` = 1 RETURN `the x`");
+    let Stage::Let(clause) = &q.stages[1] else {
+        panic!()
+    };
+    assert_eq!(clause.bindings[0].variable.name, "the x");
+}
+
+#[test]
+fn pipeline_errors() {
+    // A pipeline clause cannot start the query.
+    for (query, text) in [
+        ("WITH 1 AS x MATCH (a) RETURN a", "WITH"),
+        ("LET x = 1 MATCH (a) RETURN a", "LET"),
+        ("FILTER true MATCH (a) RETURN a", "FILTER"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("starts with"), "{}", f.message);
+    }
+    // OPTIONAL blocks.
+    let f = fail("MATCH (a) OPTIONAL { MATCH (a)-->(b) } RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "OPTIONAL {");
+    let f = fail("MATCH (a) OPTIONAL (a)-->(b) RETURN a");
+    assert_eq!(f.text, "OPTIONAL (");
+    let f = fail("MATCH (a) OPTIONAL RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.expected, ["MATCH"]);
+    // The WITH tail in order ORDER BY, OFFSET, LIMIT, WHERE.
+    for (query, text) in [
+        ("MATCH (a) WITH a LIMIT 1 ORDER BY a.x RETURN a", "ORDER"),
+        ("MATCH (a) WITH a WHERE a.x = 1 LIMIT 1 RETURN a", "LIMIT"),
+        ("MATCH (a) WITH a LIMIT 1 SKIP 1 RETURN a", "SKIP"),
+        ("MATCH (a) WITH a LIMIT 1 LIMIT 2 RETURN a", "LIMIT"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("out of place"), "{}", f.message);
+        assert!(
+            f.alternative
+                .unwrap()
+                .contains("ORDER BY, OFFSET, LIMIT, WHERE")
+        );
+    }
+    // Expected tokens after each kind of clause.
+    let f = fail("MATCH (a) WITH a b RETURN a");
+    assert_eq!(f.text, "b");
+    assert_eq!(f.expected, ["`,`", "AS", "WHERE", "MATCH", "RETURN"]);
+    let f = fail("MATCH (a) WITH a WHERE a.x = 1 WHERE a RETURN a");
+    assert_eq!(f.expected, ["MATCH", "RETURN"]);
+    let f = fail("MATCH (a) LET x = 1 y = 2 RETURN a");
+    assert_eq!(f.expected, ["`,`", "MATCH", "RETURN"]);
+    let f = fail("MATCH (a) FILTER a.x = 1 b RETURN a");
+    assert_eq!(f.expected, ["MATCH", "RETURN"]);
+    let f = fail("MATCH (a) WITH");
+    assert_eq!(f.expected, ["`*`", "an expression"]);
+    let f = fail("MATCH (a) WITH a");
+    assert!(f.message.starts_with("missing RETURN"), "{}", f.message);
+    // LET definitions.
+    let f = fail("MATCH (a) LET = 1 RETURN a");
+    assert_eq!(f.expected, ["a variable"]);
+    let f = fail("MATCH (a) LET x 1 RETURN a");
+    assert_eq!(f.expected, ["`=`"]);
+    let f = fail("MATCH (a) LET order = 1 RETURN a");
+    assert_eq!(f.text, "order");
+    assert!(f.alternative.unwrap().contains("`order`"));
+    // Misspelt pipeline keywords are suggested; RETURN stays the first suggestion.
+    let f = fail("MATCH (a) WITHH a RETURN a");
+    assert_eq!(f.suggestion.as_deref(), Some("WITH"));
+    let f = fail("MATCH (a) OPTINAL MATCH (a)-->(b) RETURN a");
+    assert_eq!(f.suggestion.as_deref(), Some("OPTIONAL MATCH"));
+    let f = fail("MATCH (a) FILTR a.x = 1 RETURN a");
+    assert_eq!(f.suggestion.as_deref(), Some("FILTER"));
+    let f = fail("MATCH (a) RETRUN a");
+    assert_eq!(f.suggestion.as_deref(), Some("RETURN"));
+    // After RETURN, a pipeline clause is out of place.
+    for (query, text) in [
+        ("MATCH (n) RETURN n WITH n", "WITH"),
+        ("MATCH (n) RETURN n LET x = 1", "LET"),
+        ("MATCH (n) RETURN n FILTER true", "FILTER"),
+        ("MATCH (n) RETURN n OPTIONAL MATCH (m)", "OPTIONAL"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("RETURN ends the query"), "{}", f.message);
+    }
+}
+
+// ----- stage 1b: quantified edges -----
+
+/// The quantifier of the first edge of `MATCH <pattern> RETURN *`: min, max, Cypher form and
+/// its text, with the edge's own text.
+fn quantified(pattern: &str) -> (u64, Option<u64>, bool, String, String) {
+    let q = ok(&format!("MATCH {pattern} RETURN *"));
+    let path = &q.matches[0].patterns[0];
+    let step = &path.steps[0];
+    assert_eq!(
+        step.node.variable.as_ref().map(|v| v.name.as_str()),
+        Some("b"),
+        "{pattern}"
+    );
+    let quantifier = step
+        .edge
+        .quantifier
+        .unwrap_or_else(|| panic!("{pattern}: no quantifier"));
+    (
+        quantifier.min,
+        quantifier.max,
+        quantifier.cypher,
+        q.text(quantifier.span).to_string(),
+        q.text(step.edge.span).to_string(),
+    )
+}
+
+#[test]
+fn gql_quantifiers_after_an_edge() {
+    let cases: &[(&str, u64, Option<u64>, &str, &str)] = &[
+        ("(a)-[:knows]->{1,3}(b)", 1, Some(3), "{1,3}", "-[:knows]->"),
+        ("(a)-[e]->{2}(b)", 2, Some(2), "{2}", "-[e]->"),
+        ("(a)-[e]->{2,}(b)", 2, None, "{2,}", "-[e]->"),
+        ("(a)-[e]->{,4}(b)", 0, Some(4), "{,4}", "-[e]->"),
+        ("(a)-[e]->{,}(b)", 0, None, "{,}", "-[e]->"),
+        ("(a)-[e]->{ 0 , 0 }(b)", 0, Some(0), "{ 0 , 0 }", "-[e]->"),
+        ("(a)-[e]->*(b)", 0, None, "*", "-[e]->"),
+        ("(a)-[e]->+(b)", 1, None, "+", "-[e]->"),
+        ("(a)<-[e]-{1,2}(b)", 1, Some(2), "{1,2}", "<-[e]-"),
+        ("(a)-[e]-{1,2}(b)", 1, Some(2), "{1,2}", "-[e]-"),
+        ("(a)-->{1,3}(b)", 1, Some(3), "{1,3}", "-->"),
+        ("(a)<--*(b)", 0, None, "*", "<--"),
+        ("(a)--+(b)", 1, None, "+", "--"),
+        ("(a)->{2}(b)", 2, Some(2), "{2}", "->"),
+        ("(a)-[e]->{0x10}(b)", 16, Some(16), "{0x10}", "-[e]->"),
+    ];
+    for (pattern, min, max, text, edge) in cases {
+        let (got_min, got_max, cypher, got_text, got_edge) = quantified(pattern);
+        assert_eq!((got_min, got_max), (*min, *max), "{pattern}");
+        assert!(!cypher, "{pattern}");
+        assert_eq!(got_text, *text, "{pattern}");
+        assert_eq!(got_edge, *edge, "{pattern}");
+    }
+    // Several quantified and plain edges in one path, with directions kept.
+    let q = ok("MATCH (a)-[:knows]->{1,2}(b)-[:created]->(c)<-[x]-*(d) RETURN d");
+    let steps = &q.matches[0].patterns[0].steps;
+    assert_eq!(steps.len(), 3);
+    assert!(steps[0].edge.quantifier.is_some());
+    assert!(steps[1].edge.quantifier.is_none());
+    assert_eq!(steps[2].edge.direction, EdgeDirection::Left);
+    assert_eq!(
+        steps[2].edge.quantifier.map(|q| (q.min, q.max)),
+        Some((0, None))
+    );
+}
+
+#[test]
+fn cypher_variable_length_edges() {
+    let cases: &[(&str, u64, Option<u64>, &str)] = &[
+        ("(a)-[*]->(b)", 1, None, "*"),
+        ("(a)-[e*]->(b)", 1, None, "*"),
+        ("(a)-[e*2]->(b)", 2, Some(2), "*2"),
+        ("(a)-[:knows*1..3]->(b)", 1, Some(3), "*1..3"),
+        ("(a)-[e:knows *1 .. 3]->(b)", 1, Some(3), "*1 .. 3"),
+        ("(a)-[*..3]->(b)", 1, Some(3), "*..3"),
+        ("(a)-[*2..]->(b)", 2, None, "*2.."),
+        ("(a)-[*..]->(b)", 1, None, "*.."),
+        ("(a)-[*0..2]->(b)", 0, Some(2), "*0..2"),
+        ("(a)<-[*1..2]-(b)", 1, Some(2), "*1..2"),
+        ("(a)-[*3]-(b)", 3, Some(3), "*3"),
+    ];
+    for (pattern, min, max, text) in cases {
+        let (got_min, got_max, cypher, got_text, _) = quantified(pattern);
+        assert_eq!((got_min, got_max), (*min, *max), "{pattern}");
+        assert!(cypher, "{pattern}");
+        assert_eq!(got_text, *text, "{pattern}");
+    }
+    // The rest of the filler after the length.
+    let q = ok("MATCH (a)-[e:knows*1..2 {weight: 1} WHERE e.weight > 0]->(b) RETURN b");
+    let edge = &q.matches[0].patterns[0].steps[0].edge;
+    assert_eq!(edge.labels.as_ref().map(label), Some("knows".into()));
+    assert!(edge.properties.is_some() && edge.where_clause.is_some());
+    assert_eq!(
+        q.text(edge.span),
+        "-[e:knows*1..2 {weight: 1} WHERE e.weight > 0]->"
+    );
+}
+
+#[test]
+fn quantifier_errors() {
+    // Lower bound above the upper bound.
+    let f = fail("MATCH (a)-[e]->{3,1}(b) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "{3,1}");
+    assert!(f.message.contains("greater than"), "{}", f.message);
+    assert!(f.alternative.unwrap().contains("{1,3}"));
+    let f = fail("MATCH (a)-[*3..1]->(b) RETURN a");
+    assert_eq!(f.text, "*3..1");
+    assert!(f.alternative.unwrap().contains("*1..3"));
+    // A quantifier on a node.
+    for (query, text) in [
+        ("MATCH (a){1,2}-->(b) RETURN a", "{"),
+        ("MATCH (a)-->(b)* RETURN a", "*"),
+        ("MATCH (a)+ RETURN a", "+"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains("node pattern"), "{}", f.message);
+    }
+    // Both forms on one edge.
+    let f = fail("MATCH (a)-[e*1..2]->{1,3}(b) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "{1,3}");
+    assert!(f.alternative.unwrap().contains("`*1..2`"));
+    let f = fail("MATCH (a)-[*]->+(b) RETURN a");
+    assert_eq!(f.text, "+");
+    // Bounds are unsigned integer literals.
+    let f = fail("MATCH (a)-[e]->{1.5}(b) RETURN a");
+    assert_eq!(f.expected, ["an integer", "`,`"]);
+    let f = fail("MATCH (a)-[e]->{$n}(b) RETURN a");
+    assert_eq!(f.text, "$n");
+    let f = fail("MATCH (a)-[e]->{1,x}(b) RETURN a");
+    assert_eq!(f.expected, ["an integer", "`}`"]);
+    let f = fail("MATCH (a)-[e]->{1,2(b) RETURN a");
+    assert_eq!(f.expected, ["`}`"]);
+    let f = fail("MATCH (a)-[e]->{1 2}(b) RETURN a");
+    assert_eq!(f.expected, ["`,`", "`}`"]);
+    // Vendor path searches stay refused.
+    let f = fail("MATCH (a)-[*BFS]->(b) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Refused);
+    // Quantified path patterns stay "not yet".
+    let f = fail("MATCH ((a)-->(b)){1,2} RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+}
+
+// ----- stage 1b: path variables -----
+
+#[test]
+fn path_variables() {
+    let q = ok("MATCH p = (a)-->(b), `the q` = (c) RETURN p");
+    let paths = &q.matches[0].patterns;
+    assert_eq!(paths[0].variable.as_ref().unwrap().name, "p");
+    assert_eq!(q.text(paths[0].variable.as_ref().unwrap().span), "p");
+    assert_eq!(q.text(paths[0].span), "p = (a)-->(b)");
+    assert_eq!(paths[1].variable.as_ref().unwrap().name, "the q");
+    assert_eq!(q.text(paths[1].span), "`the q` = (c)");
+    // With a quantified edge and in an OPTIONAL MATCH.
+    let q = ok("MATCH (a) OPTIONAL MATCH p = (a)-[:knows]->{1,3}(b) RETURN path_length(p)");
+    let path = &q.matches[1].patterns[0];
+    assert_eq!(path.variable.as_ref().unwrap().name, "p");
+    assert!(path.steps[0].edge.quantifier.is_some());
+    // A path search mode word is a path variable when `=` follows.
+    let q = ok("MATCH trail = (a)-->(b) RETURN trail");
+    assert_eq!(
+        q.matches[0].patterns[0].variable.as_ref().unwrap().name,
+        "trail"
+    );
+    // The missing-RETURN alternative names the path variable.
+    let f = fail("MATCH p = (a)-->(b)");
+    assert!(f.alternative.unwrap().contains("RETURN p, a, b"));
+    // A keyword as a path variable must be back-quoted; `p =` without a pattern is an error.
+    let f = fail("MATCH p = RETURN p");
+    assert_eq!(f.text, "RETURN");
+    assert_eq!(f.expected, ["`(`"]);
+}
+
+// ----- stage 1b: aggregates and path functions -----
+
+#[test]
+fn aggregate_calls() {
+    assert_eq!(expr("count(*)"), "count(*)");
+    assert_eq!(expr("COUNT(n)"), "COUNT(n)");
+    assert_eq!(expr("sum(n.age) + 1"), "(+ sum(n.age) 1)");
+    assert_eq!(expr("collect(n.name)"), "collect(n.name)");
+    assert_eq!(expr("collect_list(n.name)"), "collect_list(n.name)");
+    assert_eq!(expr("avg(n.age)"), "avg(n.age)");
+    assert_eq!(expr("min(n.age)"), "min(n.age)");
+    assert_eq!(expr("max(n.age)"), "max(n.age)");
+    // DISTINCT and `*` are kept in the tree, with spans.
+    let q = ok("MATCH (n) RETURN count(DISTINCT n.x), count( * ), max(n.x)");
+    let ExprKind::FunctionCall { distinct, args, .. } = &q.ret.items[0].expr.kind else {
+        panic!()
+    };
+    assert!(*distinct);
+    assert!(matches!(args, CallArgs::Exprs(a) if a.len() == 1));
+    assert_eq!(q.text(q.ret.items[0].expr.span), "count(DISTINCT n.x)");
+    let ExprKind::FunctionCall { distinct, args, .. } = &q.ret.items[1].expr.kind else {
+        panic!()
+    };
+    assert!(!*distinct);
+    let CallArgs::Star(star) = args else { panic!() };
+    assert_eq!(q.text(*star), "*");
+    assert_eq!(q.text(q.ret.items[1].expr.span), "count( * )");
+    let ExprKind::FunctionCall { distinct, .. } = &q.ret.items[2].expr.kind else {
+        panic!()
+    };
+    assert!(!*distinct);
+    // Nesting is the binder's check, not the parser's.
+    assert_eq!(expr("count(sum(n.x))"), "count(sum(n.x))");
+    // Errors.
+    let f = fail("MATCH (n) RETURN sum(*)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "*");
+    assert_eq!(f.message, "only count(*) takes `*`, not sum()");
+    let f = fail("MATCH (n) RETURN count(DISTINCT *)");
+    assert_eq!(f.text, "*");
+    assert!(f.message.contains("count(DISTINCT *)"), "{}", f.message);
+    let f = fail("MATCH (n) RETURN count()");
+    assert_eq!(f.message, "count() takes 1 argument, got 0");
+    let f = fail("MATCH (n) RETURN count(DISTINCT)");
+    assert_eq!(f.message, "count() takes 1 argument, got 0");
+    let f = fail("MATCH (n) RETURN collect(n.a, n.b)");
+    assert_eq!(f.message, "collect_list() takes 1 argument, got 2");
+    assert_eq!(f.text, "collect(n.a, n.b)");
+    let f = fail("MATCH (n) RETURN count(* 1)");
+    assert_eq!(f.expected, ["`)`"]);
+    // Scalars still refuse DISTINCT and `*`.
+    let f = fail("MATCH (n) RETURN upper(DISTINCT n.name)");
+    assert!(f.message.contains("DISTINCT"), "{}", f.message);
+}
+
+#[test]
+fn path_length_and_its_cypher_alias() {
+    assert_eq!(expr("path_length(n)"), "path_length(n)");
+    assert_eq!(expr("length(n)"), "length(n)");
+    assert_eq!(
+        lookup_function("LENGTH").map(|s| (s.function, s.name(), s.kind)),
+        Some((Function::PathLength, "path_length", FunctionKind::Scalar))
+    );
+    let f = fail("MATCH (n) RETURN length(n, n)");
+    assert_eq!(f.message, "path_length() takes 1 argument, got 2");
+    let f = fail("MATCH (n) RETURN path_lenght(n)");
+    assert_eq!(f.suggestion.as_deref(), Some("path_length()"));
+}
+
+#[test]
+fn never_panics_on_stage_1b_queries() {
+    // Prefixes of 1b queries and their mutations hit every new error path.
+    let queries = [
+        "MATCH (a) OPTIONAL MATCH p = (a)-[e:knows*1..3 {w: 1}]->{1,2}(b) \
+         WITH DISTINCT a, count(DISTINCT b) AS n ORDER BY n SKIP 1 LIMIT 2 WHERE n > 0 \
+         LET x = n, y = count(*) FILTER WHERE x > 1 RETURN a, x",
+        "MATCH (a)-->{,}(b)<-[*..]-+(c) RETURN collect(c)",
+    ];
+    for query in queries {
+        for end in 0..=query.len() {
+            if let Some(prefix) = query.get(..end) {
+                check(prefix);
+            }
+            if let (Some(head), Some(tail)) = (query.get(..end), query.get(end.min(query.len())..))
+            {
+                for insert in ["{", "*", "+", "..", ",", "=", "WITH", "OPTIONAL", "("] {
+                    check(&format!("{head}{insert}{tail}"));
+                }
+            }
+        }
     }
 }

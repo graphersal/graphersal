@@ -579,3 +579,39 @@ fn a_match_clause_holds_at_most_max_match_edges_edge_patterns() {
     let parsed = parse(&query).unwrap_or_else(|e| panic!("does not parse: {e}"));
     assert_eq!(failure(&query, bind(&parsed)).text, "-[e]->");
 }
+
+// ----- stage 1b constructs the parser accepts and the binder does not bind yet -----
+
+#[test]
+fn stage_1b_constructs_are_not_yet_bound() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("MATCH (n) RETURN count(*)", "count", "count()"),
+        ("MATCH (n) RETURN count(DISTINCT n.x)", "count", "count()"),
+        ("MATCH (n) RETURN AVG(n.age)", "AVG", "mean()"),
+        ("MATCH (n) RETURN n ORDER BY max(n.age)", "max", "max()"),
+        ("MATCH (n) RETURN 1 + collect(n.name)", "collect", "fold()"),
+        ("OPTIONAL MATCH (n) RETURN n", "OPTIONAL", "optional("),
+        (
+            "MATCH (n) optional match (n)-->(m) RETURN m",
+            "optional",
+            "optional(",
+        ),
+        ("MATCH (n) WITH n RETURN n", "WITH", "select("),
+        ("MATCH (n) LET x = 1 RETURN x", "LET", "RETURN"),
+        ("MATCH (n) FILTER n.x > 1 RETURN n", "FILTER", "WHERE"),
+        ("MATCH p = (a)-->(b) RETURN a", "p", "path()"),
+        ("MATCH (a)-[:knows]->{1,3}(b) RETURN b", "{1,3}", "repeat("),
+        ("MATCH (a)-->*(b) RETURN b", "*", "repeat("),
+        ("MATCH (a)-[:knows*1..3]->(b) RETURN b", "*1..3", "repeat("),
+    ];
+    for (query, text, alternative) in cases {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000");
+        assert_eq!(&f.text, text, "{query}");
+        assert!(f.message.contains("not yet supported"), "{}", f.message);
+        let given = f.alternative.unwrap_or_default();
+        assert!(given.contains(alternative), "{query}: {given}");
+    }
+}

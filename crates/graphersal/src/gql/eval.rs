@@ -1229,6 +1229,8 @@ fn call<En: Env>(
                 None => wrong("a string or a list"),
             },
         },
+        // No value is a path yet (path variables are bound from stage 1b's path step on).
+        Function::PathLength => wrong("a path"),
         // Handled above: it evaluates its arguments lazily.
         Function::Coalesce => Ok(Value::Null),
         Function::Count

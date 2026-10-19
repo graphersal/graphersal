@@ -52,6 +52,10 @@
 //! dropped, a duplicate key in a map, a parameter that was not supplied. `22G02` for a negative
 //! `OFFSET` / `LIMIT` literal, `22G03` for one that is not an integer.
 //!
+//! The stage 1b constructs the parser accepts (`OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, path
+//! variables, quantified edges, aggregate calls) are refused here as kind `NotYet` (`0A000`),
+//! with the messages the parser gave in stage 1a, until the binder binds them.
+//!
 //! # Pattern size (kind `Limit`, `54001`)
 //!
 //! One `MATCH` clause holds at most [`MAX_MATCH_EDGES`] edge patterns over all its
@@ -65,10 +69,10 @@ use std::collections::HashMap;
 
 use super::ast::{
     CallArgs, CountClause, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
-    MapLiteral, MatchClause, NodePattern, Query, SortDirection,
+    MapLiteral, MatchClause, NodePattern, Query, SortDirection, Stage,
 };
 use super::lexer::Span;
-use super::parser::close_to;
+use super::parser::{FunctionKind, close_to, lookup_function};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 
 /// The index of a [`Binding`] in [`BoundQuery::bindings`].
@@ -349,6 +353,105 @@ fn too_many_edges(span: Span) -> Box<GqlErrorBuilder> {
     Box::new(b)
 }
 
+/// The prefix of `span` that holds a keyword of `len` ASCII characters.
+fn keyword_span(span: Span, len: usize) -> Span {
+    Span {
+        end: span.start.saturating_add(len).min(span.end),
+        ..span
+    }
+}
+
+fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
+    Box::new(
+        GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            span.start..span.end,
+            format!("{what} is not yet supported in this version"),
+        )
+        .alternative(alternative),
+    )
+}
+
+/// Refuses the stage 1b constructs the parser accepts but the binder does not bind yet:
+/// `OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, path variables and quantified edges (the
+/// messages the parser gave in stage 1a). Aggregates are refused where they are resolved.
+fn refuse_unbound_constructs(query: &Query) -> BResult<()> {
+    for stage in &query.stages {
+        match stage {
+            Stage::Match(_) => {}
+            Stage::With(with) => {
+                return Err(not_yet(
+                    keyword_span(with.span, 4),
+                    "WITH",
+                    "put the conditions into WHERE and the projection into RETURN, or chain \
+                     Gremlin steps after gql(), for example \
+                     g.gql(\"MATCH (p:person) RETURN p.name AS name\").select(\"name\")",
+                ));
+            }
+            Stage::Let(clause) => {
+                return Err(not_yet(
+                    keyword_span(clause.span, 3),
+                    "LET",
+                    "compute the value in RETURN",
+                ));
+            }
+            Stage::Filter(clause) => {
+                return Err(not_yet(
+                    keyword_span(clause.span, 6),
+                    "FILTER",
+                    "write the condition as WHERE in the MATCH clause",
+                ));
+            }
+        }
+    }
+    for m in &query.matches {
+        if m.optional {
+            return Err(not_yet(
+                keyword_span(m.span, 8),
+                "OPTIONAL MATCH",
+                "Gremlin optional(), for example \
+                 g.v().has_label(\"person\").optional(__.out(\"created\"))",
+            ));
+        }
+        for path in &m.patterns {
+            if let Some(variable) = &path.variable {
+                return Err(not_yet(
+                    variable.span,
+                    "a path variable (p = ...)",
+                    "return the elements by their variables, or use Gremlin path(), for example \
+                     g.v(\"1\").out().out().path()",
+                ));
+            }
+            if let Some(quantifier) = path.steps.iter().find_map(|step| step.edge.quantifier) {
+                let what = if quantifier.cypher {
+                    "a variable-length edge (*, *m..n)"
+                } else {
+                    "a quantified edge ({m,n}, *, +)"
+                };
+                return Err(not_yet(
+                    quantifier.span,
+                    what,
+                    "Gremlin repeat(), for example g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An aggregate call: not bound yet (the message the parser gave in stage 1a).
+fn aggregate_not_yet(name: &Identifier) -> Box<GqlErrorBuilder> {
+    let gremlin = lookup_function(&name.name).map_or("", |spec| spec.gremlin);
+    not_yet(
+        name.span,
+        &format!("the aggregate function {}()", name.name),
+        &format!(
+            "aggregate with Gremlin steps after gql(), for example \
+             g.gql(\"MATCH (p:person) RETURN p.age AS age\").select(\"age\").{gremlin}"
+        ),
+    )
+}
+
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
 fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
     candidates
@@ -410,6 +513,7 @@ impl<'q> Binder<'q> {
     }
 
     fn run(mut self, supplied: Option<&[&str]>) -> BResult<BoundQuery> {
+        refuse_unbound_constructs(self.query)?;
         let mut matches = Vec::with_capacity(self.query.matches.len());
         // Declare every element first, so a filter naming a variable of a later clause is told
         // so; then the filters, clause by clause, in text order.
@@ -740,7 +844,12 @@ impl<'q> Binder<'q> {
                     self.resolve(scope, else_result, refs)?;
                 }
             }
-            ExprKind::FunctionCall { args, .. } => match args {
+            ExprKind::FunctionCall { name, args, .. } => match args {
+                _ if lookup_function(&name.name)
+                    .is_some_and(|spec| spec.kind == FunctionKind::Aggregate) =>
+                {
+                    return Err(aggregate_not_yet(name));
+                }
                 CallArgs::Star(_) => {}
                 CallArgs::Exprs(args) => {
                     for arg in args {

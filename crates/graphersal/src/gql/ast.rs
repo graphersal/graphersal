@@ -1,24 +1,30 @@
-//! The abstract syntax tree of a GQL read query (stage 1a subset).
+//! The abstract syntax tree of a GQL read query.
 //!
 //! Every node carries the [`Span`] of the text it was parsed from, and [`Query`] keeps the
 //! source text, so every later stage (binder, planner, lowering, errors) can point at the
 //! offending text and derive column names from it ([`Query::text`]).
 //!
 //! Stage 1a covers `MATCH` (comma-separated path patterns, optional `WHERE`), `RETURN`
-//! (`DISTINCT`, items with `AS`, `*`), `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`. Stage 1b extends
-//! the tree where noted: `OPTIONAL MATCH`, `WITH` / `LET` / `FILTER` (the query becomes a
-//! pipeline of clauses), quantified edges and path variables (`p = ...`). Those are refused by the
-//! parser until then, so no node exists for them yet.
+//! (`DISTINCT`, items with `AS`, `*`), `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`. Stage 1b adds the
+//! linear pipeline of clauses before `RETURN` ([`Query::stages`]: `[OPTIONAL] MATCH`, `WITH`,
+//! `LET`, `FILTER`), quantified edges ([`EdgePattern::quantifier`]), path variables
+//! ([`PathPattern::variable`]) and aggregate calls (an [`ExprKind::FunctionCall`] of an aggregate
+//! function, `DISTINCT` and `count(*)` included). A query written in the 1a subset has exactly
+//! the 1a tree: every `MATCH` a non-optional [`Stage::Match`], no path variable, no quantifier.
 
 use super::lexer::Span;
 
-/// A query: one or more `MATCH` clauses, then the result statement.
+/// A query: a pipeline of clauses that starts with `[OPTIONAL] MATCH`, then the result
+/// statement.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Query {
     /// The query text as given (spans index into it).
     pub(crate) source: String,
-    /// The `MATCH` clauses in order (stage 1b: a pipeline of clauses).
+    /// Every `[OPTIONAL] MATCH` clause in text order ([`Stage::Match`] indexes into it).
     pub(crate) matches: Vec<MatchClause>,
+    /// The clauses before `RETURN` in text order; the first is always a [`Stage::Match`]. A 1a
+    /// query holds one `Stage::Match(i)` per entry of `matches`, in order.
+    pub(crate) stages: Vec<Stage>,
     /// `RETURN` (mandatory).
     pub(crate) ret: ReturnClause,
     /// `ORDER BY ...`.
@@ -48,26 +54,92 @@ pub(crate) struct Identifier {
     pub(crate) span: Span,
 }
 
-/// `MATCH pattern, pattern, ... [WHERE expr]` (stage 1b: `OPTIONAL`).
+/// One clause of the pipeline before `RETURN`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Stage {
+    /// `[OPTIONAL] MATCH`: the index of the clause in [`Query::matches`].
+    Match(usize),
+    /// `WITH ...` (Cypher's form of the GQL linear pipeline).
+    With(Box<WithClause>),
+    /// `LET v = expr, ...`.
+    Let(LetClause),
+    /// `FILTER [WHERE] expr`.
+    Filter(FilterClause),
+}
+
+/// `[OPTIONAL] MATCH pattern, pattern, ... [WHERE expr]`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MatchClause {
+    /// `OPTIONAL MATCH`.
+    pub(crate) optional: bool,
     /// The comma-separated path patterns; repeated variables join them.
     pub(crate) patterns: Vec<PathPattern>,
     /// The clause's `WHERE`.
     pub(crate) where_clause: Option<Expr>,
-    /// From `MATCH` to the end of the clause.
+    /// From `OPTIONAL` (or `MATCH`) to the end of the clause.
     pub(crate) span: Span,
 }
 
-/// A path pattern: a node, then any number of edge-node steps (stage 1b: a path variable
-/// `p = ...`).
+/// `WITH [DISTINCT] items [ORDER BY ..] [OFFSET|SKIP n] [LIMIT n] [WHERE expr]`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WithClause {
+    /// `DISTINCT`.
+    pub(crate) distinct: bool,
+    /// The `*` item (every variable in scope), when written.
+    pub(crate) star: Option<Span>,
+    /// The explicit items in written order.
+    pub(crate) items: Vec<ReturnItem>,
+    /// `ORDER BY ...`.
+    pub(crate) order_by: Option<OrderBy>,
+    /// `OFFSET n` or `SKIP n`.
+    pub(crate) offset: Option<CountClause>,
+    /// `LIMIT n`.
+    pub(crate) limit: Option<CountClause>,
+    /// The `WHERE` after the projection (reads the projected names).
+    pub(crate) where_clause: Option<Expr>,
+    /// From `WITH` to the end of the clause.
+    pub(crate) span: Span,
+}
+
+/// `LET v = expr, w = expr, ...`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LetClause {
+    /// The definitions in written order (at least one).
+    pub(crate) bindings: Vec<LetBinding>,
+    /// From `LET` to the last definition.
+    pub(crate) span: Span,
+}
+
+/// One `v = expr` of a [`LetClause`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LetBinding {
+    /// The new variable.
+    pub(crate) variable: Identifier,
+    /// Its value.
+    pub(crate) value: Expr,
+    /// From the variable to the end of the value.
+    pub(crate) span: Span,
+}
+
+/// `FILTER [WHERE] expr`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FilterClause {
+    /// The condition.
+    pub(crate) condition: Expr,
+    /// From `FILTER` to the end of the condition.
+    pub(crate) span: Span,
+}
+
+/// A path pattern: `[p =] node (edge node)*`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PathPattern {
+    /// The path variable of `p = ...`.
+    pub(crate) variable: Option<Identifier>,
     /// The first node.
     pub(crate) start: NodePattern,
     /// The following edges, each with the node it leads to.
     pub(crate) steps: Vec<PatternStep>,
-    /// The whole pattern.
+    /// The whole pattern (the `p =` of a path variable included).
     pub(crate) span: Span,
 }
 
@@ -107,7 +179,7 @@ pub(crate) enum EdgeDirection {
     Any,
 }
 
-/// `-[e:Label {k: expr} WHERE expr]->` or an abbreviated form (stage 1b: a quantifier).
+/// `-[e:Label {k: expr} WHERE expr]->` or an abbreviated form, possibly quantified.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EdgePattern {
     /// The direction.
@@ -123,7 +195,24 @@ pub(crate) struct EdgePattern {
     pub(crate) properties: Option<MapLiteral>,
     /// The inline `WHERE`.
     pub(crate) where_clause: Option<Expr>,
-    /// The whole edge, arrows included.
+    /// The quantifier: GQL `{m,n}`, `*`, `+` after the edge, or Cypher `*m..n` inside its
+    /// brackets.
+    pub(crate) quantifier: Option<Quantifier>,
+    /// The whole edge, arrows included (a GQL quantifier after the edge is not part of it).
+    pub(crate) span: Span,
+}
+
+/// How often a quantified edge repeats: `min..=max` times (`max` `None`: unbounded). The
+/// parser normalizes every spelling (module docs of `parser.rs`) and guarantees `min <= max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Quantifier {
+    /// The fewest repetitions (0 allows the zero-length match).
+    pub(crate) min: u64,
+    /// The most repetitions; `None` for no upper bound.
+    pub(crate) max: Option<u64>,
+    /// Written in Cypher's bracket form (`[e*m..n]`, lower bound 1 by default), not GQL's.
+    pub(crate) cypher: bool,
+    /// The quantifier text (`{1,3}`, `*`, `+`, or `*1..3` inside the brackets).
     pub(crate) span: Span,
 }
 
@@ -336,8 +425,7 @@ pub(crate) struct CaseWhen {
 /// The arguments of a function call.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CallArgs {
-    /// `(*)`, as in `count(*)`.
-    #[allow(dead_code, reason = "count(*) is parsed from stage 1b (aggregates) on")]
+    /// `(*)`, as in `count(*)` (only `count` takes it).
     Star(Span),
     /// `(a, b, ...)`, possibly empty.
     Exprs(Vec<Expr>),
@@ -440,7 +528,9 @@ mod tests {
         let query = Query {
             source: source.into(),
             matches: vec![MatchClause {
+                optional: false,
                 patterns: vec![PathPattern {
+                    variable: None,
                     start: NodePattern {
                         variable: Some(Identifier {
                             name: "a".into(),
@@ -457,6 +547,7 @@ mod tests {
                 where_clause: None,
                 span: span(0, 9),
             }],
+            stages: vec![Stage::Match(0)],
             ret: ReturnClause {
                 distinct: false,
                 star: None,

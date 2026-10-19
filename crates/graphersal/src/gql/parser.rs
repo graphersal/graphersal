@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stage 1a subset): tokens to the [`ast`] tree.
+//! Recursive-descent parser of GQL read queries (stages 1a and 1b): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -6,23 +6,32 @@
 //! keyword or function name, and for a refused or not yet supported construct the GQL form or
 //! the Gremlin alternative.
 //!
-//! # Grammar (stage 1a)
+//! # Grammar
 //!
 //! ```text
-//! query      := match+ return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?
-//! match      := MATCH path (',' path)* (WHERE expr)?
-//! path       := node (edge node)*
+//! query      := match stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?
+//! stage      := match | with | let | filter
+//! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
+//! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
+//! let        := LET var '=' expr (',' var '=' expr)*
+//! filter     := FILTER WHERE? expr
+//! path       := (var '=')? node (edge quantifier? node)*
 //! node       := '(' var? ((':'|IS) labels)? map? (WHERE expr)? ')'
 //! edge       := '-[' filler ']->' | '<-[' filler ']-' | '-[' filler ']-' | '<-[' filler ']->'
 //!             | '-->' | '<--' | '--' | '<-->' | '->' | '<-' | '-' | '<->'
-//! filler     := var? ((':'|IS) labels)? map? (WHERE expr)?
+//! filler     := var? ((':'|IS) labels)? cypher_len? map? (WHERE expr)?
+//! quantifier := '{' int '}' | '{' int? ',' int? '}' | '*' | '+'
+//! cypher_len := '*' int? ('..' int?)?            -- edges only, inside the brackets
 //! labels     := label_or (':' name)*          -- Cypher `:A:B`, plain names only
 //! label_or   := label_and ('|' label_and)*
 //! label_and  := label_not ('&' label_not)*
 //! label_not  := '!' label_not | name | '%' | '(' label_or ')'
-//! return     := RETURN DISTINCT? ('*' (',' item)* | item (',' item)*)
+//! return     := RETURN projection
+//! projection := DISTINCT? ('*' (',' item)* | item (',' item)*)
 //! item       := expr (AS name)?
 //! order_by   := ORDER BY expr (ASC|ASCENDING|DESC|DESCENDING)? (',' ...)*
+//! call       := name '(' (expr (',' expr)*)? ')'
+//!             | aggregate '(' DISTINCT? expr ')' | count '(' '*' ')'
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
@@ -46,8 +55,25 @@
 //!   ambiguous). In expressions `v IS [NOT] LABELED A` and Cypher `v:A`.
 //! - **Functions are checked here:** the name (with "did you mean"), the argument count and
 //!   `DISTINCT` / `*`, against the one table [`FUNCTIONS`] that the binder and the evaluator also
-//!   read. Aggregates are refused here as "not yet" (stage 1b turns them on in the table's
-//!   consumers); Cypher `id()` is refused for `element_id()` (D15).
+//!   read. Aggregates take `DISTINCT`; only `count` takes `*`, and `count(DISTINCT *)` is an
+//!   error. Where an aggregate may stand (not nested, not in `WHERE`, ...) is the binder's check.
+//!   `path_length(p)` has the Cypher alias `length(p)`. Cypher `id()` is refused for
+//!   `element_id()` (D15).
+//! - **The clause pipeline** starts with `[OPTIONAL] MATCH` (a leading `OPTIONAL MATCH` too);
+//!   `WITH`, `LET` and `FILTER` before the first `MATCH` are "not yet supported", like a query
+//!   without `MATCH`. `WITH` is Cypher's spelling of the GQL linear pipeline; its parts come in
+//!   Cypher's order `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`, `WHERE`, each at most once (another
+//!   order is a syntax error naming it). `OPTIONAL { .. }` / `OPTIONAL ( .. )` blocks are "not
+//!   yet supported".
+//! - **Quantifiers** are normalized to `min..=max` ([`Quantifier`]): GQL `{n}` = `{n,n}`, `{,n}` =
+//!   `{0,n}`, `{m,}` and `{,}` unbounded, `*` = `{0,}`, `+` = `{1,}`; Cypher `[e*]` = `{1,}`,
+//!   `[e*n]` = `{n}`, `[e*m..n]` = `{m,n}`, `[e*..n]` = `{1,n}`, `[e*m..]` = `{m,}` (Cypher's
+//!   lower bound defaults to 1, GQL's postfix `*` to 0). Bounds are unsigned integer literals; a
+//!   lower bound above the upper bound, a quantifier after a node, and both forms on one edge
+//!   are syntax errors; Memgraph's `*BFS`, `*WSHORTEST`, ... stay refused, and quantified path
+//!   patterns `((a)-->(b)){m,n}` stay "not yet supported". A GQL quantifier is not part of the
+//!   edge's span; a Cypher one is.
+//! - **Path variables:** `p = path`; the path's span starts at the variable.
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -58,9 +84,9 @@
 use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, EdgePattern, Expr, ExprKind,
-    Identifier, LabelExpr, LabelExprKind, Literal, MapEntry, MapLiteral, MatchClause, NodePattern,
-    OrderBy, PathPattern, PatternStep, Query, ReturnClause, ReturnItem, SortDirection, SortItem,
-    UnaryOp,
+    FilterClause, Identifier, LabelExpr, LabelExprKind, LetBinding, LetClause, Literal, MapEntry,
+    MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern, PatternStep, Quantifier, Query,
+    ReturnClause, ReturnItem, SortDirection, SortItem, Stage, UnaryOp, WithClause,
 };
 use super::lexer::{Keyword, LexError, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -85,7 +111,7 @@ const TILDE_ALTERNATIVE: &str = "edges in Graphersal are directed; use -[e]- for
 pub(crate) enum FunctionKind {
     /// One value per row.
     Scalar,
-    /// Aggregates rows (stage 1b; refused as "not yet" by the parser until then).
+    /// Aggregates rows (`DISTINCT` and, for `count`, `*` allowed).
     Aggregate,
 }
 
@@ -110,6 +136,8 @@ pub(crate) enum Function {
     Size,
     /// `cardinality(list)`.
     Cardinality,
+    /// `path_length(p)`, Cypher `length(p)`: the number of edges of a path.
+    PathLength,
     /// `count(x)`, `count(*)`.
     Count,
     /// `sum(x)`.
@@ -138,7 +166,7 @@ pub(crate) struct FunctionSpec {
     pub(crate) max_args: usize,
     /// Scalar or aggregate.
     pub(crate) kind: FunctionKind,
-    /// The Gremlin step that does the same after `gql()` (aggregates, for the "not yet" error).
+    /// The Gremlin step that does the same after `gql()` (aggregates, for diagnostics).
     pub(crate) gremlin: &'static str,
 }
 
@@ -196,6 +224,7 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     ),
     scalar(Function::Size, &["size"], 1, 1),
     scalar(Function::Cardinality, &["cardinality"], 1, 1),
+    scalar(Function::PathLength, &["path_length", "length"], 1, 1),
     aggregate(Function::Count, &["count"], "count()"),
     aggregate(Function::Sum, &["sum"], "sum()"),
     aggregate(Function::Avg, &["avg"], "mean()"),
@@ -261,6 +290,8 @@ struct Filler {
     labels: Option<LabelExpr>,
     properties: Option<MapLiteral>,
     where_clause: Option<Expr>,
+    /// Cypher's `*m..n` (edges only).
+    quantifier: Option<Quantifier>,
 }
 
 struct Parser<'a> {
@@ -481,21 +512,6 @@ impl<'a> Parser<'a> {
                 "",
             ),
             Keyword::Cypher => not_yet("a CYPHER version prefix", "remove the prefix"),
-            Keyword::Optional => not_yet(
-                "OPTIONAL MATCH",
-                "Gremlin optional(), for example \
-                 g.v().has_label(\"person\").optional(__.out(\"created\"))",
-            ),
-            Keyword::With => not_yet(
-                "WITH",
-                "put the conditions into WHERE and the projection into RETURN, or chain Gremlin \
-                 steps after gql(), for example \
-                 g.gql(\"MATCH (p:person) RETURN p.name AS name\").select(\"name\")",
-            ),
-            Keyword::Let => not_yet("LET", "compute the value in RETURN"),
-            Keyword::Filter => {
-                not_yet("FILTER", "write the condition as WHERE in the MATCH clause")
-            }
             Keyword::Next => not_yet(
                 "NEXT",
                 "chain Gremlin steps after gql(), for example \
@@ -587,13 +603,26 @@ impl<'a> Parser<'a> {
     fn query(&mut self) -> PResult<Query> {
         let start = self.peek().span;
         let mut matches = Vec::new();
+        let mut stages = Vec::new();
         loop {
-            if self.at_kw(Keyword::Match) {
-                matches.push(self.match_clause()?);
-                continue;
+            match self.peek().keyword() {
+                Some(Keyword::Match | Keyword::Optional) => {
+                    let clause = self.match_clause()?;
+                    stages.push(Stage::Match(matches.len()));
+                    matches.push(clause);
+                    continue;
+                }
+                Some(keyword @ (Keyword::With | Keyword::Let | Keyword::Filter)) => {
+                    if stages.is_empty() {
+                        return Err(self.leading_stage());
+                    }
+                    stages.push(self.pipeline_stage(keyword)?);
+                    continue;
+                }
+                _ => {}
             }
             if self.at_kw(Keyword::Return) {
-                if matches.is_empty() {
+                if stages.is_empty() {
                     return Err(self.not_yet(
                         self.peek().span,
                         "a query without MATCH",
@@ -603,7 +632,7 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
-            if matches.is_empty() {
+            if stages.is_empty() {
                 return Err(self.unexpected(&["MATCH"]));
             }
             if matches!(self.peek().kind, TokenKind::Eof | TokenKind::Semicolon) {
@@ -612,6 +641,9 @@ impl<'a> Parser<'a> {
             if let Some(Keyword::Order | Keyword::Offset | Keyword::Skip | Keyword::Limit) =
                 self.peek().keyword()
             {
+                if let Some(Stage::With(_)) = stages.last() {
+                    return Err(self.misplaced_with_tail());
+                }
                 return Err(self.not_yet(
                     self.peek().span,
                     &format!("{} before RETURN", self.peek().text.to_ascii_uppercase()),
@@ -619,13 +651,7 @@ impl<'a> Parser<'a> {
                      MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT 2",
                 ));
             }
-            let expected: &[&str] = match matches.last() {
-                Some(MatchClause {
-                    where_clause: None, ..
-                }) => &["`,`", "WHERE", "MATCH", "RETURN"],
-                _ => &["MATCH", "RETURN"],
-            };
-            return Err(self.unexpected(expected));
+            return Err(self.after_stage(stages.last(), &matches));
         }
         let ret = self.return_clause()?;
         let order_by = if self.at_kw(Keyword::Order) {
@@ -633,26 +659,8 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let offset = match self.peek().keyword() {
-            Some(Keyword::Offset | Keyword::Skip) => {
-                let keyword = self.advance().span;
-                let value = self.expr()?;
-                Some(CountClause {
-                    span: keyword.to(self.last),
-                    value,
-                })
-            }
-            _ => None,
-        };
-        let limit = if let Some(keyword) = self.eat_kw(Keyword::Limit) {
-            let value = self.expr()?;
-            Some(CountClause {
-                span: keyword.to(self.last),
-                value,
-            })
-        } else {
-            None
-        };
+        let offset = self.offset_clause()?;
+        let limit = self.limit_clause()?;
         let end = self.last;
         self.eat(&TokenKind::Semicolon);
         if !self.at(&TokenKind::Eof) {
@@ -666,11 +674,200 @@ impl<'a> Parser<'a> {
         Ok(Query {
             source: self.src.to_string(),
             matches,
+            stages,
             ret,
             order_by,
             offset,
             limit,
             span: start.to(end),
+        })
+    }
+
+    /// `OFFSET n` / `SKIP n`, when the current token starts it.
+    fn offset_clause(&mut self) -> PResult<Option<CountClause>> {
+        match self.peek().keyword() {
+            Some(Keyword::Offset | Keyword::Skip) => {
+                let keyword = self.advance().span;
+                let value = self.expr()?;
+                Ok(Some(CountClause {
+                    span: keyword.to(self.last),
+                    value,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `LIMIT n`, when the current token starts it.
+    fn limit_clause(&mut self) -> PResult<Option<CountClause>> {
+        let Some(keyword) = self.eat_kw(Keyword::Limit) else {
+            return Ok(None);
+        };
+        let value = self.expr()?;
+        Ok(Some(CountClause {
+            span: keyword.to(self.last),
+            value,
+        }))
+    }
+
+    /// The error for a token that continues no clause of the pipeline: the tokens the last
+    /// clause and the pipeline accept, and a "did you mean" over the clause keywords.
+    fn after_stage(&self, last: Option<&Stage>, matches: &[MatchClause]) -> Box<GqlErrorBuilder> {
+        // The 1a lists stay as they were; the pipeline keywords only feed the suggestion.
+        let expected: Vec<&str> = match last {
+            Some(Stage::Match(i)) => match matches.get(*i) {
+                Some(MatchClause {
+                    where_clause: None, ..
+                }) => vec!["`,`", "WHERE", "MATCH", "RETURN"],
+                _ => vec!["MATCH", "RETURN"],
+            },
+            Some(Stage::With(with)) => {
+                let mut expected = Vec::new();
+                let tail = with.order_by.is_some()
+                    || with.offset.is_some()
+                    || with.limit.is_some()
+                    || with.where_clause.is_some();
+                if !tail {
+                    expected.push("`,`");
+                    if with.items.last().is_some_and(|item| item.alias.is_none()) {
+                        expected.push("AS");
+                    }
+                }
+                if with.where_clause.is_none() {
+                    expected.push("WHERE");
+                }
+                expected.extend(["MATCH", "RETURN"]);
+                expected
+            }
+            Some(Stage::Let(_)) => vec!["`,`", "MATCH", "RETURN"],
+            Some(Stage::Filter(_)) | None => vec!["MATCH", "RETURN"],
+        };
+        let error = self.unexpected(&expected);
+        let token = self.peek();
+        if token.kind == TokenKind::Ident
+            && suggest_keyword(token.text, &expected).is_none()
+            && let Some(suggestion) =
+                suggest_keyword(token.text, &["OPTIONAL MATCH", "WITH", "LET", "FILTER"])
+        {
+            return Box::new((*error).suggestion(suggestion));
+        }
+        error
+    }
+
+    /// The error for `WITH`, `LET` or `FILTER` as the first clause.
+    fn leading_stage(&self) -> Box<GqlErrorBuilder> {
+        let token = self.peek();
+        self.not_yet(
+            token.span,
+            &format!(
+                "a query that starts with {}",
+                token.text.to_ascii_uppercase()
+            ),
+            "start with a MATCH clause, or use Gremlin inject(), for example g.inject(1)",
+        )
+    }
+
+    /// `WITH`, `LET` or `FILTER` after the first clause.
+    fn pipeline_stage(&mut self, keyword: Keyword) -> PResult<Stage> {
+        Ok(match keyword {
+            Keyword::Let => Stage::Let(self.let_clause()?),
+            Keyword::Filter => Stage::Filter(self.filter_clause()?),
+            _ => Stage::With(Box::new(self.with_clause()?)),
+        })
+    }
+
+    /// `WITH [DISTINCT] items [ORDER BY ..] [OFFSET|SKIP n] [LIMIT n] [WHERE expr]`.
+    fn with_clause(&mut self) -> PResult<WithClause> {
+        let start = self.expect_kw(Keyword::With, &["WITH"])?;
+        let (distinct, star, items) = self.projection()?;
+        let order_by = if self.at_kw(Keyword::Order) {
+            Some(self.order_by()?)
+        } else {
+            None
+        };
+        let offset = self.offset_clause()?;
+        let limit = self.limit_clause()?;
+        let where_clause = if self.eat_kw(Keyword::Where).is_some() {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        Ok(WithClause {
+            distinct,
+            star,
+            items,
+            order_by,
+            offset,
+            limit,
+            where_clause,
+            span: start.to(self.last),
+        })
+    }
+
+    /// `ORDER BY`, `OFFSET` / `SKIP` or `LIMIT` after a `WITH` clause that could not take it
+    /// there (out of order or repeated).
+    fn misplaced_with_tail(&self) -> Box<GqlErrorBuilder> {
+        let token = self.peek();
+        let keyword = match token.keyword() {
+            Some(Keyword::Order) => "ORDER BY".to_string(),
+            _ => token.text.to_ascii_uppercase(),
+        };
+        let b = err(
+            GqlErrorKind::Syntax,
+            token.span,
+            format!(
+                "{keyword} is out of place: WITH takes ORDER BY, OFFSET / SKIP, LIMIT and WHERE \
+                 in this order, each at most once"
+            ),
+        )
+        .alternative(
+            "write the parts of WITH in the order ORDER BY, OFFSET, LIMIT, WHERE, for example \
+             WITH p ORDER BY p.age OFFSET 1 LIMIT 2 WHERE p.age > 30",
+        );
+        Box::new(b)
+    }
+
+    /// `LET v = expr (, v = expr)*`.
+    fn let_clause(&mut self) -> PResult<LetClause> {
+        let start = self.expect_kw(Keyword::Let, &["LET"])?;
+        let mut bindings = Vec::new();
+        loop {
+            let variable = match self.peek().kind {
+                TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+                    let name = self.peek().name().unwrap_or("").to_string();
+                    let span = self.advance().span;
+                    if !self.variables.contains(&name) {
+                        self.variables.push(name.clone());
+                    }
+                    Identifier { name, span }
+                }
+                _ => return Err(self.unexpected(&["a variable"])),
+            };
+            self.expect(&TokenKind::Eq, &["`=`"])?;
+            let value = self.expr()?;
+            bindings.push(LetBinding {
+                span: variable.span.to(self.last),
+                variable,
+                value,
+            });
+            if self.eat(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        Ok(LetClause {
+            bindings,
+            span: start.to(self.last),
+        })
+    }
+
+    /// `FILTER [WHERE] expr`.
+    fn filter_clause(&mut self) -> PResult<FilterClause> {
+        let start = self.expect_kw(Keyword::Filter, &["FILTER"])?;
+        self.eat_kw(Keyword::Where);
+        let condition = self.expr()?;
+        Ok(FilterClause {
+            condition,
+            span: start.to(self.last),
         })
     }
 
@@ -709,7 +906,14 @@ impl<'a> Parser<'a> {
                 );
                 return Box::new(b);
             }
-            Some(Keyword::Match | Keyword::Return) => {
+            Some(
+                Keyword::Match
+                | Keyword::Return
+                | Keyword::Optional
+                | Keyword::With
+                | Keyword::Let
+                | Keyword::Filter,
+            ) => {
                 let mut b = err(
                     GqlErrorKind::Syntax,
                     span,
@@ -767,7 +971,19 @@ impl<'a> Parser<'a> {
     }
 
     fn match_clause(&mut self) -> PResult<MatchClause> {
-        let start = self.expect_kw(Keyword::Match, &["MATCH"])?;
+        let optional = self.eat_kw(Keyword::Optional);
+        if let Some(keyword) = optional
+            && matches!(self.peek().kind, TokenKind::LBrace | TokenKind::LParen)
+        {
+            return Err(self.not_yet(
+                keyword.to(self.peek().span),
+                "an OPTIONAL block (OPTIONAL { } / OPTIONAL ( ))",
+                "write each optional part as OPTIONAL MATCH, for example \
+                 MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p, s",
+            ));
+        }
+        let keyword = self.expect_kw(Keyword::Match, &["MATCH"])?;
+        let start = optional.unwrap_or(keyword);
         self.check_match_prefix()?;
         let mut patterns = vec![self.path_pattern()?];
         while self.eat(&TokenKind::Comma).is_some() {
@@ -779,6 +995,7 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(MatchClause {
+            optional: optional.is_some(),
             patterns,
             where_clause,
             span: start.to(self.last),
@@ -822,17 +1039,8 @@ impl<'a> Parser<'a> {
     }
 
     fn path_pattern(&mut self) -> PResult<PathPattern> {
+        let variable = self.path_variable();
         let token = self.peek();
-        if matches!(token.kind, TokenKind::Ident | TokenKind::QuotedIdent(_))
-            && self.nth(1).kind == TokenKind::Eq
-        {
-            return Err(self.not_yet(
-                token.span.to(self.nth(1).span),
-                "a path variable (p = ...)",
-                "return the elements by their variables, or use Gremlin path(), for example \
-                 g.v(\"1\").out().out().path()",
-            ));
-        }
         if token.kind == TokenKind::Ident
             && (token.text.eq_ignore_ascii_case("shortestPath")
                 || token.text.eq_ignore_ascii_case("allShortestPaths"))
@@ -845,33 +1053,189 @@ impl<'a> Parser<'a> {
             ));
         }
         let start = self.node_pattern()?;
+        self.check_node_quantifier()?;
         let mut steps = Vec::new();
-        while let Some(edge) = self.edge_pattern()? {
-            self.check_quantifier()?;
+        while let Some(mut edge) = self.edge_pattern()? {
+            self.edge_quantifier(&mut edge)?;
             let node = self.node_pattern()?;
+            self.check_node_quantifier()?;
             steps.push(PatternStep { edge, node });
         }
+        let first = variable.as_ref().map_or(start.span, |v| v.span);
         Ok(PathPattern {
-            span: start.span.to(self.last),
+            span: first.to(self.last),
+            variable,
             start,
             steps,
         })
     }
 
-    /// Refuses a quantifier after an edge (`{m,n}`, `*`, `+`).
-    fn check_quantifier(&self) -> PResult<()> {
+    /// The path variable of `p = ...` with its `=`, if written.
+    fn path_variable(&mut self) -> Option<Identifier> {
+        let token = self.peek();
+        if !matches!(token.kind, TokenKind::Ident | TokenKind::QuotedIdent(_))
+            || self.nth(1).kind != TokenKind::Eq
+        {
+            return None;
+        }
+        let name = token.name().unwrap_or("").to_string();
+        let span = self.advance().span;
+        self.advance();
+        if !self.variables.contains(&name) {
+            self.variables.push(name.clone());
+        }
+        Some(Identifier { name, span })
+    }
+
+    /// Refuses a quantifier after a node pattern: GQL quantifies edges (and parenthesized
+    /// paths, not yet supported), never a single node.
+    fn check_node_quantifier(&self) -> PResult<()> {
         let token = self.peek();
         if matches!(
             token.kind,
             TokenKind::LBrace | TokenKind::Star | TokenKind::Plus
         ) {
-            return Err(self.not_yet(
+            let b = err(
+                GqlErrorKind::Syntax,
                 token.span,
-                "a quantified edge ({m,n}, *, +)",
-                "Gremlin repeat(), for example g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
-            ));
+                "a quantifier cannot follow a node pattern; it repeats the edge before it",
+            )
+            .alternative("quantify the edge, for example MATCH (a)-[:knows]->{1,3}(b) RETURN b");
+            return Err(Box::new(b));
         }
         Ok(())
+    }
+
+    /// A GQL quantifier after `edge` (`{m,n}`, `{m,}`, `{,n}`, `{n}`, `*`, `+`), if written.
+    fn edge_quantifier(&mut self, edge: &mut EdgePattern) -> PResult<()> {
+        let start = self.peek().span;
+        let (min, max) = match self.peek().kind {
+            TokenKind::Star => {
+                self.advance();
+                (0, None)
+            }
+            TokenKind::Plus => {
+                self.advance();
+                (1, None)
+            }
+            TokenKind::LBrace => self.braced_quantifier()?,
+            _ => return Ok(()),
+        };
+        let span = start.to(self.last);
+        if let Some(cypher) = &edge.quantifier {
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                "an edge takes one quantifier: the Cypher form inside the brackets or a GQL \
+                 quantifier after the edge, not both",
+            )
+            .alternative(format!(
+                "keep one of them, for example drop `{}` from the brackets",
+                self.text(cypher.span)
+            ));
+            return Err(Box::new(b));
+        }
+        edge.quantifier = Some(self.quantifier(min, max, false, span)?);
+        Ok(())
+    }
+
+    /// `{n}`, `{m,n}`, `{m,}`, `{,n}`, `{,}` from the `{`: the bounds.
+    fn braced_quantifier(&mut self) -> PResult<(u64, Option<u64>)> {
+        self.expect(&TokenKind::LBrace, &["`{`"])?;
+        let lower = self.bound();
+        if self.eat(&TokenKind::Comma).is_none() {
+            let Some(n) = lower else {
+                return Err(self.unexpected(&["an integer", "`,`"]));
+            };
+            self.expect(&TokenKind::RBrace, &["`,`", "`}`"])?;
+            return Ok((n, Some(n)));
+        }
+        let upper = self.bound();
+        if upper.is_none() {
+            self.expect(&TokenKind::RBrace, &["an integer", "`}`"])?;
+        } else {
+            self.expect(&TokenKind::RBrace, &["`}`"])?;
+        }
+        Ok((lower.unwrap_or(0), upper))
+    }
+
+    /// An unsigned integer literal of a quantifier bound, if the current token is one.
+    fn bound(&mut self) -> Option<u64> {
+        match self.peek().kind {
+            TokenKind::Integer(n) => {
+                self.advance();
+                Some(n)
+            }
+            _ => None,
+        }
+    }
+
+    /// The quantifier `min..=max` written at `span`; an error when `min > max`.
+    fn quantifier(
+        &self,
+        min: u64,
+        max: Option<u64>,
+        cypher: bool,
+        span: Span,
+    ) -> PResult<Quantifier> {
+        if let Some(max) = max
+            && min > max
+        {
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                format!("the quantifier's lower bound {min} is greater than its upper bound {max}"),
+            )
+            .alternative(if cypher {
+                format!("write the smaller bound first, for example *{max}..{min}")
+            } else {
+                format!("write the smaller bound first, for example {{{max},{min}}}")
+            });
+            return Err(Box::new(b));
+        }
+        Ok(Quantifier {
+            min,
+            max,
+            cypher,
+            span,
+        })
+    }
+
+    /// Cypher's variable length inside the brackets of an edge, from the `*`: `*` (`{1,}`),
+    /// `*n` (`{n}`), `*m..n`, `*..n` (`{1,n}`), `*m..` (`{m,}`); Memgraph's `*BFS` and the like
+    /// are refused.
+    fn cypher_quantifier(&mut self) -> PResult<Quantifier> {
+        let star = self.peek().span;
+        let next = self.nth(1);
+        const MEMGRAPH: &[&str] = &["BFS", "DFS", "WSHORTEST", "ALLSHORTEST", "KSHORTEST"];
+        if next.kind == TokenKind::Ident
+            && MEMGRAPH.iter().any(|m| m.eq_ignore_ascii_case(next.text))
+        {
+            let b = err(
+                GqlErrorKind::Refused,
+                star.to(next.span),
+                format!(
+                    "*{} is a vendor path search extension, not part of GQL",
+                    next.text
+                ),
+            )
+            .alternative(
+                "Gremlin repeat(), for example \
+                 g.v(\"1\").repeat(__.out().simple_path()).until(__.has_id(\"5\")).path()",
+            );
+            return Err(Box::new(b));
+        }
+        self.advance();
+        let lower = self.bound();
+        let (min, max) = if self.eat(&TokenKind::DotDot).is_some() {
+            (lower.unwrap_or(1), self.bound())
+        } else {
+            match lower {
+                Some(n) => (n, Some(n)),
+                None => (1, None),
+            }
+        };
+        self.quantifier(min, max, true, star.to(self.last))
     }
 
     /// A variable declaration in a pattern: an identifier or a back-quoted identifier.
@@ -919,33 +1283,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if close == &TokenKind::RBracket && self.at(&TokenKind::Star) {
-            let star = self.peek().span;
-            let next = self.nth(1);
-            const MEMGRAPH: &[&str] = &["BFS", "DFS", "WSHORTEST", "ALLSHORTEST", "KSHORTEST"];
-            if next.kind == TokenKind::Ident
-                && MEMGRAPH.iter().any(|m| m.eq_ignore_ascii_case(next.text))
-            {
-                let b = err(
-                    GqlErrorKind::Refused,
-                    star.to(next.span),
-                    format!(
-                        "*{} is a vendor path search extension, not part of GQL",
-                        next.text
-                    ),
-                )
-                .alternative(
-                    "Gremlin repeat(), for example \
-                     g.v(\"1\").repeat(__.out().simple_path()).until(__.has_id(\"5\")).path()",
-                );
-                return Err(Box::new(b));
-            }
-            return Err(self.not_yet(
-                star,
-                "a variable-length edge (*, *m..n)",
-                "Gremlin repeat(), for example g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
-            ));
-        }
+        let quantifier = if close == &TokenKind::RBracket && self.at(&TokenKind::Star) {
+            Some(self.cypher_quantifier()?)
+        } else {
+            None
+        };
         let properties = if self.at(&TokenKind::LBrace) {
             Some(self.map_literal()?.0)
         } else if let TokenKind::Parameter(_) = self.peek().kind {
@@ -986,6 +1328,7 @@ impl<'a> Parser<'a> {
             labels,
             properties,
             where_clause,
+            quantifier,
         })
     }
 
@@ -1004,6 +1347,7 @@ impl<'a> Parser<'a> {
             labels,
             properties,
             where_clause,
+            quantifier: _,
         } = self.filler(&TokenKind::RParen, "`)`")?;
         self.expect(&TokenKind::RParen, &["`)`"])?;
         Ok(NodePattern {
@@ -1025,6 +1369,7 @@ impl<'a> Parser<'a> {
             labels: None,
             properties: None,
             where_clause: None,
+            quantifier: None,
             span,
         };
         match self.peek().kind {
@@ -1088,6 +1433,7 @@ impl<'a> Parser<'a> {
             labels,
             properties,
             where_clause,
+            quantifier,
         } = self.filler(&TokenKind::RBracket, "`]`")?;
         self.expect(&TokenKind::RBracket, &["`]`"])?;
         let direction = match (left, &self.peek().kind) {
@@ -1106,6 +1452,7 @@ impl<'a> Parser<'a> {
             labels,
             properties,
             where_clause,
+            quantifier,
             span: start.to(self.last),
         })
     }
@@ -1241,18 +1588,24 @@ impl<'a> Parser<'a> {
 
     fn return_clause(&mut self) -> PResult<ReturnClause> {
         let start = self.expect_kw(Keyword::Return, &["RETURN"])?;
+        let (distinct, star, items) = self.projection()?;
+        Ok(ReturnClause {
+            distinct,
+            star,
+            items,
+            span: start.to(self.last),
+        })
+    }
+
+    /// `DISTINCT? ('*' (',' item)* | item (',' item)*)` after `RETURN` or `WITH`.
+    fn projection(&mut self) -> PResult<(bool, Option<Span>, Vec<ReturnItem>)> {
         let distinct = self.eat_kw(Keyword::Distinct).is_some();
         let mut star = None;
         let mut items = Vec::new();
         if let Some(span) = self.eat(&TokenKind::Star) {
             star = Some(span);
             if self.eat(&TokenKind::Comma).is_none() {
-                return Ok(ReturnClause {
-                    distinct,
-                    star,
-                    items,
-                    span: start.to(self.last),
-                });
+                return Ok((distinct, star, items));
             }
         }
         loop {
@@ -1274,12 +1627,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(ReturnClause {
-            distinct,
-            star,
-            items,
-            span: start.to(self.last),
-        })
+        Ok((distinct, star, items))
     }
 
     fn order_by(&mut self) -> PResult<OrderBy> {
@@ -1892,9 +2240,64 @@ impl<'a> Parser<'a> {
             span: token.span,
         };
         self.expect(&TokenKind::LParen, &["`(`"])?;
+        if spec.kind == FunctionKind::Aggregate {
+            return self.aggregate_call(spec, name);
+        }
         self.check_call_modifiers(spec)?;
         let (args, height) = self.expr_list(&TokenKind::RParen, &["`,`", "`)`"])?;
-        self.finish_call(spec, name, args, height)
+        self.finish_call(spec, name, false, args, height)
+    }
+
+    /// The arguments of an aggregate after its `(`: `DISTINCT` allowed, `*` only for `count`
+    /// (and not with `DISTINCT`). Where an aggregate may stand is the binder's check.
+    fn aggregate_call(&mut self, spec: &FunctionSpec, name: Identifier) -> PResult<(Expr, usize)> {
+        let distinct = self.eat_kw(Keyword::Distinct).is_some();
+        if self.at(&TokenKind::Star) {
+            return self.count_star(spec, name, distinct);
+        }
+        let (args, height) = self.expr_list(&TokenKind::RParen, &["`,`", "`)`"])?;
+        self.finish_call(spec, name, distinct, args, height)
+    }
+
+    /// `count(*)` from the `*`.
+    fn count_star(
+        &mut self,
+        spec: &FunctionSpec,
+        name: Identifier,
+        distinct: bool,
+    ) -> PResult<(Expr, usize)> {
+        let star = self.peek().span;
+        if spec.function != Function::Count {
+            return Err(self.syntax(
+                star,
+                format!("only count(*) takes `*`, not {}()", spec.name()),
+            ));
+        }
+        if distinct {
+            let b = err(
+                GqlErrorKind::Syntax,
+                star,
+                "count(DISTINCT *) is not allowed: DISTINCT needs an expression",
+            )
+            .alternative(
+                "count(*) counts the rows; count(DISTINCT x) counts the distinct values of x",
+            );
+            return Err(Box::new(b));
+        }
+        self.advance();
+        self.expect(&TokenKind::RParen, &["`)`"])?;
+        let span = name.span.to(self.last);
+        Ok((
+            Expr {
+                kind: ExprKind::FunctionCall {
+                    name,
+                    distinct: false,
+                    args: CallArgs::Star(star),
+                },
+                span,
+            },
+            1,
+        ))
     }
 
     /// The table entry of the function named by the current token, or the error for an unknown,
@@ -1928,19 +2331,6 @@ impl<'a> Parser<'a> {
             }
             return Err(Box::new(b));
         };
-        if spec.kind == FunctionKind::Aggregate {
-            let b = err(
-                GqlErrorKind::NotYet,
-                span,
-                format!("the aggregate function {name}() is not yet supported in this version"),
-            )
-            .alternative(format!(
-                "aggregate with Gremlin steps after gql(), for example \
-                 g.gql(\"MATCH (p:person) RETURN p.age AS age\").select(\"age\").{}",
-                spec.gremlin
-            ));
-            return Err(Box::new(b));
-        }
         Ok(spec)
     }
 
@@ -1969,6 +2359,7 @@ impl<'a> Parser<'a> {
         &self,
         spec: &FunctionSpec,
         name: Identifier,
+        distinct: bool,
         args: Vec<Expr>,
         height: usize,
     ) -> PResult<(Expr, usize)> {
@@ -1989,7 +2380,7 @@ impl<'a> Parser<'a> {
             Expr {
                 kind: ExprKind::FunctionCall {
                     name,
-                    distinct: false,
+                    distinct,
                     args: CallArgs::Exprs(args),
                 },
                 span,
