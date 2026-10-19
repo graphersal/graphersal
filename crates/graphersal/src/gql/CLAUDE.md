@@ -68,7 +68,10 @@ Files appear as their stage lands; this table is the target layout.
   (FlatBarrier, `flatbarrier_steps/step_gql_aggregate.rs`, in `MAP_PRODUCING_KINDS`, generated
   traversers, `resets_path`), `gql:distinct` (FlatBarrier, GQL equality via
   `aggregate::GroupKey`), `gql:bind` (FlatMap, continues a pattern from a `Label` / `RowColumn`
-  source), `gql:trail` (Filter, the trail check of a quantified edge). They ask no permission of
+  source), `gql:trail` (Filter, the trail check of a quantified edge); stage 2a: `gql:for`
+  (FlatMap, `flatmap_steps/step_gql_for.rs`, in `MAP_PRODUCING_KINDS`: one derived traverser
+  per list item, the item itself or the record `{x, i}` with an ordinal; `NULL` no row, a
+  non-list one row, E1). They ask no permission of
   their own (value-only, like `has()`); their rendering puts GQL text in string literals so
   camelCase respelling leaves it alone. Trail checks between single edges use
   `where(P.neq("e1"))`, joins `where(P.eq("x"))`. A step reading EVERY occurrence of a label

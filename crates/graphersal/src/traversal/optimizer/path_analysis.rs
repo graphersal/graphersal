@@ -44,6 +44,7 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "project",
     "gql:project",
     "gql:aggregate",
+    "gql:for",
     "constant",
     "unfold",
     "group",
