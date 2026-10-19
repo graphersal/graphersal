@@ -664,6 +664,7 @@ fn stages(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
                 m.filters,
                 if m.labelled { " labelled" } else { "" }
             ),
+            Stage::For(f) => format!("for{}", if f.labelled { " labelled" } else { "" }),
         })
         .collect()
 }
@@ -1003,4 +1004,44 @@ fn a_stage_1b_plan_is_deterministic() {
         assert_eq!(plan(&b, &facts, None), p);
     }
     assert_eq!(p.stages.len(), 3);
+}
+
+// ----- stage 2a: FOR / UNWIND and the unit row -----
+
+#[test]
+fn for_is_a_stage_whose_row_is_labelled_only_when_read_after_leaving_it() {
+    // Read on its own row: no row label, no first segment (the unit row).
+    let (b, p) = plan_with("FOR x IN [1, 2] RETURN x", &NoFacts);
+    assert!(p.ops.is_empty());
+    assert_eq!(stages(&b, &p), ["for"]);
+    assert!(p.labelled().is_empty());
+    // Read after a later MATCH left it.
+    let (b, p) = plan_with("FOR x IN [1] MATCH (a:person) RETURN a, x", &NoFacts);
+    assert_eq!(stages(&b, &p), ["for labelled", "match: scan a"]);
+    // A FOR item written as a node resumes the later pattern from it (gql:bind).
+    let (b, p) = plan_with(
+        "MATCH (a)-->(c) WITH collect(c) AS cs FOR n IN cs MATCH (n)-->(m) RETURN m",
+        &NoFacts,
+    );
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Aggregate] filters []",
+            "for",
+            "match: resume ^n; n-[_5]->m"
+        ]
+    );
+    // The list reads a binding after an OPTIONAL MATCH part: through its label.
+    let (b, p) = plan_with(
+        "MATCH (a) OPTIONAL MATCH (a)-->(s) FOR x IN [s] RETURN x",
+        &NoFacts,
+    );
+    assert!(reasons(&p, named(&b, "s")[0]).optional);
+    // A leading LET produces no stage: the MATCH is the first segment.
+    let (b, p) = plan_with("LET k = 1 MATCH (a {v: k}) RETURN a", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a"]);
+    assert!(p.stages.is_empty());
+    // RETURN alone: no segment at all.
+    let (_, p) = plan_with("RETURN 1 AS x", &NoFacts);
+    assert!(p.ops.is_empty() && p.stages.is_empty());
 }

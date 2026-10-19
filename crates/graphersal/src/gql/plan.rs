@@ -11,15 +11,17 @@
 //!   patterns), and [`Op::Filter`]s of the conjuncts over several bindings (or none), each placed
 //!   right after the operation that binds the last binding it reads. Several components follow
 //!   one another: the second one starts with a second scan, a Cartesian product (correct but not
-//!   optimized, Phase 0 outcome 2). Empty when the query starts with `OPTIONAL MATCH` (its
-//!   first stage is then a [`Stage::Optional`] starting from one unit row);
+//!   optimized, Phase 0 outcome 2). Empty when the query starts with anything but `MATCH`
+//!   (`OPTIONAL MATCH`, `FOR`, a materializing `WITH`, or no stage at all: `RETURN 1`): the
+//!   query then starts from one unit row (design M1);
 //! - **the later stages** ([`LogicalPlan::stages`], stage 1b, plan mechanism 2): one [`Stage`]
 //!   per later segment of the [`BoundQuery`] in order: a [`Stage::Match`] (plain `MATCH`
 //!   clauses after a cut, or only the conjuncts of a `FILTER`), a [`Stage::Optional`] (an
 //!   `OPTIONAL MATCH`, lowered inside `optional()`), a [`Stage::Materialize`] (a materializing
-//!   `WITH`). A segment's components start at a binding an earlier segment bound
-//!   ([`Op::Resume`]) when they hold one, else with a mid-traversal [`Op::Scan`]. Empty for a
-//!   stage 1a query, whose plan is exactly the stage 1a plan;
+//!   `WITH`), a [`Stage::For`] (`FOR` / `UNWIND`, stage 2a). A segment's components start at a
+//!   binding an earlier segment bound ([`Op::Resume`]) when they hold one, else with a
+//!   mid-traversal [`Op::Scan`]. Empty for a stage 1a query, whose plan is exactly the stage 1a
+//!   plan;
 //! - **the result pipeline** ([`LogicalPlan::result`]): [`ResultOp::Project`] (or
 //!   [`ResultOp::Aggregate`] when a column aggregates), then [`ResultOp::Distinct`],
 //!   [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as far as the query has them.
@@ -42,10 +44,11 @@
 //! later segment's component away from the current element, a read after an `OPTIONAL MATCH`
 //! part (no read goes to the current element there), a group variable, an element of a read
 //! path variable's pattern. Nothing else is labelled, so bulk merging is not lost to
-//! bookkeeping the query never reads. A materializing `WITH` column binding gets no reason but
-//! `path` (a path variable reads it through a label set after `gql:bind` moved to it): it is
-//! read from its row, and [`Materialize::labelled`] says whether the row needs its own label
-//! (`as("#w<k>")`) because a read comes after a later stage left the row.
+//! bookkeeping the query never reads. A materializing `WITH` or `FOR` column binding gets no
+//! reason but `path` (a path variable reads it through a label set after `gql:bind` moved to
+//! it): it is read from its row, and [`Materialize::labelled`] / [`ForStage::labelled`] say
+//! whether the row needs its own label (`as("#w<k>")`, `as("x")` / `as("#f<k>")`) because a
+//! read comes after a later stage left the row.
 //!
 //! **Phase 2 seam.** The planner takes an optional anchor binding (always `None` in stage 1a):
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a
@@ -70,7 +73,7 @@ pub(crate) const ANCHOR_VARIABLE: &str = "";
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalPlan {
     /// The match pipeline of the first segment: every component in emission order (empty when
-    /// the query starts with `OPTIONAL MATCH`).
+    /// the query does not start with `MATCH`: it starts from one unit row).
     pub(crate) ops: Vec<Op>,
     /// The later segments in order (empty for a stage 1a query).
     pub(crate) stages: Vec<Stage>,
@@ -128,6 +131,22 @@ pub(crate) enum Stage {
     },
     /// A materializing `WITH` (decision C2).
     Materialize(Materialize),
+    /// `FOR` / `UNWIND` (stage 2a, design mechanism 2): one row per item of the list.
+    For(ForStage),
+}
+
+/// `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]`: every row becomes one row per list item
+/// (`gql:for`). Without an ordinal the row is the item itself (its variable reads the current
+/// object); with one it is the record `{x, i}`, read like the row of a materializing `WITH`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ForStage {
+    /// The segment (index into [`BoundQuery::segments`], a `Segment::For` holding the variable,
+    /// the list and the ordinal).
+    pub(crate) segment: usize,
+    /// Whether the row needs a path label: a column is read after a later stage left the row.
+    /// Without an ordinal the label is the item variable's own (`as("x")`, read as a label),
+    /// with one the record's `as("#f<k>")` (read as `Binding::RowColumn`).
+    pub(crate) labelled: bool,
 }
 
 /// A materializing `WITH`: every row becomes its row map.

@@ -1395,58 +1395,6 @@ fn queries_without_match_start_from_a_unit_row() {
 }
 
 #[test]
-fn for_and_queries_without_match_are_refused_after_binding_until_planned() {
-    for (query, text, what) in [
-        ("RETURN 1", "RETURN", "a query without MATCH"),
-        ("RETURN $a AS a", "RETURN", "a query without MATCH"),
-        ("LET x = 1 RETURN x", "LET", "a query that starts with LET"),
-        (
-            "with 1 AS x RETURN x",
-            "with",
-            "a query that starts with WITH",
-        ),
-        ("FOR x IN [1] RETURN x", "FOR", "FOR"),
-        ("UNWIND [1] AS x RETURN x", "UNWIND", "UNWIND"),
-        ("MATCH (a) FOR x IN [1] RETURN a", "FOR", "FOR"),
-        (
-            "MATCH (a) WITH a UNWIND [1] AS x RETURN a",
-            "UNWIND",
-            "UNWIND",
-        ),
-        (
-            "FOR x IN [1] WITH ORDINALITY i MATCH (a) RETURN a",
-            "FOR",
-            "FOR",
-        ),
-    ] {
-        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
-        let f = failure(query, refuse_unplanned(&parsed, &bound).map(|()| bound));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000", "{query}");
-        assert_eq!(f.text, text, "{query}");
-        assert_eq!(
-            f.message,
-            format!("{what} is not yet supported in this version"),
-            "{query}"
-        );
-        let alternative = f.alternative.unwrap_or_default();
-        assert!(
-            alternative.contains("inject(") || alternative.contains("unfold()"),
-            "{query}: {alternative}"
-        );
-    }
-    for query in [
-        "MATCH (a) RETURN a",
-        "OPTIONAL MATCH (a) LET x = 1 WITH a, x LIMIT 1 RETURN a",
-    ] {
-        let parsed = parse(query).unwrap();
-        let bound = bind(&parsed).unwrap();
-        assert!(refuse_unplanned(&parsed, &bound).is_ok(), "{query}");
-    }
-}
-
-#[test]
 fn binding_never_panics_on_stage_2a_queries() {
     let pieces = [
         "",
@@ -1482,7 +1430,8 @@ fn binding_never_panics_on_stage_2a_queries() {
                 let src = format!("{p} {f} {t}");
                 if let Ok(parsed) = parse(&src) {
                     if let Ok(bound) = bind(&parsed) {
-                        let _ = refuse_unplanned(&parsed, &bound);
+                        let _ =
+                            crate::gql::planner::plan(&bound, &crate::gql::planner::NoFacts, None);
                     }
                     let _ = bind_with_parameters(&parsed, ["p"]);
                 }

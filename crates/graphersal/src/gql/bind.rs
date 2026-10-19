@@ -113,10 +113,6 @@
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable.
 //!
-//! [`refuse_unplanned`] is the temporary post-bind guard (as in stage 1b): until the planner and
-//! the lowering handle them (2a.T4) it refuses, after binding, a `FOR` / `UNWIND` and a query
-//! that starts without `MATCH`, with kind `NotYet` and the messages they had before stage 2a.
-//!
 //! # Limits (kind `Limit`, `54001`)
 //!
 //! One `MATCH` clause holds at most [`MAX_MATCH_EDGES`] edge patterns over all its
@@ -288,10 +284,6 @@ pub(crate) enum Segment {
 
 /// A bound `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]` (Cypher `UNWIND list AS x`).
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "planned and lowered from 2a.T4 on")
-)]
 pub(crate) struct BoundFor {
     /// The binding of the item (column [`FOR_ITEM`]).
     pub(crate) variable: BindingId,
@@ -580,57 +572,6 @@ fn keyword_span(span: Span, len: usize) -> Span {
         end: span.start.saturating_add(len).min(span.end),
         ..span
     }
-}
-
-/// Refuses, after binding, what the planner and the lowering do not handle yet (module docs,
-/// "Errors"): a query that starts without `MATCH`, then the first `FOR` / `UNWIND` (kind
-/// `NotYet`, the messages these had before stage 2a). Called by the lowering between binding and
-/// planning; it goes away with 2a.T4.
-pub(crate) fn refuse_unplanned(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    unplanned(query, bound).map_err(|e| e.into_error(&query.source))
-}
-
-fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
-    if bound.unit
-        && let Some(e) = leading_not_yet(query)
-    {
-        return Err(e);
-    }
-    let first_for = bound.segments.iter().find_map(|segment| match segment {
-        Segment::For(bound) => Some(bound),
-        Segment::Match(_) | Segment::Optional(_) | Segment::With(_) => None,
-    });
-    if let Some(clause) = first_for {
-        let (keyword, len) = if clause.unwind {
-            ("UNWIND", 6)
-        } else {
-            ("FOR", 3)
-        };
-        return Err(not_yet(
-            keyword_span(clause.span, len),
-            keyword,
-            "Gremlin unfold(), for example g.inject([1, 2, 3]).unfold()",
-        ));
-    }
-    Ok(())
-}
-
-/// The "not yet" error of a query that starts without `MATCH`; `None` when it starts with
-/// `[OPTIONAL] MATCH` or `FOR` (refused as a `FOR`).
-fn leading_not_yet(query: &Query) -> Option<Box<GqlErrorBuilder>> {
-    const ALTERNATIVE: &str =
-        "start with a MATCH clause, or use Gremlin inject(), for example g.inject(1)";
-    let (span, what) = match query.stages.first() {
-        Some(Stage::Match(_) | Stage::For(_)) => return None,
-        None => (keyword_span(query.ret.span, 6), "a query without MATCH"),
-        Some(Stage::Let(clause)) => (keyword_span(clause.span, 3), "a query that starts with LET"),
-        Some(Stage::With(with)) => (keyword_span(with.span, 4), "a query that starts with WITH"),
-        Some(Stage::Filter(clause)) => (
-            keyword_span(clause.span, 6),
-            "a query that starts with FILTER",
-        ),
-    };
-    Some(not_yet(span, what, ALTERNATIVE))
 }
 
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {

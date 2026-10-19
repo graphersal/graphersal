@@ -13,7 +13,6 @@ use crate::traversal::optimizer::path_analysis::PathRequirement;
 use crate::*;
 
 /// The position variable of `FOR x IN list WITH ORDINALITY i` / `WITH OFFSET i`.
-#[allow(dead_code)] // built by the `FOR` lowering (2a.T4); until then only by the step tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GqlOrdinal {
     /// The variable name as written.
@@ -25,7 +24,7 @@ pub(crate) struct GqlOrdinal {
 /// Evaluates the list of a GQL `FOR x IN list` (Cypher `UNWIND list AS x`) on each traverser
 /// and emits one traverser per item, in list order: duplicates and `NULL` items are rows of
 /// their own (an item `NULL` is a row with `x = NULL`). A `NULL` list gives no row; a value
-/// that is not a list gives one row of that value (design E1, Neo4j's `UNWIND`; [ISO]: GQL may
+/// that is not a list gives one row of that value (design E1, Neo4j's `UNWIND`; \[ISO\]: GQL may
 /// make it a type error). A list item is the value `gql:project` would hold for it: an element
 /// stays the live handle, a nested list an array, a map a record.
 ///
@@ -145,7 +144,6 @@ impl<S: GraphStorage> StepGqlFor<S> {
     }
 }
 
-#[allow(dead_code)] // built by the `FOR` lowering (2a.T4); until then only by the step tests.
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:for(variable IN list)`; see [`StepGqlFor`].
     pub(crate) fn gql_for(
@@ -163,7 +161,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     }
 }
 
-#[allow(dead_code)] // built by the `FOR` lowering (2a.T4); until then only by the step tests.
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:for(variable IN list)`; see [`StepGqlFor`].
     pub(crate) fn gql_for(

@@ -40,6 +40,10 @@
 //! | a later `MATCH` continuing from a `WITH` column | `gql:bind("a")` (moves to the element the column holds; `NULL` or not an element: no row); a join, edge join or trail check against a column is `gql:filter` comparing the current element with the column |
 //! | `OPTIONAL MATCH` | `optional(__.<part>)`, the part's own `WHERE` inside; a row it does not match continues unchanged and its variables read `NULL` (absent labels); after it every read goes through a label (no `Binding::Current`) |
 //! | a leading `OPTIONAL MATCH` | `inject(0).optional(__.v()...)`: one unit row (decision C13) |
+//! | a query that starts with `FOR`, `LET`, `WITH` or `RETURN` (design M1, E4) | `inject(0)` first: one unit row that holds no binding (`RETURN 1 AS x` is `inject(0).gql:project("x")`); a leading `LET` / projecting `WITH` followed by `MATCH` needs none (substituted, the `MATCH` starts the query) |
+//! | `FOR x IN list` (Cypher `UNWIND list AS x`; design mechanism 2) | `gql:for("x IN list")`: one derived traverser per item, the item itself the current object (`Binding::Current` on its row, `as("x")` only when read after a later step left it, read as that label); `NULL` list no row, a non-list one row (E1) |
+//! | `FOR x IN list WITH ORDINALITY i` / `WITH OFFSET i` | `gql:for(".. WITH ORDINALITY i")`: the record `{x, i}`, read like a materializing `WITH` row (`Binding::Column`, `Binding::RowColumn` through `as("#f<k>")` only when read after leaving it) |
+//! | a later `MATCH` continuing from a `FOR` item (design E3) | `gql:bind("x")` (an item that is not an element of the pattern's kind, `NULL` included: no row; never a bare `out()` on the item); a join or trail check against it is `gql:filter` as for a `WITH` column |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
@@ -72,7 +76,9 @@
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (`NEXT`, `UNION`, subqueries, quantified path patterns, shortest
-//! paths, `nodes()` / `relationships()`, ...) and the binder.
+//! paths, ...) and the binder. A `MATCH` after `FOR` that compares a node with the item
+//! (`FOR id IN $ids MATCH (n) WHERE element_id(n) = id`) is still a mid-traversal scan plus a
+//! filter per row; the correlated lookup `gql:lookup` (design M3) comes next.
 //!
 //! # Aggregation
 //!
@@ -91,14 +97,14 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters, refuse_unplanned,
+    SortKey, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    ElementFilters, Expand, LogicalPlan, Materialize, Op, PushOp, PushOperand, Pushdown, ResultOp,
-    Stage, and_factors, label_disjuncts,
+    ElementFilters, Expand, ForStage, LogicalPlan, Materialize, Op, PushOp, PushOperand, Pushdown,
+    ResultOp, Stage, and_factors, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, PathPart, RowExpr, eval_error};
@@ -108,6 +114,7 @@ use crate::traversal::step::GraphStep;
 use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateColumn;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
+use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::value::{Number, P, PValue};
 use crate::{
@@ -117,7 +124,9 @@ use crate::{
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` and `OPTIONAL MATCH`
-    /// patterns, `WHERE`, the linear pipeline `LET`, `FILTER` and `WITH` (Cypher), `RETURN`
+    /// patterns, `WHERE`, the linear pipeline `LET`, `FILTER`, `WITH` (Cypher) and `FOR x IN
+    /// list [WITH ORDINALITY i]` (Cypher `UNWIND list AS x`), a query that starts without
+    /// `MATCH` (`RETURN 1 + 2 AS x`, `FOR id IN $ids MATCH ..`), `RETURN`
     /// (mandatory; `RETURN *` returns every named variable), `ORDER BY`, `OFFSET` (Cypher `SKIP`)
     /// and `LIMIT`, and the aggregates `count`, `sum`, `avg`, `min`, `max` and `collect_list`
     /// (Cypher `collect`) in `RETURN` and `WITH`, grouped by the items without an aggregate
@@ -247,14 +256,16 @@ pub(crate) fn rhai_map_key(name: &str) -> String {
 }
 
 /// Where a step runs: the binding the traverser stands on (read as `Binding::Current`) and the
-/// materializing `WITH` whose row map is the current object (its columns read as
-/// `Binding::Column`). Every other binding is read through its path label, a column of a row
-/// left behind through the row's label (`Binding::RowColumn`).
+/// materializing `WITH` or `FOR` whose row is the current object (its columns read as
+/// `Binding::Column`; the item of a `FOR` without an ordinal, which is the row itself, as
+/// `Binding::Current`). Every other binding is read through its path label, a column of a row
+/// left behind through the row's label (`Binding::RowColumn`; the item of a `FOR` without an
+/// ordinal as `Binding::Label` of its row label).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Site {
     /// The binding the traverser stands on.
     current: Option<BindingId>,
-    /// The segment of the materializing `WITH` whose row is the current object.
+    /// The segment of the materializing `WITH` or `FOR` whose row is the current object.
     row: Option<usize>,
     /// The `OPTIONAL MATCH` segment whose part the step runs in: a group variable of that part
     /// reads its list there without the part's anchor (the part matched so far).
@@ -271,7 +282,7 @@ impl Site {
         }
     }
 
-    /// On the row of the materializing `WITH` of segment `segment`.
+    /// On the row of the materializing `WITH` or `FOR` of segment `segment`.
     fn row(segment: usize) -> Self {
         Site {
             current: None,
@@ -285,7 +296,8 @@ impl Site {
 enum Instr<S: GraphStorage> {
     /// `v()`.
     Scan,
-    /// `inject(0)`: the one unit row a leading `OPTIONAL MATCH` starts from (decision C13).
+    /// `inject(0)`: the one unit row a query that does not start with `MATCH` starts from
+    /// (decision C13, design M1).
     Unit,
     /// `has_label(labels)`.
     HasLabel(Vec<String>),
@@ -299,9 +311,17 @@ enum Instr<S: GraphStorage> {
     RowCheck(RowExpr<S>),
     /// `as(label)` of the binding, emitted only when a label is needed.
     Label(BindingId),
-    /// `as("#w<k>")` of the row of the materializing `WITH` of segment `k`, emitted only when a
-    /// later step reads the row after leaving it (`Binding::RowColumn`).
+    /// `as("#w<k>")` of the row of the materializing `WITH` of segment `k` (of a `FOR`:
+    /// `as("#f<k>")` on its record, `as("x")` on the item itself without an ordinal), emitted
+    /// only when a later step reads the row after leaving it (`Binding::RowColumn`).
     RowLabel(usize),
+    /// `gql:for(variable IN list)` at `site` (`FOR` / `UNWIND`, design mechanism 2).
+    For {
+        list: RowExpr<S>,
+        site: Site,
+        variable: CompactString,
+        ordinal: Option<GqlOrdinal>,
+    },
     /// `gql:project(columns)` at `site`.
     Project {
         columns: Vec<GqlColumn<S>>,
@@ -393,8 +413,11 @@ struct Lowered<S: GraphStorage> {
     columns: Vec<Option<ColumnRef>>,
     /// The row label of each segment (`#w<k>`; used only for a materializing `WITH`).
     row_labels: Vec<CompactString>,
-    /// Whether the row of each segment gets `as("#w<k>")`.
+    /// Whether the row of each segment gets its row label.
     rows_labelled: Vec<bool>,
+    /// Per segment: a `FOR` without an ordinal, whose row is the item itself (its item reads
+    /// `Binding::Current` on the row, `Binding::Label` of the row label after it).
+    items: Vec<bool>,
     /// Per binding: the `OPTIONAL MATCH` part and the anchor of a group variable (`None`: not a
     /// group variable).
     groups: Vec<Option<GroupRead>>,
@@ -466,6 +489,13 @@ impl<S: GraphStorage> Lowered<S> {
             };
         }
         match self.columns.get(slot).copied().flatten() {
+            Some(column) if self.items.get(column.segment).copied().unwrap_or(false) => {
+                if site.row == Some(column.segment) {
+                    Binding::Current
+                } else {
+                    Binding::Label(self.row_label(column.segment))
+                }
+            }
             Some(column) if site.row == Some(column.segment) => Binding::Column(column.column),
             Some(column) => Binding::RowColumn {
                 label: self.row_label(column.segment),
@@ -549,6 +579,18 @@ impl<S: GraphStorage> Lowered<S> {
                 Instr::Project { columns, site } => {
                     g.gql_project(Arc::clone(&self.query), columns, self.bindings(site))
                 }
+                Instr::For {
+                    list,
+                    site,
+                    variable,
+                    ordinal,
+                } => g.gql_for(
+                    Arc::clone(&self.query),
+                    variable,
+                    list,
+                    self.bindings(site),
+                    ordinal,
+                ),
                 Instr::Aggregate {
                     columns,
                     calls,
@@ -744,6 +786,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Unit
             | Instr::RowLabel(_)
             | Instr::Project { .. }
+            | Instr::For { .. }
             | Instr::Aggregate { .. }
             | Instr::Distinct
             | Instr::Order { .. }
@@ -779,6 +822,14 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
+    ) -> Self;
+    fn gql_for(
+        self,
+        query: Arc<str>,
+        variable: CompactString,
+        list: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        ordinal: Option<GqlOrdinal>,
     ) -> Self;
     fn gql_distinct(self) -> Self;
     fn gql_order(self, query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>)
@@ -844,6 +895,16 @@ macro_rules! sink {
                 bindings: Arc<[Binding]>,
             ) -> Self {
                 self.gql_aggregate(query, columns, calls, bindings)
+            }
+            fn gql_for(
+                self,
+                query: Arc<str>,
+                variable: CompactString,
+                list: RowExpr<S>,
+                bindings: Arc<[Binding]>,
+                ordinal: Option<GqlOrdinal>,
+            ) -> Self {
+                self.gql_for(query, variable, list, bindings, ordinal)
             }
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
@@ -925,7 +986,6 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    refuse_unplanned(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -1024,8 +1084,9 @@ impl<'q> Lowering<'q> {
 
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
-        // A query starting with `OPTIONAL MATCH` has no first segment: one unit row.
-        if self.plan.ops.is_empty() {
+        // A query that does not start with `MATCH` (`OPTIONAL MATCH`, `FOR`, `WITH`, `RETURN`,
+        // or the conjuncts of a leading `LET` / `FILTER` pipeline) starts from one unit row.
+        if !matches!(self.plan.ops.first(), Some(Op::Scan(_) | Op::Anchor(_))) {
             instrs.push(Instr::Unit);
         }
         let mut site = self.ops(&self.plan.ops, Site::default(), &mut instrs)?;
@@ -1043,6 +1104,7 @@ impl<'q> Lowering<'q> {
                     Site::default()
                 }
                 Stage::Materialize(m) => self.materialize(m, site, &mut instrs)?,
+                Stage::For(f) => self.for_stage(f, site, &mut instrs)?,
             };
         }
         let bound = self.bound;
@@ -1057,6 +1119,12 @@ impl<'q> Lowering<'q> {
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
         let (mut labelled, rows_labelled) = self.labelled(&instrs, &columns);
+        let items = self
+            .bound
+            .segments
+            .iter()
+            .map(|segment| matches!(segment, Segment::For(f) if f.ordinal.is_none()))
+            .collect();
         let (groups, part_labels, anchors) = self.groups(&labels, &mut labelled);
         let inner_labels = self.inner_labels(&labels);
         let paths = self.paths(&labels, &inner_labels, &groups, &anchors);
@@ -1068,6 +1136,7 @@ impl<'q> Lowering<'q> {
             columns,
             row_labels,
             rows_labelled,
+            items,
             groups,
             part_labels,
             inner_labels,
@@ -1258,6 +1327,40 @@ impl<'q> Lowering<'q> {
         }
         instrs.push(Instr::RowLabel(m.segment));
         Ok(row)
+    }
+
+    /// Lowers a `FOR` / `UNWIND` at `site`: `gql:for` over its list (read at `site`), then the
+    /// row label (emitted only when read later). Returns the row's site: the item (or the
+    /// record `{x, i}`) is the current object.
+    fn for_stage<S: GraphStorage>(
+        &self,
+        f: &ForStage,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(Segment::For(bound_for)) = self.bound.segments.get(f.segment) else {
+            return Err(self.unlowered());
+        };
+        let name = |id: BindingId| {
+            self.bound
+                .binding(id)
+                .and_then(|b| b.name.as_ref())
+                .map(|n| CompactString::from(n.name.as_str()))
+                .unwrap_or_default()
+        };
+        let list = self.compile(&bound_for.list, None, &[])?;
+        let ordinal = bound_for.ordinal.map(|(kind, id)| GqlOrdinal {
+            name: name(id),
+            kind,
+        });
+        instrs.push(Instr::For {
+            list,
+            site,
+            variable: name(bound_for.variable),
+            ordinal,
+        });
+        instrs.push(Instr::RowLabel(f.segment));
+        Ok(Site::row(f.segment))
     }
 
     /// The error of a plan part the lowering does not emit (the binder refuses those queries
@@ -1672,10 +1775,12 @@ impl<'q> Lowering<'q> {
         labelled.resize(n, false);
         let mut rows = vec![false; self.bound.segments.len()];
         for stage in &self.plan.stages {
-            if let Stage::Materialize(m) = stage
-                && m.labelled
-                && let Some(flag) = rows.get_mut(m.segment)
-            {
+            let (segment, labelled) = match stage {
+                Stage::Materialize(m) => (m.segment, m.labelled),
+                Stage::For(f) => (f.segment, f.labelled),
+                Stage::Match { .. } | Stage::Optional { .. } => continue,
+            };
+            if labelled && let Some(flag) = rows.get_mut(segment) {
                 *flag = true;
             }
         }
@@ -1749,7 +1854,7 @@ impl<'q> Lowering<'q> {
         let mut reversed = vec![false; self.bound.bindings.len()];
         let stage_ops = self.plan.stages.iter().filter_map(|stage| match stage {
             Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
-            Stage::Materialize(_) => None,
+            Stage::Materialize(_) | Stage::For(_) => None,
         });
         for op in std::iter::once(self.plan.ops.as_slice())
             .chain(stage_ops)
@@ -1872,8 +1977,10 @@ impl<'q> Lowering<'q> {
             .collect()
     }
 
-    /// The row label of each materializing `WITH` segment, `#w<k>` (more `#` in front while it
-    /// collides with a binding's label); empty for the other segments.
+    /// The row label of each materializing `WITH` segment, `#w<k>`, and of each `FOR` with an
+    /// ordinal, `#f<k>` (more `#` in front while it collides with a binding's label); of a `FOR`
+    /// without an ordinal its item's own label (the row is the item); empty for the other
+    /// segments.
     fn row_labels(&self, labels: &[CompactString]) -> Vec<CompactString> {
         self.bound
             .segments
@@ -1887,9 +1994,17 @@ impl<'q> Lowering<'q> {
                     }
                     CompactString::from(label)
                 }
-                Segment::Match(_) | Segment::Optional(_) | Segment::For(_) => {
-                    CompactString::default()
+                Segment::For(f) if f.ordinal.is_none() => {
+                    labels.get(f.variable.0).cloned().unwrap_or_default()
                 }
+                Segment::For(_) => {
+                    let mut label = format!("#f{k}");
+                    while labels.iter().any(|l| l.as_str() == label) {
+                        label.insert(0, '#');
+                    }
+                    CompactString::from(label)
+                }
+                Segment::Match(_) | Segment::Optional(_) => CompactString::default(),
             })
             .collect()
     }
@@ -2026,6 +2141,10 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 }
                 marks.read(&mut slots, *site);
             }
+            Instr::For { list, site, .. } => {
+                list.variables(&mut slots);
+                marks.read(&mut slots, *site);
+            }
             Instr::Aggregate {
                 columns,
                 calls,
@@ -2077,6 +2196,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
         match instr {
             Instr::Filter { site, .. }
             | Instr::Project { site, .. }
+            | Instr::For { site, .. }
             | Instr::Aggregate { site, .. }
             | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),

@@ -27,7 +27,9 @@
 //! 6. **lowering** (`lower.rs`, its module docs list the form of every construct): the planned
 //!    query to `GraphStep`s, existing steps plus internal `gql:*`
 //!    steps (`gql:filter`, `gql:project`, `gql:order`, `gql:not_self_loop`, the `gql:error`
-//!    marker; for stage 1b `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:trail`; their shared
+//!    marker; for stage 1b `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:trail`; for stage 2a
+//!    `gql:for` (`FOR` / `UNWIND`) and the unit row `inject(0)` of a query that does not start
+//!    with `MATCH`; their shared
 //!    run-time part is `runtime.rs`, the aggregation semantics `aggregate.rs`), handed to the
 //!    optimizer like any other plan.
 

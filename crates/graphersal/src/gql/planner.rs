@@ -23,10 +23,17 @@
 //!   the start of the segment (the first segment keeps the stage 1a rule: after the first scan);
 //! - a materializing `WITH` is a [`Stage::Materialize`]: its result pipeline (`Aggregate` when
 //!   a column aggregates, else `Project`; then `DISTINCT`, `ORDER BY`, `OFFSET`, `LIMIT`) and
-//!   its `WHERE` conjuncts; its columns are bound after it.
+//!   its `WHERE` conjuncts; its columns are bound after it;
+//! - a `FOR` / `UNWIND` is a [`Stage::For`]; its item and ordinal are bound after it (columns of
+//!   its row, like a materializing `WITH`'s: a later `MATCH` written with the item as a node
+//!   continues from it through `gql:bind`, design E3).
+//!
+//! A query that does not start with `MATCH` starts from one unit row (design M1): the first
+//! segment's operations are then empty (or only the conjuncts of a leading `LET` / `FILTER`
+//! pipeline), and the lowering emits `inject(0)` first.
 //!
 //! The current element after a segment is the one its last operation reached; after an
-//! `OPTIONAL MATCH` or a materializing `WITH` there is none.
+//! `OPTIONAL MATCH`, a materializing `WITH` or a `FOR` there is none.
 //!
 //! # Start node of a component
 //!
@@ -73,14 +80,15 @@
 //! every node and edge of a read path variable's pattern (`path`), and, from a pass over the
 //! finished plan in execution order, every read of a pattern binding after an `OPTIONAL MATCH`
 //! part that ended after the binding was bound (`optional`; the witness of a part whose group
-//! variable is read after it too) and every read of a materializing `WITH` column after a later
-//! stage left its row ([`Materialize::labelled`]).
+//! variable is read after it too) and every read of a materializing `WITH` or `FOR` column after
+//! a later stage left its row ([`Materialize::labelled`], [`ForStage::labelled`]).
 
 use super::ast::{EdgeDirection, Quantifier};
 use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Segment};
 use super::plan::{
-    EdgeLabels, ElementFilters, Expand, Labelling, LogicalPlan, Materialize, Op, Pushdown,
-    ResultOp, Resume, Scan, Stage, and_factors, classify_all, element_filters, scan_labels,
+    EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan, Materialize, Op,
+    Pushdown, ResultOp, Resume, Scan, Stage, and_factors, classify_all, element_filters,
+    scan_labels,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -295,8 +303,18 @@ impl<'q> Planner<'q> {
                     stages.push(Stage::Materialize(self.materialize(index, with)));
                     current = None;
                 }
-                // Refused before planning (`bind::refuse_unplanned`) until 2a.T4 plans it.
-                Segment::For(_) => current = None,
+                Segment::For(bound_for) => {
+                    // The item and the ordinal are bound after it (columns of its row).
+                    self.bind(bound_for.variable);
+                    if let Some((_, ordinal)) = bound_for.ordinal {
+                        self.bind(ordinal);
+                    }
+                    stages.push(Stage::For(ForStage {
+                        segment: index,
+                        labelled: false,
+                    }));
+                    current = None;
+                }
             }
         }
         self.mark_static();
@@ -917,6 +935,14 @@ impl<'q> Planner<'q> {
                     }
                     self.read_all(&mut reads, &mut at);
                 }
+                Stage::For(f) => {
+                    // The list is read on the row before the `FOR`.
+                    if let Some(Segment::For(bound_for)) = bound.segments.get(f.segment) {
+                        reads.extend_from_slice(&bound_for.bindings);
+                    }
+                    self.read_all(&mut reads, &mut at);
+                    at.row = Some(f.segment);
+                }
             }
         }
         for column in &bound.columns {
@@ -929,6 +955,7 @@ impl<'q> Planner<'q> {
         for stage in stages.iter_mut() {
             match stage {
                 Stage::Materialize(m) => m.labelled = at.rows.contains(&m.segment),
+                Stage::For(f) => f.labelled = at.rows.contains(&f.segment),
                 Stage::Optional {
                     segment,
                     witness: Some(w),
@@ -1004,9 +1031,9 @@ impl<'q> Planner<'q> {
 struct Position {
     /// The segment of the last `OPTIONAL MATCH` part that ended before it.
     optional: Option<usize>,
-    /// The segment of the materializing `WITH` whose row is the current object.
+    /// The segment of the materializing `WITH` or `FOR` whose row is the current object.
     row: Option<usize>,
-    /// The materializing `WITH` segments whose rows are read after they were left.
+    /// The materializing `WITH` and `FOR` segments whose rows are read after they were left.
     rows: Vec<usize>,
     /// The `OPTIONAL MATCH` segments whose group variables are read after them.
     witnesses: Vec<usize>,
