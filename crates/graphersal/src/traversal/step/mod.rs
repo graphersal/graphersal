@@ -379,8 +379,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   modulators, ...) works on what earlier steps produced, so `g.inject(1, 2).sum()` needs
     ///   no permission. An element handle held from an earlier, allowed run is read without a
     ///   further request (`g.inject(v).values("name")`). The internal GQL steps (`gql:filter`,
-    ///   `gql:project`, `gql:order`, `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:trail`,
-    ///   `gql:not_self_loop`, the `gql:error` marker) are value-only too: they read the
+    ///   `gql:project`, `gql:order`, `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:for`,
+    ///   `gql:trail`, `gql:not_self_loop`, the `gql:error` marker) are value-only too: they read the
     ///   properties and labels of the elements the lowered `v()` / adjacency steps reached (and
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
     ///   exactly what its Gremlin equivalent asks.
@@ -610,11 +610,11 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                 | "gql:order" | "gql:distinct",
                 _,
             ) => flow,
-            // The GQL row of an aggregation and the element a variable holds: the plan states
-            // neither (a GQL query writes nothing, so no write ever reads this flow).
-            GraphStep::FlatBarrier("gql:aggregate", _) | GraphStep::FlatMap("gql:bind", _) => {
-                AccessFlow::default()
-            }
+            // The GQL row of an aggregation, the element a variable holds and the items of a
+            // `FOR` list: the plan states none of them (a GQL query writes nothing, so no write
+            // ever reads this flow).
+            GraphStep::FlatBarrier("gql:aggregate", _)
+            | GraphStep::FlatMap("gql:bind" | "gql:for", _) => AccessFlow::default(),
             GraphStep::Init(_, _)
             | GraphStep::Append(_, _)
             | GraphStep::Map(_, _)

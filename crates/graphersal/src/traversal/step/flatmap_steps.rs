@@ -10,6 +10,8 @@ mod step_flat_map;
 pub(crate) mod step_glob_path;
 #[cfg(feature = "gql")]
 mod step_gql_bind;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_for;
 mod step_in;
 mod step_in_e;
 mod step_in_v;

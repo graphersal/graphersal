@@ -61,6 +61,8 @@ use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_pro
 use crate::{CompactString, ElementKind, ElementProperty};
 
 #[cfg(test)]
+mod for_step_tests;
+#[cfg(test)]
 mod step_tests;
 #[cfg(test)]
 mod tests;
