@@ -8200,4 +8200,411 @@ mod gql {
             assert_eq!(locked.traversal().gql(query).to_list().unwrap().len(), rows);
         }
     }
+
+    // ----- stage 1c: help sweep (rule 6) -----
+
+    /// One test per new GQLSTATUS of stage 1c: a data exception (raised by the row it failed
+    /// on), the caret under the offending argument, and a help that leads with the function
+    /// that fixes it, keeps the general data advice, and whose examples run.
+    #[test]
+    fn gql_1c_data_statuses_name_the_fix() {
+        for (expr, status, caret, advice) in [
+            (
+                "CAST(p.name AS INTEGER)",
+                "22018",
+                "p.name",
+                "CAST is strict: text that is not a value of the target type fails the query. \
+                 The Cypher conversions are lenient: toInteger(x), toFloat(x) and toBoolean(x) \
+                 give NULL for such text, and toIntegerOrNull(x), toFloatOrNull(x) and \
+                 toBooleanOrNull(x) give NULL for a value of any other kind too",
+            ),
+            (
+                "substring(p.name, -1)",
+                "22011",
+                "-1",
+                "substring(s, start, length), left(s, n) and right(s, n) take non-negative \
+                 integers",
+            ),
+            (
+                "left(p.name, p.age - 30)",
+                "22011",
+                "p.age - 30",
+                "substring(s, start, length), left(s, n) and right(s, n)",
+            ),
+            (
+                "TRIM('ab' FROM p.name)",
+                "22027",
+                "'ab'",
+                "TRIM(c FROM s) removes one character c; to remove any of several characters \
+                 use btrim(s, chars), ltrim(s, chars) or rtrim(s, chars)",
+            ),
+            (
+                "ln(p.age - 29)",
+                "2201E",
+                "p.age - 29",
+                "ln(x), log(x) and log10(x) take a positive number, and log(base, x) also a \
+                 positive base other than 1",
+            ),
+            (
+                "log(1, p.age)",
+                "2201E",
+                "1",
+                "ln(x), log(x) and log10(x) take a positive number",
+            ),
+            (
+                "sqrt(p.age - 30)",
+                "2201F",
+                "p.age - 30",
+                "sqrt(x) takes a number >= 0, and power(x, y) cannot raise 0 to a negative power",
+            ),
+            (
+                "power(p.age - 29, -1)",
+                "2201F",
+                "power(p.age - 29, -1)",
+                "sqrt(x) takes a number >= 0",
+            ),
+            (
+                "range(1, p.age, 0)",
+                "22023",
+                "0",
+                "An argument is outside the values the function accepts: range() takes a step \
+                 other than 0, round() a precision >= 0 and one of the modes UP, DOWN, CEILING, \
+                 FLOOR, HALF_UP, HALF_DOWN or HALF_EVEN (upper case), replace() a limit >= 0 \
+                 and the list trim(list, n) an n >= 0",
+            ),
+            (
+                "round(p.age, 1, 'half_up')",
+                "22023",
+                "'half_up'",
+                "An argument is outside",
+            ),
+            (
+                "replace(p.name, 'a', 'b', -1)",
+                "22023",
+                "-1",
+                "An argument is outside",
+            ),
+            ("trim([1, 2], -1)", "22023", "-1", "An argument is outside"),
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}: {report}"
+            );
+            // The caret sits under the offending argument (or the call).
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.starts_with("  query:"))
+                .take(2)
+                .collect::<Vec<_>>();
+            let [source, carets] = caret_line[..] else {
+                panic!("no excerpt in {report}");
+            };
+            // Columns count characters (the excerpt may start with `…`).
+            let start = carets.find('^').expect("a caret");
+            let marked: String = source
+                .chars()
+                .skip(start)
+                .take(caret.chars().count())
+                .collect();
+            assert_eq!(marked, caret, "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+            // The general data advice stays.
+            assert!(
+                help.ends_with(
+                    "and compare values of one kind only (no implicit conversion between text \
+                     and numbers)."
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+    }
+
+    /// `+` / `||` of text and a number or a boolean names the conversions to text (rule 6:
+    /// stage 1c functions fix it); other kinds keep the general advice.
+    #[test]
+    fn gql_text_and_number_name_to_string_and_cast() {
+        for expr in [
+            "p.name + p.age",
+            "p.age + p.name",
+            "p.name || p.age",
+            "p.name || true",
+            "1.5 || p.name",
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string()),
+                "{report}"
+            );
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "Convert the number or boolean to text first, with toString(x) or CAST(x AS \
+                     STRING), and join text with ||, as in g.gql(\"MATCH (p:person) RETURN \
+                     p.name || ' is ' || toString(p.age) AS s\"); or compute with numbers only, \
+                     converting text with toInteger(x) or toFloat(x). A row of the data made"
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+        // A list and a number: no text involved, the general advice only.
+        for expr in ["[1] + p.age", "[1] || p.name", "p.age || 1"] {
+            let help = gql_help(&format!("MATCH (p:person) RETURN {expr} AS x"));
+            assert!(
+                help.starts_with("A row of the data made the marked expression fail."),
+                "{expr}: {help}"
+            );
+        }
+        // The message itself is unchanged.
+        let (_, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person {name: 'marko'}) RETURN p.name + 1")
+                .to_list()
+        });
+        assert!(
+            report.contains(
+                "+ joins two strings or adds two numbers, not a string and a number; a number is \
+                 never turned into text implicitly"
+            ),
+            "{report}"
+        );
+    }
+
+    /// A value a GQL function or `collect_list()` would build over
+    /// `traversal.max_materialized_bytes` is the resource-limit error (not a GQL root cause:
+    /// the limit and its option are the engine's), with advice on the GQL query instead of
+    /// the Gremlin materializing steps; the GQL function names survive camelCase.
+    #[test]
+    fn gql_materialization_limit_gives_gql_advice() {
+        let tail = |raised: u64| {
+            format!(
+                "or raise the limit for the query, \
+                 g.with(\"traversal.max_materialized_bytes\", {raised}).gql(..), for example \
+                 g.with(\"traversal.max_materialized_bytes\", {raised}).gql(\"MATCH (p:person) \
+                 RETURN collect_list(p.name) AS names\"). A host can lock this option with \
+                 ExecutionPolicy::with_locked(\"traversal.max_materialized_bytes\"). Setting it \
+                 is an administrative option: a script whose host restricts it needs Update on \
+                 that Option."
+            )
+        };
+        for query in [
+            "MATCH (p:person {name: 'marko'}) RETURN range(1, 100000) AS r",
+            "MATCH (p:person {name: 'marko'}) RETURN size(split(replace(p.name, '', p.name || \
+             p.name, 9223372036854775807), '')) AS n",
+            "MATCH (p), (q) RETURN collect_list(p.name) AS r",
+            "MATCH (p) WHERE size(range(1, 100000)) > 0 RETURN p",
+            "MATCH (p) WITH p ORDER BY toString(range(1, 100000)) RETURN p",
+            // gql:aggregate: a grouping key, an aggregate's argument, an item over aggregates.
+            "MATCH (p) RETURN size(range(1, 100000)) AS k, count(*) AS c",
+            "MATCH (p) RETURN count(range(1, 100000)) AS c",
+            "MATCH (p) RETURN size(range(1, count(*) * 100000)) AS c",
+        ] {
+            let (err, report) = gql_failure(|g| {
+                g.with("traversal.max_materialized_bytes", 1_000)
+                    .gql(query)
+                    .to_list()
+            });
+            match err.root_cause() {
+                TraverserError::ResourceLimitExceeded { limit, max, .. } => {
+                    assert_eq!(limit, "traversal.max_materialized_bytes", "{query}");
+                    assert_eq!(*max, Some(1_000), "{query}");
+                }
+                other => panic!("{query}: expected the limit error, got {other}"),
+            }
+            assert!(report.contains("Step #"), "{report}");
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "The gql() query built a value larger than \
+                     'traversal.max_materialized_bytes' allows (1000 bytes); this one needed at \
+                     least "
+                ),
+                "{query}: {help}"
+            );
+            assert!(
+                help.contains(
+                    "A function whose result can be larger than its arguments (range(), \
+                     split(), replace(), || and toString() of a list or map) and the list of \
+                     collect_list() are checked before they are built"
+                ),
+                "{help}"
+            );
+            assert!(help.ends_with(&tail(2_000)), "{query}: {help}");
+            assert!(!help.contains("fold()"), "{help}");
+            assert_examples_run(&help);
+        }
+        // Under camel spelling: the GQL function names as written, the Gremlin API respelled.
+        let (err, _) = gql_failure(|g| {
+            g.with("render.spelling", "camel")
+                .with("traversal.max_materialized_bytes", 1_000)
+                .gql("MATCH (p) RETURN collect_list(p.name) AS n, range(1, 1000) AS r")
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("the list of collect_list() are checked"),
+            "{help}"
+        );
+        assert!(help.contains("ExecutionPolicy::withLocked("), "{help}");
+        assert!(!help.contains("collectList"), "{help}");
+        // A Gremlin step after gql() that materializes keeps the Gremlin advice.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 100_000)
+                .gql("MATCH (p:person {name: 'marko'}) RETURN p.name AS n")
+                .select("n")
+                .repeat(__::path())
+                .times(60)
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with("A step had to materialize a value or buffer larger"),
+            "{help}"
+        );
+    }
+
+    /// The targeted not-yet / refused functions of stage 1c lead their help with the
+    /// alternative (an LLM reads the Help line and retries), and a misspelt conversion is
+    /// corrected.
+    #[test]
+    fn gql_1c_not_yet_functions_name_the_alternative() {
+        for (expr, kind, message, advice) in [
+            (
+                "rand()",
+                GqlErrorKind::Refused,
+                "rand() is not supported: a non-deterministic function",
+                "gql() functions are deterministic; sample rows with Gremlin after gql(), for \
+                 example g.gql(\"MATCH (n) RETURN n\").sample(1), or coin(0.5).",
+            ),
+            (
+                "sin(p.age)",
+                GqlErrorKind::NotYet,
+                "sin() (a trigonometric function) is not yet supported",
+                "Gremlin math() after gql(), for example g.gql(\"MATCH (n:person) RETURN n.age \
+                 AS a\").select(\"a\").math(\"sin(_)\").",
+            ),
+            (
+                "date('2020-01-01')",
+                GqlErrorKind::NotYet,
+                "date() (a date or time function) is not yet supported",
+                "dates and times are planned for version 0.2.0",
+            ),
+            (
+                "toIntegerList(p.tags)",
+                GqlErrorKind::NotYet,
+                "toIntegerList() (a list conversion function) is not yet supported",
+                "convert the items one by one in Gremlin after gql()",
+            ),
+            (
+                "normalize(p.name)",
+                GqlErrorKind::NotYet,
+                "normalize() (Unicode normalization) is not yet supported",
+                "store normalized text, or compare with lower() / upper().",
+            ),
+            (
+                "all(x IN [1] WHERE x > 0)",
+                GqlErrorKind::NotYet,
+                "all() (a list function that binds a variable inside the call) is not yet \
+                 supported",
+                "test the items in Gremlin after gql()",
+            ),
+            (
+                "elements(p)",
+                GqlErrorKind::NotYet,
+                "elements() (a GQL path function pending verification) is not yet supported",
+                "nodes(p) and relationships(p) return the vertices and the edges of a path.",
+            ),
+            (
+                "percentileCont(p.age, 0.5)",
+                GqlErrorKind::NotYet,
+                "percentileCont() (a statistical aggregate function) is not yet supported",
+                "collect the values with collect_list(x) and compute it after gql().",
+            ),
+            (
+                "p.age ^ 2",
+                GqlErrorKind::NotYet,
+                "the exponentiation operator `^` is not yet supported",
+                "use power(x, y), as in power(2, 10).",
+            ),
+            (
+                "exists(p.age)",
+                GqlErrorKind::NotYet,
+                "EXISTS is not yet supported",
+                "test a property with n.p IS NOT NULL",
+            ),
+            (
+                "SUBSTRING(p.name FROM 1 FOR 2)",
+                GqlErrorKind::Syntax,
+                "SUBSTRING(s FROM a FOR b) is SQL, not GQL",
+                "use substring(s, start, length) with a 0-based start, as in \
+                 substring('graph', 1, 3) = 'rap', or left(s, n) / right(s, n).",
+            ),
+        ] {
+            let query = format!("MATCH (p:person) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            let (actual, _) = kind_and_status(&err);
+            assert_eq!(actual, kind, "{query}: {report}");
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+        }
+        // The forms the advice names run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for query in [
+            "MATCH (p:person) RETURN power(2, 10) AS x",
+            "MATCH (p:person) WHERE p.age IS NOT NULL RETURN p.name",
+            "MATCH (p:person) RETURN substring('graph', 1, 3) = 'rap' AS x, left(p.name, 2) AS l",
+            "MATCH x = (a)-->(b) RETURN nodes(x), relationships(x)",
+        ] {
+            assert!(locked.traversal().gql(query).to_list().is_ok(), "{query}");
+        }
+        // A misspelt conversion: "did you mean" names the Cypher spelling.
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p) RETURN toInt(p.age)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Syntax, "42001".to_string())
+        );
+        assert!(report.contains("  did you mean: toInteger()"), "{report}");
+        let help = err.help().expect("help");
+        assert!(help.starts_with("Did you mean toInteger()? "), "{help}");
+    }
+
+    /// One camelCase rendering of the stage 1c advice: the GQL function names (also those that
+    /// are Gremlin steps, `replace`, `split`, `range`, and the Cypher ones such as
+    /// `toIntegerOrNull`) stay as written, the Gremlin steps of an alternative are respelled.
+    #[test]
+    fn gql_1c_advice_under_camel_case() {
+        let camel = |query: &'static str| {
+            let (err, _) =
+                gql_failure(move |g| g.with("render.spelling", "camel").gql(query).to_list());
+            err.help().expect("help")
+        };
+        let snake = |query: &'static str| gql_help(query);
+        for query in [
+            "MATCH (p:person {name: 'marko'}) RETURN CAST(p.name AS INTEGER)",
+            "MATCH (p:person {name: 'marko'}) RETURN TRIM('ab' FROM p.name)",
+            "MATCH (p:person {name: 'marko'}) RETURN range(1, 2, 0)",
+            "MATCH (p:person {name: 'marko'}) RETURN p.name + 1",
+        ] {
+            assert_eq!(camel(query), snake(query), "{query}");
+        }
+        let help = camel("MATCH (p:person {name: 'marko'}) RETURN CAST(p.name AS INTEGER)");
+        assert!(help.contains("toIntegerOrNull(x)"), "{help}");
+        assert!(help.contains("toInteger(p.name)"), "{help}");
+        // An alternative with Gremlin steps: respelled outside the GQL text.
+        let help = camel("MATCH (p) RETURN toIntegerList(p.tags)");
+        assert!(
+            help.contains(".select(\"t\").unfold().asNumber()"),
+            "{help}"
+        );
+        let help = camel("MATCH (p) RETURN percentileCont(p.age, 0.5)");
+        assert!(help.contains("collect_list(x)"), "{help}");
+    }
 }

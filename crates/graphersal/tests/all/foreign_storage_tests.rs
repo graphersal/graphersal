@@ -368,6 +368,64 @@ const GQL_CURATED_1B_ERRORS: &[&str] = &[
     r#"g.with("repeat.max_loops", 1).gql("MATCH (a)-[:created]-{1,}(b) RETURN count(*) AS c").toList()"#,
 ];
 
+/// Stage 1c GQL functions (feature `gql`): the ones that read the storage beyond the pattern
+/// (`keys` / `properties` and their order, `startNode` / `endNode` and `IS SOURCE OF` through
+/// `GraphStorage::edge_endpoints`, `nodes` / `relationships` of paths), the pure families on
+/// stored values, and data errors, limits and not-yet functions (the last six entries fail).
+#[cfg(feature = "gql")]
+const GQL_CURATED_1C: &[&str] = &[
+    // Elements: keys / properties (order kept), stored endpoints, either direction.
+    r#"g.gql("MATCH (n) RETURN element_id(n) AS id, keys(n) AS k, properties(n) AS p ORDER BY id").toList()"#,
+    r#"g.gql("MATCH ()-[e]->() RETURN element_id(e) AS id, keys(e) AS k, properties(e) AS p ORDER BY id").toList()"#,
+    r#"g.V("1").property("nick", ()).iterate(); g.V("1").property("zeta", 1).iterate(); g.gql("MATCH (n {name: 'marko'}) RETURN keys(n) AS k, properties(n) AS p").toList()"#,
+    r#"g.gql("MATCH (a {name: 'josh'})-[e]-(b) RETURN b.name AS b, startNode(e).name AS s, endNode(e).name AS t, a IS SOURCE OF e AS src, b IS DESTINATION OF e AS dst ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (a)<-[e:created]-(b) RETURN a.name AS a, element_id(startNode(e)) AS s, element_id(endNode(e)) AS t ORDER BY a, s").toList()"#,
+    r#"g.gql("MATCH (a)-[e]->(b) WHERE startNode(e) = a AND endNode(e) = b AND a IS NOT DESTINATION OF e RETURN count(*) AS c").toList()"#,
+    // Paths: nodes / relationships, quantified and either direction, zero length, NULL.
+    r#"g.gql("MATCH p = (a {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN element_id(b) AS b, length(p) AS l, nodes(p) AS n, relationships(p) AS r ORDER BY b, l").toList()"#,
+    r#"g.gql("MATCH p = (a {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN size(relationships(p)) AS l, element_id(head(relationships(p))) AS f, element_id(last(nodes(p))) AS z ORDER BY l, f, z").toList()"#,
+    r#"g.gql("MATCH p = (a {name: 'lop'})-[:created]-{0,2}(b) RETURN size(nodes(p)) AS n, size(relationships(p)) AS r, count(*) AS c ORDER BY n, r").toList()"#,
+    r#"g.gql("MATCH (a:person) OPTIONAL MATCH p = (a)-[:created]->(s) RETURN a.name AS a, nodes(p) IS NULL AS none ORDER BY a").toList()"#,
+    // Conversions, strings, numbers, lists on stored values.
+    r#"g.gql("MATCH (n) RETURN n.name AS n, toString(n.age) AS a, CAST(n.age AS FLOAT) AS f, toInteger(n.lang) AS l, toBooleanOrNull(n.name) AS b, toString([n.age, n.name]) AS t ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (n) RETURN n.name AS n, left(n.name, 2) AS l, right(n.name, 2) AS r, substring(n.name, 1, 2) AS s, reverse(n.name) AS v, split(n.name, 'o') AS p, replace(n.name, 'o', '0') AS x, btrim(n.name, 'mo') AS b, byte_length(n.name) AS y ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (n:person) RETURN n.name AS n, abs(n.age - 30) AS a, round(n.age / 7.0, 2) AS r, sqrt(n.age) AS q, ln(n.age) AS l, power(n.age, 2) AS p, mod(n.age, 7) AS m, sign(n.age - 30) AS s, floor(n.age / 3.0) AS f ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (n:person) RETURN n.name AS n, range(1, n.age / 10) AS r, tail(range(1, 3)) AS t, trim(range(1, 4), 1) AS d, isEmpty(n.name) AS e, nullif(n.age, 29) AS z ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (n:person) WITH n, round(avg(n.age), 1) AS a RETURN count(*) AS c, max(a) AS m").toList()"#,
+    // Failing: a data error per family, the materialization limit, a not-yet function.
+    r#"g.gql("MATCH (n) RETURN CAST(n.name AS INTEGER) AS x").toList()"#,
+    r#"g.gql("MATCH (n) RETURN substring(n.name, -1) AS x").toList()"#,
+    r#"g.gql("MATCH (n:person) RETURN ln(n.age - 29) AS x").toList()"#,
+    r#"g.gql("MATCH (n) RETURN startNode(n) AS x").toList()"#,
+    r#"g.with("traversal.max_materialized_bytes", 1000).gql("MATCH (n) RETURN range(1, 1000) AS x").toList()"#,
+    r#"g.gql("MATCH (n) RETURN elements(n) AS x").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_1c_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_1C {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise the functions, not fail on the way: only the error cases fail.
+    assert_eq!(failing, 6, "only the six error cases fail");
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_1b_errors_fail_the_same_way_on_both_storages() {

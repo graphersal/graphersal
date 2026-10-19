@@ -983,3 +983,91 @@ fn a_function_free_query_plans_as_before_and_a_function_conjunct_is_never_pushed
         ["'marko'"]
     );
 }
+
+/// The limit error `query` (with `$s`, a long string) fails with under `options`: the name of
+/// the resource limit at the root cause. Never a panic, never an allocation of the full result.
+fn limit_of(graph: &Arc<Graph>, options: &[(&str, i64)], query: &str) -> String {
+    let long = "x".repeat(100_000);
+    let lock = graph.read();
+    let mut g = lock.traversal();
+    for (key, value) in options {
+        g = g.with(*key, *value);
+    }
+    let error = g
+        .gql_with(query, [("s", ElementProperty::from(long.as_str()))])
+        .to_list()
+        .expect_err(query);
+    match error.root_cause() {
+        TraverserError::ResourceLimitExceeded { limit, .. } => limit.clone(),
+        other => panic!("{query}: expected a resource limit, got {other}"),
+    }
+}
+
+/// Design F6: a function whose result can outgrow its arguments (`range`, `replace`, `split`,
+/// `||`, `toString` of a list) asks for its size before it builds anything; a blow-up is the
+/// materialization error (the engine's default limit included), or the memory-budget error
+/// under a budget, in every clause, never a panic or an out-of-memory abort.
+#[test]
+fn blow_ups_are_refused_by_the_materialization_limit_and_the_memory_budget() {
+    let graph = modern();
+    let materialized = "traversal.max_materialized_bytes";
+    // Under the default limit (1 GiB native): results of 2^63 items or 10^10 bytes.
+    for query in [
+        "MATCH (n:person {name: 'marko'}) RETURN range(0, 9223372036854775807) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN size(range(-9223372036854775808, \
+         9223372036854775807)) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN replace($s, '', $s) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN size(replace($s, 'x', $s)) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN split(replace($s, 'x', $s), '') AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN toString(range(1, 100000000)) AS x",
+    ] {
+        assert_eq!(limit_of(&graph, &[], query), materialized, "{query}");
+    }
+    // Under a lower limit: every growing function, in every clause and inside aggregates.
+    let low = [(materialized, 100_000)];
+    for query in [
+        "MATCH (n:person {name: 'marko'}) RETURN split($s, '') AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN replace(n.name, '', $s, 9223372036854775807) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN $s || $s AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN $s + $s AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN toString(split($s, '')) AS x",
+        "MATCH (n) WHERE size(split($s, '')) > 0 RETURN n",
+        "MATCH (n) LET parts = split($s, '') RETURN size(parts) AS x",
+        "MATCH (n) WITH n, replace($s, 'x', 'yy') AS t RETURN size(t) AS x",
+        "MATCH (n) RETURN n.name AS name ORDER BY size(split($s, ''))",
+        "MATCH (n) RETURN size(split($s, '')) AS k, count(*) AS c",
+        "MATCH (n) RETURN count(split($s, '')) AS c",
+        "MATCH (n) RETURN max(size(range(1, 1000000))) AS c",
+        "MATCH (n) RETURN DISTINCT size(range(1, 1000000)) AS c",
+        "MATCH (n) OPTIONAL MATCH (n)-[:knows]->(f) RETURN size(split($s || f.name, '')) AS c",
+    ] {
+        assert_eq!(limit_of(&graph, &low, query), materialized, "{query}");
+    }
+    // Under a memory budget (the engine's estimate in this test binary: the graph's footprint
+    // plus what the query holds and is about to build) with the default materialization limit.
+    let footprint = graph.read().memory_usage().unwrap().total_bytes();
+    let budget = [("memory.limit", (footprint + 1_000_000) as i64)];
+    for query in [
+        "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 10000000)) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN size(replace($s, 'x', 'yyyyyyyyyyyyyyyyyyyy')) AS x",
+        "MATCH (n:person {name: 'marko'}) RETURN size(split($s, '')) AS x",
+    ] {
+        assert_eq!(limit_of(&graph, &budget, query), "memory.limit", "{query}");
+    }
+    // The same queries with a small enough input run under the same limits.
+    let lock = graph.read();
+    let rows = lock
+        .traversal()
+        .with(materialized, 100_000)
+        .with("memory.limit", (footprint + 1_000_000) as i64)
+        .gql(
+            "MATCH (n:person {name: 'marko'}) RETURN size(range(1, 100)) AS r, \
+             size(split(n.name, '')) AS s, replace(n.name, '', '-') AS t",
+        )
+        .to_list()
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(column(&rows[0], "r"), &ElementProperty::from(100));
+    assert_eq!(column(&rows[0], "s"), &ElementProperty::from(5));
+    assert_eq!(column(&rows[0], "t"), &ElementProperty::from("-m-a-r-k-o-"));
+}

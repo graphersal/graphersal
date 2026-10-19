@@ -132,11 +132,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
             let row = Row::new(context, &traverser, &self.bindings);
             let mut values = Vec::with_capacity(self.keys.len());
             for key in self.keys.iter() {
-                let value = key
-                    .expr
-                    .eval(&row)
-                    .map_err(|error| Box::new(eval_error(&self.query, error)))?;
+                let value = key.expr.eval(&row);
+                // A limit error the row kept (a refused `Env::reserve`) wins over the
+                // evaluator's fallback error.
                 row.finish()?;
+                let value = value.map_err(|error| Box::new(eval_error(&self.query, error)))?;
                 values.push(OrderValue::of(value, &row));
             }
             drop(row);

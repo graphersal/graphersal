@@ -4324,6 +4324,8 @@ pub(crate) enum GqlHelpTopic {
     Names,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
+    /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
+    TextAndNumber,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -4634,6 +4636,21 @@ impl TraverserError {
                         *max,
                         &self.outermost_steps().unwrap_or_default(),
                     ))
+                }
+                // A value a `gql:*` step built (a function result, a collect_list() list): advice
+                // on the GQL query, not on the Gremlin materializing steps.
+                #[cfg(feature = "gql")]
+                TraverserError::ResourceLimitExceeded {
+                    limit,
+                    max,
+                    observed,
+                    ..
+                } if limit == "traversal.max_materialized_bytes"
+                    && self
+                        .innermost_failed_step()
+                        .is_some_and(|step| step.starts_with("gql:")) =>
+                {
+                    Some(gql_materialized_limit_help(*max, *observed))
                 }
                 TraverserError::RepeatLimitExceeded {
                     max_loops,
@@ -4994,8 +5011,13 @@ impl DiagnosticError for TraverserError {
     fn help(&self) -> Option<String> {
         let help = self.canonical_help()?;
         #[cfg(feature = "gql")]
-        if matches!(self.root_cause(), TraverserError::Gql { .. }) {
+        if matches!(self.root_cause(), TraverserError::Gql { .. })
+            || self
+                .innermost_failed_step()
+                .is_some_and(|step| step.starts_with("gql:"))
+        {
             // The GQL functions in the advice are GQL text; the Gremlin steps are respelled.
+            // So also for a limit a `gql:*` step reached (`collect_list()` stays as written).
             let gql_function = |name: &str| crate::gql::parser::lookup_function(name).is_some();
             return Some(
                 crate::traversal::spelling::respell_keeping(&help, self.spelling(), gql_function)
@@ -6756,14 +6778,80 @@ fn gql_help(
              as in g.gql(\"MATCH (p) RETURN sum(CASE WHEN p.age >= 0 THEN p.age END)\") (an \
              aggregate skips NULL).",
         ),
-        GqlErrorKind::Data => help.push_str(
-            "A row of the data made the marked expression fail. Keep such rows away from it \
-             with a WHERE condition or a CASE expression, for example \
-             g.gql(\"MATCH (p:person) WHERE p.age <> 0 RETURN 100 / p.age\"), and compare \
-             values of one kind only (no implicit conversion between text and numbers).",
-        ),
+        GqlErrorKind::Data => {
+            if topic == GqlHelpTopic::TextAndNumber {
+                help.push_str(
+                    "Convert the number or boolean to text first, with toString(x) or CAST(x AS STRING), \
+                     and join text with ||, as in \
+                     g.gql(\"MATCH (p:person) RETURN p.name || ' is ' || toString(p.age) AS s\"); \
+                     or compute with numbers only, converting text with toInteger(x) or \
+                     toFloat(x). ",
+                );
+            } else if let Some(advice) = gql_data_status_advice(gqlstatus) {
+                help.push_str(advice);
+                help.push(' ');
+            }
+            help.push_str(GQL_DATA_ADVICE);
+        }
     }
     help
+}
+
+/// The general advice of a [`GqlErrorKind::Data`] error.
+#[cfg(feature = "gql")]
+const GQL_DATA_ADVICE: &str = "A row of the data made the marked expression fail. Keep such \
+     rows away from it with a WHERE condition or a CASE expression, for example \
+     g.gql(\"MATCH (p:person) WHERE p.age <> 0 RETURN 100 / p.age\"), and compare values of \
+     one kind only (no implicit conversion between text and numbers).";
+
+/// The advice of a stage 1c data exception by its GQLSTATUS code, naming the function that
+/// fixes it (rule 6); `None` for the codes the general advice covers.
+#[cfg(feature = "gql")]
+fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
+    Some(match gqlstatus {
+        // Invalid character value for cast.
+        "22018" => {
+            "CAST is strict: text that is not a value of the target type fails the query. The \
+             Cypher conversions are lenient: toInteger(x), toFloat(x) and toBoolean(x) give \
+             NULL for such text, and toIntegerOrNull(x), toFloatOrNull(x) and \
+             toBooleanOrNull(x) give NULL for a value of any other kind too, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name, toInteger(p.name) AS n\")."
+        }
+        // Substring error.
+        "22011" => {
+            "substring(s, start, length), left(s, n) and right(s, n) take non-negative \
+             integers (positions count characters from 0); a position or length past the end \
+             gives '' or the rest of the string, never an error, as in \
+             g.gql(\"MATCH (p:person) RETURN substring(p.name, 1, 100) AS s\")."
+        }
+        // Trim error.
+        "22027" => {
+            "TRIM(c FROM s) removes one character c; to remove any of several characters use \
+             btrim(s, chars), ltrim(s, chars) or rtrim(s, chars), as in \
+             g.gql(\"MATCH (p:person) RETURN btrim(p.name, 'mo') AS s\")."
+        }
+        // Invalid argument for natural logarithm.
+        "2201E" => {
+            "ln(x), log(x) and log10(x) take a positive number, and log(base, x) also a \
+             positive base other than 1; keep other rows away, as in \
+             g.gql(\"MATCH (p:person) WHERE p.age > 0 RETURN ln(p.age) AS l\")."
+        }
+        // Invalid argument for power function.
+        "2201F" => {
+            "sqrt(x) takes a number >= 0, and power(x, y) cannot raise 0 to a negative power \
+             or a negative number to a power that is not an integer; keep other rows away, as in \
+             g.gql(\"MATCH (p:person) RETURN CASE WHEN p.age >= 0 THEN sqrt(p.age) END AS r\")."
+        }
+        // Invalid parameter value.
+        "22023" => {
+            "An argument is outside the values the function accepts: range() takes a \
+             step other than 0, round() a precision >= 0 and one of the modes UP, DOWN, \
+             CEILING, FLOOR, HALF_UP, HALF_DOWN or HALF_EVEN (upper case), replace() a limit \
+             >= 0 and the list trim(list, n) an n >= 0, as in \
+             g.gql(\"MATCH (p:person) RETURN round(p.age / 3.0, 1, 'HALF_EVEN') AS r\")."
+        }
+        _ => return None,
+    })
 }
 
 /// The general advice of a [`GqlErrorKind::Semantic`] error (class `42`) about `topic`.
@@ -6799,7 +6887,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              map a name of its own, as in \
              g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age\")."
         }
-        GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue => {
+        GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET and WITH define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \
@@ -7085,6 +7173,34 @@ fn gql_traverser_limit_help(max: Option<u64>, steps: &[String]) -> String {
          good as unlimited. Setting it is an administrative option: a script whose host \
          restricts it needs Update on that Option.",
         max.map(|max| format!(" ({max})")).unwrap_or_default()
+    )
+}
+
+/// Advice for `traversal.max_materialized_bytes` exceeded by an internal `gql:*` step: a
+/// function result that can outgrow its arguments, or a `collect_list()` list, refused before it
+/// was built (design F6). Names the GQL fixes and raising the limit for the `gql()` call.
+#[cfg(feature = "gql")]
+fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> String {
+    let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
+    format!(
+        "The gql() query built a value larger than 'traversal.max_materialized_bytes' \
+         allows{}{}, by the engine's size estimate. A function whose result can be larger than \
+         its arguments (range(), split(), replace(), || and toString() of a list or map) and \
+         the list of collect_list() are checked before they are built, so the query stops \
+         instead of running out of memory; the result is never cut short. Build smaller \
+         values: bound range() and replace() by the data, as in \
+         g.gql(\"MATCH (p:person) RETURN range(1, p.age / 10) AS r\"), count the values \
+         instead of collecting them, as in g.gql(\"MATCH (p:person) RETURN count(p.name) AS \
+         n\"), or raise the limit for the query, \
+         g.with(\"traversal.max_materialized_bytes\", {raised}).gql(..), for example \
+         g.with(\"traversal.max_materialized_bytes\", {raised}).gql(\"MATCH (p:person) RETURN \
+         collect_list(p.name) AS names\"). A host can lock this option with \
+         ExecutionPolicy::with_locked(\"traversal.max_materialized_bytes\"). Setting it is an \
+         administrative option: a script whose host restricts it needs Update on that Option.",
+        max.map(|max| format!(" ({max} bytes)")).unwrap_or_default(),
+        observed
+            .map(|observed| format!("; this one needed at least {observed} bytes"))
+            .unwrap_or_default(),
     )
 }
 

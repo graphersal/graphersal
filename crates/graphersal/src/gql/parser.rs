@@ -472,12 +472,12 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
     ),
     not_yet_function(
         &["normalize"],
-        "Unicode normalization (normalize())",
+        "Unicode normalization",
         "store normalized text, or compare with lower() / upper()",
     ),
     not_yet_function(
         &["any", "all", "none", "single", "reduce"],
-        "a list predicate or reduce() (a variable bound inside the call)",
+        "a list function that binds a variable inside the call",
         "test the items in Gremlin after gql(), for example \
          g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\")",
     ),
@@ -488,7 +488,7 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
     ),
     not_yet_function(
         &["percentileCont", "percentileDisc", "stDev", "stDevP"],
-        "this aggregate function",
+        "a statistical aggregate function",
         "collect the values with collect_list(x) and compute it after gql()",
     ),
 ];

@@ -1862,3 +1862,287 @@ fn random_gql_1b_queries_never_panic() {
         syntax.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 1c: random function calls (every scalar function, its Cypher spellings, the special
+// forms CAST / TRIM / IS SOURCE OF, the not-yet names, misspellings) with random arguments
+// ---------------------------------------------------------------------------------------------
+
+/// Function names for the 1c call generator and token soup (a list of its own; `GQL_TOKENS`
+/// and `GQL_1B_TOKENS` stay as they are): every name of the function table, Cypher spellings,
+/// names `gql()` refuses or does not support yet, and near misses.
+#[cfg(feature = "gql")]
+const GQL_FUNCTION_TOKENS: &[&str] = &[
+    "element_id",
+    "elementId",
+    "labels",
+    "type",
+    "coalesce",
+    "upper",
+    "toUpper",
+    "lower",
+    "toLower",
+    "char_length",
+    "character_length",
+    "size",
+    "cardinality",
+    "path_length",
+    "length",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "collect_list",
+    "collect",
+    "toInteger",
+    "toIntegerOrNull",
+    "toFloat",
+    "toFloatOrNull",
+    "toBoolean",
+    "toBooleanOrNull",
+    "toString",
+    "toStringOrNull",
+    "left",
+    "right",
+    "substring",
+    "trim",
+    "btrim",
+    "ltrim",
+    "rtrim",
+    "replace",
+    "split",
+    "reverse",
+    "byte_length",
+    "octet_length",
+    "isEmpty",
+    "nullif",
+    "abs",
+    "floor",
+    "ceil",
+    "ceiling",
+    "round",
+    "sign",
+    "sqrt",
+    "exp",
+    "ln",
+    "log",
+    "log10",
+    "power",
+    "mod",
+    "head",
+    "last",
+    "tail",
+    "range",
+    "keys",
+    "properties",
+    "startNode",
+    "endNode",
+    "nodes",
+    "relationships",
+    "TOINTEGER",
+    "Substring",
+    "rand",
+    "randomUUID",
+    "sin",
+    "atan2",
+    "pi",
+    "date",
+    "duration",
+    "toIntegerList",
+    "normalize",
+    "all",
+    "reduce",
+    "elements",
+    "percentileCont",
+    "stDev",
+    "exists",
+    "id",
+    "toInt",
+    "substr",
+    "lenght",
+    "uper",
+    "",
+];
+
+/// Arguments of the 1c call generator: NULL, numbers at the `i64` and float edges, texts with
+/// spaces, UTF-8, number and boolean texts, lists, maps, the pattern's variables and their
+/// properties, parameters.
+#[cfg(feature = "gql")]
+const GQL_FUNCTION_ARGS: &[&str] = &[
+    "NULL",
+    "0",
+    "1",
+    "-1",
+    "2",
+    "2.5",
+    "-0.5",
+    "1e308",
+    "9223372036854775807",
+    "-9223372036854775807 - 1",
+    "''",
+    "' '",
+    "'a'",
+    "'héllo'",
+    "'日本語 🎉'",
+    "' 42 '",
+    "'0x1F'",
+    "'1e3'",
+    "'NaN'",
+    "'-Infinity'",
+    "'true'",
+    "'HALF_EVEN'",
+    "'half_up'",
+    "TRUE",
+    "[]",
+    "[1, 'a', NULL]",
+    "['-', '']",
+    "[[1], {a: 1}]",
+    "{a: 1, b: NULL}",
+    "n",
+    "m",
+    "e",
+    "p",
+    "n.name",
+    "n.age",
+    "m.lang",
+    "e.weight",
+    "$n",
+    "$name",
+    "$missing",
+];
+
+/// Builds a random expression of nested function calls (depth-bounded).
+#[cfg(feature = "gql")]
+fn random_gql_call(rng: &mut Rng, depth: usize) -> String {
+    if depth == 0 || rng.chance(30) {
+        return rng.pick(GQL_FUNCTION_ARGS).to_string();
+    }
+    let arg = |rng: &mut Rng| random_gql_call(rng, depth - 1);
+    match rng.below(12) {
+        0 => {
+            let target = *rng.pick(&[
+                "INTEGER", "INT", "BIGINT", "FLOAT", "DOUBLE", "STRING", "BOOLEAN", "BOOL", "DATE",
+                "LIST", "INTEGR",
+            ]);
+            format!("CAST({} AS {target})", arg(rng))
+        }
+        1 => {
+            let side = *rng.pick(&["", "LEADING ", "TRAILING ", "BOTH "]);
+            let character = if rng.chance(50) {
+                format!("{} ", arg(rng))
+            } else {
+                String::new()
+            };
+            let from = if side.is_empty() && character.is_empty() && rng.chance(50) {
+                String::new()
+            } else {
+                "FROM ".to_string()
+            };
+            format!("TRIM({side}{character}{from}{})", arg(rng))
+        }
+        2 => {
+            let test = *rng.pick(&[
+                "IS SOURCE OF",
+                "IS NOT SOURCE OF",
+                "IS DESTINATION OF",
+                "IS NOT DESTINATION OF",
+            ]);
+            format!("{} {test} {}", arg(rng), arg(rng))
+        }
+        3 => format!("SUBSTRING({} FROM 1 FOR 2)", arg(rng)),
+        4 => format!("{} || {}", arg(rng), arg(rng)),
+        5 => format!("{} + {}", arg(rng), arg(rng)),
+        _ => {
+            let name = rng.pick(GQL_FUNCTION_TOKENS);
+            let count = rng.below(5);
+            let args: Vec<String> = (0..count).map(|_| arg(rng)).collect();
+            format!("{name}({})", args.join(", "))
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_function_calls_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut rng = Rng::new(0x6A1_C001);
+    let mut texts: Vec<String> = Vec::new();
+    // Every function with two random argument counts, on a row with a node, an edge and a
+    // path (the unit test `stage_1c_calls_never_panic` covers every count on a test row).
+    for name in GQL_FUNCTION_TOKENS {
+        for count in [rng.below(5), rng.below(5)] {
+            let args: Vec<String> = (0..count)
+                .map(|_| rng.pick(GQL_FUNCTION_ARGS).to_string())
+                .collect();
+            texts.push(format!(
+                "MATCH p = (n)-[e]->(m) RETURN {name}({}) AS x",
+                args.join(", ")
+            ));
+        }
+    }
+    // Blow-ups: refused by the materialization limit before anything is built.
+    texts.push("MATCH (n) RETURN range(0, 9223372036854775807) AS x".to_string());
+    texts.push(
+        "MATCH (n) RETURN range(-9223372036854775807 - 1, 9223372036854775807, 1) AS x".to_string(),
+    );
+    texts.push(format!(
+        "MATCH (n) LET s = '{}' RETURN size(split(replace(s, '', s), '')) AS x",
+        "x".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN toString(split('{}', '')) AS x",
+        "é".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN {}n.name{} AS x",
+        "reverse(".repeat(5_000),
+        ")".repeat(5_000)
+    ));
+    // Random nested calls in every clause that evaluates expressions.
+    for _ in 0..budget(150) {
+        let expr = random_gql_call(&mut rng, 3);
+        let query = match rng.below(7) {
+            0 => format!("MATCH (n) WHERE {expr} RETURN n.name AS x"),
+            1 => format!("MATCH (n) LET x = {expr} RETURN x"),
+            2 => format!("MATCH (n)-[e]-(m) WITH n, e, {expr} AS x RETURN x, count(*) AS c"),
+            3 => format!("MATCH (n) RETURN n.name AS x ORDER BY {expr}"),
+            4 => format!("MATCH (n) OPTIONAL MATCH p = (n)-[e]->(m) RETURN {expr} AS x"),
+            5 => format!("MATCH (n) RETURN collect_list({expr}) AS x, max({expr}) AS y"),
+            _ => format!("MATCH p = (n)-[e]->{{1,2}}(m) RETURN DISTINCT {expr} AS x"),
+        };
+        texts.push(query);
+    }
+    // Mutations of valid 1c queries and a token soup of function names and arguments.
+    const BASES: &[&str] = &[
+        "MATCH (n) RETURN toInteger(' 42 '), CAST(n.age AS STRING), round(n.age / 7.0, 2, 'UP')",
+        "MATCH (n) RETURN TRIM(LEADING 'm' FROM n.name), btrim(n.name, 'mo'), split(n.name, ['a', 'o'])",
+        "MATCH p = (n)-[e]->(m) RETURN startNode(e), nodes(p), keys(n), properties(e), n IS SOURCE OF e",
+        "MATCH (n) RETURN range(1, 10, 3), head(tail(range(1, 3))), trim([1, 2, 3], 1), log(2, 8)",
+    ];
+    for _ in 0..budget(100) {
+        let base = rng.pick(BASES).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(16);
+        let soup: Vec<&str> = (0..len)
+            .map(|_| {
+                if rng.chance(50) {
+                    *rng.pick(GQL_FUNCTION_TOKENS)
+                } else {
+                    *rng.pick(&[
+                        "(", ")", ",", "AS", "FROM", "IS", "SOURCE", "OF", "'x'", "1",
+                    ])
+                }
+            })
+            .collect();
+        texts.push(format!("MATCH (n) RETURN {}", soup.join(" ")));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 1c functions");
+}

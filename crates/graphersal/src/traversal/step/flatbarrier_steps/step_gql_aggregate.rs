@@ -263,9 +263,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
                 let Some(expr) = self.columns.get(column) else {
                     continue;
                 };
-                let value = expr.eval(&row).map_err(failed)?;
+                let value = expr.eval(&row);
+                // A limit error the row kept (a refused `Env::reserve`) wins over the
+                // evaluator's fallback error.
                 row.finish()?;
-                key.push(GroupKey(value));
+                key.push(GroupKey(value.map_err(failed)?));
             }
             let index = match groups.get_index_of(key.as_slice()) {
                 Some(index) => index,
@@ -279,9 +281,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
             };
             if let Some((_, group)) = groups.get_index_mut(index) {
                 for (call, accumulator) in self.calls.iter().zip(group.accumulators.iter_mut()) {
-                    call.add(accumulator, &row, traverser.bulk)
-                        .map_err(failed)?;
+                    let added = call.add(accumulator, &row, traverser.bulk);
                     row.finish()?;
+                    added.map_err(failed)?;
                 }
             }
         }
@@ -324,7 +326,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
                             Some(value) => value.into_owned(),
                             None => TraverserValue::Computed(ElementProperty::Null, None),
                         },
-                        None => into_traverser_value(expr.eval(&env).map_err(failed)?),
+                        None => {
+                            let value = expr.eval(&env);
+                            row.finish()?;
+                            into_traverser_value(value.map_err(failed)?)
+                        }
                     };
                     row.finish()?;
                     values.push(value);

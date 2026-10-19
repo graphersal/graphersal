@@ -2165,4 +2165,90 @@ mod gql {
             );
         }
     }
+
+    /// Denies every read of `person` vertices: a read whose label is not stated (every read)
+    /// is possibly one, so all vertex reads are denied, edge reads are not.
+    struct NoPersons;
+
+    impl Authorizer for NoPersons {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (Action::Read, Resource::Data { element, label })
+                    if element != Some(ElementKind::Edge)
+                        && label.is_none_or(|label| label == "person") =>
+                {
+                    Err(Denied::new("persons are private"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Design F8 (stage 1c): `startNode(e)` / `endNode(e)`, `nodes(p)`, `keys` and
+    /// `properties` ask no permission of their own. They read vertices the pattern already
+    /// read: every edge pattern stands between two node patterns, whose lowering reads the
+    /// endpoint vertices, so a denied vertex read refuses the query before it runs, like the
+    /// Gremlin twin `e().out_v()`. (The GQL plan starts at `v()`, the twin at `e()`, so the
+    /// denied step differs; the request is the same.)
+    #[test]
+    fn a_denied_vertex_read_refuses_start_node_like_out_v() {
+        let graph = modern();
+        // The edges alone are readable in Gremlin.
+        let weights = run(&graph, r#"g.E().values("weight").toList()"#, NoPersons).unwrap();
+        assert_eq!(weights.into_array().unwrap().len(), 6);
+        assert_denied(
+            run(&graph, r#"g.E().outV().values("name").toList()"#, NoPersons),
+            "out_v",
+            "Read Data(vertex)",
+        );
+        assert_denied(
+            run(&graph, r#"g.E().inV().values("name").toList()"#, NoPersons),
+            "in_v",
+            "Read Data(vertex)",
+        );
+        for query in [
+            "MATCH ()-[e]->() RETURN startNode(e).name AS s",
+            "MATCH ()-[e:knows]->() RETURN element_id(endNode(e)) AS t",
+            "MATCH (a)-[e]-(b) RETURN a IS SOURCE OF e AS s",
+            "MATCH p = ()-[:knows]->() RETURN nodes(p) AS n",
+            "MATCH ()-[e]->() RETURN keys(e) AS k, properties(e) AS p",
+            "MATCH (x:nobody)-[e]->() RETURN startNode(e) AS s",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            assert_denied(run(&graph, &script, NoPersons), "v", "Read Data(vertex)");
+        }
+    }
+
+    /// The functions of stage 1c add no request: a query with them asks exactly what the same
+    /// pattern without them asks, and the same set as the Gremlin twin of the endpoints.
+    #[test]
+    fn gql_1c_functions_add_no_request() {
+        let graph = modern();
+        let set = |script: &str| {
+            let mut seen = requests(&graph, script);
+            seen.sort();
+            seen.dedup();
+            seen
+        };
+        for (with_functions, without) in [
+            (
+                r#"g.gql("MATCH ()-[e]->() RETURN startNode(e), endNode(e), keys(e), properties(e)").toList()"#,
+                r#"g.gql("MATCH ()-[e]->() RETURN e").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH p = (a)-[:knows]->{1,2}(b) RETURN nodes(p), relationships(p), a IS SOURCE OF head(relationships(p))").toList()"#,
+                r#"g.gql("MATCH p = (a)-[:knows]->{1,2}(b) RETURN p").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (n) RETURN toString(n.age), upper(left(n.name, 2)), round(sqrt(n.age), 1), range(1, 3), CAST(n.age AS STRING)").toList()"#,
+                r#"g.gql("MATCH (n) RETURN n").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, with_functions), requests(&graph, without));
+        }
+        assert_eq!(
+            set(r#"g.gql("MATCH ()-[e]->() RETURN startNode(e), endNode(e)").toList()"#),
+            set(r#"g.E().project("s", "t").by(__.outV()).by(__.inV()).toList()"#)
+        );
+    }
 }

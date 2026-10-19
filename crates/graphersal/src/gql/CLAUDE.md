@@ -45,7 +45,13 @@ Files appear as their stage lands; this table is the target layout.
   never respelled under `render.spelling = camel`, and its `help()` respells the Gremlin steps
   but keeps the GQL function names (`respell_keeping`, `parser::lookup_function`). Advice is
   built from the failing query where it can be (`lower::start_with_gql`, the `$param` fixes).
-  Tests: `error_diagnostics_tests.rs` (`mod gql`), robustness `random_gql_strings_never_panic`.
+  A resource limit a `gql:*` step reaches gets GQL advice too (`gql_traverser_limit_help`,
+  `gql_materialized_limit_help`); every `gql:*` step calls `row.finish()` before it maps an
+  evaluator error, so a refused `Env::reserve` surfaces as the real limit error, not 54001.
+  Data errors carry targeted advice by GQLSTATUS (`gql_data_status_advice`) or by
+  `GqlHelpTopic`. Tests: `error_diagnostics_tests.rs` (`mod gql`), robustness
+  `random_gql_strings_never_panic`, `random_gql_1b_queries_never_panic`,
+  `random_gql_function_calls_never_panic`.
 - **Read-only in version 1.** Write clauses are refused by the parser.
 - **Lower into the ordinary pipeline.** No separate executor: the lowering builds plans with the
   ordinary builders and lets the optimizer do pushdown. Never push a `<>` comparison down

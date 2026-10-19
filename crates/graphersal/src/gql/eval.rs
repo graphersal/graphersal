@@ -1304,21 +1304,34 @@ fn binary<E: Clone + PartialEq>(
 fn add_error<E>(left: &Value<E>, right: &Value<E>, span: Span) -> EvalError {
     let text = matches!(left, Value::Scalar(ElementProperty::String(_)))
         || matches!(right, Value::Scalar(ElementProperty::String(_)));
-    let message = if text {
-        format!(
+    if text {
+        let message = format!(
             "+ joins two strings or adds two numbers, not {} and {}; a number is never turned \
              into text implicitly",
             left.kind_name(),
             right.kind_name()
-        )
-    } else {
-        format!(
-            "+ adds two numbers or joins two strings or two lists, not {} and {}",
-            left.kind_name(),
-            right.kind_name()
+        );
+        // The help names toString(x) / CAST(x AS STRING).
+        return EvalError::invalid_type(message, span).with_topic(GqlHelpTopic::TextAndNumber);
+    }
+    let message = format!(
+        "+ adds two numbers or joins two strings or two lists, not {} and {}",
+        left.kind_name(),
+        right.kind_name()
+    );
+    EvalError::invalid_type(message, span)
+}
+
+/// Text joined with a number or a boolean: the help names toString(x) / CAST(x AS STRING).
+fn text_and_scalar<E>(left: &Value<E>, right: &Value<E>) -> bool {
+    let convertible = |value: &Value<E>| {
+        matches!(
+            value,
+            Value::Scalar(ElementProperty::Number(_) | ElementProperty::Boolean(_))
         )
     };
-    EvalError::invalid_type(message, span)
+    (left.as_str().is_some() && convertible(right))
+        || (right.as_str().is_some() && convertible(left))
 }
 
 /// `needle IN haystack` (see the module docs).
@@ -1365,14 +1378,21 @@ fn concat<E: Clone>(
                 text.push_str(b);
                 Ok(Value::string(text))
             }
-            _ => Err(EvalError::invalid_type(
-                format!(
-                    "{operator} joins two strings or two lists, not {} and {}",
-                    left.kind_name(),
-                    right.kind_name()
-                ),
-                span,
-            )),
+            _ => {
+                let error = EvalError::invalid_type(
+                    format!(
+                        "{operator} joins two strings or two lists, not {} and {}",
+                        left.kind_name(),
+                        right.kind_name()
+                    ),
+                    span,
+                );
+                Err(if text_and_scalar(left, right) {
+                    error.with_topic(GqlHelpTopic::TextAndNumber)
+                } else {
+                    error
+                })
+            }
         },
     }
 }
