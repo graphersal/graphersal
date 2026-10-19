@@ -134,10 +134,6 @@ pub(crate) enum Binding {
     /// The column at this position of the incoming `gql:project` row.
     Column(usize),
     /// The column at position `column` of the row map the path labels with `label`.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
-    )]
     RowColumn {
         /// The step label of the row map.
         label: CompactString,

@@ -1,7 +1,5 @@
 //! `gql:bind(var)`: continues a GQL pattern from a bound variable (feature `gql`, internal).
 
-#![allow(dead_code, reason = "built by the pipeline lowering (stage 1b, T6)")]
-
 use std::sync::Arc;
 
 use crate::gql::runtime::{Binding, Row, labels_read_by};

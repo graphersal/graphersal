@@ -3,7 +3,7 @@
 //! [`GraphTraversalSource::gql_with`].
 //!
 //! The steps are built with the ordinary builders (`v()`, `has_label()`, `has()`, `as()`,
-//! `dedup()`, `skip()`, `limit()`) and the internal `gql:*` builders, so the plan goes through
+//! `optional()`, `skip()`, `limit()`) and the internal `gql:*` builders, so the plan goes through
 //! the optimizer, the path analysis, the profile, the limits and the permission check like a
 //! hand-written traversal (design D5, architecture e). Every fallible part (parsing, binding,
 //! compiling expressions, checking parameter values) runs first; when one fails, the source gets
@@ -31,9 +31,15 @@
 //! | merge point | `lazy_barrier()` right after a hop that yields vertices when the next hop continues from them (before the target's filters and `as()`); merges only traversers with equal path labels, so it is invisible (see below) |
 //! | several patterns / components | another `v()` per component (a Cartesian product, not optimized yet) |
 //! | `RETURN` / `RETURN *` | `gql:project(columns)` (written order, `NULL` columns kept) |
-//! | `DISTINCT` | `dedup()` after `gql:project` |
-//! | `ORDER BY` | `gql:order(keys)` after `gql:project` (and `dedup()`): a returned column is read from the row, any other variable through its path label |
+//! | `DISTINCT` | `gql:distinct()` after `gql:project` (GQL equality, decision C3: `1` and `1.0` are one value, `NULL`s are equal) |
+//! | `ORDER BY` | `gql:order(keys)` after `gql:project` (and `gql:distinct()`): a returned column is read from the row, any other variable through its path label; an alias is read only where the key names it (a substituted `LET` / `WITH` variable of the same name stays the variable) |
 //! | `OFFSET n` / `LIMIT m` | `skip(n)` / `limit(m)`; a `$param` value must be a non-negative integer (checked before the run) |
+//! | `LET x = expr`, a `WITH` that only projects | no step: the binder substitutes the definition, so the query lowers like the same query written without it (pushdown included) |
+//! | `FILTER cond`, the `WHERE` of a projecting `WITH` | conjuncts like `WHERE`: `has()` / `gql:filter` where their bindings are bound |
+//! | materializing `WITH` (aggregate, `DISTINCT`, `ORDER BY`, `OFFSET`, `LIMIT`; decision C2) | its result pipeline as for `RETURN` (`gql:project`, `gql:distinct()`, `gql:order`, `skip`, `limit`), then its `WHERE` as `gql:filter` on the row map (after `LIMIT`), then `as("#w<k>")` only when a later step reads the row after leaving it |
+//! | a later `MATCH` continuing from a `WITH` column | `gql:bind("a")` (moves to the element the column holds; `NULL` or not an element: no row); a join, edge join or trail check against a column is `gql:filter` comparing the current element with the column |
+//! | `OPTIONAL MATCH` | `optional(__.<part>)`, the part's own `WHERE` inside; a row it does not match continues unchanged and its variables read `NULL` (absent labels); after it every read goes through a label (no `Binding::Current`) |
+//! | a leading `OPTIONAL MATCH` | `inject(0).optional(__.v()...)`: one unit row (decision C13) |
 //!
 //! # Path labels (design D11)
 //!
@@ -54,25 +60,32 @@
 //! edge of the same `MATCH` (edges with overlapping label sets) labels that edge and keeps the
 //! traversers apart.
 //!
+//! A materializing `WITH` column is read from its row: `Binding::Column` while the row is the
+//! current object, `Binding::RowColumn` through the row label after a later step left it.
+//!
 //! # Not yet
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
-//! [`GqlErrorKind::NotYet`]; stage 1a never plans one.
+//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Aggregation, quantified edges and path
+//! variables are refused before planning (`bind::refuse_unplanned`); [`ResultOp::Aggregate`] is
+//! refused here as a guard.
 
 use std::sync::Arc;
 
 use super::ast::{
-    BinaryOp, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, SortDirection,
+    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
+    SortDirection,
 };
 use super::bind::{
-    BindingId, BoundQuery, Conjunct, Count, Predicate, bind_with_parameters, refuse_unplanned,
+    BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
+    SortKey, bind_with_parameters, refuse_unplanned,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    ElementFilters, Expand, LogicalPlan, Op, PushOp, PushOperand, Pushdown, ResultOp, and_factors,
-    label_disjuncts,
+    ElementFilters, Expand, LogicalPlan, Materialize, Op, PushOp, PushOperand, Pushdown, ResultOp,
+    Stage, and_factors, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, RowExpr, eval_error};
@@ -83,12 +96,16 @@ use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::value::{Number, P, PValue};
-use crate::{AnonymousTraversal, ArgStrings, CompactString, ElementProperty, GraphTraversalSource};
+use crate::{
+    AnonymousTraversal, ArgStrings, CompactString, ElementKind, ElementProperty,
+    GraphTraversalSource,
+};
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
-    /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` patterns, `WHERE`,
-    /// `RETURN` (mandatory; `RETURN *` returns every named variable), `ORDER BY`, `OFFSET`
-    /// (Cypher `SKIP`) and `LIMIT`. Use [`Self::gql_with`] for a query with `$parameters`.
+    /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` and `OPTIONAL MATCH`
+    /// patterns, `WHERE`, the linear pipeline `LET`, `FILTER` and `WITH` (Cypher), `RETURN`
+    /// (mandatory; `RETURN *` returns every named variable), `ORDER BY`, `OFFSET` (Cypher `SKIP`)
+    /// and `LIMIT`. Use [`Self::gql_with`] for a query with `$parameters`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a
@@ -209,38 +226,86 @@ pub(crate) fn rhai_map_key(name: &str) -> String {
     }
 }
 
+/// Where a step runs: the binding the traverser stands on (read as `Binding::Current`) and the
+/// materializing `WITH` whose row map is the current object (its columns read as
+/// `Binding::Column`). Every other binding is read through its path label, a column of a row
+/// left behind through the row's label (`Binding::RowColumn`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Site {
+    /// The binding the traverser stands on.
+    current: Option<BindingId>,
+    /// The segment of the materializing `WITH` whose row is the current object.
+    row: Option<usize>,
+}
+
+impl Site {
+    /// On the element of binding `id`.
+    fn on(id: BindingId) -> Self {
+        Site {
+            current: Some(id),
+            row: None,
+        }
+    }
+
+    /// On the row of the materializing `WITH` of segment `segment`.
+    fn row(segment: usize) -> Self {
+        Site {
+            current: None,
+            row: Some(segment),
+        }
+    }
+}
+
 /// One step of the lowered plan, every fallible part already done.
 enum Instr<S: GraphStorage> {
     /// `v()`.
     Scan,
+    /// `inject(0)`: the one unit row a leading `OPTIONAL MATCH` starts from (decision C13).
+    Unit,
     /// `has_label(labels)`.
     HasLabel(Vec<String>),
     /// `has(key, predicate)`.
     Has(String, P<PValue>),
-    /// `gql:filter(condition)`; `current` is the binding the traverser stands on.
-    Filter {
-        condition: RowExpr<S>,
-        current: Option<BindingId>,
-    },
+    /// `gql:filter(condition)` at `site`.
+    Filter { condition: RowExpr<S>, site: Site },
+    /// `gql:filter(condition)` comparing the current element (the extra slot after the
+    /// bindings) with a materializing `WITH` column binding: a join, an edge join or a trail
+    /// check against an element the row holds, which has no path label of its own.
+    RowCheck(RowExpr<S>),
     /// `as(label)` of the binding, emitted only when a label is needed.
     Label(BindingId),
-    /// `gql:project(columns)`.
+    /// `as("#w<k>")` of the row of the materializing `WITH` of segment `k`, emitted only when a
+    /// later step reads the row after leaving it (`Binding::RowColumn`).
+    RowLabel(usize),
+    /// `gql:project(columns)` at `site`.
     Project {
         columns: Vec<GqlColumn<S>>,
-        current: Option<BindingId>,
+        site: Site,
     },
-    /// `dedup()`.
-    Dedup,
-    /// `gql:order(keys)`, on the row map of `gql:project`.
-    Order(Vec<GqlSortKey<S>>),
+    /// `gql:distinct()` (GQL equality, decision C3).
+    Distinct,
+    /// `gql:order(keys)`, on the row map of the `gql:project` before it (`columns` columns).
+    Order {
+        keys: Vec<GqlSortKey<S>>,
+        columns: usize,
+    },
     /// `skip(n)`.
     Skip(usize),
     /// `limit(n)`.
     Limit(usize),
     /// One pattern edge walked from the current vertex ([`Op::Expand`]); see [`Hop`].
     Hop(Hop<S>),
-    /// `select(label)`: back to a binding labelled earlier (a branch of the pattern).
+    /// `select(label)`: back to a binding labelled earlier (a branch of the pattern, a later
+    /// segment starting at a node bound before it).
     Select(BindingId),
+    /// `gql:bind(name)`: moves to the element a materializing `WITH` column binding holds, read
+    /// at `site` (a later segment starting at it, a branch back to it).
+    Bind {
+        id: BindingId,
+        site: Site,
+        name: CompactString,
+        kind: ElementKind,
+    },
     /// `where(P.eq(label))`: the current element is the one bound earlier to the binding (a
     /// join: a cycle closing, a node or edge variable repeated).
     Same(BindingId),
@@ -252,6 +317,8 @@ enum Instr<S: GraphStorage> {
         direction: EdgeDirection,
         labels: Option<Vec<String>>,
     },
+    /// `optional(__.<steps>)`: the part of an `OPTIONAL MATCH` (plan mechanism 4).
+    Optional(Vec<Instr<S>>),
 }
 
 /// One walked pattern edge. The form is chosen at emission, once the labels are known: the
@@ -277,48 +344,84 @@ struct Lowered<S: GraphStorage> {
     labels: Vec<CompactString>,
     /// Whether each binding gets `as()`.
     labelled: Vec<bool>,
-    /// The number of `RETURN` columns (the extra slots of `ORDER BY`).
-    columns: usize,
+    /// The materializing `WITH` column each binding stands for (`None`: a pattern binding).
+    columns: Vec<Option<ColumnRef>>,
+    /// The row label of each segment (`#w<k>`; used only for a materializing `WITH`).
+    row_labels: Vec<CompactString>,
+    /// Whether the row of each segment gets `as("#w<k>")`.
+    rows_labelled: Vec<bool>,
 }
 
 impl<S: GraphStorage> Lowered<S> {
-    /// Where each variable slot reads from at a step whose current element is `current`.
-    fn bindings(&self, current: Option<BindingId>) -> Arc<[Binding]> {
-        self.labels
-            .iter()
-            .enumerate()
-            .map(|(slot, label)| {
-                if current == Some(BindingId(slot)) {
-                    Binding::Current
-                } else {
-                    Binding::Label(label.clone())
-                }
-            })
+    /// Where variable `slot` reads from at `site` (see [`Site`]).
+    fn binding(&self, slot: usize, site: Site) -> Binding {
+        if site.current == Some(BindingId(slot)) {
+            return Binding::Current;
+        }
+        match self.columns.get(slot).copied().flatten() {
+            Some(column) if site.row == Some(column.segment) => Binding::Column(column.column),
+            Some(column) => Binding::RowColumn {
+                label: self.row_label(column.segment),
+                column: column.column,
+            },
+            None => Binding::Label(self.labels.get(slot).cloned().unwrap_or_default()),
+        }
+    }
+
+    /// Where each variable slot reads from at `site`.
+    fn bindings(&self, site: Site) -> Arc<[Binding]> {
+        (0..self.labels.len())
+            .map(|slot| self.binding(slot, site))
             .collect()
     }
 
-    /// The slots of `ORDER BY`: every binding through its label, then the row's columns.
-    fn order_bindings(&self) -> Arc<[Binding]> {
-        self.labels
-            .iter()
-            .map(|label| Binding::Label(label.clone()))
-            .chain((0..self.columns).map(Binding::Column))
+    /// The slots of `ORDER BY` on a new row map of `columns` columns: every binding read away
+    /// from its row, then the row's columns.
+    fn order_bindings(&self, columns: usize) -> Arc<[Binding]> {
+        (0..self.labels.len())
+            .map(|slot| self.binding(slot, Site::default()))
+            .chain((0..columns).map(Binding::Column))
             .collect()
+    }
+
+    /// The slots of a [`Instr::RowCheck`]: every binding read away from its row, then the
+    /// current element.
+    fn check_bindings(&self) -> Arc<[Binding]> {
+        (0..self.labels.len())
+            .map(|slot| self.binding(slot, Site::default()))
+            .chain(std::iter::once(Binding::Current))
+            .collect()
+    }
+
+    /// The row label of segment `segment`.
+    fn row_label(&self, segment: usize) -> CompactString {
+        self.row_labels.get(segment).cloned().unwrap_or_default()
     }
 
     fn emit<'g>(mut self, source: GraphTraversalSource<'g, S>) -> GraphTraversalSource<'g, S>
     where
         S: 'g,
     {
-        let mut g = source;
-        let order_bindings = self.order_bindings();
-        for instr in std::mem::take(&mut self.instrs) {
+        let instrs = std::mem::take(&mut self.instrs);
+        self.emit_into(source, instrs)
+    }
+
+    /// Emits `instrs` onto `g` (the source, or the child of an `optional()`).
+    fn emit_into<'g, T: Sink<'g, S>>(&self, mut g: T, instrs: Vec<Instr<S>>) -> T
+    where
+        S: 'g,
+    {
+        for instr in instrs {
             g = match instr {
-                Instr::Scan => g.v(None),
+                Instr::Scan => g.v(ArgStrings::None),
+                Instr::Unit => g.inject(vec![ElementProperty::from(0_i64)]),
                 Instr::HasLabel(labels) => g.has_label(labels),
                 Instr::Has(key, predicate) => g.has_p(key, predicate),
-                Instr::Filter { condition, current } => {
-                    g.gql_filter(Arc::clone(&self.query), condition, self.bindings(current))
+                Instr::Filter { condition, site } => {
+                    g.gql_filter(Arc::clone(&self.query), condition, self.bindings(site))
+                }
+                Instr::RowCheck(condition) => {
+                    g.gql_filter(Arc::clone(&self.query), condition, self.check_bindings())
                 }
                 Instr::Label(id) => {
                     if self.labelled.get(id.0).copied().unwrap_or(false)
@@ -329,17 +432,30 @@ impl<S: GraphStorage> Lowered<S> {
                         g
                     }
                 }
-                Instr::Project { columns, current } => {
-                    g.gql_project(Arc::clone(&self.query), columns, self.bindings(current))
+                Instr::RowLabel(segment) => {
+                    if self.rows_labelled.get(segment).copied().unwrap_or(false) {
+                        g.as_(self.row_label(segment))
+                    } else {
+                        g
+                    }
                 }
-                Instr::Dedup => g.dedup(),
-                Instr::Order(keys) => {
-                    g.gql_order(Arc::clone(&self.query), keys, Arc::clone(&order_bindings))
+                Instr::Project { columns, site } => {
+                    g.gql_project(Arc::clone(&self.query), columns, self.bindings(site))
+                }
+                Instr::Distinct => g.gql_distinct(),
+                Instr::Order { keys, columns } => {
+                    g.gql_order(Arc::clone(&self.query), keys, self.order_bindings(columns))
                 }
                 Instr::Skip(n) => g.skip(n),
                 Instr::Limit(n) => g.limit(n),
                 Instr::Hop(hop) => self.hop(g, hop),
                 Instr::Select(id) => g.select(self.label(id)),
+                Instr::Bind {
+                    id,
+                    site,
+                    name,
+                    kind,
+                } => g.gql_bind(name, self.binding(id.0, site), kind),
                 Instr::Same(id) => g.where_p(P::Eq(PValue::String(self.label(id)))),
                 Instr::Differs(id) => g.where_p(P::Neq(PValue::String(self.label(id)))),
                 Instr::Merge { direction, labels } => {
@@ -353,6 +469,10 @@ impl<S: GraphStorage> Lowered<S> {
                         Some(GraphStep::FlatMap(_, next)) => g.push_step(lazy_barrier_step(next)),
                         _ => g,
                     }
+                }
+                Instr::Optional(steps) => {
+                    let part = self.emit_into(AnonymousTraversal::new(), steps);
+                    g.optional(part)
                 }
             };
         }
@@ -370,7 +490,7 @@ impl<S: GraphStorage> Lowered<S> {
     }
 
     /// Emits a hop (see [`Hop`]).
-    fn hop<'g>(&self, g: GraphTraversalSource<'g, S>, hop: Hop<S>) -> GraphTraversalSource<'g, S>
+    fn hop<'g, T: Sink<'g, S>>(&self, g: T, hop: Hop<S>) -> T
     where
         S: 'g,
     {
@@ -442,25 +562,162 @@ impl<S: GraphStorage> Lowered<S> {
         match instr {
             Instr::HasLabel(labels) => t.has_label(labels),
             Instr::Has(key, predicate) => t.has_p(key, predicate),
-            Instr::Filter { condition, current } => {
-                t.gql_filter(Arc::clone(&self.query), condition, self.bindings(current))
+            Instr::Filter { condition, site } => {
+                t.gql_filter(Arc::clone(&self.query), condition, self.bindings(site))
+            }
+            Instr::RowCheck(condition) => {
+                t.gql_filter(Arc::clone(&self.query), condition, self.check_bindings())
             }
             Instr::Label(id) if self.is_labelled(id) => t.as_(self.label(id)),
             Instr::Same(id) => t.where_p(P::Eq(PValue::String(self.label(id)))),
             Instr::Differs(id) => t.where_p(P::Neq(PValue::String(self.label(id)))),
             Instr::Label(_)
             | Instr::Scan
+            | Instr::Unit
+            | Instr::RowLabel(_)
             | Instr::Project { .. }
-            | Instr::Dedup
-            | Instr::Order(_)
+            | Instr::Distinct
+            | Instr::Order { .. }
             | Instr::Skip(_)
             | Instr::Limit(_)
             | Instr::Hop(_)
             | Instr::Select(_)
-            | Instr::Merge { .. } => t,
+            | Instr::Bind { .. }
+            | Instr::Merge { .. }
+            | Instr::Optional(_) => t,
         }
     }
 }
+
+/// The traversal the lowering emits onto: the source (`g`), or a child traversal (`__`: the
+/// part inside `optional()`). The same builders on both, so one emission serves both.
+trait Sink<'g, S: GraphStorage + 'g>: Sized {
+    fn v(self, ids: ArgStrings) -> Self;
+    fn inject(self, values: Vec<ElementProperty>) -> Self;
+    fn has_label(self, labels: Vec<String>) -> Self;
+    fn has_p(self, key: String, predicate: P<PValue>) -> Self;
+    fn gql_filter(self, query: Arc<str>, condition: RowExpr<S>, bindings: Arc<[Binding]>) -> Self;
+    fn as_(self, label: CompactString) -> Self;
+    fn gql_project(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+    ) -> Self;
+    fn gql_distinct(self) -> Self;
+    fn gql_order(self, query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>)
+    -> Self;
+    fn skip(self, n: usize) -> Self;
+    fn limit(self, n: usize) -> Self;
+    fn select(self, label: CompactString) -> Self;
+    fn gql_bind(self, name: CompactString, binding: Binding, kind: ElementKind) -> Self;
+    fn where_p(self, predicate: P<PValue>) -> Self;
+    fn out(self, labels: ArgStrings) -> Self;
+    fn in_(self, labels: ArgStrings) -> Self;
+    fn out_e(self, labels: ArgStrings) -> Self;
+    fn in_e(self, labels: ArgStrings) -> Self;
+    fn in_v(self) -> Self;
+    fn out_v(self) -> Self;
+    fn union(self, branches: Vec<AnonymousTraversal<'g, S>>) -> Self;
+    fn optional(self, part: AnonymousTraversal<'g, S>) -> Self;
+    fn push_step(self, step: GraphStep<'g, S>) -> Self;
+}
+
+/// [`Sink`] for a traversal type with the builders of the same names (inherent methods take
+/// precedence over the trait's, so each body calls the builder).
+macro_rules! sink {
+    ($traversal:ident) => {
+        impl<'g, S: GraphStorage + 'g> Sink<'g, S> for $traversal<'g, S> {
+            fn v(self, ids: ArgStrings) -> Self {
+                self.v(ids)
+            }
+            fn inject(self, values: Vec<ElementProperty>) -> Self {
+                self.inject(values)
+            }
+            fn has_label(self, labels: Vec<String>) -> Self {
+                self.has_label(labels)
+            }
+            fn has_p(self, key: String, predicate: P<PValue>) -> Self {
+                self.has_p(key, predicate)
+            }
+            fn gql_filter(
+                self,
+                query: Arc<str>,
+                condition: RowExpr<S>,
+                bindings: Arc<[Binding]>,
+            ) -> Self {
+                self.gql_filter(query, condition, bindings)
+            }
+            fn as_(self, label: CompactString) -> Self {
+                self.as_(label)
+            }
+            fn gql_project(
+                self,
+                query: Arc<str>,
+                columns: Vec<GqlColumn<S>>,
+                bindings: Arc<[Binding]>,
+            ) -> Self {
+                self.gql_project(query, columns, bindings)
+            }
+            fn gql_distinct(self) -> Self {
+                self.gql_distinct()
+            }
+            fn gql_order(
+                self,
+                query: Arc<str>,
+                keys: Vec<GqlSortKey<S>>,
+                bindings: Arc<[Binding]>,
+            ) -> Self {
+                self.gql_order(query, keys, bindings)
+            }
+            fn skip(self, n: usize) -> Self {
+                self.skip(n)
+            }
+            fn limit(self, n: usize) -> Self {
+                self.limit(n)
+            }
+            fn select(self, label: CompactString) -> Self {
+                self.select(label)
+            }
+            fn gql_bind(self, name: CompactString, binding: Binding, kind: ElementKind) -> Self {
+                self.gql_bind(name, binding, kind)
+            }
+            fn where_p(self, predicate: P<PValue>) -> Self {
+                self.where_p(predicate)
+            }
+            fn out(self, labels: ArgStrings) -> Self {
+                self.out(labels)
+            }
+            fn in_(self, labels: ArgStrings) -> Self {
+                self.in_(labels)
+            }
+            fn out_e(self, labels: ArgStrings) -> Self {
+                self.out_e(labels)
+            }
+            fn in_e(self, labels: ArgStrings) -> Self {
+                self.in_e(labels)
+            }
+            fn in_v(self) -> Self {
+                self.in_v()
+            }
+            fn out_v(self) -> Self {
+                self.out_v()
+            }
+            fn union(self, branches: Vec<AnonymousTraversal<'g, S>>) -> Self {
+                self.union(branches)
+            }
+            fn optional(self, part: AnonymousTraversal<'g, S>) -> Self {
+                self.optional(part)
+            }
+            fn push_step(self, step: GraphStep<'g, S>) -> Self {
+                self.push_step(step)
+            }
+        }
+    };
+}
+
+sink!(GraphTraversalSource);
+sink!(AnonymousTraversal);
 
 /// The labels argument of an adjacency step.
 fn adjacency(labels: &Option<Vec<String>>) -> ArgStrings {
@@ -577,12 +834,57 @@ impl<'q> Lowering<'q> {
     }
 
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
-        if !self.plan.stages.is_empty() {
-            return Err(self.unlowered());
-        }
         let mut instrs = Vec::new();
-        let mut current: Option<BindingId> = None;
-        let ops = &self.plan.ops;
+        // A query starting with `OPTIONAL MATCH` has no first segment: one unit row.
+        if self.plan.ops.is_empty() {
+            instrs.push(Instr::Unit);
+        }
+        let mut site = self.ops(&self.plan.ops, Site::default(), &mut instrs)?;
+        for stage in &self.plan.stages {
+            site = match stage {
+                Stage::Match { ops, .. } => self.ops(ops, site, &mut instrs)?,
+                Stage::Optional { ops, .. } => {
+                    let mut part = Vec::new();
+                    self.ops(ops, site, &mut part)?;
+                    instrs.push(Instr::Optional(part));
+                    // The current object differs per row (matched or not): every later read
+                    // goes through a label.
+                    Site::default()
+                }
+                Stage::Materialize(m) => self.materialize(m, site, &mut instrs)?,
+            };
+        }
+        let bound = self.bound;
+        self.pipeline(
+            &self.plan.result,
+            &bound.columns,
+            &bound.order_by,
+            site,
+            &mut instrs,
+        )?;
+        let labels = self.labels();
+        let row_labels = self.row_labels(&labels);
+        let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
+        let (labelled, rows_labelled) = self.labelled(&instrs, &columns);
+        Ok(Lowered {
+            query: self.shared,
+            instrs,
+            labels,
+            labelled,
+            columns,
+            row_labels,
+            rows_labelled,
+        })
+    }
+
+    /// Lowers the match pipeline `ops` of one segment, starting at `site`; returns the site
+    /// after it.
+    fn ops<S: GraphStorage>(
+        &self,
+        ops: &[Op],
+        mut site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
         for (at, op) in ops.iter().enumerate() {
             match op {
                 Op::Scan(scan) => {
@@ -593,16 +895,16 @@ impl<'q> Lowering<'q> {
                     }
                     instrs.extend(steps);
                     instrs.push(Instr::Label(scan.binding));
-                    current = Some(scan.binding);
+                    site = Site::on(scan.binding);
                 }
                 Op::Filter(ids) => {
                     for &id in ids {
-                        self.conjunct(id, current, &mut instrs)?;
+                        self.conjunct(id, site, instrs)?;
                     }
                 }
                 Op::Expand(expand) => {
                     if !expand.from_current {
-                        instrs.push(Instr::Select(expand.from));
+                        self.move_to(expand.from, site, instrs)?;
                     }
                     instrs.push(Instr::Hop(self.hop(expand)?));
                     if let Some(next) = next_hop(ops, at) {
@@ -620,31 +922,133 @@ impl<'q> Lowering<'q> {
                         instrs.extend(steps);
                         instrs.push(Instr::Label(expand.to));
                     }
-                    current = Some(expand.to);
+                    site = Site::on(expand.to);
                 }
                 Op::Join { binding } => {
-                    instrs.push(Instr::Same(*binding));
-                    current = Some(*binding);
+                    instrs.push(self.same(*binding)?);
+                    site = Site::on(*binding);
+                }
+                Op::Resume(resume) => {
+                    if !resume.from_current && site.current != Some(resume.binding) {
+                        self.move_to(resume.binding, site, instrs)?;
+                    }
+                    site = Site::on(resume.binding);
                 }
                 Op::Anchor(scan) => return Err(self.anchor_not_yet(scan.binding)),
-                Op::Resume(_) => return Err(self.unlowered()),
             }
         }
-        let columns = self.result(current, &mut instrs)?;
-        let labelled = self.labelled(&instrs);
-        let labels = self.labels();
-        Ok(Lowered {
-            query: self.shared,
-            instrs,
-            labels,
-            labelled,
-            columns,
-        })
+        Ok(site)
     }
 
-    /// The error of a plan part the lowering does not emit yet (stage 1b: later segments,
-    /// aggregation). `bind::refuse_unplanned` refuses those queries with their own messages
-    /// first, so this is a guard only.
+    /// Moves from `site` to node `id` bound earlier: `select(label)` for a pattern binding,
+    /// `gql:bind` for a materializing `WITH` column binding (read from its row).
+    fn move_to<S: GraphStorage>(
+        &self,
+        id: BindingId,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<(), TraverserError> {
+        let Some(binding) = self.bound.binding(id) else {
+            return Err(self.unlowered());
+        };
+        if binding.column.is_none() {
+            instrs.push(Instr::Select(id));
+            return Ok(());
+        }
+        let kind = match binding.kind {
+            BindingKind::Node => ElementKind::Vertex,
+            BindingKind::Edge => ElementKind::Edge,
+            BindingKind::Path | BindingKind::Value => return Err(self.unlowered()),
+        };
+        let name = binding
+            .name
+            .as_ref()
+            .map(|n| n.name.as_str())
+            .or(binding.key.as_deref())
+            .unwrap_or_default();
+        instrs.push(Instr::Bind {
+            id,
+            site,
+            name: CompactString::from(name),
+            kind,
+        });
+        Ok(())
+    }
+
+    /// The check that the current element is the one bound earlier to `id` (a join).
+    fn same<S: GraphStorage>(&self, id: BindingId) -> Result<Instr<S>, TraverserError> {
+        if self.is_column(id) {
+            self.row_check(id, BinaryOp::Eq)
+        } else {
+            Ok(Instr::Same(id))
+        }
+    }
+
+    /// The check that the current edge differs from the edge bound earlier to `id` (trail).
+    fn differs<S: GraphStorage>(&self, id: BindingId) -> Result<Instr<S>, TraverserError> {
+        if self.is_column(id) {
+            self.row_check(id, BinaryOp::Ne)
+        } else {
+            Ok(Instr::Differs(id))
+        }
+    }
+
+    /// Whether `id` is a materializing `WITH` column binding (no path label of its own).
+    fn is_column(&self, id: BindingId) -> bool {
+        self.bound.binding(id).is_some_and(|b| b.column.is_some())
+    }
+
+    /// `current <op> var` over the extra slot of [`Instr::RowCheck`], for column binding `id`.
+    fn row_check<S: GraphStorage>(
+        &self,
+        id: BindingId,
+        op: BinaryOp,
+    ) -> Result<Instr<S>, TraverserError> {
+        let Some(binding) = self.bound.binding(id) else {
+            return Err(self.unlowered());
+        };
+        let (Some(key), Some(&span)) = (binding.key.clone(), binding.occurrences.last()) else {
+            return Err(self.unlowered());
+        };
+        let variable = |name: String| Expr {
+            kind: ExprKind::Variable(Identifier { name, span }),
+            span,
+        };
+        let expr = Expr {
+            kind: ExprKind::Binary {
+                op,
+                left: Box::new(variable(String::new())),
+                right: Box::new(variable(key)),
+            },
+            span,
+        };
+        let extra = self.bound.bindings.len();
+        Ok(Instr::RowCheck(self.compile(&expr, Some(extra), &[])?))
+    }
+
+    /// Lowers a materializing `WITH` (decision C2) at `site`: its result pipeline, its `WHERE`
+    /// on the new row, the row label (emitted only when read later). Returns the row's site.
+    fn materialize<S: GraphStorage>(
+        &self,
+        m: &Materialize,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(Segment::With(with)) = self.bound.segments.get(m.segment) else {
+            return Err(self.unlowered());
+        };
+        self.pipeline(&m.result, &with.columns, &with.order_by, site, instrs)?;
+        let row = Site::row(m.segment);
+        for &c in &m.filters {
+            self.conjunct(c, row, instrs)?;
+        }
+        instrs.push(Instr::RowLabel(m.segment));
+        Ok(row)
+    }
+
+    /// The error of a plan part the lowering does not emit yet (stage 1b: aggregation). The
+    /// guard `bind::refuse_unplanned` refuses those queries with their own messages first, so
+    /// this is a guard only.
     fn unlowered(&self) -> TraverserError {
         GqlErrorBuilder::new(
             GqlErrorKind::NotYet,
@@ -720,11 +1124,11 @@ impl<'q> Lowering<'q> {
             let condition = self.compile(&is_labeled(factor), Some(id.0), &[])?;
             instrs.push(Instr::Filter {
                 condition,
-                current: Some(id),
+                site: Site::on(id),
             });
         }
         for c in residual {
-            self.conjunct(c, Some(id), &mut instrs)?;
+            self.conjunct(c, Site::on(id), &mut instrs)?;
         }
         Ok((first, instrs))
     }
@@ -736,9 +1140,11 @@ impl<'q> Lowering<'q> {
         let id = expand.edge;
         let mut checks = Vec::new();
         if expand.edge_join {
-            checks.push(Instr::Same(id));
+            checks.push(self.same(id)?);
         }
-        checks.extend(expand.trail.iter().map(|&other| Instr::Differs(other)));
+        for &other in &expand.trail {
+            checks.push(self.differs(other)?);
+        }
         let (labels, mut steps) = if expand.edge_join {
             (None, checks)
         } else {
@@ -764,11 +1170,11 @@ impl<'q> Lowering<'q> {
         and_factors(labels).into_iter().find_map(label_disjuncts)
     }
 
-    /// `gql:filter` of conjunct `c` (skipped when it is constantly TRUE).
+    /// `gql:filter` of conjunct `c` at `site` (skipped when it is constantly TRUE).
     fn conjunct<S: GraphStorage>(
         &self,
         c: usize,
-        current: Option<BindingId>,
+        site: Site,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<(), TraverserError> {
         let Some(conjunct) = self.bound.conjuncts.get(c) else {
@@ -782,7 +1188,7 @@ impl<'q> Lowering<'q> {
         ) {
             return Ok(());
         }
-        instrs.push(Instr::Filter { condition, current });
+        instrs.push(Instr::Filter { condition, site });
         Ok(())
     }
 
@@ -857,15 +1263,17 @@ impl<'q> Lowering<'q> {
         Ok(predicate.map(|p| (key.clone(), p)))
     }
 
-    /// The result pipeline; returns the number of columns.
-    fn result<S: GraphStorage>(
+    /// A result pipeline (`RETURN`, or a materializing `WITH`) of `columns` at `site`.
+    fn pipeline<S: GraphStorage>(
         &self,
-        current: Option<BindingId>,
+        ops: &[ResultOp],
+        columns: &[Column],
+        order_by: &[SortKey],
+        site: Site,
         instrs: &mut Vec<Instr<S>>,
-    ) -> Result<usize, TraverserError> {
+    ) -> Result<(), TraverserError> {
         let n = self.bound.bindings.len();
-        let columns = &self.bound.columns;
-        for op in &self.plan.result {
+        for op in ops {
             match op {
                 ResultOp::Project => {
                     let mut compiled = Vec::with_capacity(columns.len());
@@ -877,20 +1285,14 @@ impl<'q> Lowering<'q> {
                     }
                     instrs.push(Instr::Project {
                         columns: compiled,
-                        current,
+                        site,
                     });
                 }
                 ResultOp::Aggregate => return Err(self.unlowered()),
-                ResultOp::Distinct => instrs.push(Instr::Dedup),
+                ResultOp::Distinct => instrs.push(Instr::Distinct),
                 ResultOp::Order => {
-                    let aliases: Vec<(String, usize)> = columns
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, c)| c.aliased)
-                        .map(|(i, c)| (c.name.clone(), n + i))
-                        .collect();
-                    let mut keys = Vec::with_capacity(self.bound.order_by.len());
-                    for key in &self.bound.order_by {
+                    let mut keys = Vec::with_capacity(order_by.len());
+                    for key in order_by {
                         let expr = match key.column {
                             Some(i) => {
                                 let reference = Expr {
@@ -902,20 +1304,59 @@ impl<'q> Lowering<'q> {
                                 };
                                 self.compile(&reference, Some(n + i), &[])?
                             }
-                            None => self.compile(&key.expr, None, &aliases)?,
+                            None => self.sort_key(key, columns, n)?,
                         };
                         keys.push(GqlSortKey {
                             expr,
                             descending: key.direction == SortDirection::Desc,
                         });
                     }
-                    instrs.push(Instr::Order(keys));
+                    instrs.push(Instr::Order {
+                        keys,
+                        columns: columns.len(),
+                    });
                 }
                 ResultOp::Offset(count) => instrs.push(Instr::Skip(self.count(count, "OFFSET")?)),
                 ResultOp::Limit(count) => instrs.push(Instr::Limit(self.count(count, "LIMIT")?)),
             }
         }
-        Ok(columns.len())
+        Ok(())
+    }
+
+    /// An `ORDER BY` key that is not a whole column. An identifier the key names as a column
+    /// alias reads the column (slot `n + column`); every other variable is a binding, also one
+    /// whose key equals an alias (a substituted `LET` / `WITH` name standing for a variable,
+    /// T2 note): the binder's alias references are the identifiers of
+    /// [`SortKey::aliases`] written inside the key, which are renamed to names no binding has.
+    fn sort_key<S: GraphStorage>(
+        &self,
+        key: &SortKey,
+        columns: &[Column],
+        n: usize,
+    ) -> Result<RowExpr<S>, TraverserError> {
+        if key.aliases.is_empty() {
+            return self.compile(&key.expr, None, &[]);
+        }
+        let mut renames: Vec<(&str, String)> = Vec::with_capacity(key.aliases.len());
+        let mut aliases: Vec<(String, usize)> = Vec::with_capacity(key.aliases.len());
+        for &i in &key.aliases {
+            let Some(column) = columns.get(i) else {
+                continue;
+            };
+            let mut reserved = format!("\u{0}{i}");
+            while self
+                .names
+                .iter()
+                .any(|n| n.as_deref() == Some(reserved.as_str()))
+            {
+                reserved.insert(0, '\u{0}');
+            }
+            renames.push((column.name.as_str(), reserved.clone()));
+            aliases.push((reserved, n + i));
+        }
+        let mut expr = key.expr.clone();
+        rename_aliases(&mut expr, key.span, &renames);
+        self.compile(&expr, None, &aliases)
     }
 
     /// The value of `OFFSET` / `LIMIT`: a literal, or a parameter whose value must be a
@@ -953,18 +1394,39 @@ impl<'q> Lowering<'q> {
     }
 
     /// Which bindings need `as()` (module docs): a reason of the plan other than `read`, or a
-    /// read away from the current element.
-    fn labelled<S: GraphStorage>(&self, instrs: &[Instr<S>]) -> Vec<bool> {
+    /// read away from the current element; and which materializing `WITH` rows need their row
+    /// label: the plan says so, or a step reads a column after the row was left.
+    fn labelled<S: GraphStorage>(
+        &self,
+        instrs: &[Instr<S>],
+        columns: &[Option<ColumnRef>],
+    ) -> (Vec<bool>, Vec<bool>) {
         let n = self.bound.bindings.len();
         let mut labelled: Vec<bool> = self
             .plan
             .labelling
             .iter()
-            .map(|l| l.join || l.trail || l.branch)
+            .map(|l| l.join || l.trail || l.branch || l.resume || l.optional || l.group || l.path)
             .collect();
         labelled.resize(n, false);
-        mark_reads(instrs, n, &mut labelled);
-        labelled
+        let mut rows = vec![false; self.bound.segments.len()];
+        for stage in &self.plan.stages {
+            if let Stage::Materialize(m) = stage
+                && m.labelled
+                && let Some(flag) = rows.get_mut(m.segment)
+            {
+                *flag = true;
+            }
+        }
+        mark_reads(
+            instrs,
+            &mut Marks {
+                columns,
+                labelled: &mut labelled,
+                rows: &mut rows,
+            },
+        );
+        (labelled, rows)
     }
 
     /// The path label of each binding: its key (the variable name, or `#<id>` for a name bound
@@ -988,6 +1450,26 @@ impl<'q> Lowering<'q> {
                     }
                     CompactString::from(label)
                 }
+            })
+            .collect()
+    }
+
+    /// The row label of each materializing `WITH` segment, `#w<k>` (more `#` in front while it
+    /// collides with a binding's label); empty for the other segments.
+    fn row_labels(&self, labels: &[CompactString]) -> Vec<CompactString> {
+        self.bound
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(k, segment)| match segment {
+                Segment::With(_) => {
+                    let mut label = format!("#w{k}");
+                    while labels.iter().any(|l| l.as_str() == label) {
+                        label.insert(0, '#');
+                    }
+                    CompactString::from(label)
+                }
+                Segment::Match(_) | Segment::Optional(_) => CompactString::default(),
             })
             .collect()
     }
@@ -1067,43 +1549,82 @@ fn list_pvalues(value: &ElementProperty) -> Option<Vec<PValue>> {
         .collect()
 }
 
-/// Marks every binding an expression of `instrs` reads while it is not the current element.
-fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], n: usize, labelled: &mut [bool]) {
-    let mut slots = Vec::new();
-    let mark = |labelled: &mut [bool], slots: &mut Vec<usize>, current: Option<BindingId>| {
+/// What [`mark_reads`] records.
+struct Marks<'a> {
+    /// The materializing `WITH` column each binding stands for.
+    columns: &'a [Option<ColumnRef>],
+    /// Per binding: read away from its element (needs `as()`).
+    labelled: &'a mut [bool],
+    /// Per segment: its row is read after it was left (needs `as("#w<k>")`).
+    rows: &'a mut [bool],
+}
+
+impl Marks<'_> {
+    /// Records the reads of `slots` at `site` and clears them. Slots past the bindings (the
+    /// columns of `ORDER BY`, the current element of a row check) read no label.
+    fn read(&mut self, slots: &mut Vec<usize>, site: Site) {
         for slot in slots.drain(..) {
-            if slot < n
-                && current != Some(BindingId(slot))
-                && let Some(flag) = labelled.get_mut(slot)
-            {
-                *flag = true;
+            if site.current == Some(BindingId(slot)) {
+                continue;
+            }
+            match self.columns.get(slot) {
+                Some(Some(column)) => {
+                    if site.row != Some(column.segment)
+                        && let Some(flag) = self.rows.get_mut(column.segment)
+                    {
+                        *flag = true;
+                    }
+                }
+                Some(None) => {
+                    if let Some(flag) = self.labelled.get_mut(slot) {
+                        *flag = true;
+                    }
+                }
+                None => {}
             }
         }
-    };
+    }
+}
+
+/// Marks every binding an expression of `instrs` reads while it is not the current element, and
+/// every materializing `WITH` row a step reads while it is not the current object.
+fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
+    let mut slots = Vec::new();
     for instr in instrs {
         match instr {
-            Instr::Filter { condition, current } => {
+            Instr::Filter { condition, site } => {
                 condition.variables(&mut slots);
-                mark(labelled, &mut slots, *current);
+                marks.read(&mut slots, *site);
             }
-            Instr::Project { columns, current } => {
+            Instr::RowCheck(condition) => {
+                condition.variables(&mut slots);
+                marks.read(&mut slots, Site::default());
+            }
+            Instr::Project { columns, site } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
                 }
-                mark(labelled, &mut slots, *current);
+                marks.read(&mut slots, *site);
             }
-            Instr::Order(keys) => {
+            Instr::Order { keys, .. } => {
                 for key in keys {
                     key.expr.variables(&mut slots);
                 }
-                mark(labelled, &mut slots, None);
+                marks.read(&mut slots, Site::default());
             }
-            Instr::Hop(hop) => mark_reads(&hop.steps, n, labelled),
+            Instr::Bind { id, site, .. } => {
+                slots.push(id.0);
+                marks.read(&mut slots, *site);
+            }
+            Instr::Hop(hop) => mark_reads(&hop.steps, marks),
+            Instr::Optional(part) => mark_reads(part, marks),
             Instr::Scan
+            | Instr::Unit
             | Instr::HasLabel(_)
             | Instr::Has(..)
             | Instr::Label(_)
-            | Instr::Dedup
+            | Instr::RowLabel(_)
+            | Instr::Distinct
             | Instr::Skip(_)
             | Instr::Limit(_)
             | Instr::Select(_)
@@ -1125,4 +1646,58 @@ fn next_hop(ops: &[Op], at: usize) -> Option<&Expand> {
         }
     }
     None
+}
+
+/// Renames the alias references of an `ORDER BY` key: every variable written inside `within`
+/// (the key's text) whose name is a renamed alias. A variable outside it comes from a
+/// substituted `LET` / `WITH` definition and stays a binding. Recursion is bounded by the
+/// expression height (`MAX_HEIGHT`, kept by substitution).
+fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
+    match &mut expr.kind {
+        ExprKind::Variable(var) => {
+            let inside = var.span.start >= within.start && var.span.end <= within.end;
+            if inside && let Some((_, reserved)) = renames.iter().find(|(n, _)| *n == var.name) {
+                var.name = reserved.clone();
+            }
+        }
+        ExprKind::Literal(_) | ExprKind::Parameter(_) => {}
+        ExprKind::List(items) => {
+            for item in items {
+                rename_aliases(item, within, renames);
+            }
+        }
+        ExprKind::Map(map) => {
+            for entry in &mut map.entries {
+                rename_aliases(&mut entry.value, within, renames);
+            }
+        }
+        ExprKind::Property { target, .. } => rename_aliases(target, within, renames),
+        ExprKind::Unary { operand, .. }
+        | ExprKind::IsNull { operand, .. }
+        | ExprKind::IsLabeled { operand, .. } => rename_aliases(operand, within, renames),
+        ExprKind::Binary { left, right, .. } => {
+            rename_aliases(left, within, renames);
+            rename_aliases(right, within, renames);
+        }
+        ExprKind::Case(case) => {
+            if let Some(operand) = &mut case.operand {
+                rename_aliases(operand, within, renames);
+            }
+            for arm in &mut case.whens {
+                rename_aliases(&mut arm.when, within, renames);
+                rename_aliases(&mut arm.then, within, renames);
+            }
+            if let Some(else_result) = &mut case.else_result {
+                rename_aliases(else_result, within, renames);
+            }
+        }
+        ExprKind::FunctionCall { args, .. } => match args {
+            CallArgs::Star(_) => {}
+            CallArgs::Exprs(args) => {
+                for arg in args {
+                    rename_aliases(arg, within, renames);
+                }
+            }
+        },
+    }
 }

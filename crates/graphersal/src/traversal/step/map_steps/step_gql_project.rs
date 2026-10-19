@@ -98,6 +98,21 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     }
 }
 
+impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
+    /// Appends `gql:project(columns)`; see [`StepGqlProject`].
+    pub(crate) fn gql_project(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+    ) -> Self {
+        self.push_step(GraphStep::Map(
+            "gql:project",
+            Box::new(StepGqlProject::new(query, columns, bindings)),
+        ))
+    }
+}
+
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<S> {
     fn process(
         &self,

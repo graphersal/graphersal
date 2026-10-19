@@ -540,51 +540,15 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
 }
 
 /// Refuses the stage 1b constructs that bind but that the planner and the lowering do not
-/// handle yet: `OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, path variables, quantified edges and
-/// aggregates (kind `NotYet`, the messages the parser gave in stage 1a). Called by the lowering
+/// handle yet: path variables, quantified edges and aggregates (in `WITH` and `RETURN`) (kind
+/// `NotYet`, the messages the parser gave in stage 1a). Called by the lowering
 /// between binding and planning; the arms go away as the later stages land.
 pub(crate) fn refuse_unplanned(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
     unplanned(query, bound).map_err(|e| e.into_error(&query.source))
 }
 
 fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
-    for stage in &query.stages {
-        match stage {
-            Stage::Match(_) => {}
-            Stage::With(with) => {
-                return Err(not_yet(
-                    keyword_span(with.span, 4),
-                    "WITH",
-                    "put the conditions into WHERE and the projection into RETURN, or chain \
-                     Gremlin steps after gql(), for example \
-                     g.gql(\"MATCH (p:person) RETURN p.name AS name\").select(\"name\")",
-                ));
-            }
-            Stage::Let(clause) => {
-                return Err(not_yet(
-                    keyword_span(clause.span, 3),
-                    "LET",
-                    "compute the value in RETURN",
-                ));
-            }
-            Stage::Filter(clause) => {
-                return Err(not_yet(
-                    keyword_span(clause.span, 6),
-                    "FILTER",
-                    "write the condition as WHERE in the MATCH clause",
-                ));
-            }
-        }
-    }
     for m in &query.matches {
-        if m.optional {
-            return Err(not_yet(
-                keyword_span(m.span, 8),
-                "OPTIONAL MATCH",
-                "Gremlin optional(), for example \
-                 g.v().has_label(\"person\").optional(__.out(\"created\"))",
-            ));
-        }
         for path in &m.patterns {
             if let Some(variable) = &path.variable {
                 return Err(not_yet(
@@ -608,9 +572,13 @@ fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
             }
         }
     }
-    let first = bound
-        .columns
-        .iter()
+    // Aggregating `WITH` columns first (text order), then `RETURN`.
+    let with_columns = bound.segments.iter().flat_map(|segment| match segment {
+        Segment::With(with) => with.columns.as_slice(),
+        Segment::Match(_) | Segment::Optional(_) => &[],
+    });
+    let first = with_columns
+        .chain(&bound.columns)
         .filter(|c| c.aggregate)
         .find_map(|c| first_aggregate(&c.expr));
     if let Some(name) = first {

@@ -623,11 +623,19 @@ fn path_labels_only_where_a_later_step_reads_them() {
 }
 
 #[test]
-fn distinct_is_a_dedup_after_the_projection() {
+fn distinct_is_a_gql_distinct_after_the_projection() {
     let graph = TraversalGraph::tinkerpop_modern();
     let text = profile(&graph, "MATCH (p:person) RETURN DISTINCT 1 AS one");
-    assert!(text.contains("dedup()"), "{text}");
+    assert!(text.contains("gql:distinct()"), "{text}");
+    assert!(!text.contains("dedup()"), "{text}");
     let result = rows(&graph, "MATCH (p:person) RETURN DISTINCT 1 AS one");
+    assert_eq!(result.len(), 1);
+    // GQL equality (decision C3): 32 and 32.0 are one value.
+    let graph = fixture();
+    let result = rows(
+        &graph,
+        "MATCH (p:person) WHERE p.name IN ['josh', 'floatage'] RETURN DISTINCT p.age AS a",
+    );
     assert_eq!(result.len(), 1);
 }
 
@@ -762,7 +770,8 @@ mod differential {
             ),
             (
                 "MATCH (p:person) RETURN DISTINCT p.age AS a".into(),
-                r#"g.V().hasLabel("person").project("a").by(__.coalesce(__.values("age"), __.constant(()))).dedup()"#.into(),
+                // GQL equality (decision C3): floatage's 32.0 equals josh's 32, kept first.
+                r#"g.V().hasLabel("person").not(__.has("name", "floatage")).project("a").by(__.coalesce(__.values("age"), __.constant(()))).dedup()"#.into(),
             ),
             (
                 "MATCH (p:person {name: 'marko'}) RETURN *".into(),

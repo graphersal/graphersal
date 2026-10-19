@@ -100,6 +100,21 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     }
 }
 
+impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
+    /// Appends `gql:order(keys)`; see [`StepGqlOrder`].
+    pub(crate) fn gql_order(
+        self,
+        query: Arc<str>,
+        keys: Vec<GqlSortKey<S>>,
+        bindings: Arc<[Binding]>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatBarrier(
+            "gql:order",
+            Box::new(StepGqlOrder::new(query, keys, bindings)),
+        ))
+    }
+}
+
 impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
     /// Like `order()`, it holds the whole stream with its keys.
     fn materializes(&self) -> bool {

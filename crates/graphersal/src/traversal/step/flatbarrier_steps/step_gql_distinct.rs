@@ -1,11 +1,6 @@
 //! `gql:distinct()`: the `RETURN DISTINCT` / `WITH DISTINCT` of a GQL query (feature `gql`,
 //! internal).
 
-#![allow(
-    dead_code,
-    reason = "built by the projection lowering (stage 1b, T6/T7)"
-)]
-
 use std::collections::HashSet;
 
 use fnv::FnvBuildHasher;

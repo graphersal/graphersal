@@ -71,6 +71,7 @@ mod forwarding;
 mod from_to_modulating_steps_tests;
 mod generic_persist_tests;
 mod glob_path_tests;
+mod gql_pipeline_tests;
 mod gql_script_tests;
 mod gql_tests;
 mod graphml_edge_case_tests;
