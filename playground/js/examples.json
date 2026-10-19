@@ -123,13 +123,79 @@
     "group": "GQL",
     "graph": "modern",
     "title": "NULL for a missing property (NULLs sort last)",
-    "script": "g.gql(\"MATCH (v) RETURN v.name AS name, v.age AS age ORDER BY age\")"
+    "script": "g.gql(\"MATCH (v) RETURN v.name AS name, v.age AS age ORDER BY age, name\")"
   },
   {
     "group": "GQL",
     "graph": "modern",
     "title": "Either direction, with the edge label",
     "script": "g.gql(\"MATCH (x {name: 'josh'})-[e]-(y) RETURN type(e) AS rel, y.name AS other ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Aggregates: count and collect_list per person (implicit grouping)",
+    "script": "// The columns without an aggregate (person) are the grouping key; there is no GROUP BY.\ng.gql(`\n  MATCH (p:person)-[:created]->(s:software)\n  RETURN p.name AS person, count(s) AS projects, collect_list(s.name) AS names\n  ORDER BY projects DESC, person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Aggregates over all rows: count, sum, avg, min, max",
+    "script": "g.gql(\"MATCH (p:person) RETURN count(*) AS people, sum(p.age) AS total, avg(p.age) AS mean, min(p.age) AS youngest, max(p.age) AS oldest\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "count(DISTINCT ...): creators per language",
+    "script": "g.gql(\"MATCH (s:software)<-[:created]-(p:person) RETURN s.lang AS lang, count(s) AS rows, count(DISTINCT p) AS creators ORDER BY lang\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL MATCH: NULL when nothing matches",
+    "script": "g.gql(`\n  MATCH (p:person)\n  OPTIONAL MATCH (p)-[:created]->(s:software)\n  RETURN p.name AS person, s.name AS project\n  ORDER BY person, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL MATCH with count: zero for the unmatched",
+    "script": "g.gql(`\n  MATCH (p:person)\n  OPTIONAL MATCH (p)-[:created]->(s)\n  RETURN p.name AS person, count(s) AS projects\n  ORDER BY projects DESC, person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "WITH: aggregate, then filter on the aggregate",
+    "script": "g.gql(`\n  MATCH (p:person)-[:knows]->(f:person)\n  WITH p, count(f) AS friends, avg(f.age) AS mean_age\n  WHERE friends >= 2\n  RETURN p.name AS person, friends, mean_age\n  ORDER BY person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "WITH ... ORDER BY ... LIMIT, then MATCH again: the two oldest and their projects",
+    "script": "g.gql(`\n  MATCH (p:person)\n  WITH p ORDER BY p.age DESC LIMIT 2\n  MATCH (p)-[:created]->(s:software)\n  RETURN p.name AS person, s.name AS project\n  ORDER BY person, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "LET and FILTER with a $parameter",
+    "script": "g.gql(`\n  MATCH (p:person)\n  LET decade = p.age / 10 * 10\n  FILTER decade >= $from\n  RETURN p.name AS name, decade\n  ORDER BY decade, name\n`, #{from: 30})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Quantified edges {1,2}: reachable in one or two hops",
+    "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Cypher variable length [e*1..2]: the edge list e",
+    "script": "// [e*1..2] is GQL ->{1,2}; e is the list of the edges walked (Cypher's lower bound defaults to 1).\ng.gql(\"MATCH (a:person {name: 'marko'})-[e*1..2]->(b) RETURN b.name AS reached, size(e) AS hops ORDER BY hops, reached\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Path variable p = ...: the path and its length",
+    "script": "g.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows]->{0,1}(b)-[:created]->(s:software)\n  RETURN s.name AS project, path_length(p) AS len, p\n  ORDER BY len, project, b.name\n`)"
   },
   {
     "group": "GQL",
@@ -147,7 +213,7 @@
     "group": "GQL",
     "graph": "modern",
     "title": "Profile a GQL query (the Gremlin plan it runs)",
-    "script": "g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name\").profile()"
+    "script": "g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name ORDER BY name\").profile()"
   },
   {
     "group": "GQL",
