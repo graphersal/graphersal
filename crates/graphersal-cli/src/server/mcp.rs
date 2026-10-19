@@ -596,21 +596,30 @@ RETURN columns in the order written (bounded like query's: at most max_rows rows
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
 the graph. No Rhai escaping is needed: pass the GQL text as it is.
 
-Supported (stage 1a): MATCH with comma-separated patterns of node patterns (v:Label {key: \
-value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label expressions \
-with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS WITH, ENDS \
-WITH, CONTAINS); RETURN (mandatory; expressions with AS aliases, DISTINCT, RETURN *); ORDER BY \
-(ASC/DESC; NULLs last ascending), OFFSET (or SKIP) and LIMIT; $name parameters read from \
-params (values, never spliced into the text). String literals use single quotes. A missing \
-property is NULL. Edges in one match are distinct (trail semantics). Vertices and edges in a \
-row come back as {id, label, properties}. Not yet supported (refused with a GQLSTATUS error \
-and a Help line): aggregation (count, sum, collect, GROUP BY), OPTIONAL MATCH, WITH / LET / \
-FILTER, quantified paths (->{1,3}, *), path variables, writes (INSERT, SET, DELETE, CREATE, \
-MERGE): use the query tool with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN \
-p\").select(\"p\").out(\"created\").
+Supported (stages 1a and 1b): MATCH with comma-separated patterns of node patterns \
+(v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
+expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
+WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
+pipeline: project, aggregate, DISTINCT, ORDER BY, SKIP, LIMIT, WHERE, then more MATCH clauses); \
+LET x = expr and FILTER expr; aggregates count(x), count(*), sum, avg, min, max, collect_list \
+(Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (no GROUP \
+BY clause); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
+Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
+returned as a path value, path_length(p) (Cypher alias length); RETURN (mandatory; expressions \
+with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
+SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text). \
+String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
+(trail semantics), also inside quantified edges. Vertices and edges in a row come back as {id, \
+label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
+the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): a query \
+without MATCH, quantified path patterns ((a)-->(b)){1,3}, nodes(p) / relationships(p), UNION, \
+UNWIND, EXISTS, SHORTEST, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
+with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
-f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; more in the group \
+f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
+OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS who, count(s) AS projects ORDER BY \
+projects DESC, who; more in the group \
 \"GQL\" of the resource graphersal://examples (scripts g.gql(\"...\")).";
 
 fn all_tools() -> Vec<Tool> {
@@ -2151,6 +2160,41 @@ mod tests {
             assert!(GQL_DESCRIPTION.contains(named), "{named}");
         }
         assert!(INSTRUCTIONS.contains("`gql`"));
+    }
+
+    /// The gql tool's description lists the stage 1b subset as supported and still names what
+    /// is refused; it stays a read-only tool.
+    #[test]
+    fn gql_description_lists_stage_1b_and_what_is_still_refused() {
+        let (supported, refused) = GQL_DESCRIPTION
+            .split_once("Not yet supported")
+            .expect("a not-yet list");
+        for named in [
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "collect_list",
+            "count(*)",
+            "DISTINCT",
+            "->{1,3}",
+            "-[e*1..3]->",
+            "p = (a)-->(b)",
+            "path_length(p)",
+            "ORDER BY",
+        ] {
+            assert!(supported.contains(named), "{named}");
+        }
+        for named in [
+            "without MATCH",
+            "((a)-->(b)){1,3}",
+            "nodes(p)",
+            "INSERT",
+            "use the query tool",
+        ] {
+            assert!(refused.contains(named), "{named}");
+        }
+        assert!(GQL_DESCRIPTION.contains("never changes"));
     }
 
     #[test]

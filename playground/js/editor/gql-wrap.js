@@ -6,7 +6,7 @@
 // a query holding `${` is written as a double-quoted string with escapes instead.
 
 /** The query the action inserts into an empty editor. */
-export const GQL_TEMPLATE = 'MATCH (p:person)-[:knows]->(f:person)\nRETURN p.name AS who, f.name AS friend';
+export const GQL_TEMPLATE = 'MATCH (p:person)-[:knows]->(f:person)\nRETURN p.name AS who, f.name AS friend\nORDER BY who, friend';
 
 /** True when `text` (trimmed) already is a `g.gql(...)` call: the action leaves it alone. */
 export function isGqlCall(text) {

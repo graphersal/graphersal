@@ -334,7 +334,50 @@ const GQL_CURATED: &[&str] = &[
     r#"g.gql("MATCH (p:person) RETURN 100 / (p.age - 29)").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name LIMIT $n", #{n: -1}).toList()"#,
     r#"g.v().gql("MATCH (p) RETURN p").toList()"#,
+    // Stage 1b (every entry below runs without an error, so the five error cases above stay
+    // the only failing ones). Aggregation: grouping, every aggregate, DISTINCT, NULL skipping.
+    r#"g.gql("MATCH (p:person)-[:created]->(s) RETURN s.name AS s, count(*) AS c, sum(p.age) AS total, avg(p.age) AS a, min(p.name) AS lo, max(p.age) AS hi ORDER BY s").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN count(p.age) AS c, collect_list(p.name) AS names").toList()"#,
+    r#"g.gql("MATCH (p) RETURN labels(p) AS l, count(DISTINCT p.age) AS c ORDER BY c").toList()"#,
+    // OPTIONAL MATCH: unmatched rows read NULL, a WHERE inside the optional part.
+    r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS p, s.name AS s ORDER BY p, s").toList()"#,
+    r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:knows]->(f) WHERE f.age > 30 RETURN p.name AS p, f.name AS f ORDER BY p").toList()"#,
+    // WITH (projecting and materializing), LET, FILTER.
+    r#"g.gql("MATCH (p:person) WITH p, p.age * 2 AS dbl WHERE dbl > 60 RETURN p.name AS n, dbl ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person)-[:created]->(s) WITH s, count(*) AS c ORDER BY c DESC LIMIT 1 MATCH (s)<-[:created]-(q) RETURN s.name AS s, c, q.name AS q ORDER BY q").toList()"#,
+    r#"g.gql("MATCH (p:person) LET a = p.age + 1 FILTER a > 30 RETURN p.name AS n, a ORDER BY n").toList()"#,
+    // Quantified edges: {m,n}, {0,n}, Cypher *m..n with a group variable, +, unbounded.
+    r#"g.gql("MATCH (a {name: 'marko'})-[:knows]->{1,2}(b) RETURN b.name AS b ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (a)-[:knows|created]->{0,2}(b) WHERE a.name = 'marko' RETURN b.name AS b ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (a)-[e:created*1..2]-(b) WHERE a.name = 'lop' RETURN b.name AS b, size(e) AS n ORDER BY b, n").toList()"#,
+    r#"g.gql("MATCH (a)-[:knows]->+(b) RETURN b.name AS b ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (a)-[:created]-{1,}(b) RETURN count(*) AS c").toList()"#,
+    // Path variables: plain edges, a quantified group in either direction.
+    r#"g.gql("MATCH p = (a:person)-[:knows]->(b)-[:created]->(c) RETURN p, path_length(p) AS l ORDER BY c.name").toList()"#,
+    r#"g.gql("MATCH p = (a {name: 'marko'})-[:created|knows]-{1,2}(b) RETURN length(p) AS l, count(*) AS c ORDER BY l").toList()"#,
+    r#"g.gql("MATCH p = (a:person)<-[:knows]-{0,1}(b) RETURN p ORDER BY a.name, length(p)").select("p").toList()"#,
 ];
+
+/// Stage 1b GQL scripts that fail: data errors of an aggregate, binder refusals, the loop limit
+/// of an unbounded quantifier. Both storages fail them the same way.
+#[cfg(feature = "gql")]
+const GQL_CURATED_1B_ERRORS: &[&str] = &[
+    r#"g.gql("MATCH (p) RETURN sum(p.name) AS s").toList()"#,
+    r#"g.gql("MATCH (p) RETURN p.name AS n, count(*) AS c ORDER BY p.age").toList()"#,
+    r#"g.gql("MATCH (a)-[:knows]->{1,}(b) WITH b RETURN a.name").toList()"#,
+    r#"g.with("repeat.max_loops", 1).gql("MATCH (a)-[:created]-{1,}(b) RETURN count(*) AS c").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_1b_errors_fail_the_same_way_on_both_storages() {
+    for script in GQL_CURATED_1B_ERRORS {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        assert!(expected.result.is_err(), "`{script}`: {expected:?}");
+        assert_eq!(expected, actual, "`{script}`");
+    }
+}
 
 #[test]
 #[cfg(feature = "gql")]

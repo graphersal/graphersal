@@ -961,4 +961,59 @@ mod tests {
             assert_eq!(r["ok"], !expect_error, "example {title:?} on {graph}: {r}");
         }
     }
+
+    /// The GQL group of the Examples menu has one example per stage 1b construct, and every
+    /// GQL example that returns several rows orders them (`ORDER BY`), since GQL rows come in
+    /// no defined order.
+    #[test]
+    fn playground_gql_examples_cover_stage_1b_and_order_their_rows() {
+        let examples: Vec<Value> =
+            serde_json::from_str(include_str!("../../../playground/js/examples.json"))
+                .expect("examples.json");
+        let gql: Vec<&str> = examples
+            .iter()
+            .filter(|ex| ex["group"] == "GQL")
+            .map(|ex| ex["script"].as_str().expect("script"))
+            .collect();
+        for construct in [
+            "count(",
+            "collect_list(",
+            "sum(",
+            "avg(",
+            "min(",
+            "max(",
+            "count(DISTINCT",
+            "OPTIONAL MATCH",
+            "WITH ",
+            "LET ",
+            "FILTER ",
+            "->{1,2}",
+            "*1..2]",
+            "p = (",
+            "path_length(p)",
+        ] {
+            assert!(
+                gql.iter().any(|script| script.contains(construct)),
+                "no GQL example uses {construct:?}"
+            );
+        }
+        let options = RunOptions::default();
+        let mut tables = 0;
+        for script in gql {
+            let mut session = Session::new();
+            session.load_sample("modern").expect("sample graph");
+            let r: Value =
+                serde_json::from_str(&session.execute(script, &options)).expect("response JSON");
+            let rows = r["display"]["table"]["rows"].as_array().map_or(0, Vec::len);
+            // A Gremlin step after gql() decides the shape itself (`select`, `count`).
+            tables += usize::from(rows > 1);
+            if rows > 1 && !script.contains(").select(") && !script.contains(".count()") {
+                assert!(
+                    script.contains("ORDER BY"),
+                    "GQL example without ORDER BY: {script}"
+                );
+            }
+        }
+        assert!(tables > 10, "the row tables were read ({tables})");
+    }
 }
