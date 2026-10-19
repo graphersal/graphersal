@@ -378,19 +378,34 @@ fn the_plan_records_labels_only_never_a_full_path() {
     assert!(!plan.contains("[path:"), "{plan}");
 }
 
-/// D21 reverses C12: `nodes(p)` / `relationships(p)` are no longer refused before the run
-/// (stage 1c T1; T5 implements them and T6 asserts their rows).
+/// D21 reverses C12: `nodes(p)` / `relationships(p)` are compatibility functions (stage 1c);
+/// the path's vertices and edges in text order (more cases in `gql_function_tests.rs`).
 #[test]
-fn nodes_and_relationships_are_no_longer_refused() {
+fn nodes_and_relationships_return_the_path_elements() {
     let graph = modern();
-    for function in ["nodes", "relationships"] {
-        let query = format!("MATCH p = (a)-->(b) RETURN {function}(p)");
-        if let Err(error) = graph.read().traversal().gql(&query).to_list() {
-            let text = error.to_string();
-            assert!(!text.contains("gql:error"), "{query}: {text}");
-            assert!(!text.contains("over a path"), "{query}: {text}");
-        }
-    }
+    assert_eq!(
+        table(
+            &rows(
+                &graph,
+                "MATCH p = (a {name: 'marko'})-[:knows]->(b) RETURN nodes(p) AS n, \
+                 relationships(p) AS r"
+            ),
+            &["n", "r"]
+        ),
+        sorted(&["[marko josh]|[-knows->]", "[marko vadas]|[-knows->]"])
+    );
+    // Written right to left: the text order, not the edge direction.
+    assert_eq!(
+        table(
+            &rows(
+                &graph,
+                "MATCH p = (s {name: 'ripple'})<-[:created]-(x) RETURN nodes(p) AS n, \
+                 relationships(p) AS r"
+            ),
+            &["n", "r"]
+        ),
+        sorted(&["[ripple josh]|[-created->]"])
+    );
 }
 
 #[cfg(feature = "script")]
