@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 
 use crate::gql::aggregate::{Accumulator, Aggregate, AggregateCall, GroupKey, WithAggregates};
 use crate::gql::runtime::{
-    Binding, GqlElement, Row, RowExpr, eval_error, history_read, into_traverser_value, labels_read,
-    source_text,
+    Binding, GqlElement, RowExpr, SubqueryAnswers, SubqueryHost, eval_error, history_read,
+    into_traverser_value, labels_read, source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -53,8 +53,11 @@ struct Group<S: GraphStorage> {
 /// group, `bulk.max_expansion` for the repeated values of `collect_list` like `group()`, and
 /// `traversal.max_materialized_bytes` and the memory budget for the lists it builds, before
 /// building them. It reads the labels its expressions read (rule 13) and is a map-producing kind
-/// for the path analysis (`MAP_PRODUCING_KINDS`). Built only by the GQL lowering; not a DSL step.
-struct StepGqlAggregate<S: GraphStorage> {
+/// for the path analysis (`MAP_PRODUCING_KINDS`). A key, an aggregate's argument or an output
+/// holding `EXISTS` runs the bodies as the children of a [`SubqueryHost`] (stage 2b) on the
+/// input row (an output on the group's first row), each at most once per row. Built only by the
+/// GQL lowering; not a DSL step.
+struct StepGqlAggregate<'g, S: GraphStorage + 'g> {
     query: Arc<str>,
     /// The column names as record keys, shared by every row.
     keys: Arc<Vec<RecordKey>>,
@@ -67,9 +70,11 @@ struct StepGqlAggregate<S: GraphStorage> {
     bindings: Arc<[Binding]>,
     labels: Arc<[CompactString]>,
     history: Arc<[CompactString]>,
+    /// The subqueries the keys, the arguments and the outputs hold.
+    host: SubqueryHost<'g, S>,
 }
 
-impl<S: GraphStorage> Clone for StepGqlAggregate<S> {
+impl<'g, S: GraphStorage + 'g> Clone for StepGqlAggregate<'g, S> {
     fn clone(&self) -> Self {
         Self {
             query: Arc::clone(&self.query),
@@ -80,11 +85,12 @@ impl<S: GraphStorage> Clone for StepGqlAggregate<S> {
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
+            host: self.host.clone(),
         }
     }
 }
 
-impl<S: GraphStorage> fmt::Display for StepGqlAggregate<S> {
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlAggregate<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use crate::value::literal::rhai_strings;
         // GQL text in string literals, so the camelCase respelling leaves it alone.
@@ -114,12 +120,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlAggregate<S> {
     }
 }
 
-impl<S: GraphStorage> StepGqlAggregate<S> {
+impl<'g, S: GraphStorage + 'g> StepGqlAggregate<'g, S> {
     fn new(
         query: Arc<str>,
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
+        host: SubqueryHost<'g, S>,
     ) -> Self {
         let exprs = || {
             columns
@@ -148,6 +155,7 @@ impl<S: GraphStorage> StepGqlAggregate<S> {
             bindings,
             labels,
             history,
+            host,
         }
     }
 
@@ -208,6 +216,7 @@ impl<S: GraphStorage> StepGqlAggregate<S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:aggregate(..)`; see [`StepGqlAggregate`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn gql_aggregate(
         self,
         query: Arc<str>,
@@ -217,28 +226,64 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     ) -> Self {
         self.push_step(GraphStep::FlatBarrier(
             "gql:aggregate",
-            Box::new(StepGqlAggregate::new(query, columns, calls, bindings)),
+            Box::new(StepGqlAggregate::new(
+                query,
+                columns,
+                calls,
+                bindings,
+                SubqueryHost::default(),
+            )),
+        ))
+    }
+
+    /// Appends `gql:aggregate(..)` hosting the subqueries `children` (child `i` answers the
+    /// columns' and arguments' subquery `i`); see [`StepGqlAggregate`].
+    pub(crate) fn gql_aggregate_hosted(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatBarrier(
+            "gql:aggregate",
+            Box::new(StepGqlAggregate::new(
+                query,
+                columns,
+                calls,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
-    /// Appends `gql:aggregate(..)`; see [`StepGqlAggregate`].
-    pub(crate) fn gql_aggregate(
+    /// Appends `gql:aggregate(..)` hosting the subqueries `children` (child `i` answers the
+    /// columns' and arguments' subquery `i`); see [`StepGqlAggregate`].
+    pub(crate) fn gql_aggregate_hosted(
         self,
         query: Arc<str>,
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self {
         self.push_step(GraphStep::FlatBarrier(
             "gql:aggregate",
-            Box::new(StepGqlAggregate::new(query, columns, calls, bindings)),
+            Box::new(StepGqlAggregate::new(
+                query,
+                columns,
+                calls,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<S> {
+impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<'g, S> {
     /// Like `group()`, it holds the accumulators of every group.
     fn materializes(&self) -> bool {
         true
@@ -257,16 +302,21 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
         let mut key: Vec<GroupKey<GqlElement<S>>> = Vec::with_capacity(self.grouping.len());
         for traverser in source {
             context.tick()?;
-            let row = Row::new(context, &traverser, &self.bindings);
+            let mut answers = SubqueryAnswers::default();
             key.clear();
             for &column in self.grouping.iter() {
                 let Some(expr) = self.columns.get(column) else {
                     continue;
                 };
-                let value = expr.eval(&row);
                 // A limit error the row kept (a refused `Env::reserve`) wins over the
-                // evaluator's fallback error.
-                row.finish()?;
+                // evaluator's fallback error (`SubqueryHost::evaluate`).
+                let value = self.host.evaluate(
+                    context,
+                    &traverser,
+                    &self.bindings,
+                    &mut answers,
+                    |row| expr.eval(row),
+                )?;
                 key.push(GroupKey(value.map_err(failed)?));
             }
             let index = match groups.get_index_of(key.as_slice()) {
@@ -281,8 +331,15 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
             };
             if let Some((_, group)) = groups.get_index_mut(index) {
                 for (call, accumulator) in self.calls.iter().zip(group.accumulators.iter_mut()) {
-                    let added = call.add(accumulator, &row, traverser.bulk);
-                    row.finish()?;
+                    // The argument is evaluated before anything is added, so a row stopped at
+                    // a subquery adds nothing before it runs again.
+                    let added = self.host.evaluate(
+                        context,
+                        &traverser,
+                        &self.bindings,
+                        &mut answers,
+                        |row| call.add(accumulator, row, traverser.bulk),
+                    )?;
                     added.map_err(failed)?;
                 }
             }
@@ -314,26 +371,28 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failed)?;
             let values = {
-                let row = Row::new(context, &group.first, &self.bindings);
-                let env = WithAggregates {
-                    env: &row,
-                    results: &results,
-                };
+                let mut answers = SubqueryAnswers::default();
                 let mut values = Vec::with_capacity(self.columns.len());
                 for expr in self.columns.iter() {
-                    let value = match expr.as_variable() {
-                        Some(slot) => match row.bound(slot) {
-                            Some(value) => value.into_owned(),
-                            None => TraverserValue::Computed(ElementProperty::Null, None),
+                    let value = self.host.evaluate(
+                        context,
+                        &group.first,
+                        &self.bindings,
+                        &mut answers,
+                        |row| match expr.as_variable() {
+                            Some(slot) => Ok(match row.bound(slot) {
+                                Some(value) => value.into_owned(),
+                                None => TraverserValue::Computed(ElementProperty::Null, None),
+                            }),
+                            None => expr
+                                .eval(&WithAggregates {
+                                    env: row,
+                                    results: &results,
+                                })
+                                .map(into_traverser_value),
                         },
-                        None => {
-                            let value = expr.eval(&env);
-                            row.finish()?;
-                            into_traverser_value(value.map_err(failed)?)
-                        }
-                    };
-                    row.finish()?;
-                    values.push(value);
+                    )?;
+                    values.push(value.map_err(failed)?);
                 }
                 values
             };
@@ -352,6 +411,18 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.host.children_mut()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &PathRequirement,
+    ) -> PathRequirement {
+        self.host.analyze_paths(analysis)
     }
 
     fn history_labels(&self) -> &[CompactString] {

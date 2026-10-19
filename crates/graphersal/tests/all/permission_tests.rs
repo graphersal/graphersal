@@ -2407,4 +2407,54 @@ mod gql {
             assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
         }
     }
+
+    /// Stage 2b.T5: a subquery anywhere in an expression runs as a child of the `gql:*` step
+    /// evaluating it (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`); the
+    /// authorization walk visits those children, so an edge read reached only there is refused
+    /// before the run, also when no row would reach it, like the Gremlin `where(__.out(..))`.
+    #[test]
+    fn a_denied_read_inside_a_hosted_exists_refuses_gql() {
+        let graph = modern();
+        for script in [
+            // gql:filter: under OR
+            r#"g.gql("MATCH (p:person) WHERE p.age > 30 OR EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+            // gql:filter: under CASE
+            r#"g.gql("MATCH (p:person) WHERE CASE WHEN (p)-[:created]->() THEN true ELSE false END RETURN p.name").toList()"#,
+            // gql:project: a RETURN column
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-[:created]->() } AS c").toList()"#,
+            // gql:order: an ORDER BY key
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY EXISTS { (p)-[:created]->() }").toList()"#,
+            // gql:aggregate: an aggregate's argument and a grouping key
+            r#"g.gql("MATCH (p:person) RETURN count(CASE WHEN (p)-[:created]->() THEN 1 END) AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS e, count(*) AS c").toList()"#,
+            // gql:for: the list
+            r#"g.gql("MATCH (p:person) FOR x IN [EXISTS { (p)-[:created]->() }] RETURN x").toList()"#,
+            // no row reaches the host
+            r#"g.gql("MATCH (p:nobody) RETURN EXISTS { (p)-[:created]->() } AS c").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Without the subquery every query above is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS n ORDER BY n").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        // Allowed, a hosted child asks what the Gremlin twin's child asks.
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS c").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE p.age > 30 OR (p)-[:created]->() RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
 }

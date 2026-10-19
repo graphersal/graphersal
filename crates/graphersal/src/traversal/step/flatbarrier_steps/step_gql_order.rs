@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::gql::runtime::{
-    Binding, OrderValue, Row, RowExpr, compare_order, eval_error, history_read, labels_read,
-    source_text,
+    Binding, OrderValue, RowExpr, SubqueryAnswers, SubqueryHost, compare_order, eval_error,
+    history_read, labels_read, source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -27,17 +27,20 @@ pub(crate) struct GqlSortKey<S: GraphStorage> {
 ///
 /// The keys read the row map of the preceding `gql:project` (`Binding::Column`) or path labels
 /// (`Binding::Label`, declared as the path requirement, rule 13). A flat barrier that passes its
-/// input on, so the permission flow and the path analysis treat it like `order()`. Built only by
-/// the GQL lowering; not a DSL step.
-struct StepGqlOrder<S: GraphStorage> {
+/// input on, so the permission flow and the path analysis treat it like `order()`. A key holding
+/// `EXISTS` runs the bodies as the children of a [`SubqueryHost`] (stage 2b), each at most once
+/// per row. Built only by the GQL lowering; not a DSL step.
+struct StepGqlOrder<'g, S: GraphStorage + 'g> {
     query: Arc<str>,
     keys: Arc<[GqlSortKey<S>]>,
     bindings: Arc<[Binding]>,
     labels: Arc<[CompactString]>,
     history: Arc<[CompactString]>,
+    /// The subqueries the keys hold.
+    host: SubqueryHost<'g, S>,
 }
 
-impl<S: GraphStorage> Clone for StepGqlOrder<S> {
+impl<'g, S: GraphStorage + 'g> Clone for StepGqlOrder<'g, S> {
     fn clone(&self) -> Self {
         Self {
             query: Arc::clone(&self.query),
@@ -45,11 +48,12 @@ impl<S: GraphStorage> Clone for StepGqlOrder<S> {
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
+            host: self.host.clone(),
         }
     }
 }
 
-impl<S: GraphStorage> fmt::Display for StepGqlOrder<S> {
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlOrder<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let keys: Vec<String> = self
             .keys
@@ -71,8 +75,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlOrder<S> {
     }
 }
 
-impl<S: GraphStorage> StepGqlOrder<S> {
-    fn new(query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>) -> Self {
+impl<'g, S: GraphStorage + 'g> StepGqlOrder<'g, S> {
+    fn new(
+        query: Arc<str>,
+        keys: Vec<GqlSortKey<S>>,
+        bindings: Arc<[Binding]>,
+        host: SubqueryHost<'g, S>,
+    ) -> Self {
         let labels = labels_read(keys.iter().map(|key| &key.expr), &bindings).into();
         let history = history_read(keys.iter().map(|key| &key.expr), &bindings).into();
         Self {
@@ -81,12 +90,14 @@ impl<S: GraphStorage> StepGqlOrder<S> {
             bindings,
             labels,
             history,
+            host,
         }
     }
 }
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:order(keys)`; see [`StepGqlOrder`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn gql_order(
         self,
         query: Arc<str>,
@@ -95,27 +106,59 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     ) -> Self {
         self.push_step(GraphStep::FlatBarrier(
             "gql:order",
-            Box::new(StepGqlOrder::new(query, keys, bindings)),
+            Box::new(StepGqlOrder::new(
+                query,
+                keys,
+                bindings,
+                SubqueryHost::default(),
+            )),
+        ))
+    }
+
+    /// Appends `gql:order(keys)` hosting the subqueries `children` (child `i` answers the keys'
+    /// subquery `i`); see [`StepGqlOrder`].
+    pub(crate) fn gql_order_hosted(
+        self,
+        query: Arc<str>,
+        keys: Vec<GqlSortKey<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatBarrier(
+            "gql:order",
+            Box::new(StepGqlOrder::new(
+                query,
+                keys,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
-    /// Appends `gql:order(keys)`; see [`StepGqlOrder`].
-    pub(crate) fn gql_order(
+    /// Appends `gql:order(keys)` hosting the subqueries `children` (child `i` answers the keys'
+    /// subquery `i`); see [`StepGqlOrder`].
+    pub(crate) fn gql_order_hosted(
         self,
         query: Arc<str>,
         keys: Vec<GqlSortKey<S>>,
         bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self {
         self.push_step(GraphStep::FlatBarrier(
             "gql:order",
-            Box::new(StepGqlOrder::new(query, keys, bindings)),
+            Box::new(StepGqlOrder::new(
+                query,
+                keys,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
+impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<'g, S> {
     /// Like `order()`, it holds the whole stream with its keys.
     fn materializes(&self) -> bool {
         true
@@ -129,17 +172,20 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
         let mut keyed: Vec<(Vec<OrderValue>, Traverser<S>)> = Vec::with_capacity(source.len());
         for traverser in source {
             context.tick()?;
-            let row = Row::new(context, &traverser, &self.bindings);
+            let mut answers = SubqueryAnswers::default();
             let mut values = Vec::with_capacity(self.keys.len());
             for key in self.keys.iter() {
-                let value = key.expr.eval(&row);
                 // A limit error the row kept (a refused `Env::reserve`) wins over the
-                // evaluator's fallback error.
-                row.finish()?;
-                let value = value.map_err(|error| Box::new(eval_error(&self.query, error)))?;
-                values.push(OrderValue::of(value, &row));
+                // evaluator's fallback error (`SubqueryHost::evaluate`).
+                let value = self.host.evaluate(
+                    context,
+                    &traverser,
+                    &self.bindings,
+                    &mut answers,
+                    |row| key.expr.eval(row).map(|value| OrderValue::of(value, row)),
+                )?;
+                values.push(value.map_err(|error| Box::new(eval_error(&self.query, error)))?);
             }
-            drop(row);
             keyed.push((values, traverser));
         }
         keyed.sort_by(|(a, _), (b, _)| {
@@ -165,6 +211,18 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.host.children_mut()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &PathRequirement,
+    ) -> PathRequirement {
+        self.host.analyze_paths(analysis)
     }
 
     fn history_labels(&self) -> &[CompactString] {

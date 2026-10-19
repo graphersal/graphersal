@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::gql::eval::Truth;
 use crate::gql::runtime::{
-    Binding, Row, RowExpr, eval_error, history_read, labels_read, source_text,
+    Binding, RowExpr, SubqueryAnswers, SubqueryHost, eval_error, history_read, labels_read,
+    source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -20,8 +21,10 @@ use crate::*;
 /// A pure filter: the bulk passes unchanged, the sack is untouched, nothing is written. The
 /// optimizer's `filter_reorder` may move it within a run of filters (cost rank 5, so after the
 /// `has()` steps), never across the `as()` that sets a label it reads (an `as()` ends the run).
+/// A condition holding `EXISTS` anywhere but as a top-level conjunct (`a OR EXISTS {..}`) runs
+/// its bodies as the children of a [`SubqueryHost`] (stage 2b), lazily per row.
 /// Built only by the GQL lowering; not a DSL step.
-struct StepGqlFilter<S: GraphStorage> {
+struct StepGqlFilter<'g, S: GraphStorage + 'g> {
     /// The whole query, for the error excerpt and the rendering.
     query: Arc<str>,
     /// The condition.
@@ -32,9 +35,11 @@ struct StepGqlFilter<S: GraphStorage> {
     labels: Arc<[CompactString]>,
     /// The labels it reads in every occurrence (group variables, sorted).
     history: Arc<[CompactString]>,
+    /// The subqueries the condition holds.
+    host: SubqueryHost<'g, S>,
 }
 
-impl<S: GraphStorage> Clone for StepGqlFilter<S> {
+impl<'g, S: GraphStorage + 'g> Clone for StepGqlFilter<'g, S> {
     fn clone(&self) -> Self {
         Self {
             query: Arc::clone(&self.query),
@@ -42,11 +47,12 @@ impl<S: GraphStorage> Clone for StepGqlFilter<S> {
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
+            host: self.host.clone(),
         }
     }
 }
 
-impl<S: GraphStorage> fmt::Display for StepGqlFilter<S> {
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlFilter<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The expression is a string literal, so the camelCase respelling leaves the GQL text
         // (`element_id(n)`) alone.
@@ -58,8 +64,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlFilter<S> {
     }
 }
 
-impl<S: GraphStorage> StepGqlFilter<S> {
-    fn new(query: Arc<str>, condition: RowExpr<S>, bindings: Arc<[Binding]>) -> Self {
+impl<'g, S: GraphStorage + 'g> StepGqlFilter<'g, S> {
+    fn new(
+        query: Arc<str>,
+        condition: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        host: SubqueryHost<'g, S>,
+    ) -> Self {
         let labels = labels_read([&condition], &bindings).into();
         let history = history_read([&condition], &bindings).into();
         Self {
@@ -68,12 +79,14 @@ impl<S: GraphStorage> StepGqlFilter<S> {
             bindings,
             labels,
             history,
+            host,
         }
     }
 }
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:filter(condition)`; see [`StepGqlFilter`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn gql_filter(
         self,
         query: Arc<str>,
@@ -82,7 +95,32 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     ) -> Self {
         self.push_step(GraphStep::Filter(
             "gql:filter",
-            Box::new(StepGqlFilter::new(query, condition, bindings)),
+            Box::new(StepGqlFilter::new(
+                query,
+                condition,
+                bindings,
+                SubqueryHost::default(),
+            )),
+        ))
+    }
+
+    /// Appends `gql:filter(condition)` hosting the subqueries `children` (child `i` answers the
+    /// condition's subquery `i`); see [`StepGqlFilter`].
+    pub(crate) fn gql_filter_hosted(
+        self,
+        query: Arc<str>,
+        condition: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::Filter(
+            "gql:filter",
+            Box::new(StepGqlFilter::new(
+                query,
+                condition,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
@@ -97,20 +135,49 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     ) -> Self {
         self.push_step(GraphStep::Filter(
             "gql:filter",
-            Box::new(StepGqlFilter::new(query, condition, bindings)),
+            Box::new(StepGqlFilter::new(
+                query,
+                condition,
+                bindings,
+                SubqueryHost::default(),
+            )),
+        ))
+    }
+
+    /// Appends `gql:filter(condition)` hosting the subqueries `children` (child `i` answers the
+    /// condition's subquery `i`); see [`StepGqlFilter`].
+    pub(crate) fn gql_filter_hosted(
+        self,
+        query: Arc<str>,
+        condition: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::Filter(
+            "gql:filter",
+            Box::new(StepGqlFilter::new(
+                query,
+                condition,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlFilter<S> {
+impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlFilter<'g, S> {
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,
         source: &Traverser<S>,
     ) -> TraverserResult<bool> {
-        let row = Row::new(context, source, &self.bindings);
-        let truth = self.condition.truth(&row);
-        row.finish()?;
+        let truth = self.host.evaluate(
+            context,
+            source,
+            &self.bindings,
+            &mut SubqueryAnswers::default(),
+            |row| self.condition.truth(row),
+        )?;
         match truth {
             Ok(truth) => Ok(truth == Truth::True),
             Err(error) => Err(Box::new(eval_error(&self.query, error))),
@@ -119,6 +186,18 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlFilter<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.host.children_mut()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &PathRequirement,
+    ) -> PathRequirement {
+        self.host.analyze_paths(analysis)
     }
 
     fn history_labels(&self) -> &[CompactString] {

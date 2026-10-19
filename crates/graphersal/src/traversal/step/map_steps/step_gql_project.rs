@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::gql::runtime::{
-    Binding, Row, RowExpr, eval_error, history_read, into_traverser_value, labels_read,
+    Binding, Row, RowExpr, SubqueryAnswers, SubqueryHost, eval_error, history_read,
+    into_traverser_value, labels_read,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -28,8 +29,10 @@ pub(crate) struct GqlColumn<S: GraphStorage> {
 /// A map step: the traverser keeps its path, bulk and sack (a derived traverser, rule 20), so
 /// equal rows stay merged until a terminal expands them. It reads the step labels its columns
 /// read (rule 13) and is a map-producing kind for the path analysis (`MAP_PRODUCING_KINDS`).
+/// A column holding `EXISTS` (`RETURN EXISTS { (p)-->() } AS x`) runs the bodies as the
+/// children of a [`SubqueryHost`] (stage 2b), each at most once per row.
 /// Built only by the GQL lowering; not a DSL step.
-struct StepGqlProject<S: GraphStorage> {
+struct StepGqlProject<'g, S: GraphStorage + 'g> {
     query: Arc<str>,
     /// The column names as record keys, shared by every row.
     keys: Arc<Vec<RecordKey>>,
@@ -38,9 +41,11 @@ struct StepGqlProject<S: GraphStorage> {
     bindings: Arc<[Binding]>,
     labels: Arc<[CompactString]>,
     history: Arc<[CompactString]>,
+    /// The subqueries the columns hold.
+    host: SubqueryHost<'g, S>,
 }
 
-impl<S: GraphStorage> Clone for StepGqlProject<S> {
+impl<'g, S: GraphStorage + 'g> Clone for StepGqlProject<'g, S> {
     fn clone(&self) -> Self {
         Self {
             query: Arc::clone(&self.query),
@@ -49,11 +54,12 @@ impl<S: GraphStorage> Clone for StepGqlProject<S> {
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
+            host: self.host.clone(),
         }
     }
 }
 
-impl<S: GraphStorage> fmt::Display for StepGqlProject<S> {
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlProject<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.keys.iter().map(RecordKey::as_str).collect();
         write!(
@@ -64,8 +70,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlProject<S> {
     }
 }
 
-impl<S: GraphStorage> StepGqlProject<S> {
-    fn new(query: Arc<str>, columns: Vec<GqlColumn<S>>, bindings: Arc<[Binding]>) -> Self {
+impl<'g, S: GraphStorage + 'g> StepGqlProject<'g, S> {
+    fn new(
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+        host: SubqueryHost<'g, S>,
+    ) -> Self {
         let labels = labels_read(columns.iter().map(|column| &column.expr), &bindings).into();
         let history = history_read(columns.iter().map(|column| &column.expr), &bindings).into();
         let (keys, columns): (Vec<RecordKey>, Vec<RowExpr<S>>) = columns
@@ -79,12 +90,39 @@ impl<S: GraphStorage> StepGqlProject<S> {
             bindings,
             labels,
             history,
+            host,
         }
+    }
+
+    /// The value of `column` on `row` (see the type docs).
+    fn column(
+        &self,
+        row: &Row<'_, '_, S>,
+        column: &RowExpr<S>,
+    ) -> TraverserResult<TraverserValue<S>> {
+        let value = match column.as_variable() {
+            Some(slot) => match row.bound(slot) {
+                Some(value) => value.into_owned(),
+                None => TraverserValue::Computed(ElementProperty::Null, None),
+            },
+            None => match column.eval(row) {
+                Ok(value) => into_traverser_value(value),
+                Err(error) => {
+                    // A limit error the row kept (a refused `Env::reserve`) wins over the
+                    // evaluator's fallback error.
+                    row.finish()?;
+                    return Err(Box::new(eval_error(&self.query, error)));
+                }
+            },
+        };
+        row.finish()?;
+        Ok(value)
     }
 }
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:project(columns)`; see [`StepGqlProject`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn gql_project(
         self,
         query: Arc<str>,
@@ -93,52 +131,80 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     ) -> Self {
         self.push_step(GraphStep::Map(
             "gql:project",
-            Box::new(StepGqlProject::new(query, columns, bindings)),
+            Box::new(StepGqlProject::new(
+                query,
+                columns,
+                bindings,
+                SubqueryHost::default(),
+            )),
+        ))
+    }
+
+    /// Appends `gql:project(columns)` hosting the subqueries `children` (child `i` answers the
+    /// columns' subquery `i`); see [`StepGqlProject`].
+    pub(crate) fn gql_project_hosted(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::Map(
+            "gql:project",
+            Box::new(StepGqlProject::new(
+                query,
+                columns,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
-    /// Appends `gql:project(columns)`; see [`StepGqlProject`].
-    pub(crate) fn gql_project(
+    /// Appends `gql:project(columns)` hosting the subqueries `children` (child `i` answers the
+    /// columns' subquery `i`); see [`StepGqlProject`].
+    pub(crate) fn gql_project_hosted(
         self,
         query: Arc<str>,
         columns: Vec<GqlColumn<S>>,
         bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self {
         self.push_step(GraphStep::Map(
             "gql:project",
-            Box::new(StepGqlProject::new(query, columns, bindings)),
+            Box::new(StepGqlProject::new(
+                query,
+                columns,
+                bindings,
+                SubqueryHost::new(children),
+            )),
         ))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<S> {
+impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<'g, S> {
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,
         source: Traverser<S>,
     ) -> TraverserResult<Traverser<S>> {
-        let row = Row::new(context, &source, &self.bindings);
         let mut values = Vec::with_capacity(self.columns.len());
-        for column in self.columns.iter() {
-            let value = match column.as_variable() {
-                Some(slot) => match row.bound(slot) {
-                    Some(value) => value.into_owned(),
-                    None => TraverserValue::Computed(ElementProperty::Null, None),
-                },
-                None => match column.eval(&row) {
-                    Ok(value) => into_traverser_value(value),
-                    Err(error) => {
-                        // A limit error the row kept (a refused `Env::reserve`) wins over the
-                        // evaluator's fallback error.
-                        row.finish()?;
-                        return Err(Box::new(eval_error(&self.query, error)));
-                    }
-                },
-            };
-            row.finish()?;
-            values.push(value);
+        if self.host.is_empty() {
+            let row = Row::new(context, &source, &self.bindings);
+            for column in self.columns.iter() {
+                values.push(self.column(&row, column)?);
+            }
+        } else {
+            let mut answers = SubqueryAnswers::default();
+            for column in self.columns.iter() {
+                let value =
+                    self.host
+                        .evaluate(context, &source, &self.bindings, &mut answers, |row| {
+                            self.column(row, column).map_err(|error| *error)
+                        })?;
+                values.push(value.map_err(Box::new)?);
+            }
         }
         Ok(source.split(TraverserValue::Record {
             keys: Arc::clone(&self.keys),
@@ -148,6 +214,18 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.host.children_mut()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &PathRequirement,
+    ) -> PathRequirement {
+        self.host.analyze_paths(analysis)
     }
 
     fn history_labels(&self) -> &[CompactString] {

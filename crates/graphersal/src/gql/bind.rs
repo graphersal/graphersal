@@ -125,8 +125,10 @@
 //! after binding. Beside an aggregate a subquery may import only grouping keys.
 //!
 //! The planner plans every body with its host (`planner.rs`, "Subqueries"); the lowering runs a
-//! top-level `[NOT] EXISTS` conjunct as a child (stage 2b.T4); [`refuse_subqueries_except`]
-//! refuses a subquery anywhere else (kind `NotYet`, until stage 2b.T5).
+//! top-level `[NOT] EXISTS` conjunct as a `filter()` / `not()` child (stage 2b.T4) and a
+//! subquery anywhere else in an expression as a child of the `gql:*` step evaluating it (the
+//! hook, `runtime::SubqueryHost`, stage 2b.T5). [`refuse_subqueries_except`] (the guard of the
+//! earlier stages) is kept for the binder tests only.
 //!
 //! # Aggregates
 //!
@@ -675,11 +677,10 @@ pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(),
     refuse_subqueries_except(query, bound, |_| false)
 }
 
-/// Refuses a bound query that holds a subquery the lowering does not support yet: every
-/// subquery `k` for which `lowered(k)` is false (since stage 2b.T4 the lowering runs a
-/// top-level `[NOT] EXISTS` conjunct as a child; a subquery anywhere else in an expression
-/// waits for the evaluator hook, stage 2b.T5). The error names the first such subquery in the
-/// text.
+/// Refuses a bound query that holds a subquery `k` for which `lowered(k)` is false (the guard
+/// of stages 2b.T2 - T4; since 2b.T5 the lowering runs a subquery in every position, so only the
+/// binder tests use it). The error names the first such subquery in the text.
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
 pub(crate) fn refuse_subqueries_except(
     query: &Query,
     bound: &BoundQuery,
@@ -694,7 +695,9 @@ pub(crate) fn refuse_subqueries_except(
     }
 }
 
-/// The refusal of a subquery in a position the lowering does not support yet (stage 2b.T5).
+/// The refusal of a subquery in a position the lowering did not support before stage 2b.T5
+/// (kept for the binder tests).
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
 fn subquery_not_yet(subquery: &BoundSubquery) -> Box<GqlErrorBuilder> {
     let what = match (subquery.kind, subquery.form) {
         (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => {

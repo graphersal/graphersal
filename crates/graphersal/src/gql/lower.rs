@@ -46,7 +46,8 @@
 //! | a later `MATCH` continuing from a `FOR` item (design E3) | `gql:bind("x")` (an item that is not an element of the pattern's kind, `NULL` included: no row; never a bare `out()` on the item); a join or trail check against it is `gql:filter` as for a `WITH` column |
 //! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
-//! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). A subquery elsewhere in an expression is refused "not yet" (stage 2b.T5). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
+//! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
+//! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
@@ -77,10 +78,9 @@
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
-//! refused by the parser (`NEXT`, `UNION`, quantified path patterns, shortest paths, ...) and
-//! the binder; a subquery that is not a top-level `[NOT] EXISTS` conjunct is refused after
-//! planning (`bind::refuse_subqueries_except`, until stage 2b.T5). A component that is not the root scan and has no equality an id
-//! or index serves stays a mid-traversal `v()` plus filters per row (design E5).
+//! refused by the parser (`NEXT`, `UNION`, Cypher `COUNT { }`, quantified path patterns,
+//! shortest paths, ...) and the binder. A component that is not the root scan and has no
+//! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
 //!
@@ -99,7 +99,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters, refuse_subqueries_except,
+    SortKey, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -109,7 +109,7 @@ use super::plan::{
     PushOperand, Pushdown, ResultOp, Stage, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
-use super::runtime::{Binding, GqlElement, PathPart, RowExpr, eval_error};
+use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
@@ -308,8 +308,13 @@ enum Instr<S: GraphStorage> {
     HasLabel(Vec<String>),
     /// `has(key, predicate)`.
     Has(String, P<PValue>),
-    /// `gql:filter(condition)` at `site`.
-    Filter { condition: RowExpr<S>, site: Site },
+    /// `gql:filter(condition)` at `site`, hosting the bodies of the subqueries the condition
+    /// holds (the 2b hook: `EXISTS` under `OR`, `CASE`, ...).
+    Filter {
+        condition: RowExpr<S>,
+        site: Site,
+        subqueries: Bodies<S>,
+    },
     /// `gql:filter(condition)` comparing the current element (the extra slot after the
     /// bindings) with a materializing `WITH` column binding: a join, an edge join or a trail
     /// check against an element the row holds, which has no path label of its own.
@@ -326,17 +331,20 @@ enum Instr<S: GraphStorage> {
         site: Site,
         variable: CompactString,
         ordinal: Option<GqlOrdinal>,
+        subqueries: Bodies<S>,
     },
     /// `gql:project(columns)` at `site`.
     Project {
         columns: Vec<GqlColumn<S>>,
         site: Site,
+        subqueries: Bodies<S>,
     },
     /// `gql:aggregate(keys, aggregates, columns)` at `site`: an aggregating `RETURN` / `WITH`.
     Aggregate {
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         site: Site,
+        subqueries: Bodies<S>,
     },
     /// `gql:distinct()` (GQL equality, decision C3).
     Distinct,
@@ -344,6 +352,7 @@ enum Instr<S: GraphStorage> {
     Order {
         keys: Vec<GqlSortKey<S>>,
         columns: usize,
+        subqueries: Bodies<S>,
     },
     /// `skip(n)`.
     Skip(usize),
@@ -388,6 +397,10 @@ enum Instr<S: GraphStorage> {
     /// site (design M2, the 2b fast path); the child short-circuits at its first match.
     Exists { negated: bool, body: Vec<Instr<S>> },
 }
+
+/// The subquery bodies a `gql:*` step hosts (the 2b hook, `runtime::SubqueryHost`): body `i`
+/// answers the step's subquery `i`, each lowered from the step's site.
+type Bodies<S> = Vec<Vec<Instr<S>>>;
 
 /// One walked pattern edge. The form is chosen at emission, once the labels are known: the
 /// vertex step (`out(labels)`, `in(labels)`) when nothing runs on the edge traverser, else the
@@ -566,12 +579,22 @@ impl<S: GraphStorage> Lowered<S> {
                 Instr::Unit => g.inject(vec![ElementProperty::from(0_i64)]),
                 Instr::HasLabel(labels) => g.has_label(labels),
                 Instr::Has(key, predicate) => g.has_p(key, predicate),
-                Instr::Filter { condition, site } => {
-                    g.gql_filter(Arc::clone(&self.query), condition, self.bindings(site))
-                }
-                Instr::RowCheck(condition) => {
-                    g.gql_filter(Arc::clone(&self.query), condition, self.check_bindings())
-                }
+                Instr::Filter {
+                    condition,
+                    site,
+                    subqueries,
+                } => g.gql_filter(
+                    Arc::clone(&self.query),
+                    condition,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
+                Instr::RowCheck(condition) => g.gql_filter(
+                    Arc::clone(&self.query),
+                    condition,
+                    self.check_bindings(),
+                    Vec::new(),
+                ),
                 Instr::Label(id) => {
                     if self.labelled.get(id.0).copied().unwrap_or(false)
                         && let Some(label) = self.labels.get(id.0)
@@ -588,30 +611,53 @@ impl<S: GraphStorage> Lowered<S> {
                         g
                     }
                 }
-                Instr::Project { columns, site } => {
-                    g.gql_project(Arc::clone(&self.query), columns, self.bindings(site))
-                }
+                Instr::Project {
+                    columns,
+                    site,
+                    subqueries,
+                } => g.gql_project(
+                    Arc::clone(&self.query),
+                    columns,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
                 Instr::For {
                     list,
                     site,
                     variable,
                     ordinal,
+                    subqueries,
                 } => g.gql_for(
                     Arc::clone(&self.query),
                     variable,
                     list,
                     self.bindings(site),
                     ordinal,
+                    self.children(subqueries),
                 ),
                 Instr::Aggregate {
                     columns,
                     calls,
                     site,
-                } => g.gql_aggregate(Arc::clone(&self.query), columns, calls, self.bindings(site)),
+                    subqueries,
+                } => g.gql_aggregate(
+                    Arc::clone(&self.query),
+                    columns,
+                    calls,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
                 Instr::Distinct => g.gql_distinct(),
-                Instr::Order { keys, columns } => {
-                    g.gql_order(Arc::clone(&self.query), keys, self.order_bindings(columns))
-                }
+                Instr::Order {
+                    keys,
+                    columns,
+                    subqueries,
+                } => g.gql_order(
+                    Arc::clone(&self.query),
+                    keys,
+                    self.order_bindings(columns),
+                    self.children(subqueries),
+                ),
                 Instr::Skip(n) => g.skip(n),
                 Instr::Limit(n) => g.limit(n),
                 Instr::Hop(hop) => match hop.quantifier {
@@ -659,6 +705,17 @@ impl<S: GraphStorage> Lowered<S> {
             };
         }
         g
+    }
+
+    /// The child traversals of hosted subquery bodies (see [`Bodies`]).
+    fn children<'g>(&self, bodies: Bodies<S>) -> Vec<AnonymousTraversal<'g, S>>
+    where
+        S: 'g,
+    {
+        bodies
+            .into_iter()
+            .map(|body| self.emit_into(AnonymousTraversal::new(), body))
+            .collect()
     }
 
     /// The path label of binding `id`.
@@ -790,9 +847,16 @@ impl<S: GraphStorage> Lowered<S> {
         match instr {
             Instr::HasLabel(labels) => t.has_label(labels),
             Instr::Has(key, predicate) => t.has_p(key, predicate),
-            Instr::Filter { condition, site } => {
-                t.gql_filter(Arc::clone(&self.query), condition, self.bindings(site))
-            }
+            Instr::Filter {
+                condition,
+                site,
+                subqueries,
+            } => t.gql_filter_hosted(
+                Arc::clone(&self.query),
+                condition,
+                self.bindings(site),
+                self.children(subqueries),
+            ),
             Instr::RowCheck(condition) => {
                 t.gql_filter(Arc::clone(&self.query), condition, self.check_bindings())
             }
@@ -837,13 +901,20 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn inject(self, values: Vec<ElementProperty>) -> Self;
     fn has_label(self, labels: Vec<String>) -> Self;
     fn has_p(self, key: String, predicate: P<PValue>) -> Self;
-    fn gql_filter(self, query: Arc<str>, condition: RowExpr<S>, bindings: Arc<[Binding]>) -> Self;
+    fn gql_filter(
+        self,
+        query: Arc<str>,
+        condition: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
     fn as_(self, label: CompactString) -> Self;
     fn gql_project(
         self,
         query: Arc<str>,
         columns: Vec<GqlColumn<S>>,
         bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     fn gql_aggregate(
         self,
@@ -851,7 +922,9 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
+    #[allow(clippy::too_many_arguments)]
     fn gql_for(
         self,
         query: Arc<str>,
@@ -859,11 +932,17 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         list: RowExpr<S>,
         bindings: Arc<[Binding]>,
         ordinal: Option<GqlOrdinal>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     fn gql_lookup(self, query: Arc<str>, lookup: GqlLookup<S>, bindings: Arc<[Binding]>) -> Self;
     fn gql_distinct(self) -> Self;
-    fn gql_order(self, query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>)
-    -> Self;
+    fn gql_order(
+        self,
+        query: Arc<str>,
+        keys: Vec<GqlSortKey<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
     fn skip(self, n: usize) -> Self;
     fn limit(self, n: usize) -> Self;
     fn select(self, label: CompactString) -> Self;
@@ -905,8 +984,9 @@ macro_rules! sink {
                 query: Arc<str>,
                 condition: RowExpr<S>,
                 bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
-                self.gql_filter(query, condition, bindings)
+                self.gql_filter_hosted(query, condition, bindings, children)
             }
             fn as_(self, label: CompactString) -> Self {
                 self.as_(label)
@@ -916,8 +996,9 @@ macro_rules! sink {
                 query: Arc<str>,
                 columns: Vec<GqlColumn<S>>,
                 bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
-                self.gql_project(query, columns, bindings)
+                self.gql_project_hosted(query, columns, bindings, children)
             }
             fn gql_aggregate(
                 self,
@@ -925,8 +1006,9 @@ macro_rules! sink {
                 columns: Vec<GqlAggregateColumn<S>>,
                 calls: Vec<AggregateCall<GqlElement<S>>>,
                 bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
-                self.gql_aggregate(query, columns, calls, bindings)
+                self.gql_aggregate_hosted(query, columns, calls, bindings, children)
             }
             fn gql_for(
                 self,
@@ -935,8 +1017,9 @@ macro_rules! sink {
                 list: RowExpr<S>,
                 bindings: Arc<[Binding]>,
                 ordinal: Option<GqlOrdinal>,
+                children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
-                self.gql_for(query, variable, list, bindings, ordinal)
+                self.gql_for_hosted(query, variable, list, bindings, ordinal, children)
             }
             fn gql_lookup(
                 self,
@@ -954,8 +1037,9 @@ macro_rules! sink {
                 query: Arc<str>,
                 keys: Vec<GqlSortKey<S>>,
                 bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
-                self.gql_order(query, keys, bindings)
+                self.gql_order_hosted(query, keys, bindings, children)
             }
             fn skip(self, n: usize) -> Self {
                 self.skip(n)
@@ -1033,29 +1117,7 @@ fn prepare<S: GraphStorage>(
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
     let plan = plan(&bound, facts, None);
-    // Stage 2b.T4 lowers a top-level `[NOT] EXISTS` conjunct (the fast path); a subquery
-    // anywhere else waits for the evaluator hook (2b.T5).
-    let fast = fast_path_subqueries(&bound);
-    refuse_subqueries_except(&parsed, &bound, |k| fast.get(k).copied().unwrap_or(false))?;
     Lowering::new(query, &bound, &plan, params).run()
-}
-
-/// Per subquery: whether it is the subquery of a top-level `[NOT] EXISTS` conjunct (a pattern
-/// predicate too), which the lowering runs as a `filter()` / `not()` child (the fast path).
-/// A conjunct of a body counts too; when its subquery's own host is not a fast path, the
-/// refusal names that outer subquery first (text order puts it before the ones it holds).
-fn fast_path_subqueries(bound: &BoundQuery) -> Vec<bool> {
-    let mut fast = vec![false; bound.subqueries.len()];
-    for conjunct in &bound.conjuncts {
-        if let Predicate::Expr(expr) = &conjunct.predicate
-            && let Some((span, _)) = exists_conjunct(expr)
-            && let Some(k) = bound.subquery_at(span)
-            && let Some(flag) = fast.get_mut(k)
-        {
-            *flag = true;
-        }
-    }
-    fast
 }
 
 /// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a
@@ -1078,9 +1140,35 @@ struct LowerScope<'a> {
     /// variable of the same name).
     aliases: &'a [(String, usize)],
     params: &'a [(CompactString, ElementProperty)],
+    bound: &'a BoundQuery,
+    /// The subqueries the step being compiled hosts, in hosting order (the 2b hook); `None`:
+    /// no subquery can run here.
+    hooks: Option<&'a Hooks>,
 }
 
+/// The subqueries (indexes into `BoundQuery::subqueries`) one step hosts, in the order its
+/// compiled expressions number them ([`Scope::subquery`]); each once.
+type Hooks = std::cell::RefCell<Vec<usize>>;
+
 impl Scope for LowerScope<'_> {
+    fn subquery(&self, span: Span) -> Option<Result<usize, super::eval::EvalError>> {
+        let hooks = self.hooks?;
+        let k = self.bound.subquery_at(span)?;
+        let mut hooks = hooks.borrow_mut();
+        if let Some(index) = hooks.iter().position(|&h| h == k) {
+            return Some(Ok(index));
+        }
+        if hooks.len() >= MAX_HOSTED_SUBQUERIES {
+            return Some(Err(super::eval::EvalError::new(
+                super::eval::status::LIMIT,
+                format!("one expression step holds more than {MAX_HOSTED_SUBQUERIES} subqueries"),
+                span,
+            )));
+        }
+        hooks.push(k);
+        Some(Ok(hooks.len() - 1))
+    }
+
     fn variable(&self, name: &str) -> Option<usize> {
         if name.is_empty() {
             return self.this;
@@ -1143,22 +1231,60 @@ impl<'q> Lowering<'q> {
         }
     }
 
-    fn scope<'s>(&'s self, this: Option<usize>, aliases: &'s [(String, usize)]) -> LowerScope<'s> {
+    fn scope<'s>(
+        &'s self,
+        this: Option<usize>,
+        aliases: &'s [(String, usize)],
+        hooks: Option<&'s Hooks>,
+    ) -> LowerScope<'s> {
         LowerScope {
             names: &self.names,
             this,
             aliases,
             params: self.params,
+            bound: self.bound,
+            hooks,
         }
     }
 
+    /// Compiles `expr` where no subquery can run (the binder or planner keeps them away).
     fn compile<S: GraphStorage>(
         &self,
         expr: &Expr,
         this: Option<usize>,
         aliases: &[(String, usize)],
     ) -> Result<RowExpr<S>, TraverserError> {
-        compile(expr, &self.scope(this, aliases)).map_err(|error| eval_error(self.query, error))
+        self.compile_in(expr, this, aliases, None)
+    }
+
+    /// Compiles `expr` for a step hosting the subqueries it holds in `hooks` (the 2b hook).
+    fn compile_in<S: GraphStorage>(
+        &self,
+        expr: &Expr,
+        this: Option<usize>,
+        aliases: &[(String, usize)],
+        hooks: Option<&Hooks>,
+    ) -> Result<RowExpr<S>, TraverserError> {
+        compile(expr, &self.scope(this, aliases, hooks))
+            .map_err(|error| eval_error(self.query, error))
+    }
+
+    /// The bodies of the subqueries a step at `site` hosts (`hooks`, in hosting order), each
+    /// the body's plan for the site's current element lowered from the site (as for the fast
+    /// path, [`Self::body`]).
+    fn bodies<S: GraphStorage>(
+        &self,
+        hooks: Hooks,
+        site: Site,
+    ) -> Result<Bodies<S>, TraverserError> {
+        hooks
+            .into_inner()
+            .into_iter()
+            .map(|k| match self.bound.subqueries.get(k) {
+                Some(sub) => self.body(k, sub.span, site),
+                None => Err(self.unlowered()),
+            })
+            .collect()
     }
 
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
@@ -1483,7 +1609,9 @@ impl<'q> Lowering<'q> {
                 .map(|n| CompactString::from(n.name.as_str()))
                 .unwrap_or_default()
         };
-        let list = self.compile(&bound_for.list, None, &[])?;
+        let hooks = Hooks::default();
+        let list = self.compile_in(&bound_for.list, None, &[], Some(&hooks))?;
+        let subqueries = self.bodies(hooks, site)?;
         let ordinal = bound_for.ordinal.map(|(kind, id)| GqlOrdinal {
             name: name(id),
             kind,
@@ -1493,6 +1621,7 @@ impl<'q> Lowering<'q> {
             site,
             variable: name(bound_for.variable),
             ordinal,
+            subqueries,
         });
         instrs.push(Instr::RowLabel(f.segment));
         Ok(Site::row(f.segment))
@@ -1577,6 +1706,7 @@ impl<'q> Lowering<'q> {
             instrs.push(Instr::Filter {
                 condition,
                 site: Site::on(id),
+                subqueries: Vec::new(),
             });
         }
         for c in residual {
@@ -1672,14 +1802,20 @@ impl<'q> Lowering<'q> {
             return self.exists(span, negated, site, instrs);
         }
         let (expr, this) = self.condition(conjunct);
-        let condition: RowExpr<S> = self.compile(&expr, this, &[])?;
+        let hooks = Hooks::default();
+        let condition: RowExpr<S> = self.compile_in(&expr, this, &[], Some(&hooks))?;
         if matches!(
             condition.as_const(),
             Some(Value::Scalar(ElementProperty::Boolean(true)))
         ) {
             return Ok(());
         }
-        instrs.push(Instr::Filter { condition, site });
+        let subqueries = self.bodies(hooks, site)?;
+        instrs.push(Instr::Filter {
+            condition,
+            site,
+            subqueries,
+        });
         Ok(())
     }
 
@@ -1699,6 +1835,20 @@ impl<'q> Lowering<'q> {
         let Some(k) = self.bound.subquery_at(span) else {
             return Err(self.unlowered());
         };
+        let body = self.body(k, span, site)?;
+        instrs.push(Instr::Exists { negated, body });
+        Ok(())
+    }
+
+    /// The body of subquery `k` (written at `span`) run at `site`: its plan for the site's
+    /// current element lowered from the site, without merge points (a `lazy_barrier()` would
+    /// defeat the short circuit); counted against [`MAX_LOWERED_SUBQUERIES`].
+    fn body<S: GraphStorage>(
+        &self,
+        k: usize,
+        span: Span,
+        site: Site,
+    ) -> Result<Vec<Instr<S>>, TraverserError> {
         let Some(body_plan) = self.plan.subquery_plan(self.bound, k, site.current) else {
             return Err(self.unlowered());
         };
@@ -1710,8 +1860,7 @@ impl<'q> Lowering<'q> {
         let mut body = Vec::new();
         self.ops(&body_plan.ops, site, &mut body)?;
         body.retain(|instr| !matches!(instr, Instr::Merge { .. }));
-        instrs.push(Instr::Exists { negated, body });
-        Ok(())
+        Ok(body)
     }
 
     /// The error of a query that lowers more than [`MAX_LOWERED_SUBQUERIES`] subquery bodies.
@@ -1816,22 +1965,25 @@ impl<'q> Lowering<'q> {
         for op in ops {
             match op {
                 ResultOp::Project => {
+                    let hooks = Hooks::default();
                     let mut compiled = Vec::with_capacity(columns.len());
                     for column in columns {
                         compiled.push(GqlColumn {
                             name: CompactString::from(column.name.as_str()),
-                            expr: self.compile(&column.expr, None, &[])?,
+                            expr: self.compile_in(&column.expr, None, &[], Some(&hooks))?,
                         });
                     }
                     instrs.push(Instr::Project {
                         columns: compiled,
                         site,
+                        subqueries: self.bodies(hooks, site)?,
                     });
                 }
                 ResultOp::Aggregate => {
+                    let hooks = Hooks::default();
                     let Aggregating { outputs, calls } = compile_aggregating(
                         columns.iter().map(|c| &c.expr),
-                        &self.scope(None, &[]),
+                        &self.scope(None, &[], Some(&hooks)),
                     )
                     .map_err(|error| eval_error(self.query, error))?;
                     let columns = columns
@@ -1847,10 +1999,12 @@ impl<'q> Lowering<'q> {
                         columns,
                         calls,
                         site,
+                        subqueries: self.bodies(hooks, site)?,
                     });
                 }
                 ResultOp::Distinct => instrs.push(Instr::Distinct),
                 ResultOp::Order => {
+                    let hooks = Hooks::default();
                     let mut keys = Vec::with_capacity(order_by.len());
                     for key in order_by {
                         let expr = match key.column {
@@ -1864,16 +2018,19 @@ impl<'q> Lowering<'q> {
                                 };
                                 self.compile(&reference, Some(n + i), &[])?
                             }
-                            None => self.sort_key(key, columns, n)?,
+                            None => self.sort_key(key, columns, n, &hooks)?,
                         };
                         keys.push(GqlSortKey {
                             expr,
                             descending: key.direction == SortDirection::Desc,
                         });
                     }
+                    // The keys run on the row map: no current element, no row (as
+                    // `order_bindings`).
                     instrs.push(Instr::Order {
                         keys,
                         columns: columns.len(),
+                        subqueries: self.bodies(hooks, Site::default())?,
                     });
                 }
                 ResultOp::Offset(count) => instrs.push(Instr::Skip(self.count(count, "OFFSET")?)),
@@ -1893,9 +2050,10 @@ impl<'q> Lowering<'q> {
         key: &SortKey,
         columns: &[Column],
         n: usize,
+        hooks: &Hooks,
     ) -> Result<RowExpr<S>, TraverserError> {
         if key.aliases.is_empty() {
-            return self.compile(&key.expr, None, &[]);
+            return self.compile_in(&key.expr, None, &[], Some(hooks));
         }
         let mut renames: Vec<(&str, String)> = Vec::with_capacity(key.aliases.len());
         let mut aliases: Vec<(String, usize)> = Vec::with_capacity(key.aliases.len());
@@ -1916,7 +2074,7 @@ impl<'q> Lowering<'q> {
         }
         let mut expr = key.expr.clone();
         rename_aliases(&mut expr, key.span, &renames);
-        self.compile(&expr, None, &aliases)
+        self.compile_in(&expr, None, &aliases, Some(hooks))
     }
 
     /// The value of `OFFSET` / `LIMIT`: a literal, or a parameter whose value must be a
@@ -2323,23 +2481,39 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
     let mut slots = Vec::new();
     for instr in instrs {
         match instr {
-            Instr::Filter { condition, site } => {
+            Instr::Filter {
+                condition,
+                site,
+                subqueries,
+            } => {
                 condition.variables(&mut slots);
                 marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::RowCheck(condition) => {
                 condition.variables(&mut slots);
                 marks.read(&mut slots, Site::default());
             }
-            Instr::Project { columns, site } => {
+            Instr::Project {
+                columns,
+                site,
+                subqueries,
+            } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
                 }
                 marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
-            Instr::For { list, site, .. } => {
+            Instr::For {
+                list,
+                site,
+                subqueries,
+                ..
+            } => {
                 list.variables(&mut slots);
                 marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Lookup { lookup, site } => {
                 lookup.value.variables(&mut slots);
@@ -2349,6 +2523,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 columns,
                 calls,
                 site,
+                subqueries,
             } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
@@ -2357,12 +2532,16 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                     argument.variables(&mut slots);
                 }
                 marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
-            Instr::Order { keys, .. } => {
+            Instr::Order {
+                keys, subqueries, ..
+            } => {
                 for key in keys {
                     key.expr.variables(&mut slots);
                 }
                 marks.read(&mut slots, Site::default());
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Bind { id, site, .. } => {
                 slots.push(id.0);
@@ -2394,12 +2573,27 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
 fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
     for instr in instrs {
         match instr {
-            Instr::Filter { site, .. }
-            | Instr::Project { site, .. }
-            | Instr::For { site, .. }
-            | Instr::Lookup { site, .. }
-            | Instr::Aggregate { site, .. }
-            | Instr::Bind { site, .. } => site.part = Some(segment),
+            Instr::Filter {
+                site, subqueries, ..
+            }
+            | Instr::Project {
+                site, subqueries, ..
+            }
+            | Instr::For {
+                site, subqueries, ..
+            }
+            | Instr::Aggregate {
+                site, subqueries, ..
+            } => {
+                site.part = Some(segment);
+                subqueries
+                    .iter_mut()
+                    .for_each(|body| in_part(body, segment));
+            }
+            Instr::Order { subqueries, .. } => subqueries
+                .iter_mut()
+                .for_each(|body| in_part(body, segment)),
+            Instr::Lookup { site, .. } | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
             Instr::Optional(part) | Instr::Exists { body: part, .. } => in_part(part, segment),
             Instr::Scan
@@ -2410,7 +2604,6 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::Label(_)
             | Instr::RowLabel(_)
             | Instr::Distinct
-            | Instr::Order { .. }
             | Instr::Skip(_)
             | Instr::Limit(_)
             | Instr::Select(_)

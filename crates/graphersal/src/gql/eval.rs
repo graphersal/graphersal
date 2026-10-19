@@ -164,6 +164,17 @@ impl EvalError {
     pub(crate) fn division_by_zero(span: Span) -> Self {
         Self::new(status::DIVISION_BY_ZERO, "division by zero", span)
     }
+
+    /// The stop of an evaluation that needs a subquery the row has not run yet
+    /// ([`Env::subquery`]): the hosting step runs it and evaluates again, so a row never reports
+    /// it; an [`Env`] without a host (none in the pipeline) reports it as 0A000.
+    pub(crate) fn subquery_pending(span: Span) -> Self {
+        Self::new(
+            status::NOT_SUPPORTED,
+            "a subquery (EXISTS) cannot be evaluated here",
+            span,
+        )
+    }
 }
 
 /// A truth value of three-valued logic.
@@ -387,6 +398,14 @@ pub(crate) trait Env {
     fn reserve(&self, bytes: u64) -> bool {
         bytes <= crate::traversal::context::DEFAULT_MAX_MATERIALIZED_BYTES
     }
+    /// The value of subquery `index` ([`Scope::subquery`]) for this row (`EXISTS`: TRUE or
+    /// FALSE, never `NULL`), or `None` when the row has not run it yet: the evaluation then
+    /// stops with [`EvalError::subquery_pending`], and the step hosting the subquery
+    /// (`runtime::SubqueryHost`) runs it and evaluates the row again. The default runs nothing.
+    fn subquery(&self, index: usize) -> Option<Value<Self::Element>> {
+        let _ = index;
+        None
+    }
 }
 
 /// An aggregate call met by [`compile`] ([`Scope::aggregate`]).
@@ -413,6 +432,13 @@ pub(crate) trait Scope {
     /// with 0A000).
     fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
         let _ = call;
+        None
+    }
+    /// Where the value of the subquery written at `span` comes from: the index
+    /// [`Env::subquery`] reads, an error, or `None` when no subquery can run here (the default:
+    /// [`compile`] then fails with 0A000).
+    fn subquery(&self, span: Span) -> Option<Result<usize, EvalError>> {
+        let _ = span;
         None
     }
 }
@@ -443,6 +469,8 @@ enum Node<E> {
     Trim(TrimSide, Option<Box<Compiled<E>>>, Box<Compiled<E>>),
     /// The result of an aggregate call, read through [`Env::aggregate`].
     Aggregate(usize),
+    /// The value of a subquery (`EXISTS`), read through [`Env::subquery`].
+    Subquery(usize),
 }
 
 /// One link of a [`Node::Chain`].
@@ -630,15 +658,19 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         | ExprKind::IsLabeled { .. }
         | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
-        // Refused after binding (`bind::refuse_subqueries`) until the evaluator hook exists
-        // (stage 2b.T5).
-        ExprKind::Subquery(_) => {
-            return Err(EvalError::new(
-                status::NOT_SUPPORTED,
-                "a subquery (EXISTS) is not yet supported in this expression",
-                span,
-            ));
-        }
+        // Answered by the step hosting the expression (`runtime::SubqueryHost`); a scope
+        // without hosts (the lookup value, which the planner never gives a subquery) refuses it.
+        ExprKind::Subquery(sub) => match scope.subquery(sub.span) {
+            Some(Ok(index)) => Node::Subquery(index),
+            Some(Err(error)) => return Err(error),
+            None => {
+                return Err(EvalError::new(
+                    status::NOT_SUPPORTED,
+                    "a subquery (EXISTS) is not yet supported in this expression",
+                    span,
+                ));
+            }
+        },
     })
 }
 
@@ -881,7 +913,8 @@ impl<E> Compiled<E> {
     pub(crate) fn variables(&self, slots: &mut Vec<usize>) {
         match &self.node {
             // An aggregate's argument is compiled apart (`aggregate::AggregateCall`).
-            Node::Const(_) | Node::Aggregate(_) => {}
+            // A subquery's body declares its own reads (the host's child traversal).
+            Node::Const(_) | Node::Aggregate(_) | Node::Subquery(_) => {}
             Node::Variable(slot) => slots.push(*slot),
             Node::List(items) | Node::Call(_, items) => {
                 items.iter().for_each(|item| item.variables(slots));
@@ -993,6 +1026,10 @@ impl<E: Clone + PartialEq> Compiled<E> {
                 functions::trim(*side, character, source.arg(env)?, env, self.span)?
             }
             Node::Aggregate(index) => env.aggregate(*index),
+            Node::Subquery(index) => match env.subquery(*index) {
+                Some(value) => value,
+                None => return Err(EvalError::subquery_pending(self.span)),
+            },
             Node::Const(value) => value.clone(),
             Node::Case(case) => case.eval(env)?.into_owned(),
             Node::Chain(first, links) => eval_chain(first, links, env)?.into_owned(),

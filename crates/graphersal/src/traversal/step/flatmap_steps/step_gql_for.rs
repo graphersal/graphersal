@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::gql::ast::OrdinalKind;
 use crate::gql::eval::Value;
 use crate::gql::runtime::{
-    Binding, Row, RowExpr, RowValue, eval_error, history_read, into_traverser_value, labels_read,
-    source_text,
+    Binding, RowExpr, RowValue, SubqueryAnswers, SubqueryHost, eval_error, history_read,
+    into_traverser_value, labels_read, source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -42,8 +42,10 @@ pub(crate) struct GqlOrdinal {
 /// cancel token; the list itself is a value its source already bounded (a parameter, a stored
 /// property, a list a `gql:*` step built under its limits). It asks no permission of its own
 /// (value-only, like `unfold()`): an element in the list was reached, and its read requested,
-/// by the step that bound it. Built only by the GQL lowering; not a DSL step.
-pub(crate) struct StepGqlFor<S: GraphStorage> {
+/// by the step that bound it. A list holding `EXISTS` runs the bodies as the children of a
+/// [`SubqueryHost`] (stage 2b), each at most once per row. Built only by the GQL lowering; not a
+/// DSL step.
+pub(crate) struct StepGqlFor<'g, S: GraphStorage + 'g> {
     /// The whole query, for the error excerpt.
     query: Arc<str>,
     /// The rendering argument: `x IN <list text>` plus the ordinal clause.
@@ -58,9 +60,11 @@ pub(crate) struct StepGqlFor<S: GraphStorage> {
     labels: Arc<[CompactString]>,
     /// The labels it reads in every occurrence (group variables, sorted).
     history: Arc<[CompactString]>,
+    /// The subqueries the list holds.
+    host: SubqueryHost<'g, S>,
 }
 
-impl<S: GraphStorage> Clone for StepGqlFor<S> {
+impl<'g, S: GraphStorage + 'g> Clone for StepGqlFor<'g, S> {
     fn clone(&self) -> Self {
         Self {
             query: Arc::clone(&self.query),
@@ -73,11 +77,12 @@ impl<S: GraphStorage> Clone for StepGqlFor<S> {
                 .map(|(keys, first)| (Arc::clone(keys), *first)),
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
+            host: self.host.clone(),
         }
     }
 }
 
-impl<S: GraphStorage> fmt::Display for StepGqlFor<S> {
+impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlFor<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // One string literal, so the camelCase respelling leaves the GQL text alone.
         write!(
@@ -88,7 +93,7 @@ impl<S: GraphStorage> fmt::Display for StepGqlFor<S> {
     }
 }
 
-impl<S: GraphStorage> StepGqlFor<S> {
+impl<'g, S: GraphStorage + 'g> StepGqlFor<'g, S> {
     pub(crate) fn new(
         query: Arc<str>,
         variable: CompactString,
@@ -119,7 +124,14 @@ impl<S: GraphStorage> StepGqlFor<S> {
             record,
             labels,
             history,
+            host: SubqueryHost::default(),
         }
+    }
+
+    /// The step hosting the subqueries `children` (child `i` answers the list's subquery `i`).
+    pub(crate) fn hosting(mut self, children: Vec<AnonymousTraversal<'g, S>>) -> Self {
+        self.host = SubqueryHost::new(children);
+        self
     }
 
     /// The traverser value of one item: the item itself, or the record `{x, i}` with `index`
@@ -146,6 +158,7 @@ impl<S: GraphStorage> StepGqlFor<S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:for(variable IN list)`; see [`StepGqlFor`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn gql_for(
         self,
         query: Arc<str>,
@@ -157,42 +170,65 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
         self.push_step(GraphStep::FlatMap(
             "gql:for",
             Box::new(StepGqlFor::new(query, variable, list, bindings, ordinal)),
+        ))
+    }
+
+    /// Appends `gql:for(variable IN list)` hosting the subqueries `children`; see
+    /// [`StepGqlFor`].
+    pub(crate) fn gql_for_hosted(
+        self,
+        query: Arc<str>,
+        variable: CompactString,
+        list: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        ordinal: Option<GqlOrdinal>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatMap(
+            "gql:for",
+            Box::new(StepGqlFor::new(query, variable, list, bindings, ordinal).hosting(children)),
         ))
     }
 }
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
-    /// Appends `gql:for(variable IN list)`; see [`StepGqlFor`].
-    pub(crate) fn gql_for(
+    /// Appends `gql:for(variable IN list)` hosting the subqueries `children`; see
+    /// [`StepGqlFor`].
+    pub(crate) fn gql_for_hosted(
         self,
         query: Arc<str>,
         variable: CompactString,
         list: RowExpr<S>,
         bindings: Arc<[Binding]>,
         ordinal: Option<GqlOrdinal>,
+        children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self {
         self.push_step(GraphStep::FlatMap(
             "gql:for",
-            Box::new(StepGqlFor::new(query, variable, list, bindings, ordinal)),
+            Box::new(StepGqlFor::new(query, variable, list, bindings, ordinal).hosting(children)),
         ))
     }
 }
 
-impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlFor<S> {
+impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlFor<'g, S> {
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,
         source: Traverser<S>,
         output: &mut Vec<Traverser<S>>,
     ) -> TraverserResult<()> {
-        let list = {
-            let row = Row::new(context, &source, &self.bindings);
-            let list = self.list.eval(&row);
-            // A limit error the row kept (a refused `Env::reserve`) wins over the evaluator's
-            // fallback error.
-            row.finish()?;
-            list.map_err(|error| Box::new(eval_error(&self.query, error)))?
-        };
+        // A limit error the row kept (a refused `Env::reserve`) wins over the evaluator's
+        // fallback error (`SubqueryHost::evaluate`).
+        let list = self
+            .host
+            .evaluate(
+                context,
+                &source,
+                &self.bindings,
+                &mut SubqueryAnswers::default(),
+                |row| self.list.eval(row),
+            )?
+            .map_err(|error| Box::new(eval_error(&self.query, error)))?;
         match list {
             Value::Null => {}
             Value::List(items) => {
@@ -222,6 +258,18 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepGqlFor<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn child_traversals_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.host.children_mut()
+    }
+
+    fn analyze_nested_paths(
+        &mut self,
+        analysis: &crate::traversal::optimizer::path_analysis::PathAnalysis,
+        _downstream: &PathRequirement,
+    ) -> PathRequirement {
+        self.host.analyze_paths(analysis)
     }
 
     fn history_labels(&self) -> &[CompactString] {

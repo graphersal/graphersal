@@ -3,8 +3,10 @@
 //! predicate too) lowers to `filter(__.<body>)` / `not(__.<body>)`, the body planned with its
 //! imports as anchors (design M2, E7, E11). Differential twins against Gremlin `where(__..)` /
 //! `not(__..)` (Rhai) compare the rows as multisets (design D18); `NULL` imports (E9) and trail
-//! inside a body (E8) are hand-computed rows. A subquery anywhere else in an expression stays
-//! refused "not yet" (stage 2b.T5).
+//! inside a body (E8) are hand-computed rows. A subquery anywhere else in an expression (under
+//! `OR` / `CASE`, in `RETURN`, `ORDER BY`, an aggregate's argument, a `FOR` list) runs as a
+//! child of the `gql:*` step evaluating it (stage 2b.T5, the hook): hand-computed rows,
+//! three-valued logic around it, the profile children, and every walker visiting them.
 #![cfg(feature = "gql")]
 
 use std::sync::Arc;
@@ -500,42 +502,7 @@ fn merged_rows_test_like_unmerged_ones() {
     );
 }
 
-// ----- limits and refusals -----
-
-#[test]
-fn exists_elsewhere_in_an_expression_is_not_yet_supported() {
-    let graph = modern();
-    for (query, text) in [
-        (
-            "MATCH (p:person) WHERE p.age > 30 OR EXISTS { (p)-->() } RETURN p",
-            "EXISTS is not yet supported here",
-        ),
-        (
-            "MATCH (p:person) RETURN EXISTS { (p)-->() } AS x",
-            "EXISTS is not yet supported here",
-        ),
-        (
-            "MATCH (p:person) RETURN CASE WHEN (p)-->() THEN 1 END AS x",
-            "a pattern predicate (a pattern where an expression stands) is not yet supported here",
-        ),
-        (
-            "MATCH (p:person) RETURN p.name AS n ORDER BY EXISTS { (p)-->() }",
-            "EXISTS is not yet supported here",
-        ),
-        (
-            "MATCH (p:person) FOR x IN [EXISTS { (p)-->() }] RETURN x",
-            "EXISTS is not yet supported here",
-        ),
-        (
-            "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(q) WHERE q.age > 1 OR (q)-->() } RETURN p",
-            "a pattern predicate",
-        ),
-    ] {
-        let err = error(&graph, query);
-        assert!(err.contains(text), "{query}: {err}");
-        assert!(err.contains("0A000"), "{query}: {err}");
-    }
-}
+// ----- limits -----
 
 #[test]
 fn too_many_lowered_bodies_are_a_limit() {
@@ -578,4 +545,298 @@ fn the_deepest_nesting_runs_and_profiles() {
     assert!(query.matches("EXISTS").count() > 10, "{query}");
     assert_eq!(names(&graph, &query), sorted(&["marko", "josh", "peter"]));
     assert!(profile(&graph, &query).contains("filter("));
+}
+
+// ----- the hook: EXISTS anywhere in an expression (stage 2b.T5) -----
+
+/// The columns of every row as `name=value` texts in written key order, rows sorted (a
+/// multiset) unless `ordered`.
+fn table(graph: &Arc<Graph>, query: &str, ordered: bool) -> Vec<String> {
+    let mut out: Vec<String> = rows(graph, query)
+        .iter()
+        .map(|row| match row {
+            ElementProperty::Object(map) => map
+                .iter()
+                .map(|(k, v)| format!("{k}={}", norm(v)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => panic!("{query}: not a row map: {other:?}"),
+        })
+        .collect();
+    if !ordered {
+        out.sort();
+    }
+    out
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn exists_runs_under_or_case_and_inside_a_body() {
+    let graph = modern();
+    // Out-edges in `modern`: marko knows vadas and josh and created lop; josh created ripple
+    // and lop; peter created lop; vadas has none.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE p.age > 30 OR EXISTS { (p)-->() } RETURN p.name AS n"
+        ),
+        sorted(&["marko", "josh", "peter"])
+    );
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE p.age < 28 OR (p)-[:knows]->() RETURN p.name AS n"
+        ),
+        sorted(&["marko", "vadas"])
+    );
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE CASE WHEN (p)-[:created]->(:software {name: 'ripple'}) \
+             THEN true ELSE p.age < 28 END RETURN p.name AS n"
+        ),
+        sorted(&["vadas", "josh"])
+    );
+    // `OR` inside a body: q has an age or out-edges of its own.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(q) WHERE q.age > 1 OR (q)-->() } \
+             RETURN p.name AS n"
+        ),
+        sorted(&["marko"])
+    );
+    // A nested hook inside a hosted body.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE p.age > 100 OR EXISTS { MATCH (p)-[:created]->(s) \
+             WHERE s.lang = 'none' OR EXISTS { (s)<-[:created]-(:person {name: 'peter'}) } } \
+             RETURN p.name AS n"
+        ),
+        sorted(&["marko", "josh", "peter"])
+    );
+}
+
+#[test]
+fn exists_runs_in_return_order_by_aggregates_and_for_lists() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-->() } AS x, \
+             CASE WHEN (p)-[:knows]->() THEN 1 END AS k",
+            false
+        ),
+        strings(&[
+            "n='marko' x=true k=i:1",
+            "n='vadas' x=false k=null",
+            "n='josh' x=true k=null",
+            "n='peter' x=true k=null",
+        ])
+    );
+    // Uncorrelated: a unit row.
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN EXISTS { MATCH (s:software) WHERE s.lang = 'java' } AS a, \
+             EXISTS { MATCH (s:software) WHERE s.lang = 'cobol' } AS b",
+            false
+        ),
+        strings(&["a=true b=false"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n \
+             ORDER BY EXISTS { (p)-[:created]->(:software {name: 'lop'}) } DESC, n",
+            true
+        ),
+        vec!["n='josh'", "n='marko'", "n='peter'", "n='vadas'"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n ORDER BY (p)-[:knows]->() DESC, p.age",
+            true
+        ),
+        vec!["n='marko'", "n='vadas'", "n='josh'", "n='peter'"]
+    );
+    // An aggregate's argument and a grouping key.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN count(CASE WHEN (p)-[:created]->() THEN 1 END) AS c, \
+             collect_list(EXISTS { (p)-[:knows]->() }) AS l",
+            false
+        ),
+        vec!["c=i:3 l=[true, false, false, false]"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN EXISTS { (p)-[:knows]->() } AS k, count(*) AS c",
+            false
+        ),
+        strings(&["k=true c=i:1", "k=false c=i:3"])
+    );
+    // A FOR list.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) FOR x IN [EXISTS { (p)-[:created]->() }, (p)-[:knows]->()] \
+             RETURN p.name AS n, x",
+            false
+        ),
+        strings(&[
+            "n='marko' x=true",
+            "n='marko' x=true",
+            "n='vadas' x=false",
+            "n='vadas' x=false",
+            "n='josh' x=true",
+            "n='josh' x=false",
+            "n='peter' x=true",
+            "n='peter' x=false",
+        ])
+    );
+}
+
+#[test]
+fn exists_composes_three_valued_and_a_null_import_is_false() {
+    let graph = modern();
+    // f is NULL for vadas, josh and peter (no knows edge): EXISTS over it is FALSE (E9), never
+    // NULL, so NULL OR FALSE is NULL and NULL AND NOT EXISTS is NULL AND TRUE, NULL.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:knows]->(f) RETURN p.name AS n, \
+             EXISTS { (f)-->() } AS e, NOT EXISTS { (f)-->() } AS ne, \
+             f.age > 28 OR EXISTS { (f)-->() } AS o, f.age > 28 AND NOT (f)-->() AS a, \
+             EXISTS { (f)-->() } IS NULL AS z",
+            false
+        ),
+        strings(&[
+            "n='marko' e=false ne=true o=false a=false z=false",
+            "n='marko' e=true ne=false o=true a=false z=false",
+            "n='vadas' e=false ne=true o=null a=null z=false",
+            "n='josh' e=false ne=true o=null a=null z=false",
+            "n='peter' e=false ne=true o=null a=null z=false",
+        ])
+    );
+    // TRUE OR .. and FALSE AND .. decide without the subquery; UNKNOWN OR TRUE is TRUE.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE p.nothing > 1 OR EXISTS { (p)-[:knows]->() } \
+             RETURN p.name AS n"
+        ),
+        sorted(&["marko"])
+    );
+    // XOR with EXISTS.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE p.age > 30 XOR (p)-[:created]->() RETURN p.name AS n"
+        ),
+        sorted(&["marko"])
+    );
+}
+
+#[test]
+fn a_subquery_runs_only_when_the_evaluation_reaches_it_and_obeys_the_limits() {
+    let graph = modern();
+    let lock = graph.read();
+    let body = "EXISTS { MATCH (p)-[:knows]->*(q) WHERE q.age > 100 }";
+    // `p.age > 0` decides every row: the unbounded quantifier never runs, so the loop limit is
+    // never reached.
+    let rows = lock
+        .traversal()
+        .with("repeat.max_loops", 1)
+        .gql(&format!(
+            "MATCH (p:person) WHERE p.age > 0 OR {body} RETURN p.name AS n"
+        ))
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rows.len(), 4);
+    // Reached, the child obeys repeat.max_loops like any traversal (D14: an error, never a cut
+    // result), in every host.
+    for query in [
+        format!("MATCH (p:person) WHERE p.age > 100 OR {body} RETURN p.name AS n"),
+        format!("MATCH (p:person) RETURN {body} AS x"),
+        format!("MATCH (p:person) RETURN p.name AS n ORDER BY {body}"),
+        format!("MATCH (p:person) RETURN count(CASE WHEN {body} THEN 1 END) AS c"),
+        format!("MATCH (p:person) FOR x IN [{body}] RETURN x"),
+    ] {
+        let error = lock
+            .traversal()
+            .with("repeat.max_loops", 1)
+            .gql(&query)
+            .to_list()
+            .expect_err(&query);
+        assert!(
+            matches!(
+                error.root_cause(),
+                TraverserError::RepeatLimitExceeded { max_loops: 1, .. }
+            ),
+            "{query}: {error}"
+        );
+    }
+}
+
+#[test]
+fn each_host_shows_its_children_and_the_walkers_visit_them() {
+    let graph = modern();
+    // Every host step: the profile lists its child's steps under it (`\>`), numbered like the
+    // children of a Gremlin step; the optimizer folded the child's label into its source
+    // (`v(labels: ["software"])`).
+    let uncorrelated = "EXISTS { MATCH (s:software) WHERE s.lang = 'java' }";
+    for (host, query) in [
+        (
+            "gql:filter(",
+            format!("MATCH (p:person) WHERE p.age > 100 OR {uncorrelated} RETURN p.name AS n"),
+        ),
+        (
+            "gql:project(",
+            format!("MATCH (p:person) RETURN {uncorrelated} AS x"),
+        ),
+        (
+            "gql:order(",
+            format!("MATCH (p:person) RETURN p.name AS n ORDER BY {uncorrelated}"),
+        ),
+        (
+            "gql:aggregate(",
+            format!("MATCH (p:person) RETURN count(CASE WHEN {uncorrelated} THEN 1 END) AS c"),
+        ),
+        (
+            "gql:for(",
+            format!("MATCH (p:person) FOR x IN [{uncorrelated}] RETURN x"),
+        ),
+    ] {
+        let steps = steps(&profile(&graph, &query));
+        let at = steps
+            .iter()
+            .position(|s| s.starts_with(host))
+            .unwrap_or_else(|| panic!("{query}: no {host} in {steps:?}"));
+        assert_eq!(
+            steps.get(at + 1).map(String::as_str),
+            Some("\\> v(labels: [\"software\"])"),
+            "{query}: {steps:?}"
+        );
+    }
+    // The path analysis keeps the label an import is read through inside a child (`p` read
+    // after the walk moved to `f`), and only then.
+    let query =
+        "MATCH (p:person)-[:knows]->(f) RETURN f.name AS n, EXISTS { (p)-[:created]->() } AS c";
+    assert!(labelled(&profile(&graph, query)), "{query}");
+    assert_eq!(
+        table(&graph, query, false),
+        strings(&["n='vadas' c=true", "n='josh' c=true"])
+    );
+    let query = "MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-[:created]->() } AS c";
+    assert!(!labelled(&profile(&graph, query)), "{query}");
 }

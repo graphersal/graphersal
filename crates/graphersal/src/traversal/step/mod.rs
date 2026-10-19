@@ -385,6 +385,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
     ///   exactly what its Gremlin equivalent asks. `gql:lookup` reaches vertices of the graph
     ///   (a component found by id or index): `Read` on vertices, like the `v()` it replaces.
+    ///   A subquery (`EXISTS`) a `gql:*` step evaluates is a child traversal of that step,
+    ///   walked like any child (`child_traversals_mut`).
     ///
     /// Labels of reads are not reported (label-level read security is a later storage
     /// decorator, see `book/src/users_guide/permissions.md`).

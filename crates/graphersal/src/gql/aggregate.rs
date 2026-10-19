@@ -158,6 +158,10 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
         self.inner.parameter(name)
     }
 
+    fn subquery(&self, span: Span) -> Option<Result<usize, EvalError>> {
+        self.inner.subquery(span)
+    }
+
     fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
         let argument = match call.args {
             CallArgs::Star(_) => None,
@@ -203,6 +207,10 @@ impl<Sc: Scope> Scope for Nested<'_, Sc> {
 
     fn parameter(&self, name: &str) -> Option<ElementProperty> {
         self.inner.parameter(name)
+    }
+
+    fn subquery(&self, span: Span) -> Option<Result<usize, EvalError>> {
+        self.inner.subquery(span)
     }
 
     fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
@@ -270,6 +278,10 @@ impl<En: Env> Env for WithAggregates<'_, En> {
 
     fn reserve(&self, bytes: u64) -> bool {
         self.env.reserve(bytes)
+    }
+
+    fn subquery(&self, index: usize) -> Option<Value<Self::Element>> {
+        self.env.subquery(index)
     }
 }
 

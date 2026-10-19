@@ -47,14 +47,16 @@
 //! [`compare_values`] is the same order over evaluator values (`min` / `max`, C5).
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::eval::{Compiled, Env, EvalError, Scope, Value, status};
+use crate::error::TraverserResult;
 use crate::error::{BoxedTraverserError, GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
-use crate::traversal::{Traverser, TraverserContext, bulk};
+use crate::traversal::optimizer::path_analysis::{PathAnalysis, PathRequirement};
+use crate::traversal::{AnonymousTraversal, Traverser, TraverserContext, bulk};
 use crate::value::path_arena::PathNode;
 use crate::value::scalar::compare_scalars;
 use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_property};
@@ -343,6 +345,10 @@ pub(crate) struct Row<'a, 'c, S: GraphStorage> {
     traverser: &'a Traverser<S>,
     bindings: &'a [Binding],
     failure: RefCell<Option<BoxedTraverserError>>,
+    /// The subqueries this row already ran ([`SubqueryHost`]).
+    answers: SubqueryAnswers,
+    /// The subquery the evaluation asked for and the row has not run yet.
+    pending: Cell<Option<usize>>,
 }
 
 impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
@@ -352,11 +358,23 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
         traverser: &'a Traverser<S>,
         bindings: &'a [Binding],
     ) -> Self {
+        Self::with_answers(context, traverser, bindings, SubqueryAnswers::default())
+    }
+
+    /// The row of `traverser` with the subqueries it already ran.
+    fn with_answers(
+        context: &'a TraverserContext<'c, S>,
+        traverser: &'a Traverser<S>,
+        bindings: &'a [Binding],
+        answers: SubqueryAnswers,
+    ) -> Self {
         Row {
             context,
             traverser,
             bindings,
             failure: RefCell::new(None),
+            answers,
+            pending: Cell::new(None),
         }
     }
 
@@ -657,6 +675,16 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
         }
     }
 
+    fn subquery(&self, index: usize) -> Option<RowValue<S>> {
+        match self.answers.get(index) {
+            Some(found) => Some(Value::Scalar(ElementProperty::Boolean(found))),
+            None => {
+                self.pending.set(Some(index));
+                None
+            }
+        }
+    }
+
     /// `traversal.max_materialized_bytes` and the memory budget, like `collect_list` in
     /// `gql:aggregate`; a refusal keeps the limit error for [`Row::finish`].
     fn reserve(&self, bytes: u64) -> bool {
@@ -674,6 +702,145 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             Err(error) => {
                 self.failure.borrow_mut().get_or_insert(error);
                 false
+            }
+        }
+    }
+}
+
+/// The most subqueries one step hosts (one bit each in [`SubqueryAnswers`]): the binder admits
+/// at most `bind::MAX_SUBQUERIES` (64) per query, and a host runs each of them at most once.
+pub(crate) const MAX_HOSTED_SUBQUERIES: usize = 64;
+
+/// The subqueries one row has run so far and their results (`EXISTS`: TRUE or FALSE), one bit
+/// per hosted subquery: no allocation per row (rule 4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SubqueryAnswers {
+    known: u64,
+    found: u64,
+}
+
+impl SubqueryAnswers {
+    /// The result of subquery `index`, when the row ran it.
+    fn get(self, index: usize) -> Option<bool> {
+        let bit = 1u64.checked_shl(u32::try_from(index).ok()?)?;
+        (self.known & bit != 0).then_some(self.found & bit != 0)
+    }
+
+    /// Records the result of subquery `index`; `false` past [`MAX_HOSTED_SUBQUERIES`] (which
+    /// the lowering never builds).
+    fn set(&mut self, index: usize, found: bool) -> bool {
+        let Some(bit) = u32::try_from(index)
+            .ok()
+            .and_then(|shift| 1u64.checked_shl(shift))
+        else {
+            return false;
+        };
+        self.known |= bit;
+        if found {
+            self.found |= bit;
+        } else {
+            self.found &= !bit;
+        }
+        true
+    }
+}
+
+/// The subqueries (`EXISTS` anywhere in an expression but a top-level conjunct: under `OR`,
+/// `CASE`, in a `RETURN` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list;
+/// design M2, the 2b hook) a `gql:*` step hosts: one child traversal each, lowered from the
+/// step's site (the body's plan for its current element). The step embeds it and hands its
+/// children to every walker: `child_traversals_mut` (optimizer, step numbering, authorization,
+/// embedder binding, `find_fault`), `analyze_nested_paths` (path analysis: the children read
+/// the labels their bodies read on the step's input, their output never continues the path),
+/// and the profile (each child is a numbered child of the step).
+///
+/// Evaluation is lazy: a row runs a child only when the evaluation reaches its
+/// [`Env::subquery`] (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row
+/// ([`SubqueryAnswers`]); the evaluation stops at the first unknown one, the child runs on the
+/// step's input traverser (one unit of it, short-circuiting at its first result like
+/// `filter(__..)`), and the row is evaluated again. The children run on the same execution
+/// context, so every traversal limit, the deadline and cancellation apply inside them.
+pub(crate) struct SubqueryHost<'g, S: GraphStorage + 'g> {
+    children: Vec<AnonymousTraversal<'g, S>>,
+}
+
+impl<'g, S: GraphStorage + 'g> Clone for SubqueryHost<'g, S> {
+    fn clone(&self) -> Self {
+        Self {
+            children: self.children.clone(),
+        }
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> Default for SubqueryHost<'g, S> {
+    fn default() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
+    /// The host of `children`; child `i` answers [`Env::subquery`]`(i)`.
+    pub(crate) fn new(children: Vec<AnonymousTraversal<'g, S>>) -> Self {
+        Self { children }
+    }
+
+    /// Whether it hosts no subquery.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    /// The children, for `child_traversals_mut` (in subquery order).
+    pub(crate) fn children_mut(&mut self) -> Vec<&mut AnonymousTraversal<'g, S>> {
+        self.children.iter_mut().collect()
+    }
+
+    /// What the children read from the path of the step's input (each tests existence only:
+    /// its output does not continue the path), for `analyze_nested_paths`.
+    pub(crate) fn analyze_paths(&mut self, analysis: &PathAnalysis) -> PathRequirement {
+        self.children
+            .iter_mut()
+            .fold(PathRequirement::None, |need, child| {
+                need.union(child.analyze_paths(analysis, PathRequirement::None))
+            })
+    }
+
+    /// Runs `eval` on the row of `source` (variables bound by `bindings`), running every
+    /// subquery the evaluation reaches first (see the type docs). `answers` holds what the row
+    /// ran so far: the caller starts each traverser with the default and passes the same one to
+    /// every expression of that traverser, so a subquery runs at most once per row. A limit
+    /// error the row kept wins, as after any evaluation (`Row::finish`).
+    pub(crate) fn evaluate<T, E>(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        source: &Traverser<S>,
+        bindings: &[Binding],
+        answers: &mut SubqueryAnswers,
+        mut eval: impl FnMut(&Row<'_, '_, S>) -> Result<T, E>,
+    ) -> TraverserResult<Result<T, E>> {
+        loop {
+            let (result, pending) = {
+                let row = Row::with_answers(context, source, bindings, *answers);
+                let result = eval(&row);
+                row.finish()?;
+                (result, row.pending.get())
+            };
+            // Only an evaluation that stopped asks for a subquery (the evaluator never drops an
+            // error), so nothing `eval` did is repeated.
+            // The lowering hosts every subquery it compiles (at most `MAX_HOSTED_SUBQUERIES`);
+            // an index without a child keeps the evaluator's error (a guard only).
+            match (
+                pending.and_then(|index| Some((index, self.children.get(index)?))),
+                result,
+            ) {
+                (Some((index, child)), Err(error)) => {
+                    let found = child.exists(context, source)?;
+                    if !answers.set(index, found) {
+                        return Ok(Err(error));
+                    }
+                }
+                (_, result) => return Ok(result),
             }
         }
     }
