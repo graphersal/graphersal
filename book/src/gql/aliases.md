@@ -21,6 +21,13 @@ not supported yet or [refused](refused.md).
 | `toUpper(s)` | `upper(s)` | |
 | `toLower(s)` | `lower(s)` | |
 | `size(s)` on a string | `char_length(s)` | `size(list)` is the item count, as `cardinality(list)` |
+| `collect(x)` | `collect_list(x)` | also `collect(DISTINCT x)` |
+| `length(p)` | `path_length(p)` | the number of edges of a path |
+| `-[e:T*]->` | `-[e:T]->{1,}` | Cypher's lower bound is 1: **not** GQL's postfix `*`, which is `{0,}` |
+| `-[e:T*n]->` | `-[e:T]->{n}` | |
+| `-[e:T*m..n]->` | `-[e:T]->{m,n}` | |
+| `-[e:T*..n]->` | `-[e:T]->{1,n}` | lower bound 1 again |
+| `-[e:T*m..]->` | `-[e:T]->{m,}` | |
 
 Each pair below returns the same rows:
 
@@ -37,6 +44,36 @@ g.gql("MATCH (n:person) RETURN elementId(n) AS id, toUpper(n.name) AS up, size(n
 // #{"id": "1", "len": 5, "q": "marko?", "up": "MARKO"}
 g.gql("MATCH (n:person) RETURN element_id(n) AS id, upper(n.name) AS up, char_length(n.name) AS len, n.name || '?' AS q ORDER BY id LIMIT 1").to_list()
 // #{"id": "1", "len": 5, "q": "marko?", "up": "MARKO"}
+g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS name, collect(s.name) AS sw ORDER BY name").to_list()
+// #{"name": "josh", "sw": ["ripple", "lop"]}, #{"name": "marko", "sw": ["lop"]}, #{"name": "peter", "sw": ["lop"]}
+g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS name, collect_list(s.name) AS sw ORDER BY name").to_list()
+// #{"name": "josh", "sw": ["ripple", "lop"]}, #{"name": "marko", "sw": ["lop"]}, #{"name": "peter", "sw": ["lop"]}
+g.gql("MATCH p = (a {name: 'marko'})-[*1..2]->(b) RETURN b.name AS b, length(p) AS len ORDER BY len, b").to_list()
+// josh 1, lop 1, vadas 1, lop 2, ripple 2
+g.gql("MATCH p = (a {name: 'marko'})-[]->{1,2}(b) RETURN b.name AS b, path_length(p) AS len ORDER BY len, b").to_list()
+// josh 1, lop 1, vadas 1, lop 2, ripple 2
+```
+
+Mind the Cypher `*`: `-[*]->` starts at one edge, GQL's `-[]->*` at zero, so the GQL form
+also returns marko himself:
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'})-[*]->(b) RETURN b.name AS b ORDER BY b").to_list()   // josh, lop, lop, ripple, vadas
+g.gql("MATCH (a {name: 'marko'})-[]->*(b) RETURN b.name AS b ORDER BY b").to_list()   // josh, lop, lop, marko, ripple, vadas
+```
+
+## The Cypher clause `WITH`
+
+`WITH` is Cypher; GQL writes the same with its linear statements (`LET`, `FILTER`, and
+`RETURN ... NEXT`, which `gql()` does not support yet). `gql()` accepts `WITH` with Cypher's
+meaning: it passes on only its items, may take `DISTINCT`, aggregates, `ORDER BY`, `SKIP` /
+`OFFSET`, `LIMIT` and a `WHERE` (applied last), and a later clause continues from its columns
+([The Supported Subset](subset.md#with)). A `WITH` that only passes values on is the same as
+`LET` plus a narrower scope, and its `WHERE` the same as `FILTER`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WITH p, p.age / 10 AS d WHERE d = 3 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
+g.gql("MATCH (p:person) LET d = p.age / 10 FILTER d = 3 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
 ```
 
 ## Spellings that are GQL as well
@@ -50,9 +87,9 @@ These look like Cypher but are GQL too, so they are not aliases: `:` before a la
 | Cypher | In `gql()` |
 |---|---|
 | `id(n)` | refused: an integer in Neo4j, Graphersal ids are strings; use `element_id(n)` |
-| `collect(x)`, `count(*)` and the other aggregates | not supported yet (aggregation comes in a later version; `collect` will be the alias of `collect_list`) |
-| `-[:T*1..3]->` | not supported yet (quantified edges; will be the alias of `-[:T]->{1,3}`) |
-| `WITH`, `UNWIND`, `OPTIONAL MATCH` | not supported yet |
+| `nodes(p)`, `relationships(p)` | not supported yet: GQL has no such functions; return `p`, or name the elements |
+| `UNWIND` | not supported yet (GQL's `FOR`) |
+| `GROUP BY` (not Cypher, but often written) | an error that explains it: grouping is implicit |
 | `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE` | refused: `gql()` is read-only |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |
 | `a--1` (minus minus one) | a comment starts at `--` (GQL wins): `RETURN n.age--1 AS x` returns the column `n.age`; write `n.age - -1` |

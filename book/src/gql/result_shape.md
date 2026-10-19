@@ -14,8 +14,8 @@ g.gql("MATCH (n:person)")   // error: missing RETURN
 ```
 
 A value is a property value (number, string, boolean, date, UUID, vector, ...), `NULL` (a
-missing property gives a `NULL` column, the key is never left out), a list, a map, or a vertex
-or edge. An element column holds the live element, so Gremlin can continue from it:
+missing property gives a `NULL` column, the key is never left out), a list, a map, a vertex or
+edge, or a [path](#paths). An element column holds the live element, so Gremlin can continue from it:
 
 ```rhai,graph=modern
 g.gql("MATCH (a)-[e]->(b) RETURN * ORDER BY element_id(e) LIMIT 2").to_list()
@@ -29,6 +29,7 @@ g.gql("MATCH (s:software) RETURN s ORDER BY s.name").select("s").in("created").v
 |---|---|
 | `expr AS name` | `name` |
 | `n.name` without `AS` | the expression text as written: `n.name` |
+| `count(*)` without `AS` | the same rule: `count(*)` |
 | `RETURN *` | every named variable, in the order of its first appearance in the query |
 | `RETURN *, expr AS x` | the variables first, then `x` |
 
@@ -71,9 +72,30 @@ g.gql("MATCH (p:person) RETURN p.name AS name, p.age AS age ORDER BY age").next(
 When the written order matters, read the rows as JSON or name the columns so that their
 alphabetical order is the order you want.
 
+## Paths
+
+A path variable (`RETURN p`) and a group variable (the variable of a quantified edge) hold
+elements, so Gremlin can continue from them too:
+
+| Column | Value | JSON |
+|---|---|---|
+| a path variable `p` | a path: vertex, edge, vertex, ..., in the written order (Gremlin's `path()` value) | a list of the element objects |
+| a group variable `e` of `-[e]->{1,3}` | a list of the edges, in the written order; `[]` for a zero-length match | a list of edge objects |
+| either, from an `OPTIONAL MATCH` that did not match | `NULL` | `null` |
+
+```rhai,graph=modern
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b {name: 'vadas'}) RETURN p").to_list()   // #{"p": [v[1], e[0][1-knows->2], v[2]]}
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b {name: 'vadas'}) RETURN p").to_json()
+// [{"p": [{"id": "1", "label": "person", ...}, {"id": "0", "label": "knows", "inV": "2", "outV": "1", ...}, {"id": "2", ...}]}]
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b {name: 'vadas'}) RETURN p").select("p").unfold().to_list()   // v[1], e[0][1-knows->2], v[2]
+g.v().has("name", "marko").out_e("knows").in_v().has("name", "vadas").path().to_list()   // [v[1], e[0][1-knows->2], v[2]]
+```
+
 ## Row order and duplicates
 
 - Without `ORDER BY` the row order is unspecified ([Ordering](semantics.md#ordering)).
 - Rows are a multiset: the same row may appear several times (one per match). `RETURN DISTINCT`
-  removes duplicates.
+  removes duplicates ([with GQL's equality](semantics.md#distinct-and-grouping-equality)).
+- An aggregating `RETURN` gives one row per group; without grouping keys exactly one row, even
+  when nothing matched ([Aggregation](semantics.md#aggregation)).
 - `OFFSET` and `LIMIT` apply after `ORDER BY` and `DISTINCT`.

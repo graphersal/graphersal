@@ -95,19 +95,51 @@ Help: A row of the data made the marked expression fail. Keep such rows away fro
 Comparisons never fail: comparing values of different kinds, or with `NULL`, is `NULL`
 ([Semantics](semantics.md#comparisons-across-types)).
 
+## Scope, grouping and limits
+
+The help of a semantic error explains the rule behind it. A variable that a `WITH` did not carry
+on, a value read outside an aggregate that is not a grouping key, and a written `GROUP BY` each
+name the fix:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WITH p.name AS name RETURN p.age")   // error: the variable `p` is not in scope: the WITH before does not carry it
+g.gql("MATCH (p:person) RETURN p.name AS n, count(p.age) + p.age AS x")   // error: `p` is read outside an aggregate and is not a grouping key
+g.gql("MATCH (p:person) RETURN p.name, count(*) GROUP BY p.name")   // error: GROUP BY is not needed: grouping is implicit
+```
+
+```text
+Help: add `p` to the WITH items, as in WITH ..., p. WITH passes on only its columns: a variable it does not list is out of scope after it, so list every variable a later clause reads, ...
+Help: add `p` to the RETURN items (it then becomes a grouping key), or read it inside an aggregate, as in collect(p). A RETURN or WITH with an aggregate groups the rows by its other items (the grouping keys): ...
+Help: remove GROUP BY and list the keys as items next to the aggregates, as in MATCH (p:person)-[:created]->(s) RETURN p.name, count(s). ...
+```
+
+An unbounded quantifier that reaches `repeat.max_loops` or `traversal.max_traversers` fails with
+the ordinary limit error (`RepeatLimitExceeded`, `ResourceLimitExceeded`; no GQLSTATUS), never with
+fewer rows. Its help is written for GQL: it names the quantified edge, an upper bound to give it
+and the `g.with(..).gql(..)` that raises the limit ([Semantics](semantics.md#quantified-edges)):
+
+```rhai,graph=modern
+g.with("traversal.max_traversers", 3).gql("MATCH (a)-[:knows|created]->{1,}(b) RETURN b.name AS b")   // error: traversal.max_traversers exceeded
+```
+
+```text
+Caused by: Resource limit 'traversal.max_traversers' exceeded (limit 3, reached 6)
+Help: The gql() query kept more traversers (rows in the making) alive between two steps than 'traversal.max_traversers' allows (3). Each path a quantified edge (-[:knows|created]->{1,}) matches is a traverser of its own (trail keeps them apart, so they do not merge), ... give it a lower upper bound, as in -[:knows|created]->{1,5}. ...
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` (grouping is implicit) |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a path or group variable bound twice |
 | `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition |
+| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number |
 | `22012` | data | division or `%` by zero |
-| `22003` | data | a numeric result out of range (integer overflow) |
+| `22003` | data | a numeric result out of range (integer overflow, also of `sum()`) |
 
 `42001` is fixed; the other codes are **provisional**: they follow the standard's classes and
 may still be refined before the GQL support is complete. Match on the kind

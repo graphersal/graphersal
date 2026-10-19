@@ -3,7 +3,7 @@
 
 `gql` · category: [Start](../../traversal/step_reference.md#start)
 
-Runs a GQL read query (MATCH, WHERE, RETURN, ORDER BY, OFFSET, LIMIT; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.
+Runs a GQL read query (MATCH, OPTIONAL MATCH, WHERE, LET, FILTER, WITH, RETURN with aggregates, ORDER BY, OFFSET, LIMIT, quantified edges, path variables; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.
 
 ## Forms
 

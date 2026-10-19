@@ -3,7 +3,9 @@
 Some constructs `gql()` refuses for good, not just for now. A refused construct fails before the
 traversal runs, with GQLSTATUS `0A000`, a caret under it and a help line naming what to use
 instead. (Constructs that are only *not supported yet* are listed on
-[The Supported Subset](subset.md#not-supported-yet).)
+[The Supported Subset](subset.md#not-supported-yet).) `GROUP BY` is neither: grouping is implicit, so a
+written `GROUP BY` is a syntax error whose help shows the query without it
+([Aggregation](subset.md#aggregation)).
 
 | Construct | Why | Instead |
 |---|---|---|

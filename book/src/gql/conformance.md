@@ -31,19 +31,20 @@ The mandatory core of a GQL read query, by construct.
 | simple and searched `CASE`, `COALESCE` | supported | `NULLIF` not yet |
 | `UPPER`, `LOWER`, `CHAR_LENGTH` / `CHARACTER_LENGTH` | supported | other string functions not yet |
 | parameters `$name` | supported | values only, never text |
-| aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST` | not yet | use Gremlin after `gql()` |
-| `OPTIONAL MATCH` | not yet | |
+| aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
+| `OPTIONAL MATCH` | supported | also as the first clause |
+| Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |
 | a query without `MATCH` (`RETURN 1`) | not yet | |
 | data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
-| value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); no byte strings, no path values yet |
+| value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); path values; no byte strings |
 
 ## Optional features
 
 | ID | Feature | Status | Notes |
 |---|---|---|---|
 | G002 | different-edges match mode | partial | the semantics is the default and only mode; writing `DIFFERENT EDGES` is not accepted yet |
-| G004 | path variables | not yet | |
+| G004 | path variables | supported | `p = (a)-->(b)`, `path_length(p)` (Cypher `length`); `nodes()` / `relationships()` not yet |
 | G005 | path search prefix in a path pattern | not yet | `ANY`, `ALL`, `SHORTEST` prefixes |
 | G010 | explicit `WALK` keyword | not yet | |
 | G011 | advanced path modes: `TRAIL` | not yet | trail is the semantics of every `MATCH`; the keyword is not accepted yet |
@@ -53,8 +54,8 @@ The mandatory core of a GQL read query, by construct.
 | G017 | all shortest path search | not yet | Gremlin `repeat()` |
 | G018 | any shortest path search | not yet | Gremlin `repeat()` |
 | G019 | counted shortest path search | not yet | |
-| G035 | quantified paths | not yet | |
-| G036 | quantified edges | not yet | `-[:T]->{m,n}`; Cypher `*m..n` will be its alias |
+| G035 | quantified paths | not yet | a parenthesized path with a quantifier, `((a)-->(b)){1,3}`; quantify a single edge instead |
+| G036 | quantified edges | supported | `{m,n}`, `{n}`, `{m,}`, `{,n}`, `*`, `+` on full and abbreviated edges; Cypher `[*m..n]` and its forms are aliases; trail per clause |
 | G037 | questioned paths | not yet | |
 | G043 | complete full edge patterns | partial | pointing left, right, either direction (`-[e]-`, `<-[e]->`); the undirected forms (`~[e]~` and its variants) are refused, Graphersal edges are directed |
 | G044 | basic abbreviated edge patterns | supported | `->`, `<-`, `-` (Cypher `-->`, `<--`, `--`) |
@@ -85,16 +86,16 @@ The mandatory core of a GQL read query, by construct.
 | GQ03 | composite query: `UNION` | not yet | Gremlin `union()` |
 | GQ04 | composite query: `EXCEPT DISTINCT` *(provisional)* | not yet | |
 | GQ06 | composite query: `INTERSECT DISTINCT` *(provisional)* | not yet | |
-| GQ08 | `FILTER` statement | not yet | write the condition in `WHERE` |
-| GQ09 | `LET` statement | not yet | compute the value in `RETURN` |
+| GQ08 | `FILTER` statement | supported | `FILTER [WHERE] <condition>` |
+| GQ09 | `LET` statement | supported | |
 | GQ10 | `FOR` statement: list value support | not yet | Gremlin `unfold()` |
-| GQ12 | `ORDER BY` and page statement: `OFFSET` clause | partial | `OFFSET` / `SKIP` after `RETURN`; the standalone statement form not yet |
-| GQ13 | `ORDER BY` and page statement: `LIMIT` clause | partial | `LIMIT` after `RETURN`; the standalone statement form not yet |
+| GQ12 | `ORDER BY` and page statement: `OFFSET` clause | partial | `OFFSET` / `SKIP` after `RETURN` and in `WITH`; the standalone statement form not yet |
+| GQ13 | `ORDER BY` and page statement: `LIMIT` clause | partial | `LIMIT` after `RETURN` and in `WITH`; the standalone statement form not yet |
 | GQ14 | complex expressions in sort keys *(provisional)* | supported | `ORDER BY element_id(e)`, `ORDER BY n.age * 2` |
-| GQ15 | `GROUP BY` clause *(provisional)* | not yet | aggregation comes later |
+| GQ15 | `GROUP BY` clause *(provisional)* | not yet | grouping is implicit; a written `GROUP BY` is an error that says so |
 | GQ18 | scalar subqueries *(provisional)* | not yet | |
 | GQ20 | advanced linear composition with `NEXT` | not yet | chain Gremlin steps after `gql()` |
-| GQ21 | `OPTIONAL`: multiple `MATCH` statements *(provisional)* | not yet | |
+| GQ21 | `OPTIONAL`: multiple `MATCH` statements *(provisional)* | not yet | one `OPTIONAL MATCH` per optional part is supported; the block form `OPTIONAL { MATCH ... MATCH ... }` is not |
 | GP01 | inline procedure *(provisional)* | not yet | `CALL { ... }` |
 | GP04 | named procedure calls *(provisional)* | no | vendor procedures (`CALL db.*`, `apoc.*`) are refused |
 
@@ -111,6 +112,12 @@ where it has one):
 | `NULL` in `ORDER BY` | last ascending, first descending |
 | order of values of different types | map, vertex, edge, list, date/time, UUID, string, boolean, number, vector, `NULL` |
 | row order without `ORDER BY` | unspecified |
+| `DISTINCT`, grouping keys, `DISTINCT` in aggregates | GQL equality: `1` and `1.0` are one value, `NULL`s form one group |
+| aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; provisional) |
+| `min` / `max` over values of different kinds | the `ORDER BY` order, never an error |
+| `sum` of integers | an integer; overflow is an error (`22003`) |
+| unbounded quantifiers | no own limit: trail ends them; `repeat.max_loops` and `traversal.max_traversers` are errors, never a shortened result |
+| `WITH ... LIMIT ... WHERE` | the `WHERE` filters after `ORDER BY` / `OFFSET` / `LIMIT` (Cypher's order; provisional) |
 | name of an unaliased column | the expression as written (provisional) |
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |
 | integer division | truncates toward zero; `%` takes the sign of the dividend |

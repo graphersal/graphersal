@@ -18,7 +18,7 @@ all of them with two kinds of limit, both reported as one error,
 | | `traversal.max_materialized_bytes` | 1 GiB (256 MiB on wasm32) | estimated size of one value or buffer a step materializes |
 | | `traversal.max_string_bytes` | 16 MiB | the longest string a step builds (`replace()`, `concat()`, `format()`, ...) |
 | | `evaluationTimeout` | none | wall-clock budget, see [Query Limits](query_limits.md) |
-| | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()` |
+| | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) |
 | | `bulk.max_expansion` | 10 000 000 | values one bulk expansion may materialize |
 | | `memory.limit` | none | memory in use (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set and at every outermost commit; `"auto"` = cgroup limit minus `memory.headroom` |
 
@@ -86,6 +86,18 @@ session: `g`, `_g` and `__` (also a traversal *started* from `__`, such as
 &options)` and the same options, so the sources a script creates itself
 (`GraphSource::empty()`, `GraphSource::tinkerpop_modern()`, `schema.toGraph()`, ...) get them
 too; otherwise a script could escape a preset `evaluationTimeout` by building its own source.
+
+A `gql()` query is bounded by the same options. An unbounded quantified edge (`-[:knows]->{1,}`,
+`*`, `+`, Cypher `[*]`) has no limit of its own: trail matching ends it on a finite graph, and
+`repeat.max_loops` and `traversal.max_traversers` turn a walk that grows too far into an error,
+never into a shortened result. The help of that error names the quantifier, suggests an upper
+bound and shows `g.with(..).gql(..)` with a raised limit
+([GQL Semantics](../gql/semantics.md#quantified-edges)):
+
+```rhai,graph=modern
+g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN b.name AS b")   // error: repeat() exceeded the loop limit of 1 iterations
+g.with("repeat.max_loops", 5).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN count(*) AS n").to_list()   // #{"n": 6}
+```
 
 ## Memory: materialized bytes and expansions
 
