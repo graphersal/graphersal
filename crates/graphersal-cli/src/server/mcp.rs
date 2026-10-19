@@ -596,24 +596,34 @@ RETURN columns in the order written (bounded like query's: at most max_rows rows
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
 the graph. No Rhai escaping is needed: pass the GQL text as it is.
 
-Supported (stages 1a and 1b): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b and 1c): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
 pipeline: project, aggregate, DISTINCT, ORDER BY, SKIP, LIMIT, WHERE, then more MATCH clauses); \
 LET x = expr and FILTER expr; aggregates count(x), count(*), sum, avg, min, max, collect_list \
-(Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (no GROUP \
-BY clause); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
+(Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
+optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
 Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
-returned as a path value, path_length(p) (Cypher alias length); RETURN (mandatory; expressions \
+returned as a path value, path_length(p) (Cypher alias length), nodes(p) and \
+relationships(p) (lists of the path's vertices and edges); CASE, coalesce, nullif; scalar \
+functions: conversions CAST(x AS INTEGER|FLOAT|STRING|BOOLEAN) (strict: bad text fails the query \
+with GQLSTATUS 22018) vs Cypher toInteger, toFloat, toBoolean, toString (bad text gives NULL) \
+and their OrNull forms (NULL for any other kind too); strings upper/toUpper, lower/toLower, \
+substring (0-based), left, right, split, replace, reverse, trim, btrim, ltrim, rtrim, \
+char_length, size, || concatenation; numbers abs, ceil, floor, round(x[, precision[, mode]]), \
+sign, sqrt, exp, ln, log, log10, power, mod; lists head, last, tail, range, size, isEmpty; \
+elements keys, properties, labels, type, element_id, startNode(e) and endNode(e) (the edge's \
+stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; RETURN (mandatory; expressions \
 with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
 SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text). \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
 (trail semantics), also inside quantified edges. Vertices and edges in a row come back as {id, \
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): a query \
-without MATCH, quantified path patterns ((a)-->(b)){1,3}, nodes(p) / relationships(p), UNION, \
-UNWIND, EXISTS, SHORTEST, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
+without MATCH, quantified path patterns ((a)-->(b)){1,3}, list comprehensions [x IN list | \
+...], UNION, UNWIND, EXISTS, SHORTEST, non-deterministic functions (rand, randomUUID), \
+trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
 with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
@@ -2162,8 +2172,8 @@ mod tests {
         assert!(INSTRUCTIONS.contains("`gql`"));
     }
 
-    /// The gql tool's description lists the stage 1b subset as supported and still names what
-    /// is refused; it stays a read-only tool.
+    /// The gql tool's description lists the stage 1b and 1c subset as supported and still names
+    /// what is refused; it stays a read-only tool.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
         let (supported, refused) = GQL_DESCRIPTION
@@ -2182,13 +2192,25 @@ mod tests {
             "p = (a)-->(b)",
             "path_length(p)",
             "ORDER BY",
+            "GROUP BY",
+            "nodes(p)",
+            "relationships(p)",
+            "CAST(",
+            "toInteger",
+            "OrNull",
+            "substring",
+            "round(",
+            "keys",
+            "properties",
+            "startNode(e)",
         ] {
             assert!(supported.contains(named), "{named}");
         }
         for named in [
             "without MATCH",
             "((a)-->(b)){1,3}",
-            "nodes(p)",
+            "list comprehensions",
+            "randomUUID",
             "INSERT",
             "use the query tool",
         ] {

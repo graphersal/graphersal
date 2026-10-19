@@ -200,6 +200,42 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "Conversions: CAST (strict) and toInteger / toIntegerOrNull (lenient)",
+    "script": "// CAST fails the query on text that is not a value of the type; the Cypher conversions give NULL.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS name, CAST(p.age AS STRING) AS age_text, toInteger('4' || '2') AS answer,\n         toFloat(p.age) / 10 AS decades, toIntegerOrNull(p.name) AS not_a_number\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "String functions: substring, upper, split, replace",
+    "script": "g.gql(`\n  MATCH (s:software)\n  RETURN s.name AS name, upper(substring(s.name, 0, 1)) || substring(s.name, 1) AS title,\n         split(s.name, 'p') AS pieces, replace(s.lang, 'java', 'JVM') AS platform\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "round(avg(...), 1) with GROUP BY",
+    "script": "// GROUP BY lists the non-aggregated RETURN items; without it the grouping is the same.\ng.gql(`\n  MATCH (p:person)-[e:created]->(s:software)\n  RETURN p.name AS person, round(avg(e.weight), 1) AS mean_weight, count(s) AS projects\n  GROUP BY person\n  ORDER BY person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "keys and properties of vertices and edges",
+    "script": "g.gql(\"MATCH (a {name: 'marko'})-[e]->(b) RETURN b.name AS other, keys(e) AS edge_keys, properties(b) AS props ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "nodes(p) and relationships(p) of a path",
+    "script": "g.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows|created]->{1,2}(b)\n  RETURN b.name AS reached, size(relationships(p)) AS hops,\n         head(nodes(p)).name AS first, last(nodes(p)).name AS last\n  ORDER BY hops, reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "startNode and endNode: the stored direction of an edge",
+    "script": "// -[e]- matches either direction; startNode(e) / endNode(e) give the edge's own source and target.\ng.gql(\"MATCH (x {name: 'josh'})-[e]-(y) RETURN y.name AS other, startNode(e).name AS source, endNode(e).name AS target ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Gremlin after GQL: continue from a row variable",
     "script": "g.gql(\"MATCH (p:person {name: 'marko'}) RETURN p\")\n  .select(\"p\").out(\"created\").values(\"name\")"
   },
