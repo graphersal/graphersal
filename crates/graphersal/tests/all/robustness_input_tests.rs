@@ -1538,7 +1538,7 @@ impl<'r> Gql1bGenerator<'r> {
             filler.push_str(&self.labels());
         }
         if cypher {
-            filler.push_str(*self.rng.pick(&["*", "*2", "*1..2", "*..3", "*0.."]));
+            filler.push_str(self.rng.pick(&["*", "*2", "*1..2", "*..3", "*0.."]));
         } else if let Some(var) = &var
             && self.rng.chance(20)
         {
@@ -1655,10 +1655,10 @@ impl<'r> Gql1bGenerator<'r> {
             tail.push_str(&format!(" ORDER BY {key}{direction}"));
         }
         if self.rng.chance(15) {
-            tail.push_str(*self.rng.pick(&[" OFFSET 1", " SKIP $o"]));
+            tail.push_str(self.rng.pick(&[" OFFSET 1", " SKIP $o"]));
         }
         if self.rng.chance(20) {
-            tail.push_str(*self.rng.pick(&[" LIMIT 2", " LIMIT $n"]));
+            tail.push_str(self.rng.pick(&[" LIMIT 2", " LIMIT $n"]));
         }
         tail
     }
