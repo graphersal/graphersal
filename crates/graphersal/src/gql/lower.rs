@@ -81,8 +81,8 @@
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
 //! binder; stage 2d's `UNION`, `NEXT`, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
-//! subquery bodies parse and bind, and `bind::refuse_not_yet` refuses them before planning
-//! until they are lowered. A component that is not the root scan and has no
+//! subquery bodies parse, bind and plan, and `bind::refuse_not_yet` refuses them between
+//! planning and lowering until they are lowered. A component that is not the root scan and has no
 //! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
@@ -1205,8 +1205,8 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    refuse_not_yet(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
+    refuse_not_yet(&parsed, &bound)?;
     Lowering::new(query, &bound, &plan, params).run()
 }
 
@@ -1401,6 +1401,8 @@ impl<'q> Lowering<'q> {
                 }
                 Stage::Materialize(m) => self.materialize(m, site, &mut instrs)?,
                 Stage::For(f) => self.for_stage(f, site, &mut instrs)?,
+                // Stage 2d: refused by `bind::refuse_not_yet` before the lowering (2d.T4/T5).
+                Stage::Call(_) | Stage::Rows(_) => return Err(self.unlowered()),
             };
         }
         let bound = self.bound;
@@ -2404,6 +2406,8 @@ impl<'q> Lowering<'q> {
             let (segment, labelled) = match stage {
                 Stage::Materialize(m) => (m.segment, m.labelled),
                 Stage::For(f) => (f.segment, f.labelled),
+                Stage::Call(c) => (c.segment, c.labelled),
+                Stage::Rows(r) => (r.segment, r.labelled),
                 Stage::Match { .. } | Stage::Optional { .. } => continue,
             };
             if labelled && let Some(flag) = rows.get_mut(segment) {
@@ -2481,7 +2485,7 @@ impl<'q> Lowering<'q> {
         let mut reversed = vec![false; self.bound.bindings.len()];
         let stage_ops = self.plan.stages.iter().filter_map(|stage| match stage {
             Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
-            Stage::Materialize(_) | Stage::For(_) => None,
+            Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => None,
         });
         for op in std::iter::once(self.plan.ops.as_slice())
             .chain(stage_ops)
@@ -2604,36 +2608,31 @@ impl<'q> Lowering<'q> {
             .collect()
     }
 
-    /// The row label of each materializing `WITH` segment, `#w<k>`, and of each `FOR` with an
-    /// ordinal, `#f<k>` (more `#` in front while it collides with a binding's label); of a `FOR`
-    /// without an ordinal its item's own label (the row is the item); empty for the other
-    /// segments.
+    /// The row label of each materializing `WITH` segment, `#w<k>`, of each `FOR` with an
+    /// ordinal, `#f<k>`, of each `CALL`, `#c<k>`, and of each [`Stage::Rows`], `#n<k>` (more
+    /// `#` in front while it collides with a binding's label); of a `FOR` without an ordinal
+    /// its item's own label (the row is the item); empty for the other segments.
     fn row_labels(&self, labels: &[CompactString]) -> Vec<CompactString> {
         self.bound
             .segments
             .iter()
             .enumerate()
-            .map(|(k, segment)| match segment {
-                Segment::With(_) => {
-                    let mut label = format!("#w{k}");
-                    while labels.iter().any(|l| l.as_str() == label) {
-                        label.insert(0, '#');
+            .map(|(k, segment)| {
+                let kind = match segment {
+                    Segment::For(f) if f.ordinal.is_none() => {
+                        return labels.get(f.variable.0).cloned().unwrap_or_default();
                     }
-                    CompactString::from(label)
+                    Segment::With(_) => 'w',
+                    Segment::For(_) => 'f',
+                    Segment::Call(_) => 'c',
+                    Segment::Rows(_) => 'n',
+                    Segment::Match(_) | Segment::Optional(_) => return CompactString::default(),
+                };
+                let mut label = format!("#{kind}{k}");
+                while labels.iter().any(|l| l.as_str() == label) {
+                    label.insert(0, '#');
                 }
-                Segment::For(f) if f.ordinal.is_none() => {
-                    labels.get(f.variable.0).cloned().unwrap_or_default()
-                }
-                Segment::For(_) => {
-                    let mut label = format!("#f{k}");
-                    while labels.iter().any(|l| l.as_str() == label) {
-                        label.insert(0, '#');
-                    }
-                    CompactString::from(label)
-                }
-                Segment::Match(_) | Segment::Optional(_) | Segment::Call(_) | Segment::Rows(_) => {
-                    CompactString::default()
-                }
+                CompactString::from(label)
             })
             .chain(std::iter::once({
                 let mut label = String::from("#r");

@@ -2,7 +2,10 @@ use super::*;
 use crate::gql::ast::Literal;
 use crate::gql::bind::bind;
 use crate::gql::parser::parse;
-use crate::gql::plan::{PushOp, PushOperand, Stage, classify};
+use crate::gql::plan::{
+    CallStage, CompositePlan, PipelinePlan, PushOp, PushOperand, ResultOp, Stage, classify,
+};
+use std::collections::BTreeSet;
 
 // ----- helpers -----
 
@@ -640,10 +643,8 @@ fn storage_facts_read_statistics_and_untransformed_vertex_indexes() {
 
 /// The plan rendering of `ops` (as [`shape`]).
 fn ops_shape(b: &BoundQuery, p: &LogicalPlan, ops: &[Op]) -> Vec<String> {
-    let only = LogicalPlan {
-        ops: ops.to_vec(),
-        ..p.clone()
-    };
+    let mut only = p.clone();
+    only.body.first.first.ops = ops.to_vec();
     shape(b, &only)
 }
 
@@ -666,6 +667,8 @@ fn stages(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
                 if m.labelled { " labelled" } else { "" }
             ),
             Stage::For(f) => format!("for{}", if f.labelled { " labelled" } else { "" }),
+            Stage::Call(c) => format!("call{}", if c.labelled { " labelled" } else { "" }),
+            Stage::Rows(r) => format!("rows{}", if r.labelled { " labelled" } else { "" }),
         })
         .collect()
 }
@@ -1053,7 +1056,7 @@ fn for_is_a_stage_whose_row_is_labelled_only_when_read_after_leaving_it() {
 fn first_lookup(p: &LogicalPlan) -> Option<&Lookup> {
     let stage_ops = p.stages.iter().flat_map(|stage| match stage {
         Stage::Match { ops, .. } | Stage::Optional { ops, .. } => ops.as_slice(),
-        Stage::Materialize(_) | Stage::For(_) => &[],
+        Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => &[],
     });
     p.ops.iter().chain(stage_ops).find_map(|op| match op {
         Op::Lookup(l) => Some(l),
@@ -1506,4 +1509,517 @@ fn element_ids(f: &ElementFilters) -> Vec<usize> {
         .chain(&f.exists)
         .copied()
         .collect()
+}
+
+// ----- stage 2d: composite queries, CALL, whole-query subquery bodies -----
+
+/// One pipeline: its match pipeline (as [`shape`]), then one line per stage (as [`stages`]).
+fn pipeline_lines(b: &BoundQuery, p: &LogicalPlan, pipeline: &PipelinePlan) -> Vec<String> {
+    let mut only = p.clone();
+    only.body.first.first = pipeline.clone();
+    let mut lines = shape(b, &only);
+    lines.extend(stages(b, &only));
+    lines
+}
+
+/// Every pipeline of `plan` (its `CALL` bodies after it, indented), one line each: `|` between
+/// operands of a block, `NEXT` between blocks, the result pipeline at the end.
+fn tree(b: &BoundQuery, p: &LogicalPlan, plan: &CompositePlan) -> Vec<String> {
+    let mut out = Vec::new();
+    for (k, block) in plan.blocks().enumerate() {
+        for (i, pipeline) in block.operands().enumerate() {
+            let prefix = match (k, i) {
+                (0, 0) => String::new(),
+                (_, 0) => "NEXT ".to_owned(),
+                _ if block.distinct => "UNION ".to_owned(),
+                _ => "UNION ALL ".to_owned(),
+            };
+            out.push(format!(
+                "{prefix}{} => {:?}",
+                pipeline_lines(b, p, pipeline).join("; "),
+                pipeline.result
+            ));
+            for stage in &pipeline.stages {
+                if let Stage::Call(call) = stage {
+                    out.extend(tree(b, p, &call.plan).into_iter().map(|l| format!("  {l}")));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `CALL` stages of the first pipeline.
+fn calls(p: &LogicalPlan) -> Vec<&CallStage> {
+    p.stages
+        .iter()
+        .filter_map(|stage| match stage {
+            Stage::Call(call) => Some(call),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `tree` of the whole query.
+fn top(q: &str, facts: &dyn PlannerFacts) -> Vec<String> {
+    let (b, p) = plan_with(q, facts);
+    tree(&b, &p, &p.body)
+}
+
+/// Facts with a property index on `name` of `person` and `software`.
+fn name_indexes() -> Facts {
+    Facts {
+        indexes: vec![("person", "name"), ("software", "name")],
+        ..Facts::default()
+    }
+}
+
+#[test]
+fn a_linear_query_plans_one_block_of_one_pipeline() {
+    let (_, p) = plan_with(
+        "MATCH (a)-->(b) WITH a, count(b) AS n RETURN a, n",
+        &NoFacts,
+    );
+    assert!(p.body.next.is_empty());
+    assert!(p.body.first.unions.is_empty() && !p.body.first.distinct);
+    // The plan dereferences to its only pipeline.
+    assert_eq!(p.ops, p.body.first.first.ops);
+    assert_eq!(p.stages.len(), 1);
+    assert_eq!(p.result, [ResultOp::Project]);
+}
+
+#[test]
+fn union_operands_are_pipelines_of_their_own() {
+    // Each operand is planned like a top-level query: its own root scan, with its pushdown and
+    // index (never a lookup), its own result pipeline.
+    let q = "MATCH (a:person {name: 'marko'}) RETURN a.name AS n \
+             UNION MATCH (b:software {name: 'lop'}) RETURN b.name AS n";
+    let (b, p) = plan_with(q, &name_indexes());
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        ["scan a => [Project]", "UNION scan b => [Project]"]
+    );
+    assert!(p.body.first.distinct);
+    for operand in p.body.first.operands() {
+        let Some(Op::Scan(scan)) = operand.ops.first() else {
+            panic!("a root scan: {:?}", operand.ops)
+        };
+        assert_eq!(scan.filters.pushed.len(), 1);
+    }
+    // ORDER BY / OFFSET / LIMIT belong to their operand (E15).
+    assert_eq!(
+        top(
+            "MATCH (a:person) RETURN a.name AS n ORDER BY n LIMIT 2 \
+             UNION ALL MATCH (b:software) RETURN b.name AS n",
+            &NoFacts,
+        ),
+        [
+            "scan a => [Project, Order, Limit(Literal(2))]",
+            "UNION ALL scan b => [Project]"
+        ]
+    );
+    let (_, p) = plan_with("RETURN 1 AS x UNION ALL RETURN 2 AS x", &NoFacts);
+    assert!(!p.body.first.distinct);
+    // Operands without MATCH start from the unit row.
+    assert!(p.body.first.operands().all(|o| o.ops.is_empty()));
+}
+
+#[test]
+fn next_blocks_start_from_the_rows_before() {
+    // After a UNION block: a Rows stage, its columns read like a WITH row's (`#n<k>` only
+    // when read after a later stage left the row).
+    let union = "MATCH (a:person) RETURN a AS x UNION ALL MATCH (b:software) RETURN b AS x";
+    assert_eq!(
+        top(
+            &format!("{union} NEXT MATCH (x)-->(y) RETURN x, y"),
+            &NoFacts
+        ),
+        [
+            "scan a => [Project]",
+            "UNION ALL scan b => [Project]",
+            "NEXT rows labelled; match: resume ^x; x-[_3]->y => [Project]"
+        ]
+    );
+    assert_eq!(
+        top(&format!("{union} NEXT RETURN x ORDER BY x.name"), &NoFacts),
+        [
+            "scan a => [Project]",
+            "UNION ALL scan b => [Project]",
+            "NEXT rows => [Project, Order]"
+        ]
+    );
+    // A UNION block after NEXT: every operand starts from the same rows.
+    assert_eq!(
+        top(
+            "MATCH (a:person) RETURN a NEXT MATCH (a)-[:created]->(b) RETURN b \
+             UNION MATCH (a)-[:knows]->(b) RETURN b",
+            &NoFacts,
+        ),
+        [
+            "scan a => [Project]",
+            "NEXT rows; match: resume ^a; a-[_2]->b => [Project]",
+            "UNION rows; match: resume ^a; a-[_5]->b => [Project]"
+        ]
+    );
+    // NEXT after a linear query is the WITH it desugars to (E19): one pipeline, the same plan.
+    let (b, p) = plan_with(
+        "MATCH (a:person) RETURN a NEXT MATCH (a)-[:created]->(b) RETURN b",
+        &NoFacts,
+    );
+    let (tb, tp) = plan_with(
+        "MATCH (a:person) WITH a MATCH (a)-[:created]->(b) RETURN b",
+        &NoFacts,
+    );
+    assert!(p.body.next.is_empty());
+    assert_eq!(tree(&b, &p, &p.body), tree(&tb, &tp, &tp.body));
+}
+
+#[test]
+fn call_is_a_stage_whose_body_starts_on_the_incoming_row() {
+    let q = "MATCH (a:person) CALL (a) { MATCH (a)-[:created]->(s) RETURN s.name AS sn } \
+             RETURN a.name AS name, sn";
+    let (b, p) = plan_with(q, &NoFacts);
+    // The body continues from the current element without moving.
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; call => [Project]",
+            "  resume a; a-[_1]->s => [Project]"
+        ]
+    );
+    let call = calls(&p)[0];
+    assert_eq!(call.imports, named(&b, "a"));
+    assert!(!call.optional && !call.labelled);
+    // A returned node continues a later pattern from the CALL row (read there: no row label).
+    assert_eq!(
+        top(
+            "MATCH (a:person) CALL (a) { MATCH (a)-[:created]->(s) RETURN s } \
+             MATCH (s)<--(c) RETURN a, c",
+            &NoFacts,
+        ),
+        [
+            "scan a; call; match: resume ^s; s<-[_4]-c => [Project]",
+            "  resume a; a-[_1]->s => [Project]"
+        ]
+    );
+    // A body starting away from the current element moves to its import (a label).
+    let q = "MATCH (a)-->(b) CALL (a) { MATCH (a)-->(c) RETURN c } RETURN c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; a-[_1]->b; call => [Project]",
+            "  resume ^a; a-[_3]->c => [Project]"
+        ]
+    );
+    assert!(reasons(&p, named(&b, "a")[0]).resume);
+    // After a CALL there is no current element: a later pattern resumes through a label, and
+    // a returned column read after it left the row labels the row (`#c<k>`).
+    let q = "MATCH (a) CALL (a) { RETURN 1 AS one } MATCH (a)-->(b) RETURN b, one";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; call labelled; match: resume ^a; a-[_2]->b => [Project]",
+            "   => [Project]"
+        ]
+    );
+    assert!(reasons(&p, named(&b, "a")[0]).resume);
+}
+
+#[test]
+fn an_optional_call_reads_its_columns_through_the_row_label() {
+    let body = "(a) { MATCH (a)-[:created]->(s) RETURN s.name AS sn } RETURN sn";
+    let (_, p) = plan_with(&format!("MATCH (a:person) OPTIONAL CALL {body}"), &NoFacts);
+    let call = calls(&p)[0];
+    assert!(call.optional && call.labelled);
+    // Without OPTIONAL the column is read on the CALL's row.
+    let (_, p) = plan_with(&format!("MATCH (a:person) CALL {body}"), &NoFacts);
+    assert!(!calls(&p)[0].labelled);
+}
+
+#[test]
+fn call_bodies_follow_the_body_rules() {
+    // Conditions over imports only run first; a component without an import is a
+    // child-leading scan.
+    assert_eq!(
+        top(
+            "MATCH (a) CALL (a) { MATCH (s:software) WHERE a.age > 30 AND s.lang = a.lang \
+             RETURN s } RETURN s",
+            &NoFacts,
+        ),
+        [
+            "scan a; call => [Project]",
+            "  filter [0]; scan s; filter [1] => [Project]"
+        ]
+    );
+    // The body runs per row: an equality reading the row is a correlated lookup where an
+    // index serves it; a constant one stays a scan with its pushdown.
+    let correlated = "MATCH (a:person) CALL (a) { MATCH (s:software {name: a.name}) RETURN s } \
+                      RETURN s";
+    assert_eq!(
+        top(correlated, &name_indexes()),
+        ["scan a; call => [Project]", "  lookup s => [Project]"]
+    );
+    assert_eq!(
+        top(correlated, &NoFacts),
+        [
+            "scan a; call => [Project]",
+            "  scan s; filter [0] => [Project]"
+        ]
+    );
+    assert_eq!(
+        top(
+            "MATCH (a:person) CALL (a) { MATCH (s:software {name: 'lop'}) RETURN s } RETURN s",
+            &name_indexes(),
+        ),
+        ["scan a; call => [Project]", "  scan s => [Project]"]
+    );
+    // Every operand of a UNION body starts on the incoming row; NEXT inside from its rows.
+    assert_eq!(
+        top(
+            "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b UNION MATCH (a)<--(b) RETURN b \
+             NEXT RETURN b ORDER BY b.name LIMIT 1 } RETURN b",
+            &NoFacts,
+        ),
+        [
+            "scan a; call => [Project]",
+            "  resume a; a-[_1]->b => [Project]",
+            "  UNION resume a; a<-[_3]-b => [Project]",
+            "  NEXT rows => [Project, Order, Limit(Literal(1))]"
+        ]
+    );
+    // Nested bodies.
+    assert_eq!(
+        top(
+            "MATCH (a) CALL (a) { CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b AS c } RETURN c",
+            &NoFacts,
+        ),
+        [
+            "scan a; call => [Project]",
+            "  call => [Project]",
+            "    resume a; a-[_1]->b => [Project]"
+        ]
+    );
+    // A body read after an OPTIONAL MATCH part reads its import through a label.
+    let q = "MATCH (a) OPTIONAL MATCH (a)-->(o) CALL (a) { MATCH (a)-->(c) RETURN c } RETURN o, c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; optional: resume a; a-[_1]->o witness o; call => [Project]",
+            "  resume ^a; a-[_3]->c => [Project]"
+        ]
+    );
+    assert!(reasons(&p, named(&b, "a")[0]).optional);
+}
+
+#[test]
+fn a_row_before_a_call_is_labelled_only_when_read_after_it() {
+    // The body reads the WITH row it runs on: no row label.
+    let (b, p) = plan_with(
+        "MATCH (a) WITH a, count(*) AS n CALL (n) { RETURN n + 1 AS m } RETURN m",
+        &NoFacts,
+    );
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; with [Aggregate] filters []; call => [Project]",
+            "   => [Project]"
+        ]
+    );
+    // A column of it read after the CALL: labelled (`#w<k>`).
+    let (b, p) = plan_with(
+        "MATCH (a) WITH a, count(*) AS n CALL (a) { MATCH (a)-->(c) RETURN c } RETURN n, c",
+        &NoFacts,
+    );
+    assert_eq!(
+        tree(&b, &p, &p.body),
+        [
+            "scan a; with [Aggregate] filters [] labelled; call => [Project]",
+            "  resume ^a; a-[_3]->c => [Project]"
+        ]
+    );
+}
+
+#[test]
+fn subqueries_inside_call_bodies_are_hosted_there() {
+    let (b, p) = plan_with(
+        "MATCH (a:person) CALL (a) { MATCH (a)-->(x) WHERE EXISTS { MATCH (x)-->(y) } \
+         RETURN x } RETURN x",
+        &NoFacts,
+    );
+    assert_eq!(subplans(&b, &p), ["0@x: resume x; x-[_3]->y"]);
+}
+
+/// One line per planned whole-query body: `k@start`, then its `tree`, indented.
+fn query_subplans(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in &p.subqueries {
+        let Some(query) = &s.query else { continue };
+        assert!(s.ops.is_empty());
+        out.push(format!(
+            "{}@{}",
+            s.subquery,
+            s.current.map_or_else(|| "-".to_owned(), |c| name(b, c))
+        ));
+        out.extend(tree(b, p, query).into_iter().map(|l| format!("  {l}")));
+    }
+    out
+}
+
+#[test]
+fn whole_query_subquery_bodies_plan_as_composites() {
+    let (b, p) = plan_with(
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH s, count(*) AS c \
+         WHERE c > 0 RETURN s } RETURN p.name",
+        &NoFacts,
+    );
+    assert_eq!(
+        query_subplans(&b, &p),
+        [
+            "0@p",
+            "  resume p; p-[_1]->s; with [Aggregate] filters [0] => [Project]"
+        ]
+    );
+    // A UNION body: each operand starts on the host's element.
+    let (b, p) = plan_with(
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) RETURN x UNION MATCH (p)<--(x) \
+         RETURN x } RETURN p",
+        &NoFacts,
+    );
+    assert_eq!(
+        query_subplans(&b, &p),
+        [
+            "0@p",
+            "  resume p; p-[_1]->x => [Project]",
+            "  UNION resume p; p<-[_3]-x => [Project]"
+        ]
+    );
+    // An import read in a column after the body moved on gets the `subquery` reason.
+    let (b, p) = plan_with(
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN p.name AS n } \
+         RETURN p.name",
+        &NoFacts,
+    );
+    assert_eq!(subquery_reads(&b, &p), ["p"]);
+    let (b, p) = plan_with(
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN s.name AS n } \
+         RETURN p.name",
+        &NoFacts,
+    );
+    assert!(subquery_reads(&b, &p).is_empty());
+    // A COUNT { } body in a column, and a correlated lookup at the start of a body.
+    let (b, p) = plan_with(
+        "MATCH (p:person) RETURN COUNT { MATCH (s:software {name: p.name}) RETURN s } AS c",
+        &name_indexes(),
+    );
+    assert_eq!(query_subplans(&b, &p), ["0@p", "  lookup s => [Project]"]);
+}
+
+/// Every node binding a pipeline or body of `p` starts at or reaches, by id.
+fn reached(p: &LogicalPlan) -> BTreeSet<BindingId> {
+    fn ops_reached(ops: &[Op], out: &mut BTreeSet<BindingId>) {
+        for op in ops {
+            match op {
+                Op::Scan(s) | Op::Anchor(s) => {
+                    out.insert(s.binding);
+                }
+                Op::Lookup(l) => {
+                    out.insert(l.scan.binding);
+                }
+                Op::Resume(r) => {
+                    out.insert(r.binding);
+                }
+                Op::Expand(e) => {
+                    out.insert(e.from);
+                    out.insert(e.to);
+                }
+                Op::Join { .. } | Op::Filter(_) => {}
+            }
+        }
+    }
+    fn composite_reached(plan: &CompositePlan, out: &mut BTreeSet<BindingId>) {
+        for pipeline in plan.blocks().flat_map(|block| block.operands()) {
+            ops_reached(&pipeline.ops, out);
+            for stage in &pipeline.stages {
+                match stage {
+                    Stage::Match { ops, .. } | Stage::Optional { ops, .. } => {
+                        ops_reached(ops, out);
+                    }
+                    Stage::Call(call) => composite_reached(&call.plan, out),
+                    Stage::Materialize(_) | Stage::For(_) | Stage::Rows(_) => {}
+                }
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    composite_reached(&p.body, &mut out);
+    for s in &p.subqueries {
+        ops_reached(&s.ops, &mut out);
+        if let Some(query) = &s.query {
+            composite_reached(query, &mut out);
+        }
+    }
+    out
+}
+
+#[test]
+fn composite_plans_are_deterministic_and_reach_every_pattern_node() {
+    let queries = [
+        "MATCH (a:person)-->(b) RETURN b AS x UNION MATCH (c:software)<--(d) RETURN d AS x \
+         NEXT MATCH (x)-->(y) RETURN y",
+        "MATCH (a) CALL (a) { MATCH (a)-->(b), (c:software {name: a.name}) RETURN c \
+         UNION ALL OPTIONAL MATCH (a)<--(c) RETURN c } MATCH (c)-->(d) RETURN d",
+        "MATCH (a) OPTIONAL CALL (a) { CALL (a) { MATCH (a)-[e]->{1,2}(b) RETURN b } \
+         MATCH (b)-->(c) WHERE EXISTS { MATCH (c)-->(z) RETURN z } RETURN c } RETURN c",
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) WITH x, count(*) AS n \
+         MATCH (x)<--(y) RETURN y UNION MATCH (p)<--(y) RETURN y } RETURN p",
+        "FOR i IN [1, 2] CALL (i) { MATCH (s) WHERE s.age = i RETURN s } RETURN s",
+    ];
+    for q in queries {
+        for facts in [&NoFacts as &dyn PlannerFacts, &name_indexes()] {
+            let (b, p) = plan_with(q, facts);
+            assert_eq!(p, plan(&b, facts, None), "{q}");
+            let reached = reached(&p);
+            for m in &b.matches {
+                for path in &m.paths {
+                    for node in std::iter::once(path.start).chain(path.steps.iter().map(|s| s.node))
+                    {
+                        assert!(reached.contains(&node), "{q}: {} unreached", name(&b, node));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The deepest accepted bodies (`bind::MAX_BODY_DEPTH`) with the tallest expression inside
+/// bind and plan on a test thread's 2 MiB stack (debug build; the planner recurses once per
+/// `CALL` body, see the 2d.T3 report for the numbers).
+#[test]
+fn the_deepest_bodies_plan_within_the_stack() {
+    use crate::gql::bind::MAX_BODY_DEPTH;
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let mut calls = format!("WITH 1 AS x RETURN {} AS y", ors(500));
+    for _ in 0..MAX_BODY_DEPTH {
+        calls = format!("CALL {{ {calls} UNION ALL RETURN 2 AS y }} RETURN y");
+    }
+    let mut bodies = format!("EXISTS {{ LET x = 1 FILTER {} RETURN x }}", ors(440));
+    for _ in 1..MAX_BODY_DEPTH {
+        bodies = format!("EXISTS {{ MATCH (n) WITH n WHERE {bodies} RETURN n }}");
+    }
+    let mut matches = String::from("MATCH (n)-->(m) RETURN m");
+    for _ in 0..MAX_BODY_DEPTH {
+        matches = format!("MATCH (n) CALL (n) {{ {matches} }} RETURN m");
+    }
+    for q in [calls, format!("MATCH (n) WHERE {bodies} RETURN n"), matches] {
+        let (b, p) = plan_with(&q, &NoFacts);
+        assert_eq!(p, plan(&b, &NoFacts, None));
+    }
 }

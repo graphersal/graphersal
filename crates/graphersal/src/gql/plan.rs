@@ -1,9 +1,10 @@
 //! The logical plan of a bound GQL query: what the planner decided, in the order the lowering
 //! emits it.
 //!
-//! A [`LogicalPlan`] has three parts:
+//! A [`LogicalPlan`] is a tree of pipelines (stage 2d, see "Composite queries"); a linear query
+//! is one pipeline ([`PipelinePlan`], which the plan dereferences to) of three parts:
 //!
-//! - **the match pipeline of the first segment** ([`LogicalPlan::ops`]): for every connected
+//! - **the match pipeline of the first segment** ([`PipelinePlan::ops`]): for every connected
 //!   component of the pattern graph of the first segment's `MATCH` clauses (node bindings as
 //!   vertices, edge bindings as edges) a [`Op::Scan`] (or, from phase 2 on, an [`Op::Anchor`])
 //!   followed by one [`Op::Expand`] per pattern edge in walk order, an [`Op::Join`] after an
@@ -14,7 +15,7 @@
 //!   optimized, Phase 0 outcome 2). Empty when the query starts with anything but `MATCH`
 //!   (`OPTIONAL MATCH`, `FOR`, a materializing `WITH`, or no stage at all: `RETURN 1`): the
 //!   query then starts from one unit row (design M1);
-//! - **the later stages** ([`LogicalPlan::stages`], stage 1b, plan mechanism 2): one [`Stage`]
+//! - **the later stages** ([`PipelinePlan::stages`], stage 1b, plan mechanism 2): one [`Stage`]
 //!   per later segment of the [`BoundQuery`] in order: a [`Stage::Match`] (plain `MATCH`
 //!   clauses after a cut, or only the conjuncts of a `FILTER`), a [`Stage::Optional`] (an
 //!   `OPTIONAL MATCH`, lowered inside `optional()`), a [`Stage::Materialize`] (a materializing
@@ -22,7 +23,7 @@
 //!   binding an earlier segment bound ([`Op::Resume`]) when they hold one, else with a
 //!   mid-traversal [`Op::Scan`]. Empty for a stage 1a query, whose plan is exactly the stage 1a
 //!   plan;
-//! - **the result pipeline** ([`LogicalPlan::result`]): [`ResultOp::Project`] (or
+//! - **the result pipeline** ([`PipelinePlan::result`]): [`ResultOp::Project`] (or
 //!   [`ResultOp::Aggregate`] when a column aggregates), then [`ResultOp::Distinct`],
 //!   [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as far as the query has them.
 //!
@@ -64,6 +65,22 @@
 //! residual ones. An import read inside a body while it is not the current element there is
 //! labelled ([`Labelling::subquery`]).
 //!
+//! **Composite queries** (stage 2d, design item 8, mechanisms 5 to 7). [`LogicalPlan::body`]
+//! mirrors the bound statements ([`BoundComposite`](super::bind::BoundComposite)): a
+//! [`CompositePlan`] is [`UnionPlan`] blocks chained by `NEXT`, a block is its operands (one
+//! [`PipelinePlan`] each, every one planned like a top-level query: own root scan, own result
+//! pipeline with its `ORDER BY` / `OFFSET` / `LIMIT`, E15) and whether it removes duplicates.
+//! Every operand of a block after `NEXT` starts with a [`Stage::Rows`] (the records of the
+//! block before, columns read like a materializing `WITH` row, `#n<k>`). A `CALL` is a
+//! [`Stage::Call`] holding the plan of its body, whose first block's operands start on the
+//! incoming row (at the current element there when they continue from it, design E16: per
+//! row); its returned columns are read from its row (`#c<k>` when read after a later stage
+//! left it; always through the label after an `OPTIONAL CALL`), and after it there is no
+//! current element. A whole-query subquery body is a [`SubqueryPlan::query`], planned per start
+//! like a `MATCH`-only body. The first component of a `CALL` body or a whole-query body may be a
+//! correlated [`Op::Lookup`] when its equality reads a binding (the body runs per row); in a
+//! `MATCH`-only body (stage 2b) it stays a child-leading scan.
+//!
 //! **Phase 2 seam.** The planner takes an optional anchor binding (always `None` in stage 1a):
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a
 //! scan. [`ANCHOR_VARIABLE`] is the reserved name of that anchor.
@@ -87,13 +104,10 @@ pub(crate) const ANCHOR_VARIABLE: &str = "";
 /// The planned query (module docs).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalPlan {
-    /// The match pipeline of the first segment: every component in emission order (empty when
-    /// the query does not start with `MATCH`: it starts from one unit row).
-    pub(crate) ops: Vec<Op>,
-    /// The later segments in order (empty for a stage 1a query).
-    pub(crate) stages: Vec<Stage>,
-    /// The result pipeline of `RETURN`.
-    pub(crate) result: Vec<ResultOp>,
+    /// The plan tree of the statements (stage 2d, module docs "Composite queries"): for a linear
+    /// query one block of one pipeline. The plan dereferences to its first pipeline
+    /// ([`PipelinePlan`]: `ops`, `stages`, `result`), the whole query when it is linear.
+    pub(crate) body: CompositePlan,
     /// Why each binding needs a path label, by [`BindingId`].
     pub(crate) labelling: Vec<Labelling>,
     /// The push-down form of each conjunct, by conjunct index; `None` for a conjunct that is not
@@ -104,6 +118,15 @@ pub(crate) struct LogicalPlan {
     /// The plans of the subquery bodies (stage 2b), one per subquery and start
     /// ([`SubqueryPlan`]), sorted by subquery index then start; empty without subqueries.
     pub(crate) subqueries: Vec<SubqueryPlan>,
+}
+
+impl std::ops::Deref for LogicalPlan {
+    type Target = PipelinePlan;
+
+    /// The first pipeline (the whole query when it is linear).
+    fn deref(&self) -> &PipelinePlan {
+        &self.body.first.first
+    }
 }
 
 impl LogicalPlan {
@@ -137,6 +160,74 @@ impl LogicalPlan {
     }
 }
 
+/// The plan of one linear query (a pipeline of the bound query,
+/// [`BoundLinear`](super::bind::BoundLinear)): the whole query of stages 1a to 2c, a `UNION`
+/// operand, a block after `NEXT`, a pipeline of a `CALL` body.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PipelinePlan {
+    /// The match pipeline of its first segment when that is a `MATCH`: every component in
+    /// emission order (empty when the pipeline does not start with `MATCH`: it starts from one
+    /// unit row, the outer row in a body, or the records of a [`Stage::Rows`]).
+    pub(crate) ops: Vec<Op>,
+    /// The later segments in order (empty for a stage 1a query).
+    pub(crate) stages: Vec<Stage>,
+    /// The result pipeline of its `RETURN`.
+    pub(crate) result: Vec<ResultOp>,
+}
+
+/// The plan of a `UNION` block (design E15, mechanism 5): its operands, each a pipeline of its
+/// own over the same input (the start, the outer row of a body, or the records of the block
+/// before `NEXT`), their records in the first operand's column order; one operand for a block
+/// without `UNION`. Parallel to [`BoundBlock`](super::bind::BoundBlock).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct UnionPlan {
+    /// The first operand.
+    pub(crate) first: PipelinePlan,
+    /// The further operands in text order.
+    pub(crate) unions: Vec<PipelinePlan>,
+    /// `UNION` / `UNION DISTINCT`: duplicate records are removed (`gql:distinct()` after the
+    /// union); `false` for `UNION ALL` and for one operand.
+    pub(crate) distinct: bool,
+}
+
+impl UnionPlan {
+    /// Every operand in text order.
+    pub(crate) fn operands(&self) -> impl Iterator<Item = &PipelinePlan> {
+        std::iter::once(&self.first).chain(&self.unions)
+    }
+
+    /// Every operand in text order, mutable.
+    pub(crate) fn operands_mut(&mut self) -> impl Iterator<Item = &mut PipelinePlan> {
+        std::iter::once(&mut self.first).chain(&mut self.unions)
+    }
+}
+
+/// The plan of a composite query (the top level, a `CALL` body, a whole-query subquery body):
+/// `UNION` blocks chained by `NEXT` (design E19), parallel to
+/// [`BoundComposite`](super::bind::BoundComposite). Every block in [`Self::next`] starts each
+/// operand with a [`Stage::Rows`] reading the records of the block before.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct CompositePlan {
+    /// The first block.
+    pub(crate) first: UnionPlan,
+    /// The blocks after `NEXT`, in order.
+    pub(crate) next: Vec<UnionPlan>,
+}
+
+impl CompositePlan {
+    /// Every block in order.
+    pub(crate) fn blocks(&self) -> impl Iterator<Item = &UnionPlan> {
+        std::iter::once(&self.first).chain(&self.next)
+    }
+
+    /// Every pipeline (not those of nested bodies), mutable.
+    pub(crate) fn pipelines_mut(&mut self) -> impl Iterator<Item = &mut PipelinePlan> {
+        std::iter::once(&mut self.first)
+            .chain(&mut self.next)
+            .flat_map(UnionPlan::operands_mut)
+    }
+}
+
 /// The plan of one subquery body (module docs, "Subqueries"): its match pipeline when the host
 /// stands on `current`. A body is planned once per start: a host on a node the body imports
 /// lets the body start there without moving (`Op::Resume` from the current element), any other
@@ -149,8 +240,15 @@ pub(crate) struct SubqueryPlan {
     /// The host's current element when it is a node the body imports, else `None`.
     pub(crate) current: Option<BindingId>,
     /// The body's match pipeline: its conjuncts over imports only (or none) first, then its
-    /// components (those starting at an import first), as for a later segment.
+    /// components (those starting at an import first), as for a later segment. Empty for a
+    /// whole-query body.
     pub(crate) ops: Vec<Op>,
+    /// The plan of a whole-query body (stage 2d, [`BoundSubquery::query`]): its first block's
+    /// operands start on the host's row like a `CALL` body's; `None` for a body of `MATCH`
+    /// clauses.
+    ///
+    /// [`BoundSubquery::query`]: super::bind::BoundSubquery::query
+    pub(crate) query: Option<Box<CompositePlan>>,
 }
 
 /// The start a body of `subquery` is planned for when its host stands on `current`: the
@@ -309,6 +407,45 @@ pub(crate) enum Stage {
     Materialize(Materialize),
     /// `FOR` / `UNWIND` (stage 2a, design mechanism 2): one row per item of the list.
     For(ForStage),
+    /// `[OPTIONAL] CALL { }` (stage 2d, design mechanism 6): the body runs per row, each of its
+    /// records a new row whose columns are the returned names.
+    Call(CallStage),
+    /// The records of the block before, as rows (stage 2d, design E19): the first stage of each
+    /// operand of a block after `NEXT`.
+    Rows(RowsStage),
+}
+
+/// `[OPTIONAL] CALL (..) { body }` (stage 2d): per incoming row the records of the body (a
+/// composite query of its own, planned with the bindings before the `CALL` bound and the
+/// current element there as its start), each a row whose columns are the returned names
+/// (column bindings of the segment, read like the row of a materializing `WITH`). After it
+/// there is no current element (every outer read goes through a label).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CallStage {
+    /// The segment (index into [`BoundQuery::segments`], a `Segment::Call`).
+    pub(crate) segment: usize,
+    /// The plan of the body: its first block's operands start on the incoming row, at the
+    /// current element there when they continue from it.
+    pub(crate) plan: Box<CompositePlan>,
+    /// `OPTIONAL CALL`: a row without body records continues with the returned names `NULL`.
+    pub(crate) optional: bool,
+    /// The bindings before the `CALL` its body reads, sorted.
+    pub(crate) imports: Vec<BindingId>,
+    /// Whether the row needs a path label (`as("#c<k>")`): a returned column is read after a
+    /// later stage left the row, or after an `OPTIONAL CALL` (whose row may be the incoming one:
+    /// every read of its columns goes through the label, absent for `NULL`).
+    pub(crate) labelled: bool,
+}
+
+/// The records of the block before `NEXT` read as rows (stage 2d, a `Segment::Rows`): its
+/// columns are column bindings, read like the row of a materializing `WITH`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RowsStage {
+    /// The segment (index into [`BoundQuery::segments`], a `Segment::Rows`).
+    pub(crate) segment: usize,
+    /// Whether the row needs a path label (`as("#n<k>")`): a column is read after a later stage
+    /// left the row.
+    pub(crate) labelled: bool,
 }
 
 /// `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]`: every row becomes one row per list item

@@ -10,7 +10,7 @@
 //! # Segments (stage 1b, plan mechanism 2)
 //!
 //! The planner plans the [`BoundQuery::segments`] in order, each with the rules below over the
-//! pattern graph of its own clauses; the first segment's plan is [`LogicalPlan::ops`] (for a
+//! pattern graph of its own clauses; the first segment's plan is [`PipelinePlan::ops`] (for a
 //! stage 1a query, the only segment: the plan is exactly the stage 1a plan), every later one a
 //! [`Stage`]. The bindings bound by earlier segments are bound already when a segment starts:
 //!
@@ -27,6 +27,17 @@
 //! - a `FOR` / `UNWIND` is a [`Stage::For`]; its item and ordinal are bound after it (columns of
 //!   its row, like a materializing `WITH`'s: a later `MATCH` written with the item as a node
 //!   continues from it through `gql:bind`, design E3).
+//!
+//! Stage 2d: every pipeline of the query ([`BoundLinear::pipeline`]: the whole query, each
+//! `UNION` operand, each block after `NEXT`, each pipeline of a `CALL` body or a whole-query
+//! subquery body) is planned on its own by these rules into a [`PipelinePlan`]; "the first
+//! segment" is the pipeline's. A `CALL` is a [`Stage::Call`]: its body is planned right there
+//! (a recursion, at most `bind::MAX_BODY_DEPTH` levels), with every binding before the `CALL`
+//! bound and the current element there as the start of its first block's operands, which plan
+//! their first segment like a subquery body (see "Subqueries"; its first component may also be
+//! a correlated lookup when the equality reads a binding, since the body runs per row); its
+//! returned columns are bound after it, and there is no current element after it. A
+//! [`Segment::Rows`] is a [`Stage::Rows`] binding the columns of the block before.
 //!
 //! A query that does not start with `MATCH` starts from one unit row (design M1): the first
 //! segment's operations are then empty (or only the conjuncts of a leading `LET` / `FILTER`
@@ -124,17 +135,29 @@
 //! over every planned body at each of its host positions records those reasons for the reads
 //! inside it, and the `subquery` reason for an import a body condition reads while it is not
 //! the current element there.
+//!
+//! Stage 2d: the pass walks every pipeline of the plan tree (each operand of a block from the
+//! block's start, a `CALL` body from the position of its `CALL`, a whole-query subquery body
+//! from its host's position) and also records, by the same rule as for a `WITH` row, whether
+//! the row of a `CALL` ([`CallStage::labelled`], `#c<k>`; always when a column of an
+//! `OPTIONAL CALL` is read) or of a [`Stage::Rows`] ([`RowsStage::labelled`], `#n<k>`) is read
+//! after a later stage left it. In a whole-query subquery body an import read (by a filter, a
+//! column, a sort key, a `FOR` list) while it is not the current element gets the `subquery`
+//! reason.
 
 use super::ast::{EdgeDirection, Quantifier};
-use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Predicate, Segment};
+use super::bind::{
+    BindingId, BindingKind, BoundCall, BoundComposite, BoundLinear, BoundQuery, BoundWith, Count,
+    Predicate, Segment,
+};
 use std::collections::BTreeSet;
 
 use super::ast::Expr;
 use super::plan::{
-    EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan, Lookup, LookupBy,
-    Materialize, Op, Pushdown, ResultOp, Resume, Scan, Stage, SubqueryPlan, SubqueryUse,
-    and_factors, classify_all, element_filters, lookup_form, scan_labels, subqueries_in,
-    subquery_start,
+    CallStage, CompositePlan, EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan,
+    Lookup, LookupBy, Materialize, Op, PipelinePlan, Pushdown, ResultOp, Resume, RowsStage, Scan,
+    Stage, SubqueryPlan, SubqueryUse, UnionPlan, and_factors, classify_all, element_filters,
+    lookup_form, scan_labels, subqueries_in, subquery_start,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -326,16 +349,87 @@ impl<'q> Planner<'q> {
     fn run(mut self, anchor: Option<BindingId>) -> LogicalPlan {
         let anchor = anchor.filter(|a| self.is_node(*a));
         let bound = self.bound;
+        let mut body = self.composite(&bound.body, Entry::Top { anchor });
+        self.mark_static();
+        self.mark_positions(&mut body);
+        let mut subqueries = std::mem::take(&mut self.subplans);
+        subqueries.sort_by_key(|p| (p.subquery, p.current));
+        LogicalPlan {
+            body,
+            labelling: self.labelling,
+            pushdown: self.pushdown,
+            anchor,
+            subqueries,
+        }
+    }
+
+    /// Plans a composite query (module docs, "Composite queries"): every pipeline of every
+    /// block in order. A `CALL` body inside recurses here (at most `bind::MAX_BODY_DEPTH`
+    /// levels).
+    fn composite(&mut self, composite: &BoundComposite, entry: Entry) -> CompositePlan {
+        let mut blocks = Vec::with_capacity(composite.next.len() + 1);
+        for (k, block) in std::iter::once(&composite.first)
+            .chain(&composite.next)
+            .enumerate()
+        {
+            let mut operands = Vec::with_capacity(block.unions.len() + 1);
+            for (i, linear) in block.operands().enumerate() {
+                // The first block's operands start at the entry (the phase 2 anchor only for
+                // the first one); a block after `NEXT` starts each from the rows before.
+                let start = match entry {
+                    Entry::Top { anchor } if k == 0 => PipelineStart {
+                        kind: SegmentKind::First,
+                        current: None,
+                        anchor: anchor.filter(|_| i == 0),
+                    },
+                    Entry::Body { current } if k == 0 => PipelineStart {
+                        kind: SegmentKind::QueryBody,
+                        current,
+                        anchor: None,
+                    },
+                    Entry::Top { .. } | Entry::Body { .. } => PipelineStart {
+                        kind: SegmentKind::Later,
+                        current: None,
+                        anchor: None,
+                    },
+                };
+                operands.push(self.pipeline(linear, start));
+            }
+            let mut operands = operands.into_iter();
+            blocks.push(UnionPlan {
+                first: operands.next().unwrap_or_default(),
+                unions: operands.collect(),
+                distinct: block.distinct(),
+            });
+        }
+        let mut blocks = blocks.into_iter();
+        CompositePlan {
+            first: blocks.next().unwrap_or_default(),
+            next: blocks.collect(),
+        }
+    }
+
+    /// Plans the pipeline of `linear` (module docs, "Segments"): its first segment's match
+    /// pipeline when it is a `MATCH`, a stage per later segment, its result pipeline.
+    fn pipeline(&mut self, linear: &BoundLinear, start: PipelineStart) -> PipelinePlan {
+        let bound = self.bound;
         let mut first = Vec::new();
         let mut stages = Vec::new();
-        let mut current: Option<BindingId> = None;
-        for (index, segment) in bound.segments.iter().enumerate() {
+        let mut current = start.current;
+        for (position, &index) in linear.pipeline.iter().enumerate() {
+            let Some(segment) = bound.segments.get(index) else {
+                continue;
+            };
             match segment {
                 Segment::Match(clauses) => {
-                    let anchor = anchor.filter(|_| index == 0);
-                    let ops = self.segment(index, clauses, current, anchor, false);
+                    let (kind, anchor) = if position == 0 {
+                        (start.kind, start.anchor)
+                    } else {
+                        (SegmentKind::Later, None)
+                    };
+                    let ops = self.segment(index, clauses, current, anchor, kind);
                     current = current_after(&ops, current);
-                    if index == 0 {
+                    if position == 0 {
                         first = ops;
                     } else {
                         stages.push(Stage::Match {
@@ -345,8 +439,13 @@ impl<'q> Planner<'q> {
                     }
                 }
                 Segment::Optional(clause) => {
-                    let ops =
-                        self.segment(index, std::slice::from_ref(clause), current, None, false);
+                    let ops = self.segment(
+                        index,
+                        std::slice::from_ref(clause),
+                        current,
+                        None,
+                        SegmentKind::Later,
+                    );
                     stages.push(Stage::Optional {
                         segment: index,
                         ops,
@@ -370,66 +469,79 @@ impl<'q> Planner<'q> {
                     }));
                     current = None;
                 }
-                Segment::Call(_) | Segment::Rows(_) => {
-                    // Stage 2d: `bind::refuse_not_yet` refuses these before planning; the
-                    // planner gains their stages in 2d.T3. Their columns are bound after them.
-                    let outputs = match segment {
-                        Segment::Call(call) => call.outputs.as_slice(),
-                        Segment::Rows(rows) => rows.outputs.as_slice(),
-                        Segment::Match(_)
-                        | Segment::Optional(_)
-                        | Segment::With(_)
-                        | Segment::For(_) => &[],
-                    };
-                    for &output in outputs {
+                Segment::Call(call) => {
+                    stages.push(self.call(index, call, current));
+                    // Its rows are the body's records: no current element (design item 8).
+                    current = None;
+                }
+                Segment::Rows(rows) => {
+                    // The columns of the records before (column bindings of its row).
+                    for &output in &rows.outputs {
                         self.bind(output);
                     }
+                    stages.push(Stage::Rows(RowsStage {
+                        segment: index,
+                        labelled: false,
+                    }));
                     current = None;
                 }
             }
         }
-        self.mark_static();
-        self.mark_positions(&first, &mut stages);
-        let mut subqueries = std::mem::take(&mut self.subplans);
-        subqueries.sort_by_key(|p| (p.subquery, p.current));
-        let result = result_ops(
-            bound.aggregated(),
-            bound.distinct,
-            !bound.order_by.is_empty(),
-            &bound.offset,
-            &bound.limit,
-        );
-        LogicalPlan {
+        PipelinePlan {
             ops: first,
             stages,
-            result,
-            labelling: self.labelling,
-            pushdown: self.pushdown,
-            anchor,
-            subqueries,
+            result: result_ops(
+                linear.columns.iter().any(|c| c.aggregate),
+                linear.distinct,
+                !linear.order_by.is_empty(),
+                &linear.offset,
+                &linear.limit,
+            ),
         }
+    }
+
+    /// The stage of a `CALL` (module docs, "Composite queries"): its body planned with every
+    /// binding before it bound and the current element `current` as its start; its returned
+    /// columns are bound after it. A thin frame: it recurses through [`Self::composite`].
+    #[inline(never)]
+    fn call(&mut self, index: usize, call: &BoundCall, current: Option<BindingId>) -> Stage {
+        let plan = self.composite(&call.body, Entry::Body { current });
+        for &output in &call.outputs {
+            self.bind(output);
+        }
+        Stage::Call(CallStage {
+            segment: index,
+            plan: Box::new(plan),
+            optional: call.optional,
+            imports: call.imports.clone(),
+            labelled: false,
+        })
     }
 
     /// Plans segment `index` of `clauses` (module docs): its components best start first, its
     /// conjuncts, the leftovers at the end. `current` is the current element when it starts.
-    /// `body`: the segment is a subquery body (its conjuncts over bound bindings only run at
-    /// its start, its first component when no import starts it is a child-leading scan).
+    /// `kind`: the first segment of a top-level pipeline (its first component is the root scan,
+    /// its conjuncts over no binding run after it, as in stage 1a), a body ([`SegmentKind`]: its
+    /// conjuncts over bound bindings only run at its start, its first component when no import
+    /// starts it is a child-leading scan or, in a `CALL` body, a correlated lookup), or a later
+    /// one.
     fn segment(
         &mut self,
         index: usize,
         clauses: &[usize],
         current: Option<BindingId>,
         anchor: Option<BindingId>,
-        body: bool,
+        kind: SegmentKind,
     ) -> Vec<Op> {
         let bound = self.bound;
+        let body = matches!(kind, SegmentKind::Body | SegmentKind::QueryBody);
         self.pending = bound
             .cross
             .iter()
             .copied()
             .filter(|&c| bound.conjuncts.get(c).is_some_and(|cj| cj.segment == index))
             .collect();
-        let first = index == 0 && !body;
+        let first = kind == SegmentKind::First;
         if !first {
             self.place_filters();
         }
@@ -502,8 +614,11 @@ impl<'q> Planner<'q> {
             // Every component but the root scan may start with a correlated lookup (module
             // docs); a body's first component is a child-leading scan.
             let root = (first || body) && k == 0;
-            let lookup = (how == Start::Scan && !root)
-                .then(|| self.lookup(&nodes))
+            // The first component of a `CALL` body or a whole-query body runs per incoming
+            // row: a lookup serves it when its value reads that row (module docs).
+            let correlated = root && kind == SegmentKind::QueryBody;
+            let lookup = (how == Start::Scan && (!root || correlated))
+                .then(|| self.lookup(&nodes, correlated))
                 .flatten();
             match lookup {
                 Some(lookup) => {
@@ -526,7 +641,9 @@ impl<'q> Planner<'q> {
 
     /// The correlated lookup of a component of `nodes` (module docs), `None` when no id or
     /// index serves an equality of its nodes against the bindings bound so far.
-    fn lookup(&self, nodes: &[BindingId]) -> Option<Lookup> {
+    /// `correlated`: only an equality whose other side reads a binding (a constant one is
+    /// served by the scan's pushdown and index).
+    fn lookup(&self, nodes: &[BindingId], correlated: bool) -> Option<Lookup> {
         let bound = self.bound;
         type Rank = (u8, (u8, u64, BindingId), usize);
         let mut best: Option<(Rank, BindingId, LookupBy, &super::ast::Expr)> = None;
@@ -543,7 +660,8 @@ impl<'q> Planner<'q> {
                     && conjunct
                         .bindings
                         .iter()
-                        .all(|&b| b == node || self.is_bound(b));
+                        .all(|&b| b == node || self.is_bound(b))
+                    && (!correlated || conjunct.bindings.iter().any(|&b| b != node));
                 if !ready {
                     continue;
                 }
@@ -1060,20 +1178,72 @@ impl<'q> Planner<'q> {
     /// The labelling reasons that depend on where a read runs (module docs, "Labelling"): a
     /// pass over the plan in execution order, which also finds the host of every subquery and
     /// plans the bodies (module docs, "Subqueries").
-    fn mark_positions(&mut self, first: &[Op], stages: &mut [Stage]) {
+    fn mark_positions(&mut self, body: &mut CompositePlan) {
         let bound = self.bound;
         let mut at = Position::default();
-        let mut reads = Vec::new();
         let mut hosts = Vec::new();
-        let mut current = None;
-        self.pipeline_reads(first, &mut current, &mut at, &mut reads, &mut hosts);
-        for stage in stages.iter() {
+        self.composite_positions(body, &bound.body, None, &mut at, &mut hosts, None);
+        self.plan_subqueries(hosts, &mut at);
+        self.finish_composite(body, &at);
+        let mut subplans = std::mem::take(&mut self.subplans);
+        for query in subplans.iter_mut().filter_map(|p| p.query.as_deref_mut()) {
+            self.finish_composite(query, &at);
+        }
+        self.subplans = subplans;
+    }
+
+    /// The position pass over a composite plan (module docs, "Labelling"): its first block's
+    /// operands start at the position `at` holds and on `current` (the top level: none; a body:
+    /// its host's row), a block after `NEXT` from its rows. `body`: the whole-query subquery
+    /// whose body this is (its imports read away from the current element get
+    /// [`Labelling::subquery`]).
+    fn composite_positions(
+        &mut self,
+        plan: &CompositePlan,
+        composite: &BoundComposite,
+        current: Option<BindingId>,
+        at: &mut Position,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        let entry = (at.optional, at.row);
+        let blocks = std::iter::once(&composite.first).chain(&composite.next);
+        for (k, (block_plan, block)) in plan.blocks().zip(blocks).enumerate() {
+            for (pipeline, linear) in block_plan.operands().zip(block.operands()) {
+                let start = if k == 0 {
+                    (at.optional, at.row) = entry;
+                    current
+                } else {
+                    (at.optional, at.row) = (None, None);
+                    None
+                };
+                self.pipeline_positions(pipeline, linear, start, at, hosts, body);
+            }
+        }
+        (at.optional, at.row) = entry;
+    }
+
+    /// The position pass over one pipeline starting on `current` (see
+    /// [`Self::composite_positions`]).
+    fn pipeline_positions(
+        &mut self,
+        pipeline: &PipelinePlan,
+        linear: &BoundLinear,
+        mut current: Option<BindingId>,
+        at: &mut Position,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        let bound = self.bound;
+        let mut reads = Vec::new();
+        self.pipeline_reads(&pipeline.ops, &mut current, at, &mut reads, hosts, body);
+        for stage in &pipeline.stages {
             match stage {
                 Stage::Match { ops, .. } => {
-                    self.pipeline_reads(ops, &mut current, &mut at, &mut reads, &mut hosts);
+                    self.pipeline_reads(ops, &mut current, at, &mut reads, hosts, body);
                 }
                 Stage::Optional { segment, ops, .. } => {
-                    self.pipeline_reads(ops, &mut current, &mut at, &mut reads, &mut hosts);
+                    self.pipeline_reads(ops, &mut current, at, &mut reads, hosts, body);
                     at.optional = Some(*segment);
                     at.row = None;
                     current = None;
@@ -1082,70 +1252,149 @@ impl<'q> Planner<'q> {
                     if let Some(Segment::With(with)) = bound.segments.get(m.segment) {
                         let here = at.host(current);
                         for column in &with.columns {
+                            self.body_reads_away(body, &column.bindings, current);
                             reads.extend_from_slice(&column.bindings);
-                            self.expr_hosts(&column.expr, here, &mut hosts);
+                            self.expr_hosts(&column.expr, here, hosts);
                         }
                         // `ORDER BY` runs on the new row map, read away from any row.
                         let sorted = at.host(None).away();
                         for key in &with.order_by {
+                            self.body_reads_away(body, &key.bindings, None);
                             reads.extend_from_slice(&key.bindings);
-                            self.expr_hosts(&key.expr, sorted, &mut hosts);
+                            self.expr_hosts(&key.expr, sorted, hosts);
                         }
                     }
-                    self.read_all(&mut reads, &mut at);
+                    self.read_all(&mut reads, at);
                     at.row = Some(m.segment);
                     current = None;
                     for &c in &m.filters {
                         if let Some(cj) = bound.conjuncts.get(c) {
+                            self.body_reads_away(body, &cj.bindings, None);
                             reads.extend_from_slice(&cj.bindings);
                         }
-                        self.conjunct_hosts(c, at.host(None), &mut hosts);
+                        self.conjunct_hosts(c, at.host(None), hosts);
                     }
-                    self.read_all(&mut reads, &mut at);
+                    self.read_all(&mut reads, at);
                 }
                 Stage::For(f) => {
                     // The list is read on the row before the `FOR`.
                     if let Some(Segment::For(bound_for)) = bound.segments.get(f.segment) {
+                        self.body_reads_away(body, &bound_for.bindings, current);
                         reads.extend_from_slice(&bound_for.bindings);
-                        self.expr_hosts(&bound_for.list, at.host(current), &mut hosts);
+                        self.expr_hosts(&bound_for.list, at.host(current), hosts);
                     }
-                    self.read_all(&mut reads, &mut at);
+                    self.read_all(&mut reads, at);
                     at.row = Some(f.segment);
+                    current = None;
+                }
+                Stage::Call(c) => {
+                    // The body runs on the row here; its records are the new rows (of an
+                    // `OPTIONAL CALL` a row may stay the incoming one: no row to read from).
+                    self.call_positions(c, current, at, hosts, body);
+                    at.row = (!c.optional).then_some(c.segment);
+                    current = None;
+                }
+                Stage::Rows(r) => {
+                    at.row = Some(r.segment);
                     current = None;
                 }
             }
         }
         let here = at.host(current);
-        for column in &bound.columns {
+        for column in &linear.columns {
+            self.body_reads_away(body, &column.bindings, current);
             reads.extend_from_slice(&column.bindings);
-            self.expr_hosts(&column.expr, here, &mut hosts);
+            self.expr_hosts(&column.expr, here, hosts);
         }
         let sorted = at.host(None).away();
-        for key in &bound.order_by {
+        for key in &linear.order_by {
+            self.body_reads_away(body, &key.bindings, None);
             reads.extend_from_slice(&key.bindings);
-            self.expr_hosts(&key.expr, sorted, &mut hosts);
+            self.expr_hosts(&key.expr, sorted, hosts);
         }
-        self.read_all(&mut reads, &mut at);
-        self.plan_subqueries(hosts, &mut at);
-        for stage in stages.iter_mut() {
-            match stage {
-                Stage::Materialize(m) => m.labelled = at.rows.contains(&m.segment),
-                Stage::For(f) => f.labelled = at.rows.contains(&f.segment),
-                Stage::Optional {
-                    segment,
-                    witness: Some(w),
-                    ..
-                } if at.witnesses.contains(segment) => {
-                    let w = *w;
-                    self.mark(w, |l| l.optional = true);
-                }
-                Stage::Optional { .. } | Stage::Match { .. } => {}
+        self.read_all(&mut reads, at);
+    }
+
+    /// The position pass over the body of the `CALL` stage `call`, run on `current`. A thin
+    /// frame: it recurses through [`Self::composite_positions`].
+    #[inline(never)]
+    fn call_positions(
+        &mut self,
+        call: &CallStage,
+        current: Option<BindingId>,
+        at: &mut Position,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        if let Some(Segment::Call(bound_call)) = self.bound.segments.get(call.segment) {
+            self.composite_positions(&call.plan, &bound_call.body, current, at, hosts, body);
+        }
+    }
+
+    /// In the whole-query body of subquery `body`: records [`Labelling::subquery`] for every
+    /// import among `ids` that is read while it is not the current element `current`.
+    fn body_reads_away(
+        &mut self,
+        body: Option<usize>,
+        ids: &[BindingId],
+        current: Option<BindingId>,
+    ) {
+        let Some(k) = body else {
+            return;
+        };
+        for &id in ids {
+            if current != Some(id) && self.is_import(k, id) {
+                self.mark(id, |l| l.subquery = true);
             }
         }
     }
 
+    /// Whether `id` is declared outside the body of subquery `k` (an import when the body
+    /// reads it).
+    fn is_import(&self, k: usize, id: BindingId) -> bool {
+        self.bound
+            .binding(id)
+            .is_some_and(|b| b.subquery != Some(k))
+    }
+
+    /// Sets the row labels the position pass found needed (`at.rows`) on every stage of
+    /// `plan`, nested `CALL` bodies included, and labels the witness of every `OPTIONAL MATCH`
+    /// whose group variable is read after it.
+    fn finish_composite(&mut self, plan: &mut CompositePlan, at: &Position) {
+        for pipeline in plan.pipelines_mut() {
+            for stage in &mut pipeline.stages {
+                match stage {
+                    Stage::Materialize(m) => m.labelled = at.rows.contains(&m.segment),
+                    Stage::For(f) => f.labelled = at.rows.contains(&f.segment),
+                    Stage::Rows(r) => r.labelled = at.rows.contains(&r.segment),
+                    Stage::Call(c) => {
+                        c.labelled = at.rows.contains(&c.segment);
+                        self.finish_call(c, at);
+                    }
+                    Stage::Optional {
+                        segment,
+                        witness: Some(w),
+                        ..
+                    } if at.witnesses.contains(segment) => {
+                        let w = *w;
+                        self.mark(w, |l| l.optional = true);
+                    }
+                    Stage::Optional { .. } | Stage::Match { .. } => {}
+                }
+            }
+        }
+    }
+
+    /// [`Self::finish_composite`] of a `CALL` body. A thin frame for the recursion.
+    #[inline(never)]
+    fn finish_call(&mut self, call: &mut CallStage, at: &Position) {
+        self.finish_composite(&mut call.plan, at);
+    }
+
     /// Records the reads of the match pipeline `ops` (starting with `current` as the current
     /// element) and the hosts of the subqueries its conjuncts hold.
+    /// In the whole-query body of subquery `body`, an import a filter reads while it is not
+    /// the current element gets [`Labelling::subquery`] (as in a body of `MATCH` clauses).
     fn pipeline_reads(
         &mut self,
         ops: &[Op],
@@ -1153,9 +1402,38 @@ impl<'q> Planner<'q> {
         at: &mut Position,
         reads: &mut Vec<BindingId>,
         hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
     ) {
+        let bound = self.bound;
         for op in ops {
             self.op_hosts(op, *current, at, hosts);
+            if body.is_some() {
+                match op {
+                    Op::Filter(ids) => {
+                        for &c in ids {
+                            if let Some(cj) = bound.conjuncts.get(c) {
+                                self.body_reads_away(body, &cj.bindings, *current);
+                            }
+                        }
+                    }
+                    Op::Lookup(l) => {
+                        if let Some(cj) = bound.conjuncts.get(l.conjunct) {
+                            let other: Vec<BindingId> = cj
+                                .bindings
+                                .iter()
+                                .copied()
+                                .filter(|&b| b != l.scan.binding)
+                                .collect();
+                            self.body_reads_away(body, &other, *current);
+                        }
+                    }
+                    Op::Scan(_)
+                    | Op::Anchor(_)
+                    | Op::Resume(_)
+                    | Op::Expand(_)
+                    | Op::Join { .. } => {}
+                }
+            }
             self.op_reads(op, at, reads);
             *current = current_after(std::slice::from_ref(op), *current);
         }
@@ -1242,13 +1520,16 @@ impl<'q> Planner<'q> {
                     self.subplans.len().saturating_sub(1)
                 }
             };
-            let ops = self
+            let (ops, query) = self
                 .subplans
                 .get(index)
-                .map(|p| p.ops.clone())
+                .map(|p| (p.ops.clone(), p.query.clone()))
                 .unwrap_or_default();
             let mut nested = Vec::new();
-            self.body_reads(k, &ops, host, at, &mut nested);
+            match query {
+                Some(query) => self.query_body_reads(k, &query, host, at, &mut nested),
+                None => self.body_reads(k, &ops, host, at, &mut nested),
+            }
             queue.extend(nested);
         }
     }
@@ -1261,6 +1542,10 @@ impl<'q> Planner<'q> {
         let Some(sub) = bound.subqueries.get(k) else {
             return;
         };
+        if let Some(query) = &sub.query {
+            self.plan_query_body(k, query, current);
+            return;
+        }
         for b in &bound.bindings {
             if b.segment == sub.segment
                 && let Some(slot) = self.bound_set.get_mut(b.id.0)
@@ -1276,12 +1561,70 @@ impl<'q> Planner<'q> {
         for &import in &sub.imports {
             self.bind(import);
         }
-        let ops = self.segment(sub.segment, &sub.clauses, current, None, true);
+        let ops = self.segment(sub.segment, &sub.clauses, current, None, SegmentKind::Body);
         self.subplans.push(SubqueryPlan {
             subquery: k,
             current,
             ops,
+            query: None,
         });
+    }
+
+    /// Plans the whole-query body `query` of subquery `k` for a host on `current` (stage 2d):
+    /// like a `CALL` body, with its imports bound before it and its locals (every binding of
+    /// its pipelines, nested `CALL` bodies included) not yet.
+    fn plan_query_body(&mut self, k: usize, query: &BoundComposite, current: Option<BindingId>) {
+        let bound = self.bound;
+        let mut segments = Vec::new();
+        body_segments(bound, query, &mut segments);
+        segments.sort_unstable();
+        let inside = |segment: usize| segments.binary_search(&segment).is_ok();
+        for b in &bound.bindings {
+            if inside(b.segment)
+                && let Some(slot) = self.bound_set.get_mut(b.id.0)
+            {
+                *slot = false;
+            }
+        }
+        for (clause, m) in bound.matches.iter().enumerate() {
+            if inside(m.segment)
+                && let Some(walked) = self.walked.get_mut(clause)
+            {
+                walked.clear();
+            }
+        }
+        if let Some(sub) = bound.subqueries.get(k) {
+            for &import in &sub.imports {
+                self.bind(import);
+            }
+        }
+        let plan = self.composite(query, Entry::Body { current });
+        self.subplans.push(SubqueryPlan {
+            subquery: k,
+            current,
+            ops: Vec::new(),
+            query: Some(Box::new(plan)),
+        });
+    }
+
+    /// The position pass over the whole-query body `plan` of subquery `k` run at `host`
+    /// (stage 2d, as [`Self::body_reads`] for a body of `MATCH` clauses); collects the hosts of
+    /// the subqueries nested in it.
+    fn query_body_reads(
+        &mut self,
+        k: usize,
+        plan: &CompositePlan,
+        host: Host,
+        at: &mut Position,
+        nested: &mut Vec<(usize, Host)>,
+    ) {
+        let bound = self.bound;
+        let Some(query) = bound.subqueries.get(k).and_then(|s| s.query.as_deref()) else {
+            return;
+        };
+        at.optional = host.optional;
+        at.row = host.row;
+        self.composite_positions(plan, query, host.current, at, nested, Some(k));
     }
 
     /// Records the reads of subquery `k`'s body `ops` run at `host`: the position reasons as
@@ -1450,6 +1793,64 @@ impl Host {
     fn away(self) -> Host {
         Host { row: None, ..self }
     }
+}
+
+/// Collects the segments of every pipeline of `composite` into `out`, those of nested `CALL`
+/// bodies included (at most `bind::MAX_BODY_DEPTH` levels).
+fn body_segments(bound: &BoundQuery, composite: &BoundComposite, out: &mut Vec<usize>) {
+    for linear in composite.linears() {
+        for &index in &linear.pipeline {
+            out.push(index);
+            if let Some(Segment::Call(call)) = bound.segments.get(index) {
+                body_segments(bound, &call.body, out);
+            }
+        }
+    }
+}
+
+/// Where a composite's first block starts (see [`Planner::composite`]).
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    /// The top level: the start (with the phase 2 anchor, `None` in stage 1a).
+    Top {
+        /// The anchor binding.
+        anchor: Option<BindingId>,
+    },
+    /// A `CALL` body or a whole-query subquery body: the incoming row, on `current`.
+    Body {
+        /// The current element there.
+        current: Option<BindingId>,
+    },
+}
+
+/// How a pipeline starts (see [`Planner::pipeline`]).
+#[derive(Debug, Clone, Copy)]
+struct PipelineStart {
+    /// The kind of its first segment.
+    kind: SegmentKind,
+    /// The current element it starts on.
+    current: Option<BindingId>,
+    /// The phase 2 anchor of its first segment.
+    anchor: Option<BindingId>,
+}
+
+/// The kind of a segment for [`Planner::segment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentKind {
+    /// The first segment of a top-level pipeline: its first component is the root scan, its
+    /// conjuncts over no binding run after it (stage 1a).
+    First,
+    /// The segment of a subquery body of `MATCH` clauses (stage 2b): its conjuncts over bound
+    /// bindings only run first, its first component not starting at an import is a
+    /// child-leading scan.
+    Body,
+    /// The first segment of a pipeline of the first block of a `CALL` body or a whole-query
+    /// subquery body (stage 2d): as [`SegmentKind::Body`], but its first component may also
+    /// start with a correlated lookup (an equality reading a binding, served by the id or an
+    /// index), since the body runs per incoming row.
+    QueryBody,
+    /// Any other segment.
+    Later,
 }
 
 /// The current element after `ops` when it was `current` before (as the lowering tracks it).

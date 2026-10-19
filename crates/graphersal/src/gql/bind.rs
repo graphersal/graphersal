@@ -235,9 +235,9 @@
 //! quantified edge that reads another variable and a comprehension variable read inside a
 //! subquery (a pattern comprehension's body and `|` part included).
 //!
-//! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies ahead of their
-//! planning and lowering; [`refuse_not_yet`] (which the lowering calls between binding and
-//! planning) refuses them with `NotYet`: a `UNION` / `NEXT` composition at its first keyword,
+//! Stage 2d binds and plans composite queries, `CALL` and whole-query subquery bodies ahead of
+//! their lowering; [`refuse_not_yet`] (which the lowering calls between planning and lowering)
+//! refuses them with `NotYet`: a `UNION` / `NEXT` composition at its first keyword,
 //! else the first in text order of a `[OPTIONAL] CALL { }`, `COUNT { }`, `COLLECT { }` and a
 //! whole-query `EXISTS` body.
 //!
@@ -511,7 +511,6 @@ impl BoundBlock {
 
     /// Whether the block removes duplicate records (`UNION` / `UNION DISTINCT`; one kind per
     /// block, design E15); `false` for one operand and for `UNION ALL`.
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered in stage 2d.T4"))]
     pub(crate) fn distinct(&self) -> bool {
         self.unions
             .first()
@@ -551,7 +550,7 @@ impl BoundComposite {
     }
 
     /// Whether it is one linear query (no `UNION` block, no `NEXT` left after desugaring).
-    #[cfg_attr(not(test), allow(dead_code, reason = "planned in stage 2d.T3"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered in stage 2d.T4"))]
     pub(crate) fn is_linear(&self) -> bool {
         self.next.is_empty() && self.first.unions.is_empty()
     }
@@ -967,11 +966,12 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// Refuses (kind `NotYet`, `0A000`) what stage 2d binds but no later stage runs yet (the
-/// planner and the lowering follow in tasks 2d.T3 to 2d.T5c): a `UNION` / `NEXT` composition (at
-/// its first keyword, before anything else), then the first in text order of a
-/// `[OPTIONAL] CALL { }`, a `COUNT { }`, a `COLLECT { }` and a whole-query `EXISTS { }` body.
-/// Called on a bound query before it is planned.
+/// Refuses (kind `NotYet`, `0A000`) what stage 2d binds and plans but does not lower yet (the
+/// lowering follows in tasks 2d.T4 to 2d.T5c): a `UNION` / `NEXT` composition (at its first
+/// keyword, before anything else), then the first in text order of a `[OPTIONAL] CALL { }`, a
+/// `COUNT { }`, a `COLLECT { }` and a whole-query `EXISTS { }` body. Called on a bound query
+/// after it is planned (so every bound query goes through the planner) and before it is
+/// lowered.
 pub(crate) fn refuse_not_yet(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
     not_yet_in(query, bound).map_err(|e| e.into_error(&query.source))
 }
