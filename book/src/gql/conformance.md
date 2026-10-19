@@ -37,6 +37,8 @@ The mandatory core of a GQL read query, by construct.
 | `OPTIONAL MATCH` | supported | also as the first clause |
 | `EXISTS` predicate: `EXISTS { MATCH ... }`, `EXISTS { <pattern> }`, `EXISTS ( ... )` *(provisional: whether the standard makes it core or an optional feature, and its identifier, are still to be checked)* | partial | anywhere an expression stands, nested too; TRUE or FALSE, never `NULL`; the body holds `MATCH` clauses with their `WHERE`, other statements inside it not yet ([EXISTS](subset.md#exists-and-pattern-predicates)); Cypher pattern predicates as [aliases](aliases.md) |
 | Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |
+| record constructor `{k: expr, ...}` and list value constructor `[a, b]` | supported | the `RECORD` keyword form not yet |
+| Cypher map projections `p {.k, .*, x, k: expr}`, list comprehensions `[x IN l WHERE c \| e]`, pattern comprehensions `[(a)-->(b) WHERE c \| e]` | supported | not GQL; accepted as compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#map-projections-and-comprehensions)); a pattern comprehension is a subquery; `all()` / `any()` / `none()` / `single()` / `reduce()` not yet |
 | a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
 | data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
@@ -125,6 +127,8 @@ where it has one):
 | `NULL` in `ORDER BY` | last ascending, first descending |
 | order of values of different types | map, vertex, edge, list, date/time, UUID, string, boolean, number, vector, `NULL` |
 | row order without `ORDER BY` | unspecified |
+| item order of a pattern comprehension | unspecified: the order the matches are found, which depends on the plan |
+| a comprehension variable named like another variable of the query | an error (`42002`), also for a name no longer in scope (stricter than Neo4j) |
 | `DISTINCT`, grouping keys, `DISTINCT` in aggregates | GQL equality: `1` and `1.0` are one value, `NULL`s form one group |
 | aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; provisional) |
 | `min` / `max` over values of different kinds | the `ORDER BY` order, never an error |

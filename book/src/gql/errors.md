@@ -222,14 +222,14 @@ Help: bind `s` in the MATCH clause of the query to use it here, or test it insid
 Help: move the condition to the WHERE of that later MATCH clause inside the subquery. A subquery, ...
 ```
 
-A query holds at most 64 subqueries (`EXISTS` and pattern predicates, nested ones included) and
-runs at most 1024 subquery bodies, where a `LET` or `WITH` variable holding a subquery counts once
+A query holds at most 64 subqueries (`EXISTS`, pattern predicates and pattern comprehensions,
+nested ones included) and runs at most 1024 subquery bodies, where a `LET` or `WITH` variable holding a subquery counts once
 for every place that reads it. Either limit is `54001` before the run, and its help names both
 bounds:
 
 ```text
-Error: GQL limit exceeded at line 1, column 1553: the query holds more than 64 subqueries (EXISTS and pattern predicates) ...
-Help: join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several MATCH clauses and patterns), or add the patterns to the MATCH clause of the query. The query is larger than gql() accepts: one query holds at most 64 subqueries (EXISTS and pattern predicates, nested ones included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, as in g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN p.name").
+Error: GQL limit exceeded at line 1, column 1553: the query holds more than 64 subqueries (EXISTS and pattern predicates), pattern comprehensions included ...
+Help: join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several MATCH clauses and patterns), or add the patterns to the MATCH clause of the query; a pattern comprehension is a subquery too: collect the matches of several patterns with OPTIONAL MATCH and collect_list() instead. The query is larger than gql() accepts: one query holds at most 64 subqueries (EXISTS, pattern predicates and pattern comprehensions, nested ones included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, as in g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN p.name").
 ```
 
 A quantified edge inside a subquery that reaches `repeat.max_loops` or
@@ -257,18 +257,74 @@ Help: count the matches of the pattern with OPTIONAL MATCH and count(), as in MA
 Help: test a property with n.p IS NOT NULL, here p.age IS NOT NULL; EXISTS tests a graph pattern, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
 ```
 
+### Map projections and comprehensions
+
+A pattern comprehension is a subquery, so its errors follow the rules above with their own help
+text: the variables it binds stay inside it (read them in its `|` part), and its `|` part holds
+no aggregate (aggregate the list, `size([..])`, or use `OPTIONAL MATCH` and an aggregate). A
+list-comprehension variable must be a new name, and its `WHERE` and `|` parts hold no aggregate
+either. Each help names the form that works:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f.name] AS l ORDER BY f.name")   // error: `f` is bound inside a pattern comprehension
+g.gql("MATCH (p:person) RETURN [(p)-->(f) | count(f)] AS l")   // error: count() cannot be used inside the | part of a pattern comprehension
+g.gql("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l")   // error: the comprehension variable `p` shadows the variable `p` in scope
+g.gql("MATCH (p:person) RETURN [x IN [1, 2] | count(x)] AS l")   // error: count() cannot be used inside the WHERE or | part of a list comprehension
+g.gql("MATCH (p:person) RETURN [x IN [1, 2] WHERE x:A|B | x] AS a")   // error: unexpected `|`
+```
+
+```text
+Help: bind `f` in the MATCH clause of the query to use it here, or read it in the | part of the comprehension, as in [(a)-->(f) | f.name]. A pattern comprehension, [(a)-[:knows]->(f) WHERE <condition> | <expression>], is the list of its | part evaluated for every match of its pattern (the empty list when nothing matches); its pattern reads the variables bound before it, and the variables it binds itself stay inside it. ...
+Help: aggregate the list the comprehension builds, as in MATCH (p) RETURN size([(p)-->(f) | f.age]) AS n, or aggregate in a WITH after an OPTIONAL MATCH, as in MATCH (p) OPTIONAL MATCH (p)-->(f) RETURN p, count(f.age) AS n. ...
+Help: give the comprehension its own variable, as in [p2 IN list WHERE p2 > 0 | p2]. ...
+Help: aggregate in a WITH first and use its column in the comprehension, as in MATCH (p)-->(f) WITH p, count(f.age) AS n RETURN [x IN [1, 2, 3] WHERE x < n]. ...
+Help: a `|` in a comprehension ends its list or its WHERE condition; write a label alternative there in parentheses, as in [x IN l WHERE x:(A|B) | x.name]. ...
+```
+
+A map projection of a value that is not an element or a map, and a list comprehension over a
+value that is not a list, are data errors (`22G03`) of the row. A list-comprehension variable
+read inside an `EXISTS` or a pattern comprehension of its own `WHERE` or `|` part is not
+supported yet (`0A000`); nor are Cypher's `all()`, `any()`, `none()`, `single()` and `reduce()`,
+whose help shows the list-comprehension forms that work today:
+
+```rhai,graph=modern
+g.gql("WITH 1 AS m RETURN m {.a} AS x")   // error: a map projection reads a node, an edge or a map, not a number
+g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
+g.gql("MATCH (p:person) RETURN all(x IN [1, 2] WHERE x > 0) AS a")   // error: all() is not yet supported
+```
+
+```text
+Help: test `x` outside the subquery, as in [x IN list WHERE x > 0 AND EXISTS { MATCH (n)-->() }]. ...
+Help: ... a list comprehension counts the items a condition keeps (an item whose condition is NULL is not kept): all(x IN l WHERE c) as size([x IN l WHERE c]) = size(l), any(x IN l WHERE c) as size([x IN l WHERE c]) > 0, none(x IN l WHERE c) as size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1, as in g.gql("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive"), and a pattern comprehension tests the matches of a pattern, as in g.gql("MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 RETURN p.name") for any(); reduce() folds a list: aggregate its items with FOR, as in g.gql("FOR x IN [1, 2, 3] RETURN sum(x) AS s"). ...
+```
+
+A resource limit reached inside a pattern comprehension names it. A quantified edge in its
+pattern loops until the row's last match is found (unlike `EXISTS`, which stops at its first),
+and its list is checked against `traversal.max_materialized_bytes` and the memory budget before
+it is built, like `collect_list()`:
+
+```rhai,graph=modern
+g.with("repeat.max_loops", 1).gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows|created]->{1,}(x) | x.name] AS r")   // error: repeat() exceeded the loop limit of 1 iterations
+g.with("traversal.max_materialized_bytes", 100).gql("MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS r")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
+```
+
+```text
+Help: The loop of the quantified edge -[:knows|created]->{1,} inside a pattern comprehension [(a)-->(b) | ..] of the gql() query ran 1 iterations, the limit of repeat.max_loops. ... A pattern comprehension collects every match of its pattern for each row, so its loop runs until the row's last match is found. Give the quantifier an upper bound, as in -[:knows|created]->{1,5}, ...
+Help: ... A function whose result can be larger than its arguments (range(), split(), replace(), || and toString() of a list or map) and the list of collect_list() are checked before they are built, as is the list of a pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out of memory; the result is never cut short. ... count the values instead of collecting them, ... or, for the matches of a pattern, g.gql("MATCH (p:person) OPTIONAL MATCH (p)-->(f) RETURN p.name, count(f) AS n"), ...
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`); also `gql()` after other steps |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`; `all()`, `any()`, `none()`, `single()`, `reduce()`; a list-comprehension variable read inside a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
-| `54001` | limit | more than 64 subqueries (`EXISTS` and pattern predicates, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader) |
+| `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates and pattern comprehensions, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |
+| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |
 | `22012` | data | division or `%` by zero, also `mod(a, 0)` |
 | `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |

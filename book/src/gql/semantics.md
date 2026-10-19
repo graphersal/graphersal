@@ -158,6 +158,73 @@ work does. The global optimizer rule `filter_reorder` may still move a subquery'
 `gql:filter` by its own cost estimate, as it does for the same Gremlin steps
 ([Plans and Performance](plans.md#exists-and-pattern-predicates)).
 
+## Map projections and comprehensions
+
+**A `NULL` variable projects to `NULL`.** A map projection `v {..}` of a `NULL` variable (an
+`OPTIONAL MATCH` that did not match) is `NULL`, and its entries are not evaluated at all, while
+the GQL record constructor `{name: v.name}` builds a map whose values are `NULL`. A pattern
+comprehension that imports a `NULL` variable matches nothing and gives `[]`, never `NULL`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s {name: 'ripple'}) RETURN p.name AS name, s {.name} AS projection, {name: s.name} AS record, [(s)<-[:created]-(c) | c.name] AS creators ORDER BY name").to_list()
+// josh: projection #{"name": "ripple"}, record #{"name": "ripple"}, creators ["josh"]
+// marko, peter, vadas: projection (), record #{"name": ()}, creators []
+g.gql("MATCH (p:person {name: 'vadas'}) OPTIONAL MATCH (p)-[:created]->(s) RETURN s {k: 1 / 0} AS m").to_list()   // #{"m": ()}: the entry never runs
+```
+
+**Keys.** The entries come in the written order. `.*` puts every stored property at its place,
+in stored order, without the id and the labels; a property stored as `null` is left out, as in
+`properties()`. A key written twice (also through `.*`) keeps its first place and takes the
+later value. The variable of a projection must be a vertex, an edge or a map; any other value is
+the data error `22G03`. An element inside the map (`friend: f`) stays the live element
+([Result Shape](result_shape.md#nested-maps-and-lists)).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.name, age: 1, .age} AS m").to_json()   // [{"m": {"name": "marko", "age": 29}}]
+g.gql("WITH {a: 1, b: 2} AS m RETURN m {.a, .c, .*, d: 3} AS x").to_json()   // [{"x": {"a": 1, "c": null, "b": 2, "d": 3}}]
+g.gql("WITH 1 AS m RETURN m {.a} AS x")   // error: a map projection reads a node, an edge or a map, not a number (22G03)
+```
+
+**List comprehension.** A `NULL` list gives `NULL`, a value that is not a list the data error
+`22G03`. `WHERE` keeps an item only when the condition is TRUE: FALSE and `NULL` drop it
+([three-valued logic](#null-and-three-valued-logic)). The result keeps the list's order.
+
+```rhai,graph=modern
+g.gql("RETURN [x IN [1, NULL, 3] WHERE x > 1] AS kept, [x IN [1, NULL, 3] | x] AS every, [x IN NULL | x] AS none").to_list()
+// #{"every": [1, (), 3], "kept": [3], "none": ()}
+g.gql("RETURN [x IN 5 | x] AS m")   // error: a list comprehension iterates over a list, not a number (22G03)
+```
+
+**A comprehension variable is a new name.** It may not shadow a variable in scope, and `gql()`
+also refuses a name the query uses for another variable anywhere else: one a `WITH` dropped or
+renamed, one bound inside a subquery, one a later `LET` defines. This is stricter than Neo4j:
+`MATCH (n) WITH n AS m RETURN [n IN [1] | n]` runs there and is an error here; pick another name
+(`[x IN [1] | x]`). The variable exists only inside its brackets.
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) WITH n AS m RETURN [n IN [1] | n] AS l")   // error: the comprehension variable `n` is a name this query already uses
+g.gql("MATCH (n:person) WITH n AS m RETURN [x IN [1] | x] AS l ORDER BY l LIMIT 1").to_list()   // #{"l": [1]}
+```
+
+**Pattern comprehension: one item per match, in no defined order.** The list holds one item per
+match of the pattern, so the same value may come several times (josh created two programs in
+java). Like any subquery it runs on the row's imports, with the trail rule inside its own pattern
+([EXISTS](#exists-and-pattern-predicates)); its items come in the order the matches are found,
+which depends on the plan. When the order matters, match the pattern in the query, sort the
+rows and collect them with `collect_list()`, or sort the list after `gql()`.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'josh'}) RETURN [(p)-[:created]->(s) | s.lang] AS langs").to_list()   // #{"langs": ["java", "java"]}
+g.gql("MATCH (a {name: 'marko'}) RETURN [(a)-[:knows]->(x)<-[:knows]-(a) | x.name] AS one").to_list()   // #{"one": []}: one pattern, one edge twice
+```
+
+**Evaluated when reached, once per row.** A pattern comprehension runs its pattern only for the
+rows whose evaluation reaches it, at most once per row, like `EXISTS`; one that imports nothing
+still runs per row. Comprehensions nested from the same element multiply the work:
+`[(m)-->(a) | [(m)-->(b) | ..]]` runs the inner pattern once for every match of the outer one,
+like nested Gremlin `map(..fold())` children, and only the resource limits bound a deep chain of
+them ([Resource limits](../users_guide/resource_limits.md)).
+
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,

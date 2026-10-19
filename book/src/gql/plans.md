@@ -38,11 +38,14 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:not_self_loop()` | keeps a self-loop from matching twice in an either-direction edge |
 | `gql:for("x IN <list>")` | `FOR` / `UNWIND`: one row per item of the list (`unfold()` with GQL's `NULL` rule); with an ordinal the row is the record of item and position |
 | `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`) |
+| `gql:value("<expression>")` | the last step of a pattern comprehension's child: the value of its `\|` part for one match, which the host step collects into the list |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
-`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate` and `gql:for` may hold the bodies of
-the `EXISTS` subqueries their expressions contain as child traversals, shown as `\>` lines under
-the step ([EXISTS and pattern predicates](#exists-and-pattern-predicates)).
+`gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
+the bodies of the `EXISTS` subqueries and pattern comprehensions their expressions contain as
+child traversals, shown as `\>` lines under the step
+([EXISTS and pattern predicates](#exists-and-pattern-predicates),
+[comprehensions](#map-projections-and-comprehensions)).
 They exist only in plans of `gql()`; they are not DSL steps. Everything else in a GQL plan is an
 ordinary step.
 
@@ -513,6 +516,52 @@ The global optimizer rule `filter_reorder` may still move a fast-path child befo
 `gql:filter` by its cost estimate (`WHERE NOT (p)-->() AND p.name <> 'x'` runs `not(__.out())`
 before `gql:filter("p.name <> 'x'")`), as it would in a Gremlin plan; the rows are the same.
 
+## Map projections and comprehensions
+
+A map projection and a list comprehension add no step: the `gql:*` step that evaluates the
+expression builds the map or the list from the row's values, with no allocation per item beyond
+the result.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p {.name, .age} AS m, [x IN [p.age, 30] WHERE x > 28] AS l").profile()
+```
+
+```text
+v(labels: ["person"])                                           1       0       4
+gql:project("m", "l")                                           1       4       4
+```
+
+A pattern comprehension is a subquery that collects: like an `EXISTS` in an expression, its body
+is a child of the step evaluating it, and the child ends in `gql:value(..)`, the value of the
+`|` part per match. The host runs it once per row that reaches it and builds the list from the
+child's results (here 4 rows ran `out("knows")`, which found 2 friends), the plan of its
+Gremlin twin `project(..).by(__.out("knows").values("name").fold())`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, [(p)-[:knows]->(f) | f.name] AS friends").profile()
+g.gql("MATCH (p:person) RETURN p {.name, projects: [(p)-[:created]->(s) | s {.name, n: size([(s)<-[:created]-(c) | c])}]} AS m").profile()
+```
+
+```text
+v(labels: ["person"])                                                     1       0       4
+gql:project("name", "friends")                                            1       4       4
+  \> out("knows")                                                         4       4       2
+  \> gql:value("f.name")                                                  4       2       2
+
+v(labels: ["person"])                                                     1       0       4
+gql:project("m")                                                          1       4       4
+  \> out("created")                                                       4       4       4
+  \> gql:value("s {.name, n: size([(s)<-[:created]-(c) | c])}")           4       4       4
+        \> in("created")                                                  4       4      10
+        \> gql:value("c")                                                 4      10      10
+```
+
+A comprehension nested in the `|` part is a child of the inner `gql:value`, so it runs once per
+match of the outer pattern: nested comprehensions from the same element multiply the work, as
+nested Gremlin `fold()` children do ([Semantics](semantics.md#map-projections-and-comprehensions)).
+The collected list is checked against the limits before it is built
+([Limits](#limits-cancellation-permissions)).
+
 ## Limits, cancellation, permissions
 
 A GQL query is a traversal, so everything that bounds a traversal bounds it too:
@@ -520,9 +569,12 @@ A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
 which sees the reads of the lowered plan: reading a denied label through `gql()` is refused as
 the equivalent Gremlin is (also a label reached only through a quantified edge or an optional
-part, or only inside an `EXISTS` body, whichever way it is lowered: a subquery's child is
+part, or only inside an `EXISTS` body or a pattern comprehension, whichever way it is lowered: a subquery's child is
 checked like a Gremlin child, even when no row reaches it). An unbounded quantifier is bounded
 by `repeat.max_loops` and `traversal.max_traversers` ([Semantics](semantics.md#quantified-edges)),
-also inside a subquery. The parser bounds nesting (128 levels, `54001`) so no query can exhaust
-the stack, and a query holds at most 64 subqueries and runs at most 1024 subquery bodies
+also inside a subquery. The list of a pattern comprehension expands the bulk of its child's
+results under `bulk.max_expansion` and is checked against `traversal.max_materialized_bytes` and
+the memory budget before it is built, like `collect_list()`. The parser bounds nesting (128
+levels, `54001`) so no query can exhaust the stack, and a query holds at most 64 subqueries
+(pattern comprehensions included) and runs at most 1024 subquery bodies
 ([Errors](errors.md#subqueries)).

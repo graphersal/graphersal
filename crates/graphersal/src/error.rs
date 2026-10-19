@@ -6777,9 +6777,9 @@ fn gql_help(
         // A size limit (an operator chain, a pattern) brings its own fix as the alternative.
         GqlErrorKind::Limit if topic == GqlHelpTopic::Subquery => help.push_str(&format!(
             "The query is larger than gql() accepts: one query holds at most {} subqueries \
-             (EXISTS and pattern predicates, nested ones included) and runs at most {} \
-             subquery bodies, where a LET or WITH variable holding a subquery counts once for \
-             every place that reads it. One EXISTS may hold several MATCH clauses and patterns, \
+             (EXISTS, pattern predicates and pattern comprehensions, nested ones included) \
+             and runs at most {} subquery bodies, where a LET or WITH variable holding a \
+             subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, \
              as in g.gql(\"MATCH (p:person) WHERE EXISTS {{ MATCH (p)-[:knows]->(f) MATCH \
              (f)-[:created]->(s) }} RETURN p.name\").",
             crate::gql::bind::MAX_SUBQUERIES,

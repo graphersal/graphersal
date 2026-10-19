@@ -4,8 +4,9 @@
 unambiguous and mean exactly the same: an alias is translated to its GQL form while the query is
 parsed, so both spellings give the same plan and the same rows. An alias never has a meaning of
 its own. This table lists every accepted alias; Cypher functions without any GQL counterpart are
-the [compatibility functions](#compatibility-functions) below; any other Cypher spelling is either
-not supported yet or [refused](refused.md).
+the [compatibility functions](#compatibility-functions) below, and Cypher's map projections and
+comprehensions the [compatibility forms](#map-projections-and-comprehensions); any other Cypher
+spelling is either not supported yet or [refused](refused.md).
 
 | Cypher spelling | GQL form | Notes |
 |---|---|---|
@@ -135,6 +136,34 @@ g.gql("MATCH (a)-[e:knows]-(b) WHERE startNode(e) = a RETURN a.name AS a, b.name
 g.gql("MATCH (a)-[e:knows]-(b) WHERE a IS SOURCE OF e RETURN a.name AS a, b.name AS b ORDER BY b").to_list()   // #{"a": "marko", "b": "josh"}, #{"a": "marko", "b": "vadas"}
 ```
 
+## Map projections and comprehensions
+
+Three Cypher expression forms have no GQL counterpart with the same meaning, so they are not
+aliases either. `gql()` accepts them as **compatibility forms**, like the compatibility
+functions: with their openCypher / Neo4j Cypher 25 meaning, because they are how Cypher users and
+LLMs ask for nested, JSON-shaped answers ([The Supported Subset](subset.md#map-projections-and-comprehensions)).
+
+| Cypher form | GQL nearest form | Difference |
+|---|---|---|
+| map projection `p {.name, .age, .*, f, k: expr}` | the record constructor `{name: p.name, age: p.age, f: f, k: expr}` | for a `NULL` `p` the projection is `NULL`, the record `{name: NULL, ...}`; `.*` has no record form (`properties(p)` is the map of all properties) |
+| list comprehension `[x IN list WHERE cond \| expr]` | none; `FOR x IN list FILTER cond RETURN collect_list(expr)` gives one list per query, not per row | |
+| pattern comprehension `[(p)-[:R]->(f) WHERE cond \| expr]` | none; `OPTIONAL MATCH (p)-[:R]->(f) WHERE cond` + `collect_list(expr)` groups the rows instead | the comprehension keeps the row and gives `[]` when nothing matches |
+
+The projection and the record give the same map whenever the variable is not `NULL`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p {.name, .age} AS m ORDER BY p.name LIMIT 1").to_list()   // #{"m": #{"age": 32, "name": "josh"}}
+g.gql("MATCH (p:person) RETURN {name: p.name, age: p.age} AS m ORDER BY p.name LIMIT 1").to_list()   // #{"m": #{"age": 32, "name": "josh"}}
+g.gql("MATCH (p:person) RETURN p.name AS name, [(p)-[:created]->(s) | s.name] AS sw ORDER BY name").to_list()
+// josh [ripple, lop] (in any order), marko [lop], peter [lop], vadas []
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, collect_list(s.name) AS sw ORDER BY name").to_list()
+// josh [ripple, lop], marko [lop], peter [lop], vadas []
+```
+
+Cypher's list predicates `all()`, `any()`, `none()`, `single()` and `reduce()` are not
+supported yet; their help shows the list-comprehension form (`size([x IN l WHERE c]) = size(l)`
+for `all`).
+
 ## Cypher spellings that are not aliases
 
 | Cypher | In `gql()` |
@@ -143,7 +172,8 @@ g.gql("MATCH (a)-[e:knows]-(b) WHERE a IS SOURCE OF e RETURN a.name AS a, b.name
 | `nodes(p)`, `relationships(p)` | supported as [compatibility functions](#compatibility-functions), not aliases: GQL has no such functions |
 | `x ^ y` | not supported yet; use GQL's `power(x, y)` |
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
-| list comprehensions, `any()` / `all()` / `none()` / `single()`, `reduce()` | not supported yet; `FOR x IN list FILTER ...` walks a list item by item |
+| map projections, list and pattern comprehensions | supported as [compatibility forms](#map-projections-and-comprehensions), not aliases |
+| `any()` / `all()` / `none()` / `single()`, `reduce()` | not supported yet; count with a list comprehension, `size([x IN l WHERE c]) > 0`, or aggregate with `FOR` |
 | `COUNT { pattern }` | not supported yet; `OPTIONAL MATCH` and `count()` count the matches, `EXISTS` tests for one |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |

@@ -8880,8 +8880,8 @@ mod gql {
     #[test]
     fn gql_subquery_limits_name_both_bounds() {
         let advice = "The query is larger than gql() accepts: one query holds at most 64 \
-             subqueries (EXISTS and pattern predicates, nested ones included) and runs at most \
-             1024 subquery bodies, where a LET or WITH variable holding a subquery counts once \
+             subqueries (EXISTS, pattern predicates and pattern comprehensions, nested ones \
+             included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once \
              for every place that reads it. One EXISTS may hold several MATCH clauses and \
              patterns, as in g.gql(\"MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) \
              MATCH (f)-[:created]->(s) } RETURN p.name\").";

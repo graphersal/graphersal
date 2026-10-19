@@ -651,7 +651,8 @@ pub(crate) const MAX_MATCH_EDGES: usize = 64;
 /// low enough that binding stays fast.
 pub(crate) const MAX_SUBSTITUTED_NODES: usize = 100_000;
 
-/// The most subqueries (`EXISTS`, pattern predicates) one query may hold, nested ones included
+/// The most subqueries (`EXISTS`, pattern predicates, pattern comprehensions) one query may hold,
+/// nested ones included
 /// (module docs, "Limits"). Each is planned and run as a child traversal of its own; 64 lie far
 /// beyond any written query and keep preparing a query fast.
 pub(crate) const MAX_SUBQUERIES: usize = 64;

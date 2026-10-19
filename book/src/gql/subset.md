@@ -275,7 +275,8 @@ g.gql("MATCH (p:person WHERE NOT (p)-[:created]->())-[:knows]-(f) RETURN p.name 
 The body holds `MATCH` clauses with their `WHERE` (and nested `EXISTS`); `OPTIONAL MATCH`,
 `WITH`, `LET`, `FILTER`, `FOR`, `RETURN`, `ORDER BY` and `LIMIT` inside a body are not supported
 yet, nor is `COUNT { }` ([Not supported yet](#not-supported-yet)). A query holds at most 64
-subqueries ([Errors](errors.md#subqueries)).
+subqueries, [pattern comprehensions](#map-projections-and-comprehensions) included
+([Errors](errors.md#subqueries)).
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->(q) AS k")   // error: the pattern predicate introduces the new variable `q`
@@ -516,6 +517,9 @@ order of `NULL` and of values of different types.
 | conditional | simple `CASE x WHEN v THEN r ... ELSE d END` and searched `CASE WHEN cond THEN r ... END` |
 | conversion | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` ([Conversions](#conversions)) |
 | function calls | `name(args)` ([Functions](#functions)) |
+| map projection | `p {.name, .*, f, key: expr}` (Cypher, [below](#map-projections-and-comprehensions)) |
+| list comprehension | `[x IN list WHERE cond \| expr]`, either part optional (Cypher) |
+| pattern comprehension | `[(p)-[:knows]->(f) WHERE cond \| expr]` (Cypher) |
 
 Precedence, loosest first: `OR`, `XOR`, `AND`, `NOT`, comparison, the predicates (`IS NULL`,
 `IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, unary minus, property access.
@@ -537,6 +541,100 @@ g.gql("MATCH (n:person) RETURN {name: n.name, tags: [n.age, NULL, true]} AS m OR
 Integer arithmetic stays integer (`/` truncates toward zero, `%` takes the sign of the
 dividend); a float operand makes the result a float. An overflow or a division by zero is an
 error, never a wrapped or infinite value ([Errors](errors.md#errors-while-the-query-runs)).
+
+## Map projections and comprehensions
+
+Three Cypher forms build maps and lists inside an expression. They are not GQL; `gql()` accepts
+them with their Neo4j meaning because Cypher users and LLMs write them all the time
+([Cypher Aliases](aliases.md#map-projections-and-comprehensions)). Together they give a
+JSON-shaped answer: one row per entity, its related data nested inside.
+
+```text
+v {.key, .*, x, key: expr}                    -- map projection of a vertex, an edge or a map
+[x IN list]  [x IN list WHERE cond]  [x IN list | expr]  [x IN list WHERE cond | expr]
+[(a)-[:R]->(b) WHERE cond | expr]             -- pattern comprehension, also [p = (a)-->(b) | p]
+```
+
+**Map projection.** `v {...}` builds a map from the variable `v`: `.key` is its property (`NULL`
+when missing, the key kept), `.*` every stored property (no id, no labels), `x` the entry `x: x`,
+and `key: expr` any value, all in the written order. Its Gremlin twins are `project()` and
+`value_map().by(unfold())`; the GQL form is the record constructor `{name: p.name}`, which
+differs only for a `NULL` variable ([Semantics](semantics.md#map-projections-and-comprehensions)):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p {.name, .age, decade: p.age / 10} AS m ORDER BY p.name LIMIT 2").to_list()
+// #{"m": #{"age": 32, "decade": 3, "name": "josh"}}, #{"m": #{"age": 29, "decade": 2, "name": "marko"}}
+g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.*} AS m").to_list()   // #{"m": #{"age": 29, "name": "marko"}}
+g.v().has("name", "marko").value_map().by(__.unfold()).to_list()   // #{"age": 29, "name": "marko"}
+g.gql("MATCH (p:person {name: 'marko'})-[e:knows]->(f) RETURN e {.*, to: f.name} AS k ORDER BY k.to").to_list()
+// #{"k": #{"to": "josh", "weight": 1.0}}, #{"k": #{"to": "vadas", "weight": 0.5}}
+```
+
+**List comprehension.** `[x IN list WHERE cond | expr]` walks the list in its order, keeps the
+items for which `cond` is TRUE and maps each kept item to `expr`; leave out `WHERE` to keep every
+item, `| expr` to keep the item itself. `x` is a new name that exists only inside the brackets.
+The Gremlin twin is `local(__.unfold().is(..).fold())`:
+
+```rhai,graph=modern
+g.gql("RETURN [x IN range(1, 5) WHERE x % 2 = 1] AS odd, [x IN range(1, 3) | x * x] AS sq, [x IN [1, 2] | [y IN [10, 20] | x * y]] AS grid").to_list()
+// #{"grid": [[10, 20], [20, 40]], "odd": [1, 3, 5], "sq": [1, 4, 9]}
+g.inject([1, 2, 3, 4, 5]).local(__.unfold().is(P.gt(2)).fold()).to_list()   // [3, 4, 5]
+g.gql("MATCH p = (a {name: 'marko'})-[:knows|created]->{2}(b) RETURN [x IN nodes(p) | x.name] AS names ORDER BY b.name").to_list()
+// #{"names": ["marko", "josh", "lop"]}, #{"names": ["marko", "josh", "ripple"]}
+g.gql("MATCH (p:person) RETURN p.name AS name, [x IN [p.age, p.age + 10] WHERE x > 30] AS l ORDER BY name LIMIT 2").to_list()
+// #{"l": [32, 42], "name": "josh"}, #{"l": [39], "name": "marko"}
+```
+
+A `|` inside the list or the `WHERE` part ends that part, so a label alternative there needs
+parentheses: `[x IN l WHERE x:(A|B) | x.name]`.
+
+**Pattern comprehension.** `[(a)-[:R]->(b) WHERE cond | expr]` is the list of `expr` for every
+match of the pattern on the row: `[]` when nothing matches, never `NULL`. The pattern has at
+least one edge; it reads the variables bound before it (they are imported, like in
+[`EXISTS`](#exists-and-pattern-predicates)), and the names it binds itself (`b` here, or a path
+variable `p = ...`) exist only inside the brackets. It is a subquery: the Gremlin twin is
+`project(..).by(__.out("knows").values("name").fold())`, and the items come in no defined order.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) RETURN [(p)-[:knows]->(f) | f.name] AS friends").to_list()   // #{"friends": ["josh", "vadas"]}, in any order
+g.v().has("name", "marko").project("friends").by(__.out("knows").values("name").fold()).to_list()   // #{"friends": ["josh", "vadas"]}
+g.gql("MATCH (s:software {name: 'ripple'}) RETURN [(s)<-[:created]-(p) WHERE p.age > 30 | p.name] AS older").to_list()   // #{"older": ["josh"]}
+g.gql("MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) >= 2 RETURN p.name AS name").to_list()   // #{"name": "josh"}
+g.gql("MATCH (p:person {name: 'marko'}) RETURN [q = (p)-[:knows]->() | path_length(q)] AS l").to_list()   // #{"l": [1, 1]}
+```
+
+Together, one row per person with its friends and projects nested inside, the shape a JSON API
+or an LLM wants ([Result Shape](result_shape.md#nested-maps-and-lists)):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name], projects: [(p)-[:created]->(s) | s {.name, .lang}]} AS person ORDER BY person.name").to_json()
+// [{"person": {"name": "josh", "friends": [], "projects": [{"name": "ripple", "lang": "java"}, ...]}}, ...]
+```
+
+All three stand anywhere an expression does (`WHERE`, `RETURN`, `WITH`, `LET`, `FILTER`, `FOR`,
+`ORDER BY`, an aggregate's argument) and nest in each other. Their rules:
+
+- A comprehension variable must be a **new name**: one that is in scope, or that the query uses
+  anywhere else, is an error ([Semantics](semantics.md#map-projections-and-comprehensions)).
+- No aggregate inside the `WHERE` or `|` part (aggregate in a `WITH` first, or aggregate the list:
+  `size([..])`).
+- A list-comprehension variable cannot be read inside an `EXISTS` or a pattern comprehension in
+  its `WHERE` or `|` part yet ([Not supported yet](#not-supported-yet)).
+- A pattern comprehension counts as a subquery: a query holds at most 64 subqueries
+  ([Errors](errors.md#subqueries)).
+- `all()`, `any()`, `none()`, `single()` and `reduce()` are not supported yet; a list
+  comprehension counts the items a condition keeps: `size([x IN l WHERE c]) = size(l)` for
+  `all`, `> 0` for `any`, `= 0` for `none`, `= 1` for `single` (an item whose condition is `NULL`
+  is not kept, so these differ from Neo4j's three-valued answers only when a condition is
+  `NULL`).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l")   // error: the comprehension variable `p` shadows the variable `p` in scope
+g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | count(f)] AS l")   // error: count() cannot be used inside the | part of a pattern comprehension
+g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f.name] AS l ORDER BY f.name")   // error: `f` is bound inside a pattern comprehension
+g.gql("MATCH (p:person) RETURN all(x IN [1, 2] WHERE x > 0) AS a")   // error: all() is not yet supported
+g.gql("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive").to_list()   // #{"all_positive": true}
+```
 
 ## Functions
 
@@ -739,11 +837,13 @@ g.gql("MATCH p = (a {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN b.name AS
 g.gql("MATCH (n:person {name: 'marko'}) RETURN range(0, 9223372036854775807) AS r")   // error: Resource limit 'traversal.max_materialized_bytes' exceeded
 ```
 
-List comprehensions (`[x IN nodes(p) | x.name]`) are not supported yet; take the items with
-`head()`, `last()` and `size()`, walk the list with [`FOR`](#for-and-unwind) and collect again,
-or unfold the list with Gremlin after `gql()`.
+A [list comprehension](#map-projections-and-comprehensions) maps or filters the items of a
+list (`[x IN nodes(p) | x.name]`); [`FOR`](#for-and-unwind) walks a list as rows and
+`collect_list()` collects them again:
 
 ```rhai,graph=modern
+g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) RETURN b.name AS b, [x IN nodes(p) | x.name] AS names ORDER BY b").to_list()
+// #{"b": "josh", "names": ["marko", "josh"]}, #{"b": "vadas", "names": ["marko", "vadas"]}
 g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) FOR x IN nodes(p) RETURN b.name AS b, collect_list(x.name) AS names ORDER BY b").to_list()
 // #{"b": "josh", "names": ["marko", "josh"]}, #{"b": "vadas", "names": ["marko", "vadas"]}
 ```
@@ -784,7 +884,8 @@ construct and the alternative.
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
-| list comprehensions `[x IN list \| ...]`, `any()` / `all()` / `none()` / `single()`, `reduce()` | `head()`, `last()`, `size()`, `FOR x IN list` with `FILTER` and `collect_list()`, or Gremlin `unfold()` after `gql()` |
+| `any()` / `all()` / `none()` / `single()`, `reduce()` | a list comprehension counted with `size()` (`size([x IN l WHERE c]) = size(l)` for `all`, `> 0` for `any`), `FOR x IN list` with an aggregate for `reduce()` |
+| a list-comprehension variable read inside an `EXISTS` or a pattern comprehension of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
@@ -796,8 +897,10 @@ construct and the alternative.
 ```rhai,graph=modern
 g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path patterns are not yet supported
 g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
-g.gql("MATCH p = (a)-[:knows]->(b) RETURN [x IN nodes(p) | x.name] AS names")   // error: a list comprehension is not yet supported
-g.gql("MATCH p = (a)-[:knows]->(b) RETURN nodes(p) AS n ORDER BY b.name").select("n").unfold().values("name").to_list()   // "marko", "josh", "marko", "vadas"
+g.gql("MATCH (p:person) RETURN reduce(s = 0, x IN [1, 2] | s + x) AS a")   // error: reduce() is not yet supported
+g.gql("FOR x IN [1, 2] RETURN sum(x) AS a").to_list()   // #{"a": 3}
+g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-[:created]->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
+g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN [x IN [p] | x.name] AS l ORDER BY l").to_list()   // #{"l": ["josh"]}, #{"l": ["marko"]}, #{"l": ["peter"]}
 g.gql("MATCH (n:person) RETURN sin(n.age) AS s")   // error: sin() (a trigonometric function) is not yet supported
 g.gql("MATCH (n:person) RETURN n.name AS name, n.age AS a ORDER BY name").select("a").math("sin(_)").to_list()   // 0.5514266812416906, -0.6636338842129675, -0.428182669496151, 0.956375928404503
 ```

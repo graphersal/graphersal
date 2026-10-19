@@ -596,7 +596,7 @@ RETURN columns in the order written (bounded like query's: at most max_rows rows
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
 the graph. No Rhai escaping is needed: pass the GQL text as it is.
 
-Supported (stages 1a, 1b, 1c, 2a and 2b): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b and 2c): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -611,7 +611,14 @@ and Cypher pattern predicates (a pattern where a condition stands, naming only v
 before it), TRUE or FALSE (never NULL), anywhere an expression stands, each row kept once (a \
 semi-join, unlike a MATCH of the same pattern), e.g. who has no project: MATCH (p:person) WHERE \
 NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name, or MATCH (p:person) \
-WHERE NOT (p)-[:created]->() ...; aggregates count(x), count(*), sum, avg, min, max, collect_list \
+WHERE NOT (p)-[:created]->() ...; map projections p {.name, .age, .*, f, total: expr} \
+(Cypher; NULL for a NULL p, while the GQL record {name: p.name} gives {name: NULL}), list \
+comprehensions [x IN list WHERE x > 1 | x * 2] (WHERE and | each optional) and pattern \
+comprehensions [(p)-[:knows]->(f) WHERE f.age > 30 | f.name] (per row the list of the \
+pattern's matches, [] when none, in no defined order), anywhere an expression stands and \
+nested: use them for JSON-shaped answers, one row per entity with its related data inside, e.g. \
+MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]} AS person ORDER BY \
+person.name; aggregates count(x), count(*), sum, avg, min, max, collect_list \
 (Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
 optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
 Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
@@ -631,8 +638,9 @@ String literals use single quotes. A missing property is NULL. Edges in one matc
 (trail semantics), also inside quantified edges. Vertices and edges in a row come back as {id, \
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
-quantified path patterns ((a)-->(b)){1,3}, list comprehensions [x IN list | \
-...], COUNT { } subqueries (use OPTIONAL MATCH and count()), UNION, SHORTEST, \
+quantified path patterns ((a)-->(b)){1,3}, all(), any(), none(), single() and reduce() \
+(write size([x IN list WHERE cond]) = size(list) for all, > 0 for any, = 0 for none), COUNT { } \
+subqueries (use OPTIONAL MATCH and count()), UNION, SHORTEST, \
 non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
 with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
@@ -2182,7 +2190,7 @@ mod tests {
         assert!(INSTRUCTIONS.contains("`gql`"));
     }
 
-    /// The gql tool's description lists the stage 1b, 1c, 2a and 2b subset as supported and
+    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b and 2c subset as supported and
     /// still names what is refused; it stays a read-only tool.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
@@ -2223,12 +2231,18 @@ mod tests {
             "pattern predicates",
             "never NULL",
             "NOT EXISTS { (p)-[:created]->() }",
+            "map projections p {.name",
+            "list comprehensions [x IN list WHERE",
+            "pattern comprehensions [(p)-[:knows]->(f)",
+            "JSON-shaped answers",
+            "RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]}",
         ] {
             assert!(supported.contains(named), "{named}");
         }
         for named in [
             "((a)-->(b)){1,3}",
-            "list comprehensions",
+            "all(), any(), none(), single() and reduce()",
+            "size([x IN list WHERE cond]) = size(list)",
             "randomUUID",
             "INSERT",
             "COUNT { }",
@@ -2236,7 +2250,13 @@ mod tests {
         ] {
             assert!(refused.contains(named), "{named}");
         }
-        for gone in ["without MATCH", "UNWIND", "EXISTS"] {
+        for gone in [
+            "without MATCH",
+            "UNWIND",
+            "EXISTS",
+            "comprehension",
+            "projection",
+        ] {
             assert!(!refused.contains(gone), "{gone}");
         }
         assert!(GQL_DESCRIPTION.contains("never changes"));

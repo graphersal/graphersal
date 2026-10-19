@@ -42,7 +42,9 @@ This version supports GQL read queries: `MATCH` and `OPTIONAL MATCH`, `WHERE`, `
 Cypher's `WITH`, `RETURN` with aggregation (`count`, `sum`, `avg`, `min`, `max`, `collect_list`),
 `ORDER BY`, `OFFSET`, `LIMIT`, `FOR` (Cypher `UNWIND`) with a direct lookup per item where an
 id or index serves it, queries that start without `MATCH` (`RETURN 1 + 2 AS x`), `EXISTS`
-subqueries and Cypher pattern predicates (`WHERE NOT (p)-[:created]->()`), node and edge
+subqueries and Cypher pattern predicates (`WHERE NOT (p)-[:created]->()`), Cypher map projections
+and list and pattern comprehensions for nested, JSON-shaped answers
+(`p {.name, friends: [(p)-[:knows]->(f) | f.name]}`), node and edge
 patterns, quantified edges (`-[:knows]->{1,3}`), path variables, label expressions,
 expressions, parameters, the GQL scalar functions and the common openCypher ones (`toInteger`,
 `substring`, `split`, `round`, `keys`, `nodes(p)`, ...) ([The Supported Subset](subset.md)).

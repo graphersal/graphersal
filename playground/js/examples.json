@@ -236,6 +236,30 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "Map projection p {.name, .age, key: expr}: one map per person",
+    "script": "// A map projection builds a map from an element: .key reads a property, key: expr computes one, .* takes all.\ng.gql(\"MATCH (p:person) RETURN p {.name, .age, decade: p.age / 10} AS person ORDER BY person.name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Pattern comprehension: a JSON-shaped answer with nested lists",
+    "script": "// [(p)-[:knows]->(f) | f.name] is the list of the pattern's matches per row ([] when none, items in no defined order).\ng.gql(`\n  MATCH (p:person)\n  RETURN p {.name,\n            friends: [(p)-[:knows]->(f) | f.name],\n            projects: [(p)-[:created]->(s) | s {.name, .lang}]} AS person\n  ORDER BY person.name\n`).to_json()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "List comprehension [x IN list WHERE .. | ..]: the names along a path",
+    "script": "// WHERE keeps the items it is TRUE for, | maps each kept item; both parts are optional.\ng.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows|created]->{1,2}(b)\n  RETURN b.name AS reached,\n         [x IN nodes(p) | x.name] AS names,\n         [x IN nodes(p) WHERE x:software | x.name] AS programs\n  ORDER BY size(names), reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "size() of a pattern comprehension: people with two or more projects",
+    "script": "// size([pattern | x]) counts the matches per row; EXISTS is enough when only one match matters.\ng.gql(\"MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) >= 2 RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Quantified edges {1,2}: reachable in one or two hops",
     "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
   },
