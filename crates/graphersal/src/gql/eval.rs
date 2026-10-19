@@ -100,23 +100,17 @@ pub(crate) mod status {
     /// function not implemented yet.
     pub(crate) const NOT_SUPPORTED: &str = "0A000";
     /// Data exception: invalid character value for cast (`CAST('x' AS INTEGER)`).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const INVALID_CAST: &str = "22018";
     /// Data exception: substring error (a negative position or length).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const SUBSTRING: &str = "22011";
     /// Data exception: trim error (a trim character that is not exactly one character).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const TRIM: &str = "22027";
     /// Data exception: invalid argument for natural logarithm (`ln(0)`, `log10(-1)`).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const LOGARITHM: &str = "2201E";
     /// Data exception: invalid argument for power function (`sqrt(-1)`, `power(0, -1)`).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const POWER: &str = "2201F";
     /// Data exception: invalid parameter value (`range` step 0, a `round` mode or negative
     /// precision, a negative `replace` limit or list `trim` count).
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) const INVALID_PARAMETER: &str = "22023";
     /// Program limit exceeded: [`Env::reserve`](super::Env::reserve) refused a result's size
     /// (the step reports the row's own limit error instead, see `runtime::Row`).
@@ -316,13 +310,11 @@ impl<E> Value<E> {
     }
 
     /// A float value.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) fn float(value: f64) -> Self {
         Value::Scalar(ElementProperty::Number(Number::from_f64(value)))
     }
 
     /// A boolean value.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) fn boolean(value: bool) -> Self {
         Value::Scalar(ElementProperty::Boolean(value))
     }
@@ -379,13 +371,11 @@ pub(crate) trait Env {
     /// The element's stored properties in stored order, as stored (a stored `null` included:
     /// callers skip it; compressed values as stored: [`Value::from_property`] reads them).
     /// Default: none.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     fn properties(&self, element: &Self::Element) -> Vec<(CompactString, ElementProperty)> {
         let _ = element;
         Vec::new()
     }
     /// The stored `(source, target)` vertices of an edge; `None` for a vertex. Default: `None`.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     fn endpoints(&self, edge: &Self::Element) -> Option<(Self::Element, Self::Element)> {
         let _ = edge;
         None

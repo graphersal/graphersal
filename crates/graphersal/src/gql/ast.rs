@@ -493,7 +493,7 @@ pub(crate) enum CastTarget {
 
 impl CastTarget {
     /// The canonical GQL type name.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn name(self) -> &'static str {
         match self {
             CastTarget::Integer => "INTEGER",

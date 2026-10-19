@@ -60,7 +60,6 @@ pub(crate) struct Arg<E> {
 
 impl<E> Arg<E> {
     /// Whether the value is `NULL`.
-    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
     pub(crate) fn is_null(&self) -> bool {
         self.value.is_null()
     }
@@ -285,13 +284,11 @@ pub(crate) fn function_not_implemented(function: Function, span: Span) -> EvalEr
 }
 
 /// Whether any argument is `NULL` (design F2).
-#[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
 pub(crate) fn any_null<E>(args: &[Arg<E>]) -> bool {
     args.iter().any(Arg::is_null)
 }
 
 /// The 22G03 error "`name()` takes `what`, not <kind of `arg`>", at the argument.
-#[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
 pub(crate) fn wrong_kind<E>(function: Function, what: &str, arg: &Arg<E>) -> EvalError {
     EvalError::invalid_type(
         format!(
@@ -304,7 +301,6 @@ pub(crate) fn wrong_kind<E>(function: Function, what: &str, arg: &Arg<E>) -> Eva
 }
 
 /// The argument as text, else 22G03 naming `what` (`"a string"`, ...).
-#[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
 pub(crate) fn string_arg<'a, E>(
     function: Function,
     arg: &'a Arg<E>,
@@ -316,7 +312,6 @@ pub(crate) fn string_arg<'a, E>(
 }
 
 /// The argument as a number, else 22G03 naming `what`.
-#[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
 pub(crate) fn number_arg<'a, E>(
     function: Function,
     arg: &'a Arg<E>,
@@ -329,7 +324,6 @@ pub(crate) fn number_arg<'a, E>(
 }
 
 /// The argument as an integer (a float is 22G03 too, design F3), else 22G03 naming `what`.
-#[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
 pub(crate) fn integer_arg<E>(
     function: Function,
     arg: &Arg<E>,
