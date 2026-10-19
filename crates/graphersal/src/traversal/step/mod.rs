@@ -274,7 +274,9 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     }
 
     /// The step labels whose every occurrence this step reads; see
-    /// [`GraphStepFilter::history_labels`]. Only internal GQL steps report any.
+    /// [`GraphStepFilter::history_labels`]. Only internal GQL steps report any, so it exists only
+    /// with the `gql` feature.
+    #[cfg(feature = "gql")]
     pub(crate) fn history_labels(&self) -> &[compact_str::CompactString] {
         match self {
             GraphStep::Map(_, step) => step.history_labels(),
@@ -1355,7 +1357,9 @@ pub(crate) trait GraphStepMap<'g, S: GraphStorage + 'g>: Send + Sync + fmt::Disp
     /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
     /// quantified edge for its trail check or its group variable), besides the latest one a
     /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
-    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default;
+    /// only with the `gql` feature (no other step declares any).
+    #[cfg(feature = "gql")]
     fn history_labels(&self) -> &[compact_str::CompactString] {
         &[]
     }
@@ -1553,7 +1557,9 @@ pub(crate) trait GraphStepFlatMap<'g, S: GraphStorage + 'g>:
     /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
     /// quantified edge for its trail check or its group variable), besides the latest one a
     /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
-    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default;
+    /// only with the `gql` feature (no other step declares any).
+    #[cfg(feature = "gql")]
     fn history_labels(&self) -> &[compact_str::CompactString] {
         &[]
     }
@@ -1735,7 +1741,9 @@ pub(crate) trait GraphStepFlatBarrier<'g, S: GraphStorage + 'g>:
     /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
     /// quantified edge for its trail check or its group variable), besides the latest one a
     /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
-    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default;
+    /// only with the `gql` feature (no other step declares any).
+    #[cfg(feature = "gql")]
     fn history_labels(&self) -> &[compact_str::CompactString] {
         &[]
     }
@@ -1882,7 +1890,9 @@ pub(crate) trait GraphStepFilter<'g, S: GraphStorage + 'g>:
     /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
     /// quantified edge for its trail check or its group variable), besides the latest one a
     /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
-    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default;
+    /// only with the `gql` feature (no other step declares any).
+    #[cfg(feature = "gql")]
     fn history_labels(&self) -> &[compact_str::CompactString] {
         &[]
     }

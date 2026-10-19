@@ -24,6 +24,10 @@ use crate::error::{TraverserError, TraverserResult, ValueError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
 
+/// Above this many (required label, produced label) pairs the undeclared-label check builds a
+/// hash set instead of scanning `produced` once per required label.
+const SCAN_LIMIT: usize = 64;
+
 /// Step "kind names" (the `&'static str` every `GraphStep` variant carries) that can turn any
 /// incoming value into a map/object shape a later `select()` might legitimately read a key from
 /// (a `valueMap()`/`elementMap()`/`project()`/`group()`/... result, an `inject()`-ed map, a
@@ -371,13 +375,23 @@ impl PathAnalysis {
             // cannot rule out; never report a plausible case as a static error.
             return Ok(());
         }
-        let produced = self.produced.borrow();
         let required = self.required.borrow();
-        // A set: a scan of `produced` per required label is quadratic in the labels.
-        let produced: std::collections::HashSet<&str> =
-            produced.iter().map(CompactString::as_str).collect();
+        if required.is_empty() {
+            // The common case (no `select()` at all): nothing to check, no set to build.
+            return Ok(());
+        }
+        let produced = self.produced.borrow();
+        // A set only when the lists are large: a scan of `produced` per required label is
+        // quadratic in the labels, while building a hash set costs more than a short scan.
+        let set: Option<std::collections::HashSet<&str>> = (required.len() * produced.len()
+            > SCAN_LIMIT)
+            .then(|| produced.iter().map(CompactString::as_str).collect());
+        let is_produced = |label: &str| match &set {
+            Some(set) => set.contains(label),
+            None => produced.iter().any(|p| p.as_str() == label),
+        };
         for (label, _step_name) in required.iter() {
-            if !produced.contains(label.as_str()) {
+            if !is_produced(label.as_str()) {
                 return Err(Box::new(TraverserError::Value(
                     ValueError::UndeclaredLabel {
                         label: label.to_string(),
@@ -388,9 +402,28 @@ impl PathAnalysis {
         Ok(())
     }
 
+    /// Records the history labels `step` declares (`history_labels()`); see `history`.
+    #[cfg(feature = "gql")]
+    fn note_history<'g, S: GraphStorage + 'g>(&self, step: &GraphStep<'g, S>) {
+        let history = step.history_labels();
+        if history.is_empty() {
+            return;
+        }
+        let mut known = self.history.borrow_mut();
+        for label in history {
+            if !known.contains(label) {
+                known.push(label.clone());
+            }
+        }
+    }
+
     /// `need` upstream of an `as()` producing `labels`: without them, except the history labels
     /// (read in every occurrence, so an earlier occurrence is still needed).
     fn retract_produced(&self, need: PathRequirement, labels: &[CompactString]) -> PathRequirement {
+        // No history label can exist without the `gql` feature: a plain retraction.
+        if !cfg!(feature = "gql") {
+            return need.retract(labels);
+        }
         let history = self.history.borrow();
         if history.is_empty() || !labels.iter().any(|label| history.contains(label)) {
             return need.retract(labels);
@@ -513,15 +546,10 @@ impl PathAnalysis {
             if MAP_PRODUCING_KINDS.contains(&step.kind_name()) {
                 self.map_producing_seen.set(true);
             }
-            let history = step.history_labels();
-            if !history.is_empty() {
-                let mut known = self.history.borrow_mut();
-                for label in history {
-                    if !known.contains(label) {
-                        known.push(label.clone());
-                    }
-                }
-            }
+            // Only internal GQL steps declare history labels: without the feature this is
+            // compiled out, so a Gremlin plan pays nothing for it.
+            #[cfg(feature = "gql")]
+            self.note_history(step);
 
             if self.force_full {
                 modes[index] = PathMode::Full;
