@@ -40,6 +40,9 @@
 //! | a later `MATCH` continuing from a `WITH` column | `gql:bind("a")` (moves to the element the column holds; `NULL` or not an element: no row); a join, edge join or trail check against a column is `gql:filter` comparing the current element with the column |
 //! | `OPTIONAL MATCH` | `optional(__.<part>)`, the part's own `WHERE` inside; a row it does not match continues unchanged and its variables read `NULL` (absent labels); after it every read goes through a label (no `Binding::Current`) |
 //! | a leading `OPTIONAL MATCH` | `inject(0).optional(__.v()...)`: one unit row (decision C13) |
+//! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
+//! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
+//! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
 //!
@@ -66,8 +69,8 @@
 //! # Not yet
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
-//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Quantified edges and path variables are
-//! refused before planning (`bind::refuse_unplanned`).
+//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Path variables are refused before
+//! planning (`bind::refuse_unplanned`).
 //!
 //! # Aggregation
 //!
@@ -81,7 +84,7 @@ use std::sync::Arc;
 
 use super::aggregate::{AggregateCall, Aggregating, compile_aggregating};
 use super::ast::{
-    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
+    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, Quantifier,
     SortDirection,
 };
 use super::bind::{
@@ -116,7 +119,9 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// (mandatory; `RETURN *` returns every named variable), `ORDER BY`, `OFFSET` (Cypher `SKIP`)
     /// and `LIMIT`, and the aggregates `count`, `sum`, `avg`, `min`, `max` and `collect_list`
     /// (Cypher `collect`) in `RETURN` and `WITH`, grouped by the items without an aggregate
-    /// (NULL skipped except by `count(*)`). Use [`Self::gql_with`] for a query with
+    /// (NULL skipped except by `count(*)`), and quantified edges (`-[e:knows]->{1,3}`, `*`, `+`,
+    /// Cypher `[e:knows*1..3]`) with trail semantics (no edge twice in one match; the edge
+    /// variable is the list of the edges). Use [`Self::gql_with`] for a query with
     /// `$parameters`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
@@ -248,6 +253,9 @@ struct Site {
     current: Option<BindingId>,
     /// The segment of the materializing `WITH` whose row is the current object.
     row: Option<usize>,
+    /// The `OPTIONAL MATCH` segment whose part the step runs in: a group variable of that part
+    /// reads its list there without the part's anchor (the part matched so far).
+    part: Option<usize>,
 }
 
 impl Site {
@@ -256,6 +264,7 @@ impl Site {
         Site {
             current: Some(id),
             row: None,
+            part: None,
         }
     }
 
@@ -264,6 +273,7 @@ impl Site {
         Site {
             current: None,
             row: Some(segment),
+            part: None,
         }
     }
 }
@@ -329,6 +339,14 @@ enum Instr<S: GraphStorage> {
     Same(BindingId),
     /// `where(P.neq(label))`: the current edge differs from an earlier edge (trail).
     Differs(BindingId),
+    /// `gql:trail(labels)`: the current edge differs from every occurrence of these bindings'
+    /// labels (trail against a group variable, or the trail check in the body of a quantified
+    /// edge, its own label included; plan mechanism 5).
+    Trail(Vec<BindingId>),
+    /// `as("#o<k>")` at the end of the part of `OPTIONAL MATCH` segment `k` that binds no new
+    /// node: the anchor that tells a part not matched (its group variables `NULL`) from a
+    /// zero-length match (`[]`); emitted only when a group variable of the part is read.
+    PartLabel(usize),
     /// A merge point (`lazy_barrier()`) right after a hop whose next hop walks `direction`
     /// over `labels` (the step the merge point judges its fan-out with).
     Merge {
@@ -352,6 +370,9 @@ struct Hop<S: GraphStorage> {
     /// The steps on the edge traverser: label factors, pushed `has()`, join and trail checks,
     /// `gql:filter`s, the edge's `as()` placeholder.
     steps: Vec<Instr<S>>,
+    /// The quantifier of a quantified edge: the hop is the body of a `repeat()` (see
+    /// [`Lowered::quantified`]).
+    quantifier: Option<Quantifier>,
 }
 
 /// The lowered query, ready to be emitted onto a source.
@@ -368,6 +389,25 @@ struct Lowered<S: GraphStorage> {
     row_labels: Vec<CompactString>,
     /// Whether the row of each segment gets `as("#w<k>")`.
     rows_labelled: Vec<bool>,
+    /// Per binding: the `OPTIONAL MATCH` part and the anchor of a group variable (`None`: not a
+    /// group variable).
+    groups: Vec<Option<GroupRead>>,
+    /// The part label of each `OPTIONAL MATCH` segment that needs one (`#o<k>`, see
+    /// [`Instr::PartLabel`]); empty for the others.
+    part_labels: Vec<CompactString>,
+}
+
+/// How a group variable is read outside its element pattern (`Binding::Group`).
+#[derive(Debug, Clone)]
+struct GroupRead {
+    /// The segment that binds it.
+    segment: usize,
+    /// The label the path holds whenever its `OPTIONAL MATCH` part matched (the part's witness
+    /// node or its part label); `None` outside an `OPTIONAL MATCH`.
+    anchor: Option<CompactString>,
+    /// Walked from the node written after the edge ([`Expand::reversed`]): the list is the
+    /// reverse of path order.
+    reversed: bool,
 }
 
 impl<S: GraphStorage> Lowered<S> {
@@ -375,6 +415,18 @@ impl<S: GraphStorage> Lowered<S> {
     fn binding(&self, slot: usize, site: Site) -> Binding {
         if site.current == Some(BindingId(slot)) {
             return Binding::Current;
+        }
+        if let Some(Some(group)) = self.groups.get(slot) {
+            return Binding::Group {
+                label: self.labels.get(slot).cloned().unwrap_or_default(),
+                // Inside its own part the part matched so far: no anchor to check.
+                anchor: if site.part == Some(group.segment) {
+                    None
+                } else {
+                    group.anchor.clone()
+                },
+                reversed: group.reversed,
+            };
         }
         match self.columns.get(slot).copied().flatten() {
             Some(column) if site.row == Some(column.segment) => Binding::Column(column.column),
@@ -471,7 +523,10 @@ impl<S: GraphStorage> Lowered<S> {
                 }
                 Instr::Skip(n) => g.skip(n),
                 Instr::Limit(n) => g.limit(n),
-                Instr::Hop(hop) => self.hop(g, hop),
+                Instr::Hop(hop) => match hop.quantifier {
+                    Some(quantifier) => self.quantified(g, hop, quantifier),
+                    None => self.hop(g, hop),
+                },
                 Instr::Select(id) => g.select(self.label(id)),
                 Instr::Bind {
                     id,
@@ -481,6 +536,11 @@ impl<S: GraphStorage> Lowered<S> {
                 } => g.gql_bind(name, self.binding(id.0, site), kind),
                 Instr::Same(id) => g.where_p(P::Eq(PValue::String(self.label(id)))),
                 Instr::Differs(id) => g.where_p(P::Neq(PValue::String(self.label(id)))),
+                Instr::Trail(ids) => g.gql_trail(ids.iter().map(|&id| self.label(id)).collect()),
+                Instr::PartLabel(segment) => match self.part_labels.get(segment) {
+                    Some(label) if !label.is_empty() => g.as_(label.clone()),
+                    _ => g,
+                },
                 Instr::Merge { direction, labels } => {
                     let walk = AnonymousTraversal::<'g, S>::new();
                     let mut walk = match direction {
@@ -573,6 +633,43 @@ impl<S: GraphStorage> Lowered<S> {
         }
     }
 
+    /// Emits a quantified edge (plan mechanism 5): the single hop is the body of a `repeat()`
+    /// whose modulators give the bounds. `{m,n}`: `repeat(B).emit(__.loops().is(P.gte(m)))
+    /// .times(n)` (`emit()` for `m = 1`); `{n}`: `repeat(B).times(n)`; `{0,n}`:
+    /// `emit().repeat(B).times(n)` (the zero-length match first); no upper bound: no `times()`,
+    /// the loop ends when trail leaves no unused edge, or fails with `repeat.max_loops` (D14:
+    /// an error, never a cut result). An upper bound beyond `u32::MAX` is no bound (the loop
+    /// counter is a `u32`); `{0}` emits no step at all (see [`Lowering::ops`]).
+    fn quantified<'g, T: Sink<'g, S>>(&self, g: T, hop: Hop<S>, quantifier: Quantifier) -> T
+    where
+        S: 'g,
+    {
+        let body = self.hop(AnonymousTraversal::<'g, S>::new(), hop);
+        let max = quantifier.max.and_then(|n| u32::try_from(n).ok());
+        let at_least = || {
+            let min = i64::try_from(quantifier.min).unwrap_or(i64::MAX);
+            AnonymousTraversal::<'g, S>::new()
+                .loops()
+                .is(P::Gte(PValue::Number(Number::from_i64(min))))
+        };
+        let walk = AnonymousTraversal::<'g, S>::new();
+        let walk = match (quantifier.min, max) {
+            (0, Some(0)) => return g,
+            (0, Some(n)) => walk.emit().repeat(body).times(n),
+            (0, None) => walk.emit().repeat(body),
+            (m, Some(n)) if u64::from(n) == m => walk.repeat(body).times(n),
+            (1, Some(n)) => walk.repeat(body).emit().times(n),
+            (1, None) => walk.repeat(body).emit(),
+            (_, Some(n)) => walk.repeat(body).emit_with(at_least()).times(n),
+            (_, None) => walk.repeat(body).emit_with(at_least()),
+        };
+        let mut g = g;
+        for step in walk.steps {
+            g = g.push_step(step);
+        }
+        g
+    }
+
     /// Emits one step on the edge traverser of a hop.
     fn edge_step<'g>(
         &self,
@@ -594,7 +691,9 @@ impl<S: GraphStorage> Lowered<S> {
             Instr::Label(id) if self.is_labelled(id) => t.as_(self.label(id)),
             Instr::Same(id) => t.where_p(P::Eq(PValue::String(self.label(id)))),
             Instr::Differs(id) => t.where_p(P::Neq(PValue::String(self.label(id)))),
+            Instr::Trail(ids) => t.gql_trail(ids.iter().map(|&id| self.label(id)).collect()),
             Instr::Label(_)
+            | Instr::PartLabel(_)
             | Instr::Scan
             | Instr::Unit
             | Instr::RowLabel(_)
@@ -643,6 +742,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn select(self, label: CompactString) -> Self;
     fn gql_bind(self, name: CompactString, binding: Binding, kind: ElementKind) -> Self;
     fn where_p(self, predicate: P<PValue>) -> Self;
+    fn gql_trail(self, labels: Vec<CompactString>) -> Self;
     fn out(self, labels: ArgStrings) -> Self;
     fn in_(self, labels: ArgStrings) -> Self;
     fn out_e(self, labels: ArgStrings) -> Self;
@@ -724,6 +824,9 @@ macro_rules! sink {
             }
             fn where_p(self, predicate: P<PValue>) -> Self {
                 self.where_p(predicate)
+            }
+            fn gql_trail(self, labels: Vec<CompactString>) -> Self {
+                self.gql_trail(labels)
             }
             fn out(self, labels: ArgStrings) -> Self {
                 self.out(labels)
@@ -883,9 +986,11 @@ impl<'q> Lowering<'q> {
         for stage in &self.plan.stages {
             site = match stage {
                 Stage::Match { ops, .. } => self.ops(ops, site, &mut instrs)?,
-                Stage::Optional { ops, .. } => {
+                Stage::Optional { ops, segment, .. } => {
                     let mut part = Vec::new();
                     self.ops(ops, site, &mut part)?;
+                    part.push(Instr::PartLabel(*segment));
+                    in_part(&mut part, *segment);
                     instrs.push(Instr::Optional(part));
                     // The current object differs per row (matched or not): every later read
                     // goes through a label.
@@ -905,7 +1010,8 @@ impl<'q> Lowering<'q> {
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
-        let (labelled, rows_labelled) = self.labelled(&instrs, &columns);
+        let (mut labelled, rows_labelled) = self.labelled(&instrs, &columns);
+        let (groups, part_labels) = self.groups(&labels, &mut labelled);
         Ok(Lowered {
             query: self.shared,
             instrs,
@@ -914,6 +1020,8 @@ impl<'q> Lowering<'q> {
             columns,
             row_labels,
             rows_labelled,
+            groups,
+            part_labels,
         })
     }
 
@@ -946,8 +1054,17 @@ impl<'q> Lowering<'q> {
                     if !expand.from_current {
                         self.move_to(expand.from, site, instrs)?;
                     }
-                    instrs.push(Instr::Hop(self.hop(expand)?));
-                    if let Some(next) = next_hop(ops, at) {
+                    let zero_only = expand.quantifier.is_some_and(|q| q.max == Some(0));
+                    // `{0}` matches only the zero-length path: no step, the far node is the
+                    // node the walk starts from (its filters and label run on it).
+                    if !zero_only {
+                        instrs.push(Instr::Hop(self.hop(expand)?));
+                    }
+                    // After a quantified edge every traverser carries its own edges' labels,
+                    // so a merge point there would never merge.
+                    if let Some(next) = next_hop(ops, at)
+                        && expand.quantifier.is_none()
+                    {
                         instrs.push(Instr::Merge {
                             direction: next.direction,
                             labels: self.edge_labels(next),
@@ -1180,10 +1297,29 @@ impl<'q> Lowering<'q> {
         let id = expand.edge;
         let mut checks = Vec::new();
         if expand.edge_join {
+            if expand.quantifier.is_some() {
+                // The binder refuses a group variable bound again; a guard only.
+                return Err(self.unlowered());
+            }
             checks.push(self.same(id)?);
         }
+        // Trail (plan mechanism 5): a quantified edge checks its own earlier iterations and
+        // every earlier edge of the clause with `gql:trail` (before its own `as()`, so it
+        // compares with the earlier occurrences only); a single edge checks an earlier group
+        // variable with `gql:trail` and an earlier single edge with `where(P.neq(..))`.
+        let mut every = Vec::new();
+        if expand.quantifier.is_some() {
+            every.push(id);
+        }
         for &other in &expand.trail {
-            checks.push(self.differs(other)?);
+            if expand.quantifier.is_some() || self.is_group(other) {
+                every.push(other);
+            } else {
+                checks.push(self.differs(other)?);
+            }
+        }
+        if !every.is_empty() {
+            checks.push(Instr::Trail(every));
         }
         let (labels, mut steps) = if expand.edge_join {
             (None, checks)
@@ -1197,7 +1333,13 @@ impl<'q> Lowering<'q> {
             direction: expand.direction,
             labels,
             steps,
+            quantifier: expand.quantifier,
         })
+    }
+
+    /// Whether `id` is a group variable (the edge of a quantified edge).
+    fn is_group(&self, id: BindingId) -> bool {
+        self.bound.binding(id).is_some_and(|b| b.group)
     }
 
     /// The adjacency labels of an expansion's edge (the first label disjunction factor), as
@@ -1489,6 +1631,88 @@ impl<'q> Lowering<'q> {
         (labelled, rows)
     }
 
+    /// How each group variable is read ([`GroupRead`]) and the part label of each
+    /// `OPTIONAL MATCH` segment that needs one. A group variable of an `OPTIONAL MATCH` part
+    /// that is read anywhere is anchored: on the part's witness node (labelled for it), or,
+    /// when the part binds no new node (`OPTIONAL MATCH (a)-[e]->{0,2}(a)`), on the part label
+    /// `#o<k>` set at the end of the part. Without the anchor a part not matched (`NULL`) and a
+    /// zero-length match (`[]`) would read alike.
+    fn groups(
+        &self,
+        labels: &[CompactString],
+        labelled: &mut [bool],
+    ) -> (Vec<Option<GroupRead>>, Vec<CompactString>) {
+        let mut part_labels = vec![CompactString::default(); self.bound.segments.len()];
+        let mut anchors: Vec<Option<CompactString>> = vec![None; self.bound.segments.len()];
+        for stage in &self.plan.stages {
+            let Stage::Optional {
+                segment, witness, ..
+            } = stage
+            else {
+                continue;
+            };
+            let read = self.bound.bindings.iter().any(|b| {
+                b.group
+                    && b.segment == *segment
+                    && self.plan.labelling.get(b.id.0).is_some_and(|l| l.read)
+            });
+            if !read {
+                continue;
+            }
+            let anchor = match witness {
+                Some(w) => {
+                    if let Some(flag) = labelled.get_mut(w.0) {
+                        *flag = true;
+                    }
+                    labels.get(w.0).cloned()
+                }
+                None => {
+                    let mut label = format!("#o{segment}");
+                    while labels.iter().any(|l| l.as_str() == label) {
+                        label.insert(0, '#');
+                    }
+                    let label = CompactString::from(label);
+                    if let Some(slot) = part_labels.get_mut(*segment) {
+                        *slot = label.clone();
+                    }
+                    Some(label)
+                }
+            };
+            if let Some(slot) = anchors.get_mut(*segment) {
+                *slot = anchor;
+            }
+        }
+        let mut reversed = vec![false; self.bound.bindings.len()];
+        let stage_ops = self.plan.stages.iter().filter_map(|stage| match stage {
+            Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
+            Stage::Materialize(_) => None,
+        });
+        for op in std::iter::once(self.plan.ops.as_slice())
+            .chain(stage_ops)
+            .flatten()
+        {
+            if let Op::Expand(e) = op
+                && e.quantifier.is_some()
+                && let Some(flag) = reversed.get_mut(e.edge.0)
+            {
+                *flag = e.reversed;
+            }
+        }
+        let groups = self
+            .bound
+            .bindings
+            .iter()
+            .map(|b| {
+                b.group.then(|| GroupRead {
+                    segment: b.segment,
+                    anchor: anchors.get(b.segment).cloned().flatten(),
+                    reversed: reversed.get(b.id.0).copied().unwrap_or(false),
+                })
+            })
+            .collect();
+        (groups, part_labels)
+    }
+
     /// The path label of each binding: its key (the variable name, or `#<id>` for a name bound
     /// again after a `WITH` dropped it, decision C14); an anonymous binding `#<id>`
     /// (no plain identifier starts with `#`), with more `#` in front while it collides with a
@@ -1703,6 +1927,40 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             | Instr::Select(_)
             | Instr::Same(_)
             | Instr::Differs(_)
+            | Instr::Trail(_)
+            | Instr::PartLabel(_)
+            | Instr::Merge { .. } => {}
+        }
+    }
+}
+
+/// Marks every site of `instrs` (the part of `OPTIONAL MATCH` segment `segment`) as inside
+/// that part ([`Site::part`]).
+fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
+    for instr in instrs {
+        match instr {
+            Instr::Filter { site, .. }
+            | Instr::Project { site, .. }
+            | Instr::Aggregate { site, .. }
+            | Instr::Bind { site, .. } => site.part = Some(segment),
+            Instr::Hop(hop) => in_part(&mut hop.steps, segment),
+            Instr::Optional(part) => in_part(part, segment),
+            Instr::Scan
+            | Instr::Unit
+            | Instr::HasLabel(_)
+            | Instr::Has(..)
+            | Instr::RowCheck(_)
+            | Instr::Label(_)
+            | Instr::RowLabel(_)
+            | Instr::Distinct
+            | Instr::Order { .. }
+            | Instr::Skip(_)
+            | Instr::Limit(_)
+            | Instr::Select(_)
+            | Instr::Same(_)
+            | Instr::Differs(_)
+            | Instr::Trail(_)
+            | Instr::PartLabel(_)
             | Instr::Merge { .. } => {}
         }
     }

@@ -584,12 +584,7 @@ fn a_match_clause_holds_at_most_max_match_edges_edge_patterns() {
 
 #[test]
 fn stage_1b_constructs_bind_but_are_not_yet_planned() {
-    let cases: &[(&str, &str, &str)] = &[
-        ("MATCH p = (a)-->(b) RETURN a", "p", "path()"),
-        ("MATCH (a)-[:knows]->{1,3}(b) RETURN b", "{1,3}", "repeat("),
-        ("MATCH (a)-->*(b) RETURN b", "*", "repeat("),
-        ("MATCH (a)-[:knows*1..3]->(b) RETURN b", "*1..3", "repeat("),
-    ];
+    let cases: &[(&str, &str, &str)] = &[("MATCH p = (a)-->(b) RETURN a", "p", "path()")];
     for (query, text, alternative) in cases {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
         let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));

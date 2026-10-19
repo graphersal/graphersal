@@ -602,6 +602,7 @@ fn group_and_path_bindings_assemble_in_text_order() {
             Binding::Group {
                 label: "#g".into(),
                 anchor: Some("a".into()),
+                reversed: false,
             },
         ),
         (
@@ -701,6 +702,7 @@ fn reversed_groups_and_missing_anchors() {
             Binding::Group {
                 label: "#g".into(),
                 anchor: Some("missing".into()),
+                reversed: false,
             },
         ),
     ]);
@@ -757,6 +759,7 @@ fn a_group_variable_read_after_the_loop_keeps_every_occurrence() {
         Binding::Group {
             label: "#g".into(),
             anchor: None,
+            reversed: false,
         },
     )]);
     let columns = [GqlColumn {

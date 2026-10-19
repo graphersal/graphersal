@@ -540,7 +540,7 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
 }
 
 /// Refuses the stage 1b constructs that bind but that the planner and the lowering do not
-/// handle yet: path variables and quantified edges (kind
+/// handle yet: path variables (kind
 /// `NotYet`, the messages the parser gave in stage 1a). Called by the lowering
 /// between binding and planning; the arms go away as the later stages land.
 pub(crate) fn refuse_unplanned(query: &Query, _bound: &BoundQuery) -> Result<(), TraverserError> {
@@ -556,18 +556,6 @@ fn unplanned(query: &Query) -> BResult<()> {
                     "a path variable (p = ...)",
                     "return the elements by their variables, or use Gremlin path(), for example \
                      g.v(\"1\").out().out().path()",
-                ));
-            }
-            if let Some(quantifier) = path.steps.iter().find_map(|step| step.edge.quantifier) {
-                let what = if quantifier.cypher {
-                    "a variable-length edge (*, *m..n)"
-                } else {
-                    "a quantified edge ({m,n}, *, +)"
-                };
-                return Err(not_yet(
-                    quantifier.span,
-                    what,
-                    "Gremlin repeat(), for example g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
                 ));
             }
         }

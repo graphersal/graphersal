@@ -1,10 +1,5 @@
 //! `gql:trail(labels)`: the trail check of a GQL quantified edge (feature `gql`, internal).
 
-#![allow(
-    dead_code,
-    reason = "built by the quantified-edge lowering (stage 1b, T8)"
-)]
-
 use std::sync::Arc;
 
 use crate::graph::GraphStorage;

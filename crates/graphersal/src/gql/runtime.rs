@@ -17,7 +17,7 @@
 //! - [`Binding::RowColumn`]: a column of a row map the path labels (`as("#w1")` after a
 //!   materializing `WITH`): the map under the label, then the column, read in place;
 //! - [`Binding::Group`]: the group variable of a quantified edge outside its element pattern:
-//!   the list of every occurrence of its label in path order (an empty list for a zero-length
+//!   the list of every occurrence of its label in text order (an empty list for a zero-length
 //!   match; `NULL` when its anchor label is absent, an `OPTIONAL MATCH` that did not match);
 //! - [`Binding::Path`]: a path variable, assembled in text order from the labels of the
 //!   pattern's elements ([`PathPart`]), never from `path()` (no Full path, design C11).
@@ -140,17 +140,16 @@ pub(crate) enum Binding {
         /// The column.
         column: usize,
     },
-    /// Every object the path labels with `label`, as a list in path order.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
-    )]
+    /// Every object the path labels with `label`, as a list in text order: path order, or its
+    /// reverse when the quantified edge was walked against the text direction.
     Group {
         /// The step label set on each occurrence (the edge of each iteration).
         label: CompactString,
         /// A label the path holds whenever the pattern matched (`None`: always matched); its
         /// absence reads as `NULL`.
         anchor: Option<CompactString>,
+        /// Walked from the node written after the edge: the list is the reverse of path order.
+        reversed: bool,
     },
     /// A path value assembled from these parts in text order.
     #[cfg_attr(
@@ -215,7 +214,7 @@ impl Binding {
         match self {
             Binding::Current | Binding::Column(_) => {}
             Binding::Label(label) | Binding::RowColumn { label, .. } => out.push(label.clone()),
-            Binding::Group { label, anchor } => {
+            Binding::Group { label, anchor, .. } => {
                 out.push(label.clone());
                 out.extend(anchor.iter().cloned());
             }
@@ -382,13 +381,19 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
                 TraverserValue::Record { values, .. } => values.get(*column).map(Cow::Borrowed),
                 _ => None,
             },
-            Binding::Group { label, anchor } => {
+            Binding::Group {
+                label,
+                anchor,
+                reversed,
+            } => {
                 if let Some(anchor) = anchor
                     && self.labelled(anchor).is_none()
                 {
                     return None;
                 }
-                Some(Cow::Owned(TraverserValue::Array(self.occurrences(label))))
+                Some(Cow::Owned(TraverserValue::Array(
+                    self.occurrences_in(label, *reversed),
+                )))
             }
             Binding::Path(parts) => self.path(parts).map(Cow::Owned),
         }
@@ -404,6 +409,11 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
 
     /// Every object labelled `label`, in path order.
     fn occurrences(&self, label: &str) -> Vec<TraverserValue<S>> {
+        self.occurrences_in(label, false)
+    }
+
+    /// Every object labelled `label`, in path order, or in reverse path order when `reversed`.
+    fn occurrences_in(&self, label: &str, reversed: bool) -> Vec<TraverserValue<S>> {
         let mut found: Vec<TraverserValue<S>> = self
             .context
             .paths
@@ -411,7 +421,9 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
             .filter(|node| has_label(node, label))
             .map(|node| node.value.clone())
             .collect();
-        found.reverse();
+        if !reversed {
+            found.reverse();
+        }
         found
     }
 
