@@ -66,12 +66,20 @@
 //! # Not yet
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
-//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Aggregation, quantified edges and path
-//! variables are refused before planning (`bind::refuse_unplanned`); [`ResultOp::Aggregate`] is
-//! refused here as a guard.
+//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Quantified edges and path variables are
+//! refused before planning (`bind::refuse_unplanned`).
+//!
+//! # Aggregation
+//!
+//! An aggregating `RETURN` / `WITH` ([`ResultOp::Aggregate`]) is `gql:aggregate` in place of
+//! `gql:project`: its columns are compiled by `aggregate::compile_aggregating` (a column without
+//! an aggregate call is a grouping key), and `DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` follow
+//! it as after `gql:project`. Its output rows are generated traversers (fresh paths), so an
+//! aggregating `WITH` row read later is labelled `#w<k>` like any materializing `WITH` row.
 
 use std::sync::Arc;
 
+use super::aggregate::{AggregateCall, Aggregating, compile_aggregating};
 use super::ast::{
     BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
     SortDirection,
@@ -88,11 +96,12 @@ use super::plan::{
     Stage, and_factors, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
-use super::runtime::{Binding, RowExpr, eval_error};
+use super::runtime::{Binding, GqlElement, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
 use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
+use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateColumn;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::value::{Number, P, PValue};
@@ -105,7 +114,10 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` and `OPTIONAL MATCH`
     /// patterns, `WHERE`, the linear pipeline `LET`, `FILTER` and `WITH` (Cypher), `RETURN`
     /// (mandatory; `RETURN *` returns every named variable), `ORDER BY`, `OFFSET` (Cypher `SKIP`)
-    /// and `LIMIT`. Use [`Self::gql_with`] for a query with `$parameters`.
+    /// and `LIMIT`, and the aggregates `count`, `sum`, `avg`, `min`, `max` and `collect_list`
+    /// (Cypher `collect`) in `RETURN` and `WITH`, grouped by the items without an aggregate
+    /// (NULL skipped except by `count(*)`). Use [`Self::gql_with`] for a query with
+    /// `$parameters`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a
@@ -282,6 +294,12 @@ enum Instr<S: GraphStorage> {
         columns: Vec<GqlColumn<S>>,
         site: Site,
     },
+    /// `gql:aggregate(keys, aggregates, columns)` at `site`: an aggregating `RETURN` / `WITH`.
+    Aggregate {
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
+        site: Site,
+    },
     /// `gql:distinct()` (GQL equality, decision C3).
     Distinct,
     /// `gql:order(keys)`, on the row map of the `gql:project` before it (`columns` columns).
@@ -442,6 +460,11 @@ impl<S: GraphStorage> Lowered<S> {
                 Instr::Project { columns, site } => {
                     g.gql_project(Arc::clone(&self.query), columns, self.bindings(site))
                 }
+                Instr::Aggregate {
+                    columns,
+                    calls,
+                    site,
+                } => g.gql_aggregate(Arc::clone(&self.query), columns, calls, self.bindings(site)),
                 Instr::Distinct => g.gql_distinct(),
                 Instr::Order { keys, columns } => {
                     g.gql_order(Arc::clone(&self.query), keys, self.order_bindings(columns))
@@ -576,6 +599,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Unit
             | Instr::RowLabel(_)
             | Instr::Project { .. }
+            | Instr::Aggregate { .. }
             | Instr::Distinct
             | Instr::Order { .. }
             | Instr::Skip(_)
@@ -602,6 +626,13 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         self,
         query: Arc<str>,
         columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+    ) -> Self;
+    fn gql_aggregate(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
     ) -> Self;
     fn gql_distinct(self) -> Self;
@@ -658,6 +689,15 @@ macro_rules! sink {
                 bindings: Arc<[Binding]>,
             ) -> Self {
                 self.gql_project(query, columns, bindings)
+            }
+            fn gql_aggregate(
+                self,
+                query: Arc<str>,
+                columns: Vec<GqlAggregateColumn<S>>,
+                calls: Vec<AggregateCall<GqlElement<S>>>,
+                bindings: Arc<[Binding]>,
+            ) -> Self {
+                self.gql_aggregate(query, columns, calls, bindings)
             }
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
@@ -1046,7 +1086,7 @@ impl<'q> Lowering<'q> {
         Ok(row)
     }
 
-    /// The error of a plan part the lowering does not emit yet (stage 1b: aggregation). The
+    /// The error of a plan part the lowering does not emit yet. The
     /// guard `bind::refuse_unplanned` refuses those queries with their own messages first, so
     /// this is a guard only.
     fn unlowered(&self) -> TraverserError {
@@ -1288,7 +1328,27 @@ impl<'q> Lowering<'q> {
                         site,
                     });
                 }
-                ResultOp::Aggregate => return Err(self.unlowered()),
+                ResultOp::Aggregate => {
+                    let Aggregating { outputs, calls } = compile_aggregating(
+                        columns.iter().map(|c| &c.expr),
+                        &self.scope(None, &[]),
+                    )
+                    .map_err(|error| eval_error(self.query, error))?;
+                    let columns = columns
+                        .iter()
+                        .zip(outputs)
+                        .map(|(column, expr)| GqlAggregateColumn {
+                            name: CompactString::from(column.name.as_str()),
+                            expr,
+                            key: !column.aggregate,
+                        })
+                        .collect();
+                    instrs.push(Instr::Aggregate {
+                        columns,
+                        calls,
+                        site,
+                    });
+                }
                 ResultOp::Distinct => instrs.push(Instr::Distinct),
                 ResultOp::Order => {
                     let mut keys = Vec::with_capacity(order_by.len());
@@ -1603,6 +1663,19 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             Instr::Project { columns, site } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
+                }
+                marks.read(&mut slots, *site);
+            }
+            Instr::Aggregate {
+                columns,
+                calls,
+                site,
+            } => {
+                for column in columns {
+                    column.expr.variables(&mut slots);
+                }
+                for argument in calls.iter().filter_map(|call| call.argument.as_ref()) {
+                    argument.variables(&mut slots);
                 }
                 marks.read(&mut slots, *site);
             }

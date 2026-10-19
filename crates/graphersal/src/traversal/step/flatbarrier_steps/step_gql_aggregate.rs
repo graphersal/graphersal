@@ -1,8 +1,6 @@
 //! `gql:aggregate(keys, aggregates, columns)`: the aggregating `RETURN` / `WITH` of a GQL query
 //! (feature `gql`, internal).
 
-#![allow(dead_code, reason = "built by the aggregation lowering (stage 1b, T7)")]
-
 use std::sync::Arc;
 
 use fnv::FnvBuildHasher;

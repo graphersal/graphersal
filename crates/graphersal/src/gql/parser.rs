@@ -166,8 +166,6 @@ pub(crate) struct FunctionSpec {
     pub(crate) max_args: usize,
     /// Scalar or aggregate.
     pub(crate) kind: FunctionKind,
-    /// The Gremlin step that does the same after `gql()` (aggregates, for diagnostics).
-    pub(crate) gremlin: &'static str,
 }
 
 impl FunctionSpec {
@@ -189,22 +187,16 @@ const fn scalar(
         min_args: min,
         max_args: max,
         kind: FunctionKind::Scalar,
-        gremlin: "",
     }
 }
 
-const fn aggregate(
-    function: Function,
-    names: &'static [&'static str],
-    gremlin: &'static str,
-) -> FunctionSpec {
+const fn aggregate(function: Function, names: &'static [&'static str]) -> FunctionSpec {
     FunctionSpec {
         function,
         names,
         min_args: 1,
         max_args: 1,
         kind: FunctionKind::Aggregate,
-        gremlin,
     }
 }
 
@@ -225,16 +217,12 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     scalar(Function::Size, &["size"], 1, 1),
     scalar(Function::Cardinality, &["cardinality"], 1, 1),
     scalar(Function::PathLength, &["path_length", "length"], 1, 1),
-    aggregate(Function::Count, &["count"], "count()"),
-    aggregate(Function::Sum, &["sum"], "sum()"),
-    aggregate(Function::Avg, &["avg"], "mean()"),
-    aggregate(Function::Min, &["min"], "min()"),
-    aggregate(Function::Max, &["max"], "max()"),
-    aggregate(
-        Function::CollectList,
-        &["collect_list", "collect"],
-        "fold()",
-    ),
+    aggregate(Function::Count, &["count"]),
+    aggregate(Function::Sum, &["sum"]),
+    aggregate(Function::Avg, &["avg"]),
+    aggregate(Function::Min, &["min"]),
+    aggregate(Function::Max, &["max"]),
+    aggregate(Function::CollectList, &["collect_list", "collect"]),
 ];
 
 /// The function spelled `name` (ASCII case-insensitive), if any.

@@ -585,10 +585,6 @@ fn a_match_clause_holds_at_most_max_match_edges_edge_patterns() {
 #[test]
 fn stage_1b_constructs_bind_but_are_not_yet_planned() {
     let cases: &[(&str, &str, &str)] = &[
-        ("MATCH (n) RETURN count(*)", "count", "count()"),
-        ("MATCH (n) RETURN count(DISTINCT n.x)", "count", "count()"),
-        ("MATCH (n) RETURN AVG(n.age)", "AVG", "mean()"),
-        ("MATCH (n) RETURN 1 + collect(n.name)", "collect", "fold()"),
         ("MATCH p = (a)-->(b) RETURN a", "p", "path()"),
         ("MATCH (a)-[:knows]->{1,3}(b) RETURN b", "{1,3}", "repeat("),
         ("MATCH (a)-->*(b) RETURN b", "*", "repeat("),

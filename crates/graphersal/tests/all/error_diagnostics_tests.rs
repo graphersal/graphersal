@@ -7371,20 +7371,21 @@ mod gql {
     }
 
     #[test]
-    fn gql_aggregate_not_yet_names_the_gremlin_step() {
-        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person) RETURN sum(p.age)").to_list());
+    fn gql_quantified_path_pattern_not_yet_names_the_gremlin_step() {
+        let (err, report) =
+            gql_failure(|g| g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b").to_list());
         assert_eq!(
             kind_and_status(&err),
             (GqlErrorKind::NotYet, "0A000".to_string())
         );
         assert!(
-            report.contains("the aggregate function sum() is not yet supported"),
+            report.contains("a parenthesized path pattern ((a)-->(b)){m,n} is not yet supported"),
             "{report}"
         );
         assert!(
             report.contains(
-                "Help: aggregate with Gremlin steps after gql(), for example \
-                 g.gql(\"MATCH (p:person) RETURN p.age AS age\").select(\"age\").sum()."
+                "Help: write the path out, or use Gremlin repeat(), for example \
+                 g.v(\"1\").repeat(__.out(\"knows\")).times(2)."
             ),
             "{report}"
         );

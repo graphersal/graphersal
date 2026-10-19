@@ -42,11 +42,6 @@
 //! Its `Hash` agrees with that equality, so a `Vec<GroupKey<E>>` of the key columns is the hash
 //! key of a group without building any text.
 
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "run by the gql:aggregate step (stage 1b, T4)")
-)]
-
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
@@ -618,6 +613,7 @@ pub(crate) struct GroupKey<E>(pub(crate) Value<E>);
 
 impl<E> GroupKey<E> {
     /// The value.
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn into_value(self) -> Value<E> {
         self.0
     }

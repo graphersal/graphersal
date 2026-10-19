@@ -433,7 +433,7 @@ impl BoundQuery {
     }
 
     /// Whether `RETURN` aggregates (some column holds an aggregate call).
-    #[cfg_attr(not(test), allow(dead_code, reason = "read by the tests until T7"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn aggregated(&self) -> bool {
         self.columns.iter().any(|c| c.aggregate)
     }
@@ -540,14 +540,14 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
 }
 
 /// Refuses the stage 1b constructs that bind but that the planner and the lowering do not
-/// handle yet: path variables, quantified edges and aggregates (in `WITH` and `RETURN`) (kind
+/// handle yet: path variables and quantified edges (kind
 /// `NotYet`, the messages the parser gave in stage 1a). Called by the lowering
 /// between binding and planning; the arms go away as the later stages land.
-pub(crate) fn refuse_unplanned(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    unplanned(query, bound).map_err(|e| e.into_error(&query.source))
+pub(crate) fn refuse_unplanned(query: &Query, _bound: &BoundQuery) -> Result<(), TraverserError> {
+    unplanned(query).map_err(|e| e.into_error(&query.source))
 }
 
-fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
+fn unplanned(query: &Query) -> BResult<()> {
     for m in &query.matches {
         for path in &m.patterns {
             if let Some(variable) = &path.variable {
@@ -572,52 +572,12 @@ fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
             }
         }
     }
-    // Aggregating `WITH` columns first (text order), then `RETURN`.
-    let with_columns = bound.segments.iter().flat_map(|segment| match segment {
-        Segment::With(with) => with.columns.as_slice(),
-        Segment::Match(_) | Segment::Optional(_) => &[],
-    });
-    let first = with_columns
-        .chain(&bound.columns)
-        .filter(|c| c.aggregate)
-        .find_map(|c| first_aggregate(&c.expr));
-    if let Some(name) = first {
-        return Err(aggregate_not_yet(name));
-    }
     Ok(())
-}
-
-/// An aggregate call: not planned yet (the message the parser gave in stage 1a).
-fn aggregate_not_yet(name: &Identifier) -> Box<GqlErrorBuilder> {
-    let gremlin = lookup_function(&name.name).map_or("", |spec| spec.gremlin);
-    not_yet(
-        name.span,
-        &format!("the aggregate function {}()", name.name),
-        &format!(
-            "aggregate with Gremlin steps after gql(), for example \
-             g.gql(\"MATCH (p:person) RETURN p.age AS age\").select(\"age\").{gremlin}"
-        ),
-    )
 }
 
 /// Whether `name` is an aggregate function.
 fn is_aggregate(name: &Identifier) -> bool {
     lookup_function(&name.name).is_some_and(|spec| spec.kind == FunctionKind::Aggregate)
-}
-
-/// The name of the first aggregate call in `expr`, left to right (recursion bounded by the
-/// expression height).
-fn first_aggregate(expr: &Expr) -> Option<&Identifier> {
-    let mut found = None;
-    for_each_child(expr, &mut |child| {
-        if found.is_none() {
-            found = first_aggregate(child);
-        }
-    });
-    match &expr.kind {
-        ExprKind::FunctionCall { name, .. } if is_aggregate(name) => Some(name),
-        _ => found,
-    }
 }
 
 /// Calls `f` on every direct sub-expression of `expr`, left to right.
