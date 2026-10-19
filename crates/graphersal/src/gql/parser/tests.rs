@@ -2910,6 +2910,33 @@ fn map_projection_forms() {
 }
 
 #[test]
+fn record_constructor_is_the_map_literal() {
+    // `RECORD {..}` (any case) is the map literal; nested, empty, keyword keys.
+    assert_eq!(expr("RECORD {a: 1, b: 'x'}"), "{a: 1, b: 'x'}");
+    assert_eq!(expr("record {}"), "{}");
+    assert_eq!(expr("Record {a: RECORD {match: [1]}}"), "{a: {match: [1]}}");
+    assert_eq!(expr("[RECORD {a: 1}]"), "[{a: 1}]");
+    // The span covers the keyword.
+    let q = ok("RETURN RECORD {a: 1} AS m");
+    let item = &q.ret.items[0].expr;
+    assert_eq!(q.text(item.span), "RECORD {a: 1}");
+    assert!(matches!(item.kind, ExprKind::Map(_)), "{item:?}");
+    // Contextual: elsewhere `record` stays a variable, also before a projection that does not
+    // start with `}` or `key:`, and back-quoted always.
+    assert_eq!(expr("record"), "record");
+    assert_eq!(expr("record.name"), "record.name");
+    assert_eq!(expr("record {.name}"), "(project record {.name})");
+    assert_eq!(expr("record {.*}"), "(project record {.*})");
+    assert_eq!(expr("record {n, k: 1}"), "(project record {n (k 1)})");
+    assert_eq!(expr("`record` {k: 1}"), "(project record {(k 1)})");
+    assert_eq!(expr("`RECORD` {}"), "(project RECORD {})");
+    // A malformed record is a syntax error of the map literal.
+    let f = fail("RETURN RECORD {a: 1 b: 2} AS m");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "b");
+}
+
+#[test]
 fn map_projection_errors() {
     for (query, text, expected) in [
         (

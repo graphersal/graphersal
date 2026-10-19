@@ -359,6 +359,60 @@ mod twins {
     }
 }
 
+// ----- the record constructor -----
+
+/// `RECORD {k: expr}` (any case) is the same value as the map literal `{k: expr}`, keys in the
+/// written order, nested too; `record` stays a variable before a projection that is not a record.
+#[test]
+fn the_record_constructor_is_the_map_literal() {
+    let graph = modern();
+    let pairs = [
+        (
+            "MATCH (p:person) RETURN RECORD {name: p.name, age: p.age, k: NULL} AS m",
+            "MATCH (p:person) RETURN {name: p.name, age: p.age, k: NULL} AS m",
+        ),
+        (
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
+             RETURN record {who: p.name, what: Record {name: s.name}} AS m",
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
+             RETURN {who: p.name, what: {name: s.name}} AS m",
+        ),
+        ("RETURN RECORD {} AS m", "RETURN {} AS m"),
+    ];
+    for (record, literal) in pairs {
+        let mut a: Vec<String> = rows(&graph, record)
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        let mut b: Vec<String> = rows(&graph, literal)
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        a.sort();
+        b.sort();
+        assert!(!a.is_empty(), "{record}");
+        assert_eq!(a, b, "{record}");
+    }
+    assert_eq!(
+        key_orders(&graph, "RETURN RECORD {z: 1, a: 2, m: 3} AS m", "m"),
+        [["z", "a", "m"]]
+    );
+    // A variable named `record` is still read, also with a projection.
+    assert_eq!(
+        rows(
+            &graph,
+            "MATCH (record:person {name: 'marko'}) RETURN record.name AS n, record {.age} AS m"
+        )
+        .len(),
+        1
+    );
+    let text = failure(&graph, "MATCH (p:person) RETURN record {.name} AS m");
+    assert!(
+        text.contains("the variable `record` is not defined"),
+        "{text}"
+    );
+}
+
 // ----- map projections -----
 
 #[test]

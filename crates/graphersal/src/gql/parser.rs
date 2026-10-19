@@ -163,6 +163,13 @@
 //!   alternative there is written in parentheses, `x:(A|B)`. Cypher's `all` / `any` / `none` /
 //!   `single(x IN l WHERE c)` and `reduce(..)` stay "not yet supported", naming the
 //!   comprehension form.
+//! - **Record constructor** (stage 2c): `RECORD {k: expr, ...}` is the map literal
+//!   `{k: expr, ...}` with the ISO keyword written out ([`Parser::record_ahead`]). `RECORD` is
+//!   contextual (an identifier, any case): it is the keyword when `{` follows and then `}` or a
+//!   name and `:` (`RECORD {}`, `record {name: p.name}`); any other `{` after it (`.key`, `.*`,
+//!   a variable item) keeps it a variable with a map projection, as `record {.name}`. So a
+//!   variable named `record` is read everywhere except before an empty projection or one that
+//!   starts with a `key: expr` item; there it is back-quoted, `` `record` {k: 1} ``.
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -2691,6 +2698,7 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => self.parenthesized(),
             TokenKind::LBracket => self.list(),
             TokenKind::LBrace => self.map_expr(),
+            TokenKind::Ident if self.record_ahead() => self.record_constructor(),
             TokenKind::Keyword(Keyword::Case) => self.case_expr(),
             TokenKind::Keyword(Keyword::Exists) => self.exists_expr(),
             TokenKind::Ident | TokenKind::QuotedIdent(_) | TokenKind::Keyword(_)
@@ -3389,6 +3397,30 @@ impl<'a> Parser<'a> {
         Ok((
             Expr {
                 span: map.span,
+                kind: ExprKind::Map(map),
+            },
+            height,
+        ))
+    }
+
+    /// At a name: whether the record constructor `RECORD {k: expr, ...}` starts. `RECORD` (any
+    /// case, not back-quoted) followed by `{` and then `}` or `name :` is the constructor;
+    /// followed by `{` and anything else (`.key`, `.*`, a variable item) it stays a variable
+    /// with a map projection (module docs, "Record constructor").
+    fn record_ahead(&self) -> bool {
+        is_word(self.peek(), "RECORD")
+            && self.nth(1).kind == TokenKind::LBrace
+            && (self.nth(2).kind == TokenKind::RBrace
+                || (self.nth(2).name().is_some() && self.nth(3).kind == TokenKind::Colon))
+    }
+
+    /// `RECORD {k: expr, ...}`, at `RECORD`: the same map value as the literal `{k: expr, ...}`.
+    fn record_constructor(&mut self) -> PResult<(Expr, usize)> {
+        let keyword = self.advance().span;
+        let (map, height) = self.map_literal()?;
+        Ok((
+            Expr {
+                span: keyword.to(map.span),
                 kind: ExprKind::Map(map),
             },
             height,

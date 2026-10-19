@@ -4330,6 +4330,8 @@ pub(crate) enum GqlHelpTopic {
     /// A pattern comprehension `[(a)-->(b) | expr]`: its list, its imports, its locals (stage
     /// 2c).
     PatternComprehension,
+    /// The variable of a list comprehension `[x IN list | expr]` reusing a name (stage 2c).
+    ComprehensionVariable,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
@@ -6940,6 +6942,14 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              friends\"), and bind an element in the MATCH clause of the query to read it after \
              the comprehension, as in g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, \
              f.name\")."
+        }
+        GqlHelpTopic::ComprehensionVariable => {
+            "A list comprehension, [x IN <list> WHERE <condition> | <expression>], binds its \
+             variable x to each item of the list, inside the comprehension only; x must be a \
+             new name, used nowhere else in the query: not a variable or column in scope, not \
+             the variable of a comprehension around it, and not a name that an earlier clause \
+             bound and dropped, as in g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, \
+             p.age + 1] WHERE a > 30 | a * 2] AS l\")."
         }
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \

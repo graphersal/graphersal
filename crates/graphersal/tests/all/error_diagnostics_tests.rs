@@ -7917,6 +7917,44 @@ mod gql {
         assert!(help.ends_with(scope), "{help}");
     }
 
+    /// E14 (a list-comprehension variable reusing a name) has its own advice, with a runnable
+    /// example, not the WITH / LET scope advice.
+    #[test]
+    fn gql_comprehension_variable_errors_explain_new_names() {
+        let advice = "A list comprehension, [x IN <list> WHERE <condition> | <expression>], \
+                      binds its variable x to each item of the list, inside the comprehension \
+                      only; x must be a new name, used nowhere else in the query: not a \
+                      variable or column in scope, not the variable of a comprehension around \
+                      it, and not a name that an earlier clause bound and dropped, as in \
+                      g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, p.age + 1] WHERE a \
+                      > 30 | a * 2] AS l\").";
+        for (query, name) in [
+            ("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l", "p"),
+            (
+                "MATCH (p:person) WITH p.name AS n RETURN [p IN [1] | p] AS l",
+                "p",
+            ),
+            ("RETURN [x IN [1] | [x IN [2] | x]] AS l", "x"),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string())
+            );
+            let help = err.help().unwrap();
+            assert_eq!(
+                help,
+                format!(
+                    "give the comprehension a variable of its own, as in [{name}2 IN list WHERE \
+                     {name}2 > 0 | {name}2]. {advice}"
+                ),
+                "{query}"
+            );
+            assert!(!help.contains("WITH passes on only"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
     #[test]
     fn gql_grouping_errors_explain_grouping_keys() {
         let grouping = "A RETURN or WITH with an aggregate groups the rows by its other items \

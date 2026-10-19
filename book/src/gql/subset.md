@@ -506,7 +506,7 @@ order of `NULL` and of values of different types.
 
 | Kind | Forms |
 |---|---|
-| literals | integers (`42`, `1_000`, `0x1F`, `0o17`, `0b101`), floats (`1.5`, `.5`, `1.5e3`), strings (`'...'` or `"..."`), `TRUE`, `FALSE`, `NULL`, lists `[1, 2]`, maps `{k: v}` |
+| literals | integers (`42`, `1_000`, `0x1F`, `0o17`, `0b101`), floats (`1.5`, `.5`, `1.5e3`), strings (`'...'` or `"..."`), `TRUE`, `FALSE`, `NULL`, lists `[1, 2]`, maps (records) `{k: v}`, also written `RECORD {k: v}` |
 | parameters | `$name` ([Parameters](#parameters)) |
 | property access | `n.name`, `m.key` on a map |
 | comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; not chainable (`a < b < c` is an error) |
@@ -536,7 +536,15 @@ g.gql("MATCH (n) RETURN n.name AS name, CASE n.lang WHEN 'java' THEN 'jvm' ELSE 
 // #{"k": "other", "name": "josh"}, #{"k": "jvm", "name": "lop"}
 g.gql("MATCH (n:person) RETURN {name: n.name, tags: [n.age, NULL, true]} AS m ORDER BY n.name LIMIT 1").to_list()
 // #{"m": #{"name": "josh", "tags": [32, (), true]}}
+g.gql("MATCH (n:person) RETURN RECORD {name: n.name, age: n.age} AS m ORDER BY n.name LIMIT 1").to_list()
+// #{"m": #{"age": 32, "name": "josh"}}
 ```
+
+`RECORD {k: v}` is the ISO record constructor with its keyword written out; it builds the same map
+as `{k: v}`. The word is contextual, not reserved: `RECORD` (any case) followed by `{` and then
+`}` or `name:` is the constructor; anywhere else `record` is an ordinary variable, also before a
+map projection such as `record {.name}`. A variable named `record` whose projection is empty or
+starts with a `key: expr` item is back-quoted: `` `record` {k: 1} ``.
 
 Integer arithmetic stays integer (`/` truncates toward zero, `%` takes the sign of the
 dividend); a float operand makes the result a float. An overflow or a division by zero is an

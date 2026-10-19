@@ -2062,10 +2062,10 @@ impl<'q> Binder<'q> {
         };
         Err(semantic(var.span, message)
             .alternative(format!(
-                "give the comprehension its own variable, as in [{name}2 IN list WHERE {name}2 \
-                 > 0 | {name}2]"
+                "give the comprehension a variable of its own, as in [{name}2 IN list WHERE \
+                 {name}2 > 0 | {name}2]"
             ))
-            .topic(GqlHelpTopic::Scope)
+            .topic(GqlHelpTopic::ComprehensionVariable)
             .into())
     }
 

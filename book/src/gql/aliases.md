@@ -145,7 +145,7 @@ LLMs ask for nested, JSON-shaped answers ([The Supported Subset](subset.md#map-p
 
 | Cypher form | GQL nearest form | Difference |
 |---|---|---|
-| map projection `p {.name, .age, .*, f, k: expr}` | the record constructor `{name: p.name, age: p.age, f: f, k: expr}` | for a `NULL` `p` the projection is `NULL`, the record `{name: NULL, ...}`; `.*` has no record form (`properties(p)` is the map of all properties) |
+| map projection `p {.name, .age, .*, f, k: expr}` | the record constructor `{name: p.name, age: p.age, f: f, k: expr}` (or `RECORD {..}`) | for a `NULL` `p` the projection is `NULL`, the record `{name: NULL, ...}`; `.*` has no record form (`properties(p)` is the map of all properties) |
 | list comprehension `[x IN list WHERE cond \| expr]` | none; `FOR x IN list FILTER cond RETURN collect_list(expr)` gives one list per query, not per row | |
 | pattern comprehension `[(p)-[:R]->(f) WHERE cond \| expr]` | none; `OPTIONAL MATCH (p)-[:R]->(f) WHERE cond` + `collect_list(expr)` groups the rows instead | the comprehension keeps the row and gives `[]` when nothing matches |
 
