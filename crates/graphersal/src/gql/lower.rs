@@ -42,6 +42,7 @@
 //! | a leading `OPTIONAL MATCH` | `inject(0).optional(__.v()...)`: one unit row (decision C13) |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
+//! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
@@ -69,8 +70,9 @@
 //! # Not yet
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
-//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. Path variables are refused before
-//! planning (`bind::refuse_unplanned`).
+//! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
+//! refused by the parser (`NEXT`, `UNION`, subqueries, quantified path patterns, shortest
+//! paths, `nodes()` / `relationships()`, ...) and the binder.
 //!
 //! # Aggregation
 //!
@@ -89,7 +91,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters, refuse_unplanned,
+    SortKey, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -99,7 +101,7 @@ use super::plan::{
     Stage, and_factors, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
-use super::runtime::{Binding, GqlElement, RowExpr, eval_error};
+use super::runtime::{Binding, GqlElement, PathPart, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
@@ -121,8 +123,9 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// (Cypher `collect`) in `RETURN` and `WITH`, grouped by the items without an aggregate
     /// (NULL skipped except by `count(*)`), and quantified edges (`-[e:knows]->{1,3}`, `*`, `+`,
     /// Cypher `[e:knows*1..3]`) with trail semantics (no edge twice in one match; the edge
-    /// variable is the list of the edges). Use [`Self::gql_with`] for a query with
-    /// `$parameters`.
+    /// variable is the list of the edges), and path variables (`MATCH p = (a)-->(b) RETURN p`,
+    /// `path_length(p)`, Cypher `length(p)`; a path is the Gremlin path value). Use
+    /// [`Self::gql_with`] for a query with `$parameters`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a
@@ -373,6 +376,9 @@ struct Hop<S: GraphStorage> {
     /// The quantifier of a quantified edge: the hop is the body of a `repeat()` (see
     /// [`Lowered::quantified`]).
     quantifier: Option<Quantifier>,
+    /// The group variable of a quantified edge: the vertex each iteration reaches gets its
+    /// inner label (`as("#gv<id>")`) when a path variable reads the group.
+    inner: Option<BindingId>,
 }
 
 /// The lowered query, ready to be emitted onto a source.
@@ -395,6 +401,24 @@ struct Lowered<S: GraphStorage> {
     /// The part label of each `OPTIONAL MATCH` segment that needs one (`#o<k>`, see
     /// [`Instr::PartLabel`]); empty for the others.
     part_labels: Vec<CompactString>,
+    /// Per binding: the inner label of a group variable a path variable reads (`#gv<id>`, set
+    /// on the vertex each iteration reaches); empty for the others.
+    inner_labels: Vec<CompactString>,
+    /// Per binding: how a path variable is assembled (`None`: not a path variable).
+    paths: Vec<Option<PathRead>>,
+}
+
+/// How a path variable is read (`Binding::Path`, plan mechanism 6).
+#[derive(Debug, Clone)]
+struct PathRead {
+    /// The segment that binds it.
+    segment: usize,
+    /// The parts in text order: the labels of the pattern's nodes and edges, a quantified
+    /// edge as its edges' label and its inner vertices' label.
+    parts: Vec<PathPart>,
+    /// The label the path holds whenever its `OPTIONAL MATCH` part matched (as for a group
+    /// variable); `None` outside an `OPTIONAL MATCH`.
+    anchor: Option<CompactString>,
 }
 
 /// How a group variable is read outside its element pattern (`Binding::Group`).
@@ -413,6 +437,19 @@ struct GroupRead {
 impl<S: GraphStorage> Lowered<S> {
     /// Where variable `slot` reads from at `site` (see [`Site`]).
     fn binding(&self, slot: usize, site: Site) -> Binding {
+        if let Some(Some(path)) = self.paths.get(slot) {
+            // Inside its own part the part matched so far: no anchor to check.
+            let anchor = path
+                .anchor
+                .as_ref()
+                .filter(|_| site.part != Some(path.segment));
+            let parts = anchor
+                .map(|label| PathPart::Anchor(label.clone()))
+                .into_iter()
+                .chain(path.parts.iter().cloned())
+                .collect();
+            return Binding::Path(parts);
+        }
         if site.current == Some(BindingId(slot)) {
             return Binding::Current;
         }
@@ -644,7 +681,16 @@ impl<S: GraphStorage> Lowered<S> {
     where
         S: 'g,
     {
+        let inner = hop
+            .inner
+            .and_then(|id| self.inner_labels.get(id.0))
+            .filter(|label| !label.is_empty())
+            .cloned();
         let body = self.hop(AnonymousTraversal::<'g, S>::new(), hop);
+        let body = match inner {
+            Some(label) => body.as_(label),
+            None => body,
+        };
         let max = quantifier.max.and_then(|n| u32::try_from(n).ok());
         let at_least = || {
             let min = i64::try_from(quantifier.min).unwrap_or(i64::MAX);
@@ -879,7 +925,6 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    refuse_unplanned(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -1011,7 +1056,9 @@ impl<'q> Lowering<'q> {
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
         let (mut labelled, rows_labelled) = self.labelled(&instrs, &columns);
-        let (groups, part_labels) = self.groups(&labels, &mut labelled);
+        let (groups, part_labels, anchors) = self.groups(&labels, &mut labelled);
+        let inner_labels = self.inner_labels(&labels);
+        let paths = self.paths(&labels, &inner_labels, &groups, &anchors);
         Ok(Lowered {
             query: self.shared,
             instrs,
@@ -1022,6 +1069,8 @@ impl<'q> Lowering<'q> {
             rows_labelled,
             groups,
             part_labels,
+            inner_labels,
+            paths,
         })
     }
 
@@ -1083,6 +1132,11 @@ impl<'q> Lowering<'q> {
                 }
                 Op::Join { binding } => {
                     instrs.push(self.same(*binding)?);
+                    if self.is_column(*binding) {
+                        // A column binding has no label of its own; a path variable reads it
+                        // through one set here (emitted only then).
+                        instrs.push(Instr::Label(*binding));
+                    }
                     site = Site::on(*binding);
                 }
                 Op::Resume(resume) => {
@@ -1129,6 +1183,8 @@ impl<'q> Lowering<'q> {
             name: CompactString::from(name),
             kind,
         });
+        // A path variable reads the element through a label set here (emitted only then).
+        instrs.push(Instr::Label(id));
         Ok(())
     }
 
@@ -1203,9 +1259,8 @@ impl<'q> Lowering<'q> {
         Ok(row)
     }
 
-    /// The error of a plan part the lowering does not emit yet. The
-    /// guard `bind::refuse_unplanned` refuses those queries with their own messages first, so
-    /// this is a guard only.
+    /// The error of a plan part the lowering does not emit (the binder refuses those queries
+    /// with their own messages first, so this is a guard only).
     fn unlowered(&self) -> TraverserError {
         GqlErrorBuilder::new(
             GqlErrorKind::NotYet,
@@ -1326,7 +1381,9 @@ impl<'q> Lowering<'q> {
         } else {
             self.element(id, &expand.edge_filters, checks)?
         };
-        if !expand.edge_join {
+        // An edge joined to a column binding has no label of its own: a path variable reads it
+        // through one set here (emitted only then).
+        if !expand.edge_join || self.is_column(id) {
             steps.push(Instr::Label(id));
         }
         Ok(Hop {
@@ -1334,6 +1391,7 @@ impl<'q> Lowering<'q> {
             labels,
             steps,
             quantifier: expand.quantifier,
+            inner: expand.quantifier.map(|_| id),
         })
     }
 
@@ -1631,17 +1689,22 @@ impl<'q> Lowering<'q> {
         (labelled, rows)
     }
 
-    /// How each group variable is read ([`GroupRead`]) and the part label of each
-    /// `OPTIONAL MATCH` segment that needs one. A group variable of an `OPTIONAL MATCH` part
-    /// that is read anywhere is anchored: on the part's witness node (labelled for it), or,
-    /// when the part binds no new node (`OPTIONAL MATCH (a)-[e]->{0,2}(a)`), on the part label
-    /// `#o<k>` set at the end of the part. Without the anchor a part not matched (`NULL`) and a
-    /// zero-length match (`[]`) would read alike.
+    /// How each group variable is read ([`GroupRead`]), the part label of each
+    /// `OPTIONAL MATCH` segment that needs one, and the anchor of each segment (`None`: none
+    /// needed). A group or path variable of an `OPTIONAL MATCH` part that is read anywhere is
+    /// anchored: on the part's witness node (labelled for it), or, when the part binds no new
+    /// node (`OPTIONAL MATCH (a)-[e]->{0,2}(a)`), on the part label `#o<k>` set at the end of
+    /// the part. Without the anchor a part not matched (`NULL`) and a zero-length match (`[]`)
+    /// would read alike, and a path over elements bound before the part would read as matched.
     fn groups(
         &self,
         labels: &[CompactString],
         labelled: &mut [bool],
-    ) -> (Vec<Option<GroupRead>>, Vec<CompactString>) {
+    ) -> (
+        Vec<Option<GroupRead>>,
+        Vec<CompactString>,
+        Vec<Option<CompactString>>,
+    ) {
         let mut part_labels = vec![CompactString::default(); self.bound.segments.len()];
         let mut anchors: Vec<Option<CompactString>> = vec![None; self.bound.segments.len()];
         for stage in &self.plan.stages {
@@ -1652,7 +1715,7 @@ impl<'q> Lowering<'q> {
                 continue;
             };
             let read = self.bound.bindings.iter().any(|b| {
-                b.group
+                (b.group || b.kind == BindingKind::Path)
                     && b.segment == *segment
                     && self.plan.labelling.get(b.id.0).is_some_and(|l| l.read)
             });
@@ -1710,7 +1773,77 @@ impl<'q> Lowering<'q> {
                 })
             })
             .collect();
-        (groups, part_labels)
+        (groups, part_labels, anchors)
+    }
+
+    /// The inner label of each group variable a read path variable passes through
+    /// (`#gv<id>`, more `#` in front while it collides with a binding's label); empty for the
+    /// others. The planner marks every element of a read path's pattern ([`Labelling::path`]).
+    ///
+    /// [`Labelling::path`]: super::plan::Labelling
+    fn inner_labels(&self, labels: &[CompactString]) -> Vec<CompactString> {
+        self.bound
+            .bindings
+            .iter()
+            .map(|b| {
+                let path = self.plan.labelling.get(b.id.0).is_some_and(|l| l.path);
+                if !(b.group && path) {
+                    return CompactString::default();
+                }
+                let mut label = format!("#gv{}", b.id.0);
+                while labels.iter().any(|l| l.as_str() == label) {
+                    label.insert(0, '#');
+                }
+                CompactString::from(label)
+            })
+            .collect()
+    }
+
+    /// How each path variable is assembled ([`PathRead`]): its pattern's nodes and edges in
+    /// text order, a quantified edge as a group part (reversed when walked from its far end),
+    /// anchored like a group variable when it is bound in an `OPTIONAL MATCH` part.
+    fn paths(
+        &self,
+        labels: &[CompactString],
+        inner_labels: &[CompactString],
+        groups: &[Option<GroupRead>],
+        anchors: &[Option<CompactString>],
+    ) -> Vec<Option<PathRead>> {
+        let mut paths: Vec<Option<PathRead>> = vec![None; self.bound.bindings.len()];
+        let label = |id: BindingId| labels.get(id.0).cloned().unwrap_or_default();
+        for path in self.bound.matches.iter().flat_map(|m| &m.paths) {
+            let Some(variable) = path.variable else {
+                continue;
+            };
+            let Some(binding) = self.bound.binding(variable) else {
+                continue;
+            };
+            let mut parts = Vec::with_capacity(2 * path.steps.len() + 1);
+            parts.push(PathPart::Element(label(path.start)));
+            for step in &path.steps {
+                if step.quantifier.is_some() {
+                    parts.push(PathPart::Group {
+                        edges: label(step.edge),
+                        vertices: inner_labels.get(step.edge.0).cloned().unwrap_or_default(),
+                        reversed: groups
+                            .get(step.edge.0)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|g| g.reversed),
+                    });
+                } else {
+                    parts.push(PathPart::Element(label(step.edge)));
+                }
+                parts.push(PathPart::Element(label(step.node)));
+            }
+            if let Some(slot) = paths.get_mut(variable.0) {
+                *slot = Some(PathRead {
+                    segment: binding.segment,
+                    parts,
+                    anchor: anchors.get(binding.segment).cloned().flatten(),
+                });
+            }
+        }
+        paths
     }
 
     /// The path label of each binding: its key (the variable name, or `#<id>` for a name bound

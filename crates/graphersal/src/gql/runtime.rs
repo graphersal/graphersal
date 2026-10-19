@@ -152,19 +152,11 @@ pub(crate) enum Binding {
         reversed: bool,
     },
     /// A path value assembled from these parts in text order.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
-    )]
     Path(Arc<[PathPart]>),
 }
 
 /// One part of a path variable, in text order (see [`Binding::Path`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "built by the path lowering (T9)")
-)]
 pub(crate) enum PathPart {
     /// One node or edge of the pattern: the object most recently labelled with this label.
     Element(CompactString),
@@ -181,6 +173,10 @@ pub(crate) enum PathPart {
         /// Walked against the text direction.
         reversed: bool,
     },
+    /// No object: a label the path holds whenever its pattern matched (the witness node or the
+    /// part label of an `OPTIONAL MATCH` part); its absence makes the whole path `NULL`, also
+    /// when every element of the path was bound before the part.
+    Anchor(CompactString),
 }
 
 impl Binding {
@@ -196,7 +192,7 @@ impl Binding {
             Binding::Path(parts) => {
                 for part in parts.iter() {
                     match part {
-                        PathPart::Element(_) => {}
+                        PathPart::Element(_) | PathPart::Anchor(_) => {}
                         PathPart::Group {
                             edges, vertices, ..
                         } => {
@@ -221,7 +217,9 @@ impl Binding {
             Binding::Path(parts) => {
                 for part in parts.iter() {
                     match part {
-                        PathPart::Element(label) => out.push(label.clone()),
+                        PathPart::Element(label) | PathPart::Anchor(label) => {
+                            out.push(label.clone());
+                        }
                         PathPart::Group {
                             edges, vertices, ..
                         } => {
@@ -435,6 +433,9 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
                 PathPart::Element(label) => {
                     let value = &self.labelled(label)?.value;
                     push_path_object(&mut objects, value.clone());
+                }
+                PathPart::Anchor(label) => {
+                    self.labelled(label)?;
                 }
                 PathPart::Group {
                     edges,

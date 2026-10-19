@@ -58,7 +58,8 @@
 //!   read. Aggregates take `DISTINCT`; only `count` takes `*`, and `count(DISTINCT *)` is an
 //!   error. Where an aggregate may stand (not nested, not in `WHERE`, ...) is the binder's check.
 //!   `path_length(p)` has the Cypher alias `length(p)`. Cypher `id()` is refused for
-//!   `element_id()` (D15).
+//!   `element_id()` (D15); Cypher `nodes(p)` / `relationships(p)` are "not yet supported"
+//!   (no GQL counterpart, decision C12).
 //! - **The clause pipeline** starts with `[OPTIONAL] MATCH` (a leading `OPTIONAL MATCH` too);
 //!   `WITH`, `LET` and `FILTER` before the first `MATCH` are "not yet supported", like a query
 //!   without `MATCH`. `WITH` is Cypher's spelling of the GQL linear pipeline; its parts come in
@@ -2306,6 +2307,18 @@ impl<'a> Parser<'a> {
                 "shortest path search",
                 "Gremlin repeat(), for example \
                  g.v(\"1\").repeat(__.out().simple_path()).until(__.has_id(\"5\")).path().limit(1)",
+            ));
+        }
+        if spec.is_none()
+            && (name.eq_ignore_ascii_case("nodes") || name.eq_ignore_ascii_case("relationships"))
+        {
+            // Cypher list functions over a path (decision C12): GQL has no counterpart.
+            return Err(self.not_yet(
+                span,
+                &format!("{name}() over a path"),
+                "return the path itself (RETURN p) or name its elements and return them, as in \
+                 MATCH p = (a)-[e]->(b) RETURN a, e, b; Gremlin steps may follow gql(), as in \
+                 g.gql(\"MATCH p = (a)-->(b) RETURN p\").select(\"p\").unfold()",
             ));
         }
         let Some(spec) = spec else {

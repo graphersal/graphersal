@@ -580,24 +580,6 @@ fn a_match_clause_holds_at_most_max_match_edges_edge_patterns() {
     assert_eq!(failure(&query, bind(&parsed)).text, "-[e]->");
 }
 
-// ----- stage 1b constructs that bind but are not planned yet -----
-
-#[test]
-fn stage_1b_constructs_bind_but_are_not_yet_planned() {
-    let cases: &[(&str, &str, &str)] = &[("MATCH p = (a)-->(b) RETURN a", "p", "path()")];
-    for (query, text, alternative) in cases {
-        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
-        let f = failure(query, refuse_unplanned(&parsed, &bound).map(|()| bound));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000");
-        assert_eq!(&f.text, text, "{query}");
-        assert!(f.message.contains("not yet supported"), "{}", f.message);
-        let given = f.alternative.unwrap_or_default();
-        assert!(given.contains(alternative), "{query}: {given}");
-    }
-}
-
 // ----- stage 1b: segments, substitutions, aggregates, groups, paths -----
 
 /// A compact rendering of a stored expression: variables by name, properties, literals,
@@ -1085,9 +1067,7 @@ fn binding_never_panics_on_stage_1b_queries() {
         for t in tails {
             let src = format!("{p} {t}");
             if let Ok(parsed) = parse(&src) {
-                if let Ok(bound) = bind(&parsed) {
-                    let _ = refuse_unplanned(&parsed, &bound);
-                }
+                let _ = bind(&parsed);
                 let _ = bind_with_parameters(&parsed, ["p"]);
             }
         }

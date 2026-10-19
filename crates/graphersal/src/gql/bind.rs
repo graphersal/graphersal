@@ -106,13 +106,6 @@
 //! A substituted expression keeps the parser's bounds (height [`MAX_HEIGHT`], nesting
 //! [`MAX_DEPTH`]), and one query substitutes at most [`MAX_SUBSTITUTED_NODES`] expression nodes
 //! in all, so chained `LET`s that double an expression each cannot grow it exponentially.
-//!
-//! # Not planned yet
-//!
-//! [`refuse_unplanned`] refuses, after binding, the stage 1b constructs the planner and the
-//! lowering do not handle yet (kind `NotYet`, `0A000`, with the messages the parser gave in
-//! stage 1a); the lowering calls it before planning, and its arms go away as the later stages
-//! land.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -537,30 +530,6 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
         )
         .alternative(alternative),
     )
-}
-
-/// Refuses the stage 1b constructs that bind but that the planner and the lowering do not
-/// handle yet: path variables (kind
-/// `NotYet`, the messages the parser gave in stage 1a). Called by the lowering
-/// between binding and planning; the arms go away as the later stages land.
-pub(crate) fn refuse_unplanned(query: &Query, _bound: &BoundQuery) -> Result<(), TraverserError> {
-    unplanned(query).map_err(|e| e.into_error(&query.source))
-}
-
-fn unplanned(query: &Query) -> BResult<()> {
-    for m in &query.matches {
-        for path in &m.patterns {
-            if let Some(variable) = &path.variable {
-                return Err(not_yet(
-                    variable.span,
-                    "a path variable (p = ...)",
-                    "return the elements by their variables, or use Gremlin path(), for example \
-                     g.v(\"1\").out().out().path()",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Whether `name` is an aggregate function.

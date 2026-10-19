@@ -207,6 +207,9 @@ struct Planner<'q> {
     pending: Vec<usize>,
     /// The walked edge bindings per clause, in walk order.
     walked: Vec<Vec<BindingId>>,
+    /// Per binding: the nodes and edges of a path variable's pattern (empty for the others);
+    /// a path variable is bound once all of them are.
+    path_elements: Vec<Vec<BindingId>>,
 }
 
 impl<'q> Planner<'q> {
@@ -229,6 +232,14 @@ impl<'q> Planner<'q> {
             }
         }
         let n = bound.bindings.len();
+        let mut path_elements = vec![Vec::new(); n];
+        for path in bound.matches.iter().flat_map(|m| &m.paths) {
+            if let Some(slot) = path.variable.and_then(|p| path_elements.get_mut(p.0)) {
+                *slot = std::iter::once(path.start)
+                    .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]))
+                    .collect();
+            }
+        }
         Planner {
             bound,
             facts,
@@ -246,6 +257,7 @@ impl<'q> Planner<'q> {
             ops: Vec::new(),
             pending: Vec::new(),
             walked: vec![Vec::new(); bound.matches.len()],
+            path_elements,
         }
     }
 
@@ -569,7 +581,12 @@ impl<'q> Planner<'q> {
     }
 
     fn is_bound(&self, id: BindingId) -> bool {
-        self.bound_set.get(id.0).copied().unwrap_or(false)
+        match self.path_elements.get(id.0) {
+            Some(elements) if !elements.is_empty() => elements
+                .iter()
+                .all(|&e| self.bound_set.get(e.0) == Some(&true)),
+            _ => self.bound_set.get(id.0).copied().unwrap_or(false),
+        }
     }
 
     /// Records a labelling reason of `id`; none for a materializing `WITH` column binding,
