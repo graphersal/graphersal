@@ -86,6 +86,16 @@ impl<S: GraphStorage> core::hash::Hash for TraverserPathStep<S> {
 }
 
 impl<S: GraphStorage> TraverserPath<S> {
+    /// A path of `objects`, first position first, with no step labels.
+    pub(crate) fn from_objects(objects: impl IntoIterator<Item = TraverserValue<S>>) -> Self {
+        Self {
+            steps: objects
+                .into_iter()
+                .map(|value| TraverserPathStep { value, label: None })
+                .collect(),
+        }
+    }
+
     /// Number of objects in the path.
     pub fn len(&self) -> usize {
         self.steps.len()
