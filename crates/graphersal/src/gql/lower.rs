@@ -487,7 +487,8 @@ fn prepare<S: GraphStorage>(
 /// The names a compiled expression resolves (slot `i` < bindings: binding `i`; then the
 /// `RETURN` columns for `ORDER BY`).
 struct LowerScope<'a> {
-    /// The variable name of each binding (`None`: anonymous).
+    /// The key of each binding ([`Binding::key`](super::bind::Binding), the name stored
+    /// expressions use; `None`: anonymous).
     names: &'a [Option<String>],
     /// The slot the reserved empty name stands for: the element a synthesized expression
     /// (an inline property of an anonymous node, a label factor) is about, or an `ORDER BY`
@@ -553,11 +554,7 @@ impl<'q> Lowering<'q> {
             bound,
             plan,
             params,
-            names: bound
-                .bindings
-                .iter()
-                .map(|b| b.name.as_ref().map(|n| n.name.clone()))
-                .collect(),
+            names: bound.bindings.iter().map(|b| b.key.clone()).collect(),
         }
     }
 
@@ -580,6 +577,9 @@ impl<'q> Lowering<'q> {
     }
 
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
+        if !self.plan.stages.is_empty() {
+            return Err(self.unlowered());
+        }
         let mut instrs = Vec::new();
         let mut current: Option<BindingId> = None;
         let ops = &self.plan.ops;
@@ -627,6 +627,7 @@ impl<'q> Lowering<'q> {
                     current = Some(*binding);
                 }
                 Op::Anchor(scan) => return Err(self.anchor_not_yet(scan.binding)),
+                Op::Resume(_) => return Err(self.unlowered()),
             }
         }
         let columns = self.result(current, &mut instrs)?;
@@ -639,6 +640,22 @@ impl<'q> Lowering<'q> {
             labelled,
             columns,
         })
+    }
+
+    /// The error of a plan part the lowering does not emit yet (stage 1b: later segments,
+    /// aggregation). `bind::refuse_unplanned` refuses those queries with their own messages
+    /// first, so this is a guard only.
+    fn unlowered(&self) -> TraverserError {
+        GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            0..self.query.len(),
+            "this query form is not yet supported in this version",
+        )
+        .alternative(
+            "write the query as MATCH patterns with WHERE and RETURN, or chain Gremlin steps \
+             after gql()",
+        )
+        .into_error(self.query)
     }
 
     /// The error of the phase 2 anchor (a mid-traversal `gql()`), which stage 1a never plans.
@@ -863,6 +880,7 @@ impl<'q> Lowering<'q> {
                         current,
                     });
                 }
+                ResultOp::Aggregate => return Err(self.unlowered()),
                 ResultOp::Distinct => instrs.push(Instr::Dedup),
                 ResultOp::Order => {
                     let aliases: Vec<(String, usize)> = columns
@@ -949,7 +967,8 @@ impl<'q> Lowering<'q> {
         labelled
     }
 
-    /// The path label of each binding: the variable name; an anonymous binding `#<id>`
+    /// The path label of each binding: its key (the variable name, or `#<id>` for a name bound
+    /// again after a `WITH` dropped it, decision C14); an anonymous binding `#<id>`
     /// (no plain identifier starts with `#`), with more `#` in front while it collides with a
     /// back-quoted variable name.
     fn labels(&self) -> Vec<CompactString> {
@@ -1102,7 +1121,7 @@ fn next_hop(ops: &[Op], at: usize) -> Option<&Expand> {
         match op {
             Op::Join { .. } | Op::Filter(_) => {}
             Op::Expand(next) if next.from_current => return Some(next),
-            Op::Expand(_) | Op::Scan(_) | Op::Anchor(_) => return None,
+            Op::Expand(_) | Op::Scan(_) | Op::Anchor(_) | Op::Resume(_) => return None,
         }
     }
     None

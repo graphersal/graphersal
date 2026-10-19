@@ -2,7 +2,7 @@ use super::*;
 use crate::gql::ast::Literal;
 use crate::gql::bind::bind;
 use crate::gql::parser::parse;
-use crate::gql::plan::{PushOp, PushOperand, classify};
+use crate::gql::plan::{PushOp, PushOperand, Stage, classify};
 
 // ----- helpers -----
 
@@ -59,6 +59,11 @@ fn shape(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
         .map(|op| match op {
             Op::Scan(s) => format!("scan {}", name(b, s.binding)),
             Op::Anchor(s) => format!("anchor {}", name(b, s.binding)),
+            Op::Resume(r) => format!(
+                "resume {}{}",
+                if r.from_current { "" } else { "^" },
+                name(b, r.binding)
+            ),
             Op::Expand(e) => {
                 let (l, r) = match e.direction {
                     EdgeDirection::Right => ("-", "->"),
@@ -628,4 +633,374 @@ fn storage_facts_read_statistics_and_untransformed_vertex_indexes() {
         &facts,
     );
     assert_eq!(start(&b, &p), "c");
+}
+
+// ----- stage 1b: segments, quantified edges, aggregation, labelling reasons -----
+
+/// The plan rendering of `ops` (as [`shape`]).
+fn ops_shape(b: &BoundQuery, p: &LogicalPlan, ops: &[Op]) -> Vec<String> {
+    let only = LogicalPlan {
+        ops: ops.to_vec(),
+        ..p.clone()
+    };
+    shape(b, &only)
+}
+
+/// One line per later stage: `match: ..`, `optional: .. witness w`, `with [..] filters [..]`
+/// (`labelled` when the row is labelled).
+fn stages(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
+    p.stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::Match { ops, .. } => format!("match: {}", ops_shape(b, p, ops).join("; ")),
+            Stage::Optional { ops, witness, .. } => format!(
+                "optional: {}{}",
+                ops_shape(b, p, ops).join("; "),
+                witness.map_or(String::new(), |w| format!(" witness {}", name(b, w)))
+            ),
+            Stage::Materialize(m) => format!(
+                "with {:?} filters {:?}{}",
+                m.result,
+                m.filters,
+                if m.labelled { " labelled" } else { "" }
+            ),
+        })
+        .collect()
+}
+
+/// The bindings named `n`, in id order (a pattern binding and the WITH column bindings).
+fn named(b: &BoundQuery, n: &str) -> Vec<BindingId> {
+    b.bindings
+        .iter()
+        .filter(|x| x.name.as_ref().is_some_and(|i| i.name == n))
+        .map(|x| x.id)
+        .collect()
+}
+
+fn reasons(p: &LogicalPlan, id: BindingId) -> Labelling {
+    p.labelling[id.0]
+}
+
+fn only_1a_reasons(l: &Labelling) -> bool {
+    !l.resume && !l.optional && !l.group && !l.path
+}
+
+#[test]
+fn a_1a_query_is_one_segment_without_stages() {
+    for q in [
+        "MATCH (a:person)-[:knows]->(b), (c)-->(a) WHERE a.age > b.age RETURN DISTINCT a, c \
+         ORDER BY a.name SKIP 1 LIMIT 2",
+        "MATCH (a)-[e]-(b)-[f]-(a) RETURN e",
+        "MATCH (a) MATCH (a)-->(b) RETURN b.name AS name",
+    ] {
+        let (_, p) = plan_with(q, &NoFacts);
+        assert!(p.stages.is_empty(), "{q}");
+        assert!(p.labelling.iter().all(only_1a_reasons), "{q}");
+        assert_eq!(p.result.first(), Some(&ResultOp::Project), "{q}");
+        for op in &p.ops {
+            if let Op::Expand(e) = op {
+                assert_eq!(e.quantifier, None, "{q}");
+            }
+        }
+    }
+    // A plain edge walked from its written target is reversed too.
+    let q = "MATCH (a)-[e]->(b:person {name: 'x'}) RETURN e";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan b", "b<-[e]-a"]);
+    assert!(matches!(&p.ops[1], Op::Expand(e) if e.reversed));
+    let (_, p) = plan_with("MATCH (a:person {name: 'x'})-[e]->(b) RETURN e", &NoFacts);
+    assert!(matches!(&p.ops[1], Op::Expand(e) if !e.reversed));
+}
+
+#[test]
+fn an_optional_match_continues_from_the_current_element() {
+    let q = "MATCH (a:person) OPTIONAL MATCH (a)-[:knows]->(b) RETURN a.name, b.name";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a"]);
+    assert_eq!(stages(&b, &p), ["optional: resume a; a-[_1]->b witness b"]);
+    let (a, bb) = (named(&b, "a")[0], named(&b, "b")[0]);
+    // Both are read after the optional part: through their labels, never the current element.
+    assert!(reasons(&p, a).optional && !reasons(&p, a).resume);
+    assert!(reasons(&p, bb).optional);
+    assert_eq!(labelled(&b, &p), ["a", "b"]);
+    // The part's own conditions stay inside it, also one on the outer binding.
+    let q = "MATCH (a:person) OPTIONAL MATCH (a)-[:knows]->(b:person) WHERE a.age < b.age \
+             AND a.name <> 'x' RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        ["optional: filter [1]; resume a; a-[_1]->b; filter [0] witness b"]
+    );
+}
+
+#[test]
+fn an_optional_match_away_from_the_current_element_resumes_with_a_label() {
+    let q = "MATCH (a:person)-[:created]->(s) OPTIONAL MATCH (a)-[:knows]->(c) RETURN c.name";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a-[_1]->s"]);
+    assert_eq!(stages(&b, &p), ["optional: resume ^a; a-[_3]->c witness c"]);
+    let a = named(&b, "a")[0];
+    assert!(reasons(&p, a).resume && !reasons(&p, a).optional);
+    assert_eq!(labelled(&b, &p), ["a", "c"]);
+    // Two components of one part: the current element's first, the other one by a label.
+    let q = "MATCH (a)-->(s) OPTIONAL MATCH (a)-->(x), (s)-->(y) RETURN x, y";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        ["optional: resume s; s-[_5]->y; resume ^a; a-[_3]->x trail!=_5 witness x"]
+    );
+}
+
+#[test]
+fn a_leading_optional_match_has_no_first_segment() {
+    let (b, p) = plan_with("OPTIONAL MATCH (a:person)-->(b) RETURN a, b", &NoFacts);
+    assert!(p.ops.is_empty());
+    assert_eq!(stages(&b, &p), ["optional: scan a; a-[_1]->b witness a"]);
+    assert_eq!(labelled(&b, &p), ["a", "b"]);
+}
+
+#[test]
+fn a_plain_match_after_an_optional_part_reads_through_labels() {
+    let q = "MATCH (a)-->(b) OPTIONAL MATCH (b)-->(c) MATCH (a)-->(d) RETURN a, c, d";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a-[_1]->b"]);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "optional: resume b; b-[_3]->c witness c",
+            "match: resume ^a; a-[_5]->d",
+        ]
+    );
+    let a = named(&b, "a")[0];
+    assert!(reasons(&p, a).resume && reasons(&p, a).optional);
+    // `d` is bound after the optional part ended: the stage 1a rules hold for it.
+    assert!(!reasons(&p, named(&b, "d")[0]).optional);
+    // b is not read after the part (only resumed from inside it, as the current element).
+    assert!(!p.must_label(named(&b, "b")[0]));
+}
+
+#[test]
+fn a_materializing_with_resumes_from_its_column() {
+    let q = "MATCH (a:person) WITH a, count(*) AS n MATCH (a)-->(c) RETURN c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a"]);
+    assert_eq!(
+        stages(&b, &p),
+        ["with [Aggregate] filters []", "match: resume ^a; a-[_3]->c"]
+    );
+    let column = named(&b, "a")[1];
+    assert!(b.binding(column).is_some_and(|x| x.column.is_some()));
+    // A column binding is read from its row, never labelled itself.
+    assert!(!p.must_label(column));
+    // Reading a column after the row was left labels the row.
+    let q = "MATCH (a:person) WITH a, count(*) AS n MATCH (a)-->(c) RETURN a, n, c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Aggregate] filters [] labelled",
+            "match: resume ^a; a-[_3]->c"
+        ]
+    );
+    // A join back to a column reads it after the row was left too.
+    let q = "MATCH (a:person) WITH a, count(*) AS n MATCH (a)-->(c)-->(a) RETURN c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Aggregate] filters [] labelled",
+            "match: resume ^a; a-[_3]->c; c-[_5]->a trail!=_3; join a",
+        ]
+    );
+}
+
+#[test]
+fn a_materializing_with_read_on_its_row_needs_no_row_label() {
+    let q = "MATCH (a) WITH a, count(*) AS n WITH a, n ORDER BY n DESC LIMIT 1 WHERE n > 0 \
+             RETURN a, n";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Aggregate] filters []",
+            "with [Project, Order, Limit(Literal(1))] filters [0]",
+        ]
+    );
+    // DISTINCT, OFFSET and a FILTER after the cut (a filter-only stage on the row).
+    let q = "MATCH (a) WITH DISTINCT a.name AS name SKIP 1 FILTER name <> 'x' RETURN name";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Project, Distinct, Offset(Literal(1))] filters []",
+            "match: filter [0]",
+        ]
+    );
+    // An OPTIONAL MATCH after it: the row is left inside the part.
+    let q = "MATCH (a) WITH a ORDER BY a.age LIMIT 2 OPTIONAL MATCH (a)-->(b) RETURN a, b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        [
+            "with [Project, Order, Limit(Literal(2))] filters [] labelled",
+            "optional: resume ^a; a-[_2]->b witness b",
+        ]
+    );
+}
+
+#[test]
+fn a_name_bound_again_after_with_is_a_new_node() {
+    let q = "MATCH (a)-->(b) WITH a, count(b) AS n MATCH (b)-->(a) RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    let bs = named(&b, "b");
+    assert_eq!(bs.len(), 2);
+    assert_ne!(
+        b.binding(bs[1]).and_then(|x| x.key.clone()).as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        stages(&b, &p),
+        ["with [Aggregate] filters []", "match: resume ^a; a<-[_6]-b"]
+    );
+}
+
+#[test]
+fn let_filter_and_a_projecting_with_plan_like_stage_1a() {
+    let pairs = [
+        (
+            "MATCH (a:person) LET x = a.age FILTER x > 30 RETURN x",
+            "MATCH (a:person) WHERE a.age > 30 RETURN a.age AS x",
+        ),
+        (
+            "MATCH (a:person) WITH a WHERE a.age > 30 MATCH (a)-->(b) RETURN b",
+            "MATCH (a:person) WHERE a.age > 30 MATCH (a)-->(b) RETURN b",
+        ),
+    ];
+    for (q, twin) in pairs {
+        let (b, p) = plan_with(q, &NoFacts);
+        let (tb, tp) = plan_with(twin, &NoFacts);
+        assert!(p.stages.is_empty(), "{q}");
+        assert_eq!(shape(&b, &p), shape(&tb, &tp), "{q}");
+        assert_eq!(p.ops, tp.ops, "{q}");
+    }
+}
+
+#[test]
+fn aggregation_is_a_result_operation() {
+    let q = "MATCH (a:person) RETURN a.name AS name, count(*) AS n ORDER BY n DESC LIMIT 3";
+    let (_, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        p.result,
+        [
+            ResultOp::Aggregate,
+            ResultOp::Order,
+            ResultOp::Limit(crate::gql::bind::Count::Literal(3)),
+        ]
+    );
+    let (_, p) = plan_with("MATCH (a) RETURN DISTINCT count(a) + 1 AS n", &NoFacts);
+    assert_eq!(p.result, [ResultOp::Aggregate, ResultOp::Distinct]);
+}
+
+#[test]
+fn quantified_edges_walk_after_plain_ones() {
+    // Both edges continue from b: the plain one first, though written last.
+    let q = "MATCH (b:person {name: 'x'})-[e:knows]->{1,2}(a), (b)-[:created]->(c) RETURN *";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan b", "b-[_3]->c", "^b-[e]->a"]);
+    let Some(Op::Expand(quantified)) = p.ops.get(2) else {
+        panic!("an expansion");
+    };
+    let quantifier = quantified.quantifier.expect("quantified");
+    assert_eq!((quantifier.min, quantifier.max), (1, Some(2)));
+    assert!(!quantified.reversed);
+    // Walked from its written target: reversed.
+    let q = "MATCH (a)-[e:knows]->{1,3}(b:person {name: 'x'})-[:created]->(c) RETURN a, b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan b", "b-[_3]->c", "^b<-[e]-a"]);
+    let Some(Op::Expand(quantified)) = p.ops.get(2) else {
+        panic!("an expansion");
+    };
+    assert!(quantified.reversed && quantified.quantifier.is_some());
+    // A quantified edge back to its start closes with a join.
+    let (b, p) = plan_with("MATCH (a)-[:knows]->{1,3}(a) RETURN a", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a-[_1]->a", "join a"]);
+}
+
+#[test]
+fn trail_lists_hold_group_variables() {
+    let q = "MATCH (a)-[e1]->(b)-[e2]->{1,2}(c)-[e3]->(d) RETURN *";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a-[e1]->b",
+            "b-[e2]->c trail!=e1",
+            "c-[e3]->d trail!=e1,e2"
+        ]
+    );
+    let e2 = named(&b, "e2")[0];
+    assert!(reasons(&p, e2).group && reasons(&p, e2).trail);
+    // Disjoint label sets still need no check, a group variable included.
+    let q = "MATCH (a)-[:knows]->{1,2}(b)-[:created]->(c) RETURN c";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a-[_1]->b", "b-[_3]->c"]);
+    // Every group variable is labelled, read or not.
+    assert!(reasons(&p, BindingId(1)).group);
+    assert!(!reasons(&p, BindingId(3)).needed());
+}
+
+#[test]
+fn read_path_variables_label_their_elements() {
+    let q = "MATCH p = (a)-[:knows]->{1,3}(b)-->(c) RETURN p";
+    let (b, p) = plan_with(q, &NoFacts);
+    for n in ["a", "b", "c"] {
+        assert!(reasons(&p, named(&b, n)[0]).path, "{n}");
+    }
+    assert!(reasons(&p, BindingId(2)).path && reasons(&p, BindingId(4)).path);
+    // The path binding itself never needs a label of its own reasons but `read`.
+    let path = named(&b, "p")[0];
+    assert!(only_1a_reasons(&reasons(&p, path)));
+    // An unread path variable labels nothing.
+    let (_, p) = plan_with("MATCH p = (a)-->(b) RETURN a.name", &NoFacts);
+    assert!(p.labelling.iter().all(|l| !l.path));
+}
+
+#[test]
+fn a_group_variable_read_after_its_optional_part_labels_the_witness() {
+    let q = "MATCH (a) OPTIONAL MATCH (a)-[e]->{0,2}(b) RETURN e";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(stages(&b, &p), ["optional: resume a; a-[e]->b witness b"]);
+    let witness = named(&b, "b")[0];
+    assert!(reasons(&p, witness).optional);
+    assert_eq!(labelled(&b, &p), ["e", "b"]);
+    // Not read after the part: the witness stays unlabelled.
+    let (b, p) = plan_with(
+        "MATCH (a) OPTIONAL MATCH (a)-[e]->{0,2}(b) RETURN a",
+        &NoFacts,
+    );
+    assert!(!p.must_label(named(&b, "b")[0]));
+    // No new node in the part: no witness.
+    let (b, p) = plan_with(
+        "MATCH (a) OPTIONAL MATCH (a)-[e]->{0,2}(a) RETURN e",
+        &NoFacts,
+    );
+    assert_eq!(stages(&b, &p), ["optional: resume a; a-[e]->a; join a"]);
+}
+
+#[test]
+fn a_stage_1b_plan_is_deterministic() {
+    let q = "MATCH (a:person)-[e:knows]->{1,3}(b) OPTIONAL MATCH (b)-->(c), (a)-[:created]->(d) \
+             WITH a, count(c) AS n, collect_list(d) AS ds ORDER BY n LIMIT 5 \
+             MATCH p = (a)-->(x)<-[:knows*]-(y) WHERE x.age > n RETURN p, n";
+    let facts = Facts {
+        counts: vec![("person", 4)],
+        total: Some(6),
+        indexes: vec![],
+    };
+    let (b, p) = plan_with(q, &facts);
+    for _ in 0..8 {
+        assert_eq!(plan(&b, &facts, None), p);
+    }
+    assert_eq!(p.stages.len(), 3);
 }

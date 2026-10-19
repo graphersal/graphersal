@@ -1,32 +1,51 @@
-//! The logical plan of a bound GQL query (stage 1a): what the planner decided, in the order the
-//! lowering emits it.
+//! The logical plan of a bound GQL query: what the planner decided, in the order the lowering
+//! emits it.
 //!
-//! A [`LogicalPlan`] has two parts:
+//! A [`LogicalPlan`] has three parts:
 //!
-//! - **the match pipeline** ([`LogicalPlan::ops`]): for every connected component of the pattern
-//!   graph (node bindings as vertices, edge bindings as edges, across all `MATCH` clauses, since
-//!   stage 1a has no `OPTIONAL MATCH`) a [`Op::Scan`] (or, from phase 2 on, an [`Op::Anchor`])
+//! - **the match pipeline of the first segment** ([`LogicalPlan::ops`]): for every connected
+//!   component of the pattern graph of the first segment's `MATCH` clauses (node bindings as
+//!   vertices, edge bindings as edges) a [`Op::Scan`] (or, from phase 2 on, an [`Op::Anchor`])
 //!   followed by one [`Op::Expand`] per pattern edge in walk order, an [`Op::Join`] after an
 //!   expansion that reaches a node bound earlier (a cycle closing or a node repeated across
 //!   patterns), and [`Op::Filter`]s of the conjuncts over several bindings (or none), each placed
 //!   right after the operation that binds the last binding it reads. Several components follow
 //!   one another: the second one starts with a second scan, a Cartesian product (correct but not
-//!   optimized, Phase 0 outcome 2);
-//! - **the result pipeline** ([`LogicalPlan::result`]): [`ResultOp::Project`], then
-//!   [`ResultOp::Distinct`], [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as
-//!   far as the query has them.
+//!   optimized, Phase 0 outcome 2). Empty when the query starts with `OPTIONAL MATCH` (its
+//!   first stage is then a [`Stage::Optional`] starting from one unit row);
+//! - **the later stages** ([`LogicalPlan::stages`], stage 1b, plan mechanism 2): one [`Stage`]
+//!   per later segment of the [`BoundQuery`] in order: a [`Stage::Match`] (plain `MATCH`
+//!   clauses after a cut, or only the conjuncts of a `FILTER`), a [`Stage::Optional`] (an
+//!   `OPTIONAL MATCH`, lowered inside `optional()`), a [`Stage::Materialize`] (a materializing
+//!   `WITH`). A segment's components start at a binding an earlier segment bound
+//!   ([`Op::Resume`]) when they hold one, else with a mid-traversal [`Op::Scan`]. Empty for a
+//!   stage 1a query, whose plan is exactly the stage 1a plan;
+//! - **the result pipeline** ([`LogicalPlan::result`]): [`ResultOp::Project`] (or
+//!   [`ResultOp::Aggregate`] when a column aggregates), then [`ResultOp::Distinct`],
+//!   [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as far as the query has them.
 //!
 //! The conjuncts over one binding are not operations of their own: they belong to the element
 //! that binds it ([`ElementFilters`]: the scan's node, an expansion's edge or new node), split
 //! into those the lowering may push into `has()` ([`Pushdown`], the Phase 0 Q5 table, see
 //! [`classify`]) and the residual ones for `gql:filter`. A repeated binding gets its filters
-//! (and its label expressions) once, where it is bound first.
+//! (and its label expressions) once, where it is bound first; a conjunct of a later segment
+//! that reads a binding of an earlier one is an [`Op::Filter`] of that segment.
+//!
+//! **Quantified edges** (stage 1b, plan mechanism 5) are expansions with
+//! [`Expand::quantifier`]; their edge binding is a group variable, labelled on every iteration
+//! ([`Labelling::group`]).
 //!
 //! **Path labels (design D11).** [`LogicalPlan::labelling`] records per binding why it needs a
 //! path label (`as()`): read by a later expression ([`Binding::read`](super::bind::Binding)), the
-//! target of a join check, the target of a trail check, or the origin of an expansion that does
-//! not continue from the current element (a branch, lowered as `select(x)`). Nothing else is
-//! labelled, so bulk merging is not lost to bookkeeping the query never reads.
+//! target of a join check, the target of a trail check, the origin of an expansion that does
+//! not continue from the current element (a branch, lowered as `select(x)`), the start of a
+//! later segment's component away from the current element, a read after an `OPTIONAL MATCH`
+//! part (no read goes to the current element there), a group variable, an element of a read
+//! path variable's pattern. Nothing else is labelled, so bulk merging is not lost to
+//! bookkeeping the query never reads. A materializing `WITH` column binding gets no reason but
+//! `path` (a path variable reads it through a label set after `gql:bind` moved to it): it is
+//! read from its row, and [`Materialize::labelled`] says whether the row needs its own label
+//! (`as("#w<k>")`) because a read comes after a later stage left the row.
 //!
 //! **Phase 2 seam.** The planner takes an optional anchor binding (always `None` in stage 1a):
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a
@@ -34,7 +53,9 @@
 
 use std::collections::BTreeSet;
 
-use super::ast::{BinaryOp, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal};
+use super::ast::{
+    BinaryOp, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal, Quantifier,
+};
 use super::bind::{BindingId, BoundQuery, Conjunct, Count, Predicate};
 use super::lexer::Span;
 
@@ -48,9 +69,12 @@ pub(crate) const ANCHOR_VARIABLE: &str = "";
 /// The planned query (module docs).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LogicalPlan {
-    /// The match pipeline: every component in emission order.
+    /// The match pipeline of the first segment: every component in emission order (empty when
+    /// the query starts with `OPTIONAL MATCH`).
     pub(crate) ops: Vec<Op>,
-    /// The result pipeline.
+    /// The later segments in order (empty for a stage 1a query).
+    pub(crate) stages: Vec<Stage>,
+    /// The result pipeline of `RETURN`.
     pub(crate) result: Vec<ResultOp>,
     /// Why each binding needs a path label, by [`BindingId`].
     pub(crate) labelling: Vec<Labelling>,
@@ -78,6 +102,52 @@ impl LogicalPlan {
     }
 }
 
+/// One later segment of the plan (module docs).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Stage {
+    /// Plain `MATCH` clauses after a cut (an `OPTIONAL MATCH` or a materializing `WITH`), or
+    /// only conjuncts (a `FILTER` there): `ops` continue every row.
+    Match {
+        /// The segment (index into [`BoundQuery::segments`]).
+        segment: usize,
+        /// Its match pipeline.
+        ops: Vec<Op>,
+    },
+    /// An `OPTIONAL MATCH`: `ops` run as one optional part (plan mechanism 4); a row they do not
+    /// match continues unchanged, its bindings of the part absent (NULL).
+    Optional {
+        /// The segment (index into [`BoundQuery::segments`]).
+        segment: usize,
+        /// Its match pipeline, the segment's own conjuncts included.
+        ops: Vec<Op>,
+        /// A node binding the part always binds when it matches (its first new node by id):
+        /// labelled ([`Labelling::optional`]) when a group variable of the part is read after
+        /// it, so that a missing label tells "not matched" (NULL) from a zero-length match
+        /// (`[]`). `None`: the part binds no new node (every node was bound before it).
+        witness: Option<BindingId>,
+    },
+    /// A materializing `WITH` (decision C2).
+    Materialize(Materialize),
+}
+
+/// A materializing `WITH`: every row becomes its row map.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Materialize {
+    /// The segment (index into [`BoundQuery::segments`], a `Segment::With` holding the columns,
+    /// `ORDER BY`, `OFFSET` and `LIMIT`).
+    pub(crate) segment: usize,
+    /// Its result pipeline: [`ResultOp::Project`] or [`ResultOp::Aggregate`], then
+    /// [`ResultOp::Distinct`], [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`]
+    /// as far as the `WITH` has them.
+    pub(crate) result: Vec<ResultOp>,
+    /// The conjuncts of its `WHERE` (over its columns, on the row map), in text order.
+    pub(crate) filters: Vec<usize>,
+    /// Whether the row needs a path label (`as("#w<k>")`): a column is read after a later stage
+    /// left the row (moved to an element), so it is read from the labelled row
+    /// (`Binding::RowColumn`) instead of the current one.
+    pub(crate) labelled: bool,
+}
+
 /// One operation of the match pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Op {
@@ -86,6 +156,10 @@ pub(crate) enum Op {
     /// The start of the anchor's component (phase 2): the incoming traverser, checked against
     /// the binding's labels and filters. Never produced in stage 1a.
     Anchor(Scan),
+    /// The start of a component of a later segment at a node an earlier segment bound (its
+    /// labels and filters were checked there; the later segment's own conditions on it are
+    /// [`Op::Filter`]s right after).
+    Resume(Resume),
     /// One pattern edge, walked from a bound node to the other end.
     Expand(Expand),
     /// The current element (just reached by the preceding [`Op::Expand`]) must equal the
@@ -96,6 +170,18 @@ pub(crate) enum Op {
     },
     /// Conjunct indexes over zero or several bindings, every one of them bound here.
     Filter(Vec<usize>),
+}
+
+/// The start of a later segment's component at a node bound before the segment.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Resume {
+    /// The node binding (a pattern binding of an earlier segment, or a materializing `WITH`
+    /// column binding, read from its row: `gql:bind`).
+    pub(crate) binding: BindingId,
+    /// Whether it is the current element already (only for a pattern binding: an
+    /// `OPTIONAL MATCH` continuing from the element the segment before it ended on); else the
+    /// lowering moves to it (`select` / `gql:bind`).
+    pub(crate) from_current: bool,
 }
 
 /// A scan (or the anchor) of a component's start node.
@@ -123,12 +209,20 @@ pub(crate) struct Expand {
     pub(crate) edge: BindingId,
     /// The direction as seen from `from` (`Right`: `from` is the edge's source).
     pub(crate) direction: EdgeDirection,
+    /// Walked from the end written last (`to` is the node written before the edge): a path
+    /// variable assembles a quantified edge's iterations in reverse.
+    pub(crate) reversed: bool,
+    /// The quantifier of a quantified edge (`edge` is then a group variable, walked as a loop
+    /// of single hops, each checked for trail against the earlier iterations).
+    pub(crate) quantifier: Option<Quantifier>,
     /// The edge binding was bound earlier (the same edge variable in an earlier `MATCH`): the
     /// edge must equal it, checked on the edge traverser (lowered as `where(P.eq(e))`).
     pub(crate) edge_join: bool,
     /// Earlier edges of the same `MATCH` clause this edge must differ from (trail semantics),
     /// checked on the edge traverser right after the edge step; edges whose label sets cannot
-    /// overlap are left out (Phase 0 Q8).
+    /// overlap are left out (Phase 0 Q8). A group variable listed here (or a quantified edge
+    /// listing any) compares with every iteration (`gql:trail`); a quantified edge also checks
+    /// its own earlier iterations, which is not listed.
     pub(crate) trail: Vec<BindingId>,
     /// The edge's own conjuncts (empty when `edge_join`).
     pub(crate) edge_filters: ElementFilters,
@@ -158,11 +252,15 @@ impl ElementFilters {
     }
 }
 
-/// One operation of the result pipeline (the details are in the [`BoundQuery`]).
+/// One operation of a result pipeline (the details are in the [`BoundQuery`] for `RETURN`, in
+/// the `BoundWith` of the segment for a [`Materialize`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ResultOp {
-    /// `RETURN`: one row map of [`BoundQuery::columns`].
+    /// One row map of the columns.
     Project,
+    /// One row map per group (`gql:aggregate`): the columns without an aggregate are the
+    /// grouping keys (implicit grouping, plan mechanism 3).
+    Aggregate,
     /// `RETURN DISTINCT`.
     Distinct,
     /// `ORDER BY` [`BoundQuery::order_by`].
@@ -184,13 +282,34 @@ pub(crate) struct Labelling {
     pub(crate) trail: bool,
     /// The origin of an expansion that does not continue from the current element.
     pub(crate) branch: bool,
+    /// A later segment's component starts at it ([`Op::Resume`]) while it is not the current
+    /// element (lowered as `select(x)`).
+    pub(crate) resume: bool,
+    /// Read after an `OPTIONAL MATCH` part, where no read goes to the current element (the
+    /// current object differs per branch), or the `witness` of a [`Stage::Optional`] whose
+    /// group variable is read after it.
+    pub(crate) optional: bool,
+    /// A group variable: every iteration of the quantified edge is labelled (`#g<id>`), for its
+    /// own trail check and the list the variable reads.
+    pub(crate) group: bool,
+    /// An element of the pattern of a path variable that is read: the path is assembled from
+    /// its elements' labels (plan mechanism 6); for a group variable the inner vertices are
+    /// labelled too (`#gv<id>`). The only reason a materializing `WITH` column binding gets.
+    pub(crate) path: bool,
 }
 
 impl Labelling {
     /// Whether any reason holds.
     #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn needed(&self) -> bool {
-        self.read || self.join || self.trail || self.branch
+        self.read
+            || self.join
+            || self.trail
+            || self.branch
+            || self.resume
+            || self.optional
+            || self.group
+            || self.path
     }
 }
 

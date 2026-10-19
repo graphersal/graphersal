@@ -1,4 +1,4 @@
-//! The planner: turns a [`BoundQuery`] into a [`LogicalPlan`] (stage 1a).
+//! The planner: turns a [`BoundQuery`] into a [`LogicalPlan`].
 //!
 //! It reads the graph only through [`PlannerFacts`] (vertex label counts and which vertex
 //! property indexes exist), which [`StorageFacts::from_storage`] builds from any
@@ -6,6 +6,27 @@
 //! internals; tests pass their own facts. The plan is deterministic for a given query and facts:
 //! every choice is a minimum over a total order ending in the text order of the bindings or
 //! pattern edges.
+//!
+//! # Segments (stage 1b, plan mechanism 2)
+//!
+//! The planner plans the [`BoundQuery::segments`] in order, each with the rules below over the
+//! pattern graph of its own clauses; the first segment's plan is [`LogicalPlan::ops`] (for a
+//! stage 1a query, the only segment: the plan is exactly the stage 1a plan), every later one a
+//! [`Stage`]. The bindings bound by earlier segments are bound already when a segment starts:
+//!
+//! - a component of a later segment holding such a node starts there ([`Op::Resume`]): at the
+//!   current element when it is one (an `OPTIONAL MATCH` continuing from where the segment
+//!   before it ended), else at the earliest such node by binding id; components with such a
+//!   start come first (current first), then the others as mid-traversal scans ranked as below;
+//! - an expansion reaching such a node is a join, an edge variable bound before it an edge join;
+//! - the segment's conjuncts that read only bindings bound before it are an [`Op::Filter`] at
+//!   the start of the segment (the first segment keeps the stage 1a rule: after the first scan);
+//! - a materializing `WITH` is a [`Stage::Materialize`]: its result pipeline (`Aggregate` when
+//!   a column aggregates, else `Project`; then `DISTINCT`, `ORDER BY`, `OFFSET`, `LIMIT`) and
+//!   its `WHERE` conjuncts; its columns are bound after it.
+//!
+//! The current element after a segment is the one its last operation reached; after an
+//! `OPTIONAL MATCH` or a materializing `WITH` there is none.
 //!
 //! # Start node of a component
 //!
@@ -21,8 +42,9 @@
 //!
 //! # Walk order
 //!
-//! From the start, the pattern edges with a bound end are walked greedily, ranked by: an edge
-//! whose both ends are bound first (it closes a cycle, an [`Op::Join`] check, the earliest
+//! From the start, the pattern edges with a bound end are walked greedily, ranked by: a plain
+//! edge before a quantified one (a loop multiplies the rows most); then an edge whose both ends
+//! are bound first (it closes a cycle, an [`Op::Join`] check, the earliest
 //! filter there is); then the far node's filters (own conjuncts before label expressions before
 //! none); then continuing from the current element before branching back to an earlier node
 //! (`select(x)`, which needs a label); then the text order of the pattern edges.
@@ -41,12 +63,24 @@
 //!   clause whose label sets may overlap ([`EdgeLabels::may_overlap`]).
 //! - A conjunct over zero or several bindings is an [`Op::Filter`] right after the operation
 //!   that binds the last binding it reads (one with no binding right after the first scan).
+//! - A quantified edge walked from its written target reverses its direction like a plain
+//!   one ([`Expand::reversed`]); its trail list holds the earlier edges as for a plain edge.
+//!
+//! # Labelling
+//!
+//! Besides the stage 1a reasons (read, join, trail, branch) the planner records: a later
+//! segment's start away from the current element (`resume`), every group variable (`group`),
+//! every node and edge of a read path variable's pattern (`path`), and, from a pass over the
+//! finished plan in execution order, every read of a pattern binding after an `OPTIONAL MATCH`
+//! part that ended after the binding was bound (`optional`; the witness of a part whose group
+//! variable is read after it too) and every read of a materializing `WITH` column after a later
+//! stage left its row ([`Materialize::labelled`]).
 
-use super::ast::EdgeDirection;
-use super::bind::{BindingId, BindingKind, BoundQuery};
+use super::ast::{EdgeDirection, Quantifier};
+use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Segment};
 use super::plan::{
-    EdgeLabels, ElementFilters, Expand, Labelling, LogicalPlan, Op, Pushdown, ResultOp, Scan,
-    and_factors, classify_all, element_filters, scan_labels,
+    EdgeLabels, ElementFilters, Expand, Labelling, LogicalPlan, Materialize, Op, Pushdown,
+    ResultOp, Resume, Scan, Stage, and_factors, classify_all, element_filters, scan_labels,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -130,6 +164,21 @@ struct PatternEdge {
     edge: BindingId,
     direction: EdgeDirection,
     target: BindingId,
+    quantifier: Option<Quantifier>,
+}
+
+/// How a component starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// A scan of every vertex.
+    Scan,
+    /// The phase 2 anchor.
+    Anchor,
+    /// A node an earlier segment bound ([`Op::Resume`]).
+    Resume {
+        /// It is the current element.
+        current: bool,
+    },
 }
 
 /// Plans `bound` with `facts`; `anchor` is the phase 2 anchor binding (`None` in stage 1a).
@@ -141,7 +190,9 @@ pub(crate) fn plan(
     Planner::new(bound, facts).run(anchor)
 }
 
-/// The order of a component's start: not the anchor's component, level, estimated size, binding id.
+/// The order of a component's start: not started at a bound node (the anchor or a node bound
+/// before the segment), level (for a bound start: 0 current, 1 other), estimated size, binding
+/// id.
 type StartKey = (bool, u8, u64, BindingId);
 
 struct Planner<'q> {
@@ -171,6 +222,7 @@ impl<'q> Planner<'q> {
                         edge: step.edge,
                         direction: step.direction,
                         target: step.node,
+                        quantifier: step.quantifier,
                     });
                     source = step.node;
                 }
@@ -187,54 +239,203 @@ impl<'q> Planner<'q> {
                 .bindings
                 .iter()
                 .map(|b| Labelling {
-                    read: b.read,
+                    read: b.read && b.column.is_none(),
                     ..Labelling::default()
                 })
                 .collect(),
             ops: Vec::new(),
-            pending: bound.cross.clone(),
+            pending: Vec::new(),
             walked: vec![Vec::new(); bound.matches.len()],
         }
     }
 
     fn run(mut self, anchor: Option<BindingId>) -> LogicalPlan {
         let anchor = anchor.filter(|a| self.is_node(*a));
-        // Each component with its start: the anchor's component first, then best start first
-        // (level, estimated size, binding id).
-        let mut starts: Vec<(StartKey, Vec<BindingId>)> = self
-            .components()
+        let bound = self.bound;
+        let mut first = Vec::new();
+        let mut stages = Vec::new();
+        let mut current: Option<BindingId> = None;
+        for (index, segment) in bound.segments.iter().enumerate() {
+            match segment {
+                Segment::Match(clauses) => {
+                    let anchor = anchor.filter(|_| index == 0);
+                    let ops = self.segment(index, clauses, current, anchor);
+                    current = current_after(&ops, current);
+                    if index == 0 {
+                        first = ops;
+                    } else {
+                        stages.push(Stage::Match {
+                            segment: index,
+                            ops,
+                        });
+                    }
+                }
+                Segment::Optional(clause) => {
+                    let ops = self.segment(index, std::slice::from_ref(clause), current, None);
+                    stages.push(Stage::Optional {
+                        segment: index,
+                        ops,
+                        witness: self.witness(index),
+                    });
+                    current = None;
+                }
+                Segment::With(with) => {
+                    stages.push(Stage::Materialize(self.materialize(index, with)));
+                    current = None;
+                }
+            }
+        }
+        self.mark_static();
+        self.mark_positions(&first, &mut stages);
+        let result = result_ops(
+            bound.aggregated(),
+            bound.distinct,
+            !bound.order_by.is_empty(),
+            &bound.offset,
+            &bound.limit,
+        );
+        LogicalPlan {
+            ops: first,
+            stages,
+            result,
+            labelling: self.labelling,
+            pushdown: self.pushdown,
+            anchor,
+        }
+    }
+
+    /// Plans segment `index` of `clauses` (module docs): its components best start first, its
+    /// conjuncts, the leftovers at the end. `current` is the current element when it starts.
+    fn segment(
+        &mut self,
+        index: usize,
+        clauses: &[usize],
+        current: Option<BindingId>,
+        anchor: Option<BindingId>,
+    ) -> Vec<Op> {
+        let bound = self.bound;
+        self.pending = bound
+            .cross
+            .iter()
+            .copied()
+            .filter(|&c| bound.conjuncts.get(c).is_some_and(|cj| cj.segment == index))
+            .collect();
+        if index > 0 {
+            self.place_filters();
+        }
+        let n = bound.bindings.len();
+        // The pattern edges and nodes of the segment's clauses (membership by index, linear).
+        let mut in_clauses = vec![false; bound.matches.len()];
+        for &clause in clauses {
+            if let Some(slot) = in_clauses.get_mut(clause) {
+                *slot = true;
+            }
+        }
+        let edges: Vec<usize> = (0..self.edges.len())
+            .filter(|&i| {
+                self.edges
+                    .get(i)
+                    .is_some_and(|e| in_clauses.get(e.clause).copied().unwrap_or(false))
+            })
+            .collect();
+        let mut in_pattern = vec![false; n];
+        for &clause in clauses {
+            for path in bound.matches.get(clause).map_or(&[][..], |m| &m.paths) {
+                for node in std::iter::once(path.start).chain(path.steps.iter().map(|s| s.node)) {
+                    if let Some(slot) = in_pattern.get_mut(node.0) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+        let nodes: Vec<BindingId> = bound
+            .bindings
+            .iter()
+            .filter(|b| b.kind == BindingKind::Node && in_pattern.get(b.id.0) == Some(&true))
+            .map(|b| b.id)
+            .collect();
+        // Each component with its start: the anchor's component or one holding a node bound
+        // before the segment first (the current element first), then best start first (level,
+        // estimated size, binding id).
+        let mut starts: Vec<(StartKey, Start, Vec<BindingId>)> = self
+            .components(&edges, &nodes)
             .into_iter()
             .map(|nodes| {
-                let key = match anchor.filter(|a| nodes.contains(a)) {
-                    Some(a) => (false, 0, 0, a),
-                    None => {
+                let resume = current
+                    .filter(|c| nodes.contains(c) && self.is_bound(*c))
+                    .or_else(|| nodes.iter().copied().find(|&id| self.is_bound(id)));
+                match (anchor.filter(|a| nodes.contains(a)), resume) {
+                    (Some(a), _) => ((false, 0, 0, a), Start::Anchor, nodes),
+                    (None, Some(r)) => {
+                        let is_current = current == Some(r);
+                        (
+                            (false, u8::from(!is_current), 0, r),
+                            Start::Resume {
+                                current: is_current,
+                            },
+                            nodes,
+                        )
+                    }
+                    (None, None) => {
                         let (level, size, id) = nodes
                             .iter()
                             .map(|&id| self.start_rank(id))
                             .min()
                             .unwrap_or((u8::MAX, u64::MAX, BindingId(usize::MAX)));
-                        (true, level, size, id)
+                        ((true, level, size, id), Start::Scan, nodes)
                     }
-                };
-                (key, nodes)
+                }
             })
             .collect();
-        starts.sort_unstable_by_key(|(key, _)| *key);
-        for ((not_anchor, _, _, start), nodes) in starts {
-            self.walk_component(start, &nodes, !not_anchor);
+        starts.sort_unstable_by_key(|(key, _, _)| *key);
+        for ((_, _, _, start), how, nodes) in starts {
+            self.walk_component(start, &nodes, &edges, how);
         }
         // Conjuncts left over (none in a well-formed query: every binding is bound).
         if !self.pending.is_empty() {
             let rest = std::mem::take(&mut self.pending);
             self.ops.push(Op::Filter(rest));
         }
-        let result = self.result();
-        LogicalPlan {
-            ops: self.ops,
-            result,
-            labelling: self.labelling,
-            pushdown: self.pushdown,
-            anchor,
+        std::mem::take(&mut self.ops)
+    }
+
+    /// The first node an `OPTIONAL MATCH` segment binds (see `Stage::Optional`).
+    fn witness(&self, segment: usize) -> Option<BindingId> {
+        self.bound
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::Node && b.segment == segment && b.column.is_none())
+            .map(|b| b.id)
+    }
+
+    /// The stage of a materializing `WITH`; its columns are bound after it.
+    fn materialize(&mut self, index: usize, with: &BoundWith) -> Materialize {
+        let filters = self
+            .bound
+            .cross
+            .iter()
+            .copied()
+            .filter(|&c| {
+                self.bound
+                    .conjuncts
+                    .get(c)
+                    .is_some_and(|cj| cj.segment == index)
+            })
+            .collect();
+        for &output in &with.outputs {
+            self.bind(output);
+        }
+        Materialize {
+            segment: index,
+            result: result_ops(
+                with.columns.iter().any(|c| c.aggregate),
+                with.distinct,
+                !with.order_by.is_empty(),
+                &with.offset,
+                &with.limit,
+            ),
+            filters,
+            labelled: false,
         }
     }
 
@@ -244,9 +445,9 @@ impl<'q> Planner<'q> {
             .is_some_and(|b| b.kind == BindingKind::Node)
     }
 
-    /// The node bindings of each connected component, each sorted, components in order of
-    /// their smallest node binding.
-    fn components(&self) -> Vec<Vec<BindingId>> {
+    /// The `nodes` (sorted) of each connected component over the pattern edges `edges`, each
+    /// sorted, components in order of their smallest node binding.
+    fn components(&self, edges: &[usize], nodes: &[BindingId]) -> Vec<Vec<BindingId>> {
         let n = self.bound.bindings.len();
         let mut parent: Vec<usize> = (0..n).collect();
         fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -271,19 +472,16 @@ impl<'q> Planner<'q> {
                 }
             }
         };
-        for e in &self.edges {
+        for e in edges.iter().filter_map(|&i| self.edges.get(i)) {
             union(&mut parent, e.source.0, e.edge.0);
             union(&mut parent, e.edge.0, e.target.0);
         }
         let mut components: Vec<(usize, Vec<BindingId>)> = Vec::new();
-        for b in &self.bound.bindings {
-            if b.kind != BindingKind::Node {
-                continue;
-            }
-            let root = find(&mut parent, b.id.0);
+        for &id in nodes {
+            let root = find(&mut parent, id.0);
             match components.iter_mut().find(|(r, _)| *r == root) {
-                Some((_, nodes)) => nodes.push(b.id),
-                None => components.push((root, vec![b.id])),
+                Some((_, nodes)) => nodes.push(id),
+                None => components.push((root, vec![id])),
             }
         }
         components.into_iter().map(|(_, nodes)| nodes).collect()
@@ -374,7 +572,12 @@ impl<'q> Planner<'q> {
         self.bound_set.get(id.0).copied().unwrap_or(false)
     }
 
+    /// Records a labelling reason of `id`; none for a materializing `WITH` column binding,
+    /// which is read from its row ([`Materialize::labelled`]).
     fn mark(&mut self, id: BindingId, f: impl FnOnce(&mut Labelling)) {
+        if self.bound.binding(id).is_some_and(|b| b.column.is_some()) {
+            return;
+        }
         if let Some(l) = self.labelling.get_mut(id.0) {
             f(l);
         }
@@ -411,21 +614,43 @@ impl<'q> Planner<'q> {
         }
     }
 
-    fn walk_component(&mut self, start: BindingId, nodes: &[BindingId], anchored: bool) {
-        let labels = self
-            .bound
-            .binding(start)
-            .and_then(|b| scan_labels(&b.labels));
-        let scan = Scan {
-            binding: start,
-            filters: self.filters_of(start, if anchored { None } else { labels.as_deref() }),
-            scan_labels: labels,
-        };
-        self.ops.push(if anchored {
-            Op::Anchor(scan)
-        } else {
-            Op::Scan(scan)
-        });
+    /// Walks the component of `nodes` from `start` over the segment's pattern edges `edges`.
+    fn walk_component(
+        &mut self,
+        start: BindingId,
+        nodes: &[BindingId],
+        edges: &[usize],
+        how: Start,
+    ) {
+        match how {
+            Start::Resume { current } => {
+                if !current {
+                    self.mark(start, |l| l.resume = true);
+                }
+                self.ops.push(Op::Resume(Resume {
+                    binding: start,
+                    from_current: current,
+                }));
+            }
+            Start::Scan | Start::Anchor => {
+                let anchored = how == Start::Anchor;
+                let labels = self
+                    .bound
+                    .binding(start)
+                    .and_then(|b| scan_labels(&b.labels));
+                let scan = Scan {
+                    binding: start,
+                    filters: self
+                        .filters_of(start, if anchored { None } else { labels.as_deref() }),
+                    scan_labels: labels,
+                };
+                self.ops.push(if anchored {
+                    Op::Anchor(scan)
+                } else {
+                    Op::Scan(scan)
+                });
+            }
+        }
         self.bind(start);
         self.place_filters();
         let mut current = start;
@@ -436,7 +661,9 @@ impl<'q> Planner<'q> {
                 *slot = true;
             }
         }
-        let mut todo: Vec<usize> = (0..self.edges.len())
+        let mut todo: Vec<usize> = edges
+            .iter()
+            .copied()
             .filter(|&i| {
                 self.edges
                     .get(i)
@@ -494,7 +721,13 @@ impl<'q> Planner<'q> {
                 let (origin, far) = self.orient(e, current);
                 let far_rank = if closing { 0 } else { self.filter_rank(far) };
                 Some((
-                    (u8::from(!closing), far_rank, u8::from(origin != current), i),
+                    (
+                        u8::from(e.quantifier.is_some()),
+                        u8::from(!closing),
+                        far_rank,
+                        u8::from(origin != current),
+                        i,
+                    ),
                     i,
                 ))
             })
@@ -577,6 +810,8 @@ impl<'q> Planner<'q> {
             from_current,
             edge: e.edge,
             direction,
+            reversed: from != e.source,
+            quantifier: e.quantifier,
             edge_join,
             trail: earlier,
             edge_filters,
@@ -594,22 +829,208 @@ impl<'q> Planner<'q> {
         to
     }
 
-    fn result(&self) -> Vec<ResultOp> {
-        let mut result = vec![ResultOp::Project];
-        if self.bound.distinct {
-            result.push(ResultOp::Distinct);
+    /// The static labelling reasons: every group variable, every node and edge of a read path
+    /// variable's pattern.
+    fn mark_static(&mut self) {
+        let bound = self.bound;
+        for b in &bound.bindings {
+            if b.group {
+                self.mark(b.id, |l| l.group = true);
+            }
         }
-        if !self.bound.order_by.is_empty() {
-            result.push(ResultOp::Order);
+        for path in bound.matches.iter().flat_map(|m| &m.paths) {
+            let read = path
+                .variable
+                .and_then(|p| bound.binding(p))
+                .is_some_and(|p| p.read);
+            if !read {
+                continue;
+            }
+            // A column binding too: the path reads it through a label set after `gql:bind`.
+            let ids = std::iter::once(path.start)
+                .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]));
+            for id in ids {
+                if let Some(l) = self.labelling.get_mut(id.0) {
+                    l.path = true;
+                }
+            }
         }
-        if let Some(offset) = &self.bound.offset {
-            result.push(ResultOp::Offset(offset.clone()));
-        }
-        if let Some(limit) = &self.bound.limit {
-            result.push(ResultOp::Limit(limit.clone()));
-        }
-        result
     }
+
+    /// The labelling reasons that depend on where a read runs (module docs, "Labelling"): a
+    /// pass over the plan in execution order.
+    fn mark_positions(&mut self, first: &[Op], stages: &mut [Stage]) {
+        let bound = self.bound;
+        let mut at = Position::default();
+        let mut reads = Vec::new();
+        for op in first {
+            self.op_reads(op, &mut at, &mut reads);
+        }
+        for stage in stages.iter() {
+            match stage {
+                Stage::Match { ops, .. } => {
+                    for op in ops {
+                        self.op_reads(op, &mut at, &mut reads);
+                    }
+                }
+                Stage::Optional { segment, ops, .. } => {
+                    for op in ops {
+                        self.op_reads(op, &mut at, &mut reads);
+                    }
+                    at.optional = Some(*segment);
+                    at.row = None;
+                }
+                Stage::Materialize(m) => {
+                    if let Some(Segment::With(with)) = bound.segments.get(m.segment) {
+                        for column in &with.columns {
+                            reads.extend_from_slice(&column.bindings);
+                        }
+                        for key in &with.order_by {
+                            reads.extend_from_slice(&key.bindings);
+                        }
+                    }
+                    self.read_all(&mut reads, &mut at);
+                    at.row = Some(m.segment);
+                    for &c in &m.filters {
+                        if let Some(cj) = bound.conjuncts.get(c) {
+                            reads.extend_from_slice(&cj.bindings);
+                        }
+                    }
+                    self.read_all(&mut reads, &mut at);
+                }
+            }
+        }
+        for column in &bound.columns {
+            reads.extend_from_slice(&column.bindings);
+        }
+        for key in &bound.order_by {
+            reads.extend_from_slice(&key.bindings);
+        }
+        self.read_all(&mut reads, &mut at);
+        for stage in stages.iter_mut() {
+            match stage {
+                Stage::Materialize(m) => m.labelled = at.rows.contains(&m.segment),
+                Stage::Optional {
+                    segment,
+                    witness: Some(w),
+                    ..
+                } if at.witnesses.contains(segment) => {
+                    let w = *w;
+                    self.mark(w, |l| l.optional = true);
+                }
+                Stage::Optional { .. } | Stage::Match { .. } => {}
+            }
+        }
+    }
+
+    /// Records the reads of `op` at `at`; an operation other than a filter leaves the row.
+    fn op_reads(&mut self, op: &Op, at: &mut Position, reads: &mut Vec<BindingId>) {
+        let bound = self.bound;
+        match op {
+            Op::Filter(ids) => {
+                for &c in ids {
+                    if let Some(cj) = bound.conjuncts.get(c) {
+                        reads.extend_from_slice(&cj.bindings);
+                    }
+                }
+                self.read_all(reads, at);
+                return;
+            }
+            Op::Resume(r) => reads.push(r.binding),
+            Op::Join { binding } => reads.push(*binding),
+            Op::Expand(e) => {
+                if !e.from_current {
+                    reads.push(e.from);
+                }
+                if e.edge_join {
+                    reads.push(e.edge);
+                }
+            }
+            Op::Scan(_) | Op::Anchor(_) => {}
+        }
+        self.read_all(reads, at);
+        at.row = None;
+    }
+
+    /// Records the reads `reads` at `at` and clears them.
+    fn read_all(&mut self, reads: &mut Vec<BindingId>, at: &mut Position) {
+        let bound = self.bound;
+        for id in reads.drain(..) {
+            let Some(b) = bound.binding(id) else {
+                continue;
+            };
+            if let Some(column) = b.column {
+                if at.row != Some(column.segment) && !at.rows.contains(&column.segment) {
+                    at.rows.push(column.segment);
+                }
+                continue;
+            }
+            if !matches!(b.kind, BindingKind::Node | BindingKind::Edge) {
+                continue;
+            }
+            if at.optional.is_some_and(|k| b.segment <= k) {
+                self.mark(id, |l| l.optional = true);
+                let in_optional =
+                    matches!(bound.segments.get(b.segment), Some(Segment::Optional(_)));
+                if b.group && in_optional && !at.witnesses.contains(&b.segment) {
+                    at.witnesses.push(b.segment);
+                }
+            }
+        }
+    }
+}
+
+/// Where a read runs, for [`Planner::mark_positions`].
+#[derive(Debug, Default)]
+struct Position {
+    /// The segment of the last `OPTIONAL MATCH` part that ended before it.
+    optional: Option<usize>,
+    /// The segment of the materializing `WITH` whose row is the current object.
+    row: Option<usize>,
+    /// The materializing `WITH` segments whose rows are read after they were left.
+    rows: Vec<usize>,
+    /// The `OPTIONAL MATCH` segments whose group variables are read after them.
+    witnesses: Vec<usize>,
+}
+
+/// The current element after `ops` when it was `current` before (as the lowering tracks it).
+fn current_after(ops: &[Op], current: Option<BindingId>) -> Option<BindingId> {
+    ops.iter().fold(current, |current, op| match op {
+        Op::Scan(s) | Op::Anchor(s) => Some(s.binding),
+        Op::Resume(r) => Some(r.binding),
+        Op::Expand(e) => Some(e.to),
+        Op::Join { binding } => Some(*binding),
+        Op::Filter(_) => current,
+    })
+}
+
+/// A result pipeline: `Aggregate` when a column aggregates, else `Project`; then `DISTINCT`,
+/// `ORDER BY`, `OFFSET`, `LIMIT` as far as given.
+fn result_ops(
+    aggregated: bool,
+    distinct: bool,
+    ordered: bool,
+    offset: &Option<Count>,
+    limit: &Option<Count>,
+) -> Vec<ResultOp> {
+    let mut result = vec![if aggregated {
+        ResultOp::Aggregate
+    } else {
+        ResultOp::Project
+    }];
+    if distinct {
+        result.push(ResultOp::Distinct);
+    }
+    if ordered {
+        result.push(ResultOp::Order);
+    }
+    if let Some(offset) = offset {
+        result.push(ResultOp::Offset(offset.clone()));
+    }
+    if let Some(limit) = limit {
+        result.push(ResultOp::Limit(limit.clone()));
+    }
+    result
 }
 
 #[cfg(test)]
