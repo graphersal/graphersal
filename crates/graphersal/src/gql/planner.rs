@@ -88,8 +88,9 @@
 //!
 //! # Subqueries (stage 2b, design M2, E7, E11)
 //!
-//! The bodies of `EXISTS` and pattern predicates ([`BoundQuery::subqueries`]) are planned after
-//! the outer plan, with their host's position known: a pass over the finished plan in execution
+//! The bodies of `EXISTS`, pattern predicates and pattern comprehensions
+//! ([`BoundQuery::subqueries`]) are planned after the outer plan, with their host's position
+//! known: a pass over the finished plan in execution
 //! order finds every host (a conjunct where it is placed: on an element, in an [`Op::Filter`],
 //! in the `WHERE` of a materializing `WITH` on its row; a `RETURN` / `WITH` column; an
 //! `ORDER BY` key, on the new row map; a `FOR` list) and the position it runs at (the current
@@ -102,7 +103,9 @@
 //! is a child-leading [`Op::Scan`] (its pushdown and index apply), a later one may be an
 //! [`Op::Lookup`]. Trail holds per body clause (design E8). A body is planned once per start
 //! (the host's current element when it is a node the body imports, else none); a subquery
-//! nested in a body is hosted in that body's plan the same way (a worklist, no recursion).
+//! nested in a body is hosted in that body's plan the same way (a worklist, no recursion). The
+//! `|` part of a pattern comprehension reads at the end of its body (its reads and the hosts of
+//! the subqueries it holds are recorded there).
 //!
 //! The fast path (design E11): a conjunct that is a top-level `EXISTS` / `NOT EXISTS`
 //! ([`SubqueryUse::Exists`]) runs last at its site: in [`ElementFilters::exists`] after the
@@ -1311,6 +1314,20 @@ impl<'q> Planner<'q> {
             }
             self.op_reads(op, at, &mut reads);
             current = current_after(std::slice::from_ref(op), current);
+        }
+        // The `|` part of a pattern comprehension runs at the end of the body (`gql:value`).
+        if let Some(sub) = bound.subqueries.get(k)
+            && let Some(map) = &sub.map
+        {
+            self.expr_hosts(map, at.host(current), nested);
+            for &id in &sub.map_bindings {
+                let import = bound.binding(id).is_some_and(|b| b.segment != segment);
+                if import && current != Some(id) {
+                    self.mark(id, |l| l.subquery = true);
+                }
+            }
+            reads.extend_from_slice(&sub.map_bindings);
+            self.read_all(&mut reads, at);
         }
     }
 

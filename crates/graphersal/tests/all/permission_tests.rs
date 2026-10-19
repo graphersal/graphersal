@@ -2458,6 +2458,48 @@ mod gql {
         }
     }
 
+    /// Stage 2c.T3: a pattern comprehension runs as a child of the `gql:*` step evaluating it
+    /// (ending in `gql:value`); the authorization walk visits it in every host and nested in
+    /// another comprehension's `|` part, so an edge read reached only there is refused before
+    /// the run, also when no row reaches it, like the Gremlin `project().by(__.out(..).fold())`.
+    #[test]
+    fn a_denied_read_inside_a_pattern_comprehension_refuses_gql() {
+        let graph = modern();
+        for script in [
+            // gql:project: a RETURN column, inside a map projection
+            r#"g.gql("MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p {.name, made: [(p)-[:created]->(s) | s.name]} AS m").toList()"#,
+            // gql:filter: WHERE
+            r#"g.gql("MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) > 1 RETURN p.name").toList()"#,
+            // gql:order: an ORDER BY key
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)-[:created]->(s) | s])").toList()"#,
+            // gql:aggregate: an aggregate's argument
+            r#"g.gql("MATCH (p:person) RETURN collect_list([(p)-[:created]->(s) | s.name]) AS c").toList()"#,
+            // gql:for: the list
+            r#"g.gql("MATCH (p:person) FOR x IN [(p)-[:created]->(s) | s.name] RETURN x").toList()"#,
+            // nested in another comprehension's `|` part (gql:value hosts it)
+            r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS l").toList()"#,
+            // no row reaches the host
+            r#"g.gql("MATCH (p:nobody) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Allowed, the hosted children (the nested one under `gql:value` included) ask what
+        // the Gremlin twin's children ask, request for request.
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+                r#"g.V().hasLabel("person").project("l").by(__.out("created").values("name").fold()).toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS l").toList()"#,
+                r#"g.V().hasLabel("person").project("l").by(__.out("knows").map(__.out("created").values("name").fold()).fold()).toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
     /// Stage 2b.T6: a vertex read reached only inside a subquery (the unit row and `FOR`
     /// read none outside it; a read request states no label, so a denied label is a denied
     /// vertex read) is refused before the run like the Gremlin twin, on the fast path and

@@ -43,6 +43,7 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "element_map",
     "project",
     "gql:project",
+    "gql:value",
     "gql:aggregate",
     "gql:for",
     "constant",

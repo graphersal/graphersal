@@ -48,6 +48,7 @@
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
 //! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). A `gql:filter` hosting one on an element runs after the element's `as()` and its plain residuals (E11), so a body reading the element through its label finds it. The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`; after an aggregation an import a column holds through `gql:bind` from the row, `Site::ordered`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
+//! | pattern comprehension `[q = (a)-->(b) WHERE cond \| expr]` (stage 2c, design M2, E13) | a hosted subquery like `EXISTS` anywhere in an expression (same hosts, same site rules, `MAX_LOWERED_SUBQUERIES`), whose body ends with `gql:value(expr)` (the `|` part evaluated where the body ends: `Instr::Value`, hosting its own nested subqueries); the host runs the child to its end on one unit of the row and collects the values in arrival order, bulk expanded, checked against `bulk.max_expansion`, `traversal.max_materialized_bytes` and the memory budget before the list is built (`runtime::SubqueryHost`); an absent (`NULL`) import gives `[]`. `MATCH (p:person) RETURN [(p)-[:knows]->(f) \| f.name] AS l` is `v(labels: ["person"]).gql:project("l")` with the child `out("knows").gql:value("f.name")` |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
@@ -431,6 +432,13 @@ enum Instr<S: GraphStorage> {
     /// conjunct or pattern predicate, the subquery body lowered onto the child from the host's
     /// site (design M2, the 2b fast path); the child short-circuits at its first match.
     Exists { negated: bool, body: Vec<Instr<S>> },
+    /// `gql:value(expr)` at `site`: the last step of a pattern comprehension's body, its `|`
+    /// part (stage 2c); the host collects the values into the list.
+    Value {
+        expr: RowExpr<S>,
+        site: Site,
+        subqueries: Bodies<S>,
+    },
 }
 
 /// The subquery bodies a `gql:*` step hosts (the 2b hook, `runtime::SubqueryHost`): body `i`
@@ -752,6 +760,16 @@ impl<S: GraphStorage> Lowered<S> {
                         g.filter_t(child)
                     }
                 }
+                Instr::Value {
+                    expr,
+                    site,
+                    subqueries,
+                } => g.gql_value(
+                    Arc::clone(&self.query),
+                    expr,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
             };
         }
         g
@@ -941,6 +959,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Select(_)
             | Instr::Bind { .. }
             | Instr::Merge { .. }
+            | Instr::Value { .. }
             | Instr::Optional(_) => t,
         }
     }
@@ -987,6 +1006,13 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     fn gql_lookup(self, query: Arc<str>, lookup: GqlLookup<S>, bindings: Arc<[Binding]>) -> Self;
+    fn gql_value(
+        self,
+        query: Arc<str>,
+        expr: RowExpr<S>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
     fn gql_distinct(self) -> Self;
     fn gql_order(
         self,
@@ -1080,6 +1106,15 @@ macro_rules! sink {
                 bindings: Arc<[Binding]>,
             ) -> Self {
                 self.gql_lookup(query, lookup, bindings)
+            }
+            fn gql_value(
+                self,
+                query: Arc<str>,
+                expr: RowExpr<S>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_value_hosted(query, expr, bindings, children)
             }
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
@@ -1947,8 +1982,24 @@ impl<'q> Lowering<'q> {
         }
         self.children.set(lowered);
         let mut body = Vec::new();
-        self.ops(&body_plan.ops, site, &mut body)?;
+        let end = self.ops(&body_plan.ops, site, &mut body)?;
         body.retain(|instr| !matches!(instr, Instr::Merge { .. }));
+        // A pattern comprehension ends with its `|` part, evaluated where the body ends.
+        if let Some(map) = self
+            .bound
+            .subqueries
+            .get(k)
+            .and_then(|sub| sub.map.as_ref())
+        {
+            let hooks = Hooks::default();
+            let expr: RowExpr<S> = self.compile_in(map, None, &[], Some(&hooks))?;
+            let subqueries = self.bodies(hooks, end)?;
+            body.push(Instr::Value {
+                expr,
+                site: end,
+                subqueries,
+            });
+        }
         Ok(body)
     }
 
@@ -2179,6 +2230,9 @@ impl<'q> Lowering<'q> {
                     site, subqueries, ..
                 }
                 | Instr::Order {
+                    site, subqueries, ..
+                }
+                | Instr::Value {
                     site, subqueries, ..
                 } => {
                     site.ordered = Some(result);
@@ -2781,6 +2835,15 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 slots.push(id.0);
                 marks.read(&mut slots, *site);
             }
+            Instr::Value {
+                expr,
+                site,
+                subqueries,
+            } => {
+                expr.variables(&mut slots);
+                marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
+            }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part) | Instr::Exists { body: part, .. } => mark_reads(part, marks),
             Instr::Scan
@@ -2817,6 +2880,9 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 site, subqueries, ..
             }
             | Instr::Aggregate {
+                site, subqueries, ..
+            }
+            | Instr::Value {
                 site, subqueries, ..
             } => {
                 site.part = Some(segment);

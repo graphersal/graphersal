@@ -190,7 +190,7 @@ impl EvalError {
     pub(crate) fn subquery_pending(span: Span) -> Self {
         Self::new(
             status::NOT_SUPPORTED,
-            "a subquery (EXISTS) cannot be evaluated here",
+            "a subquery (EXISTS or a pattern comprehension) cannot be evaluated here",
             span,
         )
     }
@@ -418,7 +418,7 @@ pub(crate) trait Env {
         bytes <= crate::traversal::context::DEFAULT_MAX_MATERIALIZED_BYTES
     }
     /// The value of subquery `index` ([`Scope::subquery`]) for this row (`EXISTS`: TRUE or
-    /// FALSE, never `NULL`), or `None` when the row has not run it yet: the evaluation then
+    /// FALSE, never `NULL`; a pattern comprehension: the list, never `NULL`), or `None` when the row has not run it yet: the evaluation then
     /// stops with [`EvalError::subquery_pending`], and the step hosting the subquery
     /// (`runtime::SubqueryHost`) runs it and evaluates the row again. The default runs nothing.
     fn subquery(&self, index: usize) -> Option<Value<Self::Element>> {
@@ -613,7 +613,8 @@ enum Node<E> {
     Trim(TrimSide, Option<Box<Compiled<E>>>, Box<Compiled<E>>),
     /// The result of an aggregate call, read through [`Env::aggregate`].
     Aggregate(usize),
-    /// The value of a subquery (`EXISTS`), read through [`Env::subquery`].
+    /// The value of a subquery (`EXISTS`, a pattern comprehension), read through
+    /// [`Env::subquery`].
     Subquery(usize),
     /// A comprehension variable, read through [`Env::local`] (design M4).
     Local(usize),
@@ -841,10 +842,18 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         },
         ExprKind::MapProjection(projection) => compile_projection(projection, scope)?,
         ExprKind::ListComprehension(comprehension) => compile_comprehension(comprehension, scope)?,
-        // The binder refuses it until 2c.T3 (`bind::not_yet_expression`).
-        ExprKind::PatternComprehension(_) => {
-            return Err(not_yet_2c("a pattern comprehension", span));
-        }
+        // A subquery collecting a list (stage 2c), named by the span of the whole expression.
+        ExprKind::PatternComprehension(_) => match scope.subquery(span) {
+            Some(Ok(index)) => Node::Subquery(index),
+            Some(Err(error)) => return Err(error),
+            None => {
+                return Err(EvalError::new(
+                    status::NOT_SUPPORTED,
+                    "a pattern comprehension is not yet supported in this expression",
+                    span,
+                ));
+            }
+        },
     })
 }
 
@@ -919,15 +928,6 @@ fn compile_comprehension<E: Clone>(
         filter,
         map,
     })))
-}
-
-/// The evaluator's refusal of a stage 2c expression the binder let through.
-fn not_yet_2c(what: &str, span: Span) -> EvalError {
-    EvalError::new(
-        status::NOT_SUPPORTED,
-        format!("{what} is not yet supported in this version"),
-        span,
-    )
 }
 
 #[inline(never)]

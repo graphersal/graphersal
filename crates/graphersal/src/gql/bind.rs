@@ -108,8 +108,19 @@
 //! No aggregate stands in the `WHERE` / `|` parts (the list part may hold one). A local is not
 //! readable inside a subquery in those parts yet (`NotYet`): its body is planned apart from the
 //! item. Beside an aggregate, a projection's target, variable items and entries are checked like
-//! any expression (only grouping keys outside the aggregates). Pattern comprehensions are
-//! refused `NotYet` until 2c.T3.
+//! any expression (only grouping keys outside the aggregates).
+//!
+//! # Pattern comprehensions
+//!
+//! A pattern comprehension `[p = (a)-->(b) WHERE cond | expr]` (design E13) is bound as a
+//! subquery ([`SubqueryKind::Collect`], [`SubqueryForm::Comprehension`], its span the whole
+//! expression, which the stored expression keeps as a reference): its pattern and `WHERE` are
+//! one body clause, and its `|` part is resolved and substituted in the body's scope after the
+//! clause ([`BoundSubquery::map`]), with no aggregate (42002, naming the list's `size()` and
+//! `OPTIONAL MATCH` with an aggregate instead) and, like a body condition, without the
+//! comprehension variables around it (`NotYet`). The bindings the `|` part reads that are older
+//! than the body are imports; its locals read there are marked read. Everything else (scope,
+//! imports, grouping, limits) follows "Subqueries".
 //!
 //! # Subqueries
 //!
@@ -168,10 +179,11 @@
 //! `ORDER BY` key reading a dropped variable after `DISTINCT` / aggregation, a duplicate key in a
 //! map, a parameter that was not supplied, a subquery local read outside its body, a new
 //! variable in a pattern predicate, a comprehension variable shadowing a name or read outside
-//! its comprehension, an aggregate inside a comprehension's `WHERE` / `|` part. `22G02` for a negative `OFFSET` / `LIMIT` literal,
+//! its comprehension, an aggregate inside a comprehension's `WHERE` / `|` part (a pattern
+//! comprehension's `|` part too). `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
-//! quantified edge that reads another variable, a comprehension variable read inside a subquery
-//! and a pattern comprehension.
+//! quantified edge that reads another variable and a comprehension variable read inside a
+//! subquery (a pattern comprehension's body and `|` part included).
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -387,8 +399,8 @@ pub(crate) struct BoundWith {
     pub(crate) span: Span,
 }
 
-/// A bound subquery: `EXISTS { .. }`, `EXISTS ( .. )` or a pattern predicate (module docs,
-/// "Subqueries").
+/// A bound subquery: `EXISTS { .. }`, `EXISTS ( .. )`, a pattern predicate or a pattern
+/// comprehension (module docs, "Subqueries").
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoundSubquery {
     /// What it computes.
@@ -408,10 +420,17 @@ pub(crate) struct BoundSubquery {
     pub(crate) imports: Vec<BindingId>,
     /// The subquery whose body holds it; `None` for one in an expression of the query itself.
     pub(crate) parent: Option<usize>,
-    /// From `EXISTS` to the closing bracket; for a pattern predicate the pattern. The
-    /// [`ExprKind::Subquery`] left in a stored expression names it by this span
+    /// From `EXISTS` to the closing bracket; for a pattern predicate the pattern; for a pattern
+    /// comprehension from `[` to `]`. The [`ExprKind::Subquery`] (or
+    /// [`ExprKind::PatternComprehension`]) left in a stored expression names it by this span
     /// ([`BoundQuery::subquery_at`]).
     pub(crate) span: Span,
+    /// The expression after `|` of a pattern comprehension ([`SubqueryKind::Collect`]),
+    /// resolved and substituted in the body's scope: evaluated once per match at the end of the
+    /// body; `None` for `EXISTS`.
+    pub(crate) map: Option<Expr>,
+    /// The bindings [`Self::map`] reads (the body's locals and imports), sorted.
+    pub(crate) map_bindings: Vec<BindingId>,
 }
 
 /// Where a conjunct was written.
@@ -776,21 +795,6 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
         // own, not a child expression of this scope.
         ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
     }
-}
-
-/// The "not yet" refusal of a pattern comprehension, which the parser reads but the binder and
-/// the evaluator do not support yet (2c.T3); `None` for every other expression.
-fn not_yet_expression(expr: &Expr) -> Option<Box<GqlErrorBuilder>> {
-    let (what, alternative) = match &expr.kind {
-        ExprKind::PatternComprehension(_) => (
-            "a pattern comprehension [(a)-->(b) | b.name]",
-            "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), as in \
-             g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
-             collect_list(s.name) AS l\")",
-        ),
-        _ => return None,
-    };
-    Some(not_yet(expr.span, what, alternative))
 }
 
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
@@ -1977,9 +1981,16 @@ impl<'q> Binder<'q> {
             ExprKind::ListComprehension(comprehension) => {
                 self.comprehension(ctx, comprehension, refs)?;
             }
-            ExprKind::PatternComprehension(_) => {
-                if let Some(error) = not_yet_expression(expr) {
-                    return Err(error);
+            ExprKind::PatternComprehension(comprehension) => {
+                let subquery = SubqueryExpr {
+                    kind: SubqueryKind::Collect,
+                    form: SubqueryForm::Comprehension,
+                    matches: vec![comprehension.body.clone()],
+                    span: expr.span,
+                };
+                let index = self.subquery_with(ctx, &subquery, Some(&comprehension.map))?;
+                if let Some(bound) = self.subqueries.get(index) {
+                    refs.bindings.extend_from_slice(&bound.imports);
                 }
             }
         }
@@ -2473,13 +2484,9 @@ impl<'q> Binder<'q> {
                     map,
                 }))
             }
-            // `resolve` refuses it first (2c.T3 binds it).
-            ExprKind::PatternComprehension(_) => {
-                return match not_yet_expression(expr) {
-                    Some(error) => Err(error),
-                    None => Ok((expr.clone(), shape_of(expr))),
-                };
-            }
+            // Bound (and its `|` part substituted) on its own like a subquery
+            // ([`BoundSubquery::map`]); the expression keeps it as a reference.
+            ExprKind::PatternComprehension(_) => return Ok((expr.clone(), Shape::LEAF)),
         };
         Ok((
             Expr {
@@ -2543,6 +2550,17 @@ impl<'q> Binder<'q> {
     /// parser bounds by `MAX_DEPTH` and the host expression's height by `MAX_HEIGHT`.
     #[inline(never)]
     fn subquery_expr(&mut self, ctx: Ctx<'_>, subquery: &SubqueryExpr) -> BResult<usize> {
+        self.subquery_with(ctx, subquery, None)
+    }
+
+    /// [`Self::subquery_expr`] with the `|` expression `map` of a pattern comprehension, resolved
+    /// in the body's scope after its clauses (module docs, "Pattern comprehensions").
+    fn subquery_with(
+        &mut self,
+        ctx: Ctx<'_>,
+        subquery: &SubqueryExpr,
+        map: Option<&Expr>,
+    ) -> BResult<usize> {
         // An expression is resolved once; a repeat (none today) would read the same body.
         if let Some(index) = self.subqueries.iter().position(|s| s.span == subquery.span) {
             return Ok(index);
@@ -2583,6 +2601,8 @@ impl<'q> Binder<'q> {
             imports: Vec::new(),
             parent: self.subquery,
             span: subquery.span,
+            map: None,
+            map_bindings: Vec::new(),
         });
         // The nested scope: the names in scope now, plus the body's own (locals).
         let scope = self.scope.clone();
@@ -2599,7 +2619,29 @@ impl<'q> Binder<'q> {
         let shelved = self.shelved_locals.len();
         let locals = std::mem::take(&mut self.locals);
         self.shelved_locals.extend(locals.iter().cloned());
-        let body = self.subquery_body(subquery, segment);
+        let body = self.subquery_body(subquery, segment).and_then(|clauses| {
+            // The `|` part sees the body's names; like a body condition it marks only the
+            // body's own locals read (an import is read by the host expression anyway).
+            let resolved = match map {
+                Some(map) => Some(self.expression(Ctx::refusing(IN_PATTERN_COMPREHENSION), map)?),
+                None => None,
+            };
+            if let Some(resolved) = &resolved {
+                let own: Vec<BindingId> = resolved
+                    .refs
+                    .bindings
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        self.bindings
+                            .get(id.0)
+                            .is_some_and(|b| b.subquery == Some(index))
+                    })
+                    .collect();
+                self.mark_read(&own);
+            }
+            Ok((clauses, resolved))
+        });
         self.shelved_locals.truncate(shelved);
         self.locals = locals;
         if incomplete {
@@ -2609,7 +2651,7 @@ impl<'q> Binder<'q> {
         self.clause = clause;
         self.dropped = dropped;
         let inner = std::mem::replace(&mut self.scope, scope);
-        let clauses = body?;
+        let (clauses, map) = body?;
         for (name, _) in inner.entries {
             if self.scope.get(&name.name).is_none() {
                 self.hidden.insert(name.name, subquery.span);
@@ -2640,11 +2682,18 @@ impl<'q> Binder<'q> {
                 imports.extend(elements.filter(outside));
             }
         }
+        if let Some(map) = &map {
+            imports.extend(map.refs.bindings.iter().copied().filter(outside));
+        }
         imports.sort_unstable();
         imports.dedup();
         if let Some(bound) = self.subqueries.get_mut(index) {
             bound.clauses = clauses;
             bound.imports = imports;
+            if let Some(map) = map {
+                bound.map = Some(map.expr);
+                bound.map_bindings = map.refs.bindings;
+            }
         }
         Ok(index)
     }
@@ -2979,11 +3028,15 @@ impl<'q> Binder<'q> {
         }
         match &expr.kind {
             ExprKind::FunctionCall { name, .. } if is_aggregate(name) => Ok(()),
-            ExprKind::Subquery(subquery) => {
+            ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {
+                let span = match &expr.kind {
+                    ExprKind::Subquery(subquery) => subquery.span,
+                    _ => expr.span,
+                };
                 let imports = self
                     .subqueries
                     .iter()
-                    .find(|s| s.span == subquery.span)
+                    .find(|s| s.span == span)
                     .map_or(&[][..], |s| s.imports.as_slice());
                 let outside = imports.iter().find(|id| !key_variables.contains(id));
                 let Some(binding) = outside.and_then(|id| self.bindings.get(id.0)) else {
@@ -2991,7 +3044,7 @@ impl<'q> Binder<'q> {
                 };
                 let name = binding.name.as_ref().map_or("", |n| n.name.as_str());
                 Err(semantic(
-                    subquery.span,
+                    span,
                     format!(
                         "the subquery reads `{name}` in an item that aggregates, outside the \
                          aggregates, so `{name}` must be a grouping key of {clause}, and it is \
@@ -3312,6 +3365,8 @@ fn ordinal_as_element(var: &Identifier, here: BindingKind) -> Box<GqlErrorBuilde
 /// The place of an aggregate inside a list comprehension's `WHERE` / `|` part (refused).
 const IN_COMPREHENSION: &str = "inside the WHERE or | part of a list comprehension";
 
+const IN_PATTERN_COMPREHENSION: &str = "inside the | part of a pattern comprehension";
+
 /// A comprehension variable named inside a subquery body (not yet: the body is a child
 /// traversal planned apart from the item being iterated).
 fn local_in_subquery(var: &Identifier) -> Box<GqlErrorBuilder> {
@@ -3332,6 +3387,12 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
         format!(
             "aggregate in a WITH first and aggregate its column in RETURN, as in \
              MATCH (p)-->(f) WITH p, {f}(f) AS n RETURN max(n)"
+        )
+    } else if place == IN_PATTERN_COMPREHENSION {
+        format!(
+            "aggregate the list the comprehension builds, as in \
+             MATCH (p) RETURN size([(p)-->(f) | f.age]) AS n, or aggregate in a WITH after an \
+             OPTIONAL MATCH, as in MATCH (p) OPTIONAL MATCH (p)-->(f) RETURN p, {f}(f.age) AS n"
         )
     } else if place == IN_COMPREHENSION {
         format!(

@@ -8779,22 +8779,6 @@ mod gql {
         }
     }
 
-    /// Until 2c.T3 a pattern comprehension is refused "not yet", naming the form that runs
-    /// today, and the examples run (map projections and list comprehensions run since 2c.T2).
-    #[test]
-    fn gql_stage_2c_expressions_name_the_form_of_today() {
-        for (query, keeps) in [(
-            "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name]",
-            "collect the matches of the pattern with OPTIONAL MATCH and collect_list()",
-        )] {
-            let (err, _) = gql_failure(|g| g.gql(query).to_list());
-            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
-            let help = err.help().unwrap();
-            assert!(help.contains(keeps), "{query}: {help}");
-            assert_examples_run(&help);
-        }
-    }
-
     // ----- stage 2b: help sweep (rule 6) -----
 
     /// The general advice of the subquery errors (`GqlHelpTopic::Subquery`).

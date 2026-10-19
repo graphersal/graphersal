@@ -171,6 +171,7 @@ fn sexp(e: &Expr) -> String {
                 SubqueryForm::Braces => "exists{}",
                 SubqueryForm::Parens => "exists()",
                 SubqueryForm::PatternPredicate => "pattern",
+                SubqueryForm::Comprehension => "comprehension",
             };
             let clauses = subquery
                 .matches

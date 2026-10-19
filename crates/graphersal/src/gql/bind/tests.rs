@@ -1887,50 +1887,91 @@ fn body_conditions_mark_only_the_bodys_own_locals_read() {
     assert!(local(&q, "a").read && local(&q, "b").read);
 }
 
-// ----- stage 2c: map projections and comprehensions (refused until 2c.T2 / 2c.T3) -----
+// ----- stage 2c.T3: pattern comprehensions -----
 
-/// The parser reads the stage 2c expressions; the binder refuses them "not yet" wherever an
-/// expression stands, naming the form available today.
+/// A pattern comprehension binds wherever an expression stands (it was refused "not yet"
+/// before 2c.T3).
 #[test]
-fn stage_2c_expressions_are_not_yet_bound() {
-    for (query, text, alternative) in [
-        (
-            "MATCH (n) RETURN [(n)-->(m) | m.name]",
-            "[(n)-->(m) | m.name]",
-            "collect_list(s.name)",
-        ),
-        // Every place an expression stands.
-        ("LET l = [(n)-->() | 1] RETURN l", "[(n)-->() | 1]", ""),
-        (
-            "MATCH (n) RETURN CASE WHEN true THEN [(n)-->(m) | m] END",
-            "[(n)-->(m) | m]",
-            "",
-        ),
-        // Inside the parts of the stage 2c forms that bind.
-        (
-            "MATCH (n) RETURN n {k: [(n)-->(m) | m]}",
-            "[(n)-->(m) | m]",
-            "",
-        ),
-        (
-            "MATCH (n) RETURN [x IN [1] | [(n)-->(m) | m]]",
-            "[(n)-->(m) | m]",
-            "",
-        ),
+fn pattern_comprehensions_bind_everywhere() {
+    for query in [
+        "MATCH (n) RETURN [(n)-->(m) | m.name]",
+        "MATCH (n) LET l = [(n)-->() | 1] RETURN l",
+        "MATCH (n) RETURN CASE WHEN true THEN [(n)-->(m) | m] END",
+        "MATCH (n) RETURN n {k: [(n)-->(m) | m]}",
+        "MATCH (n) RETURN [x IN [1] | [(n)-->(m) | m]]",
+        "MATCH (n) WHERE size([(n)-->(m) | m]) > 1 RETURN n",
+        "MATCH (n) WITH n, [(n)-->(m) | m] AS ms RETURN n, ms",
+        "MATCH (n) RETURN n ORDER BY size([(n)-->(m) | m])",
+        "MATCH (n) RETURN collect_list([(n)-->(m) | m.name]) AS l",
+        "MATCH (n) RETURN n, count(*) AS c, [(n)-->(m) | m] AS ms",
+        "MATCH (n) RETURN [p = (n)-->(m) WHERE m.age > 1 | p] AS ps",
+        "MATCH (n) RETURN [(n)-->(m) | [(m)-->(o) | o.name]] AS l",
+        "MATCH (n) RETURN [(n)-->(m) WHERE EXISTS { (m)-->() } | m] AS l",
+        "FOR x IN [(a)-->(b) | b] RETURN x",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WHERE size([(m)-->(o) | o]) > 0 } RETURN n",
     ] {
-        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind(&parsed));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000", "{query}");
-        assert_eq!(f.text, text, "{query}");
-        assert!(
-            f.message.contains("not yet supported"),
-            "{query}: {}",
-            f.message
-        );
-        let given = f.alternative.unwrap_or_default();
-        assert!(given.contains(alternative), "{query}: {given}");
+        ok(query);
     }
+}
+
+#[test]
+fn a_pattern_comprehension_is_a_collecting_subquery() {
+    let q = ok("MATCH (a)-->(b) RETURN [(a)-[e]->(c) WHERE c.age > b.age | c.name] AS l");
+    assert_eq!(q.subqueries.len(), 1);
+    let s = subquery(&q, 0);
+    assert_eq!(s.kind, SubqueryKind::Collect);
+    assert_eq!(s.form, SubqueryForm::Comprehension);
+    // The span is the whole expression (the stored expression names it by it).
+    assert_eq!(
+        &"MATCH (a)-->(b) RETURN [(a)-[e]->(c) WHERE c.age > b.age | c.name] AS l"
+            [s.span.start..s.span.end],
+        "[(a)-[e]->(c) WHERE c.age > b.age | c.name]"
+    );
+    assert_eq!(names(&q, &s.imports), ["a", "b"]);
+    assert_eq!(names(&q, &s.map_bindings), ["c"]);
+    assert!(s.map.is_some());
+    // The column reads the imports; the locals are read (they are labelled when needed).
+    assert_eq!(names(&q, &q.columns[0].bindings), ["a", "b"]);
+    assert!(q.binding(id(&q, "c")).is_some_and(|b| b.read));
+    assert!(q.binding(id(&q, "e")).is_some_and(|b| !b.read));
+    // An import read only in the `|` part is an import too.
+    let q = ok("MATCH (a), (b) RETURN [(a)-->(c) | b.name] AS l");
+    assert_eq!(names(&q, &subquery(&q, 0).imports), ["a", "b"]);
+    // A LET value read in the `|` part is substituted there.
+    let q = ok("MATCH (a) LET k = a.name RETURN [(a)-->(c) | k] AS l");
+    let s = subquery(&q, 0);
+    assert_eq!(names(&q, &s.imports), ["a"]);
+    assert!(matches!(
+        s.map.as_ref().map(|m| &m.kind),
+        Some(ExprKind::Property { .. })
+    ));
+}
+
+#[test]
+fn pattern_comprehension_names_are_local() {
+    // A new name is invisible after the comprehension.
+    let f = fail("MATCH (a) RETURN [(a)-->(c) | c] AS l, c");
+    assert!(f.message.contains("`c`"), "{f:?}");
+    // An aggregate in the `|` part is refused, naming the list's size or OPTIONAL MATCH.
+    let f = fail("MATCH (a) RETURN [(a)-->(c) | count(c)] AS l");
+    assert!(f.message.contains("pattern comprehension"), "{f:?}");
+    assert!(
+        f.alternative.unwrap_or_default().contains("OPTIONAL MATCH"),
+        "alternative"
+    );
+    // A list comprehension variable read in the `|` part runs in the child: not yet.
+    let query = "MATCH (a) RETURN [x IN [1] | [(a)-->(c) | x]] AS l";
+    let parsed = parse(query).unwrap_or_else(|e| panic!("{e}"));
+    let f = failure(query, bind(&parsed));
+    assert_eq!(f.kind, GqlErrorKind::NotYet, "{f:?}");
+    assert_eq!(f.text, "x");
+    // Beside an aggregate it may import only grouping keys.
+    let f = fail("MATCH (a)-->(b) RETURN a, count(*) + size([(b)-->(x) | x]) AS c");
+    assert!(f.message.contains("`b`"), "{f:?}");
+    assert_eq!(f.text, "[(b)-->(x) | x]");
+    ok("MATCH (a)-->(b) RETURN a, count(*) + size([(a)-->(x) | x]) AS c");
+    // A column of its own is a grouping key.
+    ok("MATCH (a)-->(b) RETURN a, count(*) AS c, [(b)-->(x) | x] AS l");
 }
 
 // ----- stage 2c.T2: map projections and list comprehensions -----

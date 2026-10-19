@@ -486,12 +486,16 @@ pub(crate) struct SubqueryExpr {
     pub(crate) span: Span,
 }
 
-/// What a [`SubqueryExpr`] computes. Cypher's `COUNT { }` would be a second kind; it is not
+/// What a [`SubqueryExpr`] computes. Cypher's `COUNT { }` would be another kind; it is not
 /// supported yet (refused by the parser).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubqueryKind {
     /// TRUE when the body has at least one match, else FALSE (never `NULL`).
     Exists,
+    /// The list of one value per match of the body (a [`PatternComprehension`], stage 2c): the
+    /// parser never writes it; the binder binds a pattern comprehension as a subquery of this
+    /// kind.
+    Collect,
 }
 
 /// The spelling of a [`SubqueryExpr`].
@@ -504,6 +508,8 @@ pub(crate) enum SubqueryForm {
     /// A Cypher pattern predicate, `(a)-[:T]->(b)` where an expression stands: an alias of
     /// `EXISTS { pattern }` that may not introduce a named variable (the binder's check).
     PatternPredicate,
+    /// A pattern comprehension `[(a)-->(b) WHERE cond | expr]` ([`SubqueryKind::Collect`]).
+    Comprehension,
 }
 
 /// Prefix operators.

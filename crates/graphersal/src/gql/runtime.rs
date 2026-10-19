@@ -68,6 +68,8 @@ mod for_step_tests;
 mod step_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod value_step_tests;
 
 /// A vertex or an edge as the evaluator sees it: a storage handle.
 pub(crate) enum GqlElement<S: GraphStorage> {
@@ -345,8 +347,8 @@ pub(crate) struct Row<'a, 'c, S: GraphStorage> {
     traverser: &'a Traverser<S>,
     bindings: &'a [Binding],
     failure: RefCell<Option<BoxedTraverserError>>,
-    /// The subqueries this row already ran ([`SubqueryHost`]).
-    answers: SubqueryAnswers,
+    /// The subqueries this row already ran ([`SubqueryHost`]); `None`: none.
+    answers: Option<&'a SubqueryAnswers<S>>,
     /// The subquery the evaluation asked for and the row has not run yet.
     pending: Cell<Option<usize>>,
 }
@@ -358,7 +360,7 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
         traverser: &'a Traverser<S>,
         bindings: &'a [Binding],
     ) -> Self {
-        Self::with_answers(context, traverser, bindings, SubqueryAnswers::default())
+        Self::with_answers(context, traverser, bindings, None)
     }
 
     /// The row of `traverser` with the subqueries it already ran.
@@ -366,7 +368,7 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
         context: &'a TraverserContext<'c, S>,
         traverser: &'a Traverser<S>,
         bindings: &'a [Binding],
-        answers: SubqueryAnswers,
+        answers: Option<&'a SubqueryAnswers<S>>,
     ) -> Self {
         Row {
             context,
@@ -676,8 +678,8 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
     }
 
     fn subquery(&self, index: usize) -> Option<RowValue<S>> {
-        match self.answers.get(index) {
-            Some(found) => Some(Value::Scalar(ElementProperty::Boolean(found))),
+        match self.answers.and_then(|answers| answers.get(index)) {
+            Some(value) => Some(value),
             None => {
                 self.pending.set(Some(index));
                 None
@@ -711,19 +713,49 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
 /// at most `bind::MAX_SUBQUERIES` (64) per query, and a host runs each of them at most once.
 pub(crate) const MAX_HOSTED_SUBQUERIES: usize = 64;
 
-/// The subqueries one row has run so far and their results (`EXISTS`: TRUE or FALSE), one bit
-/// per hosted subquery: no allocation per row (rule 4).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SubqueryAnswers {
+/// The subqueries one row has run so far and their results: `EXISTS` TRUE or FALSE, one bit
+/// per hosted subquery, no allocation per row (rule 4); a pattern comprehension its list (the
+/// result value itself, the only allocation).
+pub(crate) struct SubqueryAnswers<S: GraphStorage> {
     known: u64,
     found: u64,
+    /// The lists of the pattern comprehensions the row ran, by hosted index.
+    lists: Vec<(usize, RowValue<S>)>,
 }
 
-impl SubqueryAnswers {
+impl<S: GraphStorage> Default for SubqueryAnswers<S> {
+    fn default() -> Self {
+        Self {
+            known: 0,
+            found: 0,
+            lists: Vec::new(),
+        }
+    }
+}
+
+impl<S: GraphStorage> SubqueryAnswers<S> {
     /// The result of subquery `index`, when the row ran it.
-    fn get(self, index: usize) -> Option<bool> {
+    fn get(&self, index: usize) -> Option<RowValue<S>> {
         let bit = 1u64.checked_shl(u32::try_from(index).ok()?)?;
-        (self.known & bit != 0).then_some(self.found & bit != 0)
+        if self.known & bit == 0 {
+            return None;
+        }
+        match self.lists.iter().find(|(i, _)| *i == index) {
+            Some((_, list)) => Some(list.clone()),
+            None => Some(Value::Scalar(ElementProperty::Boolean(
+                self.found & bit != 0,
+            ))),
+        }
+    }
+
+    /// Records the list of pattern comprehension `index`; `false` past
+    /// [`MAX_HOSTED_SUBQUERIES`] (which the lowering never builds).
+    fn set_list(&mut self, index: usize, list: RowValue<S>) -> bool {
+        if !self.set(index, true) {
+            return false;
+        }
+        self.lists.push((index, list));
+        true
     }
 
     /// Records the result of subquery `index`; `false` past [`MAX_HOSTED_SUBQUERIES`] (which
@@ -747,7 +779,8 @@ impl SubqueryAnswers {
 
 /// The subqueries (`EXISTS` anywhere in an expression but a top-level conjunct: under `OR`,
 /// `CASE`, in a `RETURN` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list;
-/// design M2, the 2b hook) a `gql:*` step hosts: one child traversal each, lowered from the
+/// design M2, the 2b hook; every pattern comprehension, stage 2c) a `gql:*` step hosts: one
+/// child traversal each, lowered from the
 /// step's site (the body's plan for its current element). The step embeds it and hands its
 /// children to every walker: `child_traversals_mut` (optimizer, step numbering, authorization,
 /// embedder binding, `find_fault`), `analyze_nested_paths` (path analysis: the children read
@@ -760,14 +793,24 @@ impl SubqueryAnswers {
 /// step's input traverser (one unit of it, short-circuiting at its first result like
 /// `filter(__..)`), and the row is evaluated again. The children run on the same execution
 /// context, so every traversal limit, the deadline and cancellation apply inside them.
+///
+/// A pattern comprehension's child ends with `gql:value(expr)` (its `|` part): it runs to the
+/// end on one unit of the input traverser, and its results, in arrival order (the child's
+/// order, unspecified across plans, D18), become the list, each bulk expanded. The list is
+/// checked against `bulk.max_expansion`, `traversal.max_materialized_bytes` and the memory
+/// budget before it is built ([`collect_list`]), like `collect_list()` in `gql:aggregate`. An
+/// import that is `NULL` (absent) matches nothing: the list is empty.
 pub(crate) struct SubqueryHost<'g, S: GraphStorage + 'g> {
     children: Vec<AnonymousTraversal<'g, S>>,
+    /// Per child: a pattern comprehension (collects a list) rather than `EXISTS`.
+    collects: Vec<bool>,
 }
 
 impl<'g, S: GraphStorage + 'g> Clone for SubqueryHost<'g, S> {
     fn clone(&self) -> Self {
         Self {
             children: self.children.clone(),
+            collects: self.collects.clone(),
         }
     }
 }
@@ -776,14 +819,26 @@ impl<'g, S: GraphStorage + 'g> Default for SubqueryHost<'g, S> {
     fn default() -> Self {
         Self {
             children: Vec::new(),
+            collects: Vec::new(),
         }
     }
 }
 
 impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
-    /// The host of `children`; child `i` answers [`Env::subquery`]`(i)`.
+    /// The host of `children`; child `i` answers [`Env::subquery`]`(i)`. A child ending with
+    /// `gql:value` (only the lowering of a pattern comprehension emits it, always last) collects
+    /// a list; every other child answers `EXISTS`.
     pub(crate) fn new(children: Vec<AnonymousTraversal<'g, S>>) -> Self {
-        Self { children }
+        let collects = children
+            .iter()
+            .map(|child| {
+                matches!(
+                    child.steps.last(),
+                    Some(crate::traversal::step::GraphStep::Map(GQL_VALUE, _))
+                )
+            })
+            .collect();
+        Self { children, collects }
     }
 
     /// Whether it hosts no subquery.
@@ -816,12 +871,12 @@ impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
         context: &mut TraverserContext<'_, S>,
         source: &Traverser<S>,
         bindings: &[Binding],
-        answers: &mut SubqueryAnswers,
+        answers: &mut SubqueryAnswers<S>,
         mut eval: impl FnMut(&Row<'_, '_, S>) -> Result<T, E>,
     ) -> TraverserResult<Result<T, E>> {
         loop {
             let (result, pending) = {
-                let row = Row::with_answers(context, source, bindings, *answers);
+                let row = Row::with_answers(context, source, bindings, Some(&*answers));
                 let result = eval(&row);
                 row.finish()?;
                 (result, row.pending.get())
@@ -835,8 +890,14 @@ impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
                 result,
             ) {
                 (Some((index, child)), Err(error)) => {
-                    let found = child.exists(context, source)?;
-                    if !answers.set(index, found) {
+                    let recorded = if self.collects.get(index).copied().unwrap_or(false) {
+                        let list = collect_list(context, child, source, bindings)?;
+                        answers.set_list(index, list)
+                    } else {
+                        let found = child.exists(context, source)?;
+                        answers.set(index, found)
+                    };
+                    if !recorded {
                         return Ok(Err(error));
                     }
                 }
@@ -844,6 +905,55 @@ impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
             }
         }
     }
+}
+
+/// The step name of a pattern comprehension's `|` part (the last step of its child).
+pub(crate) const GQL_VALUE: &str = "gql:value";
+
+/// The list a pattern comprehension's `child` builds for the row of `source` ([`SubqueryHost`]):
+/// the child runs on one unit of `source`; its results, in arrival order, each repeated by its
+/// bulk, are checked against `bulk.max_expansion`, `traversal.max_materialized_bytes` and the
+/// memory budget before the list is built.
+fn collect_list<S: GraphStorage>(
+    context: &mut TraverserContext<'_, S>,
+    child: &AnonymousTraversal<'_, S>,
+    source: &Traverser<S>,
+    bindings: &[Binding],
+) -> TraverserResult<RowValue<S>> {
+    let unit;
+    let source_unit = if source.bulk == 1 {
+        source
+    } else {
+        unit = Traverser::with_parts(source.value.clone(), source.path, 1, source.sack);
+        &unit
+    };
+    let produced = child.apply_to(context, source_unit)?;
+    let values = if produced.iter().all(|item| item.bulk == 1) {
+        // `bulk::expand` returns these untouched without a size check: check them here.
+        let max = context.options.max_materialized_bytes;
+        let each = std::mem::size_of::<TraverserValue<S>>() as u64;
+        let mut bytes: u64 = 0;
+        for item in &produced {
+            let estimate =
+                crate::traversal::step::profile::estimate_traverser_value_bytes(&item.value);
+            bytes = bytes.saturating_add(each.saturating_add(estimate));
+            if bytes > max {
+                return Err(bulk::materialized_bytes_error(max, bytes));
+            }
+        }
+        if let Some(budget) = &context.options.memory
+            && bytes > 0
+        {
+            budget.check(bytes)?;
+        }
+        produced.into_iter().map(|item| item.value).collect()
+    } else {
+        bulk::expand_values_in(context, produced, GQL_VALUE)?
+    };
+    let row = Row::new(context, source, bindings);
+    let list: Vec<RowValue<S>> = values.iter().map(|value| row.value(value)).collect();
+    row.finish()?;
+    Ok(Value::List(list))
 }
 
 /// `value` as the traverser value a row map holds (see the module docs).

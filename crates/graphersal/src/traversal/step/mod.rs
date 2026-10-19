@@ -379,14 +379,15 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   modulators, ...) works on what earlier steps produced, so `g.inject(1, 2).sum()` needs
     ///   no permission. An element handle held from an earlier, allowed run is read without a
     ///   further request (`g.inject(v).values("name")`). The internal GQL steps (`gql:filter`,
-    ///   `gql:project`, `gql:order`, `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:for`,
-    ///   `gql:trail`, `gql:not_self_loop`, the `gql:error` marker) are value-only too: they read the
+    ///   `gql:project`, `gql:value`, `gql:order`, `gql:aggregate`, `gql:distinct`, `gql:bind`,
+    ///   `gql:for`, `gql:trail`, `gql:not_self_loop`, the `gql:error` marker) are value-only too:
+    ///   they read the
     ///   properties and labels of the elements the lowered `v()` / adjacency steps reached (and
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
     ///   exactly what its Gremlin equivalent asks. `gql:lookup` reaches vertices of the graph
     ///   (a component found by id or index): `Read` on vertices, like the `v()` it replaces.
-    ///   A subquery (`EXISTS`) a `gql:*` step evaluates is a child traversal of that step,
-    ///   walked like any child (`child_traversals_mut`).
+    ///   A subquery (`EXISTS`, a pattern comprehension) a `gql:*` step evaluates is a child
+    ///   traversal of that step, walked like any child (`child_traversals_mut`).
     ///
     /// Labels of reads are not reported (label-level read security is a later storage
     /// decorator, see `book/src/users_guide/permissions.md`).

@@ -1,9 +1,12 @@
-//! GQL stage 2c map projections and list comprehensions (feature `gql`, design item 7, M4,
-//! E12, E14): Cypher map projections `v {.name, .*, x, k: expr}` and list comprehensions
-//! `[x IN list WHERE cond | expr]` run end to end through the ordinary evaluator steps (no new
-//! step). Differential twins against Gremlin (Rhai): map projections vs `project()` /
-//! `value_map()`, comprehensions vs `unfold().is(..).fold()`; rows compared as multisets
-//! (design D18). The `NULL` cases are hand-computed rows.
+//! GQL stage 2c map projections, list comprehensions and pattern comprehensions (feature `gql`,
+//! design item 7, M2, M4, E12, E13, E14): Cypher map projections `v {.name, .*, x, k: expr}`
+//! and list comprehensions `[x IN list WHERE cond | expr]` run end to end through the ordinary
+//! evaluator steps (no new step); a pattern comprehension `[(a)-->(b) WHERE cond | expr]` is a
+//! child of the `gql:*` step evaluating it, ending in `gql:value`. Differential twins against
+//! Gremlin (Rhai): map projections vs `project()` / `value_map()`, comprehensions vs
+//! `unfold().is(..).fold()`, pattern comprehensions vs `map(__.out(..)..fold())` /
+//! `project().by(__.out(..)..fold())`; rows compared as multisets (design D18). The `NULL`
+//! cases are hand-computed rows.
 #![cfg(feature = "gql")]
 
 use std::sync::Arc;
@@ -244,6 +247,64 @@ mod twins {
             (
                 r#"g.gql("MATCH (p:person {name: 'marko'})-[:knows]->(f) WITH collect_list(f) AS fs FOR x IN [y IN fs | y {.name}] RETURN x")"#,
                 r#"g.V().has("person", "name", "marko").out("knows").project("name").by("name")"#,
+            ),
+        ] {
+            twin(&graph, gql, gremlin);
+        }
+    }
+
+    #[test]
+    fn pattern_comprehensions_match_map_fold() {
+        let graph = modern();
+        for (gql, gremlin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | f.name] AS x")"#,
+                r#"g.V().hasLabel("person").map(__.out("knows").values("name").fold())"#,
+            ),
+            // The body's WHERE, an incoming edge variable.
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:created]->(s) WHERE s.lang = 'java' AND p.age > 30 | s.name] AS x")"#,
+                r#"g.V().hasLabel("person").map(__.choose(__.has("age", P.gt(30)), __.out("created").has("lang", "java").values("name").fold(), __.constant([])))"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)<-[e:knows]-(a) | e.weight] AS x")"#,
+                r#"g.V().hasLabel("person").map(__.in_e("knows").values("weight").fold())"#,
+            ),
+            // A path variable inside.
+            (
+                r#"g.gql("MATCH (p:person) RETURN [q = (p)-[:knows]->(f) | [n IN nodes(q) | n.name]] AS x")"#,
+                r#"g.V().hasLabel("person").map(__.out("knows").path().by("name").map(__.unfold().fold()).fold())"#,
+            ),
+            // Inside a map projection (an LLM's JSON answer) and nested.
+            (
+                r#"g.gql("MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]} AS x")"#,
+                r#"g.V().hasLabel("person").project("name", "friends").by("name").by(__.out("knows").values("name").fold())"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS x")"#,
+                r#"g.V().hasLabel("person").map(__.out("knows").map(__.out("created").values("name").fold()).fold())"#,
+            ),
+            // In WHERE, WITH and an aggregate.
+            (
+                r#"g.gql("MATCH (p:person) WHERE size([(p)-->(b) | b]) > 1 RETURN p.name AS x")"#,
+                r#"g.V().hasLabel("person").where(__.out().count().is(P.gt(1))).values("name")"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WITH p, [(p)-[:created]->(s) | s.name] AS l WHERE size(l) > 0 RETURN l AS x")"#,
+                r#"g.V().hasLabel("person").filter(__.out("created")).map(__.out("created").values("name").fold())"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN collect_list(size([(p)-->(b) | b])) AS x")"#,
+                r#"g.V().hasLabel("person").map(__.out().count()).fold()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN sum(size([(p)<--(b) | b])) AS x")"#,
+                r#"g.V().hasLabel("person").in_().count()"#,
+            ),
+            // From a unit row: no import, a child-leading scan.
+            (
+                r#"g.gql("RETURN size([(a:person)-[:created]->(s:software) WHERE s.name = 'lop' | a.name]) AS x")"#,
+                r#"g.inject(0).map(__.V().hasLabel("person").where(__.out("created").has("name", "lop")).count())"#,
             ),
         ] {
             twin(&graph, gql, gremlin);
@@ -509,17 +570,6 @@ fn comprehension_variables_shadow_nothing_and_stay_inside() {
     );
 }
 
-/// Pattern comprehensions come with 2c.T3: refused "not yet" until then.
-#[test]
-fn pattern_comprehensions_are_not_yet_supported() {
-    let graph = modern();
-    let text = failure(
-        &graph,
-        "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS l",
-    );
-    assert!(text.contains("not yet supported"), "{text}");
-}
-
 /// The deepest nesting the parser accepts runs on a test thread's stack (debug builds
 /// included): comprehensions and projections nest one evaluator level each.
 #[test]
@@ -551,4 +601,210 @@ fn the_deepest_accepted_nesting_runs() {
         }
     }
     assert!(ran > 30, "nothing ran below the nesting bound");
+}
+
+// ----- pattern comprehensions (2c.T3) -----
+
+/// A `NULL` import (an `OPTIONAL MATCH` that did not match) matches nothing: the list is empty,
+/// never `NULL`.
+#[test]
+fn a_null_import_gives_an_empty_list() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:knows]->(f) \
+             RETURN p.name AS n, f.name AS f, [(f)-[:created]->(s) | s.name] AS l",
+            &["n", "f", "l"],
+        ),
+        sorted(&[
+            "'josh'|null|[]",
+            "'marko'|'josh'|['ripple', 'lop']",
+            "'marko'|'vadas'|[]",
+            "'peter'|null|[]",
+            "'vadas'|null|[]",
+        ])
+    );
+}
+
+#[test]
+fn pattern_comprehensions_order_rows_and_group() {
+    let graph = modern();
+    // ORDER BY a key holding one.
+    let names: Vec<String> = rows(
+        &graph,
+        "MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)-->(b) | b]) DESC, n",
+    )
+    .iter()
+    .map(|row| norm(column(row, "n")))
+    .collect();
+    assert_eq!(names, ["'marko'", "'josh'", "'peter'", "'vadas'"]);
+    // A list as a grouping key beside an aggregate.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.lang] AS l, count(*) AS c",
+            &["l", "c"],
+        ),
+        sorted(&["['java', 'java']|i:1", "['java']|i:2", "[]|i:1"])
+    );
+    // Beside an aggregate it imports only grouping keys.
+    let text = failure(
+        &graph,
+        "MATCH (p:person)-->(b) RETURN p.name AS n, count(*) + size([(b)-->(x) | x]) AS c",
+    );
+    assert!(text.contains("grouping key"), "{text}");
+}
+
+#[test]
+fn pattern_comprehension_paths_and_elements_stay_live() {
+    let graph = modern();
+    let rows = rows(
+        &graph,
+        "MATCH (p:person {name: 'marko'}) RETURN [q = (p)-->(x) WHERE x.age > 30 | q] AS ps, \
+         [(p)-[:created]->(s) | s] AS ss",
+    );
+    assert_eq!(rows.len(), 1);
+    match column(&rows[0], "ps") {
+        ElementProperty::Array(paths) => assert_eq!(paths.len(), 1, "{paths:?}"),
+        other => panic!("{other:?}"),
+    }
+    match column(&rows[0], "ss") {
+        ElementProperty::Array(items) => {
+            assert!(
+                matches!(items.as_slice(), [ElementProperty::Vertex(_)]),
+                "{items:?}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Bulk: merged rows and merged child results give the same lists as the unmerged run.
+#[test]
+fn pattern_comprehensions_keep_bulk_semantics() {
+    let graph = modern();
+    for query in [
+        "MATCH ()-->(s:software) RETURN s.name AS n, [(s)<-[:created]-(y) | y.name] AS l",
+        "MATCH (s:software) RETURN s.name AS n, [(s)<--()-->(x) | x.name] AS l",
+    ] {
+        let run = |merge: bool| {
+            let mut out: Vec<String> = graph
+                .read()
+                .traversal()
+                .with("bulk.merge", merge)
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"))
+                .iter()
+                .map(|row| {
+                    let mut items: Vec<String> = match column(row, "l") {
+                        ElementProperty::Array(items) => items.iter().map(norm).collect(),
+                        other => panic!("{other:?}"),
+                    };
+                    items.sort();
+                    format!("{}|{}", norm(column(row, "n")), items.join(","))
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(run(true), run(false), "{query}");
+    }
+}
+
+#[test]
+fn a_pattern_comprehension_is_a_child_ending_in_gql_value() {
+    let graph = modern();
+    let text = profile(
+        &graph,
+        "MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f.name] AS l",
+    );
+    assert_eq!(
+        steps(&text),
+        [
+            r#"v(labels: ["person"])"#,
+            r#"gql:project("n", "l")"#,
+            r#"\> out("knows")"#,
+            r#"\> gql:value("f.name")"#,
+        ],
+        "{text}"
+    );
+    // An import read away from the current element is labelled for the child.
+    let text = profile(
+        &graph,
+        "MATCH (p:person)-[:knows]->(f) RETURN [(f)-[:created]->(s) | p.name + s.name] AS l",
+    );
+    assert!(text.contains(r#"as("p")"#), "{text}");
+    assert!(text.contains(r#"gql:value("p.name + s.name")"#), "{text}");
+}
+
+#[test]
+fn a_pattern_comprehension_obeys_the_limits() {
+    let graph = modern();
+    let error = graph
+        .read()
+        .traversal()
+        .with("traversal.max_materialized_bytes", 64)
+        .gql("MATCH (p:person {name: 'marko'}) RETURN [(p)-->(x) | x.name] AS l")
+        .to_list()
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.root_cause(),
+            TraverserError::ResourceLimitExceeded { limit, .. }
+                if limit == "traversal.max_materialized_bytes"
+        ),
+        "{error}"
+    );
+    // A comprehension the evaluation never reaches does not run: its unbounded quantifier
+    // never meets `repeat.max_loops`; reached, the child obeys it (D14: an error, never a cut
+    // list) in every host.
+    let lock = graph.read();
+    let body = "[(p)-[:knows]->*(q) | q.name]";
+    let rows = lock
+        .traversal()
+        .with("repeat.max_loops", 1)
+        .gql(&format!(
+            "MATCH (p:person) RETURN CASE WHEN p.age > 100 THEN {body} END AS l"
+        ))
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rows.len(), 4);
+    for query in [
+        format!("MATCH (p:person) WHERE size({body}) > 5 RETURN p.name AS n"),
+        format!("MATCH (p:person) RETURN {body} AS x"),
+        format!("MATCH (p:person) RETURN p.name AS n ORDER BY size({body})"),
+        format!("MATCH (p:person) RETURN collect_list({body}) AS c"),
+        format!("MATCH (p:person) FOR x IN {body} RETURN x"),
+        format!("MATCH (p:person) RETURN [(p)-->(r) | {body}] AS x"),
+    ] {
+        let error = lock
+            .traversal()
+            .with("repeat.max_loops", 1)
+            .gql(&query)
+            .to_list()
+            .expect_err(&query);
+        assert!(
+            matches!(
+                error.root_cause(),
+                TraverserError::RepeatLimitExceeded { max_loops: 1, .. }
+            ),
+            "{query}: {error}"
+        );
+    }
+}
+
+#[test]
+fn pattern_comprehension_scope_errors() {
+    let graph = modern();
+    // Its names stay inside.
+    let text = failure(&graph, "MATCH (a) RETURN [(a)-->(c) | c] AS l, c");
+    assert!(text.contains("`c`"), "{text}");
+    // No aggregate in the `|` part.
+    let text = failure(&graph, "MATCH (a) RETURN [(a)-->(c) | count(c)] AS l");
+    assert!(text.contains("pattern comprehension"), "{text}");
+    // A list comprehension variable is not readable inside it yet.
+    let text = failure(&graph, "MATCH (a) RETURN [x IN [1] | [(a)-->(c) | x]] AS l");
+    assert!(text.contains("not yet"), "{text}");
 }
