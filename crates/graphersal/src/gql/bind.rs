@@ -124,9 +124,9 @@
 //! ([`BoundQuery::subquery_at`], by span); its AST body is not substituted and is never read
 //! after binding. Beside an aggregate a subquery may import only grouping keys.
 //!
-//! The planner plans every body with its host (`planner.rs`, "Subqueries"); the lowering does
-//! not support subqueries yet: [`refuse_subqueries`] refuses a bound query holding one (kind
-//! `NotYet`, until stage 2b.T4).
+//! The planner plans every body with its host (`planner.rs`, "Subqueries"); the lowering runs a
+//! top-level `[NOT] EXISTS` conjunct as a child (stage 2b.T4); [`refuse_subqueries_except`]
+//! refuses a subquery anywhere else (kind `NotYet`, until stage 2b.T5).
 //!
 //! # Aggregates
 //!
@@ -668,29 +668,58 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
-/// Refuses a bound query that holds a subquery: the binder binds them (stage 2b.T2) and the
-/// planner plans them (2b.T3), the lowering does not support them yet (2b.T4). The error names
-/// the first subquery in the text.
+/// Refuses a bound query that holds a subquery (the guard of stage 2b.T2 / T3, kept for the
+/// binder tests). The error names the first subquery in the text.
+#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
 pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    match bound.subqueries.first() {
+    refuse_subqueries_except(query, bound, |_| false)
+}
+
+/// Refuses a bound query that holds a subquery the lowering does not support yet: every
+/// subquery `k` for which `lowered(k)` is false (since stage 2b.T4 the lowering runs a
+/// top-level `[NOT] EXISTS` conjunct as a child; a subquery anywhere else in an expression
+/// waits for the evaluator hook, stage 2b.T5). The error names the first such subquery in the
+/// text.
+pub(crate) fn refuse_subqueries_except(
+    query: &Query,
+    bound: &BoundQuery,
+    lowered: impl Fn(usize) -> bool,
+) -> Result<(), TraverserError> {
+    match (0..bound.subqueries.len())
+        .find(|&k| !lowered(k))
+        .and_then(|k| bound.subqueries.get(k))
+    {
         Some(subquery) => Err(subquery_not_yet(subquery).into_error(&query.source)),
         None => Ok(()),
     }
 }
 
-/// The refusal of a subquery until the lowering supports it (stage 2b.T4).
+/// The refusal of a subquery in a position the lowering does not support yet (stage 2b.T5).
 fn subquery_not_yet(subquery: &BoundSubquery) -> Box<GqlErrorBuilder> {
     let what = match (subquery.kind, subquery.form) {
-        (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => "EXISTS",
+        (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => {
+            "EXISTS is not yet supported here; "
+        }
         (SubqueryKind::Exists, SubqueryForm::PatternPredicate) => {
-            "a pattern predicate (a pattern where an expression stands)"
+            "a pattern predicate (a pattern where an expression stands) is not yet supported \
+             here; "
         }
     };
-    not_yet(
-        subquery.span,
-        what,
-        "add the pattern to the MATCH clause, or use Gremlin where(), for example \
-         g.v().has_label(\"person\").where(__.out(\"created\"))",
+    Box::new(
+        GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            subquery.span.start..subquery.span.end,
+            format!(
+                "{what}it is supported as a condition of its own in WHERE or FILTER (alone or \
+                 joined by AND, optionally under NOT), not yet under OR, CASE, in RETURN, \
+                 ORDER BY, a FOR list or a function argument"
+            ),
+        )
+        .alternative(
+            "write the subquery as a condition of its own, for example MATCH (p:person) WHERE \
+             NOT EXISTS { (p)-[:created]->() } RETURN p.name, or use Gremlin where(), for \
+             example g.v().has_label(\"person\").where(__.out(\"created\"))",
+        ),
     )
 }
 

@@ -2351,4 +2351,60 @@ mod gql {
             )
         );
     }
+
+    /// Stage 2b: a top-level `[NOT] EXISTS` (or a pattern predicate) is a `filter(__..)` /
+    /// `not(__..)` child, and the authorization walk visits it: an edge read reached only inside
+    /// the subquery (the query's own pattern reads vertices only) is refused before the run, at
+    /// the child's step, like the Gremlin twin `where(__.out(..))` / `not(__.out(..))`; allowed,
+    /// it asks what the twin asks.
+    #[test]
+    fn a_denied_read_inside_exists_refuses_gql_like_where() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN p.name").toList()"#,
+            r#"g.V().hasLabel("person").not(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) FILTER NOT EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Nested: the edge read sits in the inner child only.
+        for script in [
+            r#"g.V().hasLabel("person").as("p").where(__.V().hasLabel("software").where(__.in("created").where(P.eq("p")))).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { MATCH (q:software) WHERE EXISTS { (q)<-[:created]-(p) } } RETURN p.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "in", "Read Data(edge)");
+        }
+        // The node pattern alone is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN p.name").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        // Refused before it runs, also when no row would reach the child.
+        let err = run(
+            &graph,
+            r#"g.gql("MATCH (p:nobody) WHERE NOT (p)-->() RETURN p").toList()"#,
+            NoEdges,
+        )
+        .unwrap_err();
+        assert!(err.contains("edges are private"), "{err}");
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").not(__.out("created")).values("name").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
 }

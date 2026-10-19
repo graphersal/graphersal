@@ -115,10 +115,6 @@ impl LogicalPlan {
 
     /// The plan of subquery `subquery`'s body for a host whose current element is `current`
     /// (`None`: no element, a row; an edge or a node the body does not import plans as `None`).
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "read by the lowering from 2b.T4")
-    )]
     pub(crate) fn subquery_plan(
         &self,
         bound: &BoundQuery,

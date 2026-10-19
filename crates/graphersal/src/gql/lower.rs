@@ -46,6 +46,7 @@
 //! | a later `MATCH` continuing from a `FOR` item (design E3) | `gql:bind("x")` (an item that is not an element of the pattern's kind, `NULL` included: no row; never a bare `out()` on the item); a join or trail check against it is `gql:filter` as for a `WITH` column |
 //! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
+//! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). A subquery elsewhere in an expression is refused "not yet" (stage 2b.T5). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
@@ -76,8 +77,9 @@
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
-//! refused by the parser (`NEXT`, `UNION`, subqueries, quantified path patterns, shortest
-//! paths, ...) and the binder. A component that is not the root scan and has no equality an id
+//! refused by the parser (`NEXT`, `UNION`, quantified path patterns, shortest paths, ...) and
+//! the binder; a subquery that is not a top-level `[NOT] EXISTS` conjunct is refused after
+//! planning (`bind::refuse_subqueries_except`, until stage 2b.T5). A component that is not the root scan and has no equality an id
 //! or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
@@ -97,14 +99,14 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters, refuse_subqueries,
+    SortKey, bind_with_parameters, refuse_subqueries_except,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
     ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize, Op, PushOp,
-    PushOperand, Pushdown, ResultOp, Stage, and_factors, label_disjuncts,
+    PushOperand, Pushdown, ResultOp, Stage, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, PathPart, RowExpr, eval_error};
@@ -381,6 +383,10 @@ enum Instr<S: GraphStorage> {
     },
     /// `optional(__.<steps>)`: the part of an `OPTIONAL MATCH` (plan mechanism 4).
     Optional(Vec<Instr<S>>),
+    /// `filter(__.<body>)` (`not(__.<body>)` when `negated`): a top-level `[NOT] EXISTS`
+    /// conjunct or pattern predicate, the subquery body lowered onto the child from the host's
+    /// site (design M2, the 2b fast path); the child short-circuits at its first match.
+    Exists { negated: bool, body: Vec<Instr<S>> },
 }
 
 /// One walked pattern edge. The form is chosen at emission, once the labels are known: the
@@ -642,6 +648,14 @@ impl<S: GraphStorage> Lowered<S> {
                     let part = self.emit_into(AnonymousTraversal::new(), steps);
                     g.optional(part)
                 }
+                Instr::Exists { negated, body } => {
+                    let child = self.emit_into(AnonymousTraversal::new(), body);
+                    if negated {
+                        g.not(child)
+                    } else {
+                        g.filter_t(child)
+                    }
+                }
             };
         }
         g
@@ -786,6 +800,14 @@ impl<S: GraphStorage> Lowered<S> {
             Instr::Same(id) => t.where_p(P::Eq(PValue::String(self.label(id)))),
             Instr::Differs(id) => t.where_p(P::Neq(PValue::String(self.label(id)))),
             Instr::Trail(ids) => t.gql_trail(ids.iter().map(|&id| self.label(id)).collect()),
+            Instr::Exists { negated, body } => {
+                let child = self.emit_into(AnonymousTraversal::new(), body);
+                if negated {
+                    t.not(child)
+                } else {
+                    t.filter_t(child)
+                }
+            }
             Instr::Label(_)
             | Instr::PartLabel(_)
             | Instr::Scan
@@ -856,6 +878,8 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn out_v(self) -> Self;
     fn union(self, branches: Vec<AnonymousTraversal<'g, S>>) -> Self;
     fn optional(self, part: AnonymousTraversal<'g, S>) -> Self;
+    fn filter_t(self, child: AnonymousTraversal<'g, S>) -> Self;
+    fn not(self, child: AnonymousTraversal<'g, S>) -> Self;
     fn push_step(self, step: GraphStep<'g, S>) -> Self;
 }
 
@@ -975,6 +999,12 @@ macro_rules! sink {
             fn optional(self, part: AnonymousTraversal<'g, S>) -> Self {
                 self.optional(part)
             }
+            fn filter_t(self, child: AnonymousTraversal<'g, S>) -> Self {
+                self.filter_t(child)
+            }
+            fn not(self, child: AnonymousTraversal<'g, S>) -> Self {
+                self.not(child)
+            }
             fn push_step(self, step: GraphStep<'g, S>) -> Self {
                 self.push_step(step)
             }
@@ -1003,10 +1033,36 @@ fn prepare<S: GraphStorage>(
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
     let plan = plan(&bound, facts, None);
-    // Bound since stage 2b.T2, planned since 2b.T3; lowered from 2b.T4.
-    refuse_subqueries(&parsed, &bound)?;
+    // Stage 2b.T4 lowers a top-level `[NOT] EXISTS` conjunct (the fast path); a subquery
+    // anywhere else waits for the evaluator hook (2b.T5).
+    let fast = fast_path_subqueries(&bound);
+    refuse_subqueries_except(&parsed, &bound, |k| fast.get(k).copied().unwrap_or(false))?;
     Lowering::new(query, &bound, &plan, params).run()
 }
+
+/// Per subquery: whether it is the subquery of a top-level `[NOT] EXISTS` conjunct (a pattern
+/// predicate too), which the lowering runs as a `filter()` / `not()` child (the fast path).
+/// A conjunct of a body counts too; when its subquery's own host is not a fast path, the
+/// refusal names that outer subquery first (text order puts it before the ones it holds).
+fn fast_path_subqueries(bound: &BoundQuery) -> Vec<bool> {
+    let mut fast = vec![false; bound.subqueries.len()];
+    for conjunct in &bound.conjuncts {
+        if let Predicate::Expr(expr) = &conjunct.predicate
+            && let Some((span, _)) = exists_conjunct(expr)
+            && let Some(k) = bound.subquery_at(span)
+            && let Some(flag) = fast.get_mut(k)
+        {
+            *flag = true;
+        }
+    }
+    fast
+}
+
+/// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a
+/// subquery gets its own child, and a `LET` value holding one puts it into every expression
+/// that reads the name, also inside other bodies, so nested bodies multiply. Far beyond any
+/// written query; it keeps a query fast to prepare.
+pub(crate) const MAX_LOWERED_SUBQUERIES: usize = 1024;
 
 /// The names a compiled expression resolves (slot `i` < bindings: binding `i`; then the
 /// `RETURN` columns for `ORDER BY`).
@@ -1052,9 +1108,11 @@ fn parameter<'p>(
         .map(|(_, value)| value)
 }
 
-/// The labels for the step that reaches an element (`None`: no label restriction there) and the
-/// steps that run on the element.
-type ElementSteps<S> = (Option<Vec<String>>, Vec<Instr<S>>);
+/// The labels for the step that reaches an element (`None`: no label restriction there), the
+/// steps that run on the element before its `as()`, and the fast-path `EXISTS` children that run
+/// after it (design E11: last; after the `as()`, so a body reading the element through its
+/// label, a path variable for one, finds it).
+type ElementSteps<S> = (Option<Vec<String>>, Vec<Instr<S>>, Vec<Instr<S>>);
 
 struct Lowering<'q> {
     query: &'q str,
@@ -1063,6 +1121,8 @@ struct Lowering<'q> {
     plan: &'q LogicalPlan,
     params: &'q [(CompactString, ElementProperty)],
     names: Vec<Option<String>>,
+    /// The subquery bodies lowered so far (bounded by [`MAX_LOWERED_SUBQUERIES`]).
+    children: std::cell::Cell<usize>,
 }
 
 impl<'q> Lowering<'q> {
@@ -1079,6 +1139,7 @@ impl<'q> Lowering<'q> {
             plan,
             params,
             names: bound.bindings.iter().map(|b| b.key.clone()).collect(),
+            children: std::cell::Cell::new(0),
         }
     }
 
@@ -1174,12 +1235,14 @@ impl<'q> Lowering<'q> {
             match op {
                 Op::Scan(scan) => {
                     instrs.push(Instr::Scan);
-                    let (labels, steps) = self.element(scan.binding, &scan.filters, Vec::new())?;
+                    let (labels, steps, exists) =
+                        self.element(scan.binding, &scan.filters, Vec::new())?;
                     if let Some(labels) = labels {
                         instrs.push(Instr::HasLabel(labels));
                     }
                     instrs.extend(steps);
                     instrs.push(Instr::Label(scan.binding));
+                    instrs.extend(exists);
                     site = Site::on(scan.binding);
                 }
                 Op::Filter(ids) => {
@@ -1208,13 +1271,14 @@ impl<'q> Lowering<'q> {
                         });
                     }
                     if !expand.to_bound {
-                        let (labels, steps) =
+                        let (labels, steps, exists) =
                             self.element(expand.to, &expand.to_filters, Vec::new())?;
                         if let Some(labels) = labels {
                             instrs.push(Instr::HasLabel(labels));
                         }
                         instrs.extend(steps);
                         instrs.push(Instr::Label(expand.to));
+                        instrs.extend(exists);
                     }
                     site = Site::on(expand.to);
                 }
@@ -1237,12 +1301,14 @@ impl<'q> Lowering<'q> {
                     let lookup_instr = self.lookup(lookup, site)?;
                     instrs.push(lookup_instr);
                     let scan = &lookup.scan;
-                    let (labels, steps) = self.element(scan.binding, &scan.filters, Vec::new())?;
+                    let (labels, steps, exists) =
+                        self.element(scan.binding, &scan.filters, Vec::new())?;
                     if let Some(labels) = labels {
                         instrs.push(Instr::HasLabel(labels));
                     }
                     instrs.extend(steps);
                     instrs.push(Instr::Label(scan.binding));
+                    instrs.extend(exists);
                     site = Site::on(scan.binding);
                 }
                 Op::Anchor(scan) => return Err(self.anchor_not_yet(scan.binding)),
@@ -1468,7 +1534,8 @@ impl<'q> Lowering<'q> {
     /// optimizer, or the labels of an edge's adjacency step), then the steps on the element: the
     /// other label disjunctions as `has_label`, the pushed conjuncts as `has(k, P..)`, `checks`
     /// (join and trail checks), the other label factors and the residual conjuncts as
-    /// `gql:filter`.
+    /// `gql:filter`; apart from them the fast-path `EXISTS` children (the caller emits them after
+    /// the element's `as()`).
     fn element<S: GraphStorage>(
         &self,
         id: BindingId,
@@ -1515,7 +1582,12 @@ impl<'q> Lowering<'q> {
         for c in residual {
             self.conjunct(c, Site::on(id), &mut instrs)?;
         }
-        Ok((first, instrs))
+        // The fast-path `EXISTS` children last (design E11), after the element's `as()`.
+        let mut exists = Vec::new();
+        for &c in &filters.exists {
+            self.conjunct(c, Site::on(id), &mut exists)?;
+        }
+        Ok((first, instrs, exists))
     }
 
     /// The hop of an expansion: the edge's labels, filters, join and trail checks (Phase 0 Q3,
@@ -1549,8 +1621,8 @@ impl<'q> Lowering<'q> {
         if !every.is_empty() {
             checks.push(Instr::Trail(every));
         }
-        let (labels, mut steps) = if expand.edge_join {
-            (None, checks)
+        let (labels, mut steps, exists) = if expand.edge_join {
+            (None, checks, Vec::new())
         } else {
             self.element(id, &expand.edge_filters, checks)?
         };
@@ -1559,6 +1631,7 @@ impl<'q> Lowering<'q> {
         if !expand.edge_join || self.is_column(id) {
             steps.push(Instr::Label(id));
         }
+        steps.extend(exists);
         Ok(Hop {
             direction: expand.direction,
             labels,
@@ -1593,6 +1666,11 @@ impl<'q> Lowering<'q> {
         let Some(conjunct) = self.bound.conjuncts.get(c) else {
             return Ok(());
         };
+        if let Predicate::Expr(expr) = &conjunct.predicate
+            && let Some((span, negated)) = exists_conjunct(expr)
+        {
+            return self.exists(span, negated, site, instrs);
+        }
         let (expr, this) = self.condition(conjunct);
         let condition: RowExpr<S> = self.compile(&expr, this, &[])?;
         if matches!(
@@ -1603,6 +1681,55 @@ impl<'q> Lowering<'q> {
         }
         instrs.push(Instr::Filter { condition, site });
         Ok(())
+    }
+
+    /// The child of a top-level `[NOT] EXISTS` conjunct whose subquery is written at `span`,
+    /// run at `site` (design M2, the 2b fast path): the body's plan for the host's current
+    /// element, lowered from `site` like a later segment (its start `Op::Resume` from the
+    /// current element needs no step, a start at another import is `select()` / `gql:bind`, an
+    /// unanchored component a child-leading `v()`), without merge points (a `lazy_barrier()`
+    /// would defeat the short circuit).
+    fn exists<S: GraphStorage>(
+        &self,
+        span: Span,
+        negated: bool,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<(), TraverserError> {
+        let Some(k) = self.bound.subquery_at(span) else {
+            return Err(self.unlowered());
+        };
+        let Some(body_plan) = self.plan.subquery_plan(self.bound, k, site.current) else {
+            return Err(self.unlowered());
+        };
+        let lowered = self.children.get().saturating_add(1);
+        if lowered > MAX_LOWERED_SUBQUERIES {
+            return Err(self.too_many_children(span));
+        }
+        self.children.set(lowered);
+        let mut body = Vec::new();
+        self.ops(&body_plan.ops, site, &mut body)?;
+        body.retain(|instr| !matches!(instr, Instr::Merge { .. }));
+        instrs.push(Instr::Exists { negated, body });
+        Ok(())
+    }
+
+    /// The error of a query that lowers more than [`MAX_LOWERED_SUBQUERIES`] subquery bodies.
+    fn too_many_children(&self, span: Span) -> TraverserError {
+        GqlErrorBuilder::new(
+            GqlErrorKind::Limit,
+            span.start..span.end,
+            format!(
+                "the query runs more than {MAX_LOWERED_SUBQUERIES} subquery bodies once its LET \
+                 variables are substituted (each place that reads a LET holding EXISTS runs its \
+                 own copy)"
+            ),
+        )
+        .alternative(
+            "write the EXISTS where it is used instead of in a LET that is read many times, or \
+             join the patterns into fewer subqueries",
+        )
+        .into_error(self.query)
     }
 
     /// The condition of a conjunct as an expression; an inline property `{k: v}` becomes
@@ -2242,7 +2369,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 marks.read(&mut slots, *site);
             }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
-            Instr::Optional(part) => mark_reads(part, marks),
+            Instr::Optional(part) | Instr::Exists { body: part, .. } => mark_reads(part, marks),
             Instr::Scan
             | Instr::Unit
             | Instr::HasLabel(_)
@@ -2274,7 +2401,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::Aggregate { site, .. }
             | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
-            Instr::Optional(part) => in_part(part, segment),
+            Instr::Optional(part) | Instr::Exists { body: part, .. } => in_part(part, segment),
             Instr::Scan
             | Instr::Unit
             | Instr::HasLabel(_)
@@ -2376,8 +2503,8 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
                 rename_aliases(source, within, renames);
             }
         },
-        // Subqueries are refused after binding until stage 2b.T4; their bodies are scopes of
-        // their own, bound and substituted by the binder (`BoundQuery::subqueries`).
+        // A subquery body is a scope of its own, bound and substituted by the binder
+        // (`BoundQuery::subqueries`); an alias never resolves inside it.
         ExprKind::Subquery(_) => {}
     }
 }
