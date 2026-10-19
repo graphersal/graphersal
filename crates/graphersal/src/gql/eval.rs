@@ -630,6 +630,14 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         | ExprKind::IsLabeled { .. }
         | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
+        // The binder refuses subqueries until the evaluator hook exists (stage 2b.T5).
+        ExprKind::Subquery(_) => {
+            return Err(EvalError::new(
+                status::NOT_SUPPORTED,
+                "a subquery (EXISTS) is not yet supported in this expression",
+                span,
+            ));
+        }
     })
 }
 

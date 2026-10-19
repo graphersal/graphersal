@@ -1439,3 +1439,44 @@ fn binding_never_panics_on_stage_2a_queries() {
         }
     }
 }
+
+#[test]
+fn subqueries_are_not_yet_bound() {
+    // Stage 2b.T1 parses EXISTS and pattern predicates; the binder refuses them until 2b.T2.
+    for (query, text, what) in [
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) } RETURN n",
+            "EXISTS { MATCH (n)-->(m) }",
+            "EXISTS is not yet supported",
+        ),
+        (
+            "MATCH (n) WHERE NOT (n)-[:T]->() RETURN n",
+            "(n)-[:T]->()",
+            "a pattern predicate",
+        ),
+        (
+            "MATCH (n) RETURN CASE WHEN EXISTS ((n)-->()) THEN 1 END AS x",
+            "EXISTS ((n)-->())",
+            "EXISTS is not yet supported",
+        ),
+        (
+            "MATCH (n) LET x = (n)-->() RETURN x",
+            "(n)-->()",
+            "a pattern predicate",
+        ),
+        (
+            "FOR x IN [EXISTS { (a)-->() }] RETURN x",
+            "EXISTS { (a)-->() }",
+            "EXISTS is not yet supported",
+        ),
+    ] {
+        let f = failure_of(query);
+        assert_eq!(
+            (f.kind, f.gqlstatus.as_str()),
+            (GqlErrorKind::NotYet, "0A000"),
+            "{query}"
+        );
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(what), "{query}: {}", f.message);
+    }
+}

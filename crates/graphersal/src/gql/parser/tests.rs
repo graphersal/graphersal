@@ -166,6 +166,27 @@ fn sexp(e: &Expr) -> String {
             sexp(operand),
             sexp(edge)
         ),
+        ExprKind::Subquery(subquery) => {
+            let form = match subquery.form {
+                SubqueryForm::Braces => "exists{}",
+                SubqueryForm::Parens => "exists()",
+                SubqueryForm::PatternPredicate => "pattern",
+            };
+            let clauses = subquery
+                .matches
+                .iter()
+                .map(|clause| {
+                    let mut out = format!("(match {}", clause.patterns.len());
+                    if let Some(w) = &clause.where_clause {
+                        out.push_str(&format!(" (where {})", sexp(w)));
+                    }
+                    out.push(')');
+                    out
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("({form} {clauses})")
+        }
         ExprKind::FunctionCall { name, args, .. } => match args {
             CallArgs::Star(_) => format!("{}(*)", name.name),
             CallArgs::Exprs(args) => format!(
@@ -809,16 +830,6 @@ fn not_yet_supported_constructs() {
             "MATCH (n) RETURN n INTERSECT MATCH (m) RETURN m",
             "INTERSECT",
             Some("union("),
-        ),
-        (
-            "MATCH (n) WHERE EXISTS { (n)-->() } RETURN n",
-            "EXISTS",
-            Some("where("),
-        ),
-        (
-            "MATCH (n) WHERE exists(n.x) RETURN n",
-            "exists",
-            Some("where("),
         ),
         (
             "MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n",
@@ -2363,4 +2374,448 @@ fn for_and_unwind_errors() {
     // A misplaced FOR clause is still found by position: line and column.
     let f = fail("FOR x IN [1]\nWITH OFFSET\nRETURN x");
     assert_eq!((f.line, f.column), (2, 1));
+}
+
+// ----- stage 2b: EXISTS and pattern predicates -----
+
+/// The subquery of the first RETURN item of `MATCH (n) RETURN <src>`.
+fn subquery(src: &str) -> SubqueryExpr {
+    let query = ok(&format!("MATCH (n) RETURN {src}"));
+    match &query.ret.items[0].expr.kind {
+        ExprKind::Subquery(subquery) => (**subquery).clone(),
+        other => panic!("{src}: not a subquery: {other:?}"),
+    }
+}
+
+#[test]
+fn exists_forms() {
+    for (src, tree) in [
+        ("EXISTS { MATCH (n)-->(m) }", "(exists{} (match 1))"),
+        (
+            "EXISTS { MATCH (n)-->(m) WHERE m.x > 1 MATCH (m)-->(k), (k)-->() }",
+            "(exists{} (match 1 (where (> m.x 1))) (match 2))",
+        ),
+        (
+            "EXISTS { (n)-->(m), (m)-->(k) WHERE m.x > 1 }",
+            "(exists{} (match 2 (where (> m.x 1))))",
+        ),
+        ("exists { p = (n)-[:T*1..2]->() }", "(exists{} (match 1))"),
+        ("EXISTS ( (n)-->() )", "(exists() (match 1))"),
+        (
+            "EXISTS ((n)-->() WHERE n.a = 1)",
+            "(exists() (match 1 (where (= n.a 1))))",
+        ),
+        (
+            "EXISTS ( MATCH (n)-->() MATCH ()-->(n) )",
+            "(exists() (match 1) (match 1))",
+        ),
+        ("EXISTS ( p = (n)-->() )", "(exists() (match 1))"),
+        (
+            "EXISTS { MATCH (n)-->(m) WHERE EXISTS { (m)-->() } }",
+            "(exists{} (match 1 (where (exists{} (match 1)))))",
+        ),
+        (
+            "NOT EXISTS { (n)-->() } AND n.a = 1",
+            "(and (not (exists{} (match 1))) (= n.a 1))",
+        ),
+    ] {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    let s = subquery("EXISTS { MATCH (n)-[e:T]->(m:L {a: 1}) WHERE e.w > 0 }");
+    assert_eq!(s.kind, SubqueryKind::Exists);
+    assert_eq!(s.form, SubqueryForm::Braces);
+    let clause = &s.matches[0];
+    assert!(!clause.optional);
+    assert_eq!(clause.patterns[0].steps.len(), 1);
+    assert_eq!(
+        clause.patterns[0].steps[0].edge.direction,
+        EdgeDirection::Right
+    );
+    // A subquery is an ordinary operand: in WHERE, RETURN, CASE, function arguments.
+    let q = ok("MATCH (n) WHERE EXISTS { (n)-->() } OR n.a = 1 RETURN n");
+    assert!(matches!(
+        &q.matches[0].where_clause,
+        Some(Expr {
+            kind: ExprKind::Binary {
+                op: BinaryOp::Or,
+                ..
+            },
+            ..
+        })
+    ));
+    assert_eq!(
+        expr("CASE WHEN (n)-->() THEN 1 ELSE 0 END"),
+        "(case (when (pattern (match 1)) 1) (else 0))"
+    );
+    assert_eq!(
+        expr("coalesce((n)-->(), false)"),
+        "coalesce((pattern (match 1)) false)"
+    );
+}
+
+#[test]
+fn pattern_predicates() {
+    for (src, edges) in [
+        ("(n)-->()", vec![EdgeDirection::Right]),
+        ("(n)<--()", vec![EdgeDirection::Left]),
+        ("(n)--()", vec![EdgeDirection::Any]),
+        ("(n)->()", vec![EdgeDirection::Right]),
+        ("(n)<->()", vec![EdgeDirection::Any]),
+        ("(n)<-->()", vec![EdgeDirection::Any]),
+        ("(n)-[:T]->()", vec![EdgeDirection::Right]),
+        ("(n)<-[:T]-()", vec![EdgeDirection::Left]),
+        ("(n)-[e]-()", vec![EdgeDirection::Any]),
+        ("(n)<-[:T]->()", vec![EdgeDirection::Any]),
+        ("(n:L {a: 1})-[:T*1..3]->(:M)", vec![EdgeDirection::Right]),
+        ("(n)-->{1,3}()", vec![EdgeDirection::Right]),
+        ("(n)--{2}()", vec![EdgeDirection::Any]),
+        // A weak edge first, a strong one later: the whole chain is the pattern.
+        (
+            "(n)-(m)-->(k)",
+            vec![EdgeDirection::Any, EdgeDirection::Right],
+        ),
+        (
+            "(n)<-(m)--(k)",
+            vec![EdgeDirection::Left, EdgeDirection::Any],
+        ),
+        (
+            "(n)-->(m)<--(k)-(j)",
+            vec![
+                EdgeDirection::Right,
+                EdgeDirection::Left,
+                EdgeDirection::Any,
+            ],
+        ),
+    ] {
+        let s = subquery(src);
+        assert_eq!(s.form, SubqueryForm::PatternPredicate, "{src}");
+        assert_eq!(s.matches.len(), 1, "{src}");
+        let clause = &s.matches[0];
+        assert!(clause.where_clause.is_none(), "{src}");
+        assert_eq!(clause.patterns.len(), 1, "{src}");
+        let directions: Vec<_> = clause.patterns[0]
+            .steps
+            .iter()
+            .map(|step| step.edge.direction)
+            .collect();
+        assert_eq!(directions, edges, "{src}");
+    }
+    // Operator precedence: a pattern predicate is a primary.
+    assert_eq!(
+        expr("NOT (n)-[:T]->() AND (n)<--()"),
+        "(and (not (pattern (match 1))) (pattern (match 1)))"
+    );
+    assert_eq!(expr("(n)-->() = true"), "(= (pattern (match 1)) true)");
+    assert_eq!(expr("(n)-->() IS NULL"), "(null? (pattern (match 1)))");
+    assert_eq!(expr("[(n)-->(), 1]"), "[(pattern (match 1)) 1]");
+    // Nested in an inline WHERE of the pattern itself, and of MATCH.
+    let q = ok("MATCH (n WHERE (n)-->()) RETURN (n)-[:T]->(m WHERE (m)-->())");
+    assert!(matches!(
+        &q.matches[0].patterns[0].start.where_clause,
+        Some(Expr {
+            kind: ExprKind::Subquery(_),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn pattern_predicate_lookahead_keeps_arithmetic() {
+    for (src, tree) in [
+        ("(n) - (m)", "(- n m)"),
+        ("(n)-(m)", "(- n m)"),
+        ("(n.a)-(1)", "(- n.a 1)"),
+        ("(n)-1", "(- n 1)"),
+        ("(n) - 1", "(- n 1)"),
+        ("(n)--1", "(- n -1)"),
+        ("(n) - - (m)", "(- n (- m))"),
+        ("(n) - -(m)", "(- n (- m))"),
+        ("(n)<-(m)", "(< n (- m))"),
+        ("(n) <- (m)", "(< n (- m))"),
+        ("(n) - (m) - (k)", "(- (- n m) k)"),
+        ("(n) - [1]", "(- n [1])"),
+        ("(n) <-[1]", "(< n (- [1]))"),
+        ("(n.a + 1) * 2", "(* (+ n.a 1) 2)"),
+        ("((n))", "n"),
+        ("(n) - (m) < (k)", "(< (- n m) k)"),
+    ] {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    // A long chain of weak edges stays arithmetic (the lookahead gives up after a bound).
+    let chain = vec!["(n)"; 200].join(" - ");
+    let parsed = expr(&chain);
+    assert!(parsed.starts_with("(- (- "), "{parsed}");
+    // Past the bound, the chain splits: the operands closer to the strong edge than the bound
+    // read as a pattern (longer than the binder's edge limit anyway).
+    let chain = format!("{} --> (m)", vec!["(n)"; 70].join("-"));
+    let q = ok(&format!("MATCH (n) RETURN {chain}"));
+    let ExprKind::Binary {
+        op: BinaryOp::Sub,
+        right,
+        ..
+    } = &q.ret.items[0].expr.kind
+    else {
+        panic!("not arithmetic first")
+    };
+    assert!(matches!(&right.kind, ExprKind::Subquery(_)));
+    // Within the bound, the whole chain is the pattern.
+    let chain = format!("{} --> (m)", vec!["(n)"; 60].join("-"));
+    let q = ok(&format!("MATCH (n) RETURN {chain}"));
+    assert!(matches!(
+        &q.ret.items[0].expr.kind,
+        ExprKind::Subquery(s) if s.matches[0].patterns[0].steps.len() == 60
+    ));
+}
+
+#[test]
+fn subquery_spans() {
+    let query = "MATCH (n) WHERE NOT (n)-[:T]->(:L) AND EXISTS {\n MATCH (n)-->(m)\n} RETURN n";
+    let q = ok(query);
+    let Some(Expr {
+        kind: ExprKind::Binary { left, right, .. },
+        ..
+    }) = &q.matches[0].where_clause
+    else {
+        panic!("not an AND")
+    };
+    let ExprKind::Unary { operand, .. } = &left.kind else {
+        panic!("not a NOT")
+    };
+    assert_eq!(q.text(operand.span), "(n)-[:T]->(:L)");
+    let ExprKind::Subquery(s) = &operand.kind else {
+        panic!("not a pattern predicate")
+    };
+    assert_eq!(q.text(s.span), "(n)-[:T]->(:L)");
+    assert_eq!(q.text(s.matches[0].span), "(n)-[:T]->(:L)");
+    assert_eq!(q.text(right.span), "EXISTS {\n MATCH (n)-->(m)\n}");
+    let ExprKind::Subquery(s) = &right.kind else {
+        panic!("not EXISTS")
+    };
+    assert_eq!(q.text(s.matches[0].span), "MATCH (n)-->(m)");
+    assert_eq!((s.matches[0].span.line, s.matches[0].span.column), (2, 2));
+    let q = ok("MATCH (n) RETURN EXISTS ( (n)-->(m), (m)-->() WHERE m.a > 1 ) AS x");
+    let ExprKind::Subquery(s) = &q.ret.items[0].expr.kind else {
+        panic!("not EXISTS")
+    };
+    assert_eq!(
+        q.text(s.span),
+        "EXISTS ( (n)-->(m), (m)-->() WHERE m.a > 1 )"
+    );
+    assert_eq!(
+        q.text(s.matches[0].span),
+        "(n)-->(m), (m)-->() WHERE m.a > 1"
+    );
+    assert_eq!(
+        q.ret.items[0].alias.as_ref().map(|a| a.name.as_str()),
+        Some("x")
+    );
+}
+
+#[test]
+fn subquery_errors() {
+    // Cypher 4 exists(value): refused for good, with the IS NOT NULL test.
+    for (query, text, here) in [
+        ("MATCH (n) WHERE exists(n.x) RETURN n", "exists(n.x)", "n.x"),
+        ("MATCH (n) RETURN EXISTS(n) AS x", "EXISTS(n)", "n"),
+        ("MATCH (n) RETURN exists($p) AS x", "exists($p)", "$p"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.starts_with("test a property with n.p IS NOT NULL"),
+            "{alternative}"
+        );
+        assert!(
+            alternative.contains(&format!("here {here} IS NOT NULL")),
+            "{alternative}"
+        );
+    }
+    // Clauses other than MATCH inside a body: not yet (a nested query, stage 2d).
+    for (query, text) in [
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) RETURN m } RETURN n",
+            "RETURN",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH m } RETURN n",
+            "WITH",
+        ),
+        ("MATCH (n) WHERE EXISTS { RETURN 1 } RETURN n", "RETURN"),
+        (
+            "MATCH (n) WHERE EXISTS ( MATCH (n)-->(m) LIMIT 1 ) RETURN n",
+            "LIMIT",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-->(m) ORDER BY m } RETURN n",
+            "ORDER",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { OPTIONAL MATCH (n)-->() } RETURN n",
+            "OPTIONAL MATCH",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) CALL { } } RETURN n",
+            "CALL",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->() UNION MATCH (n) } RETURN n",
+            "UNION",
+        ),
+        ("MATCH (n) WHERE EXISTS { ((n)-->()){2} } RETURN n", "(("),
+        (
+            "MATCH (n) WHERE EXISTS { ANY SHORTEST (n)-->() } RETURN n",
+            "ANY SHORTEST",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    let f = fail("MATCH (n) WHERE EXISTS { MATCH (n)-->(m) RETURN m } RETURN n");
+    assert!(
+        f.message
+            .contains("RETURN inside EXISTS { } (a nested query)"),
+        "{}",
+        f.message
+    );
+    // COUNT { } stays refused (not approved, P0), naming OPTIONAL MATCH .. count().
+    let f = fail("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "COUNT {");
+    let alternative = f.alternative.unwrap_or_default();
+    assert!(alternative.contains("count(s)"), "{alternative}");
+    // Syntax errors name what may stand there.
+    for (query, text, expected) in [
+        ("MATCH (n) WHERE EXISTS x RETURN n", "x", vec!["`{`", "`(`"]),
+        (
+            "MATCH (n) WHERE EXISTS {} RETURN n",
+            "}",
+            vec!["MATCH", "`(`"],
+        ),
+        (
+            "MATCH (n) WHERE EXISTS () RETURN n",
+            ")",
+            vec!["MATCH", "`(`"],
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-->() MATCH (m) } RETURN n",
+            "MATCH",
+            vec!["`,`", "WHERE", "`}`"],
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->() WHERE n.a = 1 (m) } RETURN n",
+            "(",
+            vec!["MATCH", "`}`"],
+        ),
+        (
+            "MATCH (n) WHERE EXISTS ( (n)-->() } RETURN n",
+            "}",
+            vec!["`,`", "WHERE", "`)`"],
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-->( } RETURN n",
+            "}",
+            vec!["a variable", "`:`", "IS", "`{`", "WHERE", "`)`"],
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, expected, "{query}");
+    }
+    // A pattern predicate ends at its last node: a decisive edge without a node is a pattern
+    // error, not arithmetic.
+    let f = fail("MATCH (n) WHERE (n)--> RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    // `exists` is a keyword: as a variable it is back-quoted.
+    let f = fail("MATCH (n) RETURN exists");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    ok("MATCH (`exists`) RETURN `exists`");
+}
+
+#[test]
+fn subqueries_are_bounded() {
+    // Nesting: the parser's depth limit, never a stack overflow.
+    let mut nested = "(n)-->()".to_string();
+    for _ in 0..200 {
+        nested = format!("EXISTS {{ MATCH (n) WHERE {nested} }}");
+    }
+    let f = fail(&format!("MATCH (n) WHERE {nested} RETURN n"));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    let mut nested = "(n)-->()".to_string();
+    for _ in 0..200 {
+        nested = format!("(n WHERE {nested})-->()");
+    }
+    let f = fail(&format!("MATCH (n) WHERE {nested} RETURN n"));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    // Height: a subquery is one level taller than the tallest tree in its body, so a tall
+    // chain inside EXISTS counts toward the expression it stands in.
+    // `n.a OR n.a ...` of k items is k + 1 high; the subquery one more, each AND one more.
+    let tall = vec!["n.a"; MAX_HEIGHT - 4].join(" OR ");
+    ok(&format!(
+        "MATCH (n) WHERE n.b AND (n.c AND EXISTS {{ MATCH (n) WHERE {tall} }}) RETURN n"
+    ));
+    let f = fail(&format!(
+        "MATCH (n) WHERE n.d AND (n.b AND (n.c AND EXISTS {{ MATCH (n) WHERE {tall} }})) \
+         RETURN n"
+    ));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    let f = fail(&format!(
+        "MATCH (n) WHERE n.d AND (n.b AND (n.c AND EXISTS {{ MATCH (n {{a: 1}})-[:T]->(:L) \
+         WHERE {tall} }})) RETURN n"
+    ));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    let f = fail(&format!(
+        "MATCH (n) WHERE n.d AND (n.b AND (n.c AND (n)-[e WHERE {tall}]->())) RETURN n"
+    ));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    ok(&format!(
+        "MATCH (n) WHERE n.b AND (n.c AND (n)-[e WHERE {tall}]->()) RETURN n"
+    ));
+}
+
+/// Random expressions over the tokens that pattern predicates and arithmetic share: the
+/// parser never panics, and every accepted subquery has a non-empty body.
+#[test]
+fn random_subquery_expressions_never_panic() {
+    const TOKENS: &[&str] = &[
+        "(", "(", "(", ")", ")", ")", "-", "-", "->", "<-", "--", "-->", "<--", "<->", "[", "]",
+        "{", "}", "n", "m", "e", ":T", ":L", "1", "n.a", "*", "+", "{1,2}", ",", "WHERE", "EXISTS",
+        "EXISTS {", "EXISTS (", "MATCH", "NOT", "AND", "OR", "=", "<", "p =", "RETURN", "OPTIONAL",
+        "COUNT {", "exists(", "[e]", "-[e]->", "<-[:T]-", "()",
+    ];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut accepted = 0;
+    for _ in 0..10_000 {
+        let len = 1 + (next() % 16) as usize;
+        let body: Vec<&str> = (0..len)
+            .map(|_| TOKENS[(next() % TOKENS.len() as u64) as usize])
+            .collect();
+        let query = format!("MATCH (n) WHERE {} RETURN n", body.join(" "));
+        if let Ok(q) = parse(&query) {
+            accepted += 1;
+            let mut stack: Vec<&Expr> = q.matches[0].where_clause.iter().collect();
+            while let Some(e) = stack.pop() {
+                match &e.kind {
+                    ExprKind::Subquery(s) => assert!(!s.matches.is_empty(), "{query}"),
+                    ExprKind::Unary { operand, .. } => stack.push(operand),
+                    ExprKind::Binary { left, right, .. } => {
+                        stack.push(left);
+                        stack.push(right);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(accepted > 0);
 }

@@ -14,6 +14,9 @@
 //! Stage 2a adds `FOR` / Cypher `UNWIND` ([`Stage::For`]) and queries that start with `FOR`,
 //! `LET`, `WITH`, `FILTER` or `RETURN` (no `MATCH`: [`Query::stages`] may be empty or start
 //! with another stage).
+//! Stage 2b adds the `EXISTS` predicate and Cypher pattern predicates ([`ExprKind::Subquery`]:
+//! `EXISTS { MATCH .. }`, `EXISTS { pattern }`, `EXISTS ( .. )`, `(a)-[:T]->(b)` where an
+//! expression stands); the body holds `MATCH` clauses only.
 
 use super::lexer::Span;
 
@@ -399,6 +402,45 @@ pub(crate) enum ExprKind {
         /// The arguments.
         args: CallArgs,
     },
+    /// A subquery in an expression: `EXISTS { .. }`, `EXISTS ( .. )` or a Cypher pattern
+    /// predicate (stage 2b).
+    Subquery(Box<SubqueryExpr>),
+}
+
+/// A subquery in an expression (stage 2b, design item 6): its body is bound as a nested query
+/// whose names are the outer ones (imports) or local ones.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SubqueryExpr {
+    /// What the subquery computes.
+    pub(crate) kind: SubqueryKind,
+    /// How it was written.
+    pub(crate) form: SubqueryForm,
+    /// The body: one or more non-optional `MATCH` clauses, each with its own `WHERE`. The
+    /// pattern forms (`EXISTS { pattern, .. WHERE c }`, a pattern predicate) are one clause
+    /// whose span is the pattern list (and its `WHERE`).
+    pub(crate) matches: Vec<MatchClause>,
+    /// From `EXISTS` to the closing bracket; for a pattern predicate the pattern.
+    pub(crate) span: Span,
+}
+
+/// What a [`SubqueryExpr`] computes. Cypher's `COUNT { }` would be a second kind; it is not
+/// supported yet (refused by the parser).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubqueryKind {
+    /// TRUE when the body has at least one match, else FALSE (never `NULL`).
+    Exists,
+}
+
+/// The spelling of a [`SubqueryExpr`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubqueryForm {
+    /// `EXISTS { MATCH .. }` or `EXISTS { pattern, .. [WHERE cond] }`.
+    Braces,
+    /// `EXISTS ( MATCH .. )` or `EXISTS ( pattern, .. [WHERE cond] )`.
+    Parens,
+    /// A Cypher pattern predicate, `(a)-[:T]->(b)` where an expression stands: an alias of
+    /// `EXISTS { pattern }` that may not introduce a named variable (the binder's check).
+    PatternPredicate,
 }
 
 /// Prefix operators.

@@ -2374,5 +2374,7 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
                 rename_aliases(source, within, renames);
             }
         },
+        // The binder refuses subqueries until stage 2b.T2; their bodies are scopes of their own.
+        ExprKind::Subquery(_) => {}
     }
 }

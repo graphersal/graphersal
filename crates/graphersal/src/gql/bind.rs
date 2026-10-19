@@ -132,7 +132,8 @@ use std::rc::Rc;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy,
     Identifier, LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern,
-    OrderBy, OrdinalKind, Quantifier, Query, ReturnItem, SortDirection, Stage, WithClause,
+    OrderBy, OrdinalKind, Quantifier, Query, ReturnItem, SortDirection, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -575,6 +576,22 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
+/// The refusal of a subquery expression until the binder supports it (stage 2b.T2).
+fn subquery_not_yet(subquery: &SubqueryExpr) -> Box<GqlErrorBuilder> {
+    let what = match (subquery.kind, subquery.form) {
+        (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => "EXISTS",
+        (SubqueryKind::Exists, SubqueryForm::PatternPredicate) => {
+            "a pattern predicate (a pattern where an expression stands)"
+        }
+    };
+    not_yet(
+        subquery.span,
+        what,
+        "add the pattern to the MATCH clause, or use Gremlin where(), for example \
+         g.v().has_label(\"person\").where(__.out(\"created\"))",
+    )
+}
+
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     Box::new(
         GqlErrorBuilder::new(
@@ -622,6 +639,9 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
             }
         }
         ExprKind::FunctionCall { args, .. } => args.iter().for_each(f),
+        // The body of a subquery is a nested scope, bound on its own, not a child expression of
+        // this scope.
+        ExprKind::Subquery(_) => {}
     }
 }
 
@@ -1715,6 +1735,7 @@ impl<'q> Binder<'q> {
                     self.resolve(inner, arg, refs)?;
                 }
             }
+            ExprKind::Subquery(subquery) => return Err(subquery_not_yet(subquery)),
         }
         Ok(())
     }
@@ -2032,6 +2053,8 @@ impl<'q> Binder<'q> {
                     args,
                 }
             }
+            // `resolve` refuses subqueries before any substitution (until stage 2b.T2).
+            ExprKind::Subquery(subquery) => return Err(subquery_not_yet(subquery)),
         };
         Ok((
             Expr {

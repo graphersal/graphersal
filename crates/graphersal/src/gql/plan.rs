@@ -713,6 +713,8 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
                 stack.extend(case.else_result.as_ref());
             }
             ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
+            // A subquery may import the variable (stage 2b): conservatively it reads it.
+            ExprKind::Subquery(_) => return true,
         }
     }
     false

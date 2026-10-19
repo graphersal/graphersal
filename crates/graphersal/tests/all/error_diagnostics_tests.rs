@@ -8538,8 +8538,8 @@ mod gql {
             ),
             (
                 "exists(p.age)",
-                GqlErrorKind::NotYet,
-                "EXISTS is not yet supported",
+                GqlErrorKind::Refused,
+                "exists(value), the Cypher 4 property test, is not supported",
                 "test a property with n.p IS NOT NULL",
             ),
             (

@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 2a): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 2b): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -38,6 +38,9 @@
 //!             | CAST '(' expr AS type ')'                 -- type: one or two words
 //!             | TRIM '(' (LEADING|TRAILING|BOTH)? expr? FROM expr ')'
 //! is_pred    := expr IS NOT? (NULL | LABELED labels | SOURCE OF expr | DESTINATION OF expr)
+//! exists     := EXISTS ('{' body '}' | '(' body ')')
+//! body       := match+ | path (',' path)* (WHERE expr)?   -- MATCH without OPTIONAL (stage 2b)
+//! pattern_pred := path                 -- where an expression stands; found by lookahead
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
@@ -47,7 +50,8 @@
 //! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
 //! `a = b IS NULL` is `a = (b IS NULL)`) < additive (`+ - ||`) < multiplicative (`* / %`) <
 //! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`) <
-//! primary (literals, `[list]`, `{map}`, `$param`, variables, function calls, `CASE`, `( )`).
+//! primary (literals, `[list]`, `{map}`, `$param`, variables, function calls, `CASE`, `( )`,
+//! `EXISTS { }` / `EXISTS ( )`, pattern predicates).
 //! A minus directly before an integer or float literal is folded into the literal, so
 //! `-9223372036854775808` is `i64::MIN`; the same digits without the minus are out of range.
 //!
@@ -118,6 +122,27 @@
 //!   name is missing: a syntax error); otherwise `WITH` starts a `WITH` clause. A missing `IN`
 //!   (or `AS` after `UNWIND`) is a syntax error naming the form; an ordinal after `UNWIND` is
 //!   refused naming `FOR`. The binder checks the names (redefinition, `i` equal to `x`).
+//! - **`EXISTS` and pattern predicates** (stage 2b, design item 6, [`SubqueryExpr`]): ISO
+//!   `EXISTS { MATCH .. }`, `EXISTS { pattern, .. [WHERE c] }` and the same in parentheses, and
+//!   the Cypher pattern predicate `(a)-[:T]->(b)` where an expression stands (an alias of
+//!   `EXISTS { pattern }`, one path, no `WHERE` of its own; that it introduces no named variable
+//!   is the binder's check). The body holds non-optional `MATCH` clauses only: `OPTIONAL MATCH`
+//!   and the other clauses (`WITH`, `RETURN`, `ORDER BY`, ..., a nested query) are "not yet
+//!   supported". Cypher 4 `exists(value)` (a token after `EXISTS (` that starts no body) is
+//!   refused for good, naming `n.p IS NOT NULL`; Cypher `COUNT { }` / `COLLECT { }` stay "not
+//!   yet supported". A subquery is one level taller than the tallest expression or label tree
+//!   of its body, so [`MAX_HEIGHT`] bounds the body with its host; names declared inside do
+//!   not feed the missing-`RETURN` alternative.
+//! - **Pattern-predicate lookahead.** At `(` where an expression stands, a bounded token scan
+//!   (no parse, no backtracking: re-parsing a failed speculative pattern as an expression is
+//!   exponential in the nesting) decides: skip the balanced group, then read the edge. One that
+//!   contains `->` (`-->`, `->`, `-[..]->`, `<-->`, `<->`) is never an operator: a pattern. A
+//!   strong edge (`--` / `<--` with adjacent characters, `-[..]-`, `<-[..]-`) is a pattern when
+//!   a node `(` follows (after a quantifier, if any). A weak edge (`-` or `<-` alone, `- -` with
+//!   a space) followed by `(` continues the scan (at most 64 edges); anything else is a
+//!   parenthesized expression. So `(a) - (b)` and `(a)-1` stay arithmetic, `(a)<-(b)` stays
+//!   `a < -b`, `(a) - [1]` stays list arithmetic; `(a)--(b)`, `(a)-->(b)` and `(a)-(b)-->(c)` are
+//!   patterns (Cypher's reading wins over `a - -b`, which is written without parentheses).
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -131,7 +156,8 @@ use super::ast::{
     Expr, ExprKind, FilterClause, ForClause, GroupBy, Identifier, LabelExpr, LabelExprKind,
     LetBinding, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy,
     Ordinal, OrdinalKind, PathPattern, PatternStep, Quantifier, Query, ReturnClause, ReturnItem,
-    SortDirection, SortItem, Stage, TrimSide, UnaryOp, WithClause,
+    SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp,
+    WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -606,7 +632,28 @@ struct Parser<'a> {
     pending_minus: Option<Span>,
     /// Variables declared in patterns, in order (for the missing-`RETURN` alternative).
     variables: Vec<String>,
+    /// The greatest height of an expression or label tree parsed by [`Parser::expr`] or a
+    /// pattern filler since the innermost enclosing subquery began: the height of a
+    /// [`SubqueryExpr`] is one more, so the `MAX_HEIGHT` bound covers its body too.
+    inner_height: usize,
 }
+
+/// How an edge ahead of a node pattern in an expression reads (the pattern-predicate lookahead).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeAhead {
+    /// It contains `->` (or is `<->`): no expression operator reads it, so a pattern follows.
+    Decisive,
+    /// `--`, `<--` (the two characters adjacent) or a bracketed edge `-[..]-` / `<-[..]-`: a
+    /// pattern when a node pattern follows it.
+    Strong,
+    /// `-` or `<-` alone, or `- -` with a space: arithmetic or a comparison unless a strong or
+    /// decisive edge follows later in the chain.
+    Weak,
+}
+
+/// How many edges the pattern-predicate lookahead follows through a chain of weak edges before
+/// it decides on an expression (a pattern this long is refused by the binder anyway).
+const PREDICATE_LOOKAHEAD_EDGES: usize = 64;
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str, tokens: Vec<Token<'a>>) -> Self {
@@ -634,6 +681,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             pending_minus: None,
             variables: Vec::new(),
+            inner_height: 0,
         }
     }
 
@@ -837,12 +885,6 @@ impl<'a> Parser<'a> {
                 &text,
                 "combine the results in Gremlin, for example \
                  g.v().union(__.has_label(\"person\"), __.has_label(\"software\"))",
-            ),
-            Keyword::Exists => not_yet(
-                "EXISTS",
-                "test a property with n.p IS NOT NULL; for a pattern, add it to the MATCH \
-                 clause, or use Gremlin where(), for example \
-                 g.v().has_label(\"person\").where(__.out(\"created\"))",
             ),
             Keyword::Shortest => not_yet(
                 "shortest path search",
@@ -1766,7 +1808,9 @@ impl<'a> Parser<'a> {
         }
         let labels = if self.eat(&TokenKind::Colon).is_some() || self.eat_kw(Keyword::Is).is_some()
         {
-            Some(self.label_expr()?.0)
+            let (labels, height) = self.label_expr()?;
+            self.inner_height = self.inner_height.max(height);
+            Some(labels)
         } else {
             None
         };
@@ -1776,7 +1820,9 @@ impl<'a> Parser<'a> {
             None
         };
         let properties = if self.at(&TokenKind::LBrace) {
-            Some(self.map_literal()?.0)
+            let (map, height) = self.map_literal()?;
+            self.inner_height = self.inner_height.max(height);
+            Some(map)
         } else if let TokenKind::Parameter(_) = self.peek().kind {
             let b = err(
                 GqlErrorKind::Syntax,
@@ -2201,7 +2247,9 @@ impl<'a> Parser<'a> {
     // ----- expressions -----
 
     fn expr(&mut self) -> PResult<Expr> {
-        Ok(self.expr_bp(0)?.0)
+        let (expr, height) = self.expr_bp(0)?;
+        self.inner_height = self.inner_height.max(height);
+        Ok(expr)
     }
 
     /// An expression whose operators bind at least as tight as `min_bp`, with its tree height.
@@ -2597,13 +2645,14 @@ impl<'a> Parser<'a> {
     /// Dispatches on the first token of a primary expression (nested forms in own functions).
     fn primary(&mut self) -> PResult<(Expr, usize)> {
         match &self.peek().kind {
+            TokenKind::LParen if self.pattern_ahead() => self.pattern_predicate(),
             TokenKind::LParen => self.parenthesized(),
             TokenKind::LBracket => self.list(),
             TokenKind::LBrace => self.map_expr(),
             TokenKind::Keyword(Keyword::Case) => self.case_expr(),
+            TokenKind::Keyword(Keyword::Exists) => self.exists_expr(),
             TokenKind::Ident | TokenKind::QuotedIdent(_) | TokenKind::Keyword(_)
-                if self.nth(1).kind == TokenKind::LParen
-                    && self.peek().keyword() != Some(Keyword::Exists) =>
+                if self.nth(1).kind == TokenKind::LParen =>
             {
                 self.function_call()
             }
@@ -2628,20 +2677,17 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Null) => ExprKind::Literal(Literal::Null),
             TokenKind::Ident
                 if self.nth(1).kind == TokenKind::LBrace
-                    && ["count", "collect", "exists"]
+                    && ["count", "collect"]
                         .iter()
                         .any(|n| n.eq_ignore_ascii_case(token.text)) =>
             {
                 let alternative = if token.text.eq_ignore_ascii_case("count") {
                     "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
                      MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)"
-                } else if token.text.eq_ignore_ascii_case("collect") {
+                } else {
                     "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
                      as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
                      RETURN p.name, collect_list(s.name)"
-                } else {
-                    "add the pattern to the MATCH clause, or use Gremlin where(), for example \
-                     g.v().has_label(\"person\").where(__.out(\"created\"))"
                 };
                 return Err(self.not_yet(
                     span.to(self.nth(1).span),
@@ -2657,6 +2703,335 @@ impl<'a> Parser<'a> {
         };
         self.advance();
         Ok(Expr { kind, span })
+    }
+
+    // ----- subqueries: EXISTS and pattern predicates -----
+
+    /// The token at index `i` (the end of input past the last one).
+    fn token_at(&self, i: usize) -> &Token<'a> {
+        self.tokens.get(i).unwrap_or(&self.eof)
+    }
+
+    /// The index after the bracket group that opens at token `i` (`(`, `[` or `{`, nested groups
+    /// of any kind counted alike), or `None` when token `i` opens none or the group is not
+    /// closed.
+    fn skip_group(&self, i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut j = i;
+        loop {
+            match self.token_at(j).kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return j.checked_add(1);
+                    }
+                }
+                TokenKind::Eof => return None,
+                _ => {}
+            }
+            if depth == 0 {
+                return None;
+            }
+            j = j.checked_add(1)?;
+        }
+    }
+
+    /// The edge starting at token `i` (right after a node pattern) and the index after it, if
+    /// the tokens there read as one.
+    fn edge_ahead(&self, i: usize) -> Option<(usize, EdgeAhead)> {
+        let first = self.token_at(i);
+        let next = self.token_at(i.saturating_add(1));
+        let adjacent = if first.span.touches(next.span) {
+            EdgeAhead::Strong
+        } else {
+            EdgeAhead::Weak
+        };
+        let after = i.saturating_add(2);
+        match (&first.kind, &next.kind) {
+            (TokenKind::RightArrow, _) => Some((i.saturating_add(1), EdgeAhead::Decisive)),
+            (TokenKind::Minus | TokenKind::LeftArrow, TokenKind::LBracket) => {
+                let close = self.skip_group(i.saturating_add(1))?;
+                match self.token_at(close).kind {
+                    TokenKind::RightArrow => Some((close.saturating_add(1), EdgeAhead::Decisive)),
+                    TokenKind::Minus => Some((close.saturating_add(1), EdgeAhead::Strong)),
+                    _ => None,
+                }
+            }
+            (TokenKind::Minus | TokenKind::LeftArrow, TokenKind::RightArrow) => {
+                Some((after, EdgeAhead::Decisive))
+            }
+            (TokenKind::LeftArrow, TokenKind::Gt) if adjacent == EdgeAhead::Strong => {
+                Some((after, EdgeAhead::Decisive))
+            }
+            (TokenKind::Minus | TokenKind::LeftArrow, TokenKind::Minus) => Some((after, adjacent)),
+            (TokenKind::Minus | TokenKind::LeftArrow, TokenKind::LParen) => {
+                Some((i.saturating_add(1), EdgeAhead::Weak))
+            }
+            _ => None,
+        }
+    }
+
+    /// At `(` where an expression stands: whether a Cypher pattern predicate starts here (a
+    /// node pattern, then an edge no expression operator could mean). A bounded token scan, no
+    /// parse: `(a) - (b)` and `(a)<-(b)` stay arithmetic / a comparison, `(a)-->(b)`,
+    /// `(a)--(b)`, `(a)-[:T]-(b)` and `(a)-(b)-->(c)` are patterns (module docs).
+    fn pattern_ahead(&self) -> bool {
+        let mut i = self.pos;
+        for _ in 0..=PREDICATE_LOOKAHEAD_EDGES {
+            if self.token_at(i).kind != TokenKind::LParen {
+                return false;
+            }
+            let Some((after, edge)) = self.skip_group(i).and_then(|j| self.edge_ahead(j)) else {
+                return false;
+            };
+            if edge == EdgeAhead::Decisive {
+                return true;
+            }
+            let mut j = after;
+            match self.token_at(j).kind {
+                TokenKind::LBrace => match self.skip_group(j) {
+                    Some(k) => j = k,
+                    None => return false,
+                },
+                TokenKind::Star | TokenKind::Plus => j = j.saturating_add(1),
+                _ => {}
+            }
+            if self.token_at(j).kind != TokenKind::LParen {
+                return false;
+            }
+            if edge == EdgeAhead::Strong {
+                return true;
+            }
+            i = j;
+        }
+        false
+    }
+
+    /// A Cypher pattern predicate `(a)-[:T]->(b)`: an alias of `EXISTS { pattern }`.
+    fn pattern_predicate(&mut self) -> PResult<(Expr, usize)> {
+        self.enter()?;
+        let saved_height = std::mem::replace(&mut self.inner_height, 0);
+        let saved_variables = self.variables.len();
+        let result = self.path_pattern();
+        let inner = std::mem::replace(&mut self.inner_height, saved_height);
+        self.variables.truncate(saved_variables);
+        self.leave();
+        let pattern = result?;
+        let span = pattern.span;
+        let clause = MatchClause {
+            optional: false,
+            patterns: vec![pattern],
+            where_clause: None,
+            span,
+        };
+        self.subquery(SubqueryForm::PatternPredicate, vec![clause], span, inner)
+    }
+
+    /// The subquery expression of a parsed body whose own trees are at most `inner` high.
+    fn subquery(
+        &self,
+        form: SubqueryForm,
+        matches: Vec<MatchClause>,
+        span: Span,
+        inner: usize,
+    ) -> PResult<(Expr, usize)> {
+        let height = self.height(inner, span)?;
+        let subquery = SubqueryExpr {
+            kind: SubqueryKind::Exists,
+            form,
+            matches,
+            span,
+        };
+        Ok((
+            Expr {
+                kind: ExprKind::Subquery(Box::new(subquery)),
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// `EXISTS { .. }` or `EXISTS ( .. )`, at `EXISTS`.
+    fn exists_expr(&mut self) -> PResult<(Expr, usize)> {
+        let keyword = self.advance().span;
+        let (form, close, close_text) = match self.peek().kind {
+            TokenKind::LBrace => (SubqueryForm::Braces, TokenKind::RBrace, "`}`"),
+            TokenKind::LParen => (SubqueryForm::Parens, TokenKind::RParen, "`)`"),
+            _ => return Err(self.unexpected(&["`{`", "`(`"])),
+        };
+        if form == SubqueryForm::Parens && !self.subquery_body_ahead() {
+            return Err(self.exists_on_value(keyword));
+        }
+        self.advance();
+        self.enter()?;
+        let saved_height = std::mem::replace(&mut self.inner_height, 0);
+        let saved_variables = self.variables.len();
+        let result = self.subquery_body(form, &close, close_text);
+        let inner = std::mem::replace(&mut self.inner_height, saved_height);
+        self.variables.truncate(saved_variables);
+        self.leave();
+        let matches = result?;
+        self.subquery(form, matches, keyword.to(self.last), inner)
+    }
+
+    /// After `EXISTS (`: whether the next token can start a body (a pattern, `MATCH`, a clause
+    /// refused inside a body, or the closing parenthesis) rather than a value (Cypher 4
+    /// `exists(n.p)`).
+    fn subquery_body_ahead(&self) -> bool {
+        let token = self.nth(1);
+        match &token.kind {
+            TokenKind::LParen | TokenKind::RParen => true,
+            TokenKind::Ident | TokenKind::QuotedIdent(_) => self.nth(2).kind == TokenKind::Eq,
+            TokenKind::Keyword(k) => matches!(
+                k,
+                Keyword::Match
+                    | Keyword::Optional
+                    | Keyword::With
+                    | Keyword::Let
+                    | Keyword::Filter
+                    | Keyword::For
+                    | Keyword::Unwind
+                    | Keyword::Return
+                    | Keyword::Call
+            ),
+            _ => false,
+        }
+    }
+
+    /// The refusal of Cypher 4 `exists(value)`, at its `(`.
+    fn exists_on_value(&self, keyword: Span) -> Box<GqlErrorBuilder> {
+        let open = self.peek().span;
+        let (span, argument) = match self.skip_group(self.pos) {
+            Some(after) => {
+                let close = self.token_at(after.saturating_sub(1)).span;
+                let inside = Span {
+                    start: open.end,
+                    end: close.start,
+                    ..open
+                };
+                (keyword.to(close), self.text(inside).trim())
+            }
+            None => (keyword.to(open), ""),
+        };
+        let mut alternative = "test a property with n.p IS NOT NULL".to_string();
+        if !argument.is_empty() && argument.len() <= 80 && !argument.contains('\n') {
+            alternative.push_str(&format!(", here {argument} IS NOT NULL"));
+        }
+        alternative.push_str(
+            "; EXISTS tests a graph pattern, as in \
+             MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name",
+        );
+        let b = err(
+            GqlErrorKind::Refused,
+            span,
+            "exists(value), the Cypher 4 property test, is not supported: EXISTS takes a graph \
+             pattern or MATCH clauses",
+        )
+        .alternative(alternative);
+        Box::new(b)
+    }
+
+    /// The body of `EXISTS { .. }` / `EXISTS ( .. )` after its opening bracket, through `close`:
+    /// `MATCH` clauses, or a comma-separated pattern list with an optional `WHERE`.
+    fn subquery_body(
+        &mut self,
+        form: SubqueryForm,
+        close: &TokenKind,
+        close_text: &'static str,
+    ) -> PResult<Vec<MatchClause>> {
+        let mut matches = Vec::new();
+        let block = matches!(
+            self.peek().keyword(),
+            Some(Keyword::Match | Keyword::Optional)
+        );
+        if block {
+            while let Some(Keyword::Match | Keyword::Optional) = self.peek().keyword() {
+                if self.at_kw(Keyword::Optional) {
+                    return Err(self.not_yet(
+                        self.peek().span.to(self.nth(1).span),
+                        "OPTIONAL MATCH inside EXISTS",
+                        "leave the OPTIONAL MATCH out: an optional part never changes whether \
+                         EXISTS finds a match",
+                    ));
+                }
+                matches.push(self.match_clause()?);
+            }
+        } else {
+            if let Some(e) = self.subquery_clause_error(form) {
+                return Err(e);
+            }
+            self.check_match_prefix()?;
+            let path_variable = matches!(
+                self.peek().kind,
+                TokenKind::Ident | TokenKind::QuotedIdent(_)
+            ) && self.nth(1).kind == TokenKind::Eq;
+            if !self.at(&TokenKind::LParen) && !path_variable {
+                return Err(self.unexpected(&["MATCH", "`(`"]));
+            }
+            let start = self.peek().span;
+            let mut patterns = vec![self.path_pattern()?];
+            while self.eat(&TokenKind::Comma).is_some() {
+                patterns.push(self.path_pattern()?);
+            }
+            let where_clause = if self.eat_kw(Keyword::Where).is_some() {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            matches.push(MatchClause {
+                optional: false,
+                patterns,
+                where_clause,
+                span: start.to(self.last),
+            });
+        }
+        if self.eat(close).is_some() {
+            return Ok(matches);
+        }
+        if let Some(e) = self.subquery_clause_error(form) {
+            return Err(e);
+        }
+        let mut expected = Vec::new();
+        if matches.last().is_some_and(|m| m.where_clause.is_none()) {
+            expected.extend(["`,`", "WHERE"]);
+        }
+        if block {
+            expected.push("MATCH");
+        }
+        expected.push(close_text);
+        Err(self.unexpected(&expected))
+    }
+
+    /// The "not yet" error for a clause other than `MATCH` inside a subquery body (a nested
+    /// query: stage 2d).
+    fn subquery_clause_error(&self, form: SubqueryForm) -> Option<Box<GqlErrorBuilder>> {
+        let token = self.peek();
+        let word = match token.keyword()? {
+            Keyword::With
+            | Keyword::Let
+            | Keyword::Filter
+            | Keyword::For
+            | Keyword::Unwind
+            | Keyword::Return
+            | Keyword::Offset
+            | Keyword::Skip
+            | Keyword::Limit => token.text.to_ascii_uppercase(),
+            Keyword::Order => "ORDER BY".to_string(),
+            _ => return None,
+        };
+        let open = if form == SubqueryForm::Parens {
+            "EXISTS ( )"
+        } else {
+            "EXISTS { }"
+        };
+        Some(self.not_yet(
+            token.span,
+            &format!("{word} inside {open} (a nested query)"),
+            "EXISTS takes MATCH clauses in this version; write the condition into the WHERE \
+             of a MATCH clause, as in MATCH (p:person) WHERE EXISTS { MATCH \
+             (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name",
+        ))
     }
 
     fn parenthesized(&mut self) -> PResult<(Expr, usize)> {
