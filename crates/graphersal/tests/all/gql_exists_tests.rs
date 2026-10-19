@@ -908,3 +908,51 @@ fn each_host_shows_its_children_and_the_walkers_visit_them() {
     let query = "MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-[:created]->() } AS c";
     assert!(!labelled(&profile(&graph, query)), "{query}");
 }
+
+/// Stage 2b.T6 (found by the 2b fuzz family): a condition holding a subquery that the hook
+/// answers (`gql:filter` on an element) runs after the element's `as()`, like a fast-path
+/// child, so a body reading the element through its label (a second body clause resuming at
+/// it, a path variable for it) finds it: the hook and the fast path give the same rows.
+#[test]
+fn a_hooked_condition_on_an_element_reads_it_through_its_label() {
+    let graph = modern();
+    for (fast, hooked, expected) in [
+        (
+            // Second body clause resumes at `a` after the first moved away.
+            "MATCH (a:person) WHERE EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--() } \
+             RETURN a.name AS n",
+            "MATCH (a:person) WHERE CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--() } \
+             THEN true ELSE false END RETURN a.name AS n",
+            &["vadas", "josh"][..],
+        ),
+        (
+            // A path variable over the imported element.
+            "MATCH (a:person) WHERE EXISTS { MATCH q = (a)-[:created]->() WHERE length(q) = 1 } \
+             RETURN a.name AS n",
+            "MATCH (a:person) WHERE EXISTS { MATCH q = (a)-[:created]->() WHERE length(q) = 1 } \
+             OR a.age > 100 RETURN a.name AS n",
+            &["marko", "josh", "peter"][..],
+        ),
+        (
+            // On an expansion target, under NOT and OR.
+            "MATCH (p:person)-[:knows]->(b) WHERE NOT EXISTS { MATCH (b)<-[:knows]-() MATCH \
+             (b)-[:created]->() } RETURN b.name AS n",
+            "MATCH (p:person)-[:knows]->(b) WHERE NOT EXISTS { MATCH (b)<-[:knows]-() MATCH \
+             (b)-[:created]->() } OR b.age > 100 RETURN b.name AS n",
+            &["vadas"][..],
+        ),
+    ] {
+        assert_eq!(names(&graph, fast), sorted(expected), "{fast}");
+        assert_eq!(names(&graph, hooked), sorted(expected), "{hooked}");
+        // The hosting gql:filter stands after the element's as().
+        let plan = steps(&profile(&graph, hooked));
+        let host = plan
+            .iter()
+            .position(|s| s.starts_with("gql:filter("))
+            .unwrap_or_else(|| panic!("{hooked}: no gql:filter in {plan:?}"));
+        assert!(
+            plan[..host].iter().any(|s| s.starts_with("as(")),
+            "{hooked}: {plan:?}"
+        );
+    }
+}

@@ -8784,4 +8784,254 @@ mod gql {
             assert_examples_run(&help);
         }
     }
+
+    // ----- stage 2b: help sweep (rule 6) -----
+
+    /// The general advice of the subquery errors (`GqlHelpTopic::Subquery`).
+    const SUBQUERY_ADVICE: &str = "A subquery, EXISTS { MATCH <pattern> [WHERE <condition>] }, \
+         EXISTS { <pattern> } or a Cypher pattern predicate such as (p)-[:created]->(), is TRUE \
+         when its body has a match and FALSE otherwise, never NULL; its body reads the variables \
+         bound before it, and the variables it binds itself stay inside it. A pattern predicate \
+         binds no new variable: name new elements in an EXISTS { MATCH .. }, as in \
+         g.gql(\"MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = \
+         'java' } RETURN p.name\"), and bind an element in the MATCH clause of the query to read \
+         it after the subquery, as in g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, \
+         s.name\").";
+
+    /// The scope errors of a subquery (a pattern predicate naming a new variable, a local read
+    /// after the subquery, a body variable bound by a later clause of the body) explain what a
+    /// subquery imports and keeps, and their examples run.
+    #[test]
+    fn gql_subquery_scope_errors_explain_imports_and_locals() {
+        for (query, text, message, alternative) in [
+            (
+                "MATCH (p:person) WHERE (p)-[:created]->(s) RETURN p.name",
+                "s",
+                "the pattern predicate introduces the new variable `s`; a pattern used as a \
+                 condition may only name variables bound before it",
+                "write it as EXISTS { MATCH (p)-[:created]->(s) }, whose MATCH may bind new \
+                 variables, or leave `s` out of the pattern",
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) } RETURN x",
+                "x",
+                "the variable `x` is not in scope: it is bound inside a subquery (EXISTS or a \
+                 pattern predicate), whose variables are visible only inside it",
+                "bind `x` in the MATCH clause of the query to use it here, or test it inside the \
+                 subquery",
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(a) WHERE b.age > 1 MATCH \
+                 (a)-->(b) } RETURN p",
+                "b",
+                "the variable `b` is not defined here: it is bound by a later MATCH clause of \
+                 the subquery",
+                "move the condition to the WHERE of that later MATCH clause inside the subquery",
+            ),
+            (
+                // Nested: the later clause of the enclosing body.
+                "MATCH (p) WHERE EXISTS { MATCH (p)-->(a) WHERE EXISTS { (a)-->(c) WHERE c = \
+                 b } MATCH (a)-->(b) } RETURN p",
+                "b",
+                "it is bound by a later MATCH clause of the subquery",
+                "move the condition to the WHERE of that later MATCH clause inside the subquery",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            assert!(report.contains(&format!("`{text}`")), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert_eq!(help, format!("{alternative}. {SUBQUERY_ADVICE}"), "{query}");
+            assert_examples_run(&help);
+        }
+        // The fixes the alternatives name run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, rows) in [
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN p.name",
+                3,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(a) MATCH (a)-->(b) WHERE b.age > \
+                 1 } RETURN p",
+                0,
+            ),
+            ("MATCH (p:person)-->(x) RETURN x", 6),
+        ] {
+            assert_eq!(
+                locked.traversal().gql(query).to_list().unwrap().len(),
+                rows,
+                "{query}"
+            );
+        }
+        // An undefined name in a body without a later clause keeps the plain message.
+        let report =
+            gql_report("MATCH (p) WHERE EXISTS { MATCH (p)-->(a) WHERE zz.x = 1 } RETURN p");
+        assert!(
+            report.contains("the variable `zz` is not defined"),
+            "{report}"
+        );
+        assert!(!report.contains("later MATCH"), "{report}");
+    }
+
+    /// Both subquery limits (subqueries written, bodies run once LET values are substituted)
+    /// are 54001 with the advice naming both bounds and a runnable EXISTS that holds several
+    /// MATCH clauses.
+    #[test]
+    fn gql_subquery_limits_name_both_bounds() {
+        let advice = "The query is larger than gql() accepts: one query holds at most 64 \
+             subqueries (EXISTS and pattern predicates, nested ones included) and runs at most \
+             1024 subquery bodies, where a LET or WITH variable holding a subquery counts once \
+             for every place that reads it. One EXISTS may hold several MATCH clauses and \
+             patterns, as in g.gql(\"MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) \
+             MATCH (f)-[:created]->(s) } RETURN p.name\").";
+        let many = vec!["(p)-->()"; 65].join(" OR ");
+        let written = format!("MATCH (p) WHERE {many} RETURN p");
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = EXISTS {{ (p)-->() }} LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        for (query, message) in [
+            (
+                written.as_str(),
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates)",
+            ),
+            (
+                substituted.as_str(),
+                "the query runs more than 1024 subquery bodies once its LET variables are \
+                 substituted",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Limit, "54001".to_string())
+            );
+            assert!(report.contains(message), "{report}");
+            let help = err.help().unwrap();
+            assert!(help.ends_with(advice), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// `COUNT { }` stays "not yet" (P0); its help keeps the OPTIONAL MATCH form and names EXISTS
+    /// for the test of whether there is a match at all.
+    #[test]
+    fn gql_count_subquery_names_exists() {
+        let help = gql_help("MATCH (n) WHERE COUNT { (n)-->() } > 0 RETURN n");
+        assert!(
+            help.contains(
+                "To test only whether the pattern matches (COUNT { .. } > 0), use EXISTS, as in \
+                 MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name."
+            ),
+            "{help}"
+        );
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name")
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    /// A loop limit or a traverser limit reached by a quantified edge inside a subquery names
+    /// the quantifier and says it is inside EXISTS, on the fast path (`filter()` / `not()`) and
+    /// in a hosted child (`gql:project`, `gql:filter`, `gql:order`); a quantifier outside a
+    /// subquery, also in an OPTIONAL MATCH child, keeps the plain text.
+    #[test]
+    fn gql_limits_inside_exists_name_the_quantifier() {
+        let body = "EXISTS { MATCH (p)-[]-{1,}(q) WHERE q.name = 'zzz' }";
+        let inside = [
+            format!("MATCH (p:person) WHERE {body} RETURN p.name"),
+            format!("MATCH (p:person) WHERE NOT {body} RETURN p.name"),
+            format!("MATCH (p:person) WHERE p.age > 100 OR {body} RETURN p.name"),
+            format!("MATCH (p:person) RETURN p.name, {body} AS e"),
+            format!("MATCH (p:person) RETURN p.name AS n ORDER BY {body}"),
+            format!(
+                "MATCH (p:person) WHERE EXISTS {{ MATCH (p)-->(x) WHERE {} }} RETURN p",
+                body.replace("(p)", "(x)")
+            ),
+        ];
+        let outside = [
+            "MATCH (p:person)-[]-{1,}(q) RETURN p.name".to_string(),
+            "MATCH (p:person) OPTIONAL MATCH (p)-[]-{1,}(q) WHERE q.name = 'zzz' RETURN p.name, q"
+                .to_string(),
+        ];
+        let loops = "The loop of the quantified edge -[]-{1,} inside an EXISTS subquery (or \
+                     pattern predicate) of the gql() query ran 2 iterations, the limit of \
+                     repeat.max_loops.";
+        let early = "A subquery stops at its first match, so its loop runs this long on a row \
+                     that has no match, or only a late one. Give the quantifier an upper bound, \
+                     as in -[]-{1,5}, for example";
+        let traversers = "Each path a quantified edge (-[]-{1,}), inside an EXISTS subquery (or \
+                          pattern predicate), matches is a traverser of its own";
+        for query in &inside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.starts_with(loops), "{query}: {help}");
+            assert!(help.contains(early), "{query}: {help}");
+            assert_examples_run(&help);
+            let (err, _) =
+                gql_failure(|g| g.with("traversal.max_traversers", 5).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.contains(traversers), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        for query in &outside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "The loop of the quantified edge -[]-{1,} of the gql() query ran 2 \
+                     iterations"
+                ),
+                "{query}: {help}"
+            );
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+        }
+    }
+
+    /// EXISTS and pattern predicates run in every position: no help recommends the Gremlin
+    /// `where()` instead of them any more.
+    #[test]
+    fn gql_exists_is_no_longer_refused() {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, rows) in [
+            (
+                "MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name",
+                1,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } OR p.age > 30 RETURN p",
+                3,
+            ),
+            ("MATCH (p:person) RETURN p.name, (p)-[:knows]->() AS k", 4),
+            (
+                "MATCH (p:person) RETURN p.name ORDER BY EXISTS ((p)-->()) DESC",
+                4,
+            ),
+            ("FOR b IN [EXISTS { MATCH (s:software) }] RETURN b", 1),
+            (
+                "MATCH (p:person) RETURN count(CASE WHEN (p)-->() THEN 1 END) AS c",
+                1,
+            ),
+        ] {
+            assert_eq!(
+                locked.traversal().gql(query).to_list().unwrap().len(),
+                rows,
+                "{query}"
+            );
+        }
+    }
 }

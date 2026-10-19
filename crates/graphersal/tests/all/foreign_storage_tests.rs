@@ -463,6 +463,63 @@ fn curated_gql_2a_scripts_give_the_same_result_on_both_storages() {
     }
 }
 
+/// Stage 2b GQL (feature `gql`): `EXISTS` and pattern predicates on the fast path (`filter()` /
+/// `not()` children, the "who has no" plan asserted on both storages) and through the hook in
+/// every `gql:*` host (`OR` / `CASE`, `RETURN`, `ORDER BY`, aggregates, `FOR` lists, `LET`),
+/// nested and correlated bodies, a `NULL` import, trail inside a body, a lookup by property
+/// index inside a body; the last two entries fail (a binder error, a limit).
+#[cfg(feature = "gql")]
+const GQL_CURATED_2B: &[&str] = &[
+    r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS n").toList()"#,
+    r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS n").profile().to_string().contains("not(__.out(\"created\"))")"#,
+    r#"g.gql("MATCH (p) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name AS n ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (a:person), (b:person) WHERE (a)-[:knows]->(b) RETURN a.name AS a, b.name AS b ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (p:person) WHERE EXISTS ((p)<-[:knows]-()) OR p.age > 33 RETURN p.name AS n ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-->() } AS e, CASE WHEN (p)-[:knows]->() THEN 'k' ELSE '-' END AS k ORDER BY EXISTS { (p)-[:created]->() }, n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN count(CASE WHEN (p)-[:created]->() THEN 1 END) AS c, (p)<-[:knows]-() AS known ORDER BY known").toList()"#,
+    r#"g.gql("MATCH (p:person) FOR b IN [(p)-[:knows]->(), EXISTS { MATCH (s:software) WHERE s.lang = 'java' }] RETURN p.name AS n, b ORDER BY n, b").toList()"#,
+    r#"g.gql("MATCH (p:person) LET k = (p)-[:knows]->() FILTER k OR p.age > 33 RETURN p.name AS n, k ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s:software {lang: 'none'}) RETURN p.name AS n, EXISTS { (s)<-[:created]-() } AS e ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p) WHERE EXISTS { MATCH (p)-->(q) WHERE EXISTS { MATCH (q)-->(r) WHERE NOT (r)-->(p) } } RETURN p.name AS n").toList()"#,
+    r#"g.gql("MATCH (a)-[e]->(b) WHERE EXISTS { MATCH (a)-[e]->(b) MATCH (a)-[f]->() WHERE f <> e } RETURN element_id(e) AS e ORDER BY e").toList()"#,
+    r#"g.gql("MATCH (a:person) WHERE CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--() } THEN true ELSE false END RETURN a.name AS n ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) WITH p, count(*) AS c ORDER BY EXISTS { (p)-[:created]->() }, p.name RETURN p.name AS n").toList()"#,
+    r#"g.create_index(#{label: "software", key: "name"}); g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s), (t:software {name: s.name}) } RETURN p.name AS n ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) WHERE (p)-[:created]->(s) RETURN p").toList()"#,
+    r#"let q = "MATCH (n) WHERE (n)-->()"; for i in 0..65 { q += " OR (n)-->()"; } q += " RETURN n"; g.gql(q).toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_2b_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_2B {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise EXISTS, not fail on the way: only the two error cases fail.
+    assert_eq!(failing, 2, "only the two error cases fail");
+    // The "who has no" plan is the not() child on the reference.
+    let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2B[1]).result;
+    assert!(
+        result.as_deref().is_ok_and(|text| text.ends_with("true")),
+        "{result:?}"
+    );
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_1c_scripts_give_the_same_result_on_both_storages() {

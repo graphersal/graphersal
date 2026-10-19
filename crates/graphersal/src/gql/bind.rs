@@ -127,8 +127,7 @@
 //! The planner plans every body with its host (`planner.rs`, "Subqueries"); the lowering runs a
 //! top-level `[NOT] EXISTS` conjunct as a `filter()` / `not()` child (stage 2b.T4) and a
 //! subquery anywhere else in an expression as a child of the `gql:*` step evaluating it (the
-//! hook, `runtime::SubqueryHost`, stage 2b.T5). [`refuse_subqueries_except`] (the guard of the
-//! earlier stages) is kept for the binder tests only.
+//! hook, `runtime::SubqueryHost`, stage 2b.T5).
 //!
 //! # Aggregates
 //!
@@ -670,62 +669,6 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
-/// Refuses a bound query that holds a subquery (the guard of stage 2b.T2 / T3, kept for the
-/// binder tests). The error names the first subquery in the text.
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
-pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    refuse_subqueries_except(query, bound, |_| false)
-}
-
-/// Refuses a bound query that holds a subquery `k` for which `lowered(k)` is false (the guard
-/// of stages 2b.T2 - T4; since 2b.T5 the lowering runs a subquery in every position, so only the
-/// binder tests use it). The error names the first such subquery in the text.
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
-pub(crate) fn refuse_subqueries_except(
-    query: &Query,
-    bound: &BoundQuery,
-    lowered: impl Fn(usize) -> bool,
-) -> Result<(), TraverserError> {
-    match (0..bound.subqueries.len())
-        .find(|&k| !lowered(k))
-        .and_then(|k| bound.subqueries.get(k))
-    {
-        Some(subquery) => Err(subquery_not_yet(subquery).into_error(&query.source)),
-        None => Ok(()),
-    }
-}
-
-/// The refusal of a subquery in a position the lowering did not support before stage 2b.T5
-/// (kept for the binder tests).
-#[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
-fn subquery_not_yet(subquery: &BoundSubquery) -> Box<GqlErrorBuilder> {
-    let what = match (subquery.kind, subquery.form) {
-        (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => {
-            "EXISTS is not yet supported here; "
-        }
-        (SubqueryKind::Exists, SubqueryForm::PatternPredicate) => {
-            "a pattern predicate (a pattern where an expression stands) is not yet supported \
-             here; "
-        }
-    };
-    Box::new(
-        GqlErrorBuilder::new(
-            GqlErrorKind::NotYet,
-            subquery.span.start..subquery.span.end,
-            format!(
-                "{what}it is supported as a condition of its own in WHERE or FILTER (alone or \
-                 joined by AND, optionally under NOT), not yet under OR, CASE, in RETURN, \
-                 ORDER BY, a FOR list or a function argument"
-            ),
-        )
-        .alternative(
-            "write the subquery as a condition of its own, for example MATCH (p:person) WHERE \
-             NOT EXISTS { (p)-[:created]->() } RETURN p.name, or use Gremlin where(), for \
-             example g.v().has_label(\"person\").where(__.out(\"created\"))",
-        ),
-    )
-}
-
 /// The error of a query with more than [`MAX_SUBQUERIES`] subqueries, at the first one past the
 /// limit.
 fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
@@ -741,7 +684,8 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
         .alternative(
             "join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several \
              MATCH clauses and patterns), or add the patterns to the MATCH clause of the query",
-        ),
+        )
+        .topic(GqlHelpTopic::Subquery),
     )
 }
 
@@ -989,6 +933,9 @@ struct Binder<'q> {
     incomplete_paths: Vec<usize>,
     /// Names bound only inside a subquery body that is done, with its span (for the message).
     hidden: HashMap<String, Span>,
+    /// Names the later `MATCH` clauses of the subquery bodies being bound declare (innermost
+    /// last), for the "bound by a later MATCH clause" message inside a body.
+    later_in_body: Vec<String>,
 }
 
 impl<'q> Binder<'q> {
@@ -1012,6 +959,7 @@ impl<'q> Binder<'q> {
             sub_matches: Vec::new(),
             incomplete_paths: Vec::new(),
             hidden: HashMap::new(),
+            later_in_body: Vec::new(),
         }
     }
 
@@ -2065,6 +2013,20 @@ impl<'q> Binder<'q> {
             .topic(GqlHelpTopic::Scope)
             .into();
         }
+        if self.later_in_body.iter().any(|n| n == name) {
+            return semantic(
+                var.span,
+                format!(
+                    "the variable `{name}` is not defined here: it is bound by a later MATCH \
+                     clause of the subquery"
+                ),
+            )
+            .alternative(
+                "move the condition to the WHERE of that later MATCH clause inside the subquery",
+            )
+            .topic(GqlHelpTopic::Subquery)
+            .into();
+        }
         if self.hidden.contains_key(name) {
             return semantic(
                 var.span,
@@ -2077,6 +2039,7 @@ impl<'q> Binder<'q> {
                 "bind `{name}` in the MATCH clause of the query to use it here, or test it \
                  inside the subquery"
             ))
+            .topic(GqlHelpTopic::Subquery)
             .into();
         }
         let later = self
@@ -2451,7 +2414,16 @@ impl<'q> Binder<'q> {
     fn subquery_body(&mut self, subquery: &SubqueryExpr, segment: usize) -> BResult<Vec<usize>> {
         let base = self.query.matches.len();
         let mut clauses = Vec::with_capacity(subquery.matches.len());
-        for m in &subquery.matches {
+        let outer = self.later_in_body.len();
+        for (i, m) in subquery.matches.iter().enumerate() {
+            self.later_in_body.truncate(outer);
+            let later = subquery.matches.get(i.saturating_add(1)..).unwrap_or(&[]);
+            self.later_in_body.extend(
+                later
+                    .iter()
+                    .flat_map(declared_names)
+                    .map(|var| var.name.to_string()),
+            );
             let slot = self.sub_matches.len();
             let clause = base.saturating_add(slot);
             self.sub_matches.push(None);
@@ -2463,6 +2435,7 @@ impl<'q> Binder<'q> {
             }
             clauses.push(clause);
         }
+        self.later_in_body.truncate(outer);
         Ok(clauses)
     }
 
@@ -2498,7 +2471,7 @@ impl<'q> Binder<'q> {
                     "write it as EXISTS {{ MATCH {pattern} }}, whose MATCH may bind new \
                      variables, or leave `{name}` out of the pattern"
                 ))
-                .topic(GqlHelpTopic::PatternVariable)
+                .topic(GqlHelpTopic::Subquery)
                 .into());
             }
         }
@@ -3100,6 +3073,17 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
 }
 
 /// Whether the `MATCH` clause `m` declares `name` (a pattern element or path variable).
+/// The variables `m` names: path, node and edge variables of every path.
+fn declared_names(m: &MatchClause) -> impl Iterator<Item = &Identifier> {
+    m.patterns.iter().flat_map(|path| {
+        path.variable.iter().chain(&path.start.variable).chain(
+            path.steps
+                .iter()
+                .flat_map(|s| s.edge.variable.iter().chain(&s.node.variable)),
+        )
+    })
+}
+
 fn declares(m: &MatchClause, name: &str) -> bool {
     let named = |v: &Option<Identifier>| v.as_ref().is_some_and(|v| v.name == name);
     m.patterns.iter().any(|path| {

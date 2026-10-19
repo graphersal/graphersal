@@ -4324,6 +4324,9 @@ pub(crate) enum GqlHelpTopic {
     Names,
     /// The variable or the ordinal of a `FOR` / `UNWIND` (stage 2a).
     For,
+    /// A subquery (`EXISTS`, a pattern predicate): its imports, its locals, its size (stage
+    /// 2b).
+    Subquery,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
@@ -4625,6 +4628,7 @@ impl TraverserError {
                 } if body.contains(GQL_TRAIL) => Some(gql_repeat_limit_help(
                     *max_loops,
                     self.innermost_failed_step().unwrap_or(body),
+                    self.gql_in_subquery(),
                 )),
                 #[cfg(feature = "gql")]
                 TraverserError::ResourceLimitExceeded {
@@ -4637,6 +4641,7 @@ impl TraverserError {
                     Some(gql_traverser_limit_help(
                         *max,
                         &self.outermost_steps().unwrap_or_default(),
+                        self.gql_subquery_steps(),
                     ))
                 }
                 // A value a `gql:*` step built (a function result, a collect_list() list): advice
@@ -6766,6 +6771,16 @@ fn gql_help(
              without it or as Gremlin steps.",
         ),
         // A size limit (an operator chain, a pattern) brings its own fix as the alternative.
+        GqlErrorKind::Limit if topic == GqlHelpTopic::Subquery => help.push_str(&format!(
+            "The query is larger than gql() accepts: one query holds at most {} subqueries \
+             (EXISTS and pattern predicates, nested ones included) and runs at most {} \
+             subquery bodies, where a LET or WITH variable holding a subquery counts once for \
+             every place that reads it. One EXISTS may hold several MATCH clauses and patterns, \
+             as in g.gql(\"MATCH (p:person) WHERE EXISTS {{ MATCH (p)-[:knows]->(f) MATCH \
+             (f)-[:created]->(s) }} RETURN p.name\").",
+            crate::gql::bind::MAX_SUBQUERIES,
+            crate::gql::lower::MAX_LOWERED_SUBQUERIES,
+        )),
         GqlErrorKind::Limit if alternative.is_some() => {
             help.push_str("The query is larger than gql() accepts.")
         }
@@ -6900,6 +6915,17 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              FOR n IN nodes(p) MATCH (n)-->(m), and any other item is compared in a property \
              map or WHERE, as in g.gql(\"FOR n IN ['marko', 'josh'] WITH ORDINALITY i MATCH \
              (p:person {name: n}) RETURN i, p.age\")."
+        }
+        GqlHelpTopic::Subquery => {
+            "A subquery, EXISTS { MATCH <pattern> [WHERE <condition>] }, EXISTS { <pattern> } \
+             or a Cypher pattern predicate such as (p)-[:created]->(), is TRUE when its body \
+             has a match and FALSE otherwise, never NULL; its body reads the variables bound \
+             before it, and the variables it binds itself stay inside it. A pattern predicate \
+             binds no new variable: name new elements in an EXISTS { MATCH .. }, as in \
+             g.gql(\"MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-[:created]->(s) WHERE \
+             s.lang = 'java' } RETURN p.name\"), and bind an element in the MATCH clause of the \
+             query to read it after the subquery, as in \
+             g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, s.name\")."
         }
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
@@ -7126,26 +7152,40 @@ fn gql_edge_pattern(body: &str) -> String {
 /// bound the quantifier or raise `repeat.max_loops` for the `gql()` call, never the internal
 /// `repeat()` body. `step` is the failing loop as rendered.
 #[cfg(feature = "gql")]
-fn gql_repeat_limit_help(max_loops: u32, step: &str) -> String {
+fn gql_repeat_limit_help(max_loops: u32, step: &str, in_subquery: bool) -> String {
     let raised = u64::from(max_loops)
         .saturating_mul(2)
         .min(u64::from(u32::MAX));
+    let place = if in_subquery {
+        " inside an EXISTS subquery (or pattern predicate)"
+    } else {
+        ""
+    };
     let (edge, bounded) = match gql_quantified_edges(step).into_iter().next() {
         Some(edge) => (
-            format!("the quantified edge {} of the gql() query", edge.render()),
+            format!(
+                "the quantified edge {}{place} of the gql() query",
+                edge.render()
+            ),
             format!("{}, ", edge.bounded()),
         ),
         None => (
-            "a quantified edge of the gql() query".to_string(),
+            format!("a quantified edge{place} of the gql() query"),
             String::new(),
         ),
+    };
+    let subquery = if in_subquery {
+        " A subquery stops at its first match, so its loop runs this long on a row that has \
+         no match, or only a late one."
+    } else {
+        ""
     };
     format!(
         "The loop of {edge} ran {max_loops} iterations, the limit of repeat.max_loops. A \
          quantifier without an upper bound ({{m,}}, *, + or Cypher [*]) repeats the edge until \
          every path has used all the edges it can reach (trail), which takes more iterations \
-         than the limit on a large or densely connected graph; the result is never cut short. \
-         Give the quantifier an upper bound, as in {bounded}for example \
+         than the limit on a large or densely connected graph; the result is never cut \
+         short.{subquery} Give the quantifier an upper bound, as in {bounded}for example \
          g.gql(\"MATCH (a:person)-[:knows]->{{1,3}}(b) RETURN b.name\"). Or raise the limit for \
          the query, g.with(\"repeat.max_loops\", {raised}).gql(..), for example \
          g.with(\"repeat.max_loops\", {raised}).gql(\"MATCH (a)-[:knows]->{{1,}}(b) RETURN \
@@ -7158,15 +7198,27 @@ fn gql_repeat_limit_help(max_loops: u32, step: &str) -> String {
 /// outermost plan): narrow the pattern, bound its quantified edges, or raise the limit for the
 /// `gql()` call.
 #[cfg(feature = "gql")]
-fn gql_traverser_limit_help(max: Option<u64>, steps: &[String]) -> String {
+fn gql_traverser_limit_help(
+    max: Option<u64>,
+    steps: &[String],
+    subquery: Option<&[String]>,
+) -> String {
     let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
-    let edges = gql_quantified_edges(&steps.join("."));
+    // A child of a subquery fails on its own level, which the outermost plan shows only as its
+    // host (a `gql:*` step renders no children): read the quantifiers of the failing level.
+    let (edges, place) = match subquery {
+        Some(level) => (
+            gql_quantified_edges(&level.join(".")),
+            ", inside an EXISTS subquery (or pattern predicate),",
+        ),
+        None => (gql_quantified_edges(&steps.join(".")), ""),
+    };
     let quantified = match edges.as_slice() {
         [] => String::new(),
         [first, ..] => format!(
-            "Each path a quantified edge ({}) matches is a traverser of its own (trail keeps \
-             them apart, so they do not merge), and their number grows with every iteration: \
-             give it a lower upper bound, as in {}. ",
+            "Each path a quantified edge ({}){place} matches is a traverser of its own (trail \
+             keeps them apart, so they do not merge), and their number grows with every \
+             iteration: give it a lower upper bound, as in {}. ",
             edges
                 .iter()
                 .map(GqlQuantifiedEdge::render)
@@ -7521,6 +7573,38 @@ impl TraverserError {
             current = source;
         }
         name
+    }
+
+    /// Whether the innermost failure ran inside the child of a GQL subquery: a level above the
+    /// failing one is a `filter()` / `not()` step (the `[NOT] EXISTS` fast path) or a `gql:*`
+    /// step (a hosted subquery, the only children those steps hold).
+    #[cfg(feature = "gql")]
+    fn gql_in_subquery(&self) -> bool {
+        let mut hosted = false;
+        let mut current = self;
+        while let TraverserError::StepFailed {
+            step_name, source, ..
+        } = current
+        {
+            if matches!(**source, TraverserError::StepFailed { .. }) {
+                let name = step_name.as_str();
+                hosted |= name.starts_with("filter(")
+                    || name.starts_with("not(")
+                    || name.starts_with("gql:");
+            }
+            current = source;
+        }
+        hosted
+    }
+
+    /// The steps of the failing level when it runs inside the child of a GQL subquery (see
+    /// [`Self::gql_in_subquery`]).
+    #[cfg(feature = "gql")]
+    fn gql_subquery_steps(&self) -> Option<&[String]> {
+        if !self.gql_in_subquery() {
+            return None;
+        }
+        self.step_trace().last().map(|frame| frame.steps.as_slice())
     }
 
     fn outermost_steps(&self) -> Option<Vec<String>> {

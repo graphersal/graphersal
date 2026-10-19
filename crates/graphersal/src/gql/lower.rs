@@ -47,7 +47,7 @@
 //! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
-//! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`; after an aggregation an import a column holds through `gql:bind` from the row, `Site::ordered`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
+//! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). A `gql:filter` hosting one on an element runs after the element's `as()` and its plain residuals (E11), so a body reading the element through its label finds it. The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`; after an aggregation an import a column holds through `gql:bind` from the row, `Site::ordered`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
@@ -106,11 +106,12 @@ use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
     ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize, Op, PushOp,
-    PushOperand, Pushdown, ResultOp, Stage, and_factors, exists_conjunct, label_disjuncts,
+    PushOperand, Pushdown, ResultOp, Stage, SubqueryUse, and_factors, exists_conjunct,
+    label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
-use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
+use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
 use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
@@ -1248,9 +1249,10 @@ fn parameter<'p>(
 }
 
 /// The labels for the step that reaches an element (`None`: no label restriction there), the
-/// steps that run on the element before its `as()`, and the fast-path `EXISTS` children that run
-/// after it (design E11: last; after the `as()`, so a body reading the element through its
-/// label, a path variable for one, finds it).
+/// steps that run on the element before its `as()`, and the conjuncts holding a subquery (the
+/// hooked `gql:filter`s, then the fast-path `EXISTS` children) that run after it (design E11:
+/// last; after the `as()`, so a body reading the element through its label, a path variable for
+/// one, finds it).
 type ElementSteps<S> = (Option<Vec<String>>, Vec<Instr<S>>, Vec<Instr<S>>);
 
 struct Lowering<'q> {
@@ -1737,8 +1739,8 @@ impl<'q> Lowering<'q> {
     /// optimizer, or the labels of an edge's adjacency step), then the steps on the element: the
     /// other label disjunctions as `has_label`, the pushed conjuncts as `has(k, P..)`, `checks`
     /// (join and trail checks), the other label factors and the residual conjuncts as
-    /// `gql:filter`; apart from them the fast-path `EXISTS` children (the caller emits them after
-    /// the element's `as()`).
+    /// `gql:filter`; apart from them the residual conjuncts holding a subquery and the fast-path
+    /// `EXISTS` children (the caller emits them after the element's `as()`).
     fn element<S: GraphStorage>(
         &self,
         id: BindingId,
@@ -1774,6 +1776,15 @@ impl<'q> Lowering<'q> {
             }
         }
         residual.sort_unstable();
+        // A residual holding a subquery (the hook) runs after the element's `as()` too: its
+        // body may read the element through its label (a later body clause resuming at it, a
+        // path variable for it), and it runs after the plain residuals (design E11).
+        let (hooked, residual): (Vec<usize>, Vec<usize>) = residual.into_iter().partition(|&c| {
+            self.bound
+                .conjuncts
+                .get(c)
+                .is_some_and(|conjunct| SubqueryUse::of(conjunct) != SubqueryUse::None)
+        });
         instrs.extend(checks);
         for factor in label_filters {
             let condition = self.compile(&is_labeled(factor), Some(id.0), &[])?;
@@ -1786,8 +1797,12 @@ impl<'q> Lowering<'q> {
         for c in residual {
             self.conjunct(c, Site::on(id), &mut instrs)?;
         }
-        // The fast-path `EXISTS` children last (design E11), after the element's `as()`.
+        // The conjuncts holding a subquery last (design E11), after the element's `as()`: the
+        // hooked ones, then the fast-path `EXISTS` children.
         let mut exists = Vec::new();
+        for c in hooked {
+            self.conjunct(c, Site::on(id), &mut exists)?;
+        }
         for &c in &filters.exists {
             self.conjunct(c, Site::on(id), &mut exists)?;
         }
@@ -1952,6 +1967,7 @@ impl<'q> Lowering<'q> {
             "write the EXISTS where it is used instead of in a LET that is read many times, or \
              join the patterns into fewer subqueries",
         )
+        .topic(GqlHelpTopic::Subquery)
         .into_error(self.query)
     }
 

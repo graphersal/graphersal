@@ -2457,4 +2457,50 @@ mod gql {
             assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
         }
     }
+
+    /// Stage 2b.T6: a vertex read reached only inside a subquery (the unit row and `FOR`
+    /// read none outside it; a read request states no label, so a denied label is a denied
+    /// vertex read) is refused before the run like the Gremlin twin, on the fast path and
+    /// through every hook, also when no row reaches the subquery; allowed, the query asks what
+    /// the twin asks.
+    #[test]
+    fn a_denied_read_reached_only_inside_exists_refuses_gql_like_its_twin() {
+        let graph = modern();
+        // Outside the subqueries these queries read no vertex and are allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("FOR x IN [1, 2] FILTER x > 1 RETURN x ORDER BY x").toList()"#,
+                NoPersons
+            )
+            .is_ok()
+        );
+        for script in [
+            r#"g.inject(0).where(__.V().hasLabel("person").has("age", P.gt(30))).toList()"#,
+            // fast path: filter() / not() on the unit row and after FOR
+            r#"g.gql("FILTER EXISTS { MATCH (p:person) WHERE p.age > 30 } RETURN 1 AS x").toList()"#,
+            r#"g.gql("FOR n IN ['marko'] FILTER NOT EXISTS { MATCH (p:person {name: n}) } RETURN n").toList()"#,
+            // hooks: gql:filter, gql:project, gql:order, gql:aggregate, gql:for
+            r#"g.gql("FOR x IN [1] FILTER x = 2 OR EXISTS { MATCH (p:person) } RETURN x").toList()"#,
+            r#"g.gql("RETURN EXISTS { MATCH (p:person) } AS e").toList()"#,
+            r#"g.gql("FOR x IN [1, 2] RETURN x ORDER BY EXISTS { MATCH (p:person) WHERE p.age = x }").toList()"#,
+            r#"g.gql("FOR x IN [1, 2] RETURN count(CASE WHEN EXISTS { MATCH (p:person) } THEN x END) AS c").toList()"#,
+            r#"g.gql("FOR x IN [EXISTS { MATCH (p:person) }] RETURN x").toList()"#,
+            // no row reaches the subquery
+            r#"g.gql("FOR x IN [] FILTER EXISTS { MATCH (p:person) } RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Allowed, the fast path asks what the Gremlin twin asks.
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("FILTER EXISTS { MATCH (p:person) WHERE p.age > 30 } RETURN 1 AS x").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.inject(0).where(__.V().hasLabel("person").has("age", P.gt(30))).toList()"#
+            )
+        );
+    }
 }

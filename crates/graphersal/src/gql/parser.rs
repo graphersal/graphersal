@@ -2683,7 +2683,10 @@ impl<'a> Parser<'a> {
             {
                 let alternative = if token.text.eq_ignore_ascii_case("count") {
                     "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
-                     MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)"
+                     MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
+                     count(s). To test only whether the pattern matches (COUNT { .. } > 0), use \
+                     EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN \
+                     p.name"
                 } else {
                     "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
                      as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \

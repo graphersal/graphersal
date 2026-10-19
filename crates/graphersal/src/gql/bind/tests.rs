@@ -1441,52 +1441,30 @@ fn binding_never_panics_on_stage_2a_queries() {
 }
 
 #[test]
-fn subqueries_are_bound_but_not_yet_planned() {
-    // Stage 2b.T2 binds EXISTS and pattern predicates; the guard after binding refuses them
-    // until the planner and the lowering support them (2b.T3 / T4).
-    for (query, text, what) in [
+fn subqueries_bind_in_every_position() {
+    // Stage 2b.T2 binds EXISTS and pattern predicates; since 2b.T5 every position runs (the
+    // guard that refused them before the planner and the lowering supported them is gone).
+    for (query, text) in [
         (
             "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) } RETURN n",
             "EXISTS { MATCH (n)-->(m) }",
-            "EXISTS is not yet supported",
         ),
-        (
-            "MATCH (n) WHERE NOT (n)-[:T]->() RETURN n",
-            "(n)-[:T]->()",
-            "a pattern predicate",
-        ),
+        ("MATCH (n) WHERE NOT (n)-[:T]->() RETURN n", "(n)-[:T]->()"),
         (
             "MATCH (n) RETURN CASE WHEN EXISTS ((n)-->()) THEN 1 END AS x",
             "EXISTS ((n)-->())",
-            "EXISTS is not yet supported",
         ),
-        (
-            "MATCH (n) LET x = (n)-->() RETURN x",
-            "(n)-->()",
-            "a pattern predicate",
-        ),
+        ("MATCH (n) LET x = (n)-->() RETURN x", "(n)-->()"),
         (
             "FOR x IN [EXISTS { (a)-->() }] RETURN x",
             "EXISTS { (a)-->() }",
-            "EXISTS is not yet supported",
         ),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
         let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
         assert_eq!(bound.subqueries.len(), 1, "{query}");
-        let f = failure(query, refuse_subqueries(&parsed, &bound).map(|()| bound));
-        assert_eq!(
-            (f.kind, f.gqlstatus.as_str()),
-            (GqlErrorKind::NotYet, "0A000"),
-            "{query}"
-        );
-        assert_eq!(f.text, text, "{query}");
-        assert!(f.message.contains(what), "{query}: {}", f.message);
+        assert_eq!(parsed.text(subquery(&bound, 0).span), text, "{query}");
     }
-    // A query without a subquery passes the guard.
-    let parsed = parse("MATCH (n) RETURN n").unwrap_or_else(|e| panic!("{e}"));
-    let bound = bind(&parsed).unwrap_or_else(|e| panic!("{e}"));
-    assert!(refuse_subqueries(&parsed, &bound).is_ok());
 }
 
 // ----- subqueries (stage 2b.T2) -----
@@ -1871,9 +1849,7 @@ fn binding_never_panics_on_stage_2b_queries() {
             for t in tails {
                 for src in [format!("{h} WHERE {p} {t}"), format!("{h} FILTER {p} {t}")] {
                     if let Ok(parsed) = parse(&src) {
-                        if let Ok(bound) = bind(&parsed) {
-                            let _ = refuse_subqueries(&parsed, &bound);
-                        }
+                        let _ = bind(&parsed);
                         let _ = bind_with_parameters(&parsed, ["p"]);
                     }
                 }
