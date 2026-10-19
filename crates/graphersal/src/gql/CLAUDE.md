@@ -12,7 +12,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 |---|---|
 | `lexer.rs` | tokens with spans; comments `//`, `/* */`, `--` (comment unless `-->`/`--(` or after `)` on the same line); back-quoted identifiers; contextual, case-insensitive keywords; its module docs are the lexical spec |
 | `ast.rs`, `parser.rs` | hand-written recursive descent to an AST that keeps the source text; `parser.rs` module docs are the grammar and its decisions; `FUNCTIONS` there is the one function table (names, Cypher aliases, arity, scalar / aggregate) for every stage |
-| `bind.rs` | variables, scopes, `$param` references, column names, GQLSTATUS for semantic errors |
+| `bind.rs` | variables, scopes along the stages, segments (plain `MATCH` runs, `OPTIONAL MATCH`, materializing `WITH`), `LET` / projecting `WITH` as substitutions (bounded: `MAX_SUBSTITUTED_NODES`), group and path variables, implicit grouping checks, `$param` references, column names, GQLSTATUS for semantic errors; `refuse_unplanned` is the temporary post-bind guard for what planner/lowering do not handle yet |
 | `eval.rs` | three-valued expression evaluator: `compile` once (names, constants, functions resolved), then `eval`/`truth` per row through the `Env` trait; its module docs fix the NULL, comparison, arithmetic and function semantics; left spines are loops (`Node::Chain`), so recursion stays within `MAX_DEPTH` |
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
