@@ -59,6 +59,7 @@ fn shape(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
         .map(|op| match op {
             Op::Scan(s) => format!("scan {}", name(b, s.binding)),
             Op::Anchor(s) => format!("anchor {}", name(b, s.binding)),
+            Op::Lookup(l) => format!("lookup {}", name(b, l.scan.binding)),
             Op::Resume(r) => format!(
                 "resume {}{}",
                 if r.from_current { "" } else { "^" },
@@ -1044,4 +1045,102 @@ fn for_is_a_stage_whose_row_is_labelled_only_when_read_after_leaving_it() {
     // RETURN alone: no segment at all.
     let (_, p) = plan_with("RETURN 1 AS x", &NoFacts);
     assert!(p.ops.is_empty() && p.stages.is_empty());
+}
+
+// ----- stage 2a: the correlated lookup (design M3, E5) -----
+
+/// The lookup of the first `Op::Lookup` among the first segment and the later stages.
+fn first_lookup(p: &LogicalPlan) -> Option<&Lookup> {
+    let stage_ops = p.stages.iter().flat_map(|stage| match stage {
+        Stage::Match { ops, .. } | Stage::Optional { ops, .. } => ops.as_slice(),
+        Stage::Materialize(_) | Stage::For(_) => &[],
+    });
+    p.ops.iter().chain(stage_ops).find_map(|op| match op {
+        Op::Lookup(l) => Some(l),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_lookup_starts_a_component_only_where_an_id_or_index_serves_it() {
+    let indexed = Facts {
+        indexes: vec![("person", "name"), ("person", "age")],
+        ..Facts::default()
+    };
+    // By id: no index needed; the conjunct is the lookup's, not a filter.
+    let q = "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(stages(&b, &p), ["for", "match: lookup n"]);
+    let l = first_lookup(&p).unwrap();
+    assert_eq!(l.by, LookupBy::Id);
+    assert!(l.scan.filters.is_empty());
+    // Either operand order.
+    let (b, p) = plan_with(
+        "FOR id IN $ids MATCH (n) WHERE id = element_id(n) RETURN n",
+        &NoFacts,
+    );
+    assert_eq!(stages(&b, &p), ["for", "match: lookup n"]);
+    // An inline property: only with an index on every scan label (E5).
+    let q = "FOR x IN $xs MATCH (p:person {name: x}) RETURN p";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        stages(&b, &p),
+        ["for labelled", "match: scan p; filter [0]"]
+    );
+    let (b, p) = plan_with(q, &indexed);
+    assert_eq!(stages(&b, &p), ["for", "match: lookup p"]);
+    assert_eq!(
+        first_lookup(&p).unwrap().by,
+        LookupBy::Index("name".to_string())
+    );
+    let (_, p) = plan_with(
+        "FOR x IN $xs MATCH (p:person|dog {name: x}) RETURN p",
+        &indexed,
+    );
+    assert!(first_lookup(&p).is_none());
+    // No scan label: no index can serve it.
+    let (_, p) = plan_with("FOR x IN $xs MATCH (p {name: x}) RETURN p", &indexed);
+    assert!(first_lookup(&p).is_none());
+    // An id lookup wins over an index lookup.
+    let (_, p) = plan_with(
+        "FOR x IN $xs MATCH (p:person {name: x}) WHERE element_id(p) = x RETURN p",
+        &indexed,
+    );
+    assert_eq!(first_lookup(&p).unwrap().by, LookupBy::Id);
+    // The other side must not read the node itself.
+    let (_, p) = plan_with(
+        "FOR x IN $xs MATCH (p:person) WHERE p.name = p.nick RETURN p",
+        &indexed,
+    );
+    assert!(first_lookup(&p).is_none());
+    // Not an equality: no lookup.
+    let (_, p) = plan_with(
+        "FOR x IN $xs MATCH (p:person) WHERE p.age > x RETURN p",
+        &indexed,
+    );
+    assert!(first_lookup(&p).is_none());
+    // A second component of the first segment, against the first one.
+    let q = "MATCH (a:person {name: 'marko'}), (b:person) WHERE b.age = a.age + 3 RETURN b";
+    let (b, p) = plan_with(q, &indexed);
+    assert_eq!(shape(&b, &p), ["scan a", "lookup b"]);
+    assert_eq!(
+        first_lookup(&p).unwrap().by,
+        LookupBy::Index("age".to_string())
+    );
+    // The root scan never is one, also with an id equality to a constant.
+    let (b, p) = plan_with("MATCH (n) WHERE element_id(n) = '1' RETURN n", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan n"]);
+    // A stage 1a query without an index or id equality plans as before.
+    let (b, p) = plan_with(
+        "MATCH (a:person {name: 'marko'}), (s:software) RETURN a, s",
+        &NoFacts,
+    );
+    assert_eq!(shape(&b, &p), ["scan a", "scan s"]);
+    // The value is read on the row: the FOR item gets no label for it (above: `for`, not
+    // `for labelled`), unless a later read needs it.
+    let (b, p) = plan_with(
+        "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n, id",
+        &NoFacts,
+    );
+    assert_eq!(stages(&b, &p), ["for labelled", "match: lookup n"]);
 }

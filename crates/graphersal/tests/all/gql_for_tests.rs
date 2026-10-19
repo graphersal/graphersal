@@ -647,6 +647,439 @@ fn merged_rows_unwind_like_unmerged_ones() {
     assert_eq!(found, sorted(&["'lop'|i:3", "'ripple'|i:1", "i:1|i:4"]));
 }
 
+// ----- the correlated lookup `gql:lookup` (design M3, E5, Q5) -----
+
+mod lookup {
+    use super::*;
+    use graphersal::catalog::PropertyIndexDefinition;
+    use graphersal::storage::{
+        CompactString, EdgeHandle, ElementKind, GraphError, GraphStorage, PropertyIndexInfo,
+        PropertyMap, VertexHandle,
+    };
+
+    use crate::forwarding::Forwarding;
+
+    /// The modern graph plus `floatage` (age `29.0`), `strage` (age `"29"`) and `listage`
+    /// (age `[29]`), with property indexes on `person.name` and `person.age` when `indexed`.
+    fn graph(indexed: bool) -> TraversalGraph {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        for (name, age) in [
+            ("floatage", ElementProperty::from(29.0)),
+            ("strage", ElementProperty::from("29")),
+            (
+                "listage",
+                ElementProperty::Array(vec![ElementProperty::from(29)]),
+            ),
+        ] {
+            graph
+                .traversal_mut()
+                .add_v(vec!["person"])
+                .property("name", name)
+                .property("age", age)
+                .iterate()
+                .unwrap();
+        }
+        if indexed {
+            for key in ["name", "age"] {
+                graph
+                    .traversal_mut()
+                    .create_index(
+                        &format!("person_{key}"),
+                        PropertyIndexDefinition::new(ElementKind::Vertex, "person", key),
+                    )
+                    .unwrap();
+            }
+        }
+        graph
+    }
+
+    /// The sorted rows of `query` on `storage`, as `a|b|..` over `keys`.
+    fn run<S: GraphStorage>(
+        storage: S,
+        query: &str,
+        params: &[(&str, ElementProperty)],
+        keys: &[&str],
+    ) -> Vec<String> {
+        let rows = GraphTraversalSource::new(storage)
+            .gql_with(query, params.iter().cloned())
+            .to_list()
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let mut out = line(&rows, keys);
+        out.sort();
+        out
+    }
+
+    /// The full names of the profiled steps (nested ones after their holder), one per line:
+    /// the profile table cuts long names.
+    fn plan<S: GraphStorage>(
+        storage: S,
+        query: &str,
+        params: &[(&str, ElementProperty)],
+    ) -> String {
+        fn walk(metrics: &[graphersal::profile::Metrics], out: &mut Vec<String>) {
+            for m in metrics {
+                out.push(m.name().to_string());
+                walk(m.nested(), out);
+            }
+        }
+        let metrics = GraphTraversalSource::new(storage)
+            .gql_with(query, params.iter().cloned())
+            .profile()
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let mut out = Vec::new();
+        walk(metrics.metrics(), &mut out);
+        out.join("\n")
+    }
+
+    fn list(items: Vec<ElementProperty>) -> ElementProperty {
+        ElementProperty::Array(items)
+    }
+
+    /// A lookup query, its scan twin, its parameters and its result keys.
+    type Case = (
+        &'static str,
+        &'static str,
+        Vec<(&'static str, ElementProperty)>,
+        Vec<&'static str>,
+    );
+
+    /// The queries of the lookup forms with their parameters, result keys and scan twins (the
+    /// equality wrapped in `coalesce(.., NULL)`, which no lookup recognizes: a mid-traversal
+    /// scan plus `gql:filter`, the stage 2a.T4 form).
+    fn cases() -> Vec<Case> {
+        let ids = list(vec![
+            "1".into(),
+            "4".into(),
+            "99".into(),
+            "1".into(),
+            ElementProperty::Null,
+            1.into(),
+            list(vec!["1".into()]),
+        ]);
+        let names = list(vec![
+            "marko".into(),
+            "josh".into(),
+            "nobody".into(),
+            "josh".into(),
+            ElementProperty::Null,
+            29.into(),
+            list(vec!["marko".into()]),
+        ]);
+        let ages = list(vec![
+            29.into(),
+            29.0.into(),
+            "29".into(),
+            true.into(),
+            ElementProperty::Null,
+            list(vec![29.into()]),
+            f64::NAN.into(),
+            32.into(),
+        ]);
+        vec![
+            (
+                "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS name",
+                "FOR id IN $ids MATCH (n) WHERE coalesce(element_id(n), NULL) = id RETURN id, n.name AS name",
+                vec![("ids", ids.clone())],
+                vec!["id", "name"],
+            ),
+            (
+                "FOR id IN $ids MATCH (n:person) WHERE id = element_id(n) RETURN id, n.name AS name",
+                "FOR id IN $ids MATCH (n:person) WHERE id = coalesce(element_id(n), NULL) RETURN id, n.name AS name",
+                vec![("ids", ids)],
+                vec!["id", "name"],
+            ),
+            (
+                "FOR x IN $xs MATCH (p:person {name: x}) RETURN x, p.age AS a",
+                "FOR x IN $xs MATCH (p:person) WHERE coalesce(p.name, NULL) = x RETURN x, p.age AS a",
+                vec![("xs", names)],
+                vec!["x", "a"],
+            ),
+            (
+                "FOR x IN $xs MATCH (p:person) WHERE p.age = x RETURN x, p.name AS n",
+                "FOR x IN $xs MATCH (p:person) WHERE coalesce(p.age, NULL) = x RETURN x, p.name AS n",
+                vec![("xs", ages)],
+                vec!["x", "n"],
+            ),
+            (
+                "MATCH (a:person {name: 'marko'}), (b:person) WHERE b.age = a.age + 3 RETURN b.name AS b",
+                "MATCH (a:person {name: 'marko'}), (b:person) WHERE coalesce(b.age, NULL) = a.age + 3 RETURN b.name AS b",
+                vec![],
+                vec!["b"],
+            ),
+            (
+                "MATCH (a:person) WITH a.name AS m, count(*) AS c MATCH (p:person {name: m})-[:created]->(s) RETURN m, s.name AS s",
+                "MATCH (a:person) WITH a.name AS m, count(*) AS c MATCH (p:person)-[:created]->(s) WHERE coalesce(p.name, NULL) = m RETURN m, s.name AS s",
+                vec![],
+                vec!["m", "s"],
+            ),
+            (
+                "FOR x IN ['marko', 'nobody'] OPTIONAL MATCH (p:person {name: x})-[:created]->(s) RETURN x, s.name AS s",
+                "FOR x IN ['marko', 'nobody'] OPTIONAL MATCH (p:person)-[:created]->(s) WHERE coalesce(p.name, NULL) = x RETURN x, s.name AS s",
+                vec![],
+                vec!["x", "s"],
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_lookup_gives_the_rows_of_the_scan_it_replaces() {
+        let plain = graph(false);
+        let indexed = graph(true);
+        for (query, twin, params, keys) in cases() {
+            let expected = run(&plain, twin, &params, &keys);
+            assert!(!expected.is_empty(), "{twin}");
+            assert_eq!(run(&plain, query, &params, &keys), expected, "{query}");
+            assert_eq!(run(&indexed, query, &params, &keys), expected, "{query}");
+            assert_eq!(run(&indexed, twin, &params, &keys), expected, "{twin}");
+        }
+    }
+
+    /// Q5: the lookup keeps GQL `=`: `29 = 29.0` (one index slice across int64 and float64),
+    /// a string never equals a number, a list or `NaN` (no index key) falls back to the exact
+    /// scan, `NULL` finds nothing.
+    #[test]
+    fn a_lookup_keeps_gql_equality() {
+        let (query, _, params, keys) = cases().swap_remove(3);
+        let expected = sorted(&[
+            "i:29|'marko'",
+            "i:29|'floatage'",
+            "f:29.0|'marko'",
+            "f:29.0|'floatage'",
+            "'29'|'strage'",
+            "[i:29]|'listage'",
+            "i:32|'josh'",
+        ]);
+        assert_eq!(run(&graph(true), query, &params, &keys), expected);
+        assert_eq!(run(&graph(false), query, &params, &keys), expected);
+        let (query, _, params, keys) = cases().swap_remove(0);
+        assert_eq!(
+            run(&graph(true), query, &params, &keys),
+            sorted(&["'1'|'marko'", "'1'|'marko'", "'4'|'josh'"])
+        );
+    }
+
+    #[test]
+    fn the_plan_names_what_serves_the_lookup() {
+        let ids = [("ids", list(vec!["1".into(), "4".into()]))];
+        // By id: no row label, the equality is not repeated as gql:filter.
+        let text = plan(
+            &graph(false),
+            "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n.name AS name",
+            &ids,
+        );
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            [
+                "inject(0)",
+                "gql:for(\"id IN $ids\")",
+                "gql:lookup(\"(n)\", \"element_id(n) = id\") [id]",
+                "gql:project(\"name\")"
+            ]
+        );
+        // By index: the scan labels follow as has_label().
+        let query = "FOR x IN ['marko'] MATCH (p:person {name: x}) RETURN p.age AS a";
+        let text = plan(&graph(true), query, &[]);
+        assert!(
+            text.contains("gql:lookup(\"(p:person)\", \"name: x\") [index: vertex person.name]"),
+            "{text}"
+        );
+        assert!(!text.contains("gql:filter"), "{text}");
+        assert!(!text.contains("as(\""), "{text}");
+        // Without an index (E5): the stage 2a.T4 form, a scan and a filter per row.
+        let text = plan(&graph(false), query, &[]);
+        assert!(!text.contains("gql:lookup"), "{text}");
+        assert!(text.contains("gql:filter(\"name: x\")"), "{text}");
+        // A second component looked up from the first.
+        let text = plan(
+            &graph(true),
+            "MATCH (a:person {name: 'marko'}), (b:person) WHERE b.age = a.age + 3 RETURN b",
+            &[],
+        );
+        assert!(
+            text.contains(
+                "gql:lookup(\"(b:person)\", \"b.age = a.age + 3\") [index: vertex person.age]"
+            ),
+            "{text}"
+        );
+        // Labels the value reads stay readable: a lookup inside OPTIONAL MATCH, after a FOR.
+        let text = plan(
+            &graph(true),
+            "FOR x IN ['marko'] OPTIONAL MATCH (p:person {name: x})-[:created]->(s) RETURN x, s",
+            &[],
+        );
+        assert!(text.contains("optional(__.gql:lookup("), "{text}");
+    }
+
+    #[test]
+    fn merged_rows_look_up_like_unmerged_ones() {
+        let graph = graph(true);
+        for query in [
+            "MATCH (:person)-[:created]->(s) FOR x IN ['marko', 'josh', s.name] MATCH (p:person {name: x}) RETURN p.name AS n, count(*) AS c",
+            "MATCH (:person)-[:created]->(s) MATCH (t:software {name: s.name}) RETURN t.name AS n, count(*) AS c",
+            "MATCH (s)<-[:created]-(:person) FOR id IN ['1', element_id(s)] MATCH (v) WHERE element_id(v) = id RETURN v.name AS n, count(*) AS c",
+        ] {
+            let run = |merge: bool| {
+                let rows = graph
+                    .traversal()
+                    .with("bulk.merge", merge)
+                    .gql(query)
+                    .to_list()
+                    .unwrap_or_else(|e| panic!("{query}: {e}"));
+                let mut out: Vec<String> = rows.iter().map(norm).collect();
+                out.sort();
+                out
+            };
+            assert_eq!(run(true), run(false), "{query}");
+            assert!(!run(true).is_empty(), "{query}");
+        }
+    }
+
+    /// A storage that reports the property indexes of the graph it wraps but serves none of
+    /// them (`vertices_by_property_index` keeps the trait default `None`): the planner picks
+    /// the index lookup, the step falls back to the exact scan.
+    struct Unserved(TraversalGraph);
+
+    impl GraphStorage for Unserved {
+        type VertexId = VertexHandle;
+        type EdgeId = EdgeHandle;
+
+        fn vertex_count(&self) -> usize {
+            GraphStorage::vertex_count(&self.0)
+        }
+        fn edge_count(&self) -> usize {
+            GraphStorage::edge_count(&self.0)
+        }
+        fn vertices(&self) -> impl Iterator<Item = VertexHandle> + '_ {
+            GraphStorage::vertices(&self.0)
+        }
+        fn edges(&self) -> impl Iterator<Item = EdgeHandle> + '_ {
+            GraphStorage::edges(&self.0)
+        }
+        fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
+            GraphStorage::get_vertex_by_id(&self.0, id)
+        }
+        fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
+            GraphStorage::get_edge_by_id(&self.0, id)
+        }
+        fn out_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+            GraphStorage::out_edges(&self.0, node)
+        }
+        fn in_edges(&self, node: VertexHandle) -> impl Iterator<Item = EdgeHandle> + '_ {
+            GraphStorage::in_edges(&self.0, node)
+        }
+        fn vertex_id(&self, node: VertexHandle) -> Option<&str> {
+            GraphStorage::vertex_id(&self.0, node)
+        }
+        fn edge_id(&self, edge: EdgeHandle) -> Option<&str> {
+            GraphStorage::edge_id(&self.0, edge)
+        }
+        fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
+            GraphStorage::vertex_label(&self.0, node)
+        }
+        fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
+            GraphStorage::edge_label(&self.0, edge)
+        }
+        fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
+            GraphStorage::vertex_labels(&self.0, node)
+        }
+        fn vertex_properties(&self, node: VertexHandle) -> Option<&PropertyMap> {
+            GraphStorage::vertex_properties(&self.0, node)
+        }
+        fn edge_properties(&self, edge: EdgeHandle) -> Option<&PropertyMap> {
+            GraphStorage::edge_properties(&self.0, edge)
+        }
+        fn edge_endpoints(&self, edge: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+            GraphStorage::edge_endpoints(&self.0, edge)
+        }
+        fn insert_vertex(
+            &mut self,
+            id: Option<CompactString>,
+            labels: Vec<CompactString>,
+            properties: PropertyMap,
+        ) -> Result<VertexHandle, GraphError> {
+            GraphStorage::insert_vertex(&mut self.0, id, labels, properties)
+        }
+        fn add_vertex_label(
+            &mut self,
+            node: VertexHandle,
+            label: CompactString,
+        ) -> Result<bool, GraphError> {
+            GraphStorage::add_vertex_label(&mut self.0, node, label)
+        }
+        fn remove_vertex_label(
+            &mut self,
+            node: VertexHandle,
+            label: &str,
+        ) -> Result<bool, GraphError> {
+            GraphStorage::remove_vertex_label(&mut self.0, node, label)
+        }
+        fn insert_edge(
+            &mut self,
+            id: Option<CompactString>,
+            label: Option<CompactString>,
+            from: VertexHandle,
+            to: VertexHandle,
+            properties: PropertyMap,
+        ) -> Result<EdgeHandle, GraphError> {
+            GraphStorage::insert_edge(&mut self.0, id, label, from, to, properties)
+        }
+        fn set_vertex_property(
+            &mut self,
+            node: VertexHandle,
+            key: CompactString,
+            value: ElementProperty,
+        ) -> Result<(), GraphError> {
+            GraphStorage::set_vertex_property(&mut self.0, node, key, value)
+        }
+        fn set_edge_property(
+            &mut self,
+            edge: EdgeHandle,
+            key: CompactString,
+            value: ElementProperty,
+        ) -> Result<(), GraphError> {
+            GraphStorage::set_edge_property(&mut self.0, edge, key, value)
+        }
+        fn drop_vertex(&mut self, node: VertexHandle) -> Result<(), GraphError> {
+            GraphStorage::drop_vertex(&mut self.0, node)
+        }
+        fn drop_vertex_property(
+            &mut self,
+            prop: &str,
+            node: VertexHandle,
+        ) -> Result<(), GraphError> {
+            GraphStorage::drop_vertex_property(&mut self.0, prop, node)
+        }
+        fn drop_edge(&mut self, edge: EdgeHandle) -> Result<(), GraphError> {
+            GraphStorage::drop_edge(&mut self.0, edge)
+        }
+        fn drop_edge_property(&mut self, prop: &str, edge: EdgeHandle) -> Result<(), GraphError> {
+            GraphStorage::drop_edge_property(&mut self.0, prop, edge)
+        }
+        fn property_indexes(&self) -> Vec<PropertyIndexInfo> {
+            GraphStorage::property_indexes(&self.0)
+        }
+    }
+
+    /// The lookup is storage independent: `Forwarding` (its own handles, the index forwarded)
+    /// and a storage that reports indexes but serves none (the exact scan fallback) give the
+    /// rows of `TraversalGraph`.
+    #[test]
+    fn every_storage_gives_the_same_rows() {
+        let reference = graph(true);
+        let forwarded = Forwarding::new(graph(true));
+        let unserved = Unserved(graph(true));
+        for (query, _, params, keys) in cases() {
+            let expected = run(&reference, query, &params, &keys);
+            assert_eq!(run(&forwarded, query, &params, &keys), expected, "{query}");
+            assert_eq!(run(&unserved, query, &params, &keys), expected, "{query}");
+        }
+        let query = "FOR x IN ['marko'] MATCH (p:person {name: x}) RETURN p";
+        for text in [plan(&forwarded, query, &[]), plan(&unserved, query, &[])] {
+            assert!(text.contains("[index: vertex person.name]"), "{text}");
+        }
+    }
+}
+
 // ----- plans -----
 
 #[test]

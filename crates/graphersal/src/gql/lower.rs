@@ -44,6 +44,7 @@
 //! | `FOR x IN list` (Cypher `UNWIND list AS x`; design mechanism 2) | `gql:for("x IN list")`: one derived traverser per item, the item itself the current object (`Binding::Current` on its row, `as("x")` only when read after a later step left it, read as that label); `NULL` list no row, a non-list one row (E1) |
 //! | `FOR x IN list WITH ORDINALITY i` / `WITH OFFSET i` | `gql:for(".. WITH ORDINALITY i")`: the record `{x, i}`, read like a materializing `WITH` row (`Binding::Column`, `Binding::RowColumn` through `as("#f<k>")` only when read after leaving it) |
 //! | a later `MATCH` continuing from a `FOR` item (design E3) | `gql:bind("x")` (an item that is not an element of the pattern's kind, `NULL` included: no row; never a bare `out()` on the item); a join or trail check against it is `gql:filter` as for a `WITH` column |
+//! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
@@ -76,9 +77,8 @@
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (`NEXT`, `UNION`, subqueries, quantified path patterns, shortest
-//! paths, ...) and the binder. A `MATCH` after `FOR` that compares a node with the item
-//! (`FOR id IN $ids MATCH (n) WHERE element_id(n) = id`) is still a mid-traversal scan plus a
-//! filter per row; the correlated lookup `gql:lookup` (design M3) comes next.
+//! paths, ...) and the binder. A component that is not the root scan and has no equality an id
+//! or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
 //!
@@ -103,8 +103,8 @@ use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    ElementFilters, Expand, ForStage, LogicalPlan, Materialize, Op, PushOp, PushOperand, Pushdown,
-    ResultOp, Stage, and_factors, label_disjuncts,
+    ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize, Op, PushOp,
+    PushOperand, Pushdown, ResultOp, Stage, and_factors, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, PathPart, RowExpr, eval_error};
@@ -115,6 +115,7 @@ use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateColumn;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
+use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLookupKey};
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::value::{Number, P, PValue};
 use crate::{
@@ -296,6 +297,8 @@ impl Site {
 enum Instr<S: GraphStorage> {
     /// `v()`.
     Scan,
+    /// `gql:lookup(..)` with its value read at `site` (an [`Op::Lookup`], design M3).
+    Lookup { lookup: GqlLookup<S>, site: Site },
     /// `inject(0)`: the one unit row a query that does not start with `MATCH` starts from
     /// (decision C13, design M1).
     Unit,
@@ -551,6 +554,9 @@ impl<S: GraphStorage> Lowered<S> {
         for instr in instrs {
             g = match instr {
                 Instr::Scan => g.v(ArgStrings::None),
+                Instr::Lookup { lookup, site } => {
+                    g.gql_lookup(Arc::clone(&self.query), lookup, self.bindings(site))
+                }
                 Instr::Unit => g.inject(vec![ElementProperty::from(0_i64)]),
                 Instr::HasLabel(labels) => g.has_label(labels),
                 Instr::Has(key, predicate) => g.has_p(key, predicate),
@@ -783,6 +789,7 @@ impl<S: GraphStorage> Lowered<S> {
             Instr::Label(_)
             | Instr::PartLabel(_)
             | Instr::Scan
+            | Instr::Lookup { .. }
             | Instr::Unit
             | Instr::RowLabel(_)
             | Instr::Project { .. }
@@ -831,6 +838,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         bindings: Arc<[Binding]>,
         ordinal: Option<GqlOrdinal>,
     ) -> Self;
+    fn gql_lookup(self, query: Arc<str>, lookup: GqlLookup<S>, bindings: Arc<[Binding]>) -> Self;
     fn gql_distinct(self) -> Self;
     fn gql_order(self, query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>)
     -> Self;
@@ -905,6 +913,14 @@ macro_rules! sink {
                 ordinal: Option<GqlOrdinal>,
             ) -> Self {
                 self.gql_for(query, variable, list, bindings, ordinal)
+            }
+            fn gql_lookup(
+                self,
+                query: Arc<str>,
+                lookup: GqlLookup<S>,
+                bindings: Arc<[Binding]>,
+            ) -> Self {
+                self.gql_lookup(query, lookup, bindings)
             }
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
@@ -1215,10 +1231,61 @@ impl<'q> Lowering<'q> {
                     }
                     site = Site::on(resume.binding);
                 }
+                Op::Lookup(lookup) => {
+                    let lookup_instr = self.lookup(lookup, site)?;
+                    instrs.push(lookup_instr);
+                    let scan = &lookup.scan;
+                    let (labels, steps) = self.element(scan.binding, &scan.filters, Vec::new())?;
+                    if let Some(labels) = labels {
+                        instrs.push(Instr::HasLabel(labels));
+                    }
+                    instrs.extend(steps);
+                    instrs.push(Instr::Label(scan.binding));
+                    site = Site::on(scan.binding);
+                }
                 Op::Anchor(scan) => return Err(self.anchor_not_yet(scan.binding)),
             }
         }
         Ok(site)
+    }
+
+    /// The `gql:lookup` of `lookup` (design M3), its value read at `site` (the row before it).
+    fn lookup<S: GraphStorage>(
+        &self,
+        lookup: &Lookup,
+        site: Site,
+    ) -> Result<Instr<S>, TraverserError> {
+        let binding = self.bound.binding(lookup.scan.binding);
+        let name = binding
+            .and_then(|b| b.name.as_ref())
+            .map_or("", |n| n.name.as_str());
+        let labels = lookup.scan.scan_labels.clone().unwrap_or_default();
+        let pattern = if labels.is_empty() {
+            format!("({name})")
+        } else {
+            format!("({name}:{})", labels.join("|"))
+        };
+        let equality = self
+            .bound
+            .conjuncts
+            .get(lookup.conjunct)
+            .and_then(|c| self.query.get(c.span.start..c.span.end))
+            .unwrap_or_default()
+            .to_string();
+        let key = match &lookup.by {
+            LookupBy::Id => GqlLookupKey::Id,
+            LookupBy::Index(key) => GqlLookupKey::Property(CompactString::from(key.as_str())),
+        };
+        Ok(Instr::Lookup {
+            lookup: GqlLookup {
+                pattern,
+                equality,
+                value: self.compile(&lookup.value, None, &[])?,
+                key,
+                labels,
+            },
+            site,
+        })
     }
 
     /// Moves from `site` to node `id` bound earlier: `select(label)` for a pattern binding,
@@ -2145,6 +2212,10 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 list.variables(&mut slots);
                 marks.read(&mut slots, *site);
             }
+            Instr::Lookup { lookup, site } => {
+                lookup.value.variables(&mut slots);
+                marks.read(&mut slots, *site);
+            }
             Instr::Aggregate {
                 columns,
                 calls,
@@ -2197,6 +2268,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             Instr::Filter { site, .. }
             | Instr::Project { site, .. }
             | Instr::For { site, .. }
+            | Instr::Lookup { site, .. }
             | Instr::Aggregate { site, .. }
             | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
@@ -2229,7 +2301,9 @@ fn next_hop(ops: &[Op], at: usize) -> Option<&Expand> {
         match op {
             Op::Join { .. } | Op::Filter(_) => {}
             Op::Expand(next) if next.from_current => return Some(next),
-            Op::Expand(_) | Op::Scan(_) | Op::Anchor(_) | Op::Resume(_) => return None,
+            Op::Expand(_) | Op::Scan(_) | Op::Lookup(_) | Op::Anchor(_) | Op::Resume(_) => {
+                return None;
+            }
         }
     }
     None

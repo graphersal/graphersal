@@ -2251,4 +2251,54 @@ mod gql {
             set(r#"g.E().project("s", "t").by(__.outV()).by(__.inV()).toList()"#)
         );
     }
+
+    /// Stage 2a: `gql:lookup` (a component found by id or index, design M3) reads vertices
+    /// like the `v()` it replaces: a denied vertex read refuses it before it runs, at that step,
+    /// with the request `g.V().hasLabel(..)` is refused with, also when it is the only vertex
+    /// read of the query and no row would reach it.
+    #[test]
+    fn a_denied_read_refuses_gql_lookup_like_v_has_label() {
+        let graph = modern();
+        assert_denied(
+            run(
+                &graph,
+                r#"g.V().hasLabel("person").values("name").toList()"#,
+                NoPersons,
+            ),
+            "v",
+            "Read Data(vertex)",
+        );
+        let by_id = r#"g.gql("FOR id IN ['1', '4'] MATCH (n:person) WHERE element_id(n) = id RETURN n.name").toList()"#;
+        let by_index =
+            r#"g.gql("FOR x IN ['marko'] MATCH (n:person {name: x}) RETURN n.age").toList()"#;
+        let no_row =
+            r#"g.gql("FOR id IN [] MATCH (n:person) WHERE element_id(n) = id RETURN n").toList()"#;
+        assert!(requests(&graph, by_index).contains(&"Read Data(vertex)".to_string()));
+        // The index: created allowed, before the denied runs.
+        let _ = requests(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
+        for script in [by_id, by_index, no_row] {
+            let profile = run(
+                &graph,
+                &script.replace(".toList()", ".profile().to_string()"),
+                Recorder::default(),
+            )
+            .unwrap_or_else(|err| panic!("{script}: {err}"))
+            .to_string();
+            assert!(profile.contains("gql:lookup("), "{script}: {profile}");
+            assert!(!profile.contains("\nv()"), "{script}: {profile}");
+            assert_denied(
+                run(&graph, script, NoPersons),
+                "gql:lookup",
+                "Read Data(vertex)",
+            );
+        }
+        // It asks exactly what the Gremlin twin asks.
+        assert_eq!(
+            requests(&graph, by_id),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("person").values("name").toList()"#
+            )
+        );
+    }
 }

@@ -60,7 +60,20 @@
 //!
 //! The components of the pattern graph (across all `MATCH` clauses) are emitted best start first
 //! (the same rank), so the cheapest, possibly index-served component is the root scan; the
-//! others follow as mid-traversal scans (a Cartesian product).
+//! others follow as mid-traversal scans (a Cartesian product), or as correlated lookups.
+//!
+//! # Correlated lookup (stage 2a, design M3, E5)
+//!
+//! A component that is not the root scan (any component of a later segment, every component of
+//! the first segment after its first) and does not start at a bound node starts with an
+//! [`Op::Lookup`] instead of a mid-traversal scan when one of its nodes has an equality conjunct
+//! whose other side reads only bindings bound already (and parameters) and that the graph
+//! serves: `element_id(n) = e` (by id), or `n.k = e` / `{k: e}` with a property index on `k`
+//! for every scan label of `n` ([`PlannerFacts::has_vertex_index`]). Without such a conjunct the
+//! component keeps its scan: a lookup no id or index serves is no cheaper than scan + filter.
+//! Among several, an id lookup wins over an index lookup, then the node's start rank, then the
+//! conjunct's text order. The lookup checks the equality itself (GQL `=`), so the conjunct is
+//! not placed again; the node's other conjuncts and label factors follow as for a scan.
 //!
 //! # Checks and filters
 //!
@@ -86,9 +99,9 @@
 use super::ast::{EdgeDirection, Quantifier};
 use super::bind::{BindingId, BindingKind, BoundQuery, BoundWith, Count, Segment};
 use super::plan::{
-    EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan, Materialize, Op,
-    Pushdown, ResultOp, Resume, Scan, Stage, and_factors, classify_all, element_filters,
-    scan_labels,
+    EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan, Lookup, LookupBy,
+    Materialize, Op, Pushdown, ResultOp, Resume, Scan, Stage, and_factors, classify_all,
+    element_filters, lookup_form, scan_labels,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -187,6 +200,8 @@ enum Start {
         /// It is the current element.
         current: bool,
     },
+    /// Emitted already (an [`Op::Lookup`]).
+    Started,
 }
 
 /// Plans `bound` with `facts`; `anchor` is the phase 2 anchor binding (`None` in stage 1a).
@@ -420,8 +435,22 @@ impl<'q> Planner<'q> {
             })
             .collect();
         starts.sort_unstable_by_key(|(key, _, _)| *key);
-        for ((_, _, _, start), how, nodes) in starts {
-            self.walk_component(start, &nodes, &edges, how);
+        for (k, ((_, _, _, start), how, nodes)) in starts.into_iter().enumerate() {
+            // Every component but the root scan may start with a correlated lookup (module
+            // docs).
+            let root = index == 0 && k == 0;
+            let lookup = (how == Start::Scan && !root)
+                .then(|| self.lookup(&nodes))
+                .flatten();
+            match lookup {
+                Some(lookup) => {
+                    let start = lookup.scan.binding;
+                    self.pending.retain(|&c| c != lookup.conjunct);
+                    self.ops.push(Op::Lookup(lookup));
+                    self.walk_component(start, &nodes, &edges, Start::Started);
+                }
+                None => self.walk_component(start, &nodes, &edges, how),
+            }
         }
         // Conjuncts left over (none in a well-formed query: every binding is bound).
         if !self.pending.is_empty() {
@@ -429,6 +458,67 @@ impl<'q> Planner<'q> {
             self.ops.push(Op::Filter(rest));
         }
         std::mem::take(&mut self.ops)
+    }
+
+    /// The correlated lookup of a component of `nodes` (module docs), `None` when no id or
+    /// index serves an equality of its nodes against the bindings bound so far.
+    fn lookup(&self, nodes: &[BindingId]) -> Option<Lookup> {
+        let bound = self.bound;
+        type Rank = (u8, (u8, u64, BindingId), usize);
+        let mut best: Option<(Rank, BindingId, LookupBy, &super::ast::Expr)> = None;
+        for &node in nodes {
+            let Some(binding) = bound.binding(node) else {
+                continue;
+            };
+            let labels = scan_labels(&binding.labels);
+            for &c in binding.predicates.iter().chain(&self.pending) {
+                let Some(conjunct) = bound.conjuncts.get(c) else {
+                    continue;
+                };
+                let ready = conjunct.bindings.contains(&node)
+                    && conjunct
+                        .bindings
+                        .iter()
+                        .all(|&b| b == node || self.is_bound(b));
+                if !ready {
+                    continue;
+                }
+                let Some((by, value)) = lookup_form(conjunct, node, binding.key.as_deref()) else {
+                    continue;
+                };
+                let served = match &by {
+                    LookupBy::Id => true,
+                    LookupBy::Index(key) => labels.as_ref().is_some_and(|labels| {
+                        !labels.is_empty()
+                            && labels
+                                .iter()
+                                .all(|label| self.facts.has_vertex_index(label, key))
+                    }),
+                };
+                if !served {
+                    continue;
+                }
+                let rank = (u8::from(by != LookupBy::Id), self.start_rank(node), c);
+                if best.as_ref().is_none_or(|(r, ..)| rank < *r) {
+                    best = Some((rank, node, by, value));
+                }
+            }
+        }
+        let ((_, _, conjunct), node, by, value) = best?;
+        let scan_labels = bound.binding(node).and_then(|b| scan_labels(&b.labels));
+        let mut filters = self.filters_of(node, scan_labels.as_deref());
+        filters.pushed.retain(|&c| c != conjunct);
+        filters.residual.retain(|&c| c != conjunct);
+        Some(Lookup {
+            scan: Scan {
+                binding: node,
+                scan_labels,
+                filters,
+            },
+            conjunct,
+            by,
+            value: value.clone(),
+        })
     }
 
     /// The first node an `OPTIONAL MATCH` segment binds (see `Stage::Optional`).
@@ -669,6 +759,7 @@ impl<'q> Planner<'q> {
                     from_current: current,
                 }));
             }
+            Start::Started => {}
             Start::Scan | Start::Anchor => {
                 let anchored = how == Start::Anchor;
                 let labels = self
@@ -983,6 +1074,12 @@ impl<'q> Planner<'q> {
                 return;
             }
             Op::Resume(r) => reads.push(r.binding),
+            // The other side of the equality is read on the row before the lookup moves.
+            Op::Lookup(l) => {
+                if let Some(cj) = bound.conjuncts.get(l.conjunct) {
+                    reads.extend(cj.bindings.iter().filter(|&&b| b != l.scan.binding));
+                }
+            }
             Op::Join { binding } => reads.push(*binding),
             Op::Expand(e) => {
                 if !e.from_current {
@@ -1043,6 +1140,7 @@ struct Position {
 fn current_after(ops: &[Op], current: Option<BindingId>) -> Option<BindingId> {
     ops.iter().fold(current, |current, op| match op {
         Op::Scan(s) | Op::Anchor(s) => Some(s.binding),
+        Op::Lookup(l) => Some(l.scan.binding),
         Op::Resume(r) => Some(r.binding),
         Op::Expand(e) => Some(e.to),
         Op::Join { binding } => Some(*binding),

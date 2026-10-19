@@ -57,7 +57,8 @@
 use std::collections::BTreeSet;
 
 use super::ast::{
-    BinaryOp, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal, Quantifier,
+    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, LabelExpr, LabelExprKind, Literal,
+    Quantifier,
 };
 use super::bind::{BindingId, BoundQuery, Conjunct, Count, Predicate};
 use super::lexer::Span;
@@ -179,6 +180,11 @@ pub(crate) enum Op {
     /// labels and filters were checked there; the later segment's own conditions on it are
     /// [`Op::Filter`]s right after).
     Resume(Resume),
+    /// The start of a component that is not the root scan at the vertices matching one
+    /// equality whose other side is known on the incoming row (stage 2a, design M3, E5):
+    /// `element_id(n) = e` served by the id, or `n.k = e` served by a property index on `k`
+    /// for every scan label (lowered as `gql:lookup`).
+    Lookup(Lookup),
     /// One pattern edge, walked from a bound node to the other end.
     Expand(Expand),
     /// The current element (just reached by the preceding [`Op::Expand`]) must equal the
@@ -201,6 +207,31 @@ pub(crate) struct Resume {
     /// `OPTIONAL MATCH` continuing from the element the segment before it ended on); else the
     /// lowering moves to it (`select` / `gql:bind`).
     pub(crate) from_current: bool,
+}
+
+/// A correlated lookup (design M3): the start node of a component that is not the root scan,
+/// found per incoming row through one equality ([`Op::Lookup`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Lookup {
+    /// The node, its scan labels and its own conjuncts, as for a scan; the equality the lookup
+    /// serves is not among the filters (the lookup checks it with GQL `=`).
+    pub(crate) scan: Scan,
+    /// The conjunct the lookup serves (index into [`BoundQuery::conjuncts`]).
+    pub(crate) conjunct: usize,
+    /// What serves it.
+    pub(crate) by: LookupBy,
+    /// The other side of the equality: reads only bindings bound before the component and
+    /// parameters, evaluated once per incoming row.
+    pub(crate) value: Expr,
+}
+
+/// What serves an [`Op::Lookup`] (design E5: nothing else makes it one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LookupBy {
+    /// `element_id(n) = e`: the vertex with that id.
+    Id,
+    /// `n.key = e`: the property index on `key` of every scan label.
+    Index(String),
 }
 
 /// A scan (or the anchor) of a component's start node.
@@ -578,6 +609,113 @@ fn list_operand(expr: &Expr) -> Option<PushOperand> {
         }),
         _ => None,
     }
+}
+
+// ----- correlated lookup (design M3) -----
+
+/// What a lookup of the node `binding` (whose key, the name stored expressions use, is `key`)
+/// can read from `conjunct`: `element_id(n) = e` ([`LookupBy::Id`]) or `n.k = e` / an inline
+/// property `{k: e}` ([`LookupBy::Index`], the planner still checks the indexes), in either
+/// operand order, with `e` not reading the node. `None` for every other conjunct.
+pub(crate) fn lookup_form<'c>(
+    conjunct: &'c Conjunct,
+    binding: BindingId,
+    key: Option<&str>,
+) -> Option<(LookupBy, &'c Expr)> {
+    match &conjunct.predicate {
+        Predicate::Property {
+            binding: b,
+            key: property,
+            value,
+        } if *b == binding => {
+            if key.is_some_and(|key| mentions(value, key)) {
+                return None;
+            }
+            Some((LookupBy::Index(property.name.clone()), value))
+        }
+        Predicate::Property { .. } => None,
+        Predicate::Expr(expr) => {
+            let key = key?;
+            let ExprKind::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } = &expr.kind
+            else {
+                return None;
+            };
+            [(left, right), (right, left)]
+                .into_iter()
+                .find_map(|(side, other)| {
+                    let by = lookup_side(side, key)?;
+                    (!mentions(other, key)).then_some((by, &**other))
+                })
+        }
+    }
+}
+
+/// `element_id(key)` or `key.k` as the node side of a lookup.
+fn lookup_side(side: &Expr, key: &str) -> Option<LookupBy> {
+    let is_node = |expr: &Expr| matches!(&expr.kind, ExprKind::Variable(v) if v.name == key);
+    match &side.kind {
+        ExprKind::Property {
+            target,
+            key: property,
+        } if is_node(target) => Some(LookupBy::Index(property.name.clone())),
+        ExprKind::FunctionCall {
+            name,
+            distinct: false,
+            args: CallArgs::Exprs(args),
+        } => {
+            let [arg] = args.as_slice() else {
+                return None;
+            };
+            let spec = super::parser::lookup_function(&name.name)?;
+            (spec.function == super::parser::Function::ElementId && is_node(arg))
+                .then_some(LookupBy::Id)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `expr` reads the variable `key` anywhere (an explicit stack: no recursion).
+pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExprKind::Variable(v) => {
+                if v.name == key {
+                    return true;
+                }
+            }
+            ExprKind::Literal(_) | ExprKind::Parameter(_) => {}
+            ExprKind::List(items) => stack.extend(items),
+            ExprKind::Map(map) => stack.extend(map.entries.iter().map(|e| &e.value)),
+            ExprKind::Property { target, .. } => stack.push(target),
+            ExprKind::Unary { operand, .. }
+            | ExprKind::IsNull { operand, .. }
+            | ExprKind::IsLabeled { operand, .. } => stack.push(operand),
+            ExprKind::Binary { left, right, .. }
+            | ExprKind::IsEndpoint {
+                operand: left,
+                edge: right,
+                ..
+            } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            ExprKind::Case(case) => {
+                stack.extend(case.operand.as_ref());
+                for arm in &case.whens {
+                    stack.push(&arm.when);
+                    stack.push(&arm.then);
+                }
+                stack.extend(case.else_result.as_ref());
+            }
+            ExprKind::FunctionCall { args, .. } => stack.extend(args.iter()),
+        }
+    }
+    false
 }
 
 /// Splits the conjuncts `ids` of one element into pushed (most selective first, `indexed` keys

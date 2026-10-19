@@ -383,7 +383,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   `gql:trail`, `gql:not_self_loop`, the `gql:error` marker) are value-only too: they read the
     ///   properties and labels of the elements the lowered `v()` / adjacency steps reached (and
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
-    ///   exactly what its Gremlin equivalent asks.
+    ///   exactly what its Gremlin equivalent asks. `gql:lookup` reaches vertices of the graph
+    ///   (a component found by id or index): `Read` on vertices, like the `v()` it replaces.
     ///
     /// Labels of reads are not reported (label-level read security is a later storage
     /// decorator, see `book/src/users_guide/permissions.md`).
@@ -471,8 +472,12 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             GraphStep::Barrier("infer_schema", _) => {
                 visit(AccessRequest::new(Action::Read, Resource::Schema))
             }
+            // `gql:lookup` (a GQL component started at the vertices one equality finds) reads
+            // vertices like the `v()` it stands for.
             GraphStep::Init("v", _)
-            | GraphStep::FlatMap("out_v" | "in_v" | "both_v" | "other_v", _) => visit(read(vertex)),
+            | GraphStep::FlatMap("out_v" | "in_v" | "both_v" | "other_v" | "gql:lookup", _) => {
+                visit(read(vertex))
+            }
             GraphStep::Init("e", _) | GraphStep::FlatMap("out_e" | "in_e" | "both_e", _) => {
                 visit(read(edge))
             }
@@ -566,7 +571,7 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             GraphStep::Init("v", _) => of(ElementKind::Vertex, None),
             GraphStep::Init("e", step) => of(ElementKind::Edge, step.labels()),
             GraphStep::FlatMap(
-                "out" | "in" | "both" | "out_v" | "in_v" | "both_v" | "other_v",
+                "out" | "in" | "both" | "out_v" | "in_v" | "both_v" | "other_v" | "gql:lookup",
                 _,
             ) => of(ElementKind::Vertex, None),
             GraphStep::FlatMap("out_e" | "in_e" | "both_e", step) => {
