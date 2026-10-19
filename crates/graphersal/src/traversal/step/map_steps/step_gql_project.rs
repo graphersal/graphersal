@@ -129,7 +129,12 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<S> {
                 },
                 None => match column.eval(&row) {
                     Ok(value) => into_traverser_value(value),
-                    Err(error) => return Err(Box::new(eval_error(&self.query, error))),
+                    Err(error) => {
+                        // A limit error the row kept (a refused `Env::reserve`) wins over the
+                        // evaluator's fallback error.
+                        row.finish()?;
+                        return Err(Box::new(eval_error(&self.query, error)));
+                    }
                 },
             };
             row.finish()?;

@@ -54,7 +54,7 @@ use std::sync::Arc;
 use super::eval::{Compiled, Env, EvalError, Scope, Value, status};
 use crate::error::{BoxedTraverserError, GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
-use crate::traversal::{Traverser, TraverserContext};
+use crate::traversal::{Traverser, TraverserContext, bulk};
 use crate::value::path_arena::PathNode;
 use crate::value::scalar::compare_scalars;
 use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_property};
@@ -313,7 +313,10 @@ pub(crate) fn eval_error(query: &str, error: EvalError) -> TraverserError {
     let kind = match error.gqlstatus {
         status::SEMANTIC => GqlErrorKind::Semantic,
         status::NOT_SUPPORTED => GqlErrorKind::NotYet,
-        // `DIVISION_BY_ZERO`, `OUT_OF_RANGE`, `INVALID_VALUE_TYPE`: data exceptions.
+        // A refused `Env::reserve` outside a row (a row reports its own limit error first).
+        status::LIMIT => GqlErrorKind::Limit,
+        // `DIVISION_BY_ZERO`, `OUT_OF_RANGE`, `INVALID_VALUE_TYPE` and the other class `22`
+        // codes of stage 1c: data exceptions.
         _ => GqlErrorKind::Data,
     };
     GqlErrorBuilder::new(kind, error.span.start..error.span.end, error.message)
@@ -624,6 +627,52 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
                 .edge_label(*e)
                 .map(|label| vec![CompactString::from(label)])
                 .unwrap_or_default(),
+        }
+    }
+
+    fn properties(&self, element: &GqlElement<S>) -> Vec<(CompactString, ElementProperty)> {
+        let storage = &*self.context.storage;
+        let properties = match element {
+            GqlElement::Vertex(v) => storage.vertex_properties(*v),
+            GqlElement::Edge(e) => storage.edge_properties(*e),
+        };
+        properties
+            .map(|map| {
+                map.iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn endpoints(&self, edge: &GqlElement<S>) -> Option<(GqlElement<S>, GqlElement<S>)> {
+        match edge {
+            GqlElement::Vertex(_) => None,
+            GqlElement::Edge(e) => {
+                let (source, target) = self.context.storage.edge_endpoints(*e)?;
+                Some((GqlElement::Vertex(source), GqlElement::Vertex(target)))
+            }
+        }
+    }
+
+    /// `traversal.max_materialized_bytes` and the memory budget, like `collect_list` in
+    /// `gql:aggregate`; a refusal keeps the limit error for [`Row::finish`].
+    fn reserve(&self, bytes: u64) -> bool {
+        let max = self.context.options.max_materialized_bytes;
+        let checked = if bytes > max {
+            Err(bulk::materialized_bytes_error(max, bytes))
+        } else {
+            match &self.context.options.memory {
+                Some(budget) if bytes > 0 => budget.check(bytes),
+                _ => Ok(()),
+            }
+        };
+        match checked {
+            Ok(()) => true,
+            Err(error) => {
+                self.failure.borrow_mut().get_or_insert(error);
+                false
+            }
         }
     }
 }

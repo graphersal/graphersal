@@ -658,3 +658,99 @@ fn compare_values_is_the_order_by_order() {
         "a path sorts after a list"
     );
 }
+
+// ----- stage 1c: the `Env` methods of the functions -----
+
+#[test]
+fn row_reads_properties_endpoints_and_reserves() {
+    use crate::traversal::TraversalStrategy;
+    use std::collections::HashMap;
+
+    let mut graph = graph();
+    let marko = graph.vertices().find(|v| {
+        graph
+            .vertex_properties(*v)
+            .and_then(|properties| properties.get("name"))
+            == Some(&ElementProperty::from("marko"))
+    });
+    let Some(marko) = marko else {
+        panic!("no marko");
+    };
+    let Some(edge) = graph.edges().next() else {
+        panic!("no edges");
+    };
+    let Some((source, target)) = graph.edge_endpoints(edge) else {
+        panic!("no endpoints");
+    };
+    let mut context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());
+    context.options.max_materialized_bytes = 1_000;
+    let traverser = Traverser::start(&context, TraverserValue::Vertex(marko));
+    let row = Row::new(&context, &traverser, &[]);
+    // Stored order, values as stored.
+    let properties = row.properties(&GqlElement::Vertex(marko));
+    let keys: Vec<&str> = properties.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["name", "age"]);
+    assert_eq!(properties[1].1, ElementProperty::from(29));
+    assert_eq!(
+        row.endpoints(&GqlElement::Edge(edge)),
+        Some((GqlElement::Vertex(source), GqlElement::Vertex(target)))
+    );
+    assert_eq!(row.endpoints(&GqlElement::Vertex(marko)), None);
+    assert!(row.properties(&GqlElement::Edge(edge)).len() == 1);
+    // Within the limit: granted, nothing kept.
+    assert!(row.reserve(1_000));
+    assert!(row.finish().is_ok());
+    // Over it: refused, the limit error kept for the step.
+    assert!(!row.reserve(1_001));
+    match row.finish() {
+        Err(error) => assert!(
+            matches!(
+                &*error,
+                TraverserError::ResourceLimitExceeded { limit, max: Some(1_000), observed: Some(1_001) }
+                    if limit == "traversal.max_materialized_bytes"
+            ),
+            "{error}"
+        ),
+        Ok(()) => panic!("the refusal was not kept"),
+    }
+    assert!(row.finish().is_ok());
+}
+
+#[test]
+fn project_reports_a_refused_reserve_as_the_limit_error() {
+    let graph = graph();
+    let (query, parsed) = query("MATCH (n) RETURN n.name || n.name AS twice");
+    let (names, bindings) = slots(&[("n", Binding::Current)]);
+    let column = |parsed: &Query| GqlColumn {
+        name: "twice".into(),
+        expr: compiled(&parsed.ret.items[0].expr, &names),
+    };
+    // `||` asks for its result's size (design F6): within the limit it runs.
+    let result = graph
+        .traversal()
+        .v("1")
+        .gql_project(
+            Arc::clone(&query),
+            vec![column(&parsed)],
+            Arc::clone(&bindings),
+        )
+        .to_list()
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    // Refused, the row's limit error wins over the evaluator's fallback (54001).
+    let error = graph
+        .traversal()
+        .with("traversal.max_materialized_bytes", 4)
+        .v("1")
+        .gql_project(query, vec![column(&parsed)], bindings)
+        .to_list()
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.root_cause(),
+            TraverserError::ResourceLimitExceeded { limit, .. }
+                if limit == "traversal.max_materialized_bytes"
+        ),
+        "{error}"
+    );
+}

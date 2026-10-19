@@ -378,25 +378,18 @@ fn the_plan_records_labels_only_never_a_full_path() {
     assert!(!plan.contains("[path:"), "{plan}");
 }
 
+/// D21 reverses C12: `nodes(p)` / `relationships(p)` are no longer refused before the run
+/// (stage 1c T1; T5 implements them and T6 asserts their rows).
 #[test]
-fn nodes_and_relationships_are_not_yet_supported() {
+fn nodes_and_relationships_are_no_longer_refused() {
     let graph = modern();
     for function in ["nodes", "relationships"] {
         let query = format!("MATCH p = (a)-->(b) RETURN {function}(p)");
-        let error = graph.read().traversal().gql(&query).to_list().unwrap_err();
-        let TraverserError::Gql {
-            gqlstatus,
-            message,
-            context,
-            ..
-        } = error.root_cause()
-        else {
-            panic!("{query}: {error:?}");
-        };
-        assert_eq!(gqlstatus.as_str(), "0A000", "{query}");
-        assert!(message.contains("not yet supported"), "{message}");
-        let alternative = context.alternative.as_deref().unwrap_or_default();
-        assert!(alternative.contains("RETURN p"), "{alternative}");
+        if let Err(error) = graph.read().traversal().gql(&query).to_list() {
+            let text = error.to_string();
+            assert!(!text.contains("gql:error"), "{query}: {text}");
+            assert!(!text.contains("over a path"), "{query}: {text}");
+        }
     }
 }
 

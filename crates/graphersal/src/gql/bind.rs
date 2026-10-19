@@ -551,6 +551,10 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
             f(left);
             f(right);
         }
+        ExprKind::IsEndpoint { operand, edge, .. } => {
+            f(operand);
+            f(edge);
+        }
         ExprKind::Case(case) => {
             if let Some(operand) = &case.operand {
                 f(operand);
@@ -563,10 +567,7 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
                 f(else_result);
             }
         }
-        ExprKind::FunctionCall { args, .. } => match args {
-            CallArgs::Star(_) => {}
-            CallArgs::Exprs(args) => args.iter().for_each(f),
-        },
+        ExprKind::FunctionCall { args, .. } => args.iter().for_each(f),
     }
 }
 
@@ -1516,7 +1517,12 @@ impl<'q> Binder<'q> {
             ExprKind::Unary { operand, .. }
             | ExprKind::IsNull { operand, .. }
             | ExprKind::IsLabeled { operand, .. } => self.resolve(ctx, operand, refs)?,
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary { left, right, .. }
+            | ExprKind::IsEndpoint {
+                operand: left,
+                edge: right,
+                ..
+            } => {
                 self.resolve(ctx, left, refs)?;
                 self.resolve(ctx, right, refs)?;
             }
@@ -1541,10 +1547,8 @@ impl<'q> Binder<'q> {
                     refs.aggregate.get_or_insert(name.span);
                     inner.aggregates = Aggregates::Refused("inside another aggregate");
                 }
-                if let CallArgs::Exprs(args) = args {
-                    for arg in args {
-                        self.resolve(inner, arg, refs)?;
-                    }
+                for arg in args.iter() {
+                    self.resolve(inner, arg, refs)?;
                 }
             }
         }
@@ -1763,6 +1767,23 @@ impl<'q> Binder<'q> {
                     right: Box::new(right),
                 }
             }
+            ExprKind::IsEndpoint {
+                operand,
+                edge,
+                end,
+                negated,
+            } => {
+                let (operand, os) = self.substitute(aliases, operand)?;
+                let (edge, es) = self.substitute(aliases, edge)?;
+                children.push((os, false));
+                children.push((es, true));
+                ExprKind::IsEndpoint {
+                    operand: Box::new(operand),
+                    edge: Box::new(edge),
+                    end: *end,
+                    negated: *negated,
+                }
+            }
             ExprKind::Case(case) => {
                 let mut one = |this: &mut Self, e: &Expr| -> BResult<Expr> {
                     let (e, s) = this.substitute(aliases, e)?;
@@ -1805,6 +1826,40 @@ impl<'q> Binder<'q> {
                             out.push(e);
                         }
                         CallArgs::Exprs(out)
+                    }
+                    CallArgs::Cast {
+                        operand,
+                        target,
+                        target_span,
+                    } => {
+                        let (operand, s) = self.substitute(aliases, operand)?;
+                        children.push((s, true));
+                        CallArgs::Cast {
+                            operand: Box::new(operand),
+                            target: *target,
+                            target_span: *target_span,
+                        }
+                    }
+                    CallArgs::Trim {
+                        side,
+                        character,
+                        source,
+                    } => {
+                        let character = match character {
+                            Some(character) => {
+                                let (character, s) = self.substitute(aliases, character)?;
+                                children.push((s, true));
+                                Some(Box::new(character))
+                            }
+                            None => None,
+                        };
+                        let (source, s) = self.substitute(aliases, source)?;
+                        children.push((s, true));
+                        CallArgs::Trim {
+                            side: *side,
+                            character,
+                            source: Box::new(source),
+                        }
                     }
                 };
                 ExprKind::FunctionCall {
@@ -2366,8 +2421,12 @@ fn shape_of(expr: &Expr) -> Shape {
     );
     let mut first = true;
     for_each_child(expr, &mut |child| {
-        // The left operand of a binary operator is a link of the spine, the right one nests.
-        let binary_left = matches!(expr.kind, ExprKind::Binary { .. }) && first;
+        // The left operand of a binary operator (or of `IS SOURCE OF`) is a link of the spine,
+        // the right one nests.
+        let binary_left = matches!(
+            expr.kind,
+            ExprKind::Binary { .. } | ExprKind::IsEndpoint { .. }
+        ) && first;
         first = false;
         children.push((shape_of(child), nests && !binary_left));
     });

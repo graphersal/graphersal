@@ -151,12 +151,41 @@ fn sexp(e: &Expr) -> String {
             out.push(')');
             out
         }
+        ExprKind::IsEndpoint {
+            operand,
+            edge,
+            end,
+            negated,
+        } => format!(
+            "({}{} {} {})",
+            if *negated { "not-" } else { "" },
+            match end {
+                Endpoint::Source => "source",
+                Endpoint::Destination => "destination",
+            },
+            sexp(operand),
+            sexp(edge)
+        ),
         ExprKind::FunctionCall { name, args, .. } => match args {
             CallArgs::Star(_) => format!("{}(*)", name.name),
             CallArgs::Exprs(args) => format!(
                 "{}({})",
                 name.name,
                 args.iter().map(sexp).collect::<Vec<_>>().join(" ")
+            ),
+            CallArgs::Cast {
+                operand, target, ..
+            } => format!("{}({} as {})", name.name, sexp(operand), target.name()),
+            CallArgs::Trim {
+                side,
+                character,
+                source,
+            } => format!(
+                "{}({:?} {} from {})",
+                name.name,
+                side,
+                character.as_deref().map_or("-".to_string(), sexp),
+                sexp(source)
             ),
         },
     }
@@ -626,7 +655,10 @@ fn expected_tokens_and_did_you_mean() {
     let f = fail("MATCH (a) RETURN [1, 2");
     assert_eq!(f.expected, ["`,`", "`]`"]);
     let f = fail("MATCH (a) WHERE a.x IS 5 RETURN a");
-    assert_eq!(f.expected, ["NOT", "NULL", "LABELED"]);
+    assert_eq!(
+        f.expected,
+        ["NOT", "NULL", "LABELED", "SOURCE", "DESTINATION"]
+    );
     let f = fail("MATCH (a) WHERE a < b < c RETURN a");
     assert_eq!(f.message, "comparisons cannot be chained");
     assert_eq!(f.text, "<");
@@ -1716,5 +1748,314 @@ fn group_by_is_explained() {
         assert_eq!(f.text, "GROUP BY", "{query}");
         assert!(f.message.contains("grouping is implicit"), "{}", f.message);
         assert!(f.alternative.unwrap().contains("RETURN p.name, count(s)"));
+    }
+}
+
+// ----- stage 1c: function forms -----
+
+#[test]
+fn cast_takes_one_or_two_word_type_names() {
+    assert_eq!(expr("CAST(n.age AS INTEGER)"), "CAST(n.age as INTEGER)");
+    assert_eq!(expr("cast(n.age as int)"), "cast(n.age as INTEGER)");
+    assert_eq!(expr("CAST(1 AS SIGNED INTEGER)"), "CAST(1 as INTEGER)");
+    assert_eq!(expr("CAST('1' AS DOUBLE PRECISION)"), "CAST('1' as FLOAT)");
+    assert_eq!(expr("CAST(1 AS double)"), "CAST(1 as FLOAT)");
+    assert_eq!(expr("CAST(1 AS CHAR VARYING)"), "CAST(1 as STRING)");
+    assert_eq!(expr("CAST(1 AS varchar)"), "CAST(1 as STRING)");
+    assert_eq!(expr("CAST('true' AS BOOL)"), "CAST('true' as BOOLEAN)");
+    assert_eq!(
+        expr("CAST(n.a + 1 AS STRING) || 'x'"),
+        "(|| CAST((+ n.a 1) as STRING) 'x')"
+    );
+    // The span of the call covers the whole form; the target span the written type name.
+    let q = ok("MATCH (n) RETURN CAST(n.age AS DOUBLE PRECISION) AS x");
+    let item = &q.ret.items[0].expr;
+    assert_eq!(q.text(item.span), "CAST(n.age AS DOUBLE PRECISION)");
+    let ExprKind::FunctionCall {
+        args: CallArgs::Cast { target_span, .. },
+        ..
+    } = &item.kind
+    else {
+        panic!("not a CAST: {item:?}");
+    };
+    assert_eq!(q.text(*target_span), "DOUBLE PRECISION");
+}
+
+#[test]
+fn cast_errors_name_the_supported_types() {
+    let f = fail("MATCH (n) RETURN CAST(n.age AS INTEGR)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.gqlstatus, "42001");
+    assert_eq!(f.text, "INTEGR");
+    assert_eq!(f.suggestion.as_deref(), Some("INTEGER"));
+    assert_eq!(f.expected, ["INTEGER", "FLOAT", "STRING", "BOOLEAN"]);
+    for (query, text) in [
+        ("MATCH (n) RETURN CAST(n.age AS DATE)", "DATE"),
+        ("MATCH (n) RETURN CAST(n.age AS INT32)", "INT32"),
+        ("MATCH (n) RETURN CAST(n.tags AS LIST<STRING>)", "LIST"),
+        (
+            "MATCH (n) RETURN CAST(n.t AS ZONED DATETIME)",
+            "ZONED DATETIME",
+        ),
+        ("MATCH (n) RETURN CAST(n.x AS DECIMAL)", "DECIMAL"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.alternative
+                .as_deref()
+                .unwrap_or("")
+                .contains("INTEGER, FLOAT"),
+            "{query}: {f:?}"
+        );
+    }
+    let f = fail("MATCH (n) RETURN CAST(n.age INTEGER)");
+    assert_eq!(f.expected, ["AS"]);
+    assert_eq!(f.text, "INTEGER");
+    let f = fail("MATCH (n) RETURN CAST(n.age AS INTEGER, 1)");
+    assert_eq!(f.expected, ["`)`"]);
+    let f = fail("MATCH (n) RETURN CAST(n.age AS 5)");
+    assert_eq!(f.expected, ["a type name"]);
+    let f = fail("MATCH (n) RETURN CAST(DISTINCT n.age AS INTEGER)");
+    assert!(
+        f.message.contains("DISTINCT is only allowed"),
+        "{}",
+        f.message
+    );
+}
+
+#[test]
+fn trim_sql_forms_and_plain_calls() {
+    assert_eq!(expr("TRIM(n.name)"), "TRIM(n.name)");
+    assert_eq!(expr("trim(n.list, 2)"), "trim(n.list 2)");
+    assert_eq!(
+        expr("TRIM(LEADING 'x' FROM n.name)"),
+        "TRIM(Leading 'x' from n.name)"
+    );
+    assert_eq!(
+        expr("trim(trailing FROM n.name)"),
+        "trim(Trailing - from n.name)"
+    );
+    assert_eq!(
+        expr("TRIM(BOTH 'x' || 'y' FROM n.name)"),
+        "TRIM(Both (|| 'x' 'y') from n.name)"
+    );
+    assert_eq!(expr("TRIM('x' FROM n.name)"), "TRIM(Both 'x' from n.name)");
+    assert_eq!(expr("TRIM(FROM n.name)"), "TRIM(Both - from n.name)");
+    // A side word before `)`, `,`, `.` or an operator is a variable.
+    assert_eq!(expr("trim(leading)"), "trim(leading)");
+    assert_eq!(expr("trim(both.name, 1)"), "trim(both.name 1)");
+    assert_eq!(expr("trim(trailing || 'x')"), "trim((|| trailing 'x'))");
+    assert_eq!(expr("trim(from)"), "trim(from)");
+    let f = fail("MATCH (n) RETURN TRIM(LEADING n.name)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.expected, ["FROM"]);
+    assert_eq!(f.text, ")");
+    assert!(f.alternative.unwrap_or_default().contains("ltrim(s)"));
+    let f = fail("MATCH (n) RETURN TRIM(LEADING 'x' FROM n.name, 1)");
+    assert_eq!(f.expected, ["`)`"]);
+    let f = fail("MATCH (n) RETURN trim(n.name, 1, 2)");
+    assert_eq!(f.message, "trim() takes 1 to 2 arguments, got 3");
+}
+
+#[test]
+fn sql_substring_is_refused_with_the_alternative() {
+    for (query, text) in [
+        ("MATCH (n) RETURN SUBSTRING(n.name FROM 1 FOR 2)", "FROM"),
+        ("MATCH (n) RETURN substring(n.name FOR 2)", "FOR"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("substring(s, start, length)"),
+            "{alternative}"
+        );
+        assert!(alternative.contains("left(s, n)"), "{alternative}");
+    }
+    assert_eq!(expr("substring(n.name, 1, 2)"), "substring(n.name 1 2)");
+    assert_eq!(expr("substring(n.name, 1)"), "substring(n.name 1)");
+    let f = fail("MATCH (n) RETURN substring(n.name)");
+    assert_eq!(f.message, "substring() takes 2 to 3 arguments, got 1");
+}
+
+#[test]
+fn is_source_of_and_is_destination_of() {
+    assert_eq!(expr("n IS SOURCE OF e"), "(source n e)");
+    assert_eq!(expr("n is not destination of e"), "(not-destination n e)");
+    // A predicate: tighter than comparison and AND, its right operand like the one of IN.
+    assert_eq!(
+        expr("n IS SOURCE OF e AND m IS DESTINATION OF e"),
+        "(and (source n e) (destination m e))"
+    );
+    assert_eq!(expr("n IS SOURCE OF e = TRUE"), "(= (source n e) true)");
+    let q = ok("MATCH (n) WHERE n IS NOT SOURCE OF e RETURN n");
+    let Some(condition) = &q.matches[0].where_clause else {
+        panic!("no WHERE");
+    };
+    assert_eq!(q.text(condition.span), "n IS NOT SOURCE OF e");
+    let f = fail("MATCH (a) WHERE a IS NOT 5 RETURN a");
+    assert_eq!(f.expected, ["NULL", "LABELED", "SOURCE", "DESTINATION"]);
+    // `SOURCE` without `OF` is no predicate.
+    let f = fail("MATCH (a) WHERE a IS SOURCE e RETURN a");
+    assert_eq!(f.text, "SOURCE");
+    let f = fail("MATCH (a) WHERE a IS SOURCE OF RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+}
+
+#[test]
+fn stage_1c_functions_parse_with_their_arity() {
+    for call in [
+        "toInteger(1)",
+        "TOINTEGER(1)",
+        "toIntegerOrNull(1)",
+        "toFloat(1)",
+        "toFloatOrNull(1)",
+        "toBoolean(1)",
+        "toBooleanOrNull(1)",
+        "toString(1)",
+        "toStringOrNull(1)",
+        "left('a', 1)",
+        "right('a', 1)",
+        "substring('a', 1, 2)",
+        "btrim('a')",
+        "btrim('a', 'b')",
+        "ltrim('a', 'b')",
+        "rtrim('a')",
+        "replace('a', 'b', 'c')",
+        "replace('a', 'b', 'c', 1)",
+        "split('a', ',')",
+        "reverse('a')",
+        "byte_length('a')",
+        "octet_length('a')",
+        "isEmpty('a')",
+        "nullif(1, 2)",
+        "NULLIF(1, 2)",
+        "abs(1)",
+        "floor(1)",
+        "ceil(1)",
+        "ceiling(1)",
+        "round(1)",
+        "round(1, 2)",
+        "round(1, 2, 'HALF_UP')",
+        "sign(1)",
+        "sqrt(1)",
+        "exp(1)",
+        "ln(1)",
+        "log(1)",
+        "log(2, 8)",
+        "log10(1)",
+        "power(2, 3)",
+        "mod(5, 2)",
+        "head(n.l)",
+        "last(n.l)",
+        "LAST(n.l)",
+        "tail(n.l)",
+        "range(1, 5)",
+        "range(1, 5, 2)",
+        "keys(n)",
+        "properties(n)",
+        "startNode(e)",
+        "endNode(e)",
+        "nodes(p)",
+        "relationships(p)",
+    ] {
+        let tree = expr(call);
+        assert!(tree.ends_with(')'), "{call}: {tree}");
+    }
+    for (call, message) in [
+        ("left('a')", "left() takes 2 arguments, got 1"),
+        (
+            "replace('a', 'b', 'c', 1, 2)",
+            "replace() takes 3 to 4 arguments, got 5",
+        ),
+        (
+            "round(1, 2, 'UP', 4)",
+            "round() takes 1 to 3 arguments, got 4",
+        ),
+        ("range(1)", "range() takes 2 to 3 arguments, got 1"),
+        ("log(1, 2, 3)", "log() takes 1 to 2 arguments, got 3"),
+        ("nullif(1)", "nullif() takes 2 arguments, got 1"),
+        ("startNode()", "startNode() takes 1 argument, got 0"),
+        ("toInteger(1, 2)", "toInteger() takes 1 argument, got 2"),
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{call}");
+        assert_eq!(f.message, message, "{call}");
+    }
+    let f = fail("MATCH (n) RETURN abs(DISTINCT n.age)");
+    assert!(
+        f.message.contains("DISTINCT is only allowed"),
+        "{}",
+        f.message
+    );
+}
+
+#[test]
+fn not_yet_functions_name_the_reason_and_the_alternative() {
+    for (call, kind, needle) in [
+        ("rand()", GqlErrorKind::Refused, "sample(1)"),
+        ("randomUUID()", GqlErrorKind::Refused, "sample(1)"),
+        ("sin(n.x)", GqlErrorKind::NotYet, "math(\"sin(_)\")"),
+        ("pi()", GqlErrorKind::NotYet, "math("),
+        ("e()", GqlErrorKind::NotYet, "math("),
+        ("date('2024-01-01')", GqlErrorKind::NotYet, "0.2.0"),
+        ("timestamp()", GqlErrorKind::NotYet, "0.2.0"),
+        ("toIntegerList(n.l)", GqlErrorKind::NotYet, "unfold()"),
+        ("normalize(n.s)", GqlErrorKind::NotYet, "lower()"),
+        ("reduce(n.l)", GqlErrorKind::NotYet, "unfold()"),
+        ("elements(p)", GqlErrorKind::NotYet, "nodes(p)"),
+        (
+            "percentileCont(n.x, 0.5)",
+            GqlErrorKind::NotYet,
+            "collect_list",
+        ),
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, kind, "{call}");
+        assert_eq!(f.gqlstatus, "0A000", "{call}");
+        let name = call.split('(').next().unwrap_or("");
+        assert_eq!(f.text, name, "{call}");
+        assert!(f.message.contains(&format!("{name}()")), "{}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(alternative.contains(needle), "{call}: {alternative}");
+    }
+    let f = fail("MATCH (n) WHERE exists(n.x) RETURN n");
+    assert!(
+        f.alternative
+            .unwrap_or_default()
+            .contains("n.p IS NOT NULL"),
+        "exists(n.x)"
+    );
+    let f = fail("MATCH (n) RETURN 2 ^ 10");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "^");
+    assert!(f.alternative.unwrap_or_default().contains("power(x, y)"));
+}
+
+#[test]
+fn stage_1c_rows_keep_the_older_suggestions() {
+    for (name, suggestion) in [
+        ("uper", "upper()"),
+        ("lowr", "lower()"),
+        ("sizee", "size()"),
+        ("coalese", "coalesce()"),
+        ("lenght", "length()"),
+        ("colect", "collect()"),
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {name}(n)"));
+        assert_eq!(f.suggestion.as_deref(), Some(suggestion), "{name}");
+    }
+    for (name, suggestion) in [
+        ("toInt", "toInteger()"),
+        ("tostrin", "toString()"),
+        ("substr", "substring()"),
+        ("startnod", "startNode()"),
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {name}(n)"));
+        assert_eq!(f.suggestion.as_deref(), Some(suggestion), "{name}");
     }
 }

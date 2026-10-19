@@ -336,6 +336,18 @@ pub(crate) enum ExprKind {
     },
     /// `CASE ... END`.
     Case(Box<CaseExpr>),
+    /// `expr IS [NOT] SOURCE OF edge` / `expr IS [NOT] DESTINATION OF edge` (GQL feature G112):
+    /// whether the vertex is the stored source / target of the edge.
+    IsEndpoint {
+        /// The tested expression (a vertex).
+        operand: Box<Expr>,
+        /// The edge.
+        edge: Box<Expr>,
+        /// `SOURCE` or `DESTINATION`.
+        end: Endpoint,
+        /// `IS NOT ...`.
+        negated: bool,
+    },
     /// `name([DISTINCT] args)` or `name(*)`.
     FunctionCall {
         /// The function name as written.
@@ -429,6 +441,87 @@ pub(crate) enum CallArgs {
     Star(Span),
     /// `(a, b, ...)`, possibly empty.
     Exprs(Vec<Expr>),
+    /// `CAST(operand AS target)`.
+    Cast {
+        /// The converted expression.
+        operand: Box<Expr>,
+        /// The target type.
+        target: CastTarget,
+        /// The type name as written (one or two words).
+        target_span: Span,
+    },
+    /// The SQL forms of `TRIM`: `TRIM([LEADING | TRAILING | BOTH] [character] FROM source)`.
+    /// The plain forms `TRIM(s)` / `trim(list, n)` stay [`CallArgs::Exprs`].
+    Trim {
+        /// The side trimmed (`BOTH` when not written).
+        side: TrimSide,
+        /// The trimmed character (the space when not written).
+        character: Option<Box<Expr>>,
+        /// The trimmed string.
+        source: Box<Expr>,
+    },
+}
+
+impl CallArgs {
+    /// The argument expressions in written order (`TRIM(c FROM s)`: `c`, then `s`).
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Expr> {
+        let (list, first, second): (&[Expr], Option<&Expr>, Option<&Expr>) = match self {
+            CallArgs::Star(_) => (&[], None, None),
+            CallArgs::Exprs(args) => (args, None, None),
+            CallArgs::Cast { operand, .. } => (&[], Some(operand), None),
+            CallArgs::Trim {
+                character, source, ..
+            } => (&[], character.as_deref(), Some(source)),
+        };
+        list.iter().chain(first).chain(second)
+    }
+}
+
+/// The target type of `CAST` (the types Graphersal has values of; other GQL types are refused
+/// by the parser).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CastTarget {
+    /// `INTEGER` (`INT`, `INT64`, `BIGINT`, `SIGNED INTEGER`).
+    Integer,
+    /// `FLOAT` (`FLOAT64`, `DOUBLE`, `DOUBLE PRECISION`, `REAL`).
+    Float,
+    /// `STRING` (`VARCHAR`, `CHAR VARYING`, `CHARACTER VARYING`).
+    String,
+    /// `BOOLEAN` (`BOOL`).
+    Boolean,
+}
+
+impl CastTarget {
+    /// The canonical GQL type name.
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            CastTarget::Integer => "INTEGER",
+            CastTarget::Float => "FLOAT",
+            CastTarget::String => "STRING",
+            CastTarget::Boolean => "BOOLEAN",
+        }
+    }
+}
+
+/// The side of a SQL `TRIM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrimSide {
+    /// `LEADING`: the start only.
+    Leading,
+    /// `TRAILING`: the end only.
+    Trailing,
+    /// `BOTH` (the default): both ends.
+    Both,
+}
+
+/// Which end of an edge `IS SOURCE OF` / `IS DESTINATION OF` tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Endpoint {
+    /// `SOURCE`: the stored source (Cypher `startNode(e)`).
+    Source,
+    /// `DESTINATION`: the stored target (Cypher `endNode(e)`).
+    Destination,
 }
 
 /// `RETURN [DISTINCT] items`.

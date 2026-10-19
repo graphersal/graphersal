@@ -8121,31 +8121,18 @@ mod gql {
         );
     }
 
+    /// D21 reverses C12 (stage 1c): `nodes(p)` / `relationships(p)` no longer carry the
+    /// "over a path" refusal; their own diagnostics come with their implementation.
     #[test]
-    fn gql_nodes_and_relationships_are_not_yet_with_the_path_alternatives() {
+    fn gql_nodes_and_relationships_are_no_longer_refused() {
         for function in ["nodes", "relationships"] {
             let query = format!("MATCH p = (a)-->(b) RETURN {function}(p)");
-            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
-            assert_eq!(
-                kind_and_status(&err),
-                (GqlErrorKind::NotYet, "0A000".to_string())
-            );
-            assert!(
-                report.contains(&format!(
-                    "{function}() over a path is not yet supported in this version"
-                )),
-                "{report}"
-            );
-            let help = err.help().unwrap();
-            assert_eq!(
-                help,
-                "return the path itself (RETURN p) or name its elements and return them, as in \
-                 MATCH p = (a)-[e]->(b) RETURN a, e, b; Gremlin steps may follow gql(), as in \
-                 g.gql(\"MATCH p = (a)-->(b) RETURN p\").select(\"p\").unfold(). This construct \
-                 comes in a later version of gql(); until then, write the query without it or \
-                 as Gremlin steps."
-            );
-            assert_examples_run(&help);
+            let graph = GraphSource::tinkerpop_modern();
+            if let Err(error) = graph.read().traversal().gql(&query).to_list() {
+                let text = error.to_string();
+                assert!(!text.contains("over a path"), "{query}: {text}");
+                assert!(!text.contains("gql:error"), "{query}: {text}");
+            }
         }
     }
 

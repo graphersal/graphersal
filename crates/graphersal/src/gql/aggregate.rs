@@ -163,6 +163,14 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
             CallArgs::Star(_) => None,
             // The parser and `compile` admit exactly one argument.
             CallArgs::Exprs(exprs) => exprs.first().cloned(),
+            // Only `CAST` / `TRIM` are parsed with these forms, never an aggregate.
+            CallArgs::Cast { .. } | CallArgs::Trim { .. } => {
+                return Some(Err(EvalError::new(
+                    status::SEMANTIC,
+                    "an aggregate function takes one expression".to_string(),
+                    call.span,
+                )));
+            }
         };
         let Some(aggregate) = Aggregate::of(call.function, argument.is_some()) else {
             return Some(Err(EvalError::new(
@@ -251,6 +259,18 @@ impl<En: Env> Env for WithAggregates<'_, En> {
     fn aggregate(&self, index: usize) -> Value<Self::Element> {
         self.results.get(index).cloned().unwrap_or(Value::Null)
     }
+
+    fn properties(&self, element: &Self::Element) -> Vec<(CompactString, ElementProperty)> {
+        self.env.properties(element)
+    }
+
+    fn endpoints(&self, edge: &Self::Element) -> Option<(Self::Element, Self::Element)> {
+        self.env.endpoints(edge)
+    }
+
+    fn reserve(&self, bytes: u64) -> bool {
+        self.env.reserve(bytes)
+    }
 }
 
 /// What an [`Accumulator`] computes.
@@ -292,7 +312,51 @@ impl Aggregate {
             | Function::CharLength
             | Function::Size
             | Function::Cardinality
-            | Function::PathLength => return None,
+            | Function::PathLength
+            | Function::Cast
+            | Function::ToInteger
+            | Function::ToIntegerOrNull
+            | Function::ToFloat
+            | Function::ToFloatOrNull
+            | Function::ToBoolean
+            | Function::ToBooleanOrNull
+            | Function::ToString
+            | Function::ToStringOrNull
+            | Function::Left
+            | Function::Right
+            | Function::Substring
+            | Function::Trim
+            | Function::Btrim
+            | Function::Ltrim
+            | Function::Rtrim
+            | Function::Replace
+            | Function::Split
+            | Function::Reverse
+            | Function::ByteLength
+            | Function::IsEmpty
+            | Function::NullIf
+            | Function::Abs
+            | Function::Floor
+            | Function::Ceil
+            | Function::Round
+            | Function::Sign
+            | Function::Sqrt
+            | Function::Exp
+            | Function::Ln
+            | Function::Log
+            | Function::Log10
+            | Function::Power
+            | Function::Mod
+            | Function::Head
+            | Function::Last
+            | Function::Tail
+            | Function::Range
+            | Function::Keys
+            | Function::Properties
+            | Function::StartNode
+            | Function::EndNode
+            | Function::Nodes
+            | Function::Relationships => return None,
         })
     }
 

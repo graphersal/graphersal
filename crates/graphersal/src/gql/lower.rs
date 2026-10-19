@@ -2139,7 +2139,12 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
         ExprKind::Unary { operand, .. }
         | ExprKind::IsNull { operand, .. }
         | ExprKind::IsLabeled { operand, .. } => rename_aliases(operand, within, renames),
-        ExprKind::Binary { left, right, .. } => {
+        ExprKind::Binary { left, right, .. }
+        | ExprKind::IsEndpoint {
+            operand: left,
+            edge: right,
+            ..
+        } => {
             rename_aliases(left, within, renames);
             rename_aliases(right, within, renames);
         }
@@ -2161,6 +2166,15 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
                 for arg in args {
                     rename_aliases(arg, within, renames);
                 }
+            }
+            CallArgs::Cast { operand, .. } => rename_aliases(operand, within, renames),
+            CallArgs::Trim {
+                character, source, ..
+            } => {
+                if let Some(character) = character {
+                    rename_aliases(character, within, renames);
+                }
+                rename_aliases(source, within, renames);
             }
         },
     }

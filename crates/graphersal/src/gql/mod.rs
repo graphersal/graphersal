@@ -15,7 +15,8 @@
 //! 2. **parser** (`parser.rs`, AST in `ast.rs`): hand-written recursive descent to an AST that
 //!    keeps every span and the source text, with bounded nesting and errors that name the
 //!    expected tokens; its module docs are the grammar of the supported subset; its expressions
-//!    compile into the three-valued evaluator (`eval.rs`), which runs them per row;
+//!    compile into the three-valued evaluator (`eval.rs`), which runs them per row, with the
+//!    stage 1c scalar functions in `functions/` (one file per family);
 //! 3. **binder** (`bind.rs`): variables, scopes, parameter references and column names, with GQLSTATUS codes
 //!    for semantic errors;
 //! 4. **plan** (`plan.rs`): the logical plan, per connected component of the pattern graph a scan
@@ -34,6 +35,7 @@ pub(crate) mod aggregate;
 pub(crate) mod ast;
 pub(crate) mod bind;
 pub(crate) mod eval;
+pub(crate) mod functions;
 pub(crate) mod lexer;
 pub(crate) mod lower;
 pub(crate) mod parser;

@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a and 1b): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 1c): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -32,10 +32,15 @@
 //! order_by   := ORDER BY expr (ASC|ASCENDING|DESC|DESCENDING)? (',' ...)*
 //! call       := name '(' (expr (',' expr)*)? ')'
 //!             | aggregate '(' DISTINCT? expr ')' | count '(' '*' ')'
+//!             | CAST '(' expr AS type ')'                 -- type: one or two words
+//!             | TRIM '(' (LEADING|TRAILING|BOTH)? expr? FROM expr ')'
+//! is_pred    := expr IS NOT? (NULL | LABELED labels | SOURCE OF expr | DESTINATION OF expr)
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
 //! not chainable: `a < b < c` is an error) < predicates (`IS [NOT] NULL`, `IS [NOT] LABELED`,
+//! `IS [NOT] SOURCE OF` / `DESTINATION OF` (GQL G112; the right operand binds like the one of
+//! `IN`),
 //! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
 //! `a = b IS NULL` is `a = (b IS NULL)`) < additive (`+ - ||`) < multiplicative (`* / %`) <
 //! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`) <
@@ -58,8 +63,23 @@
 //!   read. Aggregates take `DISTINCT`; only `count` takes `*`, and `count(DISTINCT *)` is an
 //!   error. Where an aggregate may stand (not nested, not in `WHERE`, ...) is the binder's check.
 //!   `path_length(p)` has the Cypher alias `length(p)`. Cypher `id()` is refused for
-//!   `element_id()` (D15); Cypher `nodes(p)` / `relationships(p)` are "not yet supported"
-//!   (no GQL counterpart, decision C12).
+//!   `element_id()` (D15). Stage 1c appends the scalar functions of the design's catalogue
+//!   (conversions, strings, numbers, lists / elements / paths, including the openCypher
+//!   compatibility functions `nodes(p)` / `relationships(p)` of D21, which reverse C12) after
+//!   the older rows, so the "did you mean" of a misspelt older name is unchanged. Names of
+//!   functions outside the support get a targeted error from [`NOT_YET_FUNCTIONS`] (reason and
+//!   alternative; `rand()` / `randomUUID()` are refused for good) instead of "unknown
+//!   function"; Cypher's `^` operator is "not yet" naming `power(x, y)`.
+//! - **Special argument forms** (design K2): `CAST` and `TRIM` are ordinary [`FUNCTIONS`] rows
+//!   whose arguments are read differently. `CAST(x AS type)` takes the type names of
+//!   `CAST_TYPES` (one or two contextual words, `SIGNED INTEGER`, `DOUBLE PRECISION`, `CHAR
+//!   VARYING`); a GQL type Graphersal has no values of (`DATE`, `LIST`, `INT32`, ...) is "not
+//!   yet supported", any other name a syntax error with a suggestion. `TRIM`'s SQL forms
+//!   (`LEADING` / `TRAILING` / `BOTH` and `FROM` are contextual words: a side word before `)`,
+//!   `,`, `.` or an operator is a variable) become [`CallArgs::Trim`]; `TRIM(s)` and `trim(list,
+//!   n)` stay plain calls; `TRIM(LEADING s)` without `FROM` is a syntax error naming the form.
+//!   `SUBSTRING(s FROM a FOR b)` is refused with `substring(s, start, length)` (0-based) and
+//!   `left` / `right`. `IS SOURCE OF` / `IS DESTINATION OF` are contextual words after `IS`.
 //! - **The clause pipeline** starts with `[OPTIONAL] MATCH` (a leading `OPTIONAL MATCH` too);
 //!   `WITH`, `LET` and `FILTER` before the first `MATCH` are "not yet supported", like a query
 //!   without `MATCH`. `WITH` is Cypher's spelling of the GQL linear pipeline; its parts come in
@@ -84,12 +104,13 @@
 
 use super::ast::BinaryOp;
 use super::ast::{
-    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, EdgePattern, Expr, ExprKind,
-    FilterClause, Identifier, LabelExpr, LabelExprKind, LetBinding, LetClause, Literal, MapEntry,
-    MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern, PatternStep, Quantifier, Query,
-    ReturnClause, ReturnItem, SortDirection, SortItem, Stage, UnaryOp, WithClause,
+    CallArgs, CaseExpr, CaseWhen, CastTarget, CountClause, EdgeDirection, EdgePattern, Endpoint,
+    Expr, ExprKind, FilterClause, Identifier, LabelExpr, LabelExprKind, LetBinding, LetClause,
+    Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern, PatternStep,
+    Quantifier, Query, ReturnClause, ReturnItem, SortDirection, SortItem, Stage, TrimSide, UnaryOp,
+    WithClause,
 };
-use super::lexer::{Keyword, LexError, Span, Token, TokenKind, tokenize};
+use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
 
 /// The deepest nesting accepted: recursion levels of the parser (parentheses, `NOT`, unary
@@ -155,6 +176,99 @@ pub(crate) enum Function {
     Max,
     /// `collect_list(x)`, Cypher `collect(x)`.
     CollectList,
+    // ----- stage 1c: conversions (`functions/convert.rs`) -----
+    /// `CAST(x AS type)`: the strict GQL conversion; the target is in [`CallArgs::Cast`].
+    Cast,
+    /// Cypher `toInteger(x)` (lenient: an unconvertible string is `NULL`).
+    ToInteger,
+    /// Cypher `toIntegerOrNull(x)` (every failure is `NULL`).
+    ToIntegerOrNull,
+    /// Cypher `toFloat(x)`.
+    ToFloat,
+    /// Cypher `toFloatOrNull(x)`.
+    ToFloatOrNull,
+    /// Cypher `toBoolean(x)`.
+    ToBoolean,
+    /// Cypher `toBooleanOrNull(x)`.
+    ToBooleanOrNull,
+    /// Cypher `toString(x)`.
+    ToString,
+    /// Cypher `toStringOrNull(x)`.
+    ToStringOrNull,
+    // ----- stage 1c: strings (`functions/strings.rs`) -----
+    /// `left(s, n)`: the first `n` characters.
+    Left,
+    /// `right(s, n)`: the last `n` characters.
+    Right,
+    /// Cypher `substring(s, start [, length])` (0-based).
+    Substring,
+    /// `trim(s)`, the SQL forms of `TRIM` ([`CallArgs::Trim`]), and GQL's list trim
+    /// `trim(list, n)` (dispatched by the first argument's kind, design F13).
+    Trim,
+    /// `btrim(s [, chars])`.
+    Btrim,
+    /// `ltrim(s [, chars])`.
+    Ltrim,
+    /// `rtrim(s [, chars])`.
+    Rtrim,
+    /// Cypher `replace(s, search, replacement [, limit])`.
+    Replace,
+    /// Cypher `split(s, delimiter)`.
+    Split,
+    /// Cypher `reverse(x)`: a string or a list.
+    Reverse,
+    /// `byte_length(s)` / `octet_length(s)`: UTF-8 bytes.
+    ByteLength,
+    /// Cypher `isEmpty(x)`: a string, list or map.
+    IsEmpty,
+    /// `nullif(a, b)`.
+    NullIf,
+    // ----- stage 1c: numbers (`functions/numbers.rs`) -----
+    /// `abs(x)`.
+    Abs,
+    /// `floor(x)`.
+    Floor,
+    /// `ceil(x)` / `ceiling(x)`.
+    Ceil,
+    /// Cypher `round(x [, precision [, mode]])`.
+    Round,
+    /// Cypher `sign(x)`.
+    Sign,
+    /// `sqrt(x)`.
+    Sqrt,
+    /// `exp(x)`.
+    Exp,
+    /// `ln(x)`: the natural logarithm.
+    Ln,
+    /// `log(x)` (Cypher: natural) / `log(base, x)` (GQL: general), by arity (design F12).
+    Log,
+    /// `log10(x)`.
+    Log10,
+    /// `power(x, y)`.
+    Power,
+    /// `mod(a, b)`.
+    Mod,
+    // ----- stage 1c: lists, elements, paths (`functions/lists.rs`) -----
+    /// Cypher `head(list)`.
+    Head,
+    /// Cypher `last(list)`.
+    Last,
+    /// Cypher `tail(list)`.
+    Tail,
+    /// Cypher `range(start, end [, step])`.
+    Range,
+    /// Cypher `keys(x)`: a vertex's, edge's or map's keys.
+    Keys,
+    /// Cypher `properties(x)`: a vertex's or edge's properties as a map.
+    Properties,
+    /// Cypher `startNode(e)`: the stored source vertex.
+    StartNode,
+    /// Cypher `endNode(e)`: the stored target vertex.
+    EndNode,
+    /// Cypher `nodes(p)`: the vertices of a path (design D21).
+    Nodes,
+    /// Cypher `relationships(p)`: the edges of a path (design D21).
+    Relationships,
 }
 
 /// One entry of [`FUNCTIONS`].
@@ -228,7 +342,156 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     aggregate(Function::Min, &["min"]),
     aggregate(Function::Max, &["max"]),
     aggregate(Function::CollectList, &["collect_list", "collect"]),
+    // Stage 1c: appended, so the suggestions above stay the first of their distance.
+    scalar(Function::Cast, &["cast"], 1, 1),
+    scalar(Function::ToInteger, &["toInteger"], 1, 1),
+    scalar(Function::ToIntegerOrNull, &["toIntegerOrNull"], 1, 1),
+    scalar(Function::ToFloat, &["toFloat"], 1, 1),
+    scalar(Function::ToFloatOrNull, &["toFloatOrNull"], 1, 1),
+    scalar(Function::ToBoolean, &["toBoolean"], 1, 1),
+    scalar(Function::ToBooleanOrNull, &["toBooleanOrNull"], 1, 1),
+    scalar(Function::ToString, &["toString"], 1, 1),
+    scalar(Function::ToStringOrNull, &["toStringOrNull"], 1, 1),
+    scalar(Function::Left, &["left"], 2, 2),
+    scalar(Function::Right, &["right"], 2, 2),
+    scalar(Function::Substring, &["substring"], 2, 3),
+    scalar(Function::Trim, &["trim"], 1, 2),
+    scalar(Function::Btrim, &["btrim"], 1, 2),
+    scalar(Function::Ltrim, &["ltrim"], 1, 2),
+    scalar(Function::Rtrim, &["rtrim"], 1, 2),
+    scalar(Function::Replace, &["replace"], 3, 4),
+    scalar(Function::Split, &["split"], 2, 2),
+    scalar(Function::Reverse, &["reverse"], 1, 1),
+    scalar(Function::ByteLength, &["byte_length", "octet_length"], 1, 1),
+    scalar(Function::IsEmpty, &["isEmpty"], 1, 1),
+    scalar(Function::NullIf, &["nullif"], 2, 2),
+    scalar(Function::Abs, &["abs"], 1, 1),
+    scalar(Function::Floor, &["floor"], 1, 1),
+    scalar(Function::Ceil, &["ceil", "ceiling"], 1, 1),
+    scalar(Function::Round, &["round"], 1, 3),
+    scalar(Function::Sign, &["sign"], 1, 1),
+    scalar(Function::Sqrt, &["sqrt"], 1, 1),
+    scalar(Function::Exp, &["exp"], 1, 1),
+    scalar(Function::Ln, &["ln"], 1, 1),
+    scalar(Function::Log, &["log"], 1, 2),
+    scalar(Function::Log10, &["log10"], 1, 1),
+    scalar(Function::Power, &["power"], 2, 2),
+    scalar(Function::Mod, &["mod"], 2, 2),
+    scalar(Function::Head, &["head"], 1, 1),
+    scalar(Function::Last, &["last"], 1, 1),
+    scalar(Function::Tail, &["tail"], 1, 1),
+    scalar(Function::Range, &["range"], 2, 3),
+    scalar(Function::Keys, &["keys"], 1, 1),
+    scalar(Function::Properties, &["properties"], 1, 1),
+    scalar(Function::StartNode, &["startNode"], 1, 1),
+    scalar(Function::EndNode, &["endNode"], 1, 1),
+    scalar(Function::Nodes, &["nodes"], 1, 1),
+    scalar(Function::Relationships, &["relationships"], 1, 1),
 ];
+
+/// A function name `gql()` knows but does not support (yet): the reason and the alternative
+/// instead of "unknown function" (an LLM reads the `Help:` line and retries).
+pub(crate) struct UnsupportedFunction {
+    /// The names, matched ASCII case-insensitively.
+    pub(crate) names: &'static [&'static str],
+    /// What it is, for the message (`... is not yet supported` / `... is not supported`).
+    pub(crate) what: &'static str,
+    /// The alternative.
+    pub(crate) alternative: &'static str,
+    /// Refused for good (non-deterministic) rather than not yet supported.
+    pub(crate) refused: bool,
+}
+
+const fn not_yet_function(
+    names: &'static [&'static str],
+    what: &'static str,
+    alternative: &'static str,
+) -> UnsupportedFunction {
+    UnsupportedFunction {
+        names,
+        what,
+        alternative,
+        refused: false,
+    }
+}
+
+/// The functions outside the GQL support with a targeted error (design "In or out").
+pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
+    UnsupportedFunction {
+        names: &["rand", "randomUUID"],
+        what: "a non-deterministic function",
+        alternative: "gql() functions are deterministic; sample rows with Gremlin after gql(), \
+                      for example g.gql(\"MATCH (n) RETURN n\").sample(1), or coin(0.5)",
+        refused: true,
+    },
+    not_yet_function(
+        &[
+            "sin", "cos", "tan", "cot", "asin", "acos", "atan", "atan2", "degrees", "radians",
+            "pi", "e", "haversin",
+        ],
+        "a trigonometric function",
+        "Gremlin math() after gql(), for example \
+         g.gql(\"MATCH (n:person) RETURN n.age AS a\").select(\"a\").math(\"sin(_)\")",
+    ),
+    not_yet_function(
+        &[
+            "date",
+            "datetime",
+            "localdatetime",
+            "localtime",
+            "time",
+            "timestamp",
+            "duration",
+            "date_trunc",
+            "datetime_trunc",
+            "current_date",
+            "current_time",
+            "current_timestamp",
+        ],
+        "a date or time function",
+        "dates and times are planned for version 0.2.0; ISO-8601 strings compare correctly as \
+         text, for example WHERE n.since >= '2020-01-01'",
+    ),
+    not_yet_function(
+        &[
+            "toIntegerList",
+            "toFloatList",
+            "toStringList",
+            "toBooleanList",
+        ],
+        "a list conversion function",
+        "convert the items one by one in Gremlin after gql(), for example \
+         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().as_number()",
+    ),
+    not_yet_function(
+        &["normalize"],
+        "Unicode normalization (normalize())",
+        "store normalized text, or compare with lower() / upper()",
+    ),
+    not_yet_function(
+        &["any", "all", "none", "single", "reduce"],
+        "a list predicate or reduce() (a variable bound inside the call)",
+        "test the items in Gremlin after gql(), for example \
+         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\")",
+    ),
+    not_yet_function(
+        &["elements"],
+        "a GQL path function pending verification",
+        "nodes(p) and relationships(p) return the vertices and the edges of a path",
+    ),
+    not_yet_function(
+        &["percentileCont", "percentileDisc", "stDev", "stDevP"],
+        "this aggregate function",
+        "collect the values with collect_list(x) and compute it after gql()",
+    ),
+];
+
+/// The not yet supported function spelled `name`, if any.
+pub(crate) fn lookup_unsupported_function(name: &str) -> Option<&'static UnsupportedFunction> {
+    NOT_YET_FUNCTIONS
+        .iter()
+        .find(|f| f.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+}
 
 /// The function spelled `name` (ASCII case-insensitive), if any.
 pub(crate) fn lookup_function(name: &str) -> Option<&'static FunctionSpec> {
@@ -246,6 +509,15 @@ pub(crate) fn parse(query: &str) -> Result<Query, TraverserError> {
 }
 
 fn lex_error(e: LexError) -> GqlErrorBuilder {
+    if e.kind == LexErrorKind::UnexpectedChar('^') {
+        // Cypher's exponentiation operator.
+        return GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            e.span.start..e.span.end,
+            "the exponentiation operator `^` is not yet supported in this version",
+        )
+        .alternative("use power(x, y), as in power(2, 10)");
+    }
     GqlErrorBuilder::new(GqlErrorKind::Syntax, e.span.start..e.span.end, e.message())
 }
 
@@ -538,7 +810,8 @@ impl<'a> Parser<'a> {
             ),
             Keyword::Exists => not_yet(
                 "EXISTS",
-                "add the pattern to the MATCH clause, or use Gremlin where(), for example \
+                "test a property with n.p IS NOT NULL; for a pattern, add it to the MATCH \
+                 clause, or use Gremlin where(), for example \
                  g.v().has_label(\"person\").where(__.out(\"created\"))",
             ),
             Keyword::Shortest => not_yet(
@@ -1783,7 +2056,8 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// `IS [NOT] NULL`, `IS [NOT] LABELED labels`.
+    /// `IS [NOT] NULL`, `IS [NOT] LABELED labels`, `IS [NOT] SOURCE OF e`,
+    /// `IS [NOT] DESTINATION OF e`.
     fn is_rhs(&mut self, (operand, height): (Expr, usize)) -> PResult<(Expr, usize)> {
         self.advance();
         let negated = self.eat_kw(Keyword::Not).is_some();
@@ -1817,6 +2091,11 @@ impl<'a> Parser<'a> {
                 height,
             ));
         }
+        if let Some(end) = endpoint_word(self.peek())
+            && is_word(self.nth(1), "OF")
+        {
+            return self.is_endpoint_rhs((operand, height), end, negated);
+        }
         if let Some(Keyword::True | Keyword::False | Keyword::Unknown) = self.peek().keyword() {
             return Err(self.not_yet(
                 self.peek().span,
@@ -1825,10 +2104,36 @@ impl<'a> Parser<'a> {
             ));
         }
         if negated {
-            Err(self.unexpected(&["NULL", "LABELED"]))
+            Err(self.unexpected(&["NULL", "LABELED", "SOURCE", "DESTINATION"]))
         } else {
-            Err(self.unexpected(&["NOT", "NULL", "LABELED"]))
+            Err(self.unexpected(&["NOT", "NULL", "LABELED", "SOURCE", "DESTINATION"]))
         }
+    }
+
+    /// `SOURCE OF e` / `DESTINATION OF e` after `IS [NOT]`.
+    fn is_endpoint_rhs(
+        &mut self,
+        (operand, height): (Expr, usize),
+        end: Endpoint,
+        negated: bool,
+    ) -> PResult<(Expr, usize)> {
+        self.advance();
+        self.advance();
+        let (edge, edge_height) = self.expr_bp(BP_PREDICATE + 1)?;
+        let span = operand.span.to(edge.span);
+        let height = self.height(height.max(edge_height), span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::IsEndpoint {
+                    operand: Box::new(operand),
+                    edge: Box::new(edge),
+                    end,
+                    negated,
+                },
+                span,
+            },
+            height,
+        ))
     }
 
     /// The infix operator at the current token and its binding power.
@@ -2273,7 +2578,216 @@ impl<'a> Parser<'a> {
             return self.aggregate_call(spec, name);
         }
         self.check_call_modifiers(spec)?;
+        match spec.function {
+            Function::Cast => return self.cast_call(name),
+            Function::Trim => return self.trim_call(spec, name),
+            Function::Substring => return self.substring_call(spec, name),
+            _ => {}
+        }
         let (args, height) = self.expr_list(&TokenKind::RParen, &["`,`", "`)`"])?;
+        self.finish_call(spec, name, false, args, height)
+    }
+
+    /// `CAST(operand AS type)` after its `(`.
+    fn cast_call(&mut self, name: Identifier) -> PResult<(Expr, usize)> {
+        let (operand, height) = self.expr_bp(0)?;
+        self.expect_kw(Keyword::As, &["AS"])?;
+        let (target, target_span) = self.cast_target()?;
+        self.expect(&TokenKind::RParen, &["`)`"])?;
+        let span = name.span.to(self.last);
+        let height = self.height(height, span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::FunctionCall {
+                    name,
+                    distinct: false,
+                    args: CallArgs::Cast {
+                        operand: Box::new(operand),
+                        target,
+                        target_span,
+                    },
+                },
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// The type name of `CAST`: one or two words (`CAST_TYPES`); a GQL type Graphersal has
+    /// no values of is "not yet supported", an unknown name a syntax error with a suggestion.
+    fn cast_target(&mut self) -> PResult<(CastTarget, Span)> {
+        let first = self.peek().clone();
+        let Some(word) = first.name() else {
+            return Err(self.unexpected(&["a type name"]));
+        };
+        let second = self.nth(1).clone();
+        let two = second
+            .name()
+            .filter(|_| second.kind != TokenKind::RParen)
+            .map(|next| format!("{word} {next}"));
+        let found = |text: &str| {
+            CAST_TYPES
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(text))
+                .map(|(_, target)| *target)
+        };
+        let (target, span, written) = match two
+            .as_deref()
+            .and_then(|two| found(two).map(|target| (target, two.to_string())))
+        {
+            Some((target, written)) => {
+                self.advance();
+                self.advance();
+                (target, first.span.to(second.span), written)
+            }
+            None => match found(word) {
+                Some(target) => {
+                    self.advance();
+                    (target, first.span, word.to_string())
+                }
+                None => (None, first.span, word.to_string()),
+            },
+        };
+        if let Some(target) = target {
+            return Ok((target, span));
+        }
+        let supported = "CAST supports INTEGER, FLOAT, STRING and BOOLEAN";
+        if CAST_TYPES
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&written))
+            || UNSUPPORTED_CAST_TYPES
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(word))
+        {
+            return Err(self.not_yet(
+                span,
+                &format!("CAST to {}", written.to_ascii_uppercase()),
+                supported,
+            ));
+        }
+        let mut b = err(
+            GqlErrorKind::Syntax,
+            first.span,
+            format!("unknown type {word} in CAST"),
+        )
+        .expected(["INTEGER", "FLOAT", "STRING", "BOOLEAN"])
+        .alternative(supported);
+        if let Some(close) = CAST_TYPES
+            .iter()
+            .filter(|(_, target)| target.is_some())
+            .filter_map(|(name, _)| close_to(word, name).map(|d| (d, *name)))
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, name)| name)
+        {
+            b = b.suggestion(close);
+        }
+        Err(Box::new(b))
+    }
+
+    /// `TRIM(...)` after its `(`: the SQL forms `TRIM([LEADING | TRAILING | BOTH] [c] FROM s)`
+    /// become [`CallArgs::Trim`]; `TRIM(s)` and `trim(list, n)` are ordinary calls. The side
+    /// words and `FROM` are contextual: a side word followed by `)`, `,`, `.` or an operator is
+    /// a variable.
+    fn trim_call(&mut self, spec: &FunctionSpec, name: Identifier) -> PResult<(Expr, usize)> {
+        let side = trim_side(self.peek()).filter(|_| starts_operand(self.nth(1)));
+        if let Some(side) = side {
+            self.advance();
+            let character = if is_word(self.peek(), "FROM") && starts_operand(self.nth(1)) {
+                None
+            } else {
+                let (character, height) = self.expr_bp(0)?;
+                if !is_word(self.peek(), "FROM") {
+                    let b = err(
+                        GqlErrorKind::Syntax,
+                        self.peek().span,
+                        format!("unexpected {}", describe(self.peek())),
+                    )
+                    .expected(["FROM"])
+                    .alternative(
+                        "write TRIM(LEADING 'x' FROM s), TRIM(LEADING FROM s) or ltrim(s)",
+                    );
+                    return Err(Box::new(b));
+                }
+                Some((character, height))
+            };
+            return self.trim_from(name, side, character);
+        }
+        if is_word(self.peek(), "FROM") && starts_operand(self.nth(1)) {
+            return self.trim_from(name, TrimSide::Both, None);
+        }
+        let first = self.expr_bp(0)?;
+        if is_word(self.peek(), "FROM") {
+            return self.trim_from(name, TrimSide::Both, Some(first));
+        }
+        self.rest_of_call(spec, name, first)
+    }
+
+    /// From the `FROM` of a SQL `TRIM` to its `)`.
+    fn trim_from(
+        &mut self,
+        name: Identifier,
+        side: TrimSide,
+        character: Option<(Expr, usize)>,
+    ) -> PResult<(Expr, usize)> {
+        self.advance();
+        let (source, source_height) = self.expr_bp(0)?;
+        self.expect(&TokenKind::RParen, &["`)`"])?;
+        let span = name.span.to(self.last);
+        let child = character
+            .as_ref()
+            .map_or(0, |(_, height)| *height)
+            .max(source_height);
+        let height = self.height(child, span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::FunctionCall {
+                    name,
+                    distinct: false,
+                    args: CallArgs::Trim {
+                        side,
+                        character: character.map(|(character, _)| Box::new(character)),
+                        source: Box::new(source),
+                    },
+                },
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// `substring(...)` after its `(`; the SQL form `SUBSTRING(s FROM a [FOR b])` is refused
+    /// with the alternative.
+    fn substring_call(&mut self, spec: &FunctionSpec, name: Identifier) -> PResult<(Expr, usize)> {
+        let first = self.expr_bp(0)?;
+        if is_word(self.peek(), "FROM") || self.at_kw(Keyword::For) {
+            let b = err(
+                GqlErrorKind::Syntax,
+                self.peek().span,
+                "SUBSTRING(s FROM a FOR b) is SQL, not GQL",
+            )
+            .alternative(
+                "use substring(s, start, length) with a 0-based start, as in \
+                 substring('graph', 1, 3) = 'rap', or left(s, n) / right(s, n)",
+            );
+            return Err(Box::new(b));
+        }
+        self.rest_of_call(spec, name, first)
+    }
+
+    /// The arguments after the first one (already parsed) to the `)`, then the call.
+    fn rest_of_call(
+        &mut self,
+        spec: &FunctionSpec,
+        name: Identifier,
+        (first, mut height): (Expr, usize),
+    ) -> PResult<(Expr, usize)> {
+        let mut args = vec![first];
+        while self.eat(&TokenKind::Comma).is_some() {
+            let (arg, arg_height) = self.expr_bp(0)?;
+            height = height.max(arg_height);
+            args.push(arg);
+        }
+        self.expect(&TokenKind::RParen, &["`,`", "`)`"])?;
         self.finish_call(spec, name, false, args, height)
     }
 
@@ -2350,16 +2864,9 @@ impl<'a> Parser<'a> {
             ));
         }
         if spec.is_none()
-            && (name.eq_ignore_ascii_case("nodes") || name.eq_ignore_ascii_case("relationships"))
+            && let Some(unsupported) = lookup_unsupported_function(name)
         {
-            // Cypher list functions over a path (decision C12): GQL has no counterpart.
-            return Err(self.not_yet(
-                span,
-                &format!("{name}() over a path"),
-                "return the path itself (RETURN p) or name its elements and return them, as in \
-                 MATCH p = (a)-[e]->(b) RETURN a, e, b; Gremlin steps may follow gql(), as in \
-                 g.gql(\"MATCH p = (a)-->(b) RETURN p\").select(\"p\").unfold()",
-            ));
+            return Err(unsupported_function(unsupported, name, span));
         }
         let Some(spec) = spec else {
             let mut b = err(
@@ -2470,6 +2977,181 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The type names of `CAST`, one or two words; `None`: a GQL type Graphersal has no values of.
+const CAST_TYPES: &[(&str, Option<CastTarget>)] = &[
+    ("INTEGER", Some(CastTarget::Integer)),
+    ("INT", Some(CastTarget::Integer)),
+    ("INT64", Some(CastTarget::Integer)),
+    ("INTEGER64", Some(CastTarget::Integer)),
+    ("BIGINT", Some(CastTarget::Integer)),
+    ("SIGNED INTEGER", Some(CastTarget::Integer)),
+    ("SIGNED INTEGER64", Some(CastTarget::Integer)),
+    ("SIGNED BIGINT", Some(CastTarget::Integer)),
+    ("FLOAT", Some(CastTarget::Float)),
+    ("FLOAT64", Some(CastTarget::Float)),
+    ("DOUBLE", Some(CastTarget::Float)),
+    ("DOUBLE PRECISION", Some(CastTarget::Float)),
+    ("REAL", Some(CastTarget::Float)),
+    ("STRING", Some(CastTarget::String)),
+    ("VARCHAR", Some(CastTarget::String)),
+    ("CHAR VARYING", Some(CastTarget::String)),
+    ("CHARACTER VARYING", Some(CastTarget::String)),
+    ("BOOLEAN", Some(CastTarget::Boolean)),
+    ("BOOL", Some(CastTarget::Boolean)),
+    ("UNSIGNED INTEGER", None),
+    ("ZONED DATETIME", None),
+    ("LOCAL DATETIME", None),
+    ("ZONED TIME", None),
+    ("LOCAL TIME", None),
+];
+
+/// GQL type names (first word) that `CAST` does not support yet: "not yet", not "unknown".
+const UNSUPPORTED_CAST_TYPES: &[&str] = &[
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT128",
+    "INT256",
+    "SMALLINT",
+    "UINT",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "UINT128",
+    "UINT256",
+    "USMALLINT",
+    "UBIGINT",
+    "UNSIGNED",
+    "SIGNED",
+    "INTEGER8",
+    "INTEGER16",
+    "INTEGER32",
+    "INTEGER128",
+    "INTEGER256",
+    "DECIMAL",
+    "DEC",
+    "FLOAT16",
+    "FLOAT32",
+    "FLOAT128",
+    "FLOAT256",
+    "CHAR",
+    "CHARACTER",
+    "BYTES",
+    "BINARY",
+    "VARBINARY",
+    "DATE",
+    "TIME",
+    "DATETIME",
+    "TIMESTAMP",
+    "LOCAL",
+    "ZONED",
+    "DURATION",
+    "LIST",
+    "ARRAY",
+    "RECORD",
+    "PATH",
+    "NODE",
+    "VERTEX",
+    "EDGE",
+    "RELATIONSHIP",
+    "ANY",
+    "NOTHING",
+    "NULL",
+    "MAP",
+];
+
+/// The not yet supported (or refused) function `name` as its targeted error.
+fn unsupported_function(
+    unsupported: &UnsupportedFunction,
+    name: &str,
+    span: Span,
+) -> Box<GqlErrorBuilder> {
+    let (kind, message) = if unsupported.refused {
+        (
+            GqlErrorKind::Refused,
+            format!(
+                "{name}() is not supported: {} breaks LET / WITH substitution and plan determinism",
+                unsupported.what
+            ),
+        )
+    } else {
+        (
+            GqlErrorKind::NotYet,
+            format!(
+                "{name}() ({}) is not yet supported in this version",
+                unsupported.what
+            ),
+        )
+    };
+    Box::new(err(kind, span, message).alternative(unsupported.alternative))
+}
+
+/// Whether `token` is the contextual word `word` (an identifier, any case).
+fn is_word(token: &Token<'_>, word: &str) -> bool {
+    token.kind == TokenKind::Ident && token.text.eq_ignore_ascii_case(word)
+}
+
+/// The `TRIM` side `token` spells, if any.
+fn trim_side(token: &Token<'_>) -> Option<TrimSide> {
+    [
+        ("LEADING", TrimSide::Leading),
+        ("TRAILING", TrimSide::Trailing),
+        ("BOTH", TrimSide::Both),
+    ]
+    .into_iter()
+    .find(|(word, _)| is_word(token, word))
+    .map(|(_, side)| side)
+}
+
+/// The end `token` spells after `IS [NOT]`, if any.
+fn endpoint_word(token: &Token<'_>) -> Option<Endpoint> {
+    if is_word(token, "SOURCE") {
+        Some(Endpoint::Source)
+    } else if is_word(token, "DESTINATION") {
+        Some(Endpoint::Destination)
+    } else {
+        None
+    }
+}
+
+/// Whether `token` can start an operand (so a contextual word before it is not a variable):
+/// not `)`, `,`, `.`, `:`, `[`, the end, or an infix operator.
+fn starts_operand(token: &Token<'_>) -> bool {
+    match &token.kind {
+        TokenKind::RParen
+        | TokenKind::Comma
+        | TokenKind::Dot
+        | TokenKind::Colon
+        | TokenKind::LBracket
+        | TokenKind::Eof
+        | TokenKind::Eq
+        | TokenKind::Ne
+        | TokenKind::Lt
+        | TokenKind::Le
+        | TokenKind::Gt
+        | TokenKind::Ge
+        | TokenKind::Plus
+        | TokenKind::Concat
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent => false,
+        TokenKind::Keyword(keyword) => !matches!(
+            keyword,
+            Keyword::And
+                | Keyword::Or
+                | Keyword::Xor
+                | Keyword::Is
+                | Keyword::In
+                | Keyword::Contains
+                | Keyword::Starts
+                | Keyword::Ends
+                | Keyword::As
+        ),
+        _ => true,
+    }
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
@@ -2542,12 +3224,22 @@ fn suggest_keyword(word: &str, expected: &[&str]) -> Option<String> {
         .map(|(_, e)| e.to_string())
 }
 
-/// The function name closest to `word` (every accepted spelling).
+/// The function name closest to `word` (every accepted spelling); a word of at least five
+/// characters that begins a name suggests that name first (Cypher 9's `toInt` -> `toInteger`).
 fn suggest_function(word: &str) -> Option<&'static str> {
-    FUNCTIONS
-        .iter()
-        .flat_map(|spec| spec.names.iter().copied())
-        .chain(["element_id"])
+    let names = || {
+        FUNCTIONS
+            .iter()
+            .flat_map(|spec| spec.names.iter().copied())
+            .chain(["element_id"])
+    };
+    let lower = word.to_ascii_lowercase();
+    if word.chars().count() >= 5
+        && let Some(name) = names().find(|name| name.to_ascii_lowercase().starts_with(&lower))
+    {
+        return Some(name);
+    }
+    names()
         .filter_map(|name| close_to(word, name).map(|d| (d, name)))
         .min_by_key(|(d, _)| *d)
         .map(|(_, name)| name)

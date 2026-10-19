@@ -53,6 +53,11 @@
 //!   evaluated), `upper` / `lower`, `char_length`, `size` / `cardinality` (characters of a
 //!   string, items of a list), `path_length` / Cypher `length` (the edges of a path). Every one
 //!   returns `NULL` for a `NULL` argument and error 22G03 for an argument of the wrong kind.
+//! - **Stage 1c functions** live in [`functions`] (one file per family; its module docs are the
+//!   contract): the evaluator evaluates every argument left to right and dispatches there;
+//!   `CAST` compiles to its own node carrying the target type, the SQL `TRIM` forms to theirs,
+//!   `IS [NOT] SOURCE OF` / `DESTINATION OF` to a chain link. Results larger than their inputs
+//!   ask [`Env::reserve`] first (design F6), `||` / `+` of two strings or lists included.
 //! - **Paths:** a [`Value::Path`] is the elements of a matched path in text order (vertex, edge,
 //!   vertex, ...). Two paths are equal when they hold the same elements in the same order; a
 //!   path compared with a value of another kind gives `NULL`, like any two incomparable kinds.
@@ -67,9 +72,10 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use super::ast::{
-    BinaryOp, CallArgs, CaseExpr, Expr, ExprKind, LabelExpr, LabelExprKind, Literal, MapLiteral,
-    UnaryOp,
+    BinaryOp, CallArgs, CaseExpr, CastTarget, Endpoint, Expr, ExprKind, LabelExpr, LabelExprKind,
+    Literal, MapLiteral, TrimSide, UnaryOp,
 };
+use super::functions::{self, Arg, Family};
 use super::lexer::Span;
 use super::parser::{Function, FunctionKind, FunctionSpec, lookup_function};
 use crate::error::GqlHelpTopic;
@@ -90,8 +96,31 @@ pub(crate) mod status {
     pub(crate) const INVALID_VALUE_TYPE: &str = "22G03";
     /// Syntax error or access rule violation: an unknown variable or parameter at compile time.
     pub(crate) const SEMANTIC: &str = "42002";
-    /// Feature not supported: an aggregate function outside an aggregation (stage 1b).
+    /// Feature not supported: an aggregate function outside an aggregation (stage 1b), a
+    /// function not implemented yet.
     pub(crate) const NOT_SUPPORTED: &str = "0A000";
+    /// Data exception: invalid character value for cast (`CAST('x' AS INTEGER)`).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const INVALID_CAST: &str = "22018";
+    /// Data exception: substring error (a negative position or length).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const SUBSTRING: &str = "22011";
+    /// Data exception: trim error (a trim character that is not exactly one character).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const TRIM: &str = "22027";
+    /// Data exception: invalid argument for natural logarithm (`ln(0)`, `log10(-1)`).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const LOGARITHM: &str = "2201E";
+    /// Data exception: invalid argument for power function (`sqrt(-1)`, `power(0, -1)`).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const POWER: &str = "2201F";
+    /// Data exception: invalid parameter value (`range` step 0, a `round` mode or negative
+    /// precision, a negative `replace` limit or list `trim` count).
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) const INVALID_PARAMETER: &str = "22023";
+    /// Program limit exceeded: [`Env::reserve`](super::Env::reserve) refused a result's size
+    /// (the step reports the row's own limit error instead, see `runtime::Row`).
+    pub(crate) const LIMIT: &str = "54001";
 }
 
 /// A failure of [`compile`] or of an evaluation.
@@ -123,11 +152,13 @@ impl EvalError {
         self
     }
 
-    fn invalid_type(message: impl Into<String>, span: Span) -> Self {
+    /// A 22G03 error (an operand or argument of the wrong kind).
+    pub(crate) fn invalid_type(message: impl Into<String>, span: Span) -> Self {
         Self::new(status::INVALID_VALUE_TYPE, message, span)
     }
 
-    fn out_of_range(span: Span) -> Self {
+    /// A 22003 error (numeric value out of range).
+    pub(crate) fn out_of_range(span: Span) -> Self {
         Self::new(
             status::OUT_OF_RANGE,
             "numeric value out of range: the result does not fit",
@@ -135,7 +166,8 @@ impl EvalError {
         )
     }
 
-    fn division_by_zero(span: Span) -> Self {
+    /// A 22012 error.
+    pub(crate) fn division_by_zero(span: Span) -> Self {
         Self::new(status::DIVISION_BY_ZERO, "division by zero", span)
     }
 }
@@ -273,15 +305,30 @@ impl<E> Value<E> {
         matches!(self, Value::Null)
     }
 
-    fn string(text: impl Into<CompactString>) -> Self {
+    /// A string value.
+    pub(crate) fn string(text: impl Into<CompactString>) -> Self {
         Value::Scalar(ElementProperty::String(text.into()))
     }
 
-    fn integer(value: i64) -> Self {
+    /// An integer value.
+    pub(crate) fn integer(value: i64) -> Self {
         Value::Scalar(ElementProperty::Number(Number::from_i64(value)))
     }
 
-    fn as_str(&self) -> Option<&str> {
+    /// A float value.
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) fn float(value: f64) -> Self {
+        Value::Scalar(ElementProperty::Number(Number::from_f64(value)))
+    }
+
+    /// A boolean value.
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    pub(crate) fn boolean(value: bool) -> Self {
+        Value::Scalar(ElementProperty::Boolean(value))
+    }
+
+    /// The text of a string value.
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Value::Scalar(value) => value.as_str(),
             _ => None,
@@ -289,7 +336,7 @@ impl<E> Value<E> {
     }
 
     /// A short name of the value's kind, for error messages.
-    fn kind_name(&self) -> &'static str {
+    pub(crate) fn kind_name(&self) -> &'static str {
         match self {
             Value::Null => "NULL",
             Value::Scalar(ElementProperty::Number(_)) => "a number",
@@ -328,6 +375,27 @@ pub(crate) trait Env {
     fn aggregate(&self, index: usize) -> Value<Self::Element> {
         let _ = index;
         Value::Null
+    }
+    /// The element's stored properties in stored order, as stored (a stored `null` included:
+    /// callers skip it; compressed values as stored: [`Value::from_property`] reads them).
+    /// Default: none.
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    fn properties(&self, element: &Self::Element) -> Vec<(CompactString, ElementProperty)> {
+        let _ = element;
+        Vec::new()
+    }
+    /// The stored `(source, target)` vertices of an edge; `None` for a vertex. Default: `None`.
+    #[allow(dead_code, reason = "stage 1c scaffolding, used by T2-T5")]
+    fn endpoints(&self, edge: &Self::Element) -> Option<(Self::Element, Self::Element)> {
+        let _ = edge;
+        None
+    }
+    /// Asks for `bytes` more memory for a result a function is about to build (design F6):
+    /// `false` refuses it. A row of the traversal checks `traversal.max_materialized_bytes`
+    /// and the memory budget and keeps the limit error for its step; the default allows at
+    /// most the default of `traversal.max_materialized_bytes`.
+    fn reserve(&self, bytes: u64) -> bool {
+        bytes <= crate::traversal::context::DEFAULT_MAX_MATERIALIZED_BYTES
     }
 }
 
@@ -379,6 +447,10 @@ enum Node<E> {
     Chain(Box<Compiled<E>>, Vec<Link<E>>),
     Case(Box<Case<E>>),
     Call(Function, Vec<Compiled<E>>),
+    /// `CAST(operand AS target)`.
+    Cast(CastTarget, Box<Compiled<E>>),
+    /// The SQL forms of `TRIM`: side, character, source.
+    Trim(TrimSide, Option<Box<Compiled<E>>>, Box<Compiled<E>>),
     /// The result of an aggregate call, read through [`Env::aggregate`].
     Aggregate(usize),
 }
@@ -397,6 +469,8 @@ enum LinkOp<E> {
     Property(CompactString),
     IsNull(bool),
     IsLabeled(Labels, bool),
+    /// `IS [NOT] SOURCE OF edge` / `IS [NOT] DESTINATION OF edge`.
+    IsEndpoint(Endpoint, bool, Compiled<E>),
 }
 
 #[derive(Debug, Clone)]
@@ -460,7 +534,8 @@ pub(crate) fn compile<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Compi
         ExprKind::Binary { .. }
         | ExprKind::Property { .. }
         | ExprKind::IsNull { .. }
-        | ExprKind::IsLabeled { .. } => compile_chain(expr, scope)?,
+        | ExprKind::IsLabeled { .. }
+        | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
         _ => compile_other(expr, scope)?,
     };
@@ -475,7 +550,9 @@ fn chain_left(expr: &Expr) -> Option<&Expr> {
     match &expr.kind {
         ExprKind::Binary { left, .. } => Some(left),
         ExprKind::Property { target, .. } => Some(target),
-        ExprKind::IsNull { operand, .. } | ExprKind::IsLabeled { operand, .. } => Some(operand),
+        ExprKind::IsNull { operand, .. }
+        | ExprKind::IsLabeled { operand, .. }
+        | ExprKind::IsEndpoint { operand, .. } => Some(operand),
         _ => None,
     }
 }
@@ -500,6 +577,9 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 ExprKind::IsLabeled {
                     labels, negated, ..
                 } => LinkOp::IsLabeled(Labels::compile(labels), *negated),
+                ExprKind::IsEndpoint {
+                    edge, end, negated, ..
+                } => LinkOp::IsEndpoint(*end, *negated, compile(edge, scope)?),
                 // `chain_left` admits only the kinds above.
                 _ => LinkOp::IsNull(false),
             };
@@ -557,7 +637,8 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         ExprKind::Binary { .. }
         | ExprKind::Property { .. }
         | ExprKind::IsNull { .. }
-        | ExprKind::IsLabeled { .. } => compile_chain(expr, scope)?,
+        | ExprKind::IsLabeled { .. }
+        | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
     })
 }
@@ -644,12 +725,42 @@ fn compile_call<E: Clone>(
     if spec.kind == FunctionKind::Aggregate {
         return compile_aggregate_call(spec, args, distinct, scope, span);
     }
-    let CallArgs::Exprs(exprs) = args else {
-        return Err(EvalError::new(
-            status::SEMANTIC,
-            format!("{}(*) is not a function call", spec.name()),
-            span,
-        ));
+    let exprs = match args {
+        CallArgs::Exprs(exprs) if spec.function != Function::Cast => exprs,
+        CallArgs::Cast {
+            operand, target, ..
+        } if spec.function == Function::Cast => {
+            return Ok(Node::Cast(*target, Box::new(compile(operand, scope)?)));
+        }
+        CallArgs::Trim {
+            side,
+            character,
+            source,
+        } if spec.function == Function::Trim => {
+            let character = match character {
+                Some(character) => Some(Box::new(compile(character, scope)?)),
+                None => None,
+            };
+            return Ok(Node::Trim(
+                *side,
+                character,
+                Box::new(compile(source, scope)?),
+            ));
+        }
+        CallArgs::Star(_) => {
+            return Err(EvalError::new(
+                status::SEMANTIC,
+                format!("{}(*) is not a function call", spec.name()),
+                span,
+            ));
+        }
+        CallArgs::Exprs(_) | CallArgs::Cast { .. } | CallArgs::Trim { .. } => {
+            return Err(EvalError::new(
+                status::SEMANTIC,
+                format!("{}() is not called with its own argument form", spec.name()),
+                span,
+            ));
+        }
     };
     if exprs.len() < spec.min_args || exprs.len() > spec.max_args {
         return Err(EvalError::new(
@@ -700,6 +811,13 @@ fn compile_aggregate_call<E>(
             ));
         }
         CallArgs::Exprs(_) => {}
+        CallArgs::Cast { .. } | CallArgs::Trim { .. } => {
+            return Err(EvalError::new(
+                status::SEMANTIC,
+                format!("{}() takes one expression", spec.name()),
+                span,
+            ));
+        }
     }
     let call = AggregateRef {
         function: spec.function,
@@ -770,12 +888,20 @@ impl<E> Compiled<E> {
                 items.iter().for_each(|item| item.variables(slots));
             }
             Node::Map(entries) => entries.iter().for_each(|(_, value)| value.variables(slots)),
-            Node::Unary(_, operand) => operand.variables(slots),
+            Node::Unary(_, operand) | Node::Cast(_, operand) => operand.variables(slots),
+            Node::Trim(_, character, source) => {
+                if let Some(character) = character {
+                    character.variables(slots);
+                }
+                source.variables(slots);
+            }
             Node::Chain(first, links) => {
                 first.variables(slots);
                 for link in links {
                     match &link.op {
-                        LinkOp::Binary(_, right) => right.variables(slots),
+                        LinkOp::Binary(_, right) | LinkOp::IsEndpoint(_, _, right) => {
+                            right.variables(slots)
+                        }
                         LinkOp::Property(_) | LinkOp::IsNull(_) | LinkOp::IsLabeled(_, _) => {}
                     }
                 }
@@ -830,6 +956,14 @@ impl<E: Clone + PartialEq> Compiled<E> {
         }
     }
 
+    /// The value as a function argument, with its span.
+    fn arg<En: Env<Element = E>>(&self, env: &En) -> Result<Arg<E>, EvalError> {
+        Ok(Arg {
+            value: self.eval(env)?,
+            span: self.span,
+        })
+    }
+
     #[inline(never)]
     fn eval_other<En: Env<Element = E>>(&self, env: &En) -> Result<Value<E>, EvalError> {
         Ok(match &self.node {
@@ -849,6 +983,16 @@ impl<E: Clone + PartialEq> Compiled<E> {
             Node::Unary(UnaryOp::Not, operand) => operand.truth(env)?.not().into_value(),
             Node::Unary(op, operand) => unary(*op, &*operand.eval_cow(env)?, self.span)?,
             Node::Call(function, args) => call(*function, args, env, self.span)?,
+            Node::Cast(target, operand) => {
+                functions::cast(*target, operand.arg(env)?, env, self.span)?
+            }
+            Node::Trim(side, character, source) => {
+                let character = match character {
+                    Some(character) => Some(character.arg(env)?),
+                    None => None,
+                };
+                functions::trim(*side, character, source.arg(env)?, env, self.span)?
+            }
             Node::Aggregate(index) => env.aggregate(*index),
             Node::Const(value) => value.clone(),
             Node::Case(case) => case.eval(env)?.into_owned(),
@@ -873,6 +1017,9 @@ fn eval_chain<'a, En: Env>(
             }
             LinkOp::Binary(op, right) => {
                 let right = right.eval_cow(env)?;
+                if matches!(op, BinaryOp::Concat | BinaryOp::Add) {
+                    reserve_concat(&value, &right, env, link.span)?;
+                }
                 binary(*op, &value, &right, link.span)?
             }
             LinkOp::Property(key) => property(&value, key, env, link.span)?,
@@ -880,11 +1027,35 @@ fn eval_chain<'a, En: Env>(
             LinkOp::IsLabeled(labels, negated) => {
                 is_labeled(&value, labels, *negated, env, link.span)?
             }
+            LinkOp::IsEndpoint(end, negated, edge) => {
+                let edge = edge.eval_cow(env)?;
+                functions::is_endpoint(&value, &edge, *end, *negated, env, link.span)?
+            }
         };
         value = Cow::Owned(next);
         left_span = link.span;
     }
     Ok(value)
+}
+
+/// Design F6: `||` (and Cypher `+`) of two strings or two lists asks the row for the result's
+/// size before building it ([`Env::reserve`]).
+fn reserve_concat<En: Env>(
+    left: &Value<En::Element>,
+    right: &Value<En::Element>,
+    env: &En,
+    span: Span,
+) -> Result<(), EvalError> {
+    let bytes = match (left, right) {
+        (Value::List(a), Value::List(b)) => {
+            functions::list_bytes((a.len() as u64).saturating_add(b.len() as u64))
+        }
+        _ => match (left.as_str(), right.as_str()) {
+            (Some(a), Some(b)) => (a.len() as u64).saturating_add(b.len() as u64),
+            _ => return Ok(()),
+        },
+    };
+    functions::reserve(env, bytes, span)
 }
 
 /// `left op right` for `AND` / `OR` / `XOR`; the right side is skipped once `left` decides.
@@ -1247,7 +1418,8 @@ fn arithmetic<E>(op: BinaryOp, a: &Number, b: &Number, span: Span) -> Result<Val
     }
 }
 
-fn float(number: &Number) -> f64 {
+/// A number as a float.
+pub(crate) fn float(number: &Number) -> f64 {
     match &number.n {
         N::NegInt(value) => *value as f64,
         N::Float(value) => value.0,
@@ -1269,6 +1441,17 @@ fn call<En: Env>(
             }
         }
         return Ok(Value::Null);
+    }
+    if !matches!(
+        functions::family(function),
+        Family::Core | Family::Aggregate
+    ) {
+        // Stage 1c (`gql/functions/`): every argument, left to right.
+        let args = args
+            .iter()
+            .map(|arg| arg.arg(env))
+            .collect::<Result<Vec<_>, _>>()?;
+        return functions::call(function, args, env, span);
     }
     let Some(arg) = args.first() else {
         return Ok(Value::Null);
@@ -1334,6 +1517,59 @@ fn call<En: Env>(
         },
         // Handled above: it evaluates its arguments lazily.
         Function::Coalesce => Ok(Value::Null),
+        // Handled above (`gql/functions/`).
+        Function::Cast
+        | Function::ToInteger
+        | Function::ToIntegerOrNull
+        | Function::ToFloat
+        | Function::ToFloatOrNull
+        | Function::ToBoolean
+        | Function::ToBooleanOrNull
+        | Function::ToString
+        | Function::ToStringOrNull
+        | Function::Left
+        | Function::Right
+        | Function::Substring
+        | Function::Trim
+        | Function::Btrim
+        | Function::Ltrim
+        | Function::Rtrim
+        | Function::Replace
+        | Function::Split
+        | Function::Reverse
+        | Function::ByteLength
+        | Function::IsEmpty
+        | Function::NullIf
+        | Function::Abs
+        | Function::Floor
+        | Function::Ceil
+        | Function::Round
+        | Function::Sign
+        | Function::Sqrt
+        | Function::Exp
+        | Function::Ln
+        | Function::Log
+        | Function::Log10
+        | Function::Power
+        | Function::Mod
+        | Function::Head
+        | Function::Last
+        | Function::Tail
+        | Function::Range
+        | Function::Keys
+        | Function::Properties
+        | Function::StartNode
+        | Function::EndNode
+        | Function::Nodes
+        | Function::Relationships => functions::call(
+            function,
+            vec![Arg {
+                value: value.into_owned(),
+                span: arg.span,
+            }],
+            env,
+            span,
+        ),
         Function::Count
         | Function::Sum
         | Function::Avg
@@ -1356,7 +1592,8 @@ fn length<E>(count: usize, span: Span) -> Result<Value<E>, EvalError> {
         .map_err(|_| EvalError::out_of_range(span))
 }
 
-fn function_name(function: Function) -> &'static str {
+/// The canonical name of `function` (its first spelling in `FUNCTIONS`).
+pub(crate) fn function_name(function: Function) -> &'static str {
     super::parser::FUNCTIONS
         .iter()
         .find(|spec| spec.function == function)

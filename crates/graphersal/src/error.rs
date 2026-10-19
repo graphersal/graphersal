@@ -4354,7 +4354,7 @@ pub enum GqlErrorKind {
     /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL`), Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern `((a)-->(b)){1,3}`, `nodes(p)` or `UNION`.
+    /// pattern `((a)-->(b)){1,3}`, `sin(x)` or `UNION`.
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,

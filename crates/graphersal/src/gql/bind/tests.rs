@@ -603,6 +603,11 @@ fn show(e: &Expr) -> String {
                 name.name,
                 args.iter().map(show).collect::<Vec<_>>().join(", ")
             ),
+            CallArgs::Cast { .. } | CallArgs::Trim { .. } => format!(
+                "{}({})",
+                name.name,
+                args.iter().map(show).collect::<Vec<_>>().join(", ")
+            ),
         },
         other => format!("{other:?}"),
     }
