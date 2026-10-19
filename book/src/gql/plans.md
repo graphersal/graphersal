@@ -40,6 +40,9 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`) |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
+`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate` and `gql:for` may hold the bodies of
+the `EXISTS` subqueries their expressions contain as child traversals, shown as `\>` lines under
+the step ([EXISTS and pattern predicates](#exists-and-pattern-predicates)).
 They exist only in plans of `gql()`; they are not DSL steps. Everything else in a GQL plan is an
 ordinary step.
 
@@ -419,6 +422,97 @@ gql:project("p")                                                          1     
 
 A path variable that nothing reads labels nothing.
 
+## EXISTS and pattern predicates
+
+A subquery is lowered in one of two ways.
+
+**The fast path.** A `[NOT] EXISTS` (or pattern predicate) that is a condition of its own in a
+`WHERE` or `FILTER` (alone, or joined to the others by `AND`) becomes Gremlin's
+`filter(__.<body>)` or `not(__.<body>)`, the step Gremlin's `where(__..)` / `not(__..)` would
+run. The body starts where the row stands: a body that starts at the element the row is on
+needs no step and no label, so the "who has no ..." question is exactly its Gremlin twin:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS name").profile()
+g.gql("MATCH (a:person), (b:person) WHERE (a)-[:knows]->(b) RETURN a.name AS a, b.name AS b").profile()
+g.gql("MATCH (s:software) WHERE EXISTS { (p:person) WHERE p.age > 33 } RETURN s.name AS s").profile()
+```
+
+```text
+v(labels: ["person"])                                                     1       0       4
+not(__.out("created"))                                                    1       4       1
+  \> out("created")                                                       4       4       4
+gql:project("name")                                                       1       1       1
+
+v(labels: ["person"])                                                     1       0       4
+as("a") [path: labels(a)]                                                 1       4       4
+v() [path: labels(a)]                                                     1       4      24
+has_label("person") [path: labels(a)]                                     1      24      16
+filter(__.in("knows").where(P.eq("a"))) [path: labels(a)]                 1      16       2
+  \> in("knows") [path: labels(a)]                                       16      16       8
+  \> where(P.eq("a"))                                                     8       8       2
+gql:project("a", "b")                                                     1       2       2
+
+v(labels: ["software"])                                                   1       0       2
+filter(__.v(labels: ["person"]).has("age", P.gt(33)))                     1       2       2
+  \> v(labels: ["person"])                                                2       2       8
+  \> has("age", P.gt(33))                                                 2       8       2
+gql:project("s")                                                          1       2       2
+```
+
+A body that reads a second imported variable joins it with `where(P.eq("a"))` (or starts from
+it with `select()`, or with `gql:bind` from a `WITH` column); a body that imports nothing starts
+with its own scan, which the optimizer folds and pushes down as anywhere else. The optimizer
+treats the child like any Gremlin child: between two hops it may add a `lazy_barrier()`, as it
+does for `where(__.out("knows").out("created"))`.
+
+**The expression hook.** Anywhere else (under `OR`, `XOR`, `CASE`, in a `RETURN` or `WITH`
+column, an `ORDER BY` key, an aggregate, a `FOR` list) the `gql:*` step that evaluates the
+expression holds the body as a child and runs it when the evaluation of a row needs the answer:
+the `Call` and `In` columns of the child show how many rows ran it. Here only the two rows that
+`p.age > 30` did not already decide ran `in("knows")`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE p.age > 30 OR (p)<-[:knows]-() RETURN p.name AS name").profile()
+g.gql("MATCH (p:person) RETURN p.name AS name, EXISTS { (p)-[:knows]->() } AS knows").profile()
+```
+
+```text
+v(labels: ["person"])                                                     1       0       4
+gql:filter("p.age > 30 OR (p)<-[:knows]-()")                              1       4       3
+  \> in("knows")                                                          2       2       1
+gql:project("name")                                                       1       3       3
+
+v(labels: ["person"])                                                     1       0       4
+gql:project("name", "knows")                                              1       4       4
+  \> out("knows")                                                         4       4       2
+```
+
+Both forms run the same body, so they give the same rows. On an element, the subquery steps
+come last ([Semantics](semantics.md#exists-and-pattern-predicates)): after the pushed `has()`
+and the plain `gql:filter`, and after the element's `as()`, so a body that reads the element
+through its label (a second body clause starting at it) finds it:
+
+```rhai,graph=modern
+g.gql("MATCH (a:person) WHERE CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--() } THEN true ELSE false END RETURN a.name AS name ORDER BY name").profile()
+```
+
+```text
+v(labels: ["person"])                                                     1       0       4
+as("a") [path: labels(a)]                                                 1       4       4
+gql:filter("CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--()...    1       4       2
+  \> in("knows") [path: labels(a)]                                        4       4       2
+  \> select("a")                                                          2       2       2
+  \> union(__.out(), __.in_e().gql:not_self_loop().out_v())               2       2       4
+...
+gql:project("name")                                                       1       2       2
+gql:order("name")                                                         1       2       2
+```
+
+The global optimizer rule `filter_reorder` may still move a fast-path child before a
+`gql:filter` by its cost estimate (`WHERE NOT (p)-->() AND p.name <> 'x'` runs `not(__.out())`
+before `gql:filter("p.name <> 'x'")`), as it would in a Gremlin plan; the rows are the same.
+
 ## Limits, cancellation, permissions
 
 A GQL query is a traversal, so everything that bounds a traversal bounds it too:
@@ -426,6 +520,9 @@ A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
 which sees the reads of the lowered plan: reading a denied label through `gql()` is refused as
 the equivalent Gremlin is (also a label reached only through a quantified edge or an optional
-part). An unbounded quantifier is bounded by `repeat.max_loops` and `traversal.max_traversers`
-([Semantics](semantics.md#quantified-edges)). The parser bounds nesting (128 levels, `54001`) so no query can
-exhaust the stack.
+part, or only inside an `EXISTS` body, whichever way it is lowered: a subquery's child is
+checked like a Gremlin child, even when no row reaches it). An unbounded quantifier is bounded
+by `repeat.max_loops` and `traversal.max_traversers` ([Semantics](semantics.md#quantified-edges)),
+also inside a subquery. The parser bounds nesting (128 levels, `54001`) so no query can exhaust
+the stack, and a query holds at most 64 subqueries and runs at most 1024 subquery bodies
+([Errors](errors.md#subqueries)).

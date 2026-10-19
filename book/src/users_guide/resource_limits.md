@@ -99,6 +99,17 @@ g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'})-[:knows|created]->*
 g.with("repeat.max_loops", 5).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN count(*) AS n").to_list()   // #{"n": 6}
 ```
 
+The same holds for a quantified edge inside an `EXISTS` subquery, whose help says so. Besides
+the options, `gql()` bounds the size of the query itself with fixed limits (no option changes
+them), each a `54001` error before the run ([GQL Errors](../gql/errors.md#gqlstatus-codes)):
+
+| Limit | Bounds |
+|---|---|
+| 128 levels | nesting of parentheses, brackets and subqueries; an expression at most 512 high |
+| 64 edge patterns | per `MATCH` clause, over all its comma-separated paths (also per clause inside a subquery) |
+| 64 subqueries (`MAX_SUBQUERIES`) | `EXISTS` and pattern predicates written in one query, nested ones included |
+| 1024 subquery bodies (`MAX_LOWERED_SUBQUERIES`) | bodies the query runs once its `LET` / `WITH` variables are substituted: a variable holding a subquery counts once for every place that reads it |
+
 ## Memory: materialized bytes and expansions
 
 Equal traversers are merged into one record with a multiplicity (bulk), so a query like

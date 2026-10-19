@@ -35,6 +35,7 @@ The mandatory core of a GQL read query, by construct.
 | parameters `$name` | supported | values only, never text |
 | aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
 | `OPTIONAL MATCH` | supported | also as the first clause |
+| `EXISTS` predicate: `EXISTS { MATCH ... }`, `EXISTS { <pattern> }`, `EXISTS ( ... )` *(provisional: whether the standard makes it core or an optional feature, and its identifier, are still to be checked)* | partial | anywhere an expression stands, nested too; TRUE or FALSE, never `NULL`; the body holds `MATCH` clauses with their `WHERE`, other statements inside it not yet ([EXISTS](subset.md#exists-and-pattern-predicates)); Cypher pattern predicates as [aliases](aliases.md) |
 | Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |
 | a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
 | data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |

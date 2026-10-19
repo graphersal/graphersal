@@ -109,6 +109,55 @@ g.gql("MATCH (n) WHERE n.age <> 29 RETURN n.name AS name ORDER BY name").to_list
 The same holds for `<>`: a vertex without `age` is not "different from 29", its comparison is
 unknown.
 
+## EXISTS and pattern predicates
+
+**A row is kept once, however often the body matches.** `EXISTS` (and a pattern predicate,
+[The Supported Subset](subset.md#exists-and-pattern-predicates)) is a semi-join: it asks whether
+there is a match and adds no rows. The same pattern in `MATCH` gives one row per match, so josh,
+who created two programs, comes twice:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person)-[:created]->() RETURN p.name AS name ORDER BY name").to_list()   // josh, josh, marko, peter
+g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
+```
+
+**TRUE or FALSE, never `NULL`.** A body that matches is TRUE, one that does not is FALSE, also
+when it reads a variable that is `NULL` on the row (an import from an `OPTIONAL MATCH` that did
+not match): a `NULL` element matches nothing, so `EXISTS` is FALSE and `NOT EXISTS` TRUE. Around
+it, three-valued logic works as usual: `NULL OR EXISTS {..}` is TRUE when the body matches and
+`NULL` otherwise. (This follows Neo4j; the ISO text is still to be checked.)
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s WHERE s.name = 'ripple') RETURN p.name AS name, EXISTS { (s)<-[:created]-() } AS made, NOT EXISTS { (s)<-[:created]-() } AS not_made ORDER BY name").to_list()
+// josh: made true, not_made false; marko, peter, vadas (s is NULL): made false, not_made true
+g.gql("MATCH (p:person) RETURN p.name AS name, p.lang = 'x' OR (p)-[:knows]->() AS a ORDER BY name").to_list()
+// josh (), marko true, peter (), vadas ()
+```
+
+**Trail per body clause.** Each `MATCH` clause inside a body is its own clause for the trail rule
+([Trail](#trail-different-edges)): its edges are different from each other, but they may repeat
+an edge of the query outside the body (an imported edge variable is that same edge) or of another
+body clause. (Neo4j's rule; the ISO text is still to be checked.)
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'}) WHERE EXISTS { MATCH (a)-[:knows]->(x)<-[:knows]-(a) } RETURN a.name AS a").to_list()   // no rows: one clause, one edge twice
+g.gql("MATCH (a {name: 'marko'}) WHERE EXISTS { MATCH (a)-[:knows]->(x) MATCH (x)<-[:knows]-(a) } RETURN a.name AS a").to_list()   // #{"a": "marko"}
+g.gql("MATCH (a {name: 'marko'})-[e:knows]->(b) WHERE EXISTS { MATCH (b)<-[e]-(x) } RETURN b.name AS b ORDER BY b").to_list()   // josh, vadas: e imported
+```
+
+**Evaluated only when needed, at most once per row.** A body stops at its first match. Where
+`EXISTS` stands inside a larger expression, a row runs the body only when the evaluation reaches
+it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), and once even when several columns or keys
+of the row hold the same subquery. A body that imports nothing (`EXISTS { (:robot) }`) is still
+run per row; its answer is not cached yet.
+
+**Filter order.** The conditions of one element (or one `WHERE`) run in this order: those
+pushed into `has()`, the other plain conditions, then those holding a subquery, which cost the
+most (a subquery inside a larger expression before a plain `[NOT] EXISTS`). The result does not depend on the order, only the
+work does. The global optimizer rule `filter_reorder` may still move a subquery's step before a
+`gql:filter` by its own cost estimate, as it does for the same Gremlin steps
+([Plans and Performance](plans.md#exists-and-pattern-predicates)).
+
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,

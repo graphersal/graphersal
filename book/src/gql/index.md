@@ -41,12 +41,14 @@ its real output (a list is shown as its items, comma-separated, or one per line)
 This version supports GQL read queries: `MATCH` and `OPTIONAL MATCH`, `WHERE`, `LET`, `FILTER`,
 Cypher's `WITH`, `RETURN` with aggregation (`count`, `sum`, `avg`, `min`, `max`, `collect_list`),
 `ORDER BY`, `OFFSET`, `LIMIT`, `FOR` (Cypher `UNWIND`) with a direct lookup per item where an
-id or index serves it, queries that start without `MATCH` (`RETURN 1 + 2 AS x`), node and edge patterns, quantified edges (`-[:knows]->{1,3}`), path
-variables, label expressions, expressions, parameters, the GQL scalar functions and the common
-openCypher ones (`toInteger`, `substring`, `split`, `round`, `keys`, `nodes(p)`, ...)
-([The Supported Subset](subset.md)). Composite queries (`UNION`, `NEXT`), subqueries,
-shortest paths and quantified parenthesized paths come later; until then the error names the
-Gremlin step that does the same.
+id or index serves it, queries that start without `MATCH` (`RETURN 1 + 2 AS x`), `EXISTS`
+subqueries and Cypher pattern predicates (`WHERE NOT (p)-[:created]->()`), node and edge
+patterns, quantified edges (`-[:knows]->{1,3}`), path variables, label expressions,
+expressions, parameters, the GQL scalar functions and the common openCypher ones (`toInteger`,
+`substring`, `split`, `round`, `keys`, `nodes(p)`, ...) ([The Supported Subset](subset.md)).
+Composite queries (`UNION`, `NEXT`), `COUNT { }` and `CALL { }` subqueries, shortest paths and
+quantified parenthesized paths come later; until then the error names the Gremlin step that does
+the same.
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, count(s) AS made ORDER BY made DESC, name").to_list()

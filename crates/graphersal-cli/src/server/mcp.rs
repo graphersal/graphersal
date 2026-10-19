@@ -596,7 +596,7 @@ RETURN columns in the order written (bounded like query's: at most max_rows rows
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
 the graph. No Rhai escaping is needed: pass the GQL text as it is.
 
-Supported (stages 1a, 1b, 1c and 2a): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a and 2b): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -606,7 +606,12 @@ UNWIND list AS x): one row per item, e.g. FOR id IN $ids MATCH (n) WHERE element
 (a NULL list gives no row, a non-list value one row; an equality on element_id or on an \
 indexed property after FOR is a direct lookup, not a scan); a query may start with MATCH, \
 OPTIONAL MATCH, FOR, UNWIND, LET, WITH, FILTER or RETURN (RETURN 1 + 2 AS x runs on one empty \
-row); aggregates count(x), count(*), sum, avg, min, max, collect_list \
+row); EXISTS subqueries EXISTS { MATCH <pattern> [WHERE <condition>] } and EXISTS { <pattern> } \
+and Cypher pattern predicates (a pattern where a condition stands, naming only variables bound \
+before it), TRUE or FALSE (never NULL), anywhere an expression stands, each row kept once (a \
+semi-join, unlike a MATCH of the same pattern), e.g. who has no project: MATCH (p:person) WHERE \
+NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name, or MATCH (p:person) \
+WHERE NOT (p)-[:created]->() ...; aggregates count(x), count(*), sum, avg, min, max, collect_list \
 (Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
 optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
 Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
@@ -627,8 +632,8 @@ String literals use single quotes. A missing property is NULL. Edges in one matc
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 quantified path patterns ((a)-->(b)){1,3}, list comprehensions [x IN list | \
-...], UNION, EXISTS, SHORTEST, non-deterministic functions (rand, randomUUID), \
-trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
+...], COUNT { } subqueries (use OPTIONAL MATCH and count()), UNION, SHORTEST, \
+non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
 with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
@@ -2177,8 +2182,8 @@ mod tests {
         assert!(INSTRUCTIONS.contains("`gql`"));
     }
 
-    /// The gql tool's description lists the stage 1b, 1c and 2a subset as supported and still
-    /// names what is refused; it stays a read-only tool.
+    /// The gql tool's description lists the stage 1b, 1c, 2a and 2b subset as supported and
+    /// still names what is refused; it stays a read-only tool.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
         let (supported, refused) = GQL_DESCRIPTION
@@ -2213,6 +2218,11 @@ mod tests {
             "WITH ORDINALITY",
             "$ids",
             "may start with",
+            "EXISTS { MATCH",
+            "EXISTS { <pattern> }",
+            "pattern predicates",
+            "never NULL",
+            "NOT EXISTS { (p)-[:created]->() }",
         ] {
             assert!(supported.contains(named), "{named}");
         }
@@ -2221,11 +2231,12 @@ mod tests {
             "list comprehensions",
             "randomUUID",
             "INSERT",
+            "COUNT { }",
             "use the query tool",
         ] {
             assert!(refused.contains(named), "{named}");
         }
-        for gone in ["without MATCH", "UNWIND"] {
+        for gone in ["without MATCH", "UNWIND", "EXISTS"] {
             assert!(!refused.contains(gone), "{gone}");
         }
         assert!(GQL_DESCRIPTION.contains("never changes"));

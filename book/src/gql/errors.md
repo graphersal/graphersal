@@ -203,14 +203,69 @@ Caused by: Resource limit 'traversal.max_materialized_bytes' exceeded (limit 107
 Help: The gql() query built a value larger than 'traversal.max_materialized_bytes' allows (1073741824 bytes); ... A function whose result can be larger than its arguments (range(), split(), replace(), || and toString() of a list or map) and the list of collect_list() are checked before they are built, so the query stops instead of running out of memory; the result is never cut short. Build smaller values: bound range() and replace() by the data, as in g.gql("MATCH (p:person) RETURN range(1, p.age / 10) AS r"), ... or raise the limit for the query, g.with("traversal.max_materialized_bytes", 2147483648).gql(..), ...
 ```
 
+## Subqueries
+
+The errors of an `EXISTS` subquery or a pattern predicate share one help text that explains
+subqueries: TRUE or FALSE, never `NULL`; the body reads the variables bound before it, and the
+variables it binds stay inside it; a pattern predicate binds no new variable. Before it, each
+names its own fix:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->(q) AS k")   // error: the pattern predicate introduces the new variable `q`
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN s.name AS s")   // error: the variable `s` is not in scope: it is bound inside a subquery
+g.gql("MATCH (a:person) WHERE EXISTS { MATCH (a)-->() WHERE b.age > 1 MATCH (b) } RETURN a")   // error: `b` is bound by a later MATCH clause of the subquery
+```
+
+```text
+Help: write it as EXISTS { MATCH (p)-[:knows]->(q) }, whose MATCH may bind new variables, or leave `q` out of the pattern. A subquery, EXISTS { MATCH <pattern> [WHERE <condition>] }, EXISTS { <pattern> } or a Cypher pattern predicate such as (p)-[:created]->(), is TRUE when its body has a match and FALSE otherwise, never NULL; its body reads the variables bound before it, and the variables it binds itself stay inside it. A pattern predicate binds no new variable: name new elements in an EXISTS { MATCH .. }, as in g.gql("MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name"), and bind an element in the MATCH clause of the query to read it after the subquery, as in g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name, s.name").
+Help: bind `s` in the MATCH clause of the query to use it here, or test it inside the subquery. A subquery, ...
+Help: move the condition to the WHERE of that later MATCH clause inside the subquery. A subquery, ...
+```
+
+A query holds at most 64 subqueries (`EXISTS` and pattern predicates, nested ones included) and
+runs at most 1024 subquery bodies, where a `LET` or `WITH` variable holding a subquery counts once
+for every place that reads it. Either limit is `54001` before the run, and its help names both
+bounds:
+
+```text
+Error: GQL limit exceeded at line 1, column 1553: the query holds more than 64 subqueries (EXISTS and pattern predicates) ...
+Help: join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several MATCH clauses and patterns), or add the patterns to the MATCH clause of the query. The query is larger than gql() accepts: one query holds at most 64 subqueries (EXISTS and pattern predicates, nested ones included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, as in g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN p.name").
+```
+
+A quantified edge inside a subquery that reaches `repeat.max_loops` or
+`traversal.max_traversers` fails like one outside, and the help says where it stands and why a
+subquery may loop long:
+
+```rhai,graph=modern
+g.with("repeat.max_loops", 1).gql("MATCH (p:person) WHERE EXISTS { (p)-[:knows|created]->{1,}(x) } RETURN p.name AS n")   // error: repeat() exceeded the loop limit of 1 iterations
+```
+
+```text
+Help: The loop of the quantified edge -[:knows|created]->{1,} inside an EXISTS subquery (or pattern predicate) of the gql() query ran 1 iterations, the limit of repeat.max_loops. ... A subquery stops at its first match, so its loop runs this long on a row that has no match, or only a late one. Give the quantifier an upper bound, as in -[:knows|created]->{1,5}, ...
+```
+
+`COUNT { }` is not supported yet; its help shows the `OPTIONAL MATCH .. count()` form, and
+`EXISTS` for the test `COUNT { .. } > 0`. Cypher 4's `exists(n.p)` is [refused](refused.md):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN COUNT { (p)-->() } AS a")   // error: a COUNT { } subquery is not yet supported
+g.gql("MATCH (p:person) RETURN exists(p.age) AS a")   // refused: exists(value), the Cypher 4 property test, is not supported
+```
+
+```text
+Help: count the matches of the pattern with OPTIONAL MATCH and count(), as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s). To test only whether the pattern matches (COUNT { .. } > 0), use EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
+Help: test a property with n.p IS NOT NULL, here p.age IS NOT NULL; EXISTS tests a graph pattern, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`); also `gql()` after other steps |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
+| `54001` | limit | more than 64 subqueries (`EXISTS` and pattern predicates, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
 | `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |

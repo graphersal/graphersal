@@ -30,6 +30,7 @@ not supported yet or [refused](refused.md).
 | `-[e:T*m..n]->` | `-[e:T]->{m,n}` | |
 | `-[e:T*..n]->` | `-[e:T]->{1,n}` | lower bound 1 again |
 | `-[e:T*m..]->` | `-[e:T]->{m,}` | |
+| `WHERE (a)-[:T]->(b)`, a pattern predicate | `WHERE EXISTS { (a)-[:T]->(b) }` | anywhere an expression stands; it may name only variables bound before it ([EXISTS](subset.md#exists-and-pattern-predicates)) |
 | `UNWIND list AS x` | `FOR x IN list` | one row per item; `WITH ORDINALITY` / `WITH OFFSET` only after `FOR` |
 
 Each pair below returns the same rows:
@@ -57,6 +58,8 @@ g.gql("MATCH p = (a {name: 'marko'})-[]->{1,2}(b) RETURN b.name AS b, path_lengt
 // josh 1, lop 1, vadas 1, lop 2, ripple 2
 g.gql("MATCH (n:person {name: 'marko'}) RETURN log(100) AS l").to_list()   // #{"l": 4.605170185988092}
 g.gql("MATCH (n:person {name: 'marko'}) RETURN ln(100) AS l").to_list()   // #{"l": 4.605170185988092}
+g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
+g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
 g.gql("MATCH (p:person {name: 'marko'}) UNWIND [p.age, p.age + 1] AS a RETURN a ORDER BY a").to_list()   // #{"a": 29}, #{"a": 30}
 g.gql("MATCH (p:person {name: 'marko'}) FOR a IN [p.age, p.age + 1] RETURN a ORDER BY a").to_list()   // #{"a": 29}, #{"a": 30}
 ```
@@ -140,7 +143,9 @@ g.gql("MATCH (a)-[e:knows]-(b) WHERE a IS SOURCE OF e RETURN a.name AS a, b.name
 | `nodes(p)`, `relationships(p)` | supported as [compatibility functions](#compatibility-functions), not aliases: GQL has no such functions |
 | `x ^ y` | not supported yet; use GQL's `power(x, y)` |
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
-| list comprehensions, `any()` / `all()` / `none()` / `single()`, `reduce()`, `exists(n.p)` | not supported yet; `exists(n.p)` is `n.p IS NOT NULL`; `FOR x IN list FILTER ...` walks a list item by item |
+| list comprehensions, `any()` / `all()` / `none()` / `single()`, `reduce()` | not supported yet; `FOR x IN list FILTER ...` walks a list item by item |
+| `COUNT { pattern }` | not supported yet; `OPTIONAL MATCH` and `count()` count the matches, `EXISTS` tests for one |
+| `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
 | `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE` | refused: `gql()` is read-only |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |

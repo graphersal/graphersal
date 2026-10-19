@@ -212,6 +212,30 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "Who has no ...? NOT EXISTS: people who created nothing",
+    "script": "// NOT EXISTS { pattern } keeps the rows the pattern does not match; the plan is v(labels: [\"person\"]).not(__.out(\"created\")) (see .profile()).\ng.gql(\"MATCH (p:person) WHERE NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "EXISTS { MATCH ... WHERE ... }: each java creator once",
+    "script": "// EXISTS tests a match and keeps the row once; MATCH (p)-[:created]->(s) would give one row per project.\ng.gql(`\n  MATCH (p:person)\n  WHERE EXISTS { MATCH (p)-[:created]->(s:software) WHERE s.lang = 'java' }\n  RETURN p.name AS name\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Cypher pattern predicate: people known by someone",
+    "script": "// A pattern where a condition stands is EXISTS { pattern }; it may name only variables bound before it.\ng.gql(\"MATCH (p:person) WHERE ()-[:knows]->(p) RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "EXISTS in RETURN: a TRUE / FALSE column per row",
+    "script": "// EXISTS is TRUE or FALSE, never NULL, and stands anywhere an expression does.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS name,\n         EXISTS { (p)-[:knows]->() } AS knows_someone,\n         (p)-[:created]->(:software {lang: 'java'}) AS creates_java\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Quantified edges {1,2}: reachable in one or two hops",
     "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
   },

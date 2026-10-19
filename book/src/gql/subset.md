@@ -229,6 +229,63 @@ g.gql("MATCH (a:person), (b:person) WHERE a.age < b.age AND a.name STARTS WITH '
 // #{"a": "marko", "b": "josh"}, #{"a": "marko", "b": "peter"}
 ```
 
+## EXISTS and pattern predicates
+
+An `EXISTS` subquery tests whether a pattern matches: it is TRUE when its body has at least one
+match for the row and FALSE otherwise, never `NULL`. Three forms mean the same:
+
+```text
+EXISTS { MATCH <pattern> [, <pattern> ...] [WHERE <condition>] [MATCH ...] }
+EXISTS { <pattern> [, <pattern> ...] [WHERE <condition>] }
+EXISTS ( ... )                                -- either body in parentheses
+(a)-[:knows]->(b)                             -- Cypher pattern predicate: a pattern where an expression stands
+```
+
+The body reads the variables bound before it (they are **imported**: `p` inside is the row's
+`p`), and the variables it binds itself stay inside it. A pattern predicate is
+`EXISTS { <pattern> }` written without the keyword; since it stands where any expression may, it
+must not name a new variable (write `EXISTS { MATCH .. }` to name one). The Gremlin twins are
+`where(__..)` and `not(__..)`, and the "who has no ..." question runs exactly as its twin:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "vadas"}
+g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "vadas"}
+g.v().has_label("person").not(__.out("created")).values("name").to_list()   // "vadas"
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.name = 'ripple' } RETURN p.name AS name").to_list()   // #{"name": "josh"}
+g.v().has_label("person").where(__.out("created").has("name", "ripple")).values("name").to_list()   // "josh"
+g.gql("MATCH (a:person), (b:person) WHERE (a)-[:knows]->(b) RETURN a.name AS a, b.name AS b ORDER BY b").to_list()
+// #{"a": "marko", "b": "josh"}, #{"a": "marko", "b": "vadas"}
+g.gql("MATCH (p:person) WHERE EXISTS (MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(:software {name: 'ripple'})) RETURN p.name AS name").to_list()   // #{"name": "marko"}
+```
+
+`EXISTS` stands anywhere an expression does: in `WHERE` and `FILTER`, in the inline `WHERE` of a
+node or edge pattern, under `OR`, `XOR` and `CASE`, in a `RETURN` or `WITH` column, an
+`ORDER BY` key, a grouping key or an aggregate's argument, a `FOR` list. It composes with
+three-valued logic like any boolean ([Semantics](semantics.md#exists-and-pattern-predicates)).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE p.age > 30 OR (p)<-[:knows]-() RETURN p.name AS name ORDER BY name").to_list()   // josh, peter, vadas
+g.gql("MATCH (p:person) RETURN p.name AS name, EXISTS { (p)-[:knows]->() } AS knows ORDER BY knows DESC, name").to_list()
+// #{"knows": true, "name": "marko"}, #{"knows": false, "name": "josh"}, ... peter, vadas
+g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS creator, count(*) AS n ORDER BY creator").to_list()
+// #{"creator": false, "n": 1}, #{"creator": true, "n": 3}
+g.gql("MATCH (p:person WHERE NOT (p)-[:created]->())-[:knows]-(f) RETURN p.name AS p, f.name AS f").to_list()   // #{"f": "marko", "p": "vadas"}
+```
+
+The body holds `MATCH` clauses with their `WHERE` (and nested `EXISTS`); `OPTIONAL MATCH`,
+`WITH`, `LET`, `FILTER`, `FOR`, `RETURN`, `ORDER BY` and `LIMIT` inside a body are not supported
+yet, nor is `COUNT { }` ([Not supported yet](#not-supported-yet)). A query holds at most 64
+subqueries ([Errors](errors.md#subqueries)).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->(q) AS k")   // error: the pattern predicate introduces the new variable `q`
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN s.name AS s")   // error: `s` is bound inside a subquery
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) RETURN x } RETURN p")   // error: RETURN inside EXISTS { } is not yet supported
+g.gql("MATCH (p:person) RETURN COUNT { (p)-->() } AS n")   // error: a COUNT { } subquery is not yet supported
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, count(s) AS n ORDER BY name").to_list()
+// josh 2, marko 1, peter 1, vadas 0: count the matches this way until COUNT { } is supported
+```
+
 ## OPTIONAL MATCH
 
 `OPTIONAL MATCH` keeps every row that reaches it: where its pattern (and its own `WHERE`)
@@ -721,12 +778,13 @@ construct and the alternative.
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
-| `UNION`, `EXCEPT`, `INTERSECT`, `EXISTS { }`, `CALL { }` subqueries | Gremlin `union()`, `where()` |
+| `UNION`, `EXCEPT`, `INTERSECT`, `CALL { }` subqueries | Gremlin `union()` |
+| `COUNT { }` subqueries | `OPTIONAL MATCH` and `count()`; `EXISTS` when only "at least one" matters |
+| `OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, `FOR`, `RETURN`, `ORDER BY`, `LIMIT` inside an `EXISTS` body | `MATCH` clauses with their `WHERE`, nested `EXISTS` |
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | list comprehensions `[x IN list \| ...]`, `any()` / `all()` / `none()` / `single()`, `reduce()` | `head()`, `last()`, `size()`, `FOR x IN list` with `FILTER` and `collect_list()`, or Gremlin `unfold()` after `gql()` |
-| `exists(n.p)` | `n.p IS NOT NULL` |
 | the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |

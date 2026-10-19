@@ -15,6 +15,7 @@ syntax error whose help shows the query without it ([Aggregation](subset.md#aggr
 | `SHOW ...` | a vendor command, not GQL | the catalog steps (`indexes()`, `queries()`, `get_schema()`, `statistics()`) |
 | vendor path search `*BFS`, `*WSHORTEST`, `*ALLSHORTEST` | vendor extensions, not GQL | Gremlin `repeat()` |
 | `id(n)` | Cypher's `id()` is an integer; Graphersal ids are strings, and returning a different type under the same name would mislead | `element_id(n)`, the id as a string |
+| `exists(n.p)`, the Cypher 4 property test | `EXISTS` is GQL's subquery predicate and takes a graph pattern; reading it as a property test as well would give one keyword two meanings | `n.p IS NOT NULL`; `EXISTS { (n)-[:T]->() }` tests a pattern ([EXISTS](subset.md#exists-and-pattern-predicates)) |
 | `USE graph` | `gql()` runs on the graph of its traversal source | open the other graph and run there |
 | non-deterministic functions `rand()`, `randomUUID()` | every `gql()` function is pure, so a `LET` or `WITH` name may stand for its expression and the plan stays deterministic; a random value would differ between its uses | Gremlin after `gql()`: `sample(n)` or `coin(p)` to pick rows at random |
 | vendor and namespaced functions `apoc.*`, `db.*`, `gds.*`, `text.*`, ... | vendor extensions, not GQL; the accepted Cypher functions are a fixed list ([compatibility functions](aliases.md#compatibility-functions)) | a `gql()` function, or Gremlin steps after `gql()` |
@@ -28,6 +29,8 @@ g.gql("SHOW INDEXES")   // refused: SHOW commands are vendor extensions
 g.gql("MATCH (n) RETURN id(n)")   // refused: use element_id(n)
 g.gql("MATCH (a)-[:knows*BFS]->(b) RETURN b")   // refused: *BFS is a vendor path search extension
 g.gql("USE g MATCH (n) RETURN n")   // refused: USE is not supported
+g.gql("MATCH (n:person) WHERE exists(n.age) RETURN n.name AS name")   // refused: exists(value) is the Cypher 4 property test
+g.gql("MATCH (n:person) WHERE n.age IS NOT NULL RETURN n.name AS name ORDER BY name").to_list()   // josh, marko, peter, vadas
 g.gql("MATCH (n) RETURN rand() AS r")   // refused: rand() is a non-deterministic function
 g.gql("MATCH (n) RETURN apoc.text.join(['a', 'b'], ',') AS r")   // refused: apoc.text.join() is a vendor function
 g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY name").sample(1).count().next()   // 1
