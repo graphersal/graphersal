@@ -2076,4 +2076,93 @@ mod gql {
         assert_eq!(count(&graph), 6);
         assert_eq!(graph.read().edge_count(), 6);
     }
+
+    /// Stage 1b: an edge read only inside a quantified edge (a `repeat()` body), an optional
+    /// part (an `optional()` child) or a pattern after a `WITH` is refused before the run, by
+    /// the same step and request as the Gremlin twin. Reads never name a label, so the denial
+    /// is by element kind, as for every Gremlin read.
+    #[test]
+    fn a_denied_read_in_a_1b_construct_refuses_gql_like_its_gremlin_twin() {
+        let graph = modern();
+        // A quantified edge: the edge step of the repeat() body.
+        for script in [
+            r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows]->{1,2}(f) RETURN f.name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows*]->(f) RETURN count(*) AS c").toList()"#,
+            r#"g.gql("MATCH x = (p:person)-[:knows]->{0,1}(f) RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out_e", "Read Data(edge)");
+        }
+        // An optional part: the edge step inside optional().
+        for script in [
+            r#"g.V().hasLabel("person").optional(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, s.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // After a WITH, projecting or materializing (an aggregate, ORDER BY with LIMIT).
+        for script in [
+            r#"g.V().hasLabel("person").limit(2).out("created").values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p, count(*) AS c MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 2 MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Refused before it runs, also when no row would reach the optional part or the
+        // quantified edge.
+        for script in [
+            r#"g.gql("MATCH (p:nobody) OPTIONAL MATCH (p)-[:created]->(s) RETURN s").toList()"#,
+            r#"g.gql("MATCH (p:nobody)-[:knows]->{0,3}(f) RETURN f").toList()"#,
+            r#"g.gql("MATCH (p:nobody) WITH p LIMIT 0 MATCH (p)-[:created]->(s) RETURN s").toList()"#,
+        ] {
+            let err = run(&graph, script, NoEdges).unwrap_err();
+            assert!(err.contains("edges are private"), "{script}: {err}");
+        }
+        // Node-only 1b queries read vertices only: allowed.
+        let rows = run(
+            &graph,
+            r#"g.gql("MATCH (p:person) WITH p.age AS a LET b = a + 1 FILTER b > 30 RETURN count(*) AS c, collect_list(b) AS bs").toList()"#,
+            NoEdges,
+        )
+        .unwrap();
+        assert_eq!(rows.into_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn gql_1b_asks_the_same_requests_as_its_gremlin_twin() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person)-[:knows]->{1,2}(f) RETURN f.name").toList()"#,
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+                r#"g.V().hasLabel("person").optional(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WITH p, count(*) AS c MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+                r#"g.V().hasLabel("person").out("created").values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN count(*) AS c").toList()"#,
+                r#"g.V().hasLabel("person").count().toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+        // And a 1b query never asks for a write.
+        for query in [
+            "MATCH (p:person) OPTIONAL MATCH (p)-[e:knows]->{1,2}(f) RETURN p.name, count(f) AS c",
+            "MATCH x = (a)-[:created]-{1,2}(b) WITH x, length(x) AS l RETURN l, count(*) AS c",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            let seen = requests(&graph, &script);
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+    }
 }
