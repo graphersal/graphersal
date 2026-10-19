@@ -264,7 +264,7 @@ fn who_has_no_lowers_to_not_without_a_label() {
         steps(&text),
         [
             "v(labels: [\"person\"])",
-            "filter(__.out(\"knows\").lazy_barrier().out(\"created\").has(\"lang\", P....",
+            "filter(__.out(\"knows\").lazy_barrier().out(\"created\").has(\"lang\", P.eq(\"java\")))",
             "\\> out(\"knows\")",
             "\\> lazy_barrier()",
             "\\> out(\"created\")",

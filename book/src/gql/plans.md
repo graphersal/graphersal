@@ -286,11 +286,11 @@ g.gql("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS na
 ```
 
 ```text
-inject(0)                                                       1       0       1
-gql:for("id IN $ids")                                           1       1       3
-as("id") [path: labels(id)]                                     1       3       3
-gql:lookup("(n)", "element_id(n) = id") [id] [path: label...    1       3       2
-gql:project("id", "name")                                       1       2       2
+inject(0)                                                          1       0       1
+gql:for("id IN $ids")                                              1       1       3
+as("id") [path: labels(id)]                                        1       3       3
+gql:lookup("(n)", "element_id(n) = id") [id] [path: labels(id)]    1       3       2
+gql:project("id", "name")                                          1       2       2
 ```
 
 ```rhai,graph=modern
@@ -298,16 +298,15 @@ gql:project("id", "name")                                       1       2       
 ```
 
 ```text
-inject(0)                                                       1       0       1
-gql:for("n IN $names")                                          1       1       3
-as("n") [path: labels(n)]                                       1       3       3
-gql:lookup("(p:person)", "name: n") [index: vertex person...    1       3       2
-has_label("person") [path: labels(n)]                           1       2       2
-gql:project("n", "age")                                         1       2       2
+inject(0)                                                                            1       0       1
+gql:for("n IN $names")                                                               1       1       3
+as("n") [path: labels(n)]                                                            1       3       3
+gql:lookup("(p:person)", "name: n") [index: vertex person.name] [path: labels(n)]    1       3       2
+has_label("person") [path: labels(n)]                                                1       2       2
+gql:project("n", "age")                                                              1       2       2
 ```
 
-(The profile table cuts long step names; the full annotation is
-`[index: vertex person.name]`.) The lookup checks every vertex it finds with GQL's `=`, so it
+The lookup checks every vertex it finds with GQL's `=`, so it
 returns exactly the rows of the scan ([Semantics](semantics.md#lookups-use-gql-equality)); a
 `NULL` value finds nothing, and a value an index cannot serve (a list, `NaN`, a non-string id,
 a storage that reports no index) falls back to scanning the label. The same lookup starts any
@@ -383,15 +382,15 @@ g.gql("MATCH (a {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN b.name AS b")
 ```
 
 ```text
-v() [path: labels(#1)]                                                    1       0       6
-has("name", P.eq("marko")) [path: labels(#1)]                             1       6       1
-repeat(__.out_e("knows", "created").gql:trail("#1").as("#1").in_v()...    1       1       5
+v() [path: labels(#1)]                                                                  1       0       6
+has("name", P.eq("marko")) [path: labels(#1)]                                           1       6       1
+repeat(__.out_e("knows", "created").gql:trail("#1").as("#1").in_v()).times(2).emit()    1       1       5
 [loops: 2, max_depth: 2, avg_loops: 1.4]
-  \> out_e("knows", "created") [path: labels(#1)]                         2       4       5
-  \> gql:trail("#1") [path: labels(#1)]                                   2       5       5
-  \> as("#1") [path: labels(#1)]                                          2       5       5
-  \> in_v() [path: labels(#1)]                                            2       5       5
-gql:project("b")                                                          1       5       5
+  \> out_e("knows", "created") [path: labels(#1)]                                       2       4       5
+  \> gql:trail("#1") [path: labels(#1)]                                                 2       5       5
+  \> as("#1") [path: labels(#1)]                                                        2       5       5
+  \> in_v() [path: labels(#1)]                                                          2       5       5
+gql:project("b")                                                                        1       5       5
 ```
 
 The labels keep the traversers of different matches apart, so there is no merge point after a
@@ -409,18 +408,18 @@ g.gql("MATCH p = (a {name: 'marko'})-[:knows]->{1,2}(b) RETURN p").profile()
 ```
 
 ```text
-v() [path: labels(#2,#gv2)]                                               1       0       6
-has("name", P.eq("marko")) [path: labels(#2,#gv2)]                        1       6       1
-as("a") [path: labels(#2,#gv2,a)]                                         1       1       1
-repeat(__.out_e("knows").gql:trail("#2").as("#2").in_v().as("#gv2")...    1       1       2
+v() [path: labels(#2,#gv2)]                                                                                       1       0       6
+has("name", P.eq("marko")) [path: labels(#2,#gv2)]                                                                1       6       1
+as("a") [path: labels(#2,#gv2,a)]                                                                                 1       1       1
+repeat(__.out_e("knows").gql:trail("#2").as("#2").in_v().as("#gv2")).times(2).emit() [path: labels(#2,#gv2,a)]    1       1       2
 [loops: 2, max_depth: 2, avg_loops: 1.0]
-  \> out_e("knows") [path: labels(#2,#gv2,a)]                             2       3       2
-  \> gql:trail("#2") [path: labels(#2,#gv2,a)]                            2       2       2
-  \> as("#2") [path: labels(#2,#gv2,a)]                                   2       2       2
-  \> in_v() [path: labels(#2,#gv2,a)]                                     2       2       2
-  \> as("#gv2") [path: labels(#2,#gv2,a)]                                 2       2       2
-as("b") [path: labels(#2,#gv2,a,b)]                                       1       2       2
-gql:project("p")                                                          1       2       2
+  \> out_e("knows") [path: labels(#2,#gv2,a)]                                                                     2       3       2
+  \> gql:trail("#2") [path: labels(#2,#gv2,a)]                                                                    2       2       2
+  \> as("#2") [path: labels(#2,#gv2,a)]                                                                           2       2       2
+  \> in_v() [path: labels(#2,#gv2,a)]                                                                             2       2       2
+  \> as("#gv2") [path: labels(#2,#gv2,a)]                                                                         2       2       2
+as("b") [path: labels(#2,#gv2,a,b)]                                                                               1       2       2
+gql:project("p")                                                                                                  1       2       2
 ```
 
 A path variable that nothing reads labels nothing.
@@ -501,15 +500,15 @@ g.gql("MATCH (a:person) WHERE CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a
 ```
 
 ```text
-v(labels: ["person"])                                                     1       0       4
-as("a") [path: labels(a)]                                                 1       4       4
-gql:filter("CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--()...    1       4       2
-  \> in("knows") [path: labels(a)]                                        4       4       2
-  \> select("a")                                                          2       2       2
-  \> union(__.out(), __.in_e().gql:not_self_loop().out_v())               2       2       4
+v(labels: ["person"])                                                                         1       0       4
+as("a") [path: labels(a)]                                                                     1       4       4
+gql:filter("CASE WHEN EXISTS { MATCH (a)<-[:knows]-() MATCH (a)--() } THEN t…" (82 chars))    1       4       2
+  \> in("knows") [path: labels(a)]                                                            4       4       2
+  \> select("a")                                                                              2       2       2
+  \> union(__.out(), __.in_e().gql:not_self_loop().out_v())                                   2       2       4
 ...
-gql:project("name")                                                       1       2       2
-gql:order("name")                                                         1       2       2
+gql:project("name")                                                                           1       2       2
+gql:order("name")                                                                             1       2       2
 ```
 
 The global optimizer rule `filter_reorder` may still move a fast-path child before a

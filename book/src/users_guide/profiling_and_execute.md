@@ -34,6 +34,10 @@ where(__.out("knows"))                                                    1     
 Optimizer rules applied: source_filter_pushdown
 ```
 
+The `Step` column is as wide as the longest step text, annotations such as `[index: ..]` and
+`[path: ..]` included (at least 60 characters, 70 with nested steps); only a step text longer
+than 160 characters is cut with `...`.
+
 In a script it is data, a `TraversalMetrics` value:
 
 ```rhai

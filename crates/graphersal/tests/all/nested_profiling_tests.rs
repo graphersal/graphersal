@@ -280,3 +280,65 @@ fn test_rhai_script_nested_profiling() {
     assert!(res.contains(r"\> out"));
     assert!(res.contains("Traversal Metrics"));
 }
+
+/// Profiles `g.v().has("name", P.within([..]))` with `n` generated names, then `tail`.
+#[cfg(feature = "script")]
+fn profile_within(n: usize, tail: &str) -> String {
+    use std::sync::Arc;
+    let names: Vec<String> = (0..n).map(|i| format!("\"name_number_{i}\"")).collect();
+    let script = format!(
+        "g.v().has(\"name\", P.within([{}])){tail}.profile()",
+        names.join(", ")
+    );
+    crate::script_host::eval(Arc::new(GraphSource::tinkerpop_modern()), &script).unwrap()
+}
+
+/// The step column widens to the longest step text, so a long step and the `[path: ..]`
+/// annotations show in full, and every row stays aligned to the header.
+#[cfg(feature = "script")]
+#[test]
+fn test_profile_step_column_fits_longest_step() {
+    let text = profile_within(6, ".as(\"a\").out().select(\"a\")");
+    let has_row = text
+        .lines()
+        .find(|l| l.starts_with("has(\"name\""))
+        .expect("has row");
+    assert!(!has_row.contains("..."), "{text}");
+    assert!(has_row.contains("\"name_number_5\"]))"), "{text}");
+    assert!(text.contains("as(\"a\") [path: labels(a)]"), "{text}");
+    let header = text
+        .lines()
+        .find(|l| l.starts_with("Step"))
+        .expect("header");
+    let call_end = header.find("Call").expect("Call") + "Call".len();
+    assert!(call_end > 61 + 4, "wider than the 60 floor: {text}");
+    // Every step row ends its `Call` cell under the header's `Call`.
+    let rows: Vec<&str> = text
+        .lines()
+        .skip_while(|l| !l.starts_with("====="))
+        .skip(1)
+        .take(5)
+        .collect();
+    assert_eq!(rows.len(), 5, "{text}");
+    for row in rows {
+        assert_eq!(row.as_bytes()[call_end - 1], b'1', "{row:?} in {text}");
+        assert_eq!(row.as_bytes()[call_end - 5], b' ', "{row:?} in {text}");
+    }
+}
+
+/// Beyond 160 characters the step text is still cut with `...`.
+#[cfg(feature = "script")]
+#[test]
+fn test_profile_step_column_caps_at_160() {
+    let text = profile_within(16, "");
+    let has_row = text
+        .lines()
+        .find(|l| l.starts_with("has(\"name\""))
+        .expect("has row");
+    assert_eq!(has_row.find("...").map(|i| i + 3), Some(160), "{text}");
+    let header = text
+        .lines()
+        .find(|l| l.starts_with("Step"))
+        .expect("header");
+    assert_eq!(header.find("Call"), Some(161), "{text}");
+}
