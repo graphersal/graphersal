@@ -636,6 +636,7 @@ fn segment_shapes(q: &BoundQuery) -> Vec<String> {
             Segment::Match(clauses) => format!("match{clauses:?}"),
             Segment::Optional(clause) => format!("optional{clause}"),
             Segment::With(with) => format!("with{}", with.columns.len()),
+            Segment::For(clause) => format!("for{}", 1 + usize::from(clause.ordinal.is_some())),
         })
         .collect()
 }
@@ -1079,10 +1080,322 @@ fn binding_never_panics_on_stage_1b_queries() {
     }
 }
 
-// ----- stage 2a: parsed, not bound yet -----
+// ----- stage 2a: FOR / UNWIND and queries without MATCH -----
+
+/// The `FOR` segment at `index`.
+fn for_segment(q: &BoundQuery, index: usize) -> &BoundFor {
+    match q.segments.get(index) {
+        Some(Segment::For(clause)) => clause,
+        other => panic!("segment {index} is not a FOR: {other:?}"),
+    }
+}
 
 #[test]
-fn for_and_queries_without_match_are_not_yet_bound() {
+fn for_and_unwind_bind_a_value_column_and_cut_the_pipeline() {
+    let q = ok("FOR x IN [1, 2] RETURN x");
+    assert!(q.unit);
+    assert_eq!(segment_shapes(&q), ["for1"]);
+    let x = q.binding(id(&q, "x")).unwrap();
+    assert_eq!(x.kind, BindingKind::Value);
+    assert_eq!(
+        x.column,
+        Some(ColumnRef {
+            segment: 0,
+            column: FOR_ITEM
+        })
+    );
+    assert_eq!(x.key.as_deref(), Some("x"));
+    let clause = for_segment(&q, 0);
+    assert_eq!(
+        (clause.variable, clause.ordinal, clause.unwind),
+        (x.id, None, false)
+    );
+    assert!(clause.bindings.is_empty());
+    assert_eq!(column_names(&q), ["x"]);
+    assert_eq!(q.columns[0].variable, Some(x.id));
+
+    // UNWIND is the same clause.
+    let q = ok("UNWIND $ids AS id RETURN id");
+    assert!(for_segment(&q, 0).unwind);
+    assert_eq!(names(&q, &[for_segment(&q, 0).variable]), ["id"]);
+    assert_eq!(q.parameters.len(), 1);
+
+    // After MATCH: a cut between two plain segments; the list reads the row before the FOR.
+    let q = ok("MATCH (a) FOR x IN a.tags MATCH (a)-->(b) WHERE b.k = x RETURN a, b, x");
+    assert!(!q.unit);
+    assert_eq!(segment_shapes(&q), ["match[0]", "for1", "match[1]"]);
+    let clause = for_segment(&q, 1);
+    assert_eq!(names(&q, &clause.bindings), ["a"]);
+    assert_eq!(show(&clause.list), "a.tags");
+    assert!(q.binding(id(&q, "a")).unwrap().read);
+    let x = q.binding(id(&q, "x")).unwrap();
+    assert_eq!((x.segment, x.clause), (1, 0));
+    // A FOR column is never a local binding: the WHERE over it is cross.
+    let conjunct = q.conjuncts.last().unwrap();
+    assert_eq!(names(&q, &conjunct.bindings), ["x", "b"]);
+    assert_eq!(conjunct.segment, 2);
+    assert!(q.cross.contains(&(q.conjuncts.len() - 1)));
+    assert!(x.read);
+
+    // A FILTER after a FOR opens a plain segment of its own.
+    let q = ok("MATCH (a) UNWIND [1, 2] AS x FILTER x > 1 RETURN x");
+    assert_eq!(segment_shapes(&q), ["match[0]", "for1", "match[]"]);
+    assert_eq!(q.conjuncts[0].segment, 2);
+    assert_eq!(q.cross, [0]);
+
+    // LET / WITH names in the list are substituted; FOR after FOR.
+    let q = ok("MATCH (a) LET l = [a.x, 1] FOR x IN l FOR y IN [x, x] RETURN y");
+    assert_eq!(segment_shapes(&q), ["match[0]", "for1", "for1"]);
+    assert_eq!(names(&q, &for_segment(&q, 1).bindings), ["a"]);
+    assert_eq!(names(&q, &for_segment(&q, 2).bindings), ["x"]);
+}
+
+#[test]
+fn for_ordinals_are_a_second_column() {
+    for (query, kind) in [
+        (
+            "FOR x IN [5, 6] WITH ORDINALITY i RETURN *",
+            OrdinalKind::Ordinality,
+        ),
+        (
+            "FOR x IN [5, 6] WITH OFFSET i RETURN *",
+            OrdinalKind::Offset,
+        ),
+    ] {
+        let q = ok(query);
+        assert_eq!(segment_shapes(&q), ["for2"], "{query}");
+        let i = id(&q, "i");
+        assert_eq!(for_segment(&q, 0).ordinal, Some((kind, i)), "{query}");
+        let binding = q.binding(i).unwrap();
+        assert_eq!(binding.kind, BindingKind::Value);
+        assert_eq!(
+            binding.column,
+            Some(ColumnRef {
+                segment: 0,
+                column: FOR_ORDINAL
+            })
+        );
+        // `RETURN *` lists the item, then the ordinal.
+        assert_eq!(column_names(&q), ["x", "i"], "{query}");
+    }
+    // A position variable named `ordinality` is an ordinary name.
+    let q = ok("FOR x IN [1] WITH ORDINALITY ordinality RETURN ordinality");
+    assert_eq!(column_names(&q), ["ordinality"]);
+}
+
+#[test]
+fn for_names_must_be_new() {
+    for (query, text, keyword) in [
+        ("MATCH (a) FOR a IN [1] RETURN a", "a", "FOR"),
+        ("MATCH (a) UNWIND [1] AS a RETURN a", "a", "UNWIND"),
+        ("LET x = 1 FOR x IN [1] RETURN x", "x", "FOR"),
+        ("FOR x IN [1] FOR x IN [2] RETURN x", "x", "FOR"),
+        (
+            "MATCH (a) FOR x IN [1] WITH ORDINALITY a RETURN a",
+            "a",
+            "FOR",
+        ),
+        (
+            "FOR x IN [1] WITH OFFSET i FOR i IN [2] RETURN i",
+            "i",
+            "FOR",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            format!("the variable `{text}` is already defined; {keyword} defines a new variable"),
+            "{query}"
+        );
+        let alternative = f.alternative.unwrap_or_default();
+        let example = if keyword == "UNWIND" {
+            format!("UNWIND <list> AS {text}2")
+        } else {
+            format!("FOR {text}2 IN <list>")
+        };
+        assert!(alternative.contains(&example), "{query}: {alternative}");
+    }
+    // The item and its position need two names.
+    for (query, word) in [
+        ("FOR x IN [1] WITH ORDINALITY x RETURN x", "ORDINALITY"),
+        ("FOR x IN [1] WITH OFFSET x RETURN x", "OFFSET"),
+    ] {
+        let f = fail(query);
+        assert_eq!((f.gqlstatus.as_str(), f.text.as_str()), ("42002", "x"));
+        assert_eq!(
+            f.message,
+            format!(
+                "`x` names both the item and its position; WITH {word} defines a second variable"
+            )
+        );
+        assert!(
+            f.alternative
+                .unwrap_or_default()
+                .contains(&format!("FOR x IN ... WITH {word} x_index")),
+            "{query}"
+        );
+    }
+    // The list reads the scope before the FOR.
+    let f = fail("FOR x IN [x] RETURN x");
+    assert_eq!(
+        (f.text.as_str(), f.message.as_str()),
+        ("x", "the variable `x` is not defined")
+    );
+    // A name dropped by WITH and bound again by FOR is a new binding with its own key (C14).
+    let q = ok("MATCH (x) WITH 1 AS one FOR x IN [one] RETURN x");
+    let item = for_segment(&q, 1).variable;
+    let binding = q.binding(item).unwrap();
+    assert_ne!(binding.key.as_deref(), Some("x"));
+    assert_eq!(binding.name.as_ref().map(|n| n.name.as_str()), Some("x"));
+}
+
+#[test]
+fn an_aggregate_in_the_for_list_is_refused() {
+    for (query, place) in [
+        ("MATCH (a) FOR x IN collect(a) RETURN x", "in FOR"),
+        ("MATCH (a) UNWIND collect(a.x) AS x RETURN x", "in UNWIND"),
+    ] {
+        let f = fail(query);
+        assert_eq!(
+            (f.gqlstatus.as_str(), f.text.as_str()),
+            ("42002", "collect")
+        );
+        assert_eq!(
+            f.message,
+            format!("the aggregate function collect() cannot be used {place}")
+        );
+        assert!(
+            f.alternative
+                .unwrap_or_default()
+                .contains("AS fs FOR x IN fs"),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn a_for_variable_written_as_a_node_or_edge_takes_that_kind() {
+    // E3: a node of a later pattern; a label there is a conjunct of that segment.
+    let q = ok("MATCH p = (a)-->(b) FOR n IN nodes(p) MATCH (n:person)-->(m) RETURN n, m");
+    assert_eq!(segment_shapes(&q), ["match[0]", "for1", "match[1]"]);
+    let n = q.binding(id(&q, "n")).unwrap();
+    assert_eq!(n.kind, BindingKind::Node);
+    assert_eq!(n.segment, 1);
+    assert!(n.joined() && n.labels.is_empty());
+    assert!(
+        q.conjuncts
+            .iter()
+            .any(|c| c.origin == ConjunctOrigin::Label && c.bindings == [n.id] && c.segment == 2)
+    );
+    // An edge; then the same kind again joins.
+    let q = ok("FOR e IN $edges MATCH (a)-[e]->(b) MATCH (c)-[e]->(d) RETURN a, e");
+    let e = q.binding(id(&q, "e")).unwrap();
+    assert_eq!((e.kind, e.occurrences.len()), (BindingKind::Edge, 3));
+    // A projecting WITH keeps the binding, so it can still take a kind after it.
+    let q = ok("FOR n IN $l WITH n MATCH (n)-->(m) RETURN m");
+    assert_eq!(q.binding(id(&q, "n")).unwrap().kind, BindingKind::Node);
+    // Once a node, never an edge.
+    let f = fail("FOR n IN $l MATCH (n) MATCH ()-[n]->() RETURN n");
+    assert!(
+        f.message
+            .contains("used as an edge here but is already bound to a node"),
+        "{}",
+        f.message
+    );
+    // The edge of a quantified edge is always a new group variable.
+    let f = fail("FOR e IN $l MATCH (a)-[e]->{1,2}(b) RETURN a");
+    assert!(f.message.contains("group variable"), "{}", f.message);
+    // A materializing WITH column of a value stays a value.
+    let f = fail("FOR n IN $l WITH n LIMIT 1 MATCH (n) RETURN n");
+    assert!(f.message.contains("holds a value"), "{}", f.message);
+    // The ordinal is a number, never an element.
+    for query in [
+        "FOR x IN [1] WITH ORDINALITY i MATCH (i) RETURN i",
+        "FOR x IN [1] WITH OFFSET i MATCH ()-[i]->() RETURN i",
+    ] {
+        let f = fail(query);
+        assert_eq!(
+            (f.gqlstatus.as_str(), f.text.as_str()),
+            ("42002", "i"),
+            "{query}"
+        );
+        assert!(
+            f.message
+                .contains("is the position of a FOR item (a number)"),
+            "{query}: {}",
+            f.message
+        );
+    }
+}
+
+#[test]
+fn queries_without_match_start_from_a_unit_row() {
+    for (query, shapes, columns) in [
+        ("RETURN 1 + 2 AS x", &[][..], &["x"][..]),
+        ("RETURN $a AS a, 'k'", &[], &["a", "'k'"]),
+        ("LET x = 1 RETURN x", &[], &["x"]),
+        ("WITH 1 AS x RETURN x", &[], &["x"]),
+        ("WITH 1 AS x WHERE x > 0 RETURN x", &["match[]"], &["x"]),
+        (
+            "WITH 1 AS x ORDER BY x LIMIT 1 RETURN x",
+            &["with1"],
+            &["x"],
+        ),
+        ("WITH count(*) AS n RETURN n", &["with1"], &["n"]),
+        ("LET x = 1 MATCH (a {v: x}) RETURN a", &["match[0]"], &["a"]),
+        (
+            "FOR x IN [1] MATCH (a) RETURN *",
+            &["for1", "match[0]"],
+            &["x", "a"],
+        ),
+    ] {
+        let q = ok(query);
+        assert!(q.unit, "{query}");
+        assert_eq!(segment_shapes(&q), shapes, "{query}");
+        assert_eq!(column_names(&q), columns, "{query}");
+        assert!(
+            q.bindings
+                .iter()
+                .all(|b| b.name.is_some() || b.kind == BindingKind::Node)
+        );
+    }
+    for query in ["MATCH (a) RETURN a", "OPTIONAL MATCH (a) RETURN a"] {
+        assert!(!ok(query).unit, "{query}");
+    }
+    // `RETURN *` still needs a named variable.
+    for query in ["RETURN *", "LET x = 1 WITH 2 AS y RETURN *"] {
+        let parsed = parse(query).unwrap();
+        let result = bind(&parsed);
+        if query == "RETURN *" {
+            let f = failure(query, result);
+            assert!(
+                f.message.contains("needs at least one named variable"),
+                "{}",
+                f.message
+            );
+        } else {
+            assert_eq!(column_names(&result.unwrap()), ["y"]);
+        }
+    }
+    // A name of a later MATCH is named as such before the first MATCH too.
+    let f = fail("LET x = y MATCH (y) RETURN x");
+    assert!(
+        f.message.contains("bound by a later MATCH clause"),
+        "{}",
+        f.message
+    );
+    let f = fail("FOR x IN [z] MATCH (a) MATCH (z) RETURN x");
+    assert!(
+        f.message.contains("bound by a later MATCH clause"),
+        "{}",
+        f.message
+    );
+}
+
+#[test]
+fn for_and_queries_without_match_are_refused_after_binding_until_planned() {
     for (query, text, what) in [
         ("RETURN 1", "RETURN", "a query without MATCH"),
         ("RETURN $a AS a", "RETURN", "a query without MATCH"),
@@ -1107,7 +1420,8 @@ fn for_and_queries_without_match_are_not_yet_bound() {
         ),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind(&parsed));
+        let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
+        let f = failure(query, refuse_unplanned(&parsed, &bound).map(|()| bound));
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
         assert_eq!(f.gqlstatus, "0A000", "{query}");
         assert_eq!(f.text, text, "{query}");
@@ -1121,5 +1435,58 @@ fn for_and_queries_without_match_are_not_yet_bound() {
             alternative.contains("inject(") || alternative.contains("unfold()"),
             "{query}: {alternative}"
         );
+    }
+    for query in [
+        "MATCH (a) RETURN a",
+        "OPTIONAL MATCH (a) LET x = 1 WITH a, x LIMIT 1 RETURN a",
+    ] {
+        let parsed = parse(query).unwrap();
+        let bound = bind(&parsed).unwrap();
+        assert!(refuse_unplanned(&parsed, &bound).is_ok(), "{query}");
+    }
+}
+
+#[test]
+fn binding_never_panics_on_stage_2a_queries() {
+    let pieces = [
+        "",
+        "MATCH (a)",
+        "MATCH (a)-[e]->(b)",
+        "OPTIONAL MATCH (a)",
+        "LET x = 1",
+        "WITH 1 AS x",
+        "MATCH p = (a)-->(b)",
+    ];
+    let fors = [
+        "FOR x IN [1, 2]",
+        "FOR a IN [1]",
+        "UNWIND $p AS e",
+        "FOR x IN a.l WITH ORDINALITY i",
+        "FOR x IN [x] WITH OFFSET x",
+        "FOR n IN nodes(p)",
+        "UNWIND collect(a) AS y",
+    ];
+    let tails = [
+        "RETURN *",
+        "RETURN x",
+        "MATCH (x)-->(c) RETURN c",
+        "MATCH (i) RETURN i",
+        "MATCH ()-[e]->() RETURN e",
+        "MATCH (n)-[x]->{1,2}() RETURN n",
+        "WITH x, count(*) AS c RETURN c",
+        "FOR y IN [x] RETURN y",
+    ];
+    for p in pieces {
+        for f in fors {
+            for t in tails {
+                let src = format!("{p} {f} {t}");
+                if let Ok(parsed) = parse(&src) {
+                    if let Ok(bound) = bind(&parsed) {
+                        let _ = refuse_unplanned(&parsed, &bound);
+                    }
+                    let _ = bind_with_parameters(&parsed, ["p"]);
+                }
+            }
+        }
     }
 }

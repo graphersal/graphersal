@@ -295,6 +295,8 @@ impl<'q> Planner<'q> {
                     stages.push(Stage::Materialize(self.materialize(index, with)));
                     current = None;
                 }
+                // Refused before planning (`bind::refuse_unplanned`) until 2a.T4 plans it.
+                Segment::For(_) => current = None,
             }
         }
         self.mark_static();

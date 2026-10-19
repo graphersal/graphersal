@@ -26,8 +26,20 @@
 //!   change shape: the non-optional `MATCH` clauses between two cuts form one
 //!   [`Segment::Match`] (planned together, as in stage 1a); each `OPTIONAL MATCH` is a
 //!   [`Segment::Optional`]; each materializing `WITH` (one with an aggregate, `DISTINCT`,
-//!   `ORDER BY`, `OFFSET` / `SKIP` or `LIMIT`, decision C2) is a [`Segment::With`]. A stage 1a
-//!   query is exactly one `Segment::Match` holding every clause.
+//!   `ORDER BY`, `OFFSET` / `SKIP` or `LIMIT`, decision C2) is a [`Segment::With`]; each `FOR`
+//!   / `UNWIND` is a [`Segment::For`]. A stage 1a query is exactly one `Segment::Match` holding
+//!   every clause.
+//! - **`FOR` / `UNWIND` (stage 2a).** `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]` (Cypher
+//!   `UNWIND list AS x`) is a cut: its variable and its ordinal are new bindings of kind
+//!   [`BindingKind::Value`] standing for the columns `0` and `1` of the [`Segment::For`]
+//!   ([`Binding::column`]), like the columns of a materializing `WITH`. A `FOR` variable written
+//!   later as a node or edge variable (`FOR n IN nodes(p) MATCH (n)-->(m)`) takes that kind
+//!   (design E3: the lowering continues the pattern from it, a value of another kind gives no
+//!   row); the ordinal is always a number and never an element.
+//! - **Unit row (design M1, E4).** A query may start with `FOR`, `LET`, `WITH` or `RETURN`
+//!   ([`BoundQuery::unit`]): it starts from one row that holds no binding, so its first
+//!   expressions read only constants and parameters (`RETURN *` with no variable in scope is
+//!   still an error).
 //! - **Substitutions (decision C1).** `LET x = expr` and a `WITH` that only projects are not
 //!   operations: the new name stands for its expression, and every expression that reads it is
 //!   stored with the expression substituted (a name standing for a node or edge variable becomes
@@ -72,14 +84,16 @@
 //! see the variables in scope before the clause and every variable of the clause (a path
 //! variable only in the clause `WHERE`, once its pattern is complete). `LET` adds its names (its
 //! definitions read the scope before the `LET`, so one definition cannot read another of the
-//! same `LET`; redefining a name in scope is an error). `WITH` replaces the scope by its columns
+//! same `LET`; redefining a name in scope is an error). `FOR` adds its variable and its ordinal
+//! the same way (its list reads the scope before the `FOR`). `WITH` replaces the scope by its columns
 //! (`WITH *` keeps it); a dropped name written again in a later pattern is a new binding (its
 //! key is `#<id>`, decision C14). `RETURN` and its `ORDER BY` see the final scope.
 //!
 //! # Aggregates
 //!
 //! Aggregate calls stand in `RETURN` and `WITH` items only; a key of `ORDER BY` may hold one
-//! only when the whole key is a column. Refused: an aggregate in `WHERE`, `FILTER`, `LET`, a
+//! only when the whole key is a column. Refused: an aggregate in `WHERE`, `FILTER`, `LET`, the
+//! list of `FOR` / `UNWIND`, a
 //! pattern, `OFFSET` / `LIMIT`, or inside another aggregate; an aggregate item reading, outside
 //! its aggregates, anything but constants, parameters, grouping-key variables and grouping-key
 //! expressions (by their text).
@@ -92,12 +106,16 @@
 //! a repeated group variable, a property read of a group variable outside its element, a path
 //! variable read inside its own pattern, `RETURN *` / `WITH *` without a named variable, a
 //! duplicate column name, an unaliased `WITH` expression, a redefined or twice-defined `LET`
-//! name, a misplaced aggregate, a non-grouped read beside an aggregate, an `ORDER BY` key reading
-//! a dropped variable after `DISTINCT` / aggregation, a duplicate key in a map, a parameter that
-//! was not supplied. `22G02` for a negative `OFFSET` / `LIMIT` literal, `22G03` for one that is
-//! not an integer. Kind `NotYet` (`0A000`) for a condition inside a quantified edge that reads
-//! another variable, and (until stage 2a binds them) for `FOR` / `UNWIND` and a query that
-//! starts without `MATCH`, which the parser accepts since stage 2a.
+//! name, a `FOR` variable or ordinal already in scope (or both with one name), a `FOR` ordinal
+//! used as a node or edge, a misplaced aggregate, a non-grouped read beside an aggregate, an
+//! `ORDER BY` key reading a dropped variable after `DISTINCT` / aggregation, a duplicate key in a
+//! map, a parameter that was not supplied. `22G02` for a negative `OFFSET` / `LIMIT` literal,
+//! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
+//! quantified edge that reads another variable.
+//!
+//! [`refuse_unplanned`] is the temporary post-bind guard (as in stage 1b): until the planner and
+//! the lowering handle them (2a.T4) it refuses, after binding, a `FOR` / `UNWIND` and a query
+//! that starts without `MATCH`, with kind `NotYet` and the messages they had before stage 2a.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -116,9 +134,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, GroupBy, Identifier,
-    LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy,
-    Quantifier, Query, ReturnItem, SortDirection, Stage, WithClause,
+    CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy,
+    Identifier, LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern,
+    OrderBy, OrdinalKind, Quantifier, Query, ReturnItem, SortDirection, Stage, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -131,24 +149,34 @@ pub(crate) struct BindingId(pub(crate) usize);
 /// What a binding holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BindingKind {
-    /// A node pattern `(..)`, or a `WITH` column holding a node variable.
+    /// A node pattern `(..)`, a `WITH` column holding a node variable, or a `FOR` variable
+    /// written later as a node.
     Node,
-    /// An edge pattern `-[..]->`, or a `WITH` column holding an edge variable.
+    /// An edge pattern `-[..]->`, a `WITH` column holding an edge variable, or a `FOR` variable
+    /// written later as an edge.
     Edge,
     /// A path variable `p = ...`.
     Path,
-    /// A column of a materializing `WITH` that is not a node or edge variable.
+    /// A column of a materializing `WITH` that is not a node or edge variable, a `FOR` variable
+    /// (until written as a node or edge) or a `FOR` ordinal.
     Value,
 }
 
-/// The column of a materializing `WITH` a binding stands for.
+/// The column of a materializing `WITH` or of a `FOR` a binding stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColumnRef {
-    /// The [`Segment::With`] (index into [`BoundQuery::segments`]).
+    /// The [`Segment::With`] or [`Segment::For`] (index into [`BoundQuery::segments`]).
     pub(crate) segment: usize,
-    /// The column (index into [`BoundWith::columns`]).
+    /// The column: an index into [`BoundWith::columns`]; of a `FOR`, [`FOR_ITEM`] or
+    /// [`FOR_ORDINAL`].
     pub(crate) column: usize,
 }
+
+/// The column of a [`Segment::For`] holding the item.
+pub(crate) const FOR_ITEM: usize = 0;
+
+/// The column of a [`Segment::For`] holding the ordinal (`WITH ORDINALITY` / `WITH OFFSET`).
+pub(crate) const FOR_ORDINAL: usize = 1;
 
 /// One variable of the query (named or anonymous).
 #[derive(Debug, Clone, PartialEq)]
@@ -174,14 +202,14 @@ pub(crate) struct Binding {
     pub(crate) predicates: Vec<usize>,
     /// Read by an expression away from its own position (module docs, D11).
     pub(crate) read: bool,
-    /// The `MATCH` clause of its first appearance (for a `WITH` column: the last clause before
-    /// the `WITH`).
+    /// The `MATCH` clause of its first appearance (for a `WITH` / `FOR` column: the last clause
+    /// before it, `0` when none came before).
     pub(crate) clause: usize,
     /// The segment of its first appearance (index into [`BoundQuery::segments`]).
     pub(crate) segment: usize,
     /// The edge variable of a quantified edge: a group variable (module docs).
     pub(crate) group: bool,
-    /// The materializing `WITH` column it stands for.
+    /// The materializing `WITH` or `FOR` column it stands for.
     pub(crate) column: Option<ColumnRef>,
 }
 
@@ -253,6 +281,31 @@ pub(crate) enum Segment {
     Optional(usize),
     /// A materializing `WITH`; the conjuncts of this segment are its `WHERE`, over its columns.
     With(Box<BoundWith>),
+    /// `FOR` / `UNWIND`: one row per item of its list (module docs). It has no conjuncts of its
+    /// own.
+    For(Box<BoundFor>),
+}
+
+/// A bound `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]` (Cypher `UNWIND list AS x`).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "planned and lowered from 2a.T4 on")
+)]
+pub(crate) struct BoundFor {
+    /// The binding of the item (column [`FOR_ITEM`]).
+    pub(crate) variable: BindingId,
+    /// The list (`LET` / `WITH` names substituted), read on the row before the `FOR`.
+    pub(crate) list: Expr,
+    /// The bindings the list reads, sorted, without duplicates.
+    pub(crate) bindings: Vec<BindingId>,
+    /// `WITH ORDINALITY i` / `WITH OFFSET i`: the base and the binding of the position (column
+    /// [`FOR_ORDINAL`]).
+    pub(crate) ordinal: Option<(OrdinalKind, BindingId)>,
+    /// Written as Cypher `UNWIND` (for messages).
+    pub(crate) unwind: bool,
+    /// The clause.
+    pub(crate) span: Span,
 }
 
 /// A materializing `WITH` (decision C2).
@@ -413,6 +466,9 @@ pub(crate) struct BoundQuery {
     pub(crate) limit: Option<Count>,
     /// Every parameter reference in text order.
     pub(crate) parameters: Vec<ParameterRef>,
+    /// The query starts without `[OPTIONAL] MATCH` (with `FOR`, `LET`, `WITH` or `RETURN`): it
+    /// starts from one unit row that holds no binding (design M1).
+    pub(crate) unit: bool,
 }
 
 impl BoundQuery {
@@ -526,9 +582,41 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
-/// The "not yet" error of a query that starts without `MATCH` (parsed since stage 2a, bound
-/// from 2a.T2 on); `None` when it starts with `[OPTIONAL] MATCH` or `FOR` (refused by its own
-/// arm).
+/// Refuses, after binding, what the planner and the lowering do not handle yet (module docs,
+/// "Errors"): a query that starts without `MATCH`, then the first `FOR` / `UNWIND` (kind
+/// `NotYet`, the messages these had before stage 2a). Called by the lowering between binding and
+/// planning; it goes away with 2a.T4.
+pub(crate) fn refuse_unplanned(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
+    unplanned(query, bound).map_err(|e| e.into_error(&query.source))
+}
+
+fn unplanned(query: &Query, bound: &BoundQuery) -> BResult<()> {
+    if bound.unit
+        && let Some(e) = leading_not_yet(query)
+    {
+        return Err(e);
+    }
+    let first_for = bound.segments.iter().find_map(|segment| match segment {
+        Segment::For(bound) => Some(bound),
+        Segment::Match(_) | Segment::Optional(_) | Segment::With(_) => None,
+    });
+    if let Some(clause) = first_for {
+        let (keyword, len) = if clause.unwind {
+            ("UNWIND", 6)
+        } else {
+            ("FOR", 3)
+        };
+        return Err(not_yet(
+            keyword_span(clause.span, len),
+            keyword,
+            "Gremlin unfold(), for example g.inject([1, 2, 3]).unfold()",
+        ));
+    }
+    Ok(())
+}
+
+/// The "not yet" error of a query that starts without `MATCH`; `None` when it starts with
+/// `[OPTIONAL] MATCH` or `FOR` (refused as a `FOR`).
 fn leading_not_yet(query: &Query) -> Option<Box<GqlErrorBuilder>> {
     const ALTERNATIVE: &str =
         "start with a MATCH clause, or use Gremlin inject(), for example g.inject(1)";
@@ -768,8 +856,10 @@ struct Binder<'q> {
     segments: Vec<Segment>,
     /// The `Segment::Match` later plain clauses and filters join, while no cut came after it.
     open: Option<usize>,
-    /// The last `MATCH` clause bound.
+    /// The last `MATCH` clause bound (`0` before the first).
     clause: usize,
+    /// How many `MATCH` clauses are bound.
+    bound_clauses: usize,
     /// Expression nodes left to substitute.
     budget: usize,
 }
@@ -788,6 +878,7 @@ impl<'q> Binder<'q> {
             segments: Vec::new(),
             open: None,
             clause: 0,
+            bound_clauses: 0,
             budget: MAX_SUBSTITUTED_NODES,
         }
     }
@@ -805,9 +896,7 @@ impl<'q> Binder<'q> {
             }
         }
         let query = self.query;
-        if let Some(e) = leading_not_yet(query) {
-            return Err(e);
-        }
+        let unit = !matches!(query.stages.first(), Some(Stage::Match(_)));
         let mut matches = Vec::with_capacity(query.matches.len());
         for stage in &query.stages {
             match stage {
@@ -820,6 +909,7 @@ impl<'q> Binder<'q> {
                             semantic(query.span, "internal error: MATCH stages out of order")
                         })?;
                     self.clause = *index;
+                    self.bound_clauses = index.saturating_add(1);
                     let segment = if m.optional {
                         self.open = None;
                         self.segments.push(Segment::Optional(*index));
@@ -846,18 +936,7 @@ impl<'q> Binder<'q> {
                     )?;
                 }
                 Stage::With(with) => self.with_clause(with)?,
-                Stage::For(clause) => {
-                    let (keyword, len) = if clause.unwind {
-                        ("UNWIND", 6)
-                    } else {
-                        ("FOR", 3)
-                    };
-                    return Err(not_yet(
-                        keyword_span(clause.span, len),
-                        keyword,
-                        "Gremlin unfold(), for example g.inject([1, 2, 3]).unfold()",
-                    ));
-                }
+                Stage::For(clause) => self.for_clause(clause)?,
             }
         }
         let ret = &query.ret;
@@ -893,6 +972,7 @@ impl<'q> Binder<'q> {
             offset,
             limit,
             parameters: self.parameters,
+            unit,
         })
     }
 
@@ -1172,7 +1252,19 @@ impl<'q> Binder<'q> {
                 "internal error: a binding id out of range in the binder",
             )
         })?;
-        if binding.kind != site.kind {
+        let for_column = if binding.kind == BindingKind::Value {
+            self.for_column(id)
+        } else {
+            None
+        };
+        if for_column == Some(FOR_ORDINAL) {
+            return Err(ordinal_as_element(var, site.kind));
+        }
+        // A FOR item written as a node or edge takes that kind (design E3); as the edge of a
+        // quantified edge it is refused below (a group variable is always a new name).
+        let retype = for_column == Some(FOR_ITEM)
+            && matches!(site.kind, BindingKind::Node | BindingKind::Edge);
+        if binding.kind != site.kind && !retype {
             return Err(kind_conflict(var, site.kind, binding.kind));
         }
         if binding.group || site.group {
@@ -1191,6 +1283,9 @@ impl<'q> Binder<'q> {
         let same_segment = binding.segment == site.segment;
         let key = binding.key.clone().unwrap_or_default();
         if let Some(binding) = self.bindings.get_mut(id.0) {
+            if retype {
+                binding.kind = site.kind;
+            }
             binding.occurrences.push(span);
             if same_segment && let Some(labels) = labels {
                 binding.labels.push(labels.clone());
@@ -1371,6 +1466,93 @@ impl<'q> Binder<'q> {
             self.scope.insert(name, symbol);
         }
         Ok(())
+    }
+
+    /// `FOR x IN list [WITH ORDINALITY i | WITH OFFSET i]` / `UNWIND list AS x` (module docs):
+    /// a cut whose variable and ordinal enter the scope as the columns of a [`Segment::For`].
+    fn for_clause(&mut self, clause: &ForClause) -> BResult<()> {
+        let keyword = if clause.unwind { "UNWIND" } else { "FOR" };
+        let place = if clause.unwind { "in UNWIND" } else { "in FOR" };
+        // The list reads the scope before the FOR.
+        let list = self.expression(Ctx::refusing(place), &clause.list)?;
+        let var = &clause.variable;
+        self.check_new_for_name(var, keyword, clause.unwind)?;
+        if let Some(ordinal) = &clause.ordinal {
+            let name = &ordinal.variable;
+            if name.name == var.name {
+                let spelled = ordinal_word(ordinal.kind);
+                return Err(semantic(
+                    name.span,
+                    format!(
+                        "`{}` names both the item and its position; WITH {spelled} defines a \
+                         second variable",
+                        name.name
+                    ),
+                )
+                .alternative(format!(
+                    "give the position its own name, as in FOR {} IN ... WITH {spelled} {}_index",
+                    var.name, var.name
+                ))
+                .topic(GqlHelpTopic::Names)
+                .into());
+            }
+            self.check_new_for_name(name, keyword, clause.unwind)?;
+        }
+        self.mark_read(&list.refs.bindings);
+        self.open = None;
+        let segment = self.segments.len();
+        let column = |this: &mut Self, name: &Identifier, column: usize| {
+            let site = Site {
+                clause: this.clause,
+                segment,
+                kind: BindingKind::Value,
+                group: false,
+            };
+            let reference = ColumnRef { segment, column };
+            this.new_binding(site, Some(name), name.span, None, Some(reference))
+        };
+        let variable = column(self, var, FOR_ITEM);
+        let ordinal = clause
+            .ordinal
+            .as_ref()
+            .map(|o| (o.kind, column(self, &o.variable, FOR_ORDINAL)));
+        self.segments.push(Segment::For(Box::new(BoundFor {
+            variable,
+            list: list.expr,
+            bindings: list.refs.bindings,
+            ordinal,
+            unwind: clause.unwind,
+            span: clause.span,
+        })));
+        Ok(())
+    }
+
+    /// A `FOR` variable or ordinal must be a new name (42002 like `LET`).
+    fn check_new_for_name(&self, var: &Identifier, keyword: &str, unwind: bool) -> BResult<()> {
+        if self.scope.get(&var.name).is_none() {
+            return Ok(());
+        }
+        let example = if unwind {
+            format!("UNWIND <list> AS {}2", var.name)
+        } else {
+            format!("FOR {}2 IN <list>", var.name)
+        };
+        Err(semantic(
+            var.span,
+            format!(
+                "the variable `{}` is already defined; {keyword} defines a new variable",
+                var.name
+            ),
+        )
+        .alternative(format!("choose another name, as in {example}"))
+        .topic(GqlHelpTopic::Scope)
+        .into())
+    }
+
+    /// The column of a [`Segment::For`] the binding `id` stands for.
+    fn for_column(&self, id: BindingId) -> Option<usize> {
+        let column = self.bindings.get(id.0)?.column?;
+        matches!(self.segments.get(column.segment), Some(Segment::For(_))).then_some(column.column)
     }
 
     /// What a name defined as `written` stands for: the binding of a bare name for one, else the
@@ -1701,7 +1883,7 @@ impl<'q> Binder<'q> {
         let later = self
             .query
             .matches
-            .get(self.clause.saturating_add(1)..)
+            .get(self.bound_clauses..)
             .unwrap_or(&[])
             .iter()
             .any(|m| declares(m, name));
@@ -2476,6 +2658,33 @@ fn kind_conflict(var: &Identifier, here: BindingKind, there: BindingKind) -> Box
     Box::new(semantic(var.span, message).topic(GqlHelpTopic::PatternVariable))
 }
 
+/// `ORDINALITY` / `OFFSET` as written.
+fn ordinal_word(kind: OrdinalKind) -> &'static str {
+    match kind {
+        OrdinalKind::Ordinality => "ORDINALITY",
+        OrdinalKind::Offset => "OFFSET",
+    }
+}
+
+/// The error of a `FOR` ordinal written as a node or edge variable.
+fn ordinal_as_element(var: &Identifier, here: BindingKind) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "the variable `{name}` is the position of a FOR item (a number), not a {}",
+                kind_word(here)
+            ),
+        )
+        .alternative(format!(
+            "give the pattern element its own name, as in ({name}2), and compare the position \
+             in WHERE"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
 /// The error of an aggregate call where none may stand.
 fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
     let f = &name.name;
@@ -2483,6 +2692,11 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
         format!(
             "aggregate in a WITH first and aggregate its column in RETURN, as in \
              MATCH (p)-->(f) WITH p, {f}(f) AS n RETURN max(n)"
+        )
+    } else if place == "in FOR" || place == "in UNWIND" {
+        format!(
+            "aggregate in a WITH first and iterate over its column, as in \
+             MATCH (p)-->(f) WITH p, {f}(f) AS fs FOR x IN fs RETURN p, x"
         )
     } else {
         format!(

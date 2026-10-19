@@ -91,7 +91,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters,
+    SortKey, bind_with_parameters, refuse_unplanned,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -925,6 +925,7 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
+    refuse_unplanned(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -1886,7 +1887,9 @@ impl<'q> Lowering<'q> {
                     }
                     CompactString::from(label)
                 }
-                Segment::Match(_) | Segment::Optional(_) => CompactString::default(),
+                Segment::Match(_) | Segment::Optional(_) | Segment::For(_) => {
+                    CompactString::default()
+                }
             })
             .collect()
     }
