@@ -117,7 +117,7 @@ use super::ast::{
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
-use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
+use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 
 /// The index of a [`Binding`] in [`BoundQuery::bindings`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -933,6 +933,7 @@ impl<'q> Binder<'q> {
                              in a MATCH clause of its own to join on the same edge `{}`",
                             var.name
                         ))
+                        .topic(GqlHelpTopic::PatternVariable)
                         .into());
                     }
                     edges_here.push(edge);
@@ -1079,9 +1080,10 @@ impl<'q> Binder<'q> {
                 ),
             )
             .alternative(format!(
-                "give the path its own name, as in {}2 = ...",
+                "give the path its own name, as in {}2 = (a)-->(b)",
                 variable.name
             ))
+            .topic(GqlHelpTopic::PatternVariable)
             .into());
         }
         let site = Site {
@@ -1118,6 +1120,7 @@ impl<'q> Binder<'q> {
                     "give the pattern element its own name and compare it, as in ({}2 WHERE ...)",
                     var.name
                 ))
+                .topic(GqlHelpTopic::PatternVariable)
                 .into());
             }
             (_, _) => return Ok(self.new_binding(site, variable, span, labels, None)),
@@ -1141,6 +1144,7 @@ impl<'q> Binder<'q> {
                 ),
             )
             .alternative("give each edge pattern its own variable, and compare the edges in WHERE")
+            .topic(GqlHelpTopic::PatternVariable)
             .into());
         }
         let same_segment = binding.segment == site.segment;
@@ -1302,9 +1306,10 @@ impl<'q> Binder<'q> {
                     ),
                 )
                 .alternative(format!(
-                    "choose another name, as in LET {}2 = ...",
+                    "choose another name, as in LET {}2 = <value>",
                     var.name
                 ))
+                .topic(GqlHelpTopic::Scope)
                 .into());
             }
             if defined.iter().any(|(n, _)| n.name == var.name) {
@@ -1312,6 +1317,7 @@ impl<'q> Binder<'q> {
                     var.span,
                     format!("the variable `{}` is defined twice in this LET", var.name),
                 )
+                .topic(GqlHelpTopic::Names)
                 .into());
             }
             let resolved = self.expression(Ctx::refusing("in LET"), &definition.value)?;
@@ -1574,6 +1580,7 @@ impl<'q> Binder<'q> {
             "test each edge inside the edge pattern, as in -[{} WHERE {}.{} > 1]->{{1,3}}",
             var.name, var.name, key.name
         ))
+        .topic(GqlHelpTopic::PatternVariable)
         .into())
     }
 
@@ -1601,6 +1608,7 @@ impl<'q> Binder<'q> {
                         "test the path in the WHERE of the MATCH clause, as in \
                          MATCH p = (a)-->(b) WHERE path_length(p) > 0 RETURN p",
                     )
+                    .topic(GqlHelpTopic::PatternVariable)
                     .into());
                 }
                 refs.bindings.push(*id);
@@ -1632,6 +1640,7 @@ impl<'q> Binder<'q> {
             .alternative(format!(
                 "define `{name}` in a LET of its own first, as in LET {name} = ... LET y = {name} + 1"
             ))
+            .topic(GqlHelpTopic::Scope)
             .into();
         }
         if self.dropped.contains_key(name) {
@@ -1642,6 +1651,7 @@ impl<'q> Binder<'q> {
             .alternative(format!(
                 "add `{name}` to the WITH items, as in WITH ..., {name}"
             ))
+            .topic(GqlHelpTopic::Scope)
             .into();
         }
         let later = self
@@ -1961,6 +1971,7 @@ impl<'q> Binder<'q> {
                             "a WITH item that is not a variable needs a name",
                         )
                         .alternative(format!("name it with AS, as in WITH {text} AS value"))
+                        .topic(GqlHelpTopic::Scope)
                         .into());
                     }
                     Identifier {
@@ -1979,6 +1990,7 @@ impl<'q> Binder<'q> {
                 .alternative(format!(
                     "give one of the columns another name with AS, as in {clause} ... AS {n}2"
                 ))
+                .topic(GqlHelpTopic::Names)
                 .into());
             }
             columns.push(Column {
@@ -2067,6 +2079,7 @@ impl<'q> Binder<'q> {
                     "add `{name}` to the {clause} items (it then becomes a grouping key), or read \
                      it inside an aggregate, as in collect({name})"
                 ))
+                .topic(GqlHelpTopic::Grouping)
                 .into())
             }
             _ => {
@@ -2124,6 +2137,7 @@ impl<'q> Binder<'q> {
                     "compute it as a column and order by its name, as in {clause} ..., \
                      {text} AS key ORDER BY key"
                 ))
+                .topic(GqlHelpTopic::Grouping)
                 .into());
             }
             if (distinct || aggregated) && column.is_none() {
@@ -2160,6 +2174,7 @@ impl<'q> Binder<'q> {
                          {fix}",
                         if distinct { " DISTINCT" } else { "" }
                     ))
+                    .topic(GqlHelpTopic::Grouping)
                     .into());
                 }
             }
@@ -2288,7 +2303,7 @@ fn kind_conflict(var: &Identifier, here: BindingKind, there: BindingKind) -> Box
             article(here)
         ),
     };
-    Box::new(semantic(var.span, message))
+    Box::new(semantic(var.span, message).topic(GqlHelpTopic::PatternVariable))
 }
 
 /// The error of an aggregate call where none may stand.
@@ -2310,7 +2325,8 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
             name.span,
             format!("the aggregate function {f}() cannot be used {place}"),
         )
-        .alternative(alternative),
+        .alternative(alternative)
+        .topic(GqlHelpTopic::Grouping),
     )
 }
 
@@ -2388,6 +2404,7 @@ fn check_map_keys(map: &MapLiteral) -> BResult<()> {
                 entry.key.span,
                 format!("the key `{}` appears twice in this map", entry.key.name),
             )
+            .topic(GqlHelpTopic::Names)
             .into());
         }
     }

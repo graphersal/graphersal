@@ -72,6 +72,7 @@ use super::ast::{
 };
 use super::lexer::Span;
 use super::parser::{Function, FunctionKind, FunctionSpec, lookup_function};
+use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
 use crate::value::scalar::compare_scalars;
 use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
@@ -102,15 +103,24 @@ pub(crate) struct EvalError {
     pub(crate) message: String,
     /// The offending expression.
     pub(crate) span: Span,
+    /// The general advice of the error's `help()` (the kind's own by default).
+    pub(crate) topic: GqlHelpTopic,
 }
 
 impl EvalError {
-    fn new(gqlstatus: &'static str, message: impl Into<String>, span: Span) -> Self {
+    pub(crate) fn new(gqlstatus: &'static str, message: impl Into<String>, span: Span) -> Self {
         Self {
             gqlstatus,
             message: message.into(),
             span,
+            topic: GqlHelpTopic::Kind,
         }
+    }
+
+    /// The error with `topic` as the general advice of its `help()`.
+    pub(crate) fn with_topic(mut self, topic: GqlHelpTopic) -> Self {
+        self.topic = topic;
+        self
     }
 
     fn invalid_type(message: impl Into<String>, span: Span) -> Self {

@@ -105,6 +105,10 @@ const WRITE_ALTERNATIVE: &str = "gql() is read-only; use the Gremlin mutation st
                                  add_e(), property(), drop(), merge_v())";
 
 /// The alternative of the refused undirected edge forms.
+/// The clauses that may follow a clause of the pipeline, in the order the expected tokens
+/// name them.
+const NEXT_CLAUSES: [&str; 6] = ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"];
+
 const TILDE_ALTERNATIVE: &str = "edges in Graphersal are directed; use -[e]- for either direction";
 
 /// Whether a function computes a value per row or aggregates rows.
@@ -432,6 +436,23 @@ impl<'a> Parser<'a> {
         let token = self.peek();
         let span = token.span;
         let text = token.text.to_ascii_uppercase();
+        // `GROUP BY`: the grouping keys are the items without an aggregate.
+        if token.kind == TokenKind::Ident
+            && text == "GROUP"
+            && self.nth(1).text.eq_ignore_ascii_case("BY")
+        {
+            let b = err(
+                GqlErrorKind::Syntax,
+                span.to(self.nth(1).span),
+                "GROUP BY is not needed: grouping is implicit, the RETURN or WITH items without \
+                 an aggregate are the grouping keys",
+            )
+            .alternative(
+                "remove GROUP BY and list the keys as items next to the aggregates, as in \
+                 MATCH (p:person)-[:created]->(s) RETURN p.name, count(s)",
+            );
+            return Some(Box::new(b));
+        }
         let refused = |message: String, alternative: &str| {
             let mut b = err(GqlErrorKind::Refused, span, message);
             if !alternative.is_empty() {
@@ -700,15 +721,14 @@ impl<'a> Parser<'a> {
     }
 
     /// The error for a token that continues no clause of the pipeline: the tokens the last
-    /// clause and the pipeline accept, and a "did you mean" over the clause keywords.
+    /// clause accepts, then the clauses that may follow it, with a "did you mean" over them.
     fn after_stage(&self, last: Option<&Stage>, matches: &[MatchClause]) -> Box<GqlErrorBuilder> {
-        // The 1a lists stay as they were; the pipeline keywords only feed the suggestion.
-        let expected: Vec<&str> = match last {
+        let mut expected: Vec<&str> = match last {
             Some(Stage::Match(i)) => match matches.get(*i) {
                 Some(MatchClause {
                     where_clause: None, ..
-                }) => vec!["`,`", "WHERE", "MATCH", "RETURN"],
-                _ => vec!["MATCH", "RETURN"],
+                }) => vec!["`,`", "WHERE"],
+                _ => Vec::new(),
             },
             Some(Stage::With(with)) => {
                 let mut expected = Vec::new();
@@ -721,26 +741,24 @@ impl<'a> Parser<'a> {
                     if with.items.last().is_some_and(|item| item.alias.is_none()) {
                         expected.push("AS");
                     }
+                    expected.push("ORDER BY");
+                }
+                if with.offset.is_none() && with.limit.is_none() && with.where_clause.is_none() {
+                    expected.extend(["OFFSET", "SKIP"]);
+                }
+                if with.limit.is_none() && with.where_clause.is_none() {
+                    expected.push("LIMIT");
                 }
                 if with.where_clause.is_none() {
                     expected.push("WHERE");
                 }
-                expected.extend(["MATCH", "RETURN"]);
                 expected
             }
-            Some(Stage::Let(_)) => vec!["`,`", "MATCH", "RETURN"],
-            Some(Stage::Filter(_)) | None => vec!["MATCH", "RETURN"],
+            Some(Stage::Let(_)) => vec!["`,`"],
+            Some(Stage::Filter(_)) | None => Vec::new(),
         };
-        let error = self.unexpected(&expected);
-        let token = self.peek();
-        if token.kind == TokenKind::Ident
-            && suggest_keyword(token.text, &expected).is_none()
-            && let Some(suggestion) =
-                suggest_keyword(token.text, &["OPTIONAL MATCH", "WITH", "LET", "FILTER"])
-        {
-            return Box::new((*error).suggestion(suggestion));
-        }
-        error
+        expected.extend(NEXT_CLAUSES);
+        self.unexpected(&expected)
     }
 
     /// The error for `WITH`, `LET` or `FILTER` as the first clause.
@@ -1046,6 +1064,9 @@ impl<'a> Parser<'a> {
         let mut steps = Vec::new();
         while let Some(mut edge) = self.edge_pattern()? {
             self.edge_quantifier(&mut edge)?;
+            if edge.quantifier.is_none() && !self.at(&TokenKind::LParen) {
+                return Err(self.unexpected(&["`{`", "`*`", "`+`", "`(`"]));
+            }
             let node = self.node_pattern()?;
             self.check_node_quantifier()?;
             steps.push(PatternStep { edge, node });
@@ -1303,6 +1324,14 @@ impl<'a> Parser<'a> {
                 }
                 expected.extend(["`:`", "IS"]);
             }
+            // Cypher `[e:T*1..3]`: the quantifier follows the labels, inside the brackets.
+            if close == &TokenKind::RBracket
+                && quantifier.is_none()
+                && properties.is_none()
+                && where_clause.is_none()
+            {
+                expected.push("`*`");
+            }
             if properties.is_none() && where_clause.is_none() {
                 expected.push("`{`");
             }
@@ -1327,7 +1356,8 @@ impl<'a> Parser<'a> {
             return Err(self.not_yet(
                 open.to(self.peek().span),
                 "a parenthesized path pattern ((a)-->(b)){m,n}",
-                "write the path out, or use Gremlin repeat(), for example \
+                "quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; for a \
+                 longer pattern, write the path out, or use Gremlin repeat(), for example \
                  g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
             ));
         }
@@ -2054,11 +2084,21 @@ impl<'a> Parser<'a> {
                         .iter()
                         .any(|n| n.eq_ignore_ascii_case(token.text)) =>
             {
+                let alternative = if token.text.eq_ignore_ascii_case("count") {
+                    "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
+                     MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)"
+                } else if token.text.eq_ignore_ascii_case("collect") {
+                    "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
+                     as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
+                     RETURN p.name, collect_list(s.name)"
+                } else {
+                    "add the pattern to the MATCH clause, or use Gremlin where(), for example \
+                     g.v().has_label(\"person\").where(__.out(\"created\"))"
+                };
                 return Err(self.not_yet(
                     span.to(self.nth(1).span),
                     &format!("a {} {{ }} subquery", token.text.to_ascii_uppercase()),
-                    "add the pattern to the MATCH clause, or use Gremlin where(), for example \
-                     g.v().has_label(\"person\").where(__.out(\"created\"))",
+                    alternative,
                 ));
             }
             TokenKind::Ident | TokenKind::QuotedIdent(_) => ExprKind::Variable(Identifier {

@@ -24,7 +24,7 @@ Error: GQL syntax error at line 1, column 33: unexpected end of input (step #1 '
                                              ^
   expected:  an expression
   GQLSTATUS: 42001
-Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>] RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name").
+Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name") or g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n").
 ```
 
 The plan of a query that failed this way is the marker step `gql:error("<GQLSTATUS>")`, which
@@ -61,10 +61,10 @@ Error: GQL syntax error at line 1, column 18: unexpected `RETRUN` (step #1 'gql:
              ^^^^^^^^^^^^^^^^^^
   query:        MATCH (n:person) RETRUN n
                                  ^^^^^^
-  expected:     `,`, WHERE, MATCH, RETURN
+  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN
   did you mean: RETURN
   GQLSTATUS:    42001
-Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, RETURN at the marked position. ...
+Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the marked position. ...
 ```
 
 ## Errors while the query runs

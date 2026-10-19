@@ -580,7 +580,19 @@ fn expected_tokens_and_did_you_mean() {
     assert_eq!(f.suggestion.as_deref(), Some("MATCH"));
     let f = fail("MATCH (a) RETRUN a");
     assert_eq!(f.message, "unexpected `RETRUN`");
-    assert_eq!(f.expected, ["`,`", "WHERE", "MATCH", "RETURN"]);
+    assert_eq!(
+        f.expected,
+        [
+            "`,`",
+            "WHERE",
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "RETURN"
+        ]
+    );
     assert_eq!(f.suggestion.as_deref(), Some("RETURN"));
     let f = fail("MATCH (a) WHER a.x = 1 RETURN a");
     assert_eq!(f.suggestion.as_deref(), Some("WHERE"));
@@ -599,7 +611,7 @@ fn expected_tokens_and_did_you_mean() {
     assert_eq!(f.text, "RETURN");
     assert_eq!(f.expected, ["`:`", "IS", "`{`", "WHERE", "`)`"]);
     let f = fail("MATCH (a)-[e:x RETURN a");
-    assert_eq!(f.expected, ["`{`", "WHERE", "`]`"]);
+    assert_eq!(f.expected, ["`*`", "`{`", "WHERE", "`]`"]);
     let f = fail("MATCH (a)-[e]>(b) RETURN a");
     assert_eq!(f.expected, ["`->`", "`-`"]);
     let f = fail("MATCH (a) WHERE RETURN a");
@@ -1249,13 +1261,47 @@ fn pipeline_errors() {
     // Expected tokens after each kind of clause.
     let f = fail("MATCH (a) WITH a b RETURN a");
     assert_eq!(f.text, "b");
-    assert_eq!(f.expected, ["`,`", "AS", "WHERE", "MATCH", "RETURN"]);
+    assert_eq!(
+        f.expected,
+        [
+            "`,`",
+            "AS",
+            "ORDER BY",
+            "OFFSET",
+            "SKIP",
+            "LIMIT",
+            "WHERE",
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "RETURN"
+        ]
+    );
     let f = fail("MATCH (a) WITH a WHERE a.x = 1 WHERE a RETURN a");
-    assert_eq!(f.expected, ["MATCH", "RETURN"]);
+    assert_eq!(
+        f.expected,
+        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+    );
     let f = fail("MATCH (a) LET x = 1 y = 2 RETURN a");
-    assert_eq!(f.expected, ["`,`", "MATCH", "RETURN"]);
+    assert_eq!(
+        f.expected,
+        [
+            "`,`",
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "RETURN"
+        ]
+    );
     let f = fail("MATCH (a) FILTER a.x = 1 b RETURN a");
-    assert_eq!(f.expected, ["MATCH", "RETURN"]);
+    assert_eq!(
+        f.expected,
+        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+    );
     let f = fail("MATCH (a) WITH");
     assert_eq!(f.expected, ["`*`", "an expression"]);
     let f = fail("MATCH (a) WITH a");
@@ -1557,5 +1603,118 @@ fn never_panics_on_stage_1b_queries() {
                 }
             }
         }
+    }
+}
+
+// ----- stage 1b: robustness of the new grammar -----
+
+/// The stage 1b tokens and seeds (lists of their own: the 1a lists above stay as they are).
+#[test]
+fn never_panics_on_1b_tokens_and_mutated_1b_queries() {
+    const SEEDS: &[&str] = &[
+        "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)",
+        "MATCH (p) WITH DISTINCT p, count(*) AS c ORDER BY c DESC SKIP 1 LIMIT 2 WHERE c > 0 \
+         LET d = c + 1 FILTER d > 1 RETURN p, d",
+        "MATCH p = (a)-[e:knows WHERE e.w > 1]->{1,3}(b)<-[f*..2]-(c)-->+(d) RETURN p, e, \
+         path_length(p)",
+        "MATCH (a)-[e]-{,2}(b), (c)<-[:x|y]-*(d) RETURN collect_list(DISTINCT a.x), avg(b.y), \
+         sum(c.z), min(d), max(e) GROUP BY a",
+        "OPTIONAL MATCH (a) WITH a WHERE a IS NOT NULL RETURN nodes(p), relationships(p)",
+    ];
+    const TOKENS: &[&str] = &[
+        "MATCH",
+        "OPTIONAL",
+        "WITH",
+        "LET",
+        "FILTER",
+        "RETURN",
+        "GROUP",
+        "BY",
+        "DISTINCT",
+        "AS",
+        "ORDER",
+        "SKIP",
+        "LIMIT",
+        "WHERE",
+        "=",
+        ",",
+        "(a)",
+        "(b:L)",
+        "-[e]->",
+        "<-[e:T]-",
+        "-[",
+        "]-",
+        "]->",
+        "*",
+        "+",
+        "..",
+        "{",
+        "}",
+        "{1,3}",
+        "{,2}",
+        "{0}",
+        "{2,}",
+        "1",
+        "18446744073709551616",
+        "p",
+        "p =",
+        "e",
+        "count(*)",
+        "count(",
+        "sum(",
+        "avg(",
+        "collect_list(",
+        "collect(",
+        "min(",
+        "max(",
+        "path_length(",
+        "nodes(",
+        "DISTINCT a",
+        ")",
+        "a.x",
+        "$n",
+    ];
+    let mut rng = Rng(0x1B1B_5EED_0000_0001);
+    for seed in SEEDS {
+        check(seed);
+        for _ in 0..300 {
+            let mut words: Vec<&str> = seed.split(' ').collect();
+            for _ in 0..1 + rng.below(3) {
+                let at = rng.below(words.len() + 1);
+                match rng.below(3) {
+                    0 if at < words.len() => {
+                        words.remove(at);
+                    }
+                    1 if at < words.len() => words[at] = TOKENS[rng.below(TOKENS.len())],
+                    _ => words.insert(at, TOKENS[rng.below(TOKENS.len())]),
+                }
+            }
+            let separator = if rng.below(4) == 0 { "" } else { " " };
+            check(&words.join(separator));
+        }
+    }
+    for i in 0..2_000 {
+        let len = rng.below(40);
+        let mut query: Vec<&str> = (0..len).map(|_| TOKENS[rng.below(TOKENS.len())]).collect();
+        if i % 2 == 0 {
+            query.insert(0, "MATCH (n)");
+        }
+        check(&query.join(" "));
+    }
+}
+
+/// `GROUP BY` names implicit grouping wherever it stands after the items.
+#[test]
+fn group_by_is_explained() {
+    for query in [
+        "MATCH (a) RETURN a.x, count(*) GROUP BY a.x",
+        "MATCH (a) WITH a.x AS x, count(*) AS c GROUP BY x RETURN x",
+        "MATCH (a) RETURN a GROUP BY",
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, "GROUP BY", "{query}");
+        assert!(f.message.contains("grouping is implicit"), "{}", f.message);
+        assert!(f.alternative.unwrap().contains("RETURN p.name, count(s)"));
     }
 }

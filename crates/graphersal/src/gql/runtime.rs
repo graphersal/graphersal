@@ -318,6 +318,7 @@ pub(crate) fn eval_error(query: &str, error: EvalError) -> TraverserError {
     };
     GqlErrorBuilder::new(kind, error.span.start..error.span.end, error.message)
         .gqlstatus(error.gqlstatus)
+        .topic(error.topic)
         .into_error(query)
 }
 

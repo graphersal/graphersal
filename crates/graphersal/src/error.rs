@@ -4302,6 +4302,28 @@ pub struct GqlErrorContext {
     /// canonical snake_case step spelling, such as "gql() is read-only; use the Gremlin mutation
     /// steps add_v(), property(), drop() or merge_v()". `help()` leads with it.
     pub alternative: Option<String>,
+    /// Which general advice `help()` adds after the alternative (internal).
+    pub(crate) topic: GqlHelpTopic,
+}
+
+/// The general advice `help()` gives after the specific alternative of a GQL error: the kind's
+/// own by default, or one about the rule the query broke (feature `gql`, internal).
+#[cfg(feature = "gql")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum GqlHelpTopic {
+    /// The advice of the error's kind.
+    #[default]
+    Kind,
+    /// What `WITH` and `LET` keep in scope.
+    Scope,
+    /// Grouping keys of an aggregating `RETURN` / `WITH`, and the columns after it.
+    Grouping,
+    /// What a node, edge, path or group variable of a pattern names.
+    PatternVariable,
+    /// A name used twice (a column, a `LET` variable, a map key).
+    Names,
+    /// A value of the wrong kind in `sum()` / `avg()` (22G03).
+    AggregateValue,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -4331,8 +4353,8 @@ pub enum GqlErrorKind {
     /// A construct `gql()` refuses for good: every write clause (`gql()` is read-only), the
     /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL`), Cypher `id()`.
     Refused,
-    /// A construct of a later version of the GQL support, such as `OPTIONAL MATCH` or
-    /// aggregation before they land.
+    /// A construct of a later version of the GQL support, such as a parenthesized path
+    /// pattern `((a)-->(b)){1,3}`, `nodes(p)` or `UNION`.
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
@@ -4590,6 +4612,28 @@ impl TraverserError {
                 // The timeout advice rewrites the query itself, so it needs the outermost level.
                 TraverserError::Timeout { limit_ms, .. } => {
                     Some(timeout_help(*limit_ms, self.outermost_steps()))
+                }
+                // The loop of a lowered GQL quantifier: advice on the quantifier, not on its
+                // internal repeat() body.
+                #[cfg(feature = "gql")]
+                TraverserError::RepeatLimitExceeded {
+                    max_loops, body, ..
+                } if body.contains(GQL_TRAIL) => Some(gql_repeat_limit_help(
+                    *max_loops,
+                    self.innermost_failed_step().unwrap_or(body),
+                )),
+                #[cfg(feature = "gql")]
+                TraverserError::ResourceLimitExceeded {
+                    limit, max, ..
+                } if limit == "traversal.max_traversers"
+                    && self
+                        .outermost_steps()
+                        .is_some_and(|steps| steps.iter().any(|s| s.contains("gql:"))) =>
+                {
+                    Some(gql_traverser_limit_help(
+                        *max,
+                        &self.outermost_steps().unwrap_or_default(),
+                    ))
                 }
                 TraverserError::RepeatLimitExceeded {
                     max_loops,
@@ -4860,6 +4904,7 @@ impl TraverserError {
                 &context.expected,
                 context.suggestion.as_deref(),
                 context.alternative.as_deref(),
+                context.topic,
             )),
             TraverserError::Fail { .. } => Some(
                 "The query stopped on purpose: a traverser reached its fail() step. If that \
@@ -6631,11 +6676,21 @@ fn gql_help(
     expected: &[String],
     suggestion: Option<&str>,
     alternative: Option<&str>,
+    topic: GqlHelpTopic,
 ) -> String {
     let mut help = String::new();
     if let Some(alternative) = alternative {
-        help.push_str(alternative.trim_end_matches('.'));
-        help.push_str(". ");
+        // One closing full stop; an ellipsis (`= ...`) stays as written.
+        let alternative = alternative
+            .strip_suffix('.')
+            .filter(|rest| !rest.ends_with('.'))
+            .unwrap_or(alternative);
+        help.push_str(alternative);
+        help.push_str(if alternative.ends_with('.') {
+            " "
+        } else {
+            ". "
+        });
     }
     if let Some(suggestion) = suggestion {
         help.push_str(&format!("Did you mean {suggestion}? "));
@@ -6656,8 +6711,11 @@ fn gql_help(
             }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
-                 [WHERE <condition>] RETURN <items>, for example \
-                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\").",
+                 [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
+                 FILTER clauses, then RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
+                 g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
+                 AS n RETURN p.name, n\").",
             );
         }
         // Class 22 before the run: an OFFSET / LIMIT that is no non-negative integer.
@@ -6666,11 +6724,7 @@ fn gql_help(
              such a value in the parameters of gql(), for example \
              g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2}).",
         ),
-        GqlErrorKind::Semantic => help.push_str(
-            "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
-             it, for example g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), \
-             and give every $parameter a value in the parameters of gql().",
-        ),
+        GqlErrorKind::Semantic => help.push_str(gql_semantic_advice(topic)),
         GqlErrorKind::Refused if alternative.is_some() => help.push_str(
             "gql() runs read queries (MATCH ... RETURN ...); write the rest of the query as \
              Gremlin steps.",
@@ -6692,6 +6746,16 @@ fn gql_help(
             "The query nests deeper than gql() accepts. Flatten it: remove redundant \
              parentheses, and join conditions with AND / OR instead of nesting them.",
         ),
+        GqlErrorKind::Data if topic == GqlHelpTopic::AggregateValue => help.push_str(
+            "A row of the data gave the marked aggregate a value it cannot add: sum() and \
+             avg() take numbers only (count() and collect_list() take values of any kind). \
+             Aggregate a numeric property, as in g.gql(\"MATCH (p:person) RETURN sum(p.age)\"), \
+             and keep values of another kind out with a comparison to a number, which is NULL \
+             for text and so drops the row, as in \
+             g.gql(\"MATCH (p) WHERE p.age >= 0 RETURN avg(p.age)\"), or inside the aggregate, \
+             as in g.gql(\"MATCH (p) RETURN sum(CASE WHEN p.age >= 0 THEN p.age END)\") (an \
+             aggregate skips NULL).",
+        ),
         GqlErrorKind::Data => help.push_str(
             "A row of the data made the marked expression fail. Keep such rows away from it \
              with a WHERE condition or a CASE expression, for example \
@@ -6700,6 +6764,328 @@ fn gql_help(
         ),
     }
     help
+}
+
+/// The general advice of a [`GqlErrorKind::Semantic`] error (class `42`) about `topic`.
+#[cfg(feature = "gql")]
+fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
+    match topic {
+        GqlHelpTopic::Scope => {
+            "WITH passes on only its columns: a variable it does not list is out of scope after \
+             it, so list every variable a later clause reads, as in \
+             g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n\"); \
+             a WITH item other than a variable needs a name (AS). LET adds variables and keeps \
+             all others in scope, each with a new name, as in \
+             g.gql(\"MATCH (p:person) LET name = upper(p.name) RETURN p.age, name\")."
+        }
+        GqlHelpTopic::Grouping => {
+            "A RETURN or WITH with an aggregate groups the rows by its other items (the \
+             grouping keys): read a variable outside an aggregate only in such a key, and \
+             after it (as after DISTINCT) only its columns remain, so ORDER BY names a column, \
+             as in g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) AS n ORDER \
+             BY n\"). An aggregate takes no aggregate as its argument; aggregate in two steps \
+             with WITH, as in g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n \
+             RETURN max(n)\")."
+        }
+        GqlHelpTopic::PatternVariable => {
+            "In a MATCH clause a node variable names one node (written twice, it joins on the \
+             same node), an edge variable one edge, a path variable the path after its `=`, \
+             and the variable of a quantified edge the list of its edges, as in \
+             g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, b.name\"); a name \
+             defined by LET or WITH is a value, not a pattern variable."
+        }
+        GqlHelpTopic::Names => {
+            "Give every column of a RETURN or WITH, every variable of a LET and every key of a \
+             map a name of its own, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age\")."
+        }
+        GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue => {
+            "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
+             it (LET and WITH define variables too), for example \
+             g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \
+             $parameter a value in the parameters of gql()."
+        }
+    }
+}
+
+/// The internal step every lowered GQL quantifier has in its `repeat()` body (the trail check),
+/// by which a loop limit is recognised as one of a GQL query.
+#[cfg(feature = "gql")]
+const GQL_TRAIL: &str = "gql:trail(";
+
+/// A quantified edge of a GQL query, read back from its lowered loop for the advice of a limit.
+#[cfg(feature = "gql")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GqlQuantifiedEdge {
+    /// The edge pattern without its quantifier, such as `-[e:knows]->`.
+    pattern: String,
+    /// The lower bound of the quantifier.
+    min: u64,
+    /// The upper bound; `None` for none.
+    max: Option<u64>,
+}
+
+#[cfg(feature = "gql")]
+impl GqlQuantifiedEdge {
+    /// The edge with its quantifier, such as `-[e:knows]->{2,}`.
+    fn render(&self) -> String {
+        format!("{}{}", self.pattern, quantifier_text(self.min, self.max))
+    }
+
+    /// The edge with an upper bound added, for the advice: `{m, 5m}` (`{0,5}` for `m = 0`).
+    fn bounded(&self) -> String {
+        let max = self.max.unwrap_or(self.min.max(1).saturating_mul(5));
+        format!("{}{}", self.pattern, quantifier_text(self.min, Some(max)))
+    }
+}
+
+/// `{m,}`, `{n}` or `{m,n}`.
+#[cfg(feature = "gql")]
+fn quantifier_text(min: u64, max: Option<u64>) -> String {
+    match max {
+        None => format!("{{{min},}}"),
+        Some(max) if max == min => format!("{{{min}}}"),
+        Some(max) => format!("{{{min},{max}}}"),
+    }
+}
+
+/// The byte index of the `)` closing the `(` at `open` in rendered step text; quoted strings
+/// (with `\` escapes) are skipped. `None` when it does not close.
+#[cfg(feature = "gql")]
+fn closing_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, c) in text.get(open..)?.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The contents of the quoted strings in rendered step arguments (`"a", "b"` -> `a`, `b`).
+#[cfg(feature = "gql")]
+fn quoted_strings(args: &str) -> Vec<String> {
+    let mut strings = Vec::new();
+    let mut current: Option<String> = None;
+    let mut escaped = false;
+    for c in args.chars() {
+        match current.as_mut() {
+            Some(text) if escaped => {
+                text.push(c);
+                escaped = false;
+            }
+            Some(_) if c == '\\' => escaped = true,
+            Some(_) if c == '"' => strings.extend(current.take()),
+            Some(text) => text.push(c),
+            None if c == '"' => current = Some(String::new()),
+            None => {}
+        }
+    }
+    strings
+}
+
+/// Every quantified edge whose lowered loop is in `plan` (rendered steps joined with `.`), in
+/// plan order. Reads the forms of `gql::lower` (quantified edge): `emit().repeat(B)` is the
+/// lower bound 0, `repeat(B).emit()` 1, `repeat(B).emit(__.loops().is(P.gte(m)))` `m`, a
+/// following `times(n)` the upper bound (and the lower one when no `emit` gives it); the body
+/// `B` is the edge hop (`out_e`, `in_e`, or a `union` for either direction) with the trail
+/// check and `as(e)` of its variable.
+#[cfg(feature = "gql")]
+fn gql_quantified_edges(plan: &str) -> Vec<GqlQuantifiedEdge> {
+    let mut edges = Vec::new();
+    let mut from = 0;
+    while let Some(found) = plan.get(from..).and_then(|rest| rest.find("repeat(")) {
+        let start = from + found;
+        let open = start + "repeat".len();
+        let Some(close) = closing_paren(plan, open) else {
+            break;
+        };
+        from = close + 1;
+        let body = plan.get(open + 1..close).unwrap_or_default();
+        if !body.contains(GQL_TRAIL) {
+            continue;
+        }
+        let mut min = plan
+            .get(..start)
+            .is_some_and(|prefix| prefix.ends_with("emit()."))
+            .then_some(0);
+        let mut max = None;
+        let mut rest = plan.get(close + 1..).unwrap_or_default();
+        let number = |text: &str| -> (Option<u64>, usize) {
+            let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+            (text.get(..digits).and_then(|d| d.parse().ok()), digits)
+        };
+        loop {
+            if let Some(after) = rest.strip_prefix(".emit()") {
+                min = min.or(Some(1));
+                rest = after;
+            } else if let Some(after) = rest.strip_prefix(".emit(__.loops().is(P.gte(") {
+                let (value, digits) = number(after);
+                min = value.or(min);
+                rest = after
+                    .get(digits..)
+                    .and_then(|r| r.strip_prefix(")))"))
+                    .unwrap_or_default();
+            } else if let Some(after) = rest.strip_prefix(".times(") {
+                let (value, digits) = number(after);
+                max = value;
+                rest = after
+                    .get(digits..)
+                    .and_then(|r| r.strip_prefix(')'))
+                    .unwrap_or_default();
+            } else {
+                break;
+            }
+        }
+        let min = min.or(max).unwrap_or(1);
+        edges.push(GqlQuantifiedEdge {
+            pattern: gql_edge_pattern(body),
+            min,
+            max,
+        });
+    }
+    edges
+}
+
+/// The GQL edge pattern of a lowered quantifier body (without the quantifier): the direction
+/// and labels of its hop, the variable of its `as()` after the trail check (an internal `#..`
+/// label is no variable), and ` WHERE ..` when the body filters the edge.
+#[cfg(feature = "gql")]
+fn gql_edge_pattern(body: &str) -> String {
+    let (either, hop) = match body.strip_prefix("__.union(") {
+        Some(branches) => (true, branches),
+        None => (false, body),
+    };
+    let hop = hop.strip_prefix("__.").unwrap_or(hop);
+    let (outgoing, name_len) = if hop.starts_with("out_e(") {
+        (true, "out_e".len())
+    } else if hop.starts_with("outE(") {
+        (true, "outE".len())
+    } else if hop.starts_with("in_e(") {
+        (false, "in_e".len())
+    } else if hop.starts_with("inE(") {
+        (false, "inE".len())
+    } else {
+        (true, 0)
+    };
+    let hop_end = closing_paren(hop, name_len).filter(|_| name_len > 0);
+    let labels = hop_end
+        .and_then(|end| hop.get(name_len + 1..end))
+        .map(quoted_strings)
+        .unwrap_or_default();
+    let trail = hop.find(GQL_TRAIL);
+    let filtered = hop
+        .get(hop_end.map_or(0, |end| end + 1)..trail.unwrap_or(0))
+        .is_some_and(|between| between.contains("has") || between.contains("gql:filter"));
+    let variable = trail
+        .and_then(|at| closing_paren(hop, at + GQL_TRAIL.len() - 1))
+        .and_then(|end| hop.get(end + 1..))
+        .and_then(|after| after.strip_prefix(".as("))
+        .map(quoted_strings)
+        .and_then(|names| names.into_iter().next())
+        .filter(|name| !name.starts_with('#'))
+        .unwrap_or_default();
+    let mut inner = variable;
+    if !labels.is_empty() {
+        inner.push(':');
+        inner.push_str(&labels.join("|"));
+    }
+    if filtered {
+        inner.push_str(" WHERE ..");
+    }
+    let inner = inner.trim_start().to_string();
+    match (either, outgoing) {
+        (true, _) => format!("-[{inner}]-"),
+        (false, true) => format!("-[{inner}]->"),
+        (false, false) => format!("<-[{inner}]-"),
+    }
+}
+
+/// Advice for [`TraverserError::RepeatLimitExceeded`] raised by the loop of a GQL quantifier:
+/// bound the quantifier or raise `repeat.max_loops` for the `gql()` call, never the internal
+/// `repeat()` body. `step` is the failing loop as rendered.
+#[cfg(feature = "gql")]
+fn gql_repeat_limit_help(max_loops: u32, step: &str) -> String {
+    let raised = u64::from(max_loops)
+        .saturating_mul(2)
+        .min(u64::from(u32::MAX));
+    let (edge, bounded) = match gql_quantified_edges(step).into_iter().next() {
+        Some(edge) => (
+            format!("the quantified edge {} of the gql() query", edge.render()),
+            format!("{}, ", edge.bounded()),
+        ),
+        None => (
+            "a quantified edge of the gql() query".to_string(),
+            String::new(),
+        ),
+    };
+    format!(
+        "The loop of {edge} ran {max_loops} iterations, the limit of repeat.max_loops. A \
+         quantifier without an upper bound ({{m,}}, *, + or Cypher [*]) repeats the edge until \
+         every path has used all the edges it can reach (trail), which takes more iterations \
+         than the limit on a large or densely connected graph; the result is never cut short. \
+         Give the quantifier an upper bound, as in {bounded}for example \
+         g.gql(\"MATCH (a:person)-[:knows]->{{1,3}}(b) RETURN b.name\"). Or raise the limit for \
+         the query, g.with(\"repeat.max_loops\", {raised}).gql(..), for example \
+         g.with(\"repeat.max_loops\", {raised}).gql(\"MATCH (a)-[:knows]->{{1,}}(b) RETURN \
+         b.name\"). It is an administrative option: a script whose host restricts it needs \
+         Update on that Option to set it."
+    )
+}
+
+/// Advice for `traversal.max_traversers` exceeded by a lowered GQL query (`steps`, the
+/// outermost plan): narrow the pattern, bound its quantified edges, or raise the limit for the
+/// `gql()` call.
+#[cfg(feature = "gql")]
+fn gql_traverser_limit_help(max: Option<u64>, steps: &[String]) -> String {
+    let raised = max.map_or(1_000_000, |max| max.saturating_mul(2).max(1));
+    let edges = gql_quantified_edges(&steps.join("."));
+    let quantified = match edges.as_slice() {
+        [] => String::new(),
+        [first, ..] => format!(
+            "Each path a quantified edge ({}) matches is a traverser of its own (trail keeps \
+             them apart, so they do not merge), and their number grows with every iteration: \
+             give it a lower upper bound, as in {}. ",
+            edges
+                .iter()
+                .map(GqlQuantifiedEdge::render)
+                .collect::<Vec<_>>()
+                .join(", "),
+            first.bounded()
+        ),
+    };
+    format!(
+        "The gql() query kept more traversers (rows in the making) alive between two steps \
+         than 'traversal.max_traversers' allows{}. {quantified}Narrow the pattern with labels \
+         and conditions, for example \
+         g.gql(\"MATCH (p:person)-[:knows]->(f) WHERE f.age > 30 RETURN f.name\"), or raise \
+         the limit for the query, g.with(\"traversal.max_traversers\", {raised}).gql(..), for \
+         example g.with(\"traversal.max_traversers\", {raised}).gql(\"MATCH (a)-->(b) RETURN \
+         count(*)\"). A host can lock this option with \
+         ExecutionPolicy::with_locked(\"traversal.max_traversers\"); 9223372036854775807 is as \
+         good as unlimited. Setting it is an administrative option: a script whose host \
+         restricts it needs Update on that Option.",
+        max.map(|max| format!(" ({max})")).unwrap_or_default()
+    )
 }
 
 /// A GQL error under construction (feature `gql`): the parser and binder fill it with byte
@@ -6715,6 +7101,7 @@ pub(crate) struct GqlErrorBuilder {
     suggestion: Option<String>,
     alternative: Option<String>,
     gqlstatus: Option<&'static str>,
+    topic: GqlHelpTopic,
 }
 
 #[cfg(feature = "gql")]
@@ -6734,6 +7121,7 @@ impl GqlErrorBuilder {
             suggestion: None,
             alternative: None,
             gqlstatus: None,
+            topic: GqlHelpTopic::Kind,
         }
     }
 
@@ -6762,6 +7150,12 @@ impl GqlErrorBuilder {
     /// A GQLSTATUS code more specific than the kind's default.
     pub(crate) fn gqlstatus(mut self, code: &'static str) -> Self {
         self.gqlstatus = Some(code);
+        self
+    }
+
+    /// The general advice `help()` adds after the alternative, in place of the kind's own.
+    pub(crate) fn topic(mut self, topic: GqlHelpTopic) -> Self {
+        self.topic = topic;
         self
     }
 
@@ -6798,6 +7192,7 @@ impl GqlErrorBuilder {
                 expected: self.expected,
                 suggestion: self.suggestion,
                 alternative: self.alternative,
+                topic: self.topic,
             }),
         }
     }
@@ -6983,6 +7378,21 @@ impl TraverserError {
 
     /// Rendered steps of the outermost failing level: as the user wrote it when the optimizer
     /// rewrote it, otherwise as executed.
+    /// The rendered name of the innermost failing step, the one the root cause came from.
+    #[cfg(feature = "gql")]
+    fn innermost_failed_step(&self) -> Option<&str> {
+        let mut name = None;
+        let mut current = self;
+        while let TraverserError::StepFailed {
+            step_name, source, ..
+        } = current
+        {
+            name = Some(step_name.as_str());
+            current = source;
+        }
+        name
+    }
+
     fn outermost_steps(&self) -> Option<Vec<String>> {
         let frame = self.step_trace().into_iter().next()?;
         Some(match &frame.logical {
@@ -8804,8 +9214,11 @@ mod tests {
                  GQLSTATUS:    42001\n\
                  Help: Did you mean RETURN? Expected WHERE, RETURN, , at the marked position. \
                  Fix the query at the marked position: a GQL read query is MATCH <pattern> \
-                 [WHERE <condition>] RETURN <items>, for example \
-                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\")."
+                 [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
+                 FILTER clauses, then RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
+                 g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
+                 AS n RETURN p.name, n\")."
             );
         }
 

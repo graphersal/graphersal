@@ -53,6 +53,7 @@ use super::eval::{AggregateRef, Compiled, Env, EvalError, Scope, Value, compile,
 use super::lexer::Span;
 use super::parser::Function;
 use super::runtime::compare_values;
+use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
 use crate::{CompactString, ElementKind, ElementProperty};
 
@@ -164,11 +165,11 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
             CallArgs::Exprs(exprs) => exprs.first().cloned(),
         };
         let Some(aggregate) = Aggregate::of(call.function, argument.is_some()) else {
-            return Some(Err(EvalError {
-                gqlstatus: status::SEMANTIC,
-                message: "not an aggregate function".to_string(),
-                span: call.span,
-            }));
+            return Some(Err(EvalError::new(
+                status::SEMANTIC,
+                "not an aggregate function".to_string(),
+                call.span,
+            )));
         };
         let mut pending = self.pending.borrow_mut();
         let index = pending.len();
@@ -197,13 +198,13 @@ impl<Sc: Scope> Scope for Nested<'_, Sc> {
     }
 
     fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
-        Some(Err(EvalError {
-            gqlstatus: status::SEMANTIC,
-            message: "an aggregate function cannot be used inside the argument of another \
+        Some(Err(EvalError::new(
+            status::SEMANTIC,
+            "an aggregate function cannot be used inside the argument of another \
                       aggregate"
                 .to_string(),
-            span: call.span,
-        }))
+            call.span,
+        )))
     }
 }
 
@@ -385,11 +386,11 @@ fn integer<E>(value: i64) -> Value<E> {
 }
 
 fn out_of_range(span: Span) -> EvalError {
-    EvalError {
-        gqlstatus: status::OUT_OF_RANGE,
-        message: "numeric value out of range: the aggregate does not fit".to_string(),
+    EvalError::new(
+        status::OUT_OF_RANGE,
+        "numeric value out of range: the aggregate does not fit".to_string(),
         span,
-    }
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -556,15 +557,16 @@ fn accept<E>(
         }
         State::Numeric(numeric) => match value {
             Value::Scalar(ElementProperty::Number(number)) => numeric.add(number, bulk, span),
-            other => Err(EvalError {
-                gqlstatus: status::INVALID_VALUE_TYPE,
-                message: format!(
+            other => Err(EvalError::new(
+                status::INVALID_VALUE_TYPE,
+                format!(
                     "{}() takes numbers, not {}",
                     function.name(),
                     kind_name(other)
                 ),
                 span,
-            }),
+            )
+            .with_topic(GqlHelpTopic::AggregateValue)),
         },
         // `min` / `max` and `collect_list` are handled by `Accumulator::accept`; with
         // `DISTINCT` only `collect_list` keeps its values in the seen set.
@@ -577,10 +579,12 @@ fn collect<E: Clone>(items: Vec<(Value<E>, u64)>, span: Span) -> Result<Value<E>
     let total = items
         .iter()
         .fold(0u64, |total, (_, bulk)| total.saturating_add(*bulk));
-    let too_large = || EvalError {
-        gqlstatus: status::OUT_OF_RANGE,
-        message: "collect_list() would hold more items than fit in memory".to_string(),
-        span,
+    let too_large = || {
+        EvalError::new(
+            status::OUT_OF_RANGE,
+            "collect_list() would hold more items than fit in memory".to_string(),
+            span,
+        )
     };
     let capacity = usize::try_from(total).map_err(|_| too_large())?;
     let mut list = Vec::new();

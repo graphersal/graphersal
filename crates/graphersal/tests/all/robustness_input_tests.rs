@@ -1345,3 +1345,520 @@ fn random_gql_strings_never_panic() {
     }
     fatal.assert_empty("GQL");
 }
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 1b: grammar-generated queries (OPTIONAL MATCH, WITH, LET, FILTER, quantified edges,
+// path and group variables, aggregates)
+// ---------------------------------------------------------------------------------------------
+
+/// Builds random queries of the stage 1b grammar (`parser.rs` module docs): every one is
+/// syntactically valid, and it reads mostly variables in scope (it tracks what each clause
+/// declares, what `WITH` keeps and `LET` adds), so most reach the binder, the planner, the
+/// lowering and the run; the rest end in a semantic or a data error.
+#[cfg(feature = "gql")]
+struct Gql1bGenerator<'r> {
+    rng: &'r mut Rng,
+    /// The variables in scope with their kind.
+    scope: Vec<(String, GenKind)>,
+    /// The counter for fresh names.
+    fresh: usize,
+}
+
+/// What a generated variable names.
+#[cfg(feature = "gql")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenKind {
+    Node,
+    Edge,
+    Group,
+    Path,
+    Value,
+}
+
+#[cfg(feature = "gql")]
+impl<'r> Gql1bGenerator<'r> {
+    const LABELS: &'static [&'static str] = &["person", "software", "knows", "created", "nope"];
+    const KEYS: &'static [&'static str] = &["name", "age", "weight", "lang", "missing"];
+
+    fn new(rng: &'r mut Rng) -> Self {
+        Self {
+            rng,
+            scope: Vec::new(),
+            fresh: 0,
+        }
+    }
+
+    fn fresh(&mut self, prefix: &str) -> String {
+        self.fresh += 1;
+        format!("{prefix}{}", self.fresh)
+    }
+
+    /// A variable in scope of one of `kinds`, if any.
+    fn pick_var(&mut self, kinds: &[GenKind]) -> Option<String> {
+        let names: Vec<&String> = self
+            .scope
+            .iter()
+            .filter(|(_, kind)| kinds.contains(kind))
+            .map(|(name, _)| name)
+            .collect();
+        (!names.is_empty()).then(|| (*self.rng.pick(&names)).clone())
+    }
+
+    fn declare(&mut self, name: &str, kind: GenKind) {
+        if !self.scope.iter().any(|(n, _)| n == name) {
+            self.scope.push((name.to_string(), kind));
+        }
+    }
+
+    fn labels(&mut self) -> String {
+        let first = *self.rng.pick(Self::LABELS);
+        match self.rng.below(5) {
+            0 => format!(":{first}|{}", self.rng.pick(Self::LABELS)),
+            1 => format!(":!{first}"),
+            _ => format!(":{first}"),
+        }
+    }
+
+    fn literal(&mut self) -> String {
+        match self.rng.below(6) {
+            0 => "'marko'".to_string(),
+            1 => "NULL".to_string(),
+            2 => "$n".to_string(),
+            3 => "2.5".to_string(),
+            _ => self.rng.below(40).to_string(),
+        }
+    }
+
+    /// A property of an element in scope, or a literal.
+    fn property(&mut self) -> String {
+        match self.pick_var(&[GenKind::Node, GenKind::Edge]) {
+            Some(var) => format!("{var}.{}", self.rng.pick(Self::KEYS)),
+            None => self.literal(),
+        }
+    }
+
+    fn condition(&mut self) -> String {
+        let left = self.property();
+        match self.rng.below(6) {
+            0 => format!("{left} IS NULL"),
+            1 => format!("{left} IN [27, 29, NULL]"),
+            2 => format!("{left} STARTS WITH 'm'"),
+            3 => format!("{left} > {} AND NOT {left} = 1", self.literal()),
+            4 => match self.pick_var(&[GenKind::Path]) {
+                Some(path) => format!("path_length({path}) > 1"),
+                None => format!("{left} <> 0"),
+            },
+            _ => format!("{left} >= {}", self.literal()),
+        }
+    }
+
+    fn expression(&mut self) -> String {
+        match self.rng.below(8) {
+            0 => self
+                .pick_var(&[GenKind::Node, GenKind::Edge, GenKind::Value])
+                .unwrap_or_else(|| self.literal()),
+            1 => format!("coalesce({}, 0)", self.property()),
+            2 => match self.pick_var(&[GenKind::Node]) {
+                Some(node) => format!("labels({node})"),
+                None => self.literal(),
+            },
+            3 => match self.pick_var(&[GenKind::Path]) {
+                Some(path) => format!("path_length({path})"),
+                None => self.property(),
+            },
+            4 => match self.pick_var(&[GenKind::Group]) {
+                Some(group) => format!("size({group})"),
+                None => self.property(),
+            },
+            5 => format!("CASE WHEN {} THEN 1 ELSE 0 END", self.condition()),
+            _ => self.property(),
+        }
+    }
+
+    fn aggregate(&mut self) -> String {
+        let distinct = if self.rng.chance(20) { "DISTINCT " } else { "" };
+        let element = self.pick_var(&[GenKind::Node, GenKind::Edge]);
+        match (self.rng.below(7), element) {
+            (1, Some(var)) => format!("count({distinct}{var})"),
+            (2, _) => format!("sum({distinct}{})", self.property()),
+            (3, _) => format!("avg({})", self.property()),
+            (4, _) => format!("min({})", self.property()),
+            (5, _) => format!("max({})", self.expression()),
+            (6, _) => format!("collect_list({distinct}{})", self.expression()),
+            _ => "count(*)".to_string(),
+        }
+    }
+
+    fn node(&mut self) -> String {
+        let mut node = String::from("(");
+        let joined = if self.rng.chance(35) {
+            self.pick_var(&[GenKind::Node])
+        } else {
+            None
+        };
+        let var = match joined {
+            Some(var) => Some(var),
+            None if self.rng.chance(80) => Some(self.fresh("n")),
+            None => None,
+        };
+        if let Some(var) = &var {
+            node.push_str(var);
+        }
+        if self.rng.chance(40) {
+            node.push_str(&self.labels());
+        }
+        match (self.rng.below(6), &var) {
+            (0, _) => node.push_str(" {name: 'marko'}"),
+            (1, Some(var)) => {
+                let key = *self.rng.pick(Self::KEYS);
+                node.push_str(&format!(" WHERE {var}.{key} IS NOT NULL"));
+            }
+            _ => {}
+        }
+        node.push(')');
+        if let Some(var) = var {
+            self.declare(&var, GenKind::Node);
+        }
+        node
+    }
+
+    fn quantifier(&mut self) -> String {
+        (*self.rng.pick(&[
+            "{1,3}", "{2}", "{0,2}", "{1,}", "{,2}", "*", "+", "{0}", "{2,4}",
+        ]))
+        .to_string()
+    }
+
+    fn edge(&mut self) -> String {
+        let cypher = self.rng.chance(15);
+        let quantified = cypher || self.rng.chance(40);
+        let var = self.rng.chance(60).then(|| self.fresh("e"));
+        let mut filler = var.clone().unwrap_or_default();
+        if self.rng.chance(50) {
+            filler.push_str(&self.labels());
+        }
+        if cypher {
+            filler.push_str(*self.rng.pick(&["*", "*2", "*1..2", "*..3", "*0.."]));
+        } else if let Some(var) = &var
+            && self.rng.chance(20)
+        {
+            filler.push_str(&format!(" WHERE {var}.weight > 0.1"));
+        }
+        let edge = match self.rng.below(7) {
+            0 => format!("<-[{filler}]-"),
+            1 => format!("-[{filler}]-"),
+            2 if var.is_none() && !cypher => "-->".to_string(),
+            3 if var.is_none() && !cypher => "<--".to_string(),
+            _ => format!("-[{filler}]->"),
+        };
+        if let Some(var) = var {
+            let kind = if quantified {
+                GenKind::Group
+            } else {
+                GenKind::Edge
+            };
+            self.declare(&var, kind);
+        }
+        if quantified && !cypher {
+            format!("{edge}{}", self.quantifier())
+        } else {
+            edge
+        }
+    }
+
+    fn path(&mut self) -> String {
+        let mut path = String::new();
+        let variable = self.rng.chance(20).then(|| self.fresh("p"));
+        if let Some(var) = &variable {
+            path.push_str(&format!("{var} = "));
+        }
+        path.push_str(&self.node());
+        for _ in 0..self.rng.below(3) {
+            path.push_str(&self.edge());
+            path.push_str(&self.node());
+        }
+        if let Some(var) = variable {
+            self.declare(&var, GenKind::Path);
+        }
+        path
+    }
+
+    fn match_clause(&mut self, first: bool) -> String {
+        let optional = if first {
+            self.rng.chance(5)
+        } else {
+            self.rng.chance(40)
+        };
+        let keyword = if optional { "OPTIONAL MATCH" } else { "MATCH" };
+        let mut clause = format!("{keyword} {}", self.path());
+        if self.rng.chance(15) {
+            let path = self.path();
+            clause.push_str(&format!(", {path}"));
+        }
+        if self.rng.chance(30) {
+            let condition = self.condition();
+            clause.push_str(&format!(" WHERE {condition}"));
+        }
+        clause
+    }
+
+    /// The items of a `RETURN` / `WITH` and the names of its columns (the sort keys a tail may
+    /// use after an aggregate or `DISTINCT`).
+    fn items(&mut self, with: bool) -> (String, Vec<(String, GenKind)>) {
+        if !with && self.rng.chance(10) {
+            return ("*".to_string(), Vec::new());
+        }
+        let mut items = Vec::new();
+        let mut columns = Vec::new();
+        for _ in 0..1 + self.rng.below(3) {
+            let carried = if self.rng.chance(40) {
+                self.pick_var(&[
+                    GenKind::Node,
+                    GenKind::Edge,
+                    GenKind::Group,
+                    GenKind::Path,
+                    GenKind::Value,
+                ])
+            } else {
+                None
+            };
+            if let Some(name) = carried
+                && !columns.iter().any(|(n, _)| *n == name)
+            {
+                let kind = self
+                    .scope
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(GenKind::Value, |(_, kind)| *kind);
+                items.push(name.clone());
+                columns.push((name, kind));
+                continue;
+            }
+            let item = if self.rng.chance(35) {
+                self.aggregate()
+            } else {
+                self.expression()
+            };
+            let alias = self.fresh("v");
+            items.push(format!("{item} AS {alias}"));
+            columns.push((alias, GenKind::Value));
+        }
+        (items.join(", "), columns)
+    }
+
+    /// `ORDER BY` (a column), `OFFSET` / `SKIP` and `LIMIT` in this order, each maybe.
+    fn tail(&mut self, columns: &[(String, GenKind)]) -> String {
+        let mut tail = String::new();
+        if !columns.is_empty() && self.rng.chance(30) {
+            let (key, _) = self.rng.pick(columns).clone();
+            let direction = *self.rng.pick(&["", " DESC", " ASC"]);
+            tail.push_str(&format!(" ORDER BY {key}{direction}"));
+        }
+        if self.rng.chance(15) {
+            tail.push_str(*self.rng.pick(&[" OFFSET 1", " SKIP $o"]));
+        }
+        if self.rng.chance(20) {
+            tail.push_str(*self.rng.pick(&[" LIMIT 2", " LIMIT $n"]));
+        }
+        tail
+    }
+
+    fn query(&mut self) -> String {
+        let mut clauses = vec![self.match_clause(true)];
+        for _ in 0..self.rng.below(4) {
+            let clause = match self.rng.below(5) {
+                0 | 1 => self.match_clause(false),
+                2 => {
+                    let distinct = if self.rng.chance(15) { "DISTINCT " } else { "" };
+                    let (items, columns) = self.items(true);
+                    let mut with = format!("WITH {distinct}{items}");
+                    with.push_str(&self.tail(&columns));
+                    self.scope = columns;
+                    if self.rng.chance(25) {
+                        let condition = self.condition();
+                        with.push_str(&format!(" WHERE {condition}"));
+                    }
+                    with
+                }
+                3 => {
+                    let value = self.expression();
+                    let name = self.fresh("v");
+                    self.declare(&name, GenKind::Value);
+                    format!("LET {name} = {value}")
+                }
+                _ => format!("FILTER {}", self.condition()),
+            };
+            clauses.push(clause);
+        }
+        let distinct = if self.rng.chance(15) { "DISTINCT " } else { "" };
+        let (items, columns) = self.items(false);
+        let tail = self.tail(&columns);
+        clauses.push(format!("RETURN {distinct}{items}{tail}"));
+        clauses.join(if self.rng.chance(20) { "\n" } else { " " })
+    }
+}
+
+/// Valid stage 1b queries of every new construct: the base documents of the 1b mutations.
+#[cfg(feature = "gql")]
+const GQL_1B_CORPUS: &[&str] = &[
+    "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)",
+    "MATCH (p:person) WITH p, count(*) AS c ORDER BY c DESC LIMIT 2 WHERE c > 0 RETURN p, c",
+    "MATCH (p:person) LET n = upper(p.name), a = p.age + 1 FILTER a > 28 RETURN n, a",
+    "MATCH (a)-[e:knows]->{1,3}(b) RETURN a, e, b",
+    "MATCH (a)-[:knows]->*(b) RETURN DISTINCT b",
+    "MATCH (a)<-[e*1..2]-(b) RETURN size(e), path_length(p) AS l",
+    "MATCH p = (a)-[:knows|created]-+(b) RETURN p, path_length(p)",
+    "MATCH (a) RETURN a.lang, collect_list(a.name), collect(DISTINCT a.age), sum(a.age), \
+     avg(a.age), min(a.age), max(a.name), count(DISTINCT a)",
+    "OPTIONAL MATCH (x:nope) RETURN x",
+    "MATCH (a)-[e]-{0,2}(b) WITH DISTINCT b WHERE b.age IS NOT NULL RETURN b.name ORDER BY \
+     b.name SKIP $o LIMIT $n",
+    "MATCH (a:person) WITH a MATCH (a)-[:created]->(s) OPTIONAL MATCH (s)<-[:created]-(o) \
+     RETURN a, s, count(o)",
+    "MATCH (a)-[e]->{1,}(b)-[f]->{,2}(c) RETURN count(*)",
+    "MATCH p = (a)-[e:knows WHERE e.weight > 0.1]->{1,2}(b) RETURN nodes(p)",
+    "MATCH (a) RETURN a.name GROUP BY a.name",
+];
+
+/// Tokens of stage 1b for the 1b token soup (a list of its own; `GQL_TOKENS` stays as it is).
+#[cfg(feature = "gql")]
+const GQL_1B_TOKENS: &[&str] = &[
+    "MATCH",
+    "OPTIONAL",
+    "WITH",
+    "LET",
+    "FILTER",
+    "RETURN",
+    "DISTINCT",
+    "ORDER BY",
+    "LIMIT",
+    "WHERE",
+    "AS",
+    "=",
+    "(a)",
+    "(b:person)",
+    "-[e]->",
+    "<-[e:knows]-",
+    "-[e*1..2]->",
+    "-[*]-",
+    "-->",
+    "{1,3}",
+    "{0}",
+    "{2,}",
+    "{,2}",
+    "{",
+    "}",
+    ",",
+    "*",
+    "+",
+    "p =",
+    "p",
+    "e",
+    "a",
+    "count(*)",
+    "count(",
+    "sum(a.age)",
+    "collect_list(",
+    "collect(DISTINCT a)",
+    "avg(",
+    "path_length(p)",
+    "nodes(p)",
+    ")",
+    "a.age",
+    "GROUP BY",
+    "1",
+    "$n",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_1b_queries_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut rng = Rng::new(0x6A1_B001);
+    let mut generated = Vec::new();
+    for _ in 0..budget(150) {
+        generated.push(Gql1bGenerator::new(&mut rng).query());
+    }
+    // Every generated query parses: an error is a semantic one or a run-time one; and enough
+    // of them run to the end that the generator exercises the planner and the lowering.
+    let mut ran = 0;
+    for query in &generated {
+        let text = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            let graph = TraversalGraph::tinkerpop_modern();
+            match graph
+                .traversal()
+                .gql_with(&text, [("n", 2), ("o", 1)])
+                .to_list()
+            {
+                Ok(_) => Ok(()),
+                Err(err) => match err.root_cause() {
+                    TraverserError::Gql { kind, message, .. } => {
+                        Err(Some((*kind, message.clone())))
+                    }
+                    _ => Err(None),
+                },
+            }
+        });
+        match outcome {
+            Ok(Ok(())) => ran += 1,
+            Ok(Err(Some((graphersal::error::GqlErrorKind::Syntax, message)))) => {
+                syntax.push(format!("{query}: {message}"));
+            }
+            Ok(Err(_)) => {}
+            Err(outcome) => fatal.check(query, Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 2 >= generated.len(),
+        "only {ran} of {} generated 1b queries ran",
+        generated.len()
+    );
+    let mut texts = generated;
+    texts.extend(GQL_1B_CORPUS.iter().map(|s| s.to_string()));
+    // Long 1b chains: bounded errors or results, never a stack overflow.
+    texts.push(format!(
+        "MATCH (a) {}RETURN a",
+        "OPTIONAL MATCH (a)-->(b) ".repeat(200)
+    ));
+    texts.push(format!("MATCH (a) {}RETURN a", "WITH a ".repeat(500)));
+    texts.push(format!(
+        "MATCH (a) LET x0 = 1 {}RETURN x199",
+        (1..200)
+            .map(|i| format!("LET x{i} = x{} + x{} ", i - 1, i - 1))
+            .collect::<String>()
+    ));
+    texts.push(format!(
+        "MATCH (a){}(b) RETURN count(*)",
+        "-[]->{1,}()".repeat(30)
+    ));
+    texts.push(format!(
+        "MATCH (a) RETURN {}a.age{}",
+        "max(".repeat(50),
+        ")".repeat(50)
+    ));
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_1B_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(24);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_1B_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (a)");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 1b");
+    assert!(
+        syntax.is_empty(),
+        "generated 1b queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+}

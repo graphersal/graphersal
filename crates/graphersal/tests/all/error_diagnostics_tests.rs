@@ -7264,14 +7264,20 @@ mod gql {
             report.contains("  line 2:    WHERE p.age 30\n                         ^^"),
             "the caret must sit under `30` on line 2: {report}"
         );
-        assert!(report.contains("  expected:  MATCH, RETURN"), "{report}");
+        assert!(
+            report.contains("  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN"),
+            "{report}"
+        );
         assert!(report.contains("  GQLSTATUS: 42001"), "{report}");
         assert!(
             report.contains(
-                "Help: Expected MATCH, RETURN at the marked position. Fix the query at the \
-                 marked position: a GQL read query is MATCH <pattern> [WHERE <condition>] \
-                 RETURN <items>, for example \
-                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\")."
+                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the marked \
+                 position. Fix the query at the marked position: a GQL read query is MATCH \
+                 <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, \
+                 LET or FILTER clauses, then RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
+                 g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
+                 AS n RETURN p.name, n\")."
             ),
             "{report}"
         );
@@ -7384,7 +7390,8 @@ mod gql {
         );
         assert!(
             report.contains(
-                "Help: write the path out, or use Gremlin repeat(), for example \
+                "Help: quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; \
+                 for a longer pattern, write the path out, or use Gremlin repeat(), for example \
                  g.v(\"1\").repeat(__.out(\"knows\")).times(2)."
             ),
             "{report}"
@@ -7679,5 +7686,504 @@ mod gql {
         )
         .unwrap();
         assert_eq!(names.into_array().unwrap().len(), 4);
+    }
+
+    // ----- stage 1b: help sweep (rule 6) -----
+
+    /// The help of the GQL error `g.gql(query)` raises on the modern graph.
+    fn gql_help(query: &str) -> String {
+        let (err, _) = gql_failure(|g| g.gql(query).to_list());
+        err.help().expect("a GQL error has help")
+    }
+
+    /// Every `g.gql("..")` example in `help`, with the `g.with(key, n)` options before it.
+    fn gql_examples(help: &str) -> Vec<(Vec<(String, i64)>, String)> {
+        let mut examples = Vec::new();
+        let mut rest = help;
+        while let Some(at) = rest.find("g.") {
+            let mut tail = &rest[at + 2..];
+            rest = tail;
+            let mut options = Vec::new();
+            while let Some(after) = tail.strip_prefix("with(\"") {
+                let key_end = after.find('"').expect("a closed option key");
+                let key = after[..key_end].to_string();
+                let after = after[key_end + 1..].trim_start_matches(", ");
+                let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+                let after = after[digits.len()..]
+                    .strip_prefix(").")
+                    .expect("an option value");
+                options.push((key, digits.parse().expect("a number")));
+                tail = after;
+            }
+            let Some(query) = tail.strip_prefix("gql(\"") else {
+                continue;
+            };
+            let end = query.find("\")").expect("a closed example");
+            examples.push((options, query[..end].replace("\\\"", "\"")));
+        }
+        examples
+    }
+
+    /// Runs every `g.gql(..)` example of `help` on the modern graph: each must succeed.
+    fn assert_examples_run(help: &str) {
+        let examples = gql_examples(help);
+        assert!(!examples.is_empty(), "no g.gql(..) example in: {help}");
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (options, query) in examples {
+            let mut g = locked.traversal();
+            for (key, value) in &options {
+                g = g.with(key.as_str(), *value);
+            }
+            let rows = g.gql(&query).to_list();
+            assert!(rows.is_ok(), "{options:?} {query}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn gql_expected_tokens_name_every_clause_and_the_quantifiers() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a)-[e]->(b) RETRN a").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax);
+        assert!(
+            report.contains(
+                "  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: RETURN"), "{report}");
+        // The syntax advice describes the whole clause pipeline, and its examples run.
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "a GQL read query is MATCH <pattern> [WHERE <condition>], then any further \
+                 MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // After a node pattern too.
+        let help = gql_help("MATCH (p:person) RETRUN p");
+        assert!(
+            help.contains(
+                "Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the \
+                 marked position."
+            ),
+            "{help}"
+        );
+        // A misspelt 1b clause gets its suggestion from the same list.
+        let report = gql_report("MATCH (a) OPTINAL MATCH (a)-->(b) RETURN b");
+        assert!(
+            report.contains("  did you mean: OPTIONAL MATCH"),
+            "{report}"
+        );
+        // WITH lists its own tail, then the clauses.
+        let help = gql_help("MATCH (a) WITH a b RETURN a");
+        assert!(
+            help.starts_with(
+                "Expected `,`, AS, ORDER BY, OFFSET, SKIP, LIMIT, WHERE, MATCH, ... at the \
+                 marked position."
+            ),
+            "{help}"
+        );
+        // Cypher `*` inside the brackets, a GQL quantifier after the edge.
+        let help = gql_help("MATCH (a)-[e:knows RETURN a");
+        assert!(
+            help.starts_with("Expected `*`, `{`, WHERE, `]` at the marked position."),
+            "{help}"
+        );
+        let help = gql_help("MATCH (a)-[e]->x RETURN a");
+        assert!(
+            help.starts_with("Expected `{`, `*`, `+`, `(` at the marked position."),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_group_by_explains_implicit_grouping() {
+        for (query, text) in [
+            (
+                "MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) GROUP BY p.name",
+                "GROUP BY",
+            ),
+            (
+                "MATCH (p:person) WITH p.name AS n, count(*) AS c group by n RETURN n, c",
+                "group by",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Syntax, "42001".to_string())
+            );
+            assert!(
+                report.contains(
+                    "GROUP BY is not needed: grouping is implicit, the RETURN or WITH items \
+                     without an aggregate are the grouping keys"
+                ),
+                "{report}"
+            );
+            assert!(
+                report.contains(&format!("{text} ")) && report.contains(" ^^^^^^^^\n  GQLSTATUS"),
+                "the caret must underline {text}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "remove GROUP BY and list the keys as items next to the aggregates, as in \
+                     MATCH (p:person)-[:created]->(s) RETURN p.name, count(s). "
+                ),
+                "{help}"
+            );
+            assert_examples_run(&help);
+        }
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql("MATCH (p:person)-[:created]->(s) RETURN p.name, count(s)")
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn gql_with_and_let_scope_errors_explain_the_scope() {
+        let scope = "WITH passes on only its columns: a variable it does not list is out of \
+                     scope after it, so list every variable a later clause reads, as in \
+                     g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
+                     p.name, n\"); a WITH item other than a variable needs a name (AS). LET \
+                     adds variables and keeps all others in scope, each with a new name, as in \
+                     g.gql(\"MATCH (p:person) LET name = upper(p.name) RETURN p.age, name\").";
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a) WITH a.name AS n RETURN a").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the variable `a` is not in scope: the WITH before does not carry it"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            format!("add `a` to the WITH items, as in WITH ..., a. {scope}")
+        );
+        // The generic advice about MATCH declarations is not given.
+        assert!(!help.contains("Declare every variable"), "{help}");
+        assert_examples_run(&help);
+
+        let help = gql_help("MATCH (a) WITH a.age + 1 RETURN a");
+        assert_eq!(
+            help,
+            format!("name it with AS, as in WITH a.age + 1 AS value. {scope}")
+        );
+        let help = gql_help("MATCH (a) LET x = 1 LET x = 2 RETURN x");
+        assert_eq!(
+            help,
+            format!("choose another name, as in LET x2 = <value>. {scope}")
+        );
+        let help = gql_help("MATCH (a) LET x = 1, y = x + 1 RETURN y");
+        assert!(help.ends_with(scope), "{help}");
+    }
+
+    #[test]
+    fn gql_grouping_errors_explain_grouping_keys() {
+        let grouping = "A RETURN or WITH with an aggregate groups the rows by its other items \
+                        (the grouping keys): read a variable outside an aggregate only in such a \
+                        key, and after it (as after DISTINCT) only its columns remain, so ORDER \
+                        BY names a column, as in g.gql(\"MATCH (p:person)-[:created]->(s) \
+                        RETURN p.name, count(s) AS n ORDER BY n\"). An aggregate takes no \
+                        aggregate as its argument; aggregate in two steps with WITH, as in \
+                        g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
+                        max(n)\").";
+        let help = gql_help("MATCH (a) RETURN count(*), a.name ORDER BY a.age");
+        assert_eq!(
+            help,
+            format!(
+                "return the sort key too (RETURN ..., a.age) and order by it, or group by it \
+                 too. {grouping}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a)-->(b) RETURN a.name, count(b) + b.age",
+            "MATCH (a) RETURN a.age, max(count(a))",
+            "MATCH (a) WHERE count(a) > 1 RETURN a",
+            "MATCH (a) RETURN a.name ORDER BY count(a)",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(grouping), "{query}: {help}");
+            assert!(!help.contains("Declare every variable"), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_pattern_variable_errors_explain_what_a_variable_names() {
+        let pattern = "In a MATCH clause a node variable names one node (written twice, it joins \
+                       on the same node), an edge variable one edge, a path variable the path \
+                       after its `=`, and the variable of a quantified edge the list of its \
+                       edges, as in g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, \
+                       b.name\"); a name defined by LET or WITH is a value, not a pattern \
+                       variable.";
+        let help = gql_help("MATCH (a)-[e]->(b), (c)-[e]->(d) RETURN a");
+        assert_eq!(
+            help,
+            format!(
+                "give the second edge its own variable, or put the second pattern in a MATCH \
+                 clause of its own to join on the same edge `e`. {pattern}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a)-[e]->(e) RETURN a",
+            "MATCH p = (a)-->(b) MATCH p = (c)-->(d) RETURN p",
+            "MATCH (a)-[e]->{1,2}(b) RETURN e.weight",
+            "MATCH (a) WITH a.name AS n MATCH (n) RETURN n",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(pattern), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_duplicate_names_ask_for_a_name_of_its_own() {
+        let names = "Give every column of a RETURN or WITH, every variable of a LET and every \
+                     key of a map a name of its own, as in \
+                     g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age\").";
+        let help = gql_help("MATCH (a) RETURN a.name AS n, a.age AS n");
+        assert_eq!(
+            help,
+            format!(
+                "give one of the columns another name with AS, as in RETURN ... AS n2. {names}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a) LET x = 1, x = 2 RETURN x",
+            "MATCH (a) RETURN {k: 1, k: 2}",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(names), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_aggregate_of_the_wrong_kind_names_numeric_aggregates() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a) RETURN sum(a.name)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report.contains("sum() takes numbers, not a string"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            "A row of the data gave the marked aggregate a value it cannot add: sum() and avg() \
+             take numbers only (count() and collect_list() take values of any kind). Aggregate \
+             a numeric property, as in g.gql(\"MATCH (p:person) RETURN sum(p.age)\"), and keep \
+             values of another kind out with a comparison to a number, which is NULL for text \
+             and so drops the row, as in g.gql(\"MATCH (p) WHERE p.age >= 0 RETURN \
+             avg(p.age)\"), or inside the aggregate, as in g.gql(\"MATCH (p) RETURN sum(CASE \
+             WHEN p.age >= 0 THEN p.age END)\") (an aggregate skips NULL)."
+        );
+        assert_examples_run(&help);
+        // avg() too; a failing argument keeps the general data advice.
+        let help = gql_help("MATCH (a) RETURN avg(a.lang)");
+        assert!(
+            help.starts_with("A row of the data gave the marked aggregate"),
+            "{help}"
+        );
+        let help = gql_help("MATCH (a:person) RETURN sum(1 / (a.age - 29))");
+        assert!(
+            help.starts_with("A row of the data made the marked expression fail."),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_repeat_limit_of_a_quantifier_names_the_quantifier() {
+        let (err, report) = gql_failure(|g| {
+            g.with("repeat.max_loops", 1)
+                .gql("MATCH (a:person)-[e:knows]->{2,}(b) RETURN b")
+                .to_list()
+        });
+        assert!(
+            report.contains("Caused by: repeat() exceeded the loop limit of 1 iterations"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            "The loop of the quantified edge -[e:knows]->{2,} of the gql() query ran 1 \
+             iterations, the limit of repeat.max_loops. A quantifier without an upper bound \
+             ({m,}, *, + or Cypher [*]) repeats the edge until every path has used all the \
+             edges it can reach (trail), which takes more iterations than the limit on a large \
+             or densely connected graph; the result is never cut short. Give the quantifier an \
+             upper bound, as in -[e:knows]->{2,10}, for example \
+             g.gql(\"MATCH (a:person)-[:knows]->{1,3}(b) RETURN b.name\"). Or raise the limit \
+             for the query, g.with(\"repeat.max_loops\", 2).gql(..), for example \
+             g.with(\"repeat.max_loops\", 2).gql(\"MATCH (a)-[:knows]->{1,}(b) RETURN \
+             b.name\"). It is an administrative option: a script whose host restricts it needs \
+             Update on that Option to set it."
+        );
+        // The internal loop body is not offered as advice.
+        assert!(!help.contains("gql:trail"), "{help}");
+        assert!(!help.contains("glob_path"), "{help}");
+        assert_examples_run(&help);
+        // Other forms: `*` (lower bound 0), either direction, `<-`, Cypher `[*]`, a filter.
+        for (query, edge) in [
+            ("MATCH (a)-[:knows]->*(b) RETURN b", "-[:knows]->{0,}"),
+            ("MATCH (a)-[e]-+(b) RETURN b", "-[e]-{1,}"),
+            (
+                "MATCH (a)<-[:knows|created]-{1,}(b) RETURN b",
+                "<-[:knows|created]-{1,}",
+            ),
+            ("MATCH (a)-[e:knows*]->(b) RETURN b", "-[e:knows]->{1,}"),
+            (
+                "MATCH (a)-[e WHERE e.weight > 0.1]->{1,}(b) RETURN b",
+                "-[e WHERE ..]->{1,}",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 1).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!("The loop of the quantified edge {edge} of")),
+                "{query}: {help}"
+            );
+        }
+        // Under camel spelling the advice reads the same.
+        let (err, _) = gql_failure(|g| {
+            g.with("render.spelling", "camel")
+                .with("repeat.max_loops", 1)
+                .gql("MATCH (a:person)-[e:knows]->{2,}(b) RETURN b")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with("The loop of the quantified edge -[e:knows]->{2,} of"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_traverser_limit_gives_gql_advice() {
+        let tail = "Narrow the pattern with labels and conditions, for example \
+                    g.gql(\"MATCH (p:person)-[:knows]->(f) WHERE f.age > 30 RETURN f.name\"), \
+                    or raise the limit for the query, g.with(\"traversal.max_traversers\", \
+                    40).gql(..), for example g.with(\"traversal.max_traversers\", \
+                    40).gql(\"MATCH (a)-->(b) RETURN count(*)\"). A host can lock this option \
+                    with ExecutionPolicy::with_locked(\"traversal.max_traversers\"); \
+                    9223372036854775807 is as good as unlimited. Setting it is an \
+                    administrative option: a script whose host restricts it needs Update on \
+                    that Option.";
+        let (err, report) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 20)
+                .gql("MATCH (a)-[e]-{1,}(b) RETURN count(*)")
+                .to_list()
+        });
+        assert!(
+            report.contains("Resource limit 'traversal.max_traversers' exceeded (limit 20"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            format!(
+                "The gql() query kept more traversers (rows in the making) alive between two \
+                 steps than 'traversal.max_traversers' allows (20). Each path a quantified edge \
+                 (-[e]-{{1,}}) matches is a traverser of its own (trail keeps them apart, so \
+                 they do not merge), and their number grows with every iteration: give it a \
+                 lower upper bound, as in -[e]-{{1,5}}. {tail}"
+            )
+        );
+        assert!(!help.contains("v().out().out()"), "{help}");
+        assert_examples_run(&help);
+        // A query without a quantifier gets the GQL advice without the quantifier sentence.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 3)
+                .gql("MATCH (a)-->(b) RETURN b")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "The gql() query kept more traversers (rows in the making) alive between two \
+                 steps than 'traversal.max_traversers' allows (3). Narrow the pattern"
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains("g.with(\"traversal.max_traversers\", 6).gql(..)"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_nodes_and_relationships_are_not_yet_with_the_path_alternatives() {
+        for function in ["nodes", "relationships"] {
+            let query = format!("MATCH p = (a)-->(b) RETURN {function}(p)");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string())
+            );
+            assert!(
+                report.contains(&format!(
+                    "{function}() over a path is not yet supported in this version"
+                )),
+                "{report}"
+            );
+            let help = err.help().unwrap();
+            assert_eq!(
+                help,
+                "return the path itself (RETURN p) or name its elements and return them, as in \
+                 MATCH p = (a)-[e]->(b) RETURN a, e, b; Gremlin steps may follow gql(), as in \
+                 g.gql(\"MATCH p = (a)-->(b) RETURN p\").select(\"p\").unfold(). This construct \
+                 comes in a later version of gql(); until then, write the query without it or \
+                 as Gremlin steps."
+            );
+            assert_examples_run(&help);
+        }
+    }
+
+    #[test]
+    fn gql_subqueries_name_the_optional_match_aggregate_form() {
+        let help = gql_help("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n");
+        assert!(
+            help.starts_with(
+                "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
+                 MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)."
+            ),
+            "{help}"
+        );
+        let help = gql_help("MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m }");
+        assert!(
+            help.starts_with(
+                "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), as \
+                 in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
+                 collect_list(s.name)."
+            ),
+            "{help}"
+        );
+        // The forms both advices name run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, rows) in [
+            (
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)",
+                4,
+            ),
+            (
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
+                 collect_list(s.name)",
+                4,
+            ),
+            ("MATCH (a)-[:knows]->{1,3}(b) RETURN b", 2),
+        ] {
+            assert_eq!(locked.traversal().gql(query).to_list().unwrap().len(), rows);
+        }
     }
 }
