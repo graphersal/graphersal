@@ -61,6 +61,22 @@
 //! - **Paths:** a [`Value::Path`] is the elements of a matched path in text order (vertex, edge,
 //!   vertex, ...). Two paths are equal when they hold the same elements in the same order; a
 //!   path compared with a value of another kind gives `NULL`, like any two incomparable kinds.
+//! - **Map projections** (stage 2c, Cypher) `v {.key, .*, x, key: expr}`: a `NULL` target gives
+//!   `NULL` (where the record constructor `{key: v.key}` gives `{key: null}`); from a node or an
+//!   edge `.key` reads its property (missing: `NULL`, the key kept) and `.*` every stored
+//!   property in stored order (no id, no labels; a stored `null` left out, as `properties()`
+//!   does); from a map `.key` reads the entry and `.*` every entry; any other target is error
+//!   22G03. `x` is the variable's value under its name, `key: expr` the expression's. Keys come
+//!   in written order with `.*` expanded at its place; a key written twice keeps its first place
+//!   and takes the later value (design E12). An element inside stays an element.
+//! - **List comprehensions** (stage 2c, Cypher) `[x IN list WHERE cond | expr]`: a `NULL` list
+//!   gives `NULL`, a value that is not a list error 22G03; an item is kept only when `cond` is
+//!   TRUE (FALSE and `NULL` drop it); `| expr` maps a kept item, else the item itself is kept;
+//!   the result keeps the list's order. The variable is a **local** (design M4): compiled to
+//!   `Node::Local` through [`Scope::local`] and bound per item through [`Env::local`] by a
+//!   frame on the call stack (`LocalEnv`), so a comprehension allocates nothing per item
+//!   besides the result values. The binder refuses a variable that shadows another name (E14),
+//!   so a local never hides a row variable.
 //! - **Aggregates** (`count`, `sum`, `avg`, `min`, `max`, `collect_list`) are compiled only where
 //!   the [`Scope`] admits them ([`Scope::aggregate`], the aggregating stage `aggregate.rs`); the
 //!   compiled call reads its result through [`Env::aggregate`]. Elsewhere they are error 0A000.
@@ -73,7 +89,7 @@ use std::cmp::Ordering;
 
 use super::ast::{
     BinaryOp, CallArgs, CaseExpr, CastTarget, Endpoint, Expr, ExprKind, LabelExpr, LabelExprKind,
-    Literal, MapLiteral, TrimSide, UnaryOp,
+    ListComprehension, Literal, MapLiteral, MapProjection, ProjectionItem, TrimSide, UnaryOp,
 };
 use super::functions::{self, Arg, Family};
 use super::lexer::Span;
@@ -85,6 +101,9 @@ use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod local_tests;
 
 /// The GQLSTATUS codes the evaluator raises.
 pub(crate) mod status {
@@ -406,6 +425,83 @@ pub(crate) trait Env {
         let _ = index;
         None
     }
+    /// The value of the comprehension variable `index` ([`Scope::local`], design M4). Only the
+    /// evaluator's own [`LocalEnv`] holds locals; every other row has none (`NULL`).
+    fn local(&self, index: usize) -> Value<Self::Element> {
+        let _ = index;
+        Value::Null
+    }
+}
+
+/// The row of a comprehension's `WHERE` and `|` parts (design M4): the variable `index` bound
+/// to one item of the list, everything else read from `parent`. It holds a reference to the
+/// item and to the row around it, so a nested comprehension stacks one more on the call stack:
+/// no allocation per item, and one type however deep the nesting (`parent` is a trait object,
+/// so the evaluator is not instantiated once per nesting level).
+struct LocalEnv<'a, E> {
+    parent: &'a (dyn Env<Element = E> + 'a),
+    index: usize,
+    value: &'a Value<E>,
+}
+
+impl<E: Clone + PartialEq> Env for LocalEnv<'_, E> {
+    type Element = E;
+
+    fn variable(&self, slot: usize) -> Value<E> {
+        self.parent.variable(slot)
+    }
+
+    fn kind(&self, element: &E) -> ElementKind {
+        self.parent.kind(element)
+    }
+
+    fn element_id(&self, element: &E) -> CompactString {
+        self.parent.element_id(element)
+    }
+
+    fn property(&self, element: &E, key: &str) -> Option<ElementProperty> {
+        self.parent.property(element, key)
+    }
+
+    fn has_label(&self, element: &E, label: &str) -> bool {
+        self.parent.has_label(element, label)
+    }
+
+    fn has_any_label(&self, element: &E) -> bool {
+        self.parent.has_any_label(element)
+    }
+
+    fn labels(&self, element: &E) -> Vec<CompactString> {
+        self.parent.labels(element)
+    }
+
+    fn aggregate(&self, index: usize) -> Value<E> {
+        self.parent.aggregate(index)
+    }
+
+    fn properties(&self, element: &E) -> Vec<(CompactString, ElementProperty)> {
+        self.parent.properties(element)
+    }
+
+    fn endpoints(&self, edge: &E) -> Option<(E, E)> {
+        self.parent.endpoints(edge)
+    }
+
+    fn reserve(&self, bytes: u64) -> bool {
+        self.parent.reserve(bytes)
+    }
+
+    fn subquery(&self, index: usize) -> Option<Value<E>> {
+        self.parent.subquery(index)
+    }
+
+    fn local(&self, index: usize) -> Value<E> {
+        if index == self.index {
+            self.value.clone()
+        } else {
+            self.parent.local(index)
+        }
+    }
 }
 
 /// An aggregate call met by [`compile`] ([`Scope::aggregate`]).
@@ -441,6 +537,54 @@ pub(crate) trait Scope {
         let _ = span;
         None
     }
+    /// The index of the comprehension variable `name` ([`Env::local`]) when one is in scope
+    /// here (design M4). Only [`compile`]'s own scope of a comprehension's parts has locals.
+    fn local(&self, name: &str) -> Option<usize> {
+        let _ = name;
+        None
+    }
+    /// How many comprehension variables are in scope: the index the next one gets.
+    fn locals(&self) -> usize {
+        0
+    }
+}
+
+/// The scope of a comprehension's `WHERE` and `|` parts: its variable, then `parent` (a trait
+/// object, so [`compile`] is instantiated once however deep comprehensions nest).
+struct LocalScope<'a> {
+    parent: &'a (dyn Scope + 'a),
+    name: &'a str,
+    index: usize,
+}
+
+impl Scope for LocalScope<'_> {
+    fn variable(&self, name: &str) -> Option<usize> {
+        self.parent.variable(name)
+    }
+
+    fn parameter(&self, name: &str) -> Option<ElementProperty> {
+        self.parent.parameter(name)
+    }
+
+    fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
+        self.parent.aggregate(call)
+    }
+
+    fn subquery(&self, span: Span) -> Option<Result<usize, EvalError>> {
+        self.parent.subquery(span)
+    }
+
+    fn local(&self, name: &str) -> Option<usize> {
+        if name == self.name {
+            Some(self.index)
+        } else {
+            self.parent.local(name)
+        }
+    }
+
+    fn locals(&self) -> usize {
+        self.index.saturating_add(1)
+    }
 }
 
 /// A compiled expression, evaluated per row against an [`Env`].
@@ -471,6 +615,39 @@ enum Node<E> {
     Aggregate(usize),
     /// The value of a subquery (`EXISTS`), read through [`Env::subquery`].
     Subquery(usize),
+    /// A comprehension variable, read through [`Env::local`] (design M4).
+    Local(usize),
+    /// A map projection `target {.k, .*, x, k: expr}`.
+    Projection(Box<Projection<E>>),
+    /// A list comprehension `[x IN list WHERE cond | expr]`.
+    Comprehension(Box<Comprehension<E>>),
+}
+
+/// A compiled map projection.
+#[derive(Debug, Clone)]
+struct Projection<E> {
+    target: Compiled<E>,
+    items: Vec<ProjectionPart<E>>,
+}
+
+/// One item of a [`Projection`], in written order.
+#[derive(Debug, Clone)]
+enum ProjectionPart<E> {
+    /// `.key` (and `x`, whose key is its name, compiled as an entry).
+    Property(CompactString),
+    /// `.*`.
+    All,
+    /// `key: expr` and a variable item `x`.
+    Entry(CompactString, Compiled<E>),
+}
+
+/// A compiled list comprehension: `index` is its variable's local index.
+#[derive(Debug, Clone)]
+struct Comprehension<E> {
+    index: usize,
+    list: Compiled<E>,
+    filter: Option<Compiled<E>>,
+    map: Option<Compiled<E>>,
 }
 
 /// One link of a [`Node::Chain`].
@@ -634,16 +811,7 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 ));
             }
         },
-        ExprKind::Variable(name) => match scope.variable(&name.name) {
-            Some(slot) => Node::Variable(slot),
-            None => {
-                return Err(EvalError::new(
-                    status::SEMANTIC,
-                    format!("the variable {} is not defined", name.name),
-                    span,
-                ));
-            }
-        },
+        ExprKind::Variable(name) => compile_variable(&name.name, scope, span)?,
         ExprKind::List(items) => compile_list(items, scope)?,
         ExprKind::Map(map) => compile_map(map, scope)?,
         ExprKind::Case(case) => compile_case(case, scope)?,
@@ -671,15 +839,86 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 ));
             }
         },
-        // The binder refuses them until 2c.T2 / 2c.T3 (`bind::not_yet_expression`).
-        ExprKind::MapProjection(_) => return Err(not_yet_2c("a map projection", span)),
-        ExprKind::ListComprehension(_) => {
-            return Err(not_yet_2c("a list comprehension", span));
-        }
+        ExprKind::MapProjection(projection) => compile_projection(projection, scope)?,
+        ExprKind::ListComprehension(comprehension) => compile_comprehension(comprehension, scope)?,
+        // The binder refuses it until 2c.T3 (`bind::not_yet_expression`).
         ExprKind::PatternComprehension(_) => {
             return Err(not_yet_2c("a pattern comprehension", span));
         }
     })
+}
+
+/// A variable: a comprehension variable in scope first (the binder refuses one shadowing any
+/// other name, design E14), else a slot of the row.
+fn compile_variable<E>(name: &str, scope: &impl Scope, span: Span) -> Result<Node<E>, EvalError> {
+    if let Some(index) = scope.local(name) {
+        return Ok(Node::Local(index));
+    }
+    match scope.variable(name) {
+        Some(slot) => Ok(Node::Variable(slot)),
+        None => Err(EvalError::new(
+            status::SEMANTIC,
+            format!("the variable {name} is not defined"),
+            span,
+        )),
+    }
+}
+
+#[inline(never)]
+fn compile_projection<E: Clone>(
+    projection: &MapProjection,
+    scope: &impl Scope,
+) -> Result<Node<E>, EvalError> {
+    let target = compile(&projection.target, scope)?;
+    let mut items = Vec::with_capacity(projection.items.len());
+    for item in &projection.items {
+        items.push(match item {
+            ProjectionItem::Property(key) => ProjectionPart::Property(key.name.as_str().into()),
+            ProjectionItem::AllProperties(_) => ProjectionPart::All,
+            ProjectionItem::Variable(var) => ProjectionPart::Entry(
+                var.name.as_str().into(),
+                Compiled {
+                    node: compile_variable(&var.name, scope, var.span)?,
+                    span: var.span,
+                },
+            ),
+            ProjectionItem::Entry(entry) => ProjectionPart::Entry(
+                entry.key.name.as_str().into(),
+                compile(&entry.value, scope)?,
+            ),
+        });
+    }
+    Ok(Node::Projection(Box::new(Projection { target, items })))
+}
+
+#[inline(never)]
+fn compile_comprehension<E: Clone>(
+    comprehension: &ListComprehension,
+    scope: &impl Scope,
+) -> Result<Node<E>, EvalError> {
+    let list = compile(&comprehension.list, scope)?;
+    let index = scope.locals();
+    let local = LocalScope {
+        parent: scope,
+        name: &comprehension.variable.name,
+        index,
+    };
+    let filter = comprehension
+        .filter
+        .as_ref()
+        .map(|filter| compile(filter, &local))
+        .transpose()?;
+    let map = comprehension
+        .map
+        .as_ref()
+        .map(|map| compile(map, &local))
+        .transpose()?;
+    Ok(Node::Comprehension(Box::new(Comprehension {
+        index,
+        list,
+        filter,
+        map,
+    })))
 }
 
 /// The evaluator's refusal of a stage 2c expression the binder let through.
@@ -931,8 +1170,26 @@ impl<E> Compiled<E> {
         match &self.node {
             // An aggregate's argument is compiled apart (`aggregate::AggregateCall`).
             // A subquery's body declares its own reads (the host's child traversal).
-            Node::Const(_) | Node::Aggregate(_) | Node::Subquery(_) => {}
+            // A comprehension variable is no slot of the row.
+            Node::Const(_) | Node::Aggregate(_) | Node::Subquery(_) | Node::Local(_) => {}
             Node::Variable(slot) => slots.push(*slot),
+            Node::Projection(projection) => {
+                projection.target.variables(slots);
+                for item in &projection.items {
+                    if let ProjectionPart::Entry(_, value) = item {
+                        value.variables(slots);
+                    }
+                }
+            }
+            Node::Comprehension(comprehension) => {
+                comprehension.list.variables(slots);
+                if let Some(filter) = &comprehension.filter {
+                    filter.variables(slots);
+                }
+                if let Some(map) = &comprehension.map {
+                    map.variables(slots);
+                }
+            }
             Node::List(items) | Node::Call(_, items) => {
                 items.iter().for_each(|item| item.variables(slots));
             }
@@ -1047,10 +1304,129 @@ impl<E: Clone + PartialEq> Compiled<E> {
                 Some(value) => value,
                 None => return Err(EvalError::subquery_pending(self.span)),
             },
+            Node::Local(index) => env.local(*index),
+            Node::Projection(projection) => projection.eval(env)?,
+            Node::Comprehension(comprehension) => comprehension.eval(env)?,
             Node::Const(value) => value.clone(),
             Node::Case(case) => case.eval(env)?.into_owned(),
             Node::Chain(first, links) => eval_chain(first, links, env)?.into_owned(),
         })
+    }
+}
+
+impl<E: Clone + PartialEq> Projection<E> {
+    /// The map (design item 7): `NULL` for a `NULL` target; from a node or an edge its
+    /// properties, from a map its entries; keys in written order with `.*` expanded at its
+    /// place; a key written twice keeps its first place and takes the later value (E12).
+    #[inline(never)]
+    fn eval<En: Env<Element = E>>(&self, env: &En) -> Result<Value<E>, EvalError> {
+        let target = self.target.eval_cow(env)?;
+        let source = match &*target {
+            Value::Null => return Ok(Value::Null),
+            Value::Element(_) | Value::Map(_) => &*target,
+            other => {
+                return Err(EvalError::invalid_type(
+                    format!(
+                        "a map projection reads a node, an edge or a map, not {}",
+                        other.kind_name()
+                    ),
+                    self.target.span,
+                ));
+            }
+        };
+        let mut entries: Vec<(CompactString, Value<E>)> = Vec::with_capacity(self.items.len());
+        for item in &self.items {
+            match item {
+                ProjectionPart::Property(key) => {
+                    let value = match source {
+                        Value::Element(element) => env
+                            .property(element, key)
+                            .map(Value::from_property)
+                            .unwrap_or(Value::Null),
+                        Value::Map(map) => map
+                            .iter()
+                            .find(|(name, _)| name == key)
+                            .map(|(_, value)| value.clone())
+                            .unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    };
+                    put_entry(&mut entries, key.clone(), value);
+                }
+                ProjectionPart::All => match source {
+                    Value::Element(element) => {
+                        for (key, value) in env.properties(element) {
+                            // A stored `null` is no property (it reads as NULL).
+                            if !matches!(value, ElementProperty::Null) {
+                                put_entry(&mut entries, key, Value::from_property(value));
+                            }
+                        }
+                    }
+                    Value::Map(map) => {
+                        for (key, value) in map {
+                            put_entry(&mut entries, key.clone(), value.clone());
+                        }
+                    }
+                    _ => {}
+                },
+                ProjectionPart::Entry(key, value) => {
+                    put_entry(&mut entries, key.clone(), value.eval(env)?);
+                }
+            }
+        }
+        Ok(Value::Map(entries))
+    }
+}
+
+/// Adds `key: value` to a map being built: a key already there keeps its place and takes the
+/// new value (E12).
+fn put_entry<E>(entries: &mut Vec<(CompactString, Value<E>)>, key: CompactString, value: Value<E>) {
+    match entries.iter_mut().find(|(name, _)| *name == key) {
+        Some(entry) => entry.1 = value,
+        None => entries.push((key, value)),
+    }
+}
+
+impl<E: Clone + PartialEq> Comprehension<E> {
+    /// The list (design item 7): `NULL` for a `NULL` list, error 22G03 for a value that is not a
+    /// list; an item is kept only when the `WHERE` condition is TRUE; the result keeps the
+    /// list's order. The variable is bound per item through a [`LocalEnv`] (design M4).
+    #[inline(never)]
+    fn eval<En: Env<Element = E>>(&self, env: &En) -> Result<Value<E>, EvalError> {
+        let items = match self.list.eval(env)? {
+            Value::Null => return Ok(Value::Null),
+            Value::List(items) => items,
+            other => {
+                return Err(EvalError::invalid_type(
+                    format!(
+                        "a list comprehension iterates over a list, not {}",
+                        other.kind_name()
+                    ),
+                    self.list.span,
+                ));
+            }
+        };
+        let mut out = Vec::with_capacity(if self.filter.is_some() {
+            0
+        } else {
+            items.len()
+        });
+        for item in items {
+            let local = LocalEnv {
+                parent: env,
+                index: self.index,
+                value: &item,
+            };
+            if let Some(filter) = &self.filter
+                && filter.truth(&local)? != Truth::True
+            {
+                continue;
+            }
+            match &self.map {
+                Some(map) => out.push(map.eval(&local)?),
+                None => out.push(item),
+            }
+        }
+        Ok(Value::List(out))
     }
 }
 

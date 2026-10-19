@@ -8769,12 +8769,6 @@ mod gql {
                 "or with FOR in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' \
                  RETURN DISTINCT n\")",
             ),
-            (
-                "MATCH (p) RETURN [x IN [1, 2, 3] WHERE x > 1]",
-                "Gremlin unfold() and fold()",
-                "or FOR in gql(), as in g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN \
-                 collect_list(x) AS l\")",
-            ),
         ] {
             let (err, _) = gql_failure(|g| g.gql(query).to_list());
             assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
@@ -8785,25 +8779,14 @@ mod gql {
         }
     }
 
-    /// Until 2c.T2 / 2c.T3 the stage 2c expressions are refused "not yet", naming the form that
-    /// runs today, and the examples run.
+    /// Until 2c.T3 a pattern comprehension is refused "not yet", naming the form that runs
+    /// today, and the examples run (map projections and list comprehensions run since 2c.T2).
     #[test]
     fn gql_stage_2c_expressions_name_the_form_of_today() {
-        for (query, keeps) in [
-            (
-                "MATCH (p:person) RETURN p {.name, .age}",
-                "or build the map with a record constructor, as in g.gql(\"MATCH (p:person) \
-                 RETURN {name: p.name, age: p.age} AS m\")",
-            ),
-            (
-                "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name]",
-                "collect the matches of the pattern with OPTIONAL MATCH and collect_list()",
-            ),
-            (
-                "RETURN [x IN [1, 2, 3] | x * 2]",
-                "Gremlin unfold() and fold()",
-            ),
-        ] {
+        for (query, keeps) in [(
+            "MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name]",
+            "collect the matches of the pattern with OPTIONAL MATCH and collect_list()",
+        )] {
             let (err, _) = gql_failure(|g| g.gql(query).to_list());
             assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
             let help = err.help().unwrap();

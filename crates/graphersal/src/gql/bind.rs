@@ -94,6 +94,23 @@
 //! (`WITH *` keeps it); a dropped name written again in a later pattern is a new binding (its
 //! key is `#<id>`, decision C14). `RETURN` and its `ORDER BY` see the final scope.
 //!
+//! # Map projections and list comprehensions (stage 2c)
+//!
+//! A map projection `v {.k, .*, x, k: expr}` reads its target, its variable items `x` and its
+//! entries like any expression; keys may repeat (design E12: the evaluator keeps the first place
+//! and the later value). When a `LET` / `WITH` substitution changes a variable item, it becomes
+//! the entry `x: <substituted>`, so its key stays the written name. A list comprehension
+//! `[x IN list WHERE cond | expr]` resolves `list` in the scope around it and its `WHERE` and
+//! `|` parts with `x` as a **local** (design M4): it reads no binding and is visible only in
+//! those parts. A local may not shadow a name (E14, 42002): a variable or an `ORDER BY` alias
+//! in scope, a local around it, or any name a binding of the query has or had (a substituted
+//! expression names bindings by their keys, which a local of the same name would capture).
+//! No aggregate stands in the `WHERE` / `|` parts (the list part may hold one). A local is not
+//! readable inside a subquery in those parts yet (`NotYet`): its body is planned apart from the
+//! item. Beside an aggregate, a projection's target, variable items and entries are checked like
+//! any expression (only grouping keys outside the aggregates). Pattern comprehensions are
+//! refused `NotYet` until 2c.T3.
+//!
 //! # Subqueries
 //!
 //! A subquery's body (its `MATCH` clauses, their inline filters and `WHERE`s) is bound where the
@@ -150,9 +167,11 @@
 //! used as a node or edge, a misplaced aggregate, a non-grouped read beside an aggregate, an
 //! `ORDER BY` key reading a dropped variable after `DISTINCT` / aggregation, a duplicate key in a
 //! map, a parameter that was not supplied, a subquery local read outside its body, a new
-//! variable in a pattern predicate. `22G02` for a negative `OFFSET` / `LIMIT` literal,
+//! variable in a pattern predicate, a comprehension variable shadowing a name or read outside
+//! its comprehension, an aggregate inside a comprehension's `WHERE` / `|` part. `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
-//! quantified edge that reads another variable.
+//! quantified edge that reads another variable, a comprehension variable read inside a subquery
+//! and a pattern comprehension.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -176,9 +195,9 @@ use std::rc::Rc;
 
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy,
-    Identifier, LabelExpr, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern,
-    OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, ReturnItem, SortDirection, Stage,
-    SubqueryExpr, SubqueryForm, SubqueryKind, WithClause,
+    Identifier, LabelExpr, LetClause, ListComprehension, Literal, MapEntry, MapLiteral,
+    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier,
+    Query, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -759,23 +778,10 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     }
 }
 
-/// The "not yet" refusal of a stage 2c expression (a map projection, a list or pattern
-/// comprehension), which the parser reads but the binder and the evaluator do not support yet
-/// (2c.T2 / 2c.T3); `None` for every other expression.
+/// The "not yet" refusal of a pattern comprehension, which the parser reads but the binder and
+/// the evaluator do not support yet (2c.T3); `None` for every other expression.
 fn not_yet_expression(expr: &Expr) -> Option<Box<GqlErrorBuilder>> {
     let (what, alternative) = match &expr.kind {
-        ExprKind::MapProjection(_) => (
-            "a map projection (v {.name})",
-            "return the properties one by one, for example RETURN v.name AS name, or build the \
-             map with a record constructor, as in \
-             g.gql(\"MATCH (p:person) RETURN {name: p.name, age: p.age} AS m\")",
-        ),
-        ExprKind::ListComprehension(_) => (
-            "a list comprehension [x IN list | ...]",
-            "Gremlin unfold() and fold(), for example \
-             g.inject([1, 2, 3]).unfold().is(P.gt(1)).fold(), or FOR in gql(), as in \
-             g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN collect_list(x) AS l\")",
-        ),
         ExprKind::PatternComprehension(_) => (
             "a pattern comprehension [(a)-->(b) | b.name]",
             "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), as in \
@@ -981,6 +987,12 @@ struct Binder<'q> {
     /// Names the later `MATCH` clauses of the subquery bodies being bound declare (innermost
     /// last), for the "bound by a later MATCH clause" message inside a body.
     later_in_body: Vec<String>,
+    /// The variables of the list comprehensions whose `WHERE` / `|` part is being resolved,
+    /// innermost last (design M4: locals of one expression, never bindings).
+    locals: Vec<Identifier>,
+    /// The comprehension variables around a subquery body being bound: not readable inside it
+    /// (not yet), named by the error.
+    shelved_locals: Vec<Identifier>,
 }
 
 impl<'q> Binder<'q> {
@@ -1005,6 +1017,8 @@ impl<'q> Binder<'q> {
             incomplete_paths: Vec::new(),
             hidden: HashMap::new(),
             later_in_body: Vec::new(),
+            locals: Vec::new(),
+            shelved_locals: Vec::new(),
         }
     }
 
@@ -1950,15 +1964,94 @@ impl<'q> Binder<'q> {
                     refs.bindings.extend_from_slice(&bound.imports);
                 }
             }
-            ExprKind::MapProjection(_)
-            | ExprKind::ListComprehension(_)
-            | ExprKind::PatternComprehension(_) => {
+            ExprKind::MapProjection(projection) => {
+                self.resolve(ctx, &projection.target, refs)?;
+                for item in &projection.items {
+                    match item {
+                        ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {}
+                        ProjectionItem::Variable(var) => self.variable(ctx, var, refs)?,
+                        ProjectionItem::Entry(entry) => self.resolve(ctx, &entry.value, refs)?,
+                    }
+                }
+            }
+            ExprKind::ListComprehension(comprehension) => {
+                self.comprehension(ctx, comprehension, refs)?;
+            }
+            ExprKind::PatternComprehension(_) => {
                 if let Some(error) = not_yet_expression(expr) {
                     return Err(error);
                 }
             }
         }
         Ok(())
+    }
+
+    /// A list comprehension: its list in the scope around it, its `WHERE` and `|` parts with
+    /// its variable as a local (design M4) that may not shadow any other name (E14), no
+    /// aggregate inside them.
+    #[inline(never)]
+    fn comprehension(
+        &mut self,
+        ctx: Ctx<'_>,
+        comprehension: &ListComprehension,
+        refs: &mut Refs,
+    ) -> BResult<()> {
+        self.resolve(ctx, &comprehension.list, refs)?;
+        self.check_local(ctx, &comprehension.variable)?;
+        let inner = Ctx {
+            aggregates: Aggregates::Refused(IN_COMPREHENSION),
+            ..ctx
+        };
+        self.locals.push(comprehension.variable.clone());
+        let mut result = Ok(());
+        for part in [&comprehension.filter, &comprehension.map]
+            .into_iter()
+            .flatten()
+        {
+            result = self.resolve(inner, part, refs);
+            if result.is_err() {
+                break;
+            }
+        }
+        self.locals.pop();
+        result
+    }
+
+    /// A comprehension variable may not shadow a name (design E14, 42002): a variable or an
+    /// alias in scope, another comprehension variable around it, or any name a binding of the
+    /// query has or had (a substituted expression refers to bindings by those names, so a
+    /// local of the same name would capture them).
+    fn check_local(&self, ctx: Ctx<'_>, var: &Identifier) -> BResult<()> {
+        let name = &var.name;
+        let in_scope = self.scope.get(name).is_some()
+            || ctx.aliases.iter().any(|(alias, _)| alias == name)
+            || self.locals.iter().any(|local| local.name == *name)
+            || self.shelved_locals.iter().any(|local| local.name == *name);
+        let used = self.taken.contains(name.as_str())
+            || self.dropped.contains_key(name)
+            || self.hidden.contains_key(name)
+            || self.pending_let.iter().any(|n| n == name);
+        if !in_scope && !used {
+            return Ok(());
+        }
+        let message = if in_scope {
+            format!(
+                "the comprehension variable `{name}` shadows the variable `{name}` in scope; a \
+                 comprehension variable must be a new name"
+            )
+        } else {
+            format!(
+                "the comprehension variable `{name}` is a name this query already uses; a \
+                 comprehension variable must be a new name"
+            )
+        };
+        Err(semantic(var.span, message)
+            .alternative(format!(
+                "give the comprehension its own variable, as in [{name}2 IN list WHERE {name}2 \
+                 > 0 | {name}2]"
+            ))
+            .topic(GqlHelpTopic::Scope)
+            .into())
     }
 
     /// `g.key` of a group variable `g` outside its own element reads the list: refused.
@@ -1995,6 +2088,10 @@ impl<'q> Binder<'q> {
     }
 
     fn variable(&self, ctx: Ctx<'_>, var: &Identifier, refs: &mut Refs) -> BResult<()> {
+        // A comprehension variable reads no binding (it shadows nothing: `check_local`).
+        if self.locals.iter().any(|local| local.name == var.name) {
+            return Ok(());
+        }
         if let Some((_, column)) = ctx.aliases.iter().find(|(name, _)| *name == var.name) {
             refs.aliases.push(*column);
             return Ok(());
@@ -2040,6 +2137,9 @@ impl<'q> Binder<'q> {
     /// The error of a name not in scope.
     fn undefined(&self, ctx: Ctx<'_>, var: &Identifier) -> Box<GqlErrorBuilder> {
         let name = &var.name;
+        if self.shelved_locals.iter().any(|local| local.name == *name) {
+            return local_in_subquery(var);
+        }
         if self.pending_let.iter().any(|n| n == name) {
             return semantic(
                 var.span,
@@ -2307,10 +2407,74 @@ impl<'q> Binder<'q> {
             // The body is bound (and substituted) on its own ([`BoundQuery::subqueries`]); the
             // expression keeps the written subquery as a reference to it.
             ExprKind::Subquery(_) => return Ok((expr.clone(), Shape::LEAF)),
-            // `resolve` refuses them first (2c.T2 / 2c.T3 bind them).
-            ExprKind::MapProjection(_)
-            | ExprKind::ListComprehension(_)
-            | ExprKind::PatternComprehension(_) => {
+            ExprKind::MapProjection(projection) => {
+                let (target, s) = self.substitute(aliases, &projection.target)?;
+                children.push((s, true));
+                let mut items = Vec::with_capacity(projection.items.len());
+                for item in &projection.items {
+                    items.push(match item {
+                        ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {
+                            item.clone()
+                        }
+                        // The key stays the written name; the value is substituted.
+                        ProjectionItem::Variable(var) => {
+                            let written = Expr {
+                                kind: ExprKind::Variable(var.clone()),
+                                span: var.span,
+                            };
+                            let (value, s) = self.substitute(aliases, &written)?;
+                            children.push((s, true));
+                            if value == written {
+                                item.clone()
+                            } else {
+                                ProjectionItem::Entry(MapEntry {
+                                    key: var.clone(),
+                                    value,
+                                })
+                            }
+                        }
+                        ProjectionItem::Entry(entry) => {
+                            let (value, s) = self.substitute(aliases, &entry.value)?;
+                            children.push((s, true));
+                            ProjectionItem::Entry(MapEntry {
+                                key: entry.key.clone(),
+                                value,
+                            })
+                        }
+                    });
+                }
+                ExprKind::MapProjection(Box::new(MapProjection {
+                    target,
+                    items,
+                    braces: projection.braces,
+                }))
+            }
+            // The variable is a local of the `WHERE` / `|` parts: it is in no scope, so
+            // `substitute_variable` leaves it as written.
+            ExprKind::ListComprehension(comprehension) => {
+                let mut one = |this: &mut Self, e: &Expr| -> BResult<Expr> {
+                    let (e, s) = this.substitute(aliases, e)?;
+                    children.push((s, true));
+                    Ok(e)
+                };
+                let list = one(self, &comprehension.list)?;
+                let filter = match &comprehension.filter {
+                    Some(filter) => Some(one(self, filter)?),
+                    None => None,
+                };
+                let map = match &comprehension.map {
+                    Some(map) => Some(one(self, map)?),
+                    None => None,
+                };
+                ExprKind::ListComprehension(Box::new(ListComprehension {
+                    variable: comprehension.variable.clone(),
+                    list,
+                    filter,
+                    map,
+                }))
+            }
+            // `resolve` refuses it first (2c.T3 binds it).
+            ExprKind::PatternComprehension(_) => {
                 return match not_yet_expression(expr) {
                     Some(error) => Err(error),
                     None => Ok((expr.clone(), shape_of(expr))),
@@ -2396,6 +2560,16 @@ impl<'q> Binder<'q> {
                 return Err(too_many_edges(edge.edge.span));
             }
         }
+        // A comprehension variable is not visible inside a subquery yet: a body naming one
+        // would silently bind a new variable instead.
+        if let Some(var) = subquery
+            .matches
+            .iter()
+            .flat_map(declared_names)
+            .find(|var| self.locals.iter().any(|local| local.name == var.name))
+        {
+            return Err(local_in_subquery(var));
+        }
         if subquery.form == SubqueryForm::PatternPredicate {
             self.check_pattern_predicate(ctx, subquery)?;
         }
@@ -2422,7 +2596,12 @@ impl<'q> Binder<'q> {
         let first_binding = self.bindings.len();
         let first_conjunct = self.conjuncts.len();
         let first_clause = self.sub_matches.len();
+        let shelved = self.shelved_locals.len();
+        let locals = std::mem::take(&mut self.locals);
+        self.shelved_locals.extend(locals.iter().cloned());
         let body = self.subquery_body(subquery, segment);
+        self.shelved_locals.truncate(shelved);
+        self.locals = locals;
         if incomplete {
             self.incomplete_paths.pop();
         }
@@ -2826,32 +3005,22 @@ impl<'q> Binder<'q> {
                 .topic(GqlHelpTopic::Grouping)
                 .into())
             }
-            ExprKind::Variable(var) => {
-                let grouped = match self.scope.get(&var.name) {
-                    Some(Symbol::Binding(id)) => key_variables.contains(id),
-                    Some(Symbol::Value(substitution)) => substitution
-                        .bindings
-                        .iter()
-                        .all(|id| key_variables.contains(id)),
-                    None => true,
-                };
-                if grouped {
-                    return Ok(());
+            ExprKind::Variable(var) => self.grouped_variable(var, key_variables, clause),
+            // In written order; a variable item `x` reads `x` like a variable.
+            ExprKind::MapProjection(projection) => {
+                self.grouped(&projection.target, key_variables, key_texts, clause)?;
+                for item in &projection.items {
+                    match item {
+                        ProjectionItem::Variable(var) => {
+                            self.grouped_variable(var, key_variables, clause)?;
+                        }
+                        ProjectionItem::Entry(entry) => {
+                            self.grouped(&entry.value, key_variables, key_texts, clause)?;
+                        }
+                        ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {}
+                    }
                 }
-                let name = &var.name;
-                Err(semantic(
-                    var.span,
-                    format!(
-                        "`{name}` is read outside an aggregate in an item that aggregates, so it \
-                         must be a grouping key of {clause}, and it is not one"
-                    ),
-                )
-                .alternative(format!(
-                    "add `{name}` to the {clause} items (it then becomes a grouping key), or read \
-                     it inside an aggregate, as in collect({name})"
-                ))
-                .topic(GqlHelpTopic::Grouping)
-                .into())
+                Ok(())
             }
             _ => {
                 let mut result = Ok(());
@@ -2863,6 +3032,41 @@ impl<'q> Binder<'q> {
                 result
             }
         }
+    }
+
+    /// A variable read outside the aggregates of an aggregating item must be a grouping key (a
+    /// comprehension variable is in no scope: it reads nothing of the row).
+    fn grouped_variable(
+        &self,
+        var: &Identifier,
+        key_variables: &[BindingId],
+        clause: &'static str,
+    ) -> BResult<()> {
+        let grouped = match self.scope.get(&var.name) {
+            Some(Symbol::Binding(id)) => key_variables.contains(id),
+            Some(Symbol::Value(substitution)) => substitution
+                .bindings
+                .iter()
+                .all(|id| key_variables.contains(id)),
+            None => true,
+        };
+        if grouped {
+            return Ok(());
+        }
+        let name = &var.name;
+        Err(semantic(
+            var.span,
+            format!(
+                "`{name}` is read outside an aggregate in an item that aggregates, so it \
+                 must be a grouping key of {clause}, and it is not one"
+            ),
+        )
+        .alternative(format!(
+            "add `{name}` to the {clause} items (it then becomes a grouping key), or read \
+             it inside an aggregate, as in collect({name})"
+        ))
+        .topic(GqlHelpTopic::Grouping)
+        .into())
     }
 
     fn order_by(
@@ -3105,12 +3309,34 @@ fn ordinal_as_element(var: &Identifier, here: BindingKind) -> Box<GqlErrorBuilde
 }
 
 /// The error of an aggregate call where none may stand.
+/// The place of an aggregate inside a list comprehension's `WHERE` / `|` part (refused).
+const IN_COMPREHENSION: &str = "inside the WHERE or | part of a list comprehension";
+
+/// A comprehension variable named inside a subquery body (not yet: the body is a child
+/// traversal planned apart from the item being iterated).
+fn local_in_subquery(var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    not_yet(
+        var.span,
+        &format!("reading the comprehension variable `{name}` inside a subquery"),
+        &format!(
+            "test `{name}` outside the subquery, as in [{name} IN list WHERE {name} > 0 AND \
+             EXISTS {{ MATCH (n)-->() }}]"
+        ),
+    )
+}
+
 fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
     let f = &name.name;
     let alternative = if place == "inside another aggregate" {
         format!(
             "aggregate in a WITH first and aggregate its column in RETURN, as in \
              MATCH (p)-->(f) WITH p, {f}(f) AS n RETURN max(n)"
+        )
+    } else if place == IN_COMPREHENSION {
+        format!(
+            "aggregate in a WITH first and use its column in the comprehension, as in \
+             MATCH (p)-->(f) WITH p, {f}(f.age) AS n RETURN [x IN [1, 2, 3] WHERE x < n]"
         )
     } else if place == "in FOR" || place == "in UNWIND" {
         format!(

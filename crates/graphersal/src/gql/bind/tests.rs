@@ -1895,54 +1895,25 @@ fn body_conditions_mark_only_the_bodys_own_locals_read() {
 fn stage_2c_expressions_are_not_yet_bound() {
     for (query, text, alternative) in [
         (
-            "MATCH (n) RETURN n {.name, k: 1}",
-            "n {.name, k: 1}",
-            "RETURN {name: p.name, age: p.age} AS m",
-        ),
-        (
-            "MATCH (n) RETURN [x IN [1, 2] WHERE x > 1 | x]",
-            "[x IN [1, 2] WHERE x > 1 | x]",
-            "FOR x IN [1, 2, 3] FILTER x > 1",
-        ),
-        (
             "MATCH (n) RETURN [(n)-->(m) | m.name]",
             "[(n)-->(m) | m.name]",
             "collect_list(s.name)",
         ),
         // Every place an expression stands.
-        (
-            "MATCH (n) WHERE size([x IN n.l | x]) > 0 RETURN n",
-            "[x IN n.l | x]",
-            "",
-        ),
-        (
-            "MATCH (n {k: [x IN [1] | x]}) RETURN n",
-            "[x IN [1] | x]",
-            "",
-        ),
-        ("MATCH (n WHERE n {.a} IS NULL) RETURN n", "n {.a}", ""),
-        (
-            "MATCH (n)-[e WHERE e {.a} IS NULL]->(m) RETURN n",
-            "e {.a}",
-            "",
-        ),
         ("LET l = [(n)-->() | 1] RETURN l", "[(n)-->() | 1]", ""),
-        ("MATCH (n) WITH n {.a} AS m RETURN m", "n {.a}", ""),
-        ("FOR x IN [y IN [1] | y] RETURN x", "[y IN [1] | y]", ""),
-        ("MATCH (n) RETURN n ORDER BY n {.a}", "n {.a}", ""),
-        (
-            "MATCH (n) FILTER [x IN [1] WHERE x = 1] = [1] RETURN n",
-            "[x IN [1] WHERE x = 1]",
-            "",
-        ),
-        (
-            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WHERE [x IN [m] | x] = [] } RETURN n",
-            "[x IN [m] | x]",
-            "",
-        ),
-        ("MATCH (n) RETURN collect_list(n {.a})", "n {.a}", ""),
         (
             "MATCH (n) RETURN CASE WHEN true THEN [(n)-->(m) | m] END",
+            "[(n)-->(m) | m]",
+            "",
+        ),
+        // Inside the parts of the stage 2c forms that bind.
+        (
+            "MATCH (n) RETURN n {k: [(n)-->(m) | m]}",
+            "[(n)-->(m) | m]",
+            "",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [1] | [(n)-->(m) | m]]",
             "[(n)-->(m) | m]",
             "",
         ),
@@ -1960,4 +1931,217 @@ fn stage_2c_expressions_are_not_yet_bound() {
         let given = f.alternative.unwrap_or_default();
         assert!(given.contains(alternative), "{query}: {given}");
     }
+}
+
+// ----- stage 2c.T2: map projections and list comprehensions -----
+
+#[test]
+fn map_projections_and_list_comprehensions_bind_everywhere() {
+    for query in [
+        "MATCH (n) RETURN n {.name, k: 1}",
+        "MATCH (n) RETURN n {.*, n}",
+        "MATCH (n) RETURN [x IN [1, 2] WHERE x > 1 | x]",
+        "MATCH (n) WHERE size([x IN n.l | x]) > 0 RETURN n",
+        "MATCH (n {k: [x IN [1] | x]}) RETURN n",
+        "MATCH (n WHERE n {.a} IS NULL) RETURN n",
+        "MATCH (n)-[e WHERE e {.a} IS NULL]->(m) RETURN n",
+        "MATCH (n) WITH n {.a} AS m RETURN m",
+        "FOR x IN [y IN [1] | y] RETURN x",
+        "MATCH (n) RETURN n ORDER BY n {.a}",
+        "MATCH (n) FILTER [x IN [1] WHERE x = 1] = [1] RETURN n",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WHERE [x IN [m] | x] = [] } RETURN n",
+        "MATCH (n) RETURN collect_list(n {.a})",
+        "MATCH (n) RETURN [x IN collect_list(n.age) WHERE x > 1] AS l",
+        "MATCH (n) RETURN [x IN [1] | [y IN [x] | x + y]] AS l",
+        "MATCH (n) RETURN [x IN [1] WHERE EXISTS { MATCH (n)-->() } | x] AS l",
+        "MATCH (n) RETURN [x IN [1] | x] AS a, [x IN [2] | x] AS b",
+        "MATCH (n) RETURN n.a AS a ORDER BY [x IN [a] | x]",
+    ] {
+        ok(query);
+    }
+}
+
+#[test]
+fn a_comprehension_reads_the_bindings_of_its_parts_not_its_variable() {
+    let q = ok("MATCH (n)-->(m) RETURN [x IN n.l WHERE x > m.age | x] AS l");
+    assert_eq!(names(&q, &q.columns[0].bindings), ["n", "m"]);
+    let q = ok("MATCH (n)-->(m) RETURN n {.a, m} AS p");
+    assert_eq!(names(&q, &q.columns[0].bindings), ["n", "m"]);
+    // An aggregate in the list part aggregates the item.
+    let q = ok("MATCH (n) RETURN [x IN collect_list(n.age) WHERE x > 1] AS l");
+    assert!(q.columns[0].aggregate);
+}
+
+#[test]
+fn a_comprehension_variable_shadows_nothing() {
+    for (query, text, message) in [
+        (
+            "MATCH (n) RETURN [n IN [1] | n]",
+            "n",
+            "the comprehension variable `n` shadows the variable `n` in scope",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [1] | [x IN [2] | x]]",
+            "x",
+            "the comprehension variable `x` shadows the variable `x` in scope",
+        ),
+        (
+            "LET y = 1 RETURN [y IN [1] | y]",
+            "y",
+            "the comprehension variable `y` shadows the variable `y` in scope",
+        ),
+        (
+            "MATCH (n) RETURN n.a AS a ORDER BY [a IN [1] | a]",
+            "a",
+            "the comprehension variable `a` shadows the variable `a` in scope",
+        ),
+        // A name the query used before: a substituted expression refers to bindings by it.
+        (
+            "MATCH (n) WITH n AS m RETURN [n IN [1] | m]",
+            "n",
+            "the comprehension variable `n` is a name this query already uses",
+        ),
+        (
+            "MATCH (p) WHERE EXISTS { MATCH (p)-->(q) } RETURN [q IN [1] | q]",
+            "q",
+            "the comprehension variable `q` is a name this query already uses",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with(message), "{query}: {}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains(&format!("[{text}2 IN list")),
+            "{query}: {alternative}"
+        );
+    }
+}
+
+#[test]
+fn a_comprehension_variable_is_invisible_outside_its_parts() {
+    for (query, text) in [
+        ("MATCH (n) RETURN [x IN [1] | x] AS l, x", "x"),
+        ("MATCH (n) WHERE [x IN [1] | x] = [1] RETURN x", "x"),
+        // The list part is outside the variable's scope.
+        ("MATCH (n) RETURN [x IN [x] | x] AS l", "x"),
+        ("MATCH (n) RETURN [x IN [1] | x] AS l ORDER BY x", "x"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("is not defined"),
+            "{query}: {}",
+            f.message
+        );
+    }
+}
+
+#[test]
+fn no_aggregate_inside_the_parts_of_a_comprehension() {
+    for query in [
+        "MATCH (n) RETURN [x IN [1] WHERE count(*) > 1] AS l",
+        "MATCH (n) RETURN [x IN [1] | sum(x)] AS l",
+    ] {
+        let f = fail(query);
+        assert!(
+            f.message
+                .contains("cannot be used inside the WHERE or | part of a list comprehension"),
+            "{query}: {}",
+            f.message
+        );
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("use its column in the comprehension"),
+            "{query}: {alternative}"
+        );
+    }
+}
+
+#[test]
+fn a_comprehension_variable_inside_a_subquery_is_not_yet_read() {
+    for (query, text) in [
+        (
+            "MATCH (n) RETURN [x IN [1] WHERE EXISTS { MATCH (n)-->(m) WHERE m.a = x }] AS l",
+            "x",
+        ),
+        // Named in a body pattern it would be a new variable: refused too.
+        (
+            "MATCH (n) RETURN [x IN [1] WHERE EXISTS { MATCH (n)-->(x) }] AS l",
+            "x",
+        ),
+        ("MATCH (n) RETURN [x IN [1] WHERE (n)-->(x)] AS l", "x"),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message
+                .contains("reading the comprehension variable `x` inside a subquery"),
+            "{query}: {}",
+            f.message
+        );
+    }
+}
+
+#[test]
+fn a_projection_variable_item_keeps_its_name_when_substituted() {
+    let q = ok("MATCH (n) LET k = n.age RETURN n {.name, k} AS p");
+    let ExprKind::MapProjection(projection) = &q.columns[0].expr.kind else {
+        panic!("not a projection: {:?}", q.columns[0].expr);
+    };
+    match &projection.items[1] {
+        ProjectionItem::Entry(entry) => {
+            assert_eq!(entry.key.name, "k");
+            assert!(matches!(entry.value.kind, ExprKind::Property { .. }));
+        }
+        other => panic!("not an entry: {other:?}"),
+    }
+    // A variable that is a binding's own name stays a variable item.
+    let q = ok("MATCH (n)-->(m) RETURN n {m} AS p");
+    let ExprKind::MapProjection(projection) = &q.columns[0].expr.kind else {
+        panic!("not a projection");
+    };
+    assert!(matches!(&projection.items[0], ProjectionItem::Variable(v) if v.name == "m"));
+    // A substituted target.
+    let q = ok("MATCH (n) WITH n AS m RETURN m {.name} AS p");
+    let ExprKind::MapProjection(projection) = &q.columns[0].expr.kind else {
+        panic!("not a projection");
+    };
+    assert!(matches!(&projection.target.kind, ExprKind::Variable(v) if v.name == "n"));
+    // A comprehension keeps its variable through a substitution of its parts.
+    let q = ok("MATCH (n) LET k = n.age RETURN [x IN [1] | x + k] AS l");
+    let ExprKind::ListComprehension(comprehension) = &q.columns[0].expr.kind else {
+        panic!("not a comprehension");
+    };
+    assert_eq!(comprehension.variable.name, "x");
+    assert_eq!(names(&q, &q.columns[0].bindings), ["n"]);
+}
+
+#[test]
+fn a_projection_beside_an_aggregate_reads_only_grouping_keys() {
+    ok("MATCH (n)-->(m) RETURN n, n {.a, c: count(*)} AS p");
+    ok("MATCH (n)-->(m) RETURN n, m, n {m, c: count(*)} AS p");
+    for (query, text) in [
+        ("MATCH (n)-->(m) RETURN n {.a, c: count(*)} AS p", "n"),
+        ("MATCH (n)-->(m) RETURN n, n {m, c: count(*)} AS p", "m"),
+        (
+            "MATCH (n)-->(m) RETURN n, n {k: m.a, c: count(*)} AS p",
+            "m",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("must be a grouping key"),
+            "{query}: {}",
+            f.message
+        );
+    }
+    // A comprehension variable is no grouping key and needs none.
+    ok("MATCH (n) RETURN [x IN collect_list(n.a) WHERE x > 1 | x * 2] AS l");
 }

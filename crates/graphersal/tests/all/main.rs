@@ -73,6 +73,7 @@ mod generic_persist_tests;
 mod glob_path_tests;
 mod gql_aggregate_tests;
 mod gql_exists_tests;
+mod gql_expression_tests;
 mod gql_for_tests;
 mod gql_function_tests;
 mod gql_path_tests;

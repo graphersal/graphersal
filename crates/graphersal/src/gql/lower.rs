@@ -94,7 +94,7 @@ use std::sync::Arc;
 
 use super::aggregate::{AggregateCall, Aggregating, compile_aggregating};
 use super::ast::{
-    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal,
+    BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, MapEntry,
     ProjectionItem, Quantifier, SortDirection,
 };
 use super::bind::{
@@ -2942,8 +2942,32 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
         ExprKind::MapProjection(projection) => {
             rename_aliases(&mut projection.target, within, renames);
             for item in &mut projection.items {
-                if let ProjectionItem::Entry(entry) = item {
-                    rename_aliases(&mut entry.value, within, renames);
+                match item {
+                    ProjectionItem::Entry(entry) => {
+                        rename_aliases(&mut entry.value, within, renames);
+                    }
+                    // `x` of an alias: the key stays the written name, the value reads the
+                    // renamed alias.
+                    ProjectionItem::Variable(var) => {
+                        let inside = var.span.start >= within.start && var.span.end <= within.end;
+                        if inside
+                            && let Some((_, reserved)) =
+                                renames.iter().find(|(n, _)| *n == var.name)
+                        {
+                            let value = Expr {
+                                kind: ExprKind::Variable(Identifier {
+                                    name: reserved.clone(),
+                                    span: var.span,
+                                }),
+                                span: var.span,
+                            };
+                            *item = ProjectionItem::Entry(MapEntry {
+                                key: var.clone(),
+                                value,
+                            });
+                        }
+                    }
+                    ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {}
                 }
             }
         }
