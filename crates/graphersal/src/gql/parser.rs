@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 1c): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 2a): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -9,12 +9,14 @@
 //! # Grammar
 //!
 //! ```text
-//! query      := match stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?
-//! stage      := match | with | let | filter
+//! query      := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?   -- not FILTER first
+//! stage      := match | with | let | filter | for
 //! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
 //! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
 //! let        := LET var '=' expr (',' var '=' expr)*
 //! filter     := FILTER WHERE? expr
+//! for        := FOR var IN expr (WITH (ORDINALITY | OFFSET) var)?   -- ORDINALITY: a contextual word
+//!             | UNWIND expr AS var
 //! path       := (var '=')? node (edge quantifier? node)*
 //! node       := '(' var? ((':'|IS) labels)? map? (WHERE expr)? ')'
 //! edge       := '-[' filler ']->' | '<-[' filler ']-' | '-[' filler ']-' | '<-[' filler ']->'
@@ -52,7 +54,11 @@
 //! # Decisions
 //!
 //! - **`RETURN` is mandatory** (design D10); its absence is a syntax error whose alternative names
-//!   `RETURN *` and the query's own variables. A query without `MATCH` is "not yet supported".
+//!   `RETURN *` and the query's own variables.
+//! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
+//!   `LET`, `WITH` or directly with `RETURN` (one unit row); [`Query::stages`] is then empty or
+//!   starts with that stage. A leading `FILTER` stays "not yet supported". A first token that
+//!   starts no clause still expects `MATCH` only (the expected-token lists are unchanged).
 //! - **Result tail in GQL order:** `ORDER BY`, then `OFFSET` / `SKIP`, then `LIMIT`, each at most
 //!   once, as GQL and Neo4j write them. Another order is a syntax error naming the right one; the
 //!   standalone Cypher 25 forms before `RETURN` are "not yet supported".
@@ -87,9 +93,8 @@
 //!   n)` stay plain calls; `TRIM(LEADING s)` without `FROM` is a syntax error naming the form.
 //!   `SUBSTRING(s FROM a FOR b)` is refused with `substring(s, start, length)` (0-based) and
 //!   `left` / `right`. `IS SOURCE OF` / `IS DESTINATION OF` are contextual words after `IS`.
-//! - **The clause pipeline** starts with `[OPTIONAL] MATCH` (a leading `OPTIONAL MATCH` too);
-//!   `WITH`, `LET` and `FILTER` before the first `MATCH` are "not yet supported", like a query
-//!   without `MATCH`. `WITH` is Cypher's spelling of the GQL linear pipeline; its parts come in
+//! - **The clause pipeline** usually starts with `[OPTIONAL] MATCH` (a leading `OPTIONAL MATCH`
+//!   too). `WITH` is Cypher's spelling of the GQL linear pipeline; its parts come in
 //!   Cypher's order `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`, `WHERE`, each at most once (another
 //!   order is a syntax error naming it). `OPTIONAL { .. }` / `OPTIONAL ( .. )` blocks are "not
 //!   yet supported".
@@ -102,6 +107,15 @@
 //!   patterns `((a)-->(b)){m,n}` stay "not yet supported". A GQL quantifier is not part of the
 //!   edge's span; a Cypher one is.
 //! - **Path variables:** `p = path`; the path's span starts at the variable.
+//! - **`FOR` / `UNWIND`** ([`ForClause`]): GQL `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET
+//!   i]` and its Cypher alias `UNWIND expr AS x` (one meaning, no ordinal). The variables are
+//!   plain names (a keyword must be back-quoted). `ORDINALITY` is a contextual word, not a
+//!   keyword, so `ordinality` stays usable as a variable: after a `FOR` clause, `WITH OFFSET`
+//!   always starts the ordinal form, `WITH ORDINALITY` does when a name follows it, or when the
+//!   query ends or a clause keyword follows and no variable `ordinality` was declared (then the
+//!   name is missing: a syntax error); otherwise `WITH` starts a `WITH` clause. A missing `IN`
+//!   (or `AS` after `UNWIND`) is a syntax error naming the form; an ordinal after `UNWIND` is
+//!   refused naming `FOR`. The binder checks the names (redefinition, `i` equal to `x`).
 //! - **Keywords are contextual** (lexer docs): where only a name can stand (label, property key,
 //!   map key, alias, function name) a keyword is a name; as a variable it must be back-quoted.
 //! - **Bounded nesting (kind `Limit`):** the recursion depth of the parser is limited to
@@ -112,10 +126,10 @@
 use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CaseExpr, CaseWhen, CastTarget, CountClause, EdgeDirection, EdgePattern, Endpoint,
-    Expr, ExprKind, FilterClause, GroupBy, Identifier, LabelExpr, LabelExprKind, LetBinding,
-    LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy, PathPattern,
-    PatternStep, Quantifier, Query, ReturnClause, ReturnItem, SortDirection, SortItem, Stage,
-    TrimSide, UnaryOp, WithClause,
+    Expr, ExprKind, FilterClause, ForClause, GroupBy, Identifier, LabelExpr, LabelExprKind,
+    LetBinding, LetClause, Literal, MapEntry, MapLiteral, MatchClause, NodePattern, OrderBy,
+    Ordinal, OrdinalKind, PathPattern, PatternStep, Quantifier, Query, ReturnClause, ReturnItem,
+    SortDirection, SortItem, Stage, TrimSide, UnaryOp, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -811,10 +825,6 @@ impl<'a> Parser<'a> {
                 "combine the results in Gremlin, for example \
                  g.v().union(__.has_label(\"person\"), __.has_label(\"software\"))",
             ),
-            Keyword::For | Keyword::Unwind => not_yet(
-                &text,
-                "Gremlin unfold(), for example g.inject([1, 2, 3]).unfold()",
-            ),
             Keyword::Exists => not_yet(
                 "EXISTS",
                 "test a property with n.p IS NOT NULL; for a pattern, add it to the MATCH \
@@ -902,24 +912,20 @@ impl<'a> Parser<'a> {
                     matches.push(clause);
                     continue;
                 }
+                Some(Keyword::Filter) if stages.is_empty() => {
+                    return Err(self.leading_stage());
+                }
                 Some(keyword @ (Keyword::With | Keyword::Let | Keyword::Filter)) => {
-                    if stages.is_empty() {
-                        return Err(self.leading_stage());
-                    }
                     stages.push(self.pipeline_stage(keyword)?);
+                    continue;
+                }
+                Some(Keyword::For | Keyword::Unwind) => {
+                    stages.push(Stage::For(self.for_clause()?));
                     continue;
                 }
                 _ => {}
             }
             if self.at_kw(Keyword::Return) {
-                if stages.is_empty() {
-                    return Err(self.not_yet(
-                        self.peek().span,
-                        "a query without MATCH",
-                        "start with a MATCH clause, or use Gremlin inject(), for example \
-                         g.inject(1)",
-                    ));
-                }
                 break;
             }
             if stages.is_empty() {
@@ -1035,13 +1041,16 @@ impl<'a> Parser<'a> {
                 expected
             }
             Some(Stage::Let(_)) => vec!["`,`"],
-            Some(Stage::Filter(_)) | None => Vec::new(),
+            Some(Stage::For(clause)) if !clause.unwind && clause.ordinal.is_none() => {
+                vec!["WITH ORDINALITY", "WITH OFFSET"]
+            }
+            Some(Stage::Filter(_) | Stage::For(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
         self.unexpected(&expected)
     }
 
-    /// The error for `WITH`, `LET` or `FILTER` as the first clause.
+    /// The error for `FILTER` as the first clause.
     fn leading_stage(&self) -> Box<GqlErrorBuilder> {
         let token = self.peek();
         self.not_yet(
@@ -1147,6 +1156,181 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET i]` or `UNWIND expr AS x`, at `FOR` /
+    /// `UNWIND`.
+    fn for_clause(&mut self) -> PResult<ForClause> {
+        let keyword = self.advance();
+        let start = keyword.span;
+        if keyword.keyword() == Some(Keyword::Unwind) {
+            let list = self.expr()?;
+            if !self.at_kw(Keyword::As) {
+                return Err(self.missing_for_word(
+                    "AS",
+                    "UNWIND needs AS and a variable after the list",
+                    "write UNWIND list AS x, for example UNWIND [1, 2, 3] AS x RETURN x (GQL: \
+                     FOR x IN [1, 2, 3] RETURN x)",
+                ));
+            }
+            self.advance();
+            let variable = self.for_variable()?;
+            if let Some(ordinal) = self.ordinal()? {
+                let b = err(
+                    GqlErrorKind::Syntax,
+                    ordinal.span,
+                    "WITH ORDINALITY / WITH OFFSET belong to GQL FOR, not to UNWIND",
+                )
+                .alternative(
+                    "write FOR x IN list WITH ORDINALITY i, for example \
+                     FOR x IN ['a', 'b'] WITH ORDINALITY i RETURN x, i",
+                );
+                return Err(Box::new(b));
+            }
+            return Ok(ForClause {
+                variable,
+                list,
+                ordinal: None,
+                unwind: true,
+                span: start.to(self.last),
+            });
+        }
+        let variable = self.for_variable()?;
+        if !self.at_kw(Keyword::In) {
+            return Err(self.missing_for_word(
+                "IN",
+                "FOR needs IN between the variable and the list",
+                "write FOR x IN list, for example FOR x IN [1, 2, 3] RETURN x",
+            ));
+        }
+        self.advance();
+        let list = self.expr()?;
+        let ordinal = self.ordinal()?;
+        Ok(ForClause {
+            variable,
+            list,
+            ordinal,
+            unwind: false,
+            span: start.to(self.last),
+        })
+    }
+
+    /// The new variable of a `FOR` clause (or of its ordinal).
+    fn for_variable(&mut self) -> PResult<Identifier> {
+        match self.peek().kind {
+            TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+                let name = self.peek().name().unwrap_or("").to_string();
+                let span = self.advance().span;
+                if !self.variables.contains(&name) {
+                    self.variables.push(name.clone());
+                }
+                Ok(Identifier { name, span })
+            }
+            _ => Err(self.unexpected(&["a variable"])),
+        }
+    }
+
+    /// The syntax error for a missing `IN` (`FOR`) or `AS` (`UNWIND`) at the current token.
+    fn missing_for_word(
+        &self,
+        word: &str,
+        message: &str,
+        alternative: &str,
+    ) -> Box<GqlErrorBuilder> {
+        if let Some(e) = self.construct_error() {
+            return e;
+        }
+        let token = self.peek();
+        let b = err(
+            GqlErrorKind::Syntax,
+            token.span,
+            format!("{message}, found {}", describe(token)),
+        )
+        .expected([word])
+        .alternative(alternative);
+        Box::new(b)
+    }
+
+    /// `WITH ORDINALITY i` / `WITH OFFSET i` after a `FOR` list, when the tokens start it
+    /// (module docs: a `WITH` clause otherwise).
+    fn ordinal(&mut self) -> PResult<Option<Ordinal>> {
+        if !self.at_kw(Keyword::With) {
+            return Ok(None);
+        }
+        let word = self.nth(1);
+        let kind = if word.keyword() == Some(Keyword::Offset) {
+            OrdinalKind::Offset
+        } else if is_word(word, "ORDINALITY") && self.ordinality_form() {
+            OrdinalKind::Ordinality
+        } else {
+            return Ok(None);
+        };
+        let with = self.advance().span;
+        let word = self.advance();
+        let spelled = if kind == OrdinalKind::Offset {
+            "OFFSET"
+        } else {
+            "ORDINALITY"
+        };
+        if !matches!(
+            self.peek().kind,
+            TokenKind::Ident | TokenKind::QuotedIdent(_)
+        ) {
+            let token = self.peek();
+            let mut alternative = format!(
+                "name the position, for example FOR x IN ['a', 'b'] WITH {spelled} i RETURN x, i"
+            );
+            // A keyword in lower or mixed case is likely meant as the name.
+            if token.keyword().is_some() && token.text != token.text.to_ascii_uppercase() {
+                alternative.push_str(&format!(
+                    "; {} is a keyword: as a name, write it back-quoted: `{}`",
+                    token.text, token.text
+                ));
+            }
+            let b = err(
+                GqlErrorKind::Syntax,
+                with.to(word.span),
+                format!("WITH {spelled} needs a variable name for the position"),
+            )
+            .expected(["a variable"])
+            .alternative(alternative);
+            return Err(Box::new(b));
+        }
+        let variable = self.for_variable()?;
+        Ok(Some(Ordinal {
+            kind,
+            span: with.to(variable.span),
+            variable,
+        }))
+    }
+
+    /// Whether `WITH ORDINALITY` at the current token is the ordinal of a `FOR` clause rather
+    /// than a `WITH` clause projecting a variable `ordinality` (module docs).
+    fn ordinality_form(&self) -> bool {
+        let after = self.nth(2);
+        match &after.kind {
+            TokenKind::Ident | TokenKind::QuotedIdent(_) => true,
+            TokenKind::Eof | TokenKind::Semicolon => !self.declared(self.nth(1).text),
+            TokenKind::Keyword(keyword) => {
+                matches!(
+                    keyword,
+                    Keyword::Match
+                        | Keyword::Optional
+                        | Keyword::With
+                        | Keyword::Let
+                        | Keyword::Filter
+                        | Keyword::For
+                        | Keyword::Unwind
+                        | Keyword::Return
+                ) && !self.declared(self.nth(1).text)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a variable named `name` was declared so far.
+    fn declared(&self, name: &str) -> bool {
+        self.variables.iter().any(|v| v == name)
+    }
+
     /// `FILTER [WHERE] expr`.
     fn filter_clause(&mut self) -> PResult<FilterClause> {
         let start = self.expect_kw(Keyword::Filter, &["FILTER"])?;
@@ -1213,7 +1397,9 @@ impl<'a> Parser<'a> {
                 | Keyword::Optional
                 | Keyword::With
                 | Keyword::Let
-                | Keyword::Filter,
+                | Keyword::Filter
+                | Keyword::For
+                | Keyword::Unwind,
             ) => {
                 let mut b = err(
                     GqlErrorKind::Syntax,

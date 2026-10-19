@@ -11,19 +11,23 @@
 //! ([`PathPattern::variable`]) and aggregate calls (an [`ExprKind::FunctionCall`] of an aggregate
 //! function, `DISTINCT` and `count(*)` included). A query written in the 1a subset has exactly
 //! the 1a tree: every `MATCH` a non-optional [`Stage::Match`], no path variable, no quantifier.
+//! Stage 2a adds `FOR` / Cypher `UNWIND` ([`Stage::For`]) and queries that start with `FOR`,
+//! `LET`, `WITH` or `RETURN` (no `MATCH`: [`Query::stages`] may be empty or start with another
+//! stage).
 
 use super::lexer::Span;
 
-/// A query: a pipeline of clauses that starts with `[OPTIONAL] MATCH`, then the result
-/// statement.
+/// A query: a pipeline of clauses, then the result statement.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Query {
     /// The query text as given (spans index into it).
     pub(crate) source: String,
     /// Every `[OPTIONAL] MATCH` clause in text order ([`Stage::Match`] indexes into it).
     pub(crate) matches: Vec<MatchClause>,
-    /// The clauses before `RETURN` in text order; the first is always a [`Stage::Match`]. A 1a
-    /// query holds one `Stage::Match(i)` per entry of `matches`, in order.
+    /// The clauses before `RETURN` in text order (empty for a query that is only a result
+    /// statement). A 1a / 1b query starts with a [`Stage::Match`]; a 2a query may start with
+    /// [`Stage::For`], [`Stage::Let`] or [`Stage::With`] (never [`Stage::Filter`]). A 1a query
+    /// holds one `Stage::Match(i)` per entry of `matches`, in order.
     pub(crate) stages: Vec<Stage>,
     /// `RETURN` (mandatory).
     pub(crate) ret: ReturnClause,
@@ -65,6 +69,8 @@ pub(crate) enum Stage {
     Let(LetClause),
     /// `FILTER [WHERE] expr`.
     Filter(FilterClause),
+    /// `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET i]`, Cypher `UNWIND expr AS x`.
+    For(ForClause),
 }
 
 /// `[OPTIONAL] MATCH pattern, pattern, ... [WHERE expr]`.
@@ -128,6 +134,42 @@ pub(crate) struct FilterClause {
     pub(crate) condition: Expr,
     /// From `FILTER` to the end of the condition.
     pub(crate) span: Span,
+}
+
+/// `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET i]` or Cypher `UNWIND expr AS x` (one
+/// meaning for both spellings: one row per list item).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ForClause {
+    /// The new variable bound to each item.
+    pub(crate) variable: Identifier,
+    /// The list expression.
+    pub(crate) list: Expr,
+    /// `WITH ORDINALITY i` / `WITH OFFSET i` (GQL only).
+    pub(crate) ordinal: Option<Ordinal>,
+    /// Written as Cypher `UNWIND expr AS x`.
+    pub(crate) unwind: bool,
+    /// From `FOR` (or `UNWIND`) to the end of the clause.
+    pub(crate) span: Span,
+}
+
+/// The position variable of a [`ForClause`]: `WITH ORDINALITY i` or `WITH OFFSET i`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Ordinal {
+    /// Which base the position counts from.
+    pub(crate) kind: OrdinalKind,
+    /// The new variable bound to the position.
+    pub(crate) variable: Identifier,
+    /// From `WITH` to the variable.
+    pub(crate) span: Span,
+}
+
+/// The base of an [`Ordinal`]. Closed by definition: GQL defines exactly these two forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrdinalKind {
+    /// `WITH ORDINALITY i`: 1, 2, ...
+    Ordinality,
+    /// `WITH OFFSET i`: 0, 1, ...
+    Offset,
 }
 
 /// A path pattern: `[p =] node (edge node)*`.

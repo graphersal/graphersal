@@ -799,8 +799,6 @@ fn not_yet_supported_constructs() {
             "COUNT {",
             None,
         ),
-        ("FOR x IN [1] RETURN x", "FOR", Some("unfold()")),
-        ("UNWIND [1] AS x RETURN x", "UNWIND", Some("unfold()")),
         ("MATCH ((a)-->(b)){1,2} RETURN a", "((", Some("repeat(")),
         (
             "MATCH shortestPath((a)-->(b)) RETURN a",
@@ -818,7 +816,6 @@ fn not_yet_supported_constructs() {
         ("MATCH (n) RETURN n.list[0]", "[", None),
         ("MATCH (n) RETURN n ORDER BY n.x NULLS FIRST", "NULLS", None),
         ("MATCH (n) WHERE n.x IS TRUE RETURN n", "TRUE", None),
-        ("RETURN 1", "RETURN", Some("inject(")),
         ("CYPHER 25 MATCH (n) RETURN n", "CYPHER", None),
         (
             "MATCH (n) CALL { MATCH (m) RETURN m } RETURN n",
@@ -1142,6 +1139,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::With(_) => "with",
             Stage::Let(_) => "let",
             Stage::Filter(_) => "filter",
+            Stage::For(_) => "for",
         })
         .collect()
 }
@@ -1254,16 +1252,10 @@ fn with_forms_and_a_leading_optional_match() {
 #[test]
 fn pipeline_errors() {
     // A pipeline clause cannot start the query.
-    for (query, text) in [
-        ("WITH 1 AS x MATCH (a) RETURN a", "WITH"),
-        ("LET x = 1 MATCH (a) RETURN a", "LET"),
-        ("FILTER true MATCH (a) RETURN a", "FILTER"),
-    ] {
-        let f = fail(query);
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
-        assert_eq!(f.text, text, "{query}");
-        assert!(f.message.contains("starts with"), "{}", f.message);
-    }
+    let f = fail("FILTER true MATCH (a) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "FILTER");
+    assert!(f.message.contains("starts with"), "{}", f.message);
     // OPTIONAL blocks.
     let f = fail("MATCH (a) OPTIONAL { MATCH (a)-->(b) } RETURN a");
     assert_eq!(f.kind, GqlErrorKind::NotYet);
@@ -2088,4 +2080,218 @@ fn stage_1c_rows_keep_the_older_suggestions() {
         let f = fail(&format!("MATCH (n) RETURN {name}(n)"));
         assert_eq!(f.suggestion.as_deref(), Some(suggestion), "{name}");
     }
+}
+
+// ----- stage 2a: FOR / UNWIND and queries without MATCH -----
+
+/// The `FOR` clause at `stages[i]`.
+fn for_clause(q: &Query, i: usize) -> &ForClause {
+    match q.stages.get(i) {
+        Some(Stage::For(clause)) => clause,
+        other => panic!("stage {i} is not FOR: {other:?}"),
+    }
+}
+
+#[test]
+fn for_and_unwind_forms() {
+    let q = ok("FOR x IN [1, 2, 3] RETURN x");
+    assert_eq!(stage_kinds(&q), ["for"]);
+    assert!(q.matches.is_empty());
+    let f = for_clause(&q, 0);
+    assert_eq!(f.variable.name, "x");
+    assert_eq!(q.text(f.variable.span), "x");
+    assert_eq!(q.text(f.list.span), "[1, 2, 3]");
+    assert!(matches!(f.list.kind, ExprKind::List(ref items) if items.len() == 3));
+    assert_eq!(f.ordinal, None);
+    assert!(!f.unwind);
+    assert_eq!(q.text(f.span), "FOR x IN [1, 2, 3]");
+
+    // The Cypher alias: the same clause, marked.
+    let q = ok("UNWIND $ids AS id RETURN id");
+    let f = for_clause(&q, 0);
+    assert!(f.unwind);
+    assert_eq!(f.variable.name, "id");
+    assert_eq!(f.list.kind, ExprKind::Parameter("ids".into()));
+    assert_eq!(q.text(f.span), "UNWIND $ids AS id");
+
+    // Ordinals; keywords in any case, back-quoted names.
+    let q = ok("for x in ['a', 'b'] with ordinality i RETURN x, i");
+    let ordinal = for_clause(&q, 0).ordinal.as_ref().unwrap();
+    assert_eq!(ordinal.kind, OrdinalKind::Ordinality);
+    assert_eq!(ordinal.variable.name, "i");
+    assert_eq!(q.text(ordinal.span), "with ordinality i");
+    assert_eq!(
+        q.text(for_clause(&q, 0).span),
+        "for x in ['a', 'b'] with ordinality i"
+    );
+    let q = ok("FOR `x y` IN $xs WITH OFFSET `match` RETURN `x y`, `match`");
+    let f = for_clause(&q, 0);
+    assert_eq!(f.variable.name, "x y");
+    let ordinal = f.ordinal.as_ref().unwrap();
+    assert_eq!(ordinal.kind, OrdinalKind::Offset);
+    assert_eq!(ordinal.variable.name, "match");
+    assert_eq!(q.text(ordinal.span), "WITH OFFSET `match`");
+
+    // `IN` inside the list expression is the operator; the clause's `IN` comes first.
+    let q = ok("FOR b IN [2 IN [2], 3] RETURN b");
+    assert_eq!(q.text(for_clause(&q, 0).list.span), "[2 IN [2], 3]");
+    let q = ok("FOR b IN $xs WITH OFFSET k FILTER k > 1 RETURN b");
+    assert_eq!(q.text(for_clause(&q, 0).list.span), "$xs");
+    // Any expression is a list expression (its type is checked later).
+    let q = ok("MATCH p = (a)-->(b) FOR n IN nodes(p) RETURN n");
+    assert_eq!(q.text(for_clause(&q, 1).list.span), "nodes(p)");
+}
+
+#[test]
+fn for_stands_anywhere_in_the_pipeline() {
+    let q = ok("MATCH (a) FOR x IN a.list UNWIND [1] AS y WITH a, x, y \
+                FOR z IN [x] WITH ORDINALITY i OPTIONAL MATCH (a)-->(b) LET w = z FILTER w > 0 \
+                RETURN a, i");
+    assert_eq!(
+        stage_kinds(&q),
+        [
+            "match", "for", "for", "with", "for", "optional", "let", "filter"
+        ]
+    );
+    assert_eq!(
+        q.text(for_clause(&q, 4).span),
+        "FOR z IN [x] WITH ORDINALITY i"
+    );
+    // A WITH clause after a FOR clause stays a WITH clause.
+    let q = ok("FOR x IN [1] WITH x AS y RETURN y");
+    assert_eq!(stage_kinds(&q), ["for", "with"]);
+    assert_eq!(for_clause(&q, 0).ordinal, None);
+    // `ordinality` is a plain variable: `WITH ordinality AS o` / `WITH ordinality, x` project it.
+    let q = ok("LET ordinality = 1 FOR x IN [1] WITH ordinality AS o RETURN o");
+    assert_eq!(stage_kinds(&q), ["let", "for", "with"]);
+    let q = ok("LET ordinality = 1 FOR x IN [1] WITH ordinality, x RETURN x");
+    assert_eq!(stage_kinds(&q), ["let", "for", "with"]);
+    // ... and a declared `ordinality` before RETURN is a WITH clause too.
+    let q = ok("LET ordinality = 1 FOR x IN [1] WITH ordinality RETURN ordinality");
+    assert_eq!(stage_kinds(&q), ["let", "for", "with"]);
+    assert_eq!(for_clause(&q, 1).ordinal, None);
+    // A name after ORDINALITY always makes the ordinal.
+    let q = ok("LET ordinality = 1 FOR x IN [1] WITH ORDINALITY ordinality RETURN x");
+    assert_eq!(stage_kinds(&q), ["let", "for"]);
+}
+
+#[test]
+fn queries_may_start_without_match() {
+    let q = ok("RETURN 1 + 2 AS x");
+    assert!(q.stages.is_empty() && q.matches.is_empty());
+    assert_eq!(q.text(q.ret.span), "RETURN 1 + 2 AS x");
+    let q = ok("RETURN $a AS a ORDER BY a LIMIT 1;");
+    assert!(q.stages.is_empty());
+    assert!(q.limit.is_some());
+    let q = ok("LET x = $a RETURN x");
+    assert_eq!(stage_kinds(&q), ["let"]);
+    let q = ok("WITH 1 AS x MATCH (a) RETURN a, x");
+    assert_eq!(stage_kinds(&q), ["with", "match"]);
+    let q = ok("LET x = 1 MATCH (a) RETURN a");
+    assert_eq!(stage_kinds(&q), ["let", "match"]);
+    let q = ok("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n");
+    assert_eq!(stage_kinds(&q), ["for", "match"]);
+    assert_eq!(q.matches.len(), 1);
+    // A leading FILTER stays "not yet"; an unknown first token still expects MATCH.
+    let f = fail("FILTER $flag RETURN 1");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "FILTER");
+    let f = fail("FOO 1");
+    assert_eq!(f.expected, ["MATCH"]);
+}
+
+#[test]
+fn for_and_unwind_errors() {
+    // FOR without IN.
+    let f = fail("FOR x [1, 2] RETURN x");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "[");
+    assert_eq!(f.expected, ["IN"]);
+    assert!(f.message.starts_with("FOR needs IN"), "{}", f.message);
+    assert!(f.alternative.unwrap().contains("FOR x IN [1, 2, 3]"));
+    let f = fail("FOR x");
+    assert_eq!(f.expected, ["IN"]);
+    assert!(f.message.contains("end of input"), "{}", f.message);
+    // The Cypher order written with FOR: the variable is missing.
+    let f = fail("FOR [1, 2] AS x RETURN x");
+    assert_eq!(f.text, "[");
+    assert_eq!(f.expected, ["a variable"]);
+    // A keyword as the variable: back-quote it.
+    let f = fail("FOR match IN [1] RETURN 1");
+    assert_eq!(f.expected, ["a variable"]);
+    assert!(f.alternative.unwrap().contains("`match`"));
+    // UNWIND without AS.
+    let f = fail("UNWIND [1, 2] x RETURN x");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "x");
+    assert_eq!(f.expected, ["AS"]);
+    assert!(f.message.starts_with("UNWIND needs AS"), "{}", f.message);
+    assert!(f.alternative.unwrap().contains("UNWIND [1, 2, 3] AS x"));
+    let f = fail("UNWIND [1] AS RETURN 1");
+    assert_eq!(f.text, "RETURN");
+    assert_eq!(f.expected, ["a variable"]);
+    // GQL's IN with UNWIND: a syntax error naming AS.
+    let f = fail("UNWIND x IN [1] RETURN x");
+    assert_eq!(f.text, "RETURN");
+    assert_eq!(f.expected, ["AS"]);
+    // An ordinal without a name.
+    for (query, text) in [
+        ("FOR x IN [1] WITH ORDINALITY RETURN x", "WITH ORDINALITY"),
+        ("FOR x IN [1] WITH ORDINALITY", "WITH ORDINALITY"),
+        ("FOR x IN [1] WITH OFFSET RETURN x", "WITH OFFSET"),
+        ("FOR x IN [1] WITH OFFSET 1 RETURN x", "WITH OFFSET"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, ["a variable"], "{query}");
+        assert!(f.message.contains("needs a variable name"), "{}", f.message);
+        assert!(f.alternative.unwrap().contains(" i RETURN x, i"), "{query}");
+    }
+    let f = fail("FOR x IN [1] WITH OFFSET limit RETURN x");
+    assert!(f.alternative.unwrap().contains("`limit`"));
+    // An ordinal after UNWIND.
+    let f = fail("UNWIND [1] AS x WITH ORDINALITY i RETURN x");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "WITH ORDINALITY i");
+    assert!(
+        f.alternative
+            .unwrap()
+            .contains("FOR x IN list WITH ORDINALITY i")
+    );
+    // An unexpected token after the clause names the ordinal forms and the next clauses.
+    let f = fail("FOR x IN [1] y RETURN x");
+    assert_eq!(f.text, "y");
+    assert_eq!(
+        f.expected,
+        [
+            "WITH ORDINALITY",
+            "WITH OFFSET",
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "RETURN"
+        ]
+    );
+    let f = fail("FOR x IN [1] WITH OFFSET i y RETURN x");
+    assert_eq!(
+        f.expected,
+        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+    );
+    let f = fail("FOR x IN [1]");
+    assert!(f.message.starts_with("missing RETURN"), "{}", f.message);
+    assert!(f.alternative.unwrap().contains("RETURN x"));
+    // After RETURN.
+    for query in [
+        "MATCH (a) RETURN a FOR x IN [1]",
+        "MATCH (a) RETURN a UNWIND [1] AS x",
+    ] {
+        let f = fail(query);
+        assert!(f.message.contains("after RETURN"), "{query}: {}", f.message);
+    }
+    // A misplaced FOR clause is still found by position: line and column.
+    let f = fail("FOR x IN [1]\nWITH OFFSET\nRETURN x");
+    assert_eq!((f.line, f.column), (2, 1));
 }

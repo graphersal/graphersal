@@ -96,7 +96,8 @@
 //! a dropped variable after `DISTINCT` / aggregation, a duplicate key in a map, a parameter that
 //! was not supplied. `22G02` for a negative `OFFSET` / `LIMIT` literal, `22G03` for one that is
 //! not an integer. Kind `NotYet` (`0A000`) for a condition inside a quantified edge that reads
-//! another variable.
+//! another variable, and (until stage 2a binds them) for `FOR` / `UNWIND` and a query that
+//! starts without `MATCH`, which the parser accepts since stage 2a.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -525,6 +526,25 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
+/// The "not yet" error of a query that starts without `MATCH` (parsed since stage 2a, bound
+/// from 2a.T2 on); `None` when it starts with `[OPTIONAL] MATCH` or `FOR` (refused by its own
+/// arm).
+fn leading_not_yet(query: &Query) -> Option<Box<GqlErrorBuilder>> {
+    const ALTERNATIVE: &str =
+        "start with a MATCH clause, or use Gremlin inject(), for example g.inject(1)";
+    let (span, what) = match query.stages.first() {
+        Some(Stage::Match(_) | Stage::For(_)) => return None,
+        None => (keyword_span(query.ret.span, 6), "a query without MATCH"),
+        Some(Stage::Let(clause)) => (keyword_span(clause.span, 3), "a query that starts with LET"),
+        Some(Stage::With(with)) => (keyword_span(with.span, 4), "a query that starts with WITH"),
+        Some(Stage::Filter(clause)) => (
+            keyword_span(clause.span, 6),
+            "a query that starts with FILTER",
+        ),
+    };
+    Some(not_yet(span, what, ALTERNATIVE))
+}
+
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     Box::new(
         GqlErrorBuilder::new(
@@ -785,6 +805,9 @@ impl<'q> Binder<'q> {
             }
         }
         let query = self.query;
+        if let Some(e) = leading_not_yet(query) {
+            return Err(e);
+        }
         let mut matches = Vec::with_capacity(query.matches.len());
         for stage in &query.stages {
             match stage {
@@ -823,6 +846,18 @@ impl<'q> Binder<'q> {
                     )?;
                 }
                 Stage::With(with) => self.with_clause(with)?,
+                Stage::For(clause) => {
+                    let (keyword, len) = if clause.unwind {
+                        ("UNWIND", 6)
+                    } else {
+                        ("FOR", 3)
+                    };
+                    return Err(not_yet(
+                        keyword_span(clause.span, len),
+                        keyword,
+                        "Gremlin unfold(), for example g.inject([1, 2, 3]).unfold()",
+                    ));
+                }
             }
         }
         let ret = &query.ret;
