@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use crate::gql::eval::Truth;
-use crate::gql::runtime::{Binding, Row, RowExpr, eval_error, labels_read, source_text};
+use crate::gql::runtime::{
+    Binding, Row, RowExpr, eval_error, history_read, labels_read, source_text,
+};
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
 use crate::*;
@@ -28,6 +30,8 @@ struct StepGqlFilter<S: GraphStorage> {
     bindings: Arc<[Binding]>,
     /// The step labels the condition reads (sorted).
     labels: Arc<[CompactString]>,
+    /// The labels it reads in every occurrence (group variables, sorted).
+    history: Arc<[CompactString]>,
 }
 
 impl<S: GraphStorage> Clone for StepGqlFilter<S> {
@@ -37,6 +41,7 @@ impl<S: GraphStorage> Clone for StepGqlFilter<S> {
             condition: Arc::clone(&self.condition),
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
+            history: Arc::clone(&self.history),
         }
     }
 }
@@ -56,11 +61,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlFilter<S> {
 impl<S: GraphStorage> StepGqlFilter<S> {
     fn new(query: Arc<str>, condition: RowExpr<S>, bindings: Arc<[Binding]>) -> Self {
         let labels = labels_read([&condition], &bindings).into();
+        let history = history_read([&condition], &bindings).into();
         Self {
             query,
             condition: Arc::new(condition),
             bindings,
             labels,
+            history,
         }
     }
 }
@@ -112,6 +119,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepGqlFilter<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn history_labels(&self) -> &[CompactString] {
+        &self.history
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {

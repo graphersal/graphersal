@@ -12,6 +12,8 @@ mod step_gql_error;
 mod step_gql_filter;
 #[cfg(feature = "gql")]
 mod step_gql_not_self_loop;
+#[cfg(feature = "gql")]
+mod step_gql_trail;
 pub(crate) mod step_has;
 mod step_has_id;
 mod step_has_key;

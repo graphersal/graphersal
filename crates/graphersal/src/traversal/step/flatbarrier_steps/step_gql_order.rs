@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use crate::gql::runtime::{
-    Binding, OrderValue, Row, RowExpr, compare_order, eval_error, labels_read, source_text,
+    Binding, OrderValue, Row, RowExpr, compare_order, eval_error, history_read, labels_read,
+    source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -33,6 +34,7 @@ struct StepGqlOrder<S: GraphStorage> {
     keys: Arc<[GqlSortKey<S>]>,
     bindings: Arc<[Binding]>,
     labels: Arc<[CompactString]>,
+    history: Arc<[CompactString]>,
 }
 
 impl<S: GraphStorage> Clone for StepGqlOrder<S> {
@@ -42,6 +44,7 @@ impl<S: GraphStorage> Clone for StepGqlOrder<S> {
             keys: Arc::clone(&self.keys),
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
+            history: Arc::clone(&self.history),
         }
     }
 }
@@ -71,11 +74,13 @@ impl<S: GraphStorage> fmt::Display for StepGqlOrder<S> {
 impl<S: GraphStorage> StepGqlOrder<S> {
     fn new(query: Arc<str>, keys: Vec<GqlSortKey<S>>, bindings: Arc<[Binding]>) -> Self {
         let labels = labels_read(keys.iter().map(|key| &key.expr), &bindings).into();
+        let history = history_read(keys.iter().map(|key| &key.expr), &bindings).into();
         Self {
             query,
             keys: keys.into(),
             bindings,
             labels,
+            history,
         }
     }
 }
@@ -145,6 +150,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlOrder<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn history_labels(&self) -> &[CompactString] {
+        &self.history
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFlatBarrier<'g, S> + 'g> {

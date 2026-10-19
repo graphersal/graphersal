@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::gql::runtime::{Binding, Row, RowExpr, eval_error, into_traverser_value, labels_read};
+use crate::gql::runtime::{
+    Binding, Row, RowExpr, eval_error, history_read, into_traverser_value, labels_read,
+};
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
 use crate::*;
@@ -35,6 +37,7 @@ struct StepGqlProject<S: GraphStorage> {
     columns: Arc<[RowExpr<S>]>,
     bindings: Arc<[Binding]>,
     labels: Arc<[CompactString]>,
+    history: Arc<[CompactString]>,
 }
 
 impl<S: GraphStorage> Clone for StepGqlProject<S> {
@@ -45,6 +48,7 @@ impl<S: GraphStorage> Clone for StepGqlProject<S> {
             columns: Arc::clone(&self.columns),
             bindings: Arc::clone(&self.bindings),
             labels: Arc::clone(&self.labels),
+            history: Arc::clone(&self.history),
         }
     }
 }
@@ -63,6 +67,7 @@ impl<S: GraphStorage> fmt::Display for StepGqlProject<S> {
 impl<S: GraphStorage> StepGqlProject<S> {
     fn new(query: Arc<str>, columns: Vec<GqlColumn<S>>, bindings: Arc<[Binding]>) -> Self {
         let labels = labels_read(columns.iter().map(|column| &column.expr), &bindings).into();
+        let history = history_read(columns.iter().map(|column| &column.expr), &bindings).into();
         let (keys, columns): (Vec<RecordKey>, Vec<RowExpr<S>>) = columns
             .into_iter()
             .map(|column| (RecordKey::Name(column.name), column.expr))
@@ -73,6 +78,7 @@ impl<S: GraphStorage> StepGqlProject<S> {
             columns: columns.into(),
             bindings,
             labels,
+            history,
         }
     }
 }
@@ -122,6 +128,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<S> {
 
     fn path_requirement(&self) -> PathRequirement {
         PathRequirement::labels(self.labels.iter().cloned())
+    }
+
+    fn history_labels(&self) -> &[CompactString] {
+        &self.history
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepMap<'g, S> + 'g> {

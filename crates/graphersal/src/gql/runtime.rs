@@ -13,7 +13,14 @@
 //!   the per-execution path arena like `select("a")` (D11: only labels a step reads are kept,
 //!   which the steps declare through `path_requirement()`);
 //! - [`Binding::Column`]: a column of the row map built by `gql:project` (an `ORDER BY` key that
-//!   names a returned alias).
+//!   names a returned alias);
+//! - [`Binding::RowColumn`]: a column of a row map the path labels (`as("#w1")` after a
+//!   materializing `WITH`): the map under the label, then the column, read in place;
+//! - [`Binding::Group`]: the group variable of a quantified edge outside its element pattern:
+//!   the list of every occurrence of its label in path order (an empty list for a zero-length
+//!   match; `NULL` when its anchor label is absent, an `OPTIONAL MATCH` that did not match);
+//! - [`Binding::Path`]: a path variable, assembled in text order from the labels of the
+//!   pattern's elements ([`PathPart`]), never from `path()` (no Full path, design C11).
 //!
 //! A variable whose source holds nothing reads as `NULL`.
 //!
@@ -48,10 +55,13 @@ use super::eval::{Compiled, Env, EvalError, Scope, Value, status};
 use crate::error::{BoxedTraverserError, GqlErrorBuilder, GqlErrorKind, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::{Traverser, TraverserContext};
+use crate::value::path_arena::PathNode;
 use crate::value::scalar::compare_scalars;
 use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_property};
 use crate::{CompactString, ElementKind, ElementProperty};
 
+#[cfg(test)]
+mod step_tests;
 #[cfg(test)]
 mod tests;
 
@@ -123,6 +133,111 @@ pub(crate) enum Binding {
     Label(CompactString),
     /// The column at this position of the incoming `gql:project` row.
     Column(usize),
+    /// The column at position `column` of the row map the path labels with `label`.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
+    )]
+    RowColumn {
+        /// The step label of the row map.
+        label: CompactString,
+        /// The column.
+        column: usize,
+    },
+    /// Every object the path labels with `label`, as a list in path order.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
+    )]
+    Group {
+        /// The step label set on each occurrence (the edge of each iteration).
+        label: CompactString,
+        /// A label the path holds whenever the pattern matched (`None`: always matched); its
+        /// absence reads as `NULL`.
+        anchor: Option<CompactString>,
+    },
+    /// A path value assembled from these parts in text order.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "built by the 1b lowering (T6-T9)")
+    )]
+    Path(Arc<[PathPart]>),
+}
+
+/// One part of a path variable, in text order (see [`Binding::Path`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "built by the path lowering (T9)")
+)]
+pub(crate) enum PathPart {
+    /// One node or edge of the pattern: the object most recently labelled with this label.
+    Element(CompactString),
+    /// The edges of a quantified edge and the vertices between them. `edges` labels each
+    /// iteration's edge, `vertices` the vertex each iteration reaches, both in walk order.
+    /// `reversed`: the pattern was walked against the text direction, so the walk order is the
+    /// reverse of the text order. The vertex reached by the last iteration is not part of the
+    /// group (it is the next node of the pattern).
+    Group {
+        /// The label of each iteration's edge.
+        edges: CompactString,
+        /// The label of the vertex each iteration reaches.
+        vertices: CompactString,
+        /// Walked against the text direction.
+        reversed: bool,
+    },
+}
+
+impl Binding {
+    /// The step labels this binding reads in every occurrence (a group variable, the groups of
+    /// a path variable), appended to `out`; see `GraphStep::history_labels`.
+    fn history_into(&self, out: &mut Vec<CompactString>) {
+        match self {
+            Binding::Current
+            | Binding::Column(_)
+            | Binding::Label(_)
+            | Binding::RowColumn { .. } => {}
+            Binding::Group { label, .. } => out.push(label.clone()),
+            Binding::Path(parts) => {
+                for part in parts.iter() {
+                    match part {
+                        PathPart::Element(_) => {}
+                        PathPart::Group {
+                            edges, vertices, ..
+                        } => {
+                            out.push(edges.clone());
+                            out.push(vertices.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The step labels this binding reads, appended to `out`.
+    fn labels_into(&self, out: &mut Vec<CompactString>) {
+        match self {
+            Binding::Current | Binding::Column(_) => {}
+            Binding::Label(label) | Binding::RowColumn { label, .. } => out.push(label.clone()),
+            Binding::Group { label, anchor } => {
+                out.push(label.clone());
+                out.extend(anchor.iter().cloned());
+            }
+            Binding::Path(parts) => {
+                for part in parts.iter() {
+                    match part {
+                        PathPart::Element(label) => out.push(label.clone()),
+                        PathPart::Group {
+                            edges, vertices, ..
+                        } => {
+                            out.push(edges.clone());
+                            out.push(vertices.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The step labels `exprs` read through `bindings`, for `path_requirement()` (rule 13): sorted,
@@ -135,13 +250,44 @@ pub(crate) fn labels_read<'a, S: GraphStorage + 'a>(
     for expr in exprs {
         expr.variables(&mut slots);
     }
-    let mut labels: Vec<CompactString> = slots
-        .into_iter()
-        .filter_map(|slot| match bindings.get(slot) {
-            Some(Binding::Label(label)) => Some(label.clone()),
-            Some(Binding::Current | Binding::Column(_)) | None => None,
-        })
-        .collect();
+    let mut labels: Vec<CompactString> = Vec::new();
+    for slot in slots {
+        if let Some(binding) = bindings.get(slot) {
+            binding.labels_into(&mut labels);
+        }
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
+
+/// The step labels `exprs` read in every occurrence through `bindings` (group variables and
+/// the groups of path variables), for `history_labels()`: sorted, deduplicated.
+pub(crate) fn history_read<'a, S: GraphStorage + 'a>(
+    exprs: impl IntoIterator<Item = &'a RowExpr<S>>,
+    bindings: &[Binding],
+) -> Vec<CompactString> {
+    let mut slots = Vec::new();
+    for expr in exprs {
+        expr.variables(&mut slots);
+    }
+    let mut labels: Vec<CompactString> = Vec::new();
+    for slot in slots {
+        if let Some(binding) = bindings.get(slot) {
+            binding.history_into(&mut labels);
+        }
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
+
+/// Every step label `bindings` read, whatever expression reads them: sorted, deduplicated.
+pub(crate) fn labels_read_by(bindings: &[Binding]) -> Vec<CompactString> {
+    let mut labels = Vec::new();
+    for binding in bindings {
+        binding.labels_into(&mut labels);
+    }
     labels.sort_unstable();
     labels.dedup();
     labels
@@ -236,7 +382,95 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
                 TraverserValue::Record { values, .. } => values.get(*index).map(Cow::Borrowed),
                 _ => None,
             },
+            Binding::RowColumn { label, column } => match &self.labelled(label)?.value {
+                TraverserValue::Record { values, .. } => values.get(*column).map(Cow::Borrowed),
+                _ => None,
+            },
+            Binding::Group { label, anchor } => {
+                if let Some(anchor) = anchor
+                    && self.labelled(anchor).is_none()
+                {
+                    return None;
+                }
+                Some(Cow::Owned(TraverserValue::Array(self.occurrences(label))))
+            }
+            Binding::Path(parts) => self.path(parts).map(Cow::Owned),
         }
+    }
+
+    /// The newest path position labelled `label`.
+    fn labelled(&self, label: &str) -> Option<&'a PathNode<S>> {
+        self.context
+            .paths
+            .iter_rev(self.traverser.path)
+            .find(|node| has_label(node, label))
+    }
+
+    /// Every object labelled `label`, in path order.
+    fn occurrences(&self, label: &str) -> Vec<TraverserValue<S>> {
+        let mut found: Vec<TraverserValue<S>> = self
+            .context
+            .paths
+            .iter_rev(self.traverser.path)
+            .filter(|node| has_label(node, label))
+            .map(|node| node.value.clone())
+            .collect();
+        found.reverse();
+        found
+    }
+
+    /// The path value of `parts` (see [`PathPart`]); `None` when a part's label is absent.
+    fn path(&self, parts: &[PathPart]) -> Option<TraverserValue<S>> {
+        let mut objects: Vec<TraverserValue<S>> = Vec::new();
+        for part in parts {
+            match part {
+                PathPart::Element(label) => {
+                    let value = &self.labelled(label)?.value;
+                    push_path_object(&mut objects, value.clone());
+                }
+                PathPart::Group {
+                    edges,
+                    vertices,
+                    reversed,
+                } => {
+                    let edges = self.occurrences(edges);
+                    let vertices = self.occurrences(vertices);
+                    // Iteration `i` reached `vertices[i]`; the last one is the next node.
+                    if vertices.len() + 1 < edges.len() {
+                        return None;
+                    }
+                    let count = edges.len();
+                    if *reversed {
+                        // Walk order e_k .. e_1: the vertex after e_i in the text is the one
+                        // iteration `i` reached before it.
+                        for (i, edge) in edges.iter().enumerate().rev() {
+                            objects.push(edge.clone());
+                            if i > 0
+                                && let Some(vertex) = vertices.get(i - 1)
+                            {
+                                objects.push(vertex.clone());
+                            }
+                        }
+                    } else {
+                        for (i, edge) in edges.iter().enumerate() {
+                            objects.push(edge.clone());
+                            if i + 1 < count
+                                && let Some(vertex) = vertices.get(i)
+                            {
+                                objects.push(vertex.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(TraverserValue::Path(TraverserPath::from_objects(objects)))
+    }
+
+    /// `value` as a GQL value (a row map's column, a sort key); a materialization error is kept
+    /// for [`Self::finish`].
+    pub(crate) fn value(&self, value: &TraverserValue<S>) -> RowValue<S> {
+        self.to_value(value)
     }
 
     /// `value` as a GQL value; a materialization error is kept for [`Self::finish`].
@@ -279,6 +513,27 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
             }
         }
     }
+}
+
+/// Whether `node` carries the step label `label`.
+fn has_label<S: GraphStorage>(node: &PathNode<S>, label: &str) -> bool {
+    node.labels
+        .as_ref()
+        .is_some_and(|labels| labels.iter().any(|l| l == label))
+}
+
+/// Appends a node or an edge to a path being assembled. A vertex right after a vertex is the
+/// same node again (the far end of a zero-length quantified edge), so it is not repeated.
+fn push_path_object<S: GraphStorage>(
+    objects: &mut Vec<TraverserValue<S>>,
+    value: TraverserValue<S>,
+) {
+    if matches!(value, TraverserValue::Vertex(_))
+        && matches!(objects.last(), Some(TraverserValue::Vertex(_)))
+    {
+        return;
+    }
+    objects.push(value);
 }
 
 /// The elements of a path made only of vertices and edges (a GQL path value), else `None`.

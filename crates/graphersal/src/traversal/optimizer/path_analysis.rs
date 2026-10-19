@@ -39,6 +39,7 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "element_map",
     "project",
     "gql:project",
+    "gql:aggregate",
     "constant",
     "unfold",
     "group",
@@ -267,6 +268,11 @@ pub(crate) struct PathAnalysis {
     /// so a rejected modulator inside a branch that never executes (`where(__.out().by("x"))` on
     /// a traverser that never reaches `where()`) is still reported before execution.
     rejected_modulator: std::cell::RefCell<Option<crate::error::BoxedTraverserError>>,
+    /// Labels some step reads in every occurrence (`history_labels()`: a GQL trail check, a
+    /// GQL group variable), anywhere in the query. An `as()` setting such a label does not
+    /// retract it, so the earlier occurrences stay on the path (labels only, never `Full`).
+    /// Collected by the first walk, which seeds the second.
+    history: std::cell::RefCell<Vec<CompactString>>,
 }
 
 impl PathAnalysis {
@@ -281,6 +287,7 @@ impl PathAnalysis {
             required: std::cell::RefCell::new(Vec::new()),
             map_producing_seen: std::cell::Cell::new(false),
             rejected_modulator: std::cell::RefCell::new(None),
+            history: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -327,6 +334,7 @@ impl PathAnalysis {
         }
         let effects = collect.effects.get();
         let known = SmallLabelSet::new(collect.produced.into_inner());
+        let history = collect.history.into_inner();
         let analysis = PathAnalysis {
             force_full: false,
             effects: std::cell::Cell::new(PlanEffects::default()),
@@ -336,6 +344,7 @@ impl PathAnalysis {
             required: std::cell::RefCell::new(Vec::new()),
             map_producing_seen: std::cell::Cell::new(false),
             rejected_modulator: std::cell::RefCell::new(None),
+            history: std::cell::RefCell::new(history),
         };
         Ok((
             analysis.analyze_level(steps, PathRequirement::None).0,
@@ -377,6 +386,21 @@ impl PathAnalysis {
             }
         }
         Ok(())
+    }
+
+    /// `need` upstream of an `as()` producing `labels`: without them, except the history labels
+    /// (read in every occurrence, so an earlier occurrence is still needed).
+    fn retract_produced(&self, need: PathRequirement, labels: &[CompactString]) -> PathRequirement {
+        let history = self.history.borrow();
+        if history.is_empty() || !labels.iter().any(|label| history.contains(label)) {
+            return need.retract(labels);
+        }
+        let retracted: Vec<CompactString> = labels
+            .iter()
+            .filter(|label| !history.contains(label))
+            .cloned()
+            .collect();
+        need.retract(&retracted)
     }
 
     /// Drops the labels of `requirement` that no `as()` in the query produces.
@@ -489,6 +513,15 @@ impl PathAnalysis {
             if MAP_PRODUCING_KINDS.contains(&step.kind_name()) {
                 self.map_producing_seen.set(true);
             }
+            let history = step.history_labels();
+            if !history.is_empty() {
+                let mut known = self.history.borrow_mut();
+                for label in history {
+                    if !known.contains(label) {
+                        known.push(label.clone());
+                    }
+                }
+            }
 
             if self.force_full {
                 modes[index] = PathMode::Full;
@@ -498,7 +531,7 @@ impl PathAnalysis {
                 // (the labels themselves were already recorded above, unconditionally).
                 let labels: &[CompactString] = as_step.step_labels().map_or(&[], |l| &l[..]);
                 modes[index] = need.clone();
-                need = need.retract(labels).union(children);
+                need = self.retract_produced(need, labels).union(children);
             } else {
                 modes[index] = need.clone();
                 let skipped = next_is_count && step.skipped_before_count();

@@ -273,6 +273,25 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         }
     }
 
+    /// The step labels whose every occurrence this step reads; see
+    /// [`GraphStepFilter::history_labels`]. Only internal GQL steps report any.
+    pub(crate) fn history_labels(&self) -> &[compact_str::CompactString] {
+        match self {
+            GraphStep::Map(_, step) => step.history_labels(),
+            GraphStep::FlatMap(_, step) => step.history_labels(),
+            GraphStep::FlatBarrier(_, step) => step.history_labels(),
+            GraphStep::Filter(_, step) => step.history_labels(),
+            GraphStep::Init(_, _)
+            | GraphStep::Append(_, _)
+            | GraphStep::Barrier(_, _)
+            | GraphStep::As(_, _)
+            | GraphStep::SideEffect(_, _)
+            | GraphStep::SideEffectMut(_, _)
+            | GraphStep::Modulator(_, _)
+            | GraphStep::Count(_, _) => &[],
+        }
+    }
+
     /// Labels this step requires to resolve, declared somewhere in the query, together with the
     /// step's own name for the diagnostic; see `GraphStepMap::required_labels`. Only `Map` steps
     /// (`select()`) report anything today.
@@ -358,7 +377,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   modulators, ...) works on what earlier steps produced, so `g.inject(1, 2).sum()` needs
     ///   no permission. An element handle held from an earlier, allowed run is read without a
     ///   further request (`g.inject(v).values("name")`). The internal GQL steps (`gql:filter`,
-    ///   `gql:project`, `gql:order`, the `gql:error` marker) are value-only too: they read the
+    ///   `gql:project`, `gql:order`, `gql:aggregate`, `gql:distinct`, `gql:bind`, `gql:trail`,
+    ///   `gql:not_self_loop`, the `gql:error` marker) are value-only too: they read the
     ///   properties and labels of the elements the lowered `v()` / adjacency steps reached (and
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
     ///   exactly what its Gremlin equivalent asks.
@@ -525,7 +545,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   them (`add_v(labels)`);
     /// - every step that passes its input on unchanged keeps the flow: filters, side effects,
     ///   modulators, step labels, `identity()`, the ordering and windowing barriers
-    ///   (`barrier`, `dedup`, `limit`, `order`, `range`, `sample`, `skip`, `tail`; their
+    ///   (`barrier`, `dedup`, `limit`, `order`, `range`, `sample`, `skip`, `tail`, the GQL
+    ///   `gql:order` and `gql:distinct`; their
     ///   `Scope.local` forms are map steps) and the writes of the received
     ///   elements (`property`, ...); `add_label` / `drop_label` / `set_label` keep the kind but
     ///   forget the labels;
@@ -584,9 +605,14 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             | GraphStep::Map("identity", _)
             | GraphStep::FlatBarrier(
                 "barrier" | "dedup" | "limit" | "order" | "range" | "sample" | "skip" | "tail"
-                | "gql:order",
+                | "gql:order" | "gql:distinct",
                 _,
             ) => flow,
+            // The GQL row of an aggregation and the element a variable holds: the plan states
+            // neither (a GQL query writes nothing, so no write ever reads this flow).
+            GraphStep::FlatBarrier("gql:aggregate", _) | GraphStep::FlatMap("gql:bind", _) => {
+                AccessFlow::default()
+            }
             GraphStep::Init(_, _)
             | GraphStep::Append(_, _)
             | GraphStep::Map(_, _)
@@ -679,7 +705,12 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
 
     /// Whether this step starts new paths, so nothing upstream of it survives into its outputs.
     pub(crate) fn resets_path(&self) -> bool {
-        matches!(self, GraphStep::Barrier(_, _) | GraphStep::Count(_, _))
+        matches!(
+            self,
+            GraphStep::Barrier(_, _)
+                | GraphStep::Count(_, _)
+                | GraphStep::FlatBarrier("gql:aggregate", _)
+        )
     }
 
     /// Whether this step genuinely owns new heap data at the end of its execution — see
@@ -1321,6 +1352,13 @@ pub(crate) trait GraphStepMap<'g, S: GraphStorage + 'g>: Send + Sync + fmt::Disp
     fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
     }
+    /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
+    /// quantified edge for its trail check or its group variable), besides the latest one a
+    /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    fn history_labels(&self) -> &[compact_str::CompactString] {
+        &[]
+    }
     /// Analyses the child traversals of this step, given what the steps after it read, and
     /// returns what the children read from the incoming path. Steps without children keep the
     /// default.
@@ -1512,6 +1550,13 @@ pub(crate) trait GraphStepFlatMap<'g, S: GraphStorage + 'g>:
     fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
     }
+    /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
+    /// quantified edge for its trail check or its group variable), besides the latest one a
+    /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    fn history_labels(&self) -> &[compact_str::CompactString] {
+        &[]
+    }
     /// Analyses the child traversals of this step, given what the steps after it read, and
     /// returns what the children read from the incoming path. Steps without children keep the
     /// default.
@@ -1687,6 +1732,13 @@ pub(crate) trait GraphStepFlatBarrier<'g, S: GraphStorage + 'g>:
     fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
     }
+    /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
+    /// quantified edge for its trail check or its group variable), besides the latest one a
+    /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    fn history_labels(&self) -> &[compact_str::CompactString] {
+        &[]
+    }
     /// Analyses the child traversals of this step, given what the steps after it read, and
     /// returns what the children read from the incoming path. Steps without children keep the
     /// default.
@@ -1826,6 +1878,13 @@ pub(crate) trait GraphStepFilter<'g, S: GraphStorage + 'g>:
     /// `Traverser.path` must override it, so the path requirement analysis records it for them.
     fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
+    }
+    /// The step labels whose every occurrence on the path this step reads (the edges of a GQL
+    /// quantified edge for its trail check or its group variable), besides the latest one a
+    /// `select()` reads. The path analysis keeps such a label upstream of the `as()` that sets it
+    /// again, so earlier occurrences survive (`PathAnalysis`'s history labels). Empty by default.
+    fn history_labels(&self) -> &[compact_str::CompactString] {
+        &[]
     }
     /// Analyses the child traversals of this step, given what the steps after it read, and
     /// returns what the children read from the incoming path. Steps without children keep the

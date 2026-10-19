@@ -16,7 +16,7 @@ builds for wasm32. The module doc of `mod.rs` lists the stages and what is imple
 | `eval.rs` | three-valued expression evaluator: `compile` once (names, constants, functions resolved), then `eval`/`truth` per row through the `Env` trait; its module docs fix the NULL, comparison, arithmetic and function semantics; left spines are loops (`Node::Chain`), so recursion stays within `MAX_DEPTH` |
 | `plan.rs` | logical plan: pattern graph plus a linear operator pipeline |
 | `planner.rs` | start node, expansion order, joins of repeated variables, edge-uniqueness checks |
-| `runtime.rs` | what the internal steps share at run time: `GqlElement` handles, `Binding` (slot -> current object / path label / `gql:project` column), the traverser-backed `Env` (`Row`), value conversions (an element column stays a live `TraverserValue::Vertex`/`Edge`), `eval_error` (evaluator error -> `TraverserError::Gql`, kind `Data` for class `22`, GQLSTATUS kept), the total `ORDER BY` order (`compare_order`; tests of all steps in `runtime/tests.rs`) |
+| `runtime.rs` | what the internal steps share at run time: `GqlElement` handles, `Binding` (slot -> current object / path label / `gql:project` column / labelled row column / group list / assembled path), the traverser-backed `Env` (`Row`), value conversions (an element column stays a live `TraverserValue::Vertex`/`Edge`), `eval_error` (evaluator error -> `TraverserError::Gql`, kind `Data` for class `22`, GQLSTATUS kept), the total `ORDER BY` order (`compare_order`; tests of all steps in `runtime/tests.rs`) |
 | `lower.rs` | the plan to `GraphStep`s (existing builders plus internal `gql:*` builders; every fallible part first, an error becomes the `gql:error` marker) and the Rust entry points `GraphTraversalSource::gql` / `gql_with` (start step only); its module docs are the table of forms per construct; `as()` only for a binding read while it is not the current element (or a join / trail / branch reason of the plan); `$param` pushdown decided on the value; edge hops choose their form at emission, once the labels are known; its own `lazy_barrier()` merge points between hops; tests `tests/all/gql_tests.rs` (differential vs Rhai twins, profile, errors) |
 
 Files appear as their stage lands; this table is the target layout.
@@ -57,10 +57,17 @@ Files appear as their stage lands; this table is the target layout.
   `map_steps/step_gql_project.rs`, in `MAP_PRODUCING_KINDS`), `gql:order` (FlatBarrier,
   `flatbarrier_steps/step_gql_order.rs`), `gql:not_self_loop` (Filter, the incoming branch of an
   either-direction edge, `filter_steps/step_gql_not_self_loop.rs`), the `gql:error` marker
-  (Filter, `plan_check`, `filter_steps/step_gql_error.rs`). They ask no permission of their own
-  (value-only, like `has()`); their rendering puts GQL text in string literals so camelCase
-  respelling leaves it alone. Trail checks use `where(P.neq("e1"))`, joins `where(P.eq("x"))`,
-  no internal step.
+  (Filter, `plan_check`, `filter_steps/step_gql_error.rs`); stage 1b: `gql:aggregate`
+  (FlatBarrier, `flatbarrier_steps/step_gql_aggregate.rs`, in `MAP_PRODUCING_KINDS`, generated
+  traversers, `resets_path`), `gql:distinct` (FlatBarrier, GQL equality via
+  `aggregate::GroupKey`), `gql:bind` (FlatMap, continues a pattern from a `Label` / `RowColumn`
+  source), `gql:trail` (Filter, the trail check of a quantified edge). They ask no permission of
+  their own (value-only, like `has()`); their rendering puts GQL text in string literals so
+  camelCase respelling leaves it alone. Trail checks between single edges use
+  `where(P.neq("e1"))`, joins `where(P.eq("x"))`. A step reading EVERY occurrence of a label
+  (`gql:trail`, a `Binding::Group` / `Binding::Path` group part) declares it in
+  `history_labels()`: the path analysis then never retracts it at the `as()` that sets it again,
+  so earlier occurrences survive in labels-only mode (a plain `select()` reads only the latest).
 - **Edge forms** (table in `lower.rs`): `out()`/`in()` when nothing runs on the edge, else
   `out_e()..in_v()`; either direction is `union(out.., in_e().gql:not_self_loop()..)`, never
   `both_e().other_v()` (full paths) or plain `both()` (a self-loop twice).

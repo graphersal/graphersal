@@ -8,6 +8,8 @@ mod step_coalesce;
 mod step_element;
 mod step_flat_map;
 pub(crate) mod step_glob_path;
+#[cfg(feature = "gql")]
+mod step_gql_bind;
 mod step_in;
 mod step_in_e;
 mod step_in_v;
