@@ -51,6 +51,8 @@
 //! | pattern comprehension `[q = (a)-->(b) WHERE cond \| expr]` (stage 2c, design M2, E13) | a hosted subquery like `EXISTS` anywhere in an expression (same hosts, same site rules, `MAX_LOWERED_SUBQUERIES`), whose body ends with `gql:value(expr)` (the `|` part evaluated where the body ends: `Instr::Value`, hosting its own nested subqueries); the host runs the child to its end on one unit of the row and collects the values in arrival order, bulk expanded, checked against `bulk.max_expansion`, `traversal.max_materialized_bytes` and the memory budget before the list is built (`runtime::SubqueryHost`); an absent (`NULL`) import gives `[]`. `MATCH (p:person) RETURN [(p)-[:knows]->(f) \| f.name] AS l` is `v(labels: ["person"]).gql:project("l")` with the child `out("knows").gql:value("f.name")` |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
+//! | `q1 UNION [DISTINCT] q2`, `q1 UNION ALL q2` (stage 2d, design E15) | `union(__.<q1>, __.<q2>)`, each operand lowered onto its child like a query of its own (its own root scan, so its leading `v()` keeps the source pushdown and the property index; a unit operand `__.inject(0)`; its own `ORDER BY` / `OFFSET` / `LIMIT`; columns of a later operand projected in the first operand's order by the binder), the start step `g.union(..)` at the start of the query; then `gql:distinct()` for `UNION` / `UNION DISTINCT` (GQL equality, decision C3), nothing for `UNION ALL`. Each operand's `RETURN` row is a result pipeline of its own (`segments.len() + p`, row label `#r` for the first linear query, `#r<p>` for the others) |
+//! | `q1 NEXT q2` (stage 2d, design E19) | after a linear query: the `WITH` it desugars to (the binder makes one pipeline). After a `UNION` block, or a `UNION` block after `NEXT`: each operand starts from the records ([`Stage::Rows`], read like the row of a materializing `WITH`: `Binding::Column` on the row, `RowColumn` through `as("#n<k>")` only when read after leaving it, `gql:bind` to continue a pattern from an element column); several operands are a mid-traversal `union()`, whose children each see every record (an aggregation in an operand reads the whole table) |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
@@ -80,9 +82,9 @@
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
-//! binder; stage 2d's `UNION`, `NEXT`, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
-//! subquery bodies parse, bind and plan, and `bind::refuse_not_yet` refuses them between
-//! planning and lowering until they are lowered. A component that is not the root scan and has no
+//! binder; stage 2d's `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query subquery bodies
+//! parse, bind and plan, and `bind::refuse_not_yet` refuses them between planning and lowering
+//! until they are lowered (`UNION` and `NEXT` lower since 2d.T4). A component that is not the root scan and has no
 //! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
@@ -101,16 +103,16 @@ use super::ast::{
     ProjectionItem, Quantifier, SortDirection,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundQuery, Column, ColumnRef, Conjunct, Count, Predicate, Segment,
-    SortKey, bind_with_parameters, refuse_not_yet,
+    BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, Column, ColumnRef, Conjunct,
+    Count, Predicate, Segment, SortKey, bind_with_parameters, refuse_not_yet,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize, Op, PushOp,
-    PushOperand, Pushdown, ResultOp, Stage, SubqueryUse, and_factors, exists_conjunct,
-    label_disjuncts,
+    CompositePlan, ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize,
+    Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage, SubqueryUse, UnionPlan,
+    and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
@@ -430,6 +432,10 @@ enum Instr<S: GraphStorage> {
     },
     /// `optional(__.<steps>)`: the part of an `OPTIONAL MATCH` (plan mechanism 4).
     Optional(Vec<Instr<S>>),
+    /// `union(__.<operand>, ..)`: the operands of a `UNION` block (stage 2d, design E15), each
+    /// lowered onto its child like a query of its own; the start step `g.union(..)` when the
+    /// block starts the query.
+    Union(Vec<Vec<Instr<S>>>),
     /// `filter(__.<body>)` (`not(__.<body>)` when `negated`): a top-level `[NOT] EXISTS`
     /// conjunct or pattern predicate, the subquery body lowered onto the child from the host's
     /// site (design M2, the 2b fast path); the child short-circuits at its first match.
@@ -754,6 +760,7 @@ impl<S: GraphStorage> Lowered<S> {
                     let part = self.emit_into(AnonymousTraversal::new(), steps);
                     g.optional(part)
                 }
+                Instr::Union(operands) => g.union(self.children(operands)),
                 Instr::Exists { negated, body } => {
                     let child = self.emit_into(AnonymousTraversal::new(), body);
                     if negated {
@@ -962,7 +969,8 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Bind { .. }
             | Instr::Merge { .. }
             | Instr::Value { .. }
-            | Instr::Optional(_) => t,
+            | Instr::Optional(_)
+            | Instr::Union(_) => t,
         }
     }
 }
@@ -1302,6 +1310,11 @@ struct Lowering<'q> {
     names: Vec<Option<String>>,
     /// The subquery bodies lowered so far (bounded by [`MAX_LOWERED_SUBQUERIES`]).
     children: std::cell::Cell<usize>,
+    /// Every linear query of the bound query (stage 2d): the top-level ones in text order
+    /// first (the first one is the query when it is linear), then those of `CALL` bodies and
+    /// whole-query subquery bodies. The `RETURN` row of linear query `p` is result pipeline
+    /// `segments.len() + p` ([`Site::ordered`], [`Lowering::result_of`]).
+    linears: Vec<&'q BoundLinear>,
 }
 
 impl<'q> Lowering<'q> {
@@ -1319,7 +1332,44 @@ impl<'q> Lowering<'q> {
             params,
             names: bound.bindings.iter().map(|b| b.key.clone()).collect(),
             children: std::cell::Cell::new(0),
+            linears: linears(bound),
         }
+    }
+
+    /// The result pipeline index of the `RETURN` row of `linear` (see [`Self::linears`]).
+    fn result_of(&self, linear: &BoundLinear) -> usize {
+        let p = self
+            .linears
+            .iter()
+            .position(|l| std::ptr::eq(*l, linear))
+            .unwrap_or(0);
+        self.bound.segments.len() + p
+    }
+
+    /// The `RETURN` columns of result pipeline `result` when it is a `RETURN` row.
+    fn return_columns(&self, result: usize) -> Option<&'q [Column]> {
+        let p = result.checked_sub(self.bound.segments.len())?;
+        self.linears.get(p).map(|l| l.columns.as_slice())
+    }
+
+    /// Every pipeline of the plan, those of `CALL` bodies and whole-query subquery bodies
+    /// included (in no particular order).
+    fn pipelines(&self) -> Vec<&'q PipelinePlan> {
+        let plan: &'q LogicalPlan = self.plan;
+        let mut work: Vec<&'q CompositePlan> = vec![&plan.body];
+        work.extend(plan.subqueries.iter().filter_map(|s| s.query.as_deref()));
+        let mut pipelines = Vec::new();
+        while let Some(composite) = work.pop() {
+            for pipeline in composite.blocks().flat_map(UnionPlan::operands) {
+                pipelines.push(pipeline);
+                for stage in &pipeline.stages {
+                    if let Stage::Call(call) = stage {
+                        work.push(&call.plan);
+                    }
+                }
+            }
+        }
+        pipelines
     }
 
     fn scope<'s>(
@@ -1380,39 +1430,8 @@ impl<'q> Lowering<'q> {
 
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
-        // A query that does not start with `MATCH` (`OPTIONAL MATCH`, `FOR`, `WITH`, `RETURN`,
-        // or the conjuncts of a leading `LET` / `FILTER` pipeline) starts from one unit row.
-        if !matches!(self.plan.ops.first(), Some(Op::Scan(_) | Op::Anchor(_))) {
-            instrs.push(Instr::Unit);
-        }
-        let mut site = self.ops(&self.plan.ops, Site::default(), &mut instrs)?;
-        for stage in &self.plan.stages {
-            site = match stage {
-                Stage::Match { ops, .. } => self.ops(ops, site, &mut instrs)?,
-                Stage::Optional { ops, segment, .. } => {
-                    let mut part = Vec::new();
-                    self.ops(ops, site, &mut part)?;
-                    part.push(Instr::PartLabel(*segment));
-                    in_part(&mut part, *segment);
-                    instrs.push(Instr::Optional(part));
-                    // The current object differs per row (matched or not): every later read
-                    // goes through a label.
-                    Site::default()
-                }
-                Stage::Materialize(m) => self.materialize(m, site, &mut instrs)?,
-                Stage::For(f) => self.for_stage(f, site, &mut instrs)?,
-                // Stage 2d: refused by `bind::refuse_not_yet` before the lowering (2d.T4/T5).
-                Stage::Call(_) | Stage::Rows(_) => return Err(self.unlowered()),
-            };
-        }
         let bound = self.bound;
-        self.pipeline(
-            &self.plan.result,
-            &bound.columns,
-            &bound.order_by,
-            (site, bound.segments.len()),
-            &mut instrs,
-        )?;
+        self.composite(&self.plan.body, &bound.body, &mut instrs)?;
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
@@ -1442,6 +1461,94 @@ impl<'q> Lowering<'q> {
             inner_labels,
             paths,
         })
+    }
+
+    /// Lowers a composite query (stage 2d, design item 8) at the start of the query: its
+    /// blocks in `NEXT` order, each one operand inline or several as `union(__.<op>, ..)` (the
+    /// start step `g.union(..)` for the first block, a mid-traversal `union()` after `NEXT`,
+    /// whose operands each read every record of the block before: the children of `union()`
+    /// see the whole input), then `gql:distinct()` for `UNION` / `UNION DISTINCT`.
+    fn composite<S: GraphStorage>(
+        &self,
+        plan: &'q CompositePlan,
+        bound: &'q BoundComposite,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<(), TraverserError> {
+        let blocks = std::iter::once(&bound.first).chain(&bound.next);
+        if plan.blocks().count() != bound.next.len() + 1 {
+            return Err(self.unlowered());
+        }
+        for (k, (block_plan, block)) in plan.blocks().zip(blocks).enumerate() {
+            if block_plan.operands().count() != block.operands().count() {
+                return Err(self.unlowered());
+            }
+            if block_plan.unions.is_empty() {
+                self.linear(&block_plan.first, &block.first, k == 0, instrs)?;
+            } else {
+                let mut branches = Vec::with_capacity(block_plan.unions.len() + 1);
+                for (pipeline, linear) in block_plan.operands().zip(block.operands()) {
+                    let mut branch = Vec::new();
+                    self.linear(pipeline, linear, k == 0, &mut branch)?;
+                    branches.push(branch);
+                }
+                instrs.push(Instr::Union(branches));
+            }
+            if block_plan.distinct {
+                instrs.push(Instr::Distinct);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lowers one linear query: its match pipeline, its later stages, its result pipeline.
+    /// `first`: it starts the query (one unit row unless it starts with `MATCH`); else it
+    /// starts with the [`Stage::Rows`] of the block before.
+    fn linear<S: GraphStorage>(
+        &self,
+        plan: &PipelinePlan,
+        linear: &BoundLinear,
+        first: bool,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<(), TraverserError> {
+        // A query that does not start with `MATCH` (`OPTIONAL MATCH`, `FOR`, `WITH`, `RETURN`,
+        // or the conjuncts of a leading `LET` / `FILTER` pipeline) starts from one unit row.
+        if first && !matches!(plan.ops.first(), Some(Op::Scan(_) | Op::Anchor(_))) {
+            instrs.push(Instr::Unit);
+        }
+        let mut site = self.ops(&plan.ops, Site::default(), instrs)?;
+        for stage in &plan.stages {
+            site = match stage {
+                Stage::Match { ops, .. } => self.ops(ops, site, instrs)?,
+                Stage::Optional { ops, segment, .. } => {
+                    let mut part = Vec::new();
+                    self.ops(ops, site, &mut part)?;
+                    part.push(Instr::PartLabel(*segment));
+                    in_part(&mut part, *segment);
+                    instrs.push(Instr::Optional(part));
+                    // The current object differs per row (matched or not): every later read
+                    // goes through a label.
+                    Site::default()
+                }
+                Stage::Materialize(m) => self.materialize(m, site, instrs)?,
+                Stage::For(f) => self.for_stage(f, site, instrs)?,
+                // The records of the block before are the rows (design E19): read like the row
+                // of a materializing `WITH` (`#n<k>` only when read after leaving it).
+                Stage::Rows(rows) => {
+                    instrs.push(Instr::RowLabel(rows.segment));
+                    Site::row(rows.segment)
+                }
+                // Stage 2d: refused by `bind::refuse_not_yet` before the lowering (2d.T5).
+                Stage::Call(_) => return Err(self.unlowered()),
+            };
+        }
+        self.pipeline(
+            &plan.result,
+            &linear.columns,
+            &linear.order_by,
+            (site, self.result_of(linear)),
+            instrs,
+        )?;
+        Ok(())
     }
 
     /// Lowers the match pipeline `ops` of one segment, starting at `site`; returns the site
@@ -2252,6 +2359,11 @@ impl<'q> Lowering<'q> {
                 Instr::Optional(part) | Instr::Exists { body: part, .. } => {
                     self.in_order(part, result)?;
                 }
+                Instr::Union(operands) => {
+                    for operand in operands.iter_mut() {
+                        self.in_order(operand, result)?;
+                    }
+                }
                 Instr::Select(id) if held(*id) => *instr = self.bind(*id, away)?,
                 Instr::Same(id) if held(*id) => {
                     *instr = self.row_check(*id, BinaryOp::Eq)?;
@@ -2287,8 +2399,7 @@ impl<'q> Lowering<'q> {
         let columns = match self.bound.segments.get(result) {
             Some(Segment::With(with)) => &with.columns,
             Some(_) => return None,
-            None if result == self.bound.segments.len() => &self.bound.columns,
-            None => return None,
+            None => self.return_columns(result)?,
         };
         columns.iter().position(|c| c.variable == Some(id))
     }
@@ -2306,9 +2417,11 @@ impl<'q> Lowering<'q> {
                 | Segment::Call(_)
                 | Segment::Rows(_) => Vec::new(),
             })
-            .chain(std::iter::once(
-                self.bound.columns.iter().map(|c| c.variable).collect(),
-            ))
+            .chain(
+                self.linears
+                    .iter()
+                    .map(|l| l.columns.iter().map(|c| c.variable).collect()),
+            )
             .collect()
     }
 
@@ -2400,9 +2513,9 @@ impl<'q> Lowering<'q> {
             .map(|l| l.join || l.trail || l.branch || l.resume || l.optional || l.group || l.path)
             .collect();
         labelled.resize(n, false);
-        // One more for the `RETURN` row (`Site::ordered`).
-        let mut rows = vec![false; self.bound.segments.len() + 1];
-        for stage in &self.plan.stages {
+        // One more per `RETURN` row (`Site::ordered`).
+        let mut rows = vec![false; self.bound.segments.len() + self.linears.len()];
+        for stage in self.pipelines().into_iter().flat_map(|p| &p.stages) {
             let (segment, labelled) = match stage {
                 Stage::Materialize(m) => (m.segment, m.labelled),
                 Stage::For(f) => (f.segment, f.labelled),
@@ -2444,7 +2557,8 @@ impl<'q> Lowering<'q> {
     ) {
         let mut part_labels = vec![CompactString::default(); self.bound.segments.len()];
         let mut anchors: Vec<Option<CompactString>> = vec![None; self.bound.segments.len()];
-        for stage in &self.plan.stages {
+        let pipelines = self.pipelines();
+        for stage in pipelines.iter().flat_map(|p| &p.stages) {
             let Stage::Optional {
                 segment, witness, ..
             } = stage
@@ -2483,14 +2597,15 @@ impl<'q> Lowering<'q> {
             }
         }
         let mut reversed = vec![false; self.bound.bindings.len()];
-        let stage_ops = self.plan.stages.iter().filter_map(|stage| match stage {
-            Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
-            Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => None,
+        let stage_ops = pipelines.iter().flat_map(|p| {
+            std::iter::once(p.ops.as_slice()).chain(p.stages.iter().filter_map(
+                |stage| match stage {
+                    Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
+                    Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => None,
+                },
+            ))
         });
-        for op in std::iter::once(self.plan.ops.as_slice())
-            .chain(stage_ops)
-            .flatten()
-        {
+        for op in stage_ops.flatten() {
             if let Op::Expand(e) = op
                 && e.quantifier.is_some()
                 && let Some(flag) = reversed.get_mut(e.edge.0)
@@ -2634,8 +2749,14 @@ impl<'q> Lowering<'q> {
                 }
                 CompactString::from(label)
             })
-            .chain(std::iter::once({
-                let mut label = String::from("#r");
+            .chain((0..self.linears.len()).map(|p| {
+                // `#r` for the first linear query (the query when it is linear), `#r<p>` for the
+                // others (stage 2d).
+                let mut label = if p == 0 {
+                    String::from("#r")
+                } else {
+                    format!("#r{p}")
+                };
                 while labels.iter().any(|l| l.as_str() == label) {
                     label.insert(0, '#');
                 }
@@ -2643,6 +2764,26 @@ impl<'q> Lowering<'q> {
             }))
             .collect()
     }
+}
+
+/// Every linear query of `bound` ([`Lowering::linears`]): the top-level ones in text order,
+/// then those of each `CALL` body (every `Segment::Call`, nested ones included, since their
+/// segments are in the one table), then those of whole-query subquery bodies.
+fn linears(bound: &BoundQuery) -> Vec<&BoundLinear> {
+    let calls = bound.segments.iter().filter_map(|segment| match segment {
+        Segment::Call(call) => Some(&*call.body),
+        Segment::Match(_)
+        | Segment::Optional(_)
+        | Segment::With(_)
+        | Segment::For(_)
+        | Segment::Rows(_) => None,
+    });
+    let bodies = bound.subqueries.iter().filter_map(|s| s.query.as_deref());
+    std::iter::once(&bound.body)
+        .chain(calls)
+        .chain(bodies)
+        .flat_map(BoundComposite::linears)
+        .collect()
 }
 
 /// `this IS LABELED <factor>` over the reserved name.
@@ -2854,6 +2995,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part) | Instr::Exists { body: part, .. } => mark_reads(part, marks),
+            Instr::Union(operands) => operands.iter().for_each(|o| mark_reads(o, marks)),
             Instr::Scan
             | Instr::Unit
             | Instr::HasLabel(_)
@@ -2904,6 +3046,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             Instr::Lookup { site, .. } | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
             Instr::Optional(part) | Instr::Exists { body: part, .. } => in_part(part, segment),
+            Instr::Union(operands) => operands.iter_mut().for_each(|o| in_part(o, segment)),
             Instr::Scan
             | Instr::Unit
             | Instr::HasLabel(_)

@@ -236,10 +236,9 @@
 //! subquery (a pattern comprehension's body and `|` part included).
 //!
 //! Stage 2d binds and plans composite queries, `CALL` and whole-query subquery bodies ahead of
-//! their lowering; [`refuse_not_yet`] (which the lowering calls between planning and lowering)
-//! refuses them with `NotYet`: a `UNION` / `NEXT` composition at its first keyword,
-//! else the first in text order of a `[OPTIONAL] CALL { }`, `COUNT { }`, `COLLECT { }` and a
-//! whole-query `EXISTS` body.
+//! their lowering; `UNION` and `NEXT` lower (2d.T4), and [`refuse_not_yet`] (which the lowering
+//! calls between planning and lowering) refuses the rest with `NotYet`: the first in text order
+//! of a `[OPTIONAL] CALL { }`, `COUNT { }`, `COLLECT { }` and a whole-query `EXISTS` body.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -550,7 +549,7 @@ impl BoundComposite {
     }
 
     /// Whether it is one linear query (no `UNION` block, no `NEXT` left after desugaring).
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered in stage 2d.T4"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_linear(&self) -> bool {
         self.next.is_empty() && self.first.unions.is_empty()
     }
@@ -967,17 +966,16 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
 }
 
 /// Refuses (kind `NotYet`, `0A000`) what stage 2d binds and plans but does not lower yet (the
-/// lowering follows in tasks 2d.T4 to 2d.T5c): a `UNION` / `NEXT` composition (at its first
-/// keyword, before anything else), then the first in text order of a `[OPTIONAL] CALL { }`, a
-/// `COUNT { }`, a `COLLECT { }` and a whole-query `EXISTS { }` body. Called on a bound query
+/// lowering follows in tasks 2d.T5 to 2d.T5c; `UNION` and `NEXT` lower since 2d.T4): the first
+/// in text order of a `[OPTIONAL] CALL { }`, a `COUNT { }`, a `COLLECT { }` and a whole-query
+/// `EXISTS { }` body. Called on a bound query
 /// after it is planned (so every bound query goes through the planner) and before it is
 /// lowered.
 pub(crate) fn refuse_not_yet(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    not_yet_in(query, bound).map_err(|e| e.into_error(&query.source))
+    not_yet_in(bound).map_err(|e| e.into_error(&query.source))
 }
 
-fn not_yet_in(query: &Query, bound: &BoundQuery) -> BResult<()> {
-    composite_not_yet(query)?;
+fn not_yet_in(bound: &BoundQuery) -> BResult<()> {
     let calls = bound.segments.iter().filter_map(|segment| match segment {
         Segment::Call(call) => Some((call.span, call_not_yet(call))),
         Segment::Match(_)
@@ -994,31 +992,6 @@ fn not_yet_in(query: &Query, bound: &BoundQuery) -> BResult<()> {
         Some((_, error)) => Err(error),
         None => Ok(()),
     }
-}
-
-/// The "not yet" error of a `UNION` or `NEXT` composition (stage 2d: bound, lowered in a later
-/// task), at its first `UNION` or `NEXT` keyword.
-fn composite_not_yet(query: &Query) -> BResult<()> {
-    if query.is_linear() {
-        return Ok(());
-    }
-    if let Some(operand) = query.body.first.unions.first() {
-        return Err(not_yet(
-            operand.keyword,
-            "UNION",
-            "combine the results in Gremlin, for example \
-             g.v().union(__.has_label(\"person\"), __.has_label(\"software\"))",
-        ));
-    }
-    if let Some(next) = query.body.next.first() {
-        return Err(not_yet(
-            next.keyword,
-            "NEXT",
-            "chain Gremlin steps after gql(), for example \
-             g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")",
-        ));
-    }
-    Ok(())
 }
 
 /// The "not yet" error of a `CALL { }` subquery (stage 2d: bound, lowered in a later task).

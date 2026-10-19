@@ -587,3 +587,30 @@ fn deeply_nested_gql_bodies_stay_within_the_wasm_stack() {
         }
     }
 }
+
+/// Stage 2d.T4: `UNION` operands and `NEXT` blocks lower and run the tallest expression (a
+/// substituted `LET` and a column read from the rows before) within the 1 MB wasm32 stack.
+#[wasm_bindgen_test]
+fn tall_expressions_in_union_operands_stay_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    for query in [
+        format!("RETURN 0 AS y UNION ALL LET x = 1 RETURN {} AS y", ors(500)),
+        format!(
+            "RETURN 0 AS y UNION ALL WITH 1 AS x RETURN {} AS y",
+            ors(500)
+        ),
+        format!(
+            "RETURN 0 AS x UNION ALL RETURN 1 AS x NEXT RETURN {} AS y UNION RETURN x = 0 AS y",
+            ors(500)
+        ),
+    ] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}

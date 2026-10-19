@@ -48,6 +48,7 @@ impl Query {
     }
 
     /// Whether the query is one linear query (no `UNION`, no `NEXT`).
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_linear(&self) -> bool {
         self.body.is_linear()
     }
@@ -76,6 +77,7 @@ pub(crate) struct CompositeQuery {
 
 impl CompositeQuery {
     /// Whether it is one linear query (no `UNION`, no `NEXT`).
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_linear(&self) -> bool {
         self.next.is_empty() && self.first.unions.is_empty()
     }

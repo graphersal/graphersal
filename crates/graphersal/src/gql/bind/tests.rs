@@ -2201,18 +2201,16 @@ fn a_projection_beside_an_aggregate_reads_only_grouping_keys() {
 /// keyword or their whole text.
 #[test]
 fn stage_2d_constructs_parse_and_are_not_yet_bound() {
-    // Stage 2d.T2: they bind; `refuse_not_yet` refuses them before planning.
+    // Stage 2d.T2: they bind; `refuse_not_yet` refuses them before planning. Stage 2d.T4:
+    // `UNION` and `NEXT` lower and pass it.
+    for query in [
+        "MATCH (a) RETURN a.x AS x UNION ALL MATCH (b) RETURN b.x AS x",
+        "MATCH (a) RETURN a NEXT MATCH (a)-->(b) RETURN b",
+    ] {
+        let parsed = parse(query).unwrap();
+        assert!(bind_then_refuse(&parsed).is_ok(), "{query}");
+    }
     for (query, text, what) in [
-        (
-            "MATCH (a) RETURN a.x AS x UNION ALL MATCH (b) RETURN b.x AS x",
-            "UNION ALL",
-            "UNION",
-        ),
-        (
-            "MATCH (a) RETURN a NEXT MATCH (a)-->(b) RETURN b",
-            "NEXT",
-            "NEXT",
-        ),
         (
             "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b",
             "CALL (a) { MATCH (a)-->(b) RETURN b }",
