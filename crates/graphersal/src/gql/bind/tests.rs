@@ -1441,8 +1441,9 @@ fn binding_never_panics_on_stage_2a_queries() {
 }
 
 #[test]
-fn subqueries_are_not_yet_bound() {
-    // Stage 2b.T1 parses EXISTS and pattern predicates; the binder refuses them until 2b.T2.
+fn subqueries_are_bound_but_not_yet_planned() {
+    // Stage 2b.T2 binds EXISTS and pattern predicates; the guard after binding refuses them
+    // until the planner and the lowering support them (2b.T3 / T4).
     for (query, text, what) in [
         (
             "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) } RETURN n",
@@ -1470,7 +1471,10 @@ fn subqueries_are_not_yet_bound() {
             "EXISTS is not yet supported",
         ),
     ] {
-        let f = failure_of(query);
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
+        assert_eq!(bound.subqueries.len(), 1, "{query}");
+        let f = failure(query, refuse_subqueries(&parsed, &bound).map(|()| bound));
         assert_eq!(
             (f.kind, f.gqlstatus.as_str()),
             (GqlErrorKind::NotYet, "0A000"),
@@ -1478,5 +1482,402 @@ fn subqueries_are_not_yet_bound() {
         );
         assert_eq!(f.text, text, "{query}");
         assert!(f.message.contains(what), "{query}: {}", f.message);
+    }
+    // A query without a subquery passes the guard.
+    let parsed = parse("MATCH (n) RETURN n").unwrap_or_else(|e| panic!("{e}"));
+    let bound = bind(&parsed).unwrap_or_else(|e| panic!("{e}"));
+    assert!(refuse_subqueries(&parsed, &bound).is_ok());
+}
+
+// ----- subqueries (stage 2b.T2) -----
+
+fn subquery(q: &BoundQuery, index: usize) -> &BoundSubquery {
+    q.subqueries
+        .get(index)
+        .unwrap_or_else(|| panic!("no subquery {index}: {:?}", q.subqueries))
+}
+
+/// The binding of `name` declared inside a subquery body (the last of that name).
+fn local<'q>(q: &'q BoundQuery, name: &str) -> &'q Binding {
+    q.bindings
+        .iter()
+        .rev()
+        .find(|b| b.name.as_ref().is_some_and(|n| n.name == name))
+        .unwrap_or_else(|| panic!("no binding `{name}`"))
+}
+
+#[test]
+fn subquery_bodies_are_nested_scopes_with_imports() {
+    let query = "MATCH (a)-->(b) WHERE EXISTS { MATCH (b)-->(c) WHERE c.x = a.x } RETURN a";
+    let q = ok(query);
+    assert_eq!(q.subqueries.len(), 1);
+    let s = subquery(&q, 0);
+    assert_eq!(
+        (s.kind, s.form),
+        (SubqueryKind::Exists, SubqueryForm::Braces)
+    );
+    assert_eq!(s.parent, None);
+    // Imports: the outer names the body reads, in a pattern (b) or a condition (a).
+    assert_eq!(names(&q, &s.imports), ["a", "b"]);
+    // The body clause follows the query's own clauses; its segment lies past the pipeline.
+    assert_eq!(s.clauses, [1]);
+    assert_eq!(q.matches.len(), 2);
+    assert_eq!(segment_shapes(&q), ["match[0]"]);
+    assert_eq!(s.segment, 1);
+    assert_eq!(q.matches.get(1).map(|m| m.segment), Some(1));
+    // `b` in the body is the outer binding (a correlation), `c` a local of the body.
+    let body = &q.matches[1].paths[0];
+    assert_eq!(body.start, id(&q, "b"));
+    let c = local(&q, "c");
+    assert_eq!((c.subquery, c.segment, c.clause), (Some(0), 1, 1));
+    assert_eq!(q.binding(id(&q, "b")).map(|b| b.subquery), Some(None));
+    // The host conjunct reads the imports; the body conjunct runs in the body's segment.
+    assert_eq!(
+        conjuncts(query, &q),
+        [
+            "c.x = a.x [\"a\", \"c\"]",
+            "EXISTS { MATCH (b)-->(c) WHERE c.x = a.x } [\"a\", \"b\"]"
+        ]
+    );
+    assert_eq!(
+        q.conjuncts.iter().map(|c| c.segment).collect::<Vec<_>>(),
+        [1, 0]
+    );
+    // The host conjunct reads two bindings: a cross conjunct of the outer segment, both read.
+    assert_eq!(q.cross, [0, 1]);
+    assert!(q.binding(id(&q, "a")).is_some_and(|b| b.read));
+    // The stored host expression names the subquery by its span.
+    let Predicate::Expr(host) = &q.conjuncts[1].predicate else {
+        panic!("not an expression")
+    };
+    assert_eq!(q.subquery_at(host.span), Some(0));
+}
+
+#[test]
+fn a_subquery_on_one_element_is_listed_on_it_and_reads_nothing_away() {
+    // "Who has no ...": the conjunct imports only the element being bound, so it sits on that
+    // element (design 6: pushdown into the scan), and the element needs no label.
+    // (`RETURN` reads nothing, so only the subquery could set the read flag.)
+    let query = "MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN count(*) AS c";
+    let q = ok(query);
+    let p = q.binding(id(&q, "p")).unwrap_or_else(|| panic!("p"));
+    assert_eq!(p.predicates, [0]);
+    assert!(!p.read);
+    assert!(q.cross.is_empty());
+    let s = subquery(&q, 0);
+    assert_eq!(s.form, SubqueryForm::PatternPredicate);
+    assert_eq!(names(&q, &s.imports), ["p"]);
+    // The anonymous elements of the pattern are locals of the body.
+    let locals: Vec<_> = q
+        .bindings
+        .iter()
+        .filter(|b| b.subquery == Some(0))
+        .collect();
+    assert_eq!(locals.len(), 2);
+    assert!(
+        locals
+            .iter()
+            .all(|b| b.name.is_none() && b.segment == s.segment)
+    );
+    // A label written on an import inside the body is a condition of the body.
+    let query = "MATCH (p) WHERE EXISTS { (p:person)-->() } RETURN p";
+    let q = ok(query);
+    assert_eq!(
+        conjuncts(query, &q),
+        ["person [\"p\"]", "EXISTS { (p:person)-->() } [\"p\"]"]
+    );
+    assert_eq!(q.conjuncts[0].origin, ConjunctOrigin::Label);
+    assert_eq!(q.conjuncts[0].segment, subquery(&q, 0).segment);
+    assert!(q.binding(id(&q, "p")).is_some_and(|b| b.labels.is_empty()));
+}
+
+#[test]
+fn nested_subqueries_import_through_their_parents() {
+    let query = "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE EXISTS { MATCH (b)-->(c) \
+                 WHERE c.x = a.x } } RETURN a";
+    let q = ok(query);
+    assert_eq!(q.subqueries.len(), 2);
+    let (outer, inner) = (subquery(&q, 0), subquery(&q, 1));
+    assert_eq!((outer.parent, inner.parent), (None, Some(0)));
+    // `b` is a local of the outer body, so only `a` crosses its border.
+    assert_eq!(names(&q, &outer.imports), ["a"]);
+    assert_eq!(names(&q, &inner.imports), ["a", "b"]);
+    assert_eq!((outer.segment, inner.segment), (1, 2));
+    assert_eq!(
+        (outer.clauses.as_slice(), inner.clauses.as_slice()),
+        (&[1][..], &[2][..])
+    );
+    assert_eq!(local(&q, "b").subquery, Some(0));
+    assert_eq!(local(&q, "c").subquery, Some(1));
+    // Several clauses in one body: each its own clause, one segment; joins across them.
+    let q = ok("MATCH (a) WHERE EXISTS { MATCH (a)-[f]->(b) MATCH (b)-[f]->(c) } RETURN a");
+    let s = subquery(&q, 0);
+    assert_eq!(s.clauses, [1, 2]);
+    assert!(q.matches[1..].iter().all(|m| m.segment == s.segment));
+    assert!(local(&q, "f").joined());
+}
+
+#[test]
+fn subquery_locals_do_not_leak_into_the_query() {
+    for (query, text) in [
+        ("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } RETURN b", "b"),
+        (
+            "MATCH (a) WHERE EXISTS { (a)-[e]->() } AND e.w > 1 RETURN a",
+            "e",
+        ),
+        (
+            "MATCH (a) WHERE EXISTS { MATCH p = (a)-->() } RETURN p",
+            "p",
+        ),
+        (
+            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } AND EXISTS { MATCH (a) WHERE b.x = 1 } \
+             RETURN a",
+            "b",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("bound inside a subquery"),
+            "{query}: {}",
+            f.message
+        );
+        assert!(
+            f.alternative
+                .as_deref()
+                .is_some_and(|a| a.contains("MATCH clause")),
+            "{query}: {f:?}"
+        );
+    }
+    // The same name bound later by the query is a new binding of its own.
+    let q = ok("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } MATCH (b) RETURN b");
+    let bs: Vec<_> = q
+        .bindings
+        .iter()
+        .filter(|b| b.name.as_ref().is_some_and(|n| n.name == "b"))
+        .collect();
+    assert_eq!(bs.len(), 2);
+    assert_eq!((bs[0].subquery, bs[1].subquery), (Some(0), None));
+    assert_ne!(bs[0].key, bs[1].key);
+    assert_eq!(column_names(&q), ["b"]);
+    assert_eq!(q.columns[0].variable, Some(bs[1].id));
+}
+
+#[test]
+fn pattern_predicates_introduce_no_variable() {
+    for (query, text) in [
+        ("MATCH (a) WHERE (a)-->(b) RETURN a", "b"),
+        ("MATCH (a) WHERE NOT (a)-[r:T]->() RETURN a", "r"),
+        ("MATCH (a) RETURN (x)-->(a) AS y", "x"),
+    ] {
+        let f = fail(query);
+        assert_eq!(
+            (f.text.as_str(), f.gqlstatus.as_str()),
+            (text, "42002"),
+            "{query}"
+        );
+        assert!(f.message.contains("new variable"), "{query}: {}", f.message);
+        assert!(
+            f.alternative
+                .as_deref()
+                .is_some_and(|a| a.contains("EXISTS { MATCH (")),
+            "{query}: {f:?}"
+        );
+    }
+    // A name a WITH dropped keeps its own message.
+    let f = fail("MATCH (a)-->(b) WITH a WHERE (b)-->() RETURN a");
+    assert!(f.message.contains("does not carry it"), "{}", f.message);
+    // Names in scope, anonymous elements, labels and property maps are fine; braces may bind.
+    ok("MATCH (a), (b) WHERE (a)-[:T]->(b) AND NOT (b {x: 1})-->(:L) RETURN a");
+    ok("MATCH (a) WHERE EXISTS { (a)-->(b) WHERE b.x = 1 } RETURN a");
+    ok("FOR x IN [1] RETURN EXISTS { (a)-->() } AS e");
+}
+
+#[test]
+fn subquery_names_follow_the_pattern_rules() {
+    // An edge bound outside may be bound again inside (design E8: trail per body clause).
+    let q = ok("MATCH (a)-[e]->(b) WHERE EXISTS { MATCH (b)<-[e]-(a) } RETURN a");
+    assert_eq!(names(&q, &subquery(&q, 0).imports), ["a", "e", "b"]);
+    // Inside one body clause an edge variable is still bound once.
+    let f = fail("MATCH (a) WHERE EXISTS { MATCH (a)-[f]->(b), (b)-[f]->(c) } RETURN a");
+    assert!(f.message.contains("more than one edge"), "{}", f.message);
+    // Kinds, group variables, path variables and LET values keep their rules.
+    let f = fail("MATCH (a)-[e]->(b) WHERE EXISTS { (e)-->() } RETURN a");
+    assert!(
+        f.message.contains("already bound to an edge"),
+        "{}",
+        f.message
+    );
+    let f = fail("MATCH (a)-[e]->{1,2}(b) WHERE EXISTS { MATCH (a)-[e]->(b) } RETURN a");
+    assert!(f.message.contains("group variable"), "{}", f.message);
+    let f = fail("MATCH p = (a)-->(b) WHERE EXISTS { MATCH p = (a)-->() } RETURN a");
+    assert!(f.message.contains("already bound"), "{}", f.message);
+    let f = fail("MATCH (a) LET x = 1 FILTER EXISTS { MATCH (x)-->() } RETURN a");
+    assert!(f.message.contains("value defined by LET"), "{}", f.message);
+    // A path variable of the body is a local; one read inside its own MATCH is incomplete,
+    // also from a subquery standing in that MATCH's inline filter.
+    ok("MATCH (a) WHERE EXISTS { MATCH p = (a)-->() WHERE path_length(p) > 0 } RETURN a");
+    let f = fail(
+        "MATCH p = (a WHERE EXISTS { MATCH (a)-->(b) WHERE path_length(p) > 0 })-->() RETURN a",
+    );
+    assert!(f.message.contains("not complete"), "{}", f.message);
+    // An undefined name inside a body gets the usual suggestion.
+    let f = fail("MATCH (alpha) WHERE EXISTS { MATCH (alpha)-->(b) WHERE b.x = alpa.x } RETURN 1");
+    assert_eq!(f.suggestion.as_deref(), Some("alpha"));
+}
+
+#[test]
+fn subqueries_read_let_values_and_stand_anywhere_an_expression_does() {
+    // A LET value read in a body is substituted there, and its bindings are imports.
+    let query =
+        "MATCH (n) LET y = n.age FILTER EXISTS { MATCH (n)-->(m) WHERE m.age > y } RETURN n";
+    let q = ok(query);
+    assert_eq!(names(&q, &subquery(&q, 0).imports), ["n"]);
+    assert_eq!(conjunct_exprs(&q)[0], "(m.age Gt n.age)");
+    // A LET holding a subquery: the substituted host keeps naming the same subquery.
+    let q = ok("MATCH (n) LET has = (n)-->() FILTER has OR n.x = 1 RETURN n, has AS h");
+    assert_eq!(q.subqueries.len(), 1);
+    let Predicate::Expr(filter) = &q.conjuncts[0].predicate else {
+        panic!("not an expression")
+    };
+    let ExprKind::Binary { left, .. } = &filter.kind else {
+        panic!("{filter:?}")
+    };
+    assert_eq!(q.subquery_at(left.span), Some(0));
+    assert_eq!(names(&q, &q.columns[1].bindings), ["n"]);
+    // Columns, sort keys, FOR lists: the host reads the imports, so they are read.
+    let q = ok("MATCH (a)-->(b) RETURN b, EXISTS { (a)-->(b) } AS e ORDER BY EXISTS { (b)-->() }");
+    assert_eq!(names(&q, &q.columns[1].bindings), ["a", "b"]);
+    assert_eq!(names(&q, &q.order_by[0].bindings), ["b"]);
+    assert!(q.binding(id(&q, "a")).is_some_and(|b| b.read));
+    let q = ok("MATCH (a) FOR x IN [EXISTS { (a)-->() }] RETURN x");
+    let Some(Segment::For(f)) = q.segments.get(1) else {
+        panic!("{:?}", q.segments)
+    };
+    assert_eq!(names(&q, &f.bindings), ["a"]);
+    assert_eq!(subquery(&q, 0).segment, 2);
+}
+
+#[test]
+fn subquery_bodies_refuse_aggregates_and_check_grouping() {
+    let f = fail("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE count(b) > 1 } RETURN a");
+    assert!(f.message.contains("in WHERE"), "{}", f.message);
+    let f = fail("MATCH (a) WHERE EXISTS { MATCH (a)-->(b {x: max(1)}) } RETURN a");
+    assert!(f.message.contains("in a pattern"), "{}", f.message);
+    // Beside an aggregate, a subquery may import only grouping keys.
+    let f = fail(
+        "MATCH (a)-->(b) RETURN count(b) + CASE WHEN EXISTS { (a)-->() } THEN 1 ELSE 0 END AS x",
+    );
+    assert_eq!(f.text, "EXISTS { (a)-->() }");
+    assert!(f.message.contains("`a`"), "{}", f.message);
+    ok("MATCH (a)-->(b) RETURN a, count(b) + CASE WHEN EXISTS { (a)-->() } THEN 1 ELSE 0 END AS x");
+    // A subquery inside an aggregate argument is fine.
+    ok("MATCH (a) RETURN count(CASE WHEN (a)-->() THEN 1 END) AS c");
+    // After DISTINCT, ORDER BY reads only returned columns, imports included.
+    let f = fail("MATCH (a)-->(b) RETURN DISTINCT b ORDER BY EXISTS { (a)-->() }");
+    assert!(f.message.contains("`a`"), "{}", f.message);
+}
+
+#[test]
+fn subqueries_are_limited() {
+    // At most MAX_SUBQUERIES per query (nested ones included), kind Limit.
+    let many = |n: usize| {
+        let preds = vec!["(a)-->()"; n].join(" AND ");
+        format!("MATCH (a) WHERE {preds} RETURN a")
+    };
+    assert_eq!(ok(&many(MAX_SUBQUERIES)).subqueries.len(), MAX_SUBQUERIES);
+    let query = many(MAX_SUBQUERIES + 1);
+    let f = failure_of(&query);
+    assert_eq!(
+        (f.kind, f.gqlstatus.as_str()),
+        (GqlErrorKind::Limit, "54001")
+    );
+    assert_eq!(f.text, "(a)-->()");
+    let offset = query.rfind("(a)-->()").unwrap_or(0);
+    let parsed = parse(&query).unwrap_or_else(|e| panic!("{e}"));
+    let Err(TraverserError::Gql { offset: at, .. }) = bind(&parsed) else {
+        panic!("bound")
+    };
+    assert_eq!(at, offset);
+    // A body clause holds at most MAX_MATCH_EDGES edge patterns, like a clause of the query.
+    let chain = |n: usize| "-->()".repeat(n);
+    ok(&format!(
+        "MATCH (a) WHERE EXISTS {{ MATCH (a){} }} RETURN a",
+        chain(MAX_MATCH_EDGES)
+    ));
+    let f = failure_of(&format!(
+        "MATCH (a) WHERE EXISTS {{ MATCH (a){} }} RETURN a",
+        chain(MAX_MATCH_EDGES + 1)
+    ));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    assert!(f.message.contains("edge patterns"), "{}", f.message);
+}
+
+#[test]
+fn deeply_nested_subqueries_bind_without_overflow() {
+    // The deepest nesting the parser accepts binds (recursion: one level per subquery).
+    let mut deepest = None;
+    let mut nested = "(n)-->()".to_string();
+    for _ in 0..200 {
+        nested = format!("EXISTS {{ MATCH (n) WHERE {nested} }}");
+        let query = format!("MATCH (n) WHERE {nested} RETURN n");
+        match parse(&query) {
+            Ok(parsed) => deepest = Some(parsed),
+            Err(_) => break,
+        }
+    }
+    let parsed = deepest.unwrap_or_else(|| panic!("nothing parsed"));
+    let bound = bind(&parsed).unwrap_or_else(|e| panic!("{e}"));
+    assert!(bound.subqueries.len() > 10, "{}", bound.subqueries.len());
+    assert!(
+        bound
+            .subqueries
+            .iter()
+            .enumerate()
+            .skip(1)
+            .all(|(k, s)| s.parent == Some(k - 1) && s.imports.len() == 1)
+    );
+}
+
+#[test]
+fn binding_never_panics_on_stage_2b_queries() {
+    let heads = [
+        "MATCH (a)-[e]->(b)",
+        "OPTIONAL MATCH (a)",
+        "MATCH (a)-[e]->{1,2}(b)",
+        "MATCH p = (a)-->(b)",
+        "FOR a IN [1]",
+        "MATCH (a) WITH a, count(*) AS c",
+    ];
+    let preds = [
+        "EXISTS { MATCH (a)-->(c) }",
+        "EXISTS { (a)-[e]->(b) WHERE b.x = a.x }",
+        "NOT (a)-->(b)",
+        "(a)-[x]->()",
+        "EXISTS ((c)-->())",
+        "EXISTS { MATCH (a)-->(b) MATCH (b)-->(c) WHERE EXISTS { (c)-->(a) } }",
+        "EXISTS { MATCH q = (a)-->() WHERE path_length(p) > 1 }",
+        "count(a) > 1 OR (a)-->()",
+    ];
+    let tails = [
+        "RETURN a",
+        "RETURN c",
+        "RETURN a, (a)-->() AS h ORDER BY h",
+        "RETURN count(*) + CASE WHEN (a)-->() THEN 1 END AS k",
+        "MATCH (c) RETURN c",
+    ];
+    for h in heads {
+        for p in preds {
+            for t in tails {
+                for src in [format!("{h} WHERE {p} {t}"), format!("{h} FILTER {p} {t}")] {
+                    if let Ok(parsed) = parse(&src) {
+                        if let Ok(bound) = bind(&parsed) {
+                            let _ = refuse_subqueries(&parsed, &bound);
+                        }
+                        let _ = bind_with_parameters(&parsed, ["p"]);
+                    }
+                }
+            }
+        }
     }
 }

@@ -77,6 +77,8 @@
 //! - **`OFFSET` / `LIMIT`** are a non-negative integer literal or a parameter (Neo4j's rule); the
 //!   lowering checks a parameter's value.
 //! - **Parameters:** every `$name` reference with its span, in text order.
+//! - **Subqueries (stage 2b, design M2):** `EXISTS { .. }`, `EXISTS ( .. )` and Cypher pattern
+//!   predicates; see "Subqueries".
 //!
 //! # Scope
 //!
@@ -88,6 +90,39 @@
 //! the same way (its list reads the scope before the `FOR`). `WITH` replaces the scope by its columns
 //! (`WITH *` keeps it); a dropped name written again in a later pattern is a new binding (its
 //! key is `#<id>`, decision C14). `RETURN` and its `ORDER BY` see the final scope.
+//!
+//! # Subqueries
+//!
+//! A subquery's body (its `MATCH` clauses, their inline filters and `WHERE`s) is bound where the
+//! expression holding it is resolved, as a **nested scope**: every name in scope there is
+//! visible inside; a name written inside that is in scope is that binding (a correlation, an
+//! **import**: a node or edge variable continues it, a `LET` value is substituted), and a new name
+//! is a **local** of the body ([`Binding::subquery`]), invisible after it (a later read is
+//! 42002 naming the subquery; a later `MATCH` binding the same name makes a new binding).
+//! Nested subqueries see the locals of the bodies around them. The pattern rules of a `MATCH`
+//! clause hold in each body clause: edge uniqueness per clause (an edge bound outside may be
+//! bound again inside, design E8), kinds, group and path variables (a path variable inside is a
+//! local; one of a clause whose inline filter holds the subquery is not complete there).
+//! Aggregates are refused in a body like in any `WHERE` or pattern.
+//!
+//! A **pattern predicate** (an alias of `EXISTS { pattern }`) may not introduce a named variable:
+//! every name it writes must be in scope (42002, the alternative is the `EXISTS { MATCH .. }`
+//! form).
+//!
+//! Each subquery is a [`BoundSubquery`] in [`BoundQuery::subqueries`] (text order) with its
+//! imports (the older bindings its body reads in a pattern, a condition or a nested subquery).
+//! The body clauses follow the query's own clauses in [`BoundQuery::matches`]; the body is one
+//! segment of its own, numbered past [`BoundQuery::segments`] ([`BoundSubquery::segment`]), so
+//! its conjuncts, its locals and its clauses plan like a [`Segment::Match`] with the imports
+//! bound before it. The expression holding the subquery reads its imports: a conjunct's
+//! bindings (so a conjunct importing only the element it filters is listed on that element), a
+//! column's, a sort key's, a `FOR` list's; read flags follow from that as usual. The stored
+//! expression keeps the written [`ExprKind::Subquery`] as a reference to its bound form
+//! ([`BoundQuery::subquery_at`], by span); its AST body is not substituted and is never read
+//! after binding. Beside an aggregate a subquery may import only grouping keys.
+//!
+//! The planner and the lowering do not support subqueries yet: [`refuse_subqueries`] refuses
+//! a bound query holding one (kind `NotYet`, until stages 2b.T3 / T4).
 //!
 //! # Aggregates
 //!
@@ -109,7 +144,8 @@
 //! name, a `FOR` variable or ordinal already in scope (or both with one name), a `FOR` ordinal
 //! used as a node or edge, a misplaced aggregate, a non-grouped read beside an aggregate, an
 //! `ORDER BY` key reading a dropped variable after `DISTINCT` / aggregation, a duplicate key in a
-//! map, a parameter that was not supplied. `22G02` for a negative `OFFSET` / `LIMIT` literal,
+//! map, a parameter that was not supplied, a subquery local read outside its body, a new
+//! variable in a pattern predicate. `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable.
 //!
@@ -121,6 +157,10 @@
 //! edges; the limit keeps every query fast to prepare. It is checked for every clause before any
 //! other work (the parser itself is linear in a long path). Separate `MATCH` clauses are not
 //! limited together: edge uniqueness holds within one clause, and their cost adds up linearly.
+//! The clauses of a subquery body are limited the same way, each on its own.
+//!
+//! One query holds at most [`MAX_SUBQUERIES`] subqueries, nested ones included: each becomes a
+//! child traversal planned with its host.
 //!
 //! A substituted expression keeps the parser's bounds (height [`MAX_HEIGHT`], nesting
 //! [`MAX_DEPTH`]), and one query substitutes at most [`MAX_SUBSTITUTED_NODES`] expression nodes
@@ -208,6 +248,9 @@ pub(crate) struct Binding {
     pub(crate) group: bool,
     /// The materializing `WITH` or `FOR` column it stands for.
     pub(crate) column: Option<ColumnRef>,
+    /// The subquery whose body declares it (index into [`BoundQuery::subqueries`]): a local
+    /// of that body, invisible outside it; `None` for a binding of the query itself.
+    pub(crate) subquery: Option<usize>,
 }
 
 impl Binding {
@@ -317,6 +360,33 @@ pub(crate) struct BoundWith {
     /// The binding of each column (what the names mean after the `WITH`).
     pub(crate) outputs: Vec<BindingId>,
     /// The clause.
+    pub(crate) span: Span,
+}
+
+/// A bound subquery: `EXISTS { .. }`, `EXISTS ( .. )` or a pattern predicate (module docs,
+/// "Subqueries").
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundSubquery {
+    /// What it computes.
+    pub(crate) kind: SubqueryKind,
+    /// How it was written.
+    pub(crate) form: SubqueryForm,
+    /// The `MATCH` clauses of its body in order (indexes into [`BoundQuery::matches`], past the
+    /// clauses of the query itself).
+    pub(crate) clauses: Vec<usize>,
+    /// The segment of its body: an index past [`BoundQuery::segments`] (the body is planned
+    /// with its host, never as a stage of the pipeline). Its clauses, its local bindings and its
+    /// conjuncts carry it, so the body plans like a [`Segment::Match`] of these clauses.
+    pub(crate) segment: usize,
+    /// The bindings declared outside it that its body reads (correlations), sorted, without
+    /// duplicates: the variables written in its patterns, its conditions and its nested
+    /// subqueries that are not its own locals. The expression holding it reads them too.
+    pub(crate) imports: Vec<BindingId>,
+    /// The subquery whose body holds it; `None` for one in an expression of the query itself.
+    pub(crate) parent: Option<usize>,
+    /// From `EXISTS` to the closing bracket; for a pattern predicate the pattern. The
+    /// [`ExprKind::Subquery`] left in a stored expression names it by this span
+    /// ([`BoundQuery::subquery_at`]).
     pub(crate) span: Span,
 }
 
@@ -463,6 +533,9 @@ pub(crate) struct BoundQuery {
     /// `RETURN`): it
     /// starts from one unit row that holds no binding (design M1).
     pub(crate) unit: bool,
+    /// Every subquery in text order (a subquery before the ones nested in its body); module
+    /// docs, "Subqueries".
+    pub(crate) subqueries: Vec<BoundSubquery>,
 }
 
 impl BoundQuery {
@@ -478,6 +551,19 @@ impl BoundQuery {
             .iter()
             .find(|b| b.name.as_ref().is_some_and(|n| n.name == name))
             .map(|b| b.id)
+    }
+
+    /// The subquery written at `span` (the span of an [`ExprKind::Subquery`] in a stored
+    /// expression): its index into [`Self::subqueries`].
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "read by the tests; the planner reads it from 2b.T3"
+        )
+    )]
+    pub(crate) fn subquery_at(&self, span: Span) -> Option<usize> {
+        self.subqueries.iter().position(|s| s.span == span)
     }
 
     /// Whether `RETURN` aggregates (some column holds an aggregate call).
@@ -529,6 +615,15 @@ pub(crate) const MAX_MATCH_EDGES: usize = 64;
 /// low enough that binding stays fast.
 pub(crate) const MAX_SUBSTITUTED_NODES: usize = 100_000;
 
+/// The most subqueries (`EXISTS`, pattern predicates) one query may hold, nested ones included
+/// (module docs, "Limits"). Each is planned and run as a child traversal of its own; 64 lie far
+/// beyond any written query and keep preparing a query fast.
+pub(crate) const MAX_SUBQUERIES: usize = 64;
+
+/// The provisional segment of subquery `k`'s body while binding is `SUBQUERY_SEGMENTS + k`; the
+/// binder renumbers it past the query's own segments at the end ([`BoundSubquery::segment`]).
+const SUBQUERY_SEGMENTS: usize = usize::MAX / 2;
+
 type BResult<T> = Result<T, Box<GqlErrorBuilder>>;
 
 fn semantic(span: Span, message: impl Into<String>) -> GqlErrorBuilder {
@@ -576,8 +671,18 @@ fn keyword_span(span: Span, len: usize) -> Span {
     }
 }
 
-/// The refusal of a subquery expression until the binder supports it (stage 2b.T2).
-fn subquery_not_yet(subquery: &SubqueryExpr) -> Box<GqlErrorBuilder> {
+/// Refuses a bound query that holds a subquery: the binder binds them (stage 2b.T2), the
+/// planner and the lowering do not support them yet (stages 2b.T3 / T4). The error names the
+/// first subquery in the text.
+pub(crate) fn refuse_subqueries(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
+    match bound.subqueries.first() {
+        Some(subquery) => Err(subquery_not_yet(subquery).into_error(&query.source)),
+        None => Ok(()),
+    }
+}
+
+/// The refusal of a subquery until the planner and the lowering support it (stages 2b.T3 / T4).
+fn subquery_not_yet(subquery: &BoundSubquery) -> Box<GqlErrorBuilder> {
     let what = match (subquery.kind, subquery.form) {
         (SubqueryKind::Exists, SubqueryForm::Braces | SubqueryForm::Parens) => "EXISTS",
         (SubqueryKind::Exists, SubqueryForm::PatternPredicate) => {
@@ -589,6 +694,25 @@ fn subquery_not_yet(subquery: &SubqueryExpr) -> Box<GqlErrorBuilder> {
         what,
         "add the pattern to the MATCH clause, or use Gremlin where(), for example \
          g.v().has_label(\"person\").where(__.out(\"created\"))",
+    )
+}
+
+/// The error of a query with more than [`MAX_SUBQUERIES`] subqueries, at the first one past the
+/// limit.
+fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
+    Box::new(
+        GqlErrorBuilder::new(
+            GqlErrorKind::Limit,
+            span.start..span.end,
+            format!(
+                "the query holds more than {MAX_SUBQUERIES} subqueries (EXISTS and pattern \
+                 predicates)"
+            ),
+        )
+        .alternative(
+            "join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several \
+             MATCH clauses and patterns), or add the patterns to the MATCH clause of the query",
+        ),
     )
 }
 
@@ -824,6 +948,18 @@ struct Binder<'q> {
     bound_clauses: usize,
     /// Expression nodes left to substitute.
     budget: usize,
+    /// Every subquery bound or being bound, in text order (the placeholder of one being bound
+    /// gets its clauses and imports when its body is done).
+    subqueries: Vec<BoundSubquery>,
+    /// The subquery whose body is being bound (its new bindings are its locals).
+    subquery: Option<usize>,
+    /// The `MATCH` clauses of the subquery bodies, in order; `None` while a clause is bound.
+    sub_matches: Vec<Option<BoundMatch>>,
+    /// The `MATCH` clauses whose path variables are not complete where a subquery body is
+    /// bound (it stands in an inline filter of such a clause).
+    incomplete_paths: Vec<usize>,
+    /// Names bound only inside a subquery body that is done, with its span (for the message).
+    hidden: HashMap<String, Span>,
 }
 
 impl<'q> Binder<'q> {
@@ -842,6 +978,11 @@ impl<'q> Binder<'q> {
             clause: 0,
             bound_clauses: 0,
             budget: MAX_SUBSTITUTED_NODES,
+            subqueries: Vec::new(),
+            subquery: None,
+            sub_matches: Vec::new(),
+            incomplete_paths: Vec::new(),
+            hidden: HashMap::new(),
         }
     }
 
@@ -911,6 +1052,7 @@ impl<'q> Binder<'q> {
         if let Some(supplied) = supplied {
             self.check_parameters(supplied)?;
         }
+        self.finish_subqueries(&mut matches)?;
         let mut cross = Vec::new();
         for index in 0..self.conjuncts.len() {
             match self.local_binding(index) {
@@ -935,7 +1077,39 @@ impl<'q> Binder<'q> {
             limit,
             parameters: self.parameters,
             unit,
+            subqueries: self.subqueries,
         })
+    }
+
+    /// Appends the clauses of the subquery bodies to `matches` and renumbers the provisional
+    /// segments of the bodies past the query's own segments.
+    fn finish_subqueries(&mut self, matches: &mut Vec<BoundMatch>) -> BResult<()> {
+        let outer = self.segments.len();
+        let renumber = |segment: &mut usize| {
+            if *segment >= SUBQUERY_SEGMENTS {
+                *segment = *segment - SUBQUERY_SEGMENTS + outer;
+            }
+        };
+        for m in std::mem::take(&mut self.sub_matches) {
+            let mut m = m.ok_or_else(|| {
+                semantic(
+                    self.query.span,
+                    "internal error: a subquery clause left unbound",
+                )
+            })?;
+            renumber(&mut m.segment);
+            matches.push(m);
+        }
+        self.bindings
+            .iter_mut()
+            .for_each(|b| renumber(&mut b.segment));
+        self.conjuncts
+            .iter_mut()
+            .for_each(|c| renumber(&mut c.segment));
+        self.subqueries
+            .iter_mut()
+            .for_each(|s| renumber(&mut s.segment));
+        Ok(())
     }
 
     /// The binding a conjunct is listed on (module docs): its only binding, a node or edge of
@@ -1128,6 +1302,7 @@ impl<'q> Binder<'q> {
         if let Some(v) = name {
             self.scope.insert(v.clone(), Symbol::Binding(id));
             self.dropped.remove(&v.name);
+            self.hidden.remove(&v.name);
         }
         self.bindings.push(Binding {
             id,
@@ -1142,6 +1317,7 @@ impl<'q> Binder<'q> {
             segment: site.segment,
             group: site.group,
             column,
+            subquery: self.subquery,
         });
         id
     }
@@ -1735,7 +1911,12 @@ impl<'q> Binder<'q> {
                     self.resolve(inner, arg, refs)?;
                 }
             }
-            ExprKind::Subquery(subquery) => return Err(subquery_not_yet(subquery)),
+            ExprKind::Subquery(subquery) => {
+                let index = self.subquery_expr(ctx, subquery)?;
+                if let Some(bound) = self.subqueries.get(index) {
+                    refs.bindings.extend_from_slice(&bound.imports);
+                }
+            }
         }
         Ok(())
     }
@@ -1783,7 +1964,8 @@ impl<'q> Binder<'q> {
                 let binding = self.bindings.get(id.0);
                 if let Some(binding) = binding
                     && binding.kind == BindingKind::Path
-                    && ctx.inline_clause == Some(binding.clause)
+                    && (ctx.inline_clause == Some(binding.clause)
+                        || self.incomplete_paths.contains(&binding.clause))
                 {
                     return Err(semantic(
                         var.span,
@@ -1841,6 +2023,20 @@ impl<'q> Binder<'q> {
                 "add `{name}` to the WITH items, as in WITH ..., {name}"
             ))
             .topic(GqlHelpTopic::Scope)
+            .into();
+        }
+        if self.hidden.contains_key(name) {
+            return semantic(
+                var.span,
+                format!(
+                    "the variable `{name}` is not in scope: it is bound inside a subquery (EXISTS \
+                     or a pattern predicate), whose variables are visible only inside it"
+                ),
+            )
+            .alternative(format!(
+                "bind `{name}` in the MATCH clause of the query to use it here, or test it \
+                 inside the subquery"
+            ))
             .into();
         }
         let later = self
@@ -2053,8 +2249,9 @@ impl<'q> Binder<'q> {
                     args,
                 }
             }
-            // `resolve` refuses subqueries before any substitution (until stage 2b.T2).
-            ExprKind::Subquery(subquery) => return Err(subquery_not_yet(subquery)),
+            // The body is bound (and substituted) on its own ([`BoundQuery::subqueries`]); the
+            // expression keeps the written subquery as a reference to it.
+            ExprKind::Subquery(_) => return Ok((expr.clone(), Shape::LEAF)),
         };
         Ok((
             Expr {
@@ -2109,6 +2306,163 @@ impl<'q> Binder<'q> {
             // Resolved before; unreachable for a resolved expression.
             None => Ok((expr.clone(), Shape::LEAF)),
         }
+    }
+
+    // ----- subqueries -----
+
+    /// Binds the body of `subquery` as a nested scope (module docs, "Subqueries") and returns its
+    /// index in [`BoundQuery::subqueries`]. Recursion: one level per nested subquery, which the
+    /// parser bounds by `MAX_DEPTH` and the host expression's height by `MAX_HEIGHT`.
+    #[inline(never)]
+    fn subquery_expr(&mut self, ctx: Ctx<'_>, subquery: &SubqueryExpr) -> BResult<usize> {
+        // An expression is resolved once; a repeat (none today) would read the same body.
+        if let Some(index) = self.subqueries.iter().position(|s| s.span == subquery.span) {
+            return Ok(index);
+        }
+        if self.subqueries.len() >= MAX_SUBQUERIES {
+            return Err(too_many_subqueries(subquery.span));
+        }
+        for m in &subquery.matches {
+            if let Some(edge) = m
+                .patterns
+                .iter()
+                .flat_map(|path| &path.steps)
+                .nth(MAX_MATCH_EDGES)
+            {
+                return Err(too_many_edges(edge.edge.span));
+            }
+        }
+        if subquery.form == SubqueryForm::PatternPredicate {
+            self.check_pattern_predicate(ctx, subquery)?;
+        }
+        let index = self.subqueries.len();
+        let segment = SUBQUERY_SEGMENTS.saturating_add(index);
+        self.subqueries.push(BoundSubquery {
+            kind: subquery.kind,
+            form: subquery.form,
+            clauses: Vec::new(),
+            segment,
+            imports: Vec::new(),
+            parent: self.subquery,
+            span: subquery.span,
+        });
+        // The nested scope: the names in scope now, plus the body's own (locals).
+        let scope = self.scope.clone();
+        let dropped = self.dropped.clone();
+        let clause = self.clause;
+        let parent = self.subquery.replace(index);
+        let incomplete = ctx.inline_clause.is_some();
+        if let Some(inline) = ctx.inline_clause {
+            self.incomplete_paths.push(inline);
+        }
+        let first_binding = self.bindings.len();
+        let first_conjunct = self.conjuncts.len();
+        let first_clause = self.sub_matches.len();
+        let body = self.subquery_body(subquery, segment);
+        if incomplete {
+            self.incomplete_paths.pop();
+        }
+        self.subquery = parent;
+        self.clause = clause;
+        self.dropped = dropped;
+        let inner = std::mem::replace(&mut self.scope, scope);
+        let clauses = body?;
+        for (name, _) in inner.entries {
+            if self.scope.get(&name.name).is_none() {
+                self.hidden.insert(name.name, subquery.span);
+            }
+        }
+        // Imports: every binding older than the body that the body (nested bodies included)
+        // reads, in a pattern or in a condition.
+        let outside = |id: &BindingId| id.0 < first_binding;
+        let mut imports: Vec<BindingId> = self
+            .conjuncts
+            .get(first_conjunct..)
+            .unwrap_or(&[])
+            .iter()
+            .flat_map(|c| c.bindings.iter().copied())
+            .filter(outside)
+            .collect();
+        for m in self
+            .sub_matches
+            .get(first_clause..)
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
+        {
+            for path in &m.paths {
+                let elements = std::iter::once(path.start)
+                    .chain(path.variable)
+                    .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]));
+                imports.extend(elements.filter(outside));
+            }
+        }
+        imports.sort_unstable();
+        imports.dedup();
+        if let Some(bound) = self.subqueries.get_mut(index) {
+            bound.clauses = clauses;
+            bound.imports = imports;
+        }
+        Ok(index)
+    }
+
+    /// The `MATCH` clauses of a subquery body, bound like the clauses of one `Segment::Match`
+    /// (each with its own edge uniqueness, design E8); returns their indexes.
+    fn subquery_body(&mut self, subquery: &SubqueryExpr, segment: usize) -> BResult<Vec<usize>> {
+        let base = self.query.matches.len();
+        let mut clauses = Vec::with_capacity(subquery.matches.len());
+        for m in &subquery.matches {
+            let slot = self.sub_matches.len();
+            let clause = base.saturating_add(slot);
+            self.sub_matches.push(None);
+            self.clause = clause;
+            let bound = self.declare_clause(clause, m, segment)?;
+            self.clause_filters(clause, m, &bound)?;
+            if let Some(entry) = self.sub_matches.get_mut(slot) {
+                *entry = Some(bound);
+            }
+            clauses.push(clause);
+        }
+        Ok(clauses)
+    }
+
+    /// A pattern predicate may not introduce a named variable (design 6): every name it writes
+    /// must be in scope.
+    fn check_pattern_predicate(&self, ctx: Ctx<'_>, subquery: &SubqueryExpr) -> BResult<()> {
+        for path in subquery.matches.iter().flat_map(|m| &m.patterns) {
+            let names = path.variable.iter().chain(&path.start.variable).chain(
+                path.steps
+                    .iter()
+                    .flat_map(|step| step.edge.variable.iter().chain(&step.node.variable)),
+            );
+            for var in names {
+                if self.scope.get(&var.name).is_some() {
+                    continue;
+                }
+                let name = &var.name;
+                if self.pending_let.iter().any(|n| n == name)
+                    || self.dropped.contains_key(name)
+                    || self.hidden.contains_key(name)
+                {
+                    return Err(self.undefined(ctx, var));
+                }
+                let pattern = self.query.text(subquery.span);
+                return Err(semantic(
+                    var.span,
+                    format!(
+                        "the pattern predicate introduces the new variable `{name}`; a pattern \
+                         used as a condition may only name variables bound before it"
+                    ),
+                )
+                .alternative(format!(
+                    "write it as EXISTS {{ MATCH {pattern} }}, whose MATCH may bind new \
+                     variables, or leave `{name}` out of the pattern"
+                ))
+                .topic(GqlHelpTopic::PatternVariable)
+                .into());
+            }
+        }
+        Ok(())
     }
 
     // ----- result -----
@@ -2372,6 +2726,32 @@ impl<'q> Binder<'q> {
         }
         match &expr.kind {
             ExprKind::FunctionCall { name, .. } if is_aggregate(name) => Ok(()),
+            ExprKind::Subquery(subquery) => {
+                let imports = self
+                    .subqueries
+                    .iter()
+                    .find(|s| s.span == subquery.span)
+                    .map_or(&[][..], |s| s.imports.as_slice());
+                let outside = imports.iter().find(|id| !key_variables.contains(id));
+                let Some(binding) = outside.and_then(|id| self.bindings.get(id.0)) else {
+                    return Ok(());
+                };
+                let name = binding.name.as_ref().map_or("", |n| n.name.as_str());
+                Err(semantic(
+                    subquery.span,
+                    format!(
+                        "the subquery reads `{name}` in an item that aggregates, outside the \
+                         aggregates, so `{name}` must be a grouping key of {clause}, and it is \
+                         not one"
+                    ),
+                )
+                .alternative(format!(
+                    "add `{name}` to the {clause} items (it then becomes a grouping key), or move \
+                     the subquery into a column of its own"
+                ))
+                .topic(GqlHelpTopic::Grouping)
+                .into())
+            }
             ExprKind::Variable(var) => {
                 let grouped = match self.scope.get(&var.name) {
                     Some(Symbol::Binding(id)) => key_variables.contains(id),
