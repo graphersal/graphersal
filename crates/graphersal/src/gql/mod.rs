@@ -29,6 +29,7 @@
 //!    marker; their shared run-time part is `runtime.rs`), handed to the optimizer like any other
 //!    plan.
 
+pub(crate) mod aggregate;
 pub(crate) mod ast;
 pub(crate) mod bind;
 pub(crate) mod eval;

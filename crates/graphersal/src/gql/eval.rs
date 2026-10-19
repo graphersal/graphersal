@@ -51,8 +51,14 @@
 //!   one-item list), `type` (the edge label; **a vertex is error 22G03**, as Neo4j refuses a
 //!   node; use `labels(v)`), `coalesce` (the first non-`NULL` argument, later ones not
 //!   evaluated), `upper` / `lower`, `char_length`, `size` / `cardinality` (characters of a
-//!   string, items of a list). Every one returns `NULL` for a `NULL` argument and error 22G03
-//!   for an argument of the wrong kind. Aggregates are not evaluated here (stage 1b).
+//!   string, items of a list), `path_length` / Cypher `length` (the edges of a path). Every one
+//!   returns `NULL` for a `NULL` argument and error 22G03 for an argument of the wrong kind.
+//! - **Paths:** a [`Value::Path`] is the elements of a matched path in text order (vertex, edge,
+//!   vertex, ...). Two paths are equal when they hold the same elements in the same order; a
+//!   path compared with a value of another kind gives `NULL`, like any two incomparable kinds.
+//! - **Aggregates** (`count`, `sum`, `avg`, `min`, `max`, `collect_list`) are compiled only where
+//!   the [`Scope`] admits them ([`Scope::aggregate`], the aggregating stage `aggregate.rs`); the
+//!   compiled call reads its result through [`Env::aggregate`]. Elsewhere they are error 0A000.
 //!
 //! Errors are [`EvalError`]s carrying a GQLSTATUS ([`status`]), a message and the span of the
 //! offending expression; the step that runs the evaluator maps them into a `TraverserError`.
@@ -65,7 +71,7 @@ use super::ast::{
     UnaryOp,
 };
 use super::lexer::Span;
-use super::parser::{Function, FunctionKind, lookup_function};
+use super::parser::{Function, FunctionKind, FunctionSpec, lookup_function};
 use crate::value::number::{N, Number};
 use crate::value::scalar::compare_scalars;
 use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
@@ -199,6 +205,9 @@ pub(crate) enum Value<E> {
     Map(Vec<(CompactString, Value<E>)>),
     /// A vertex or an edge.
     Element(E),
+    /// A path: its elements in text order, vertices at the even positions and edges at the odd
+    /// ones, starting and ending with a vertex (a zero-length path is one vertex).
+    Path(Vec<E>),
 }
 
 impl<E> Value<E> {
@@ -243,6 +252,9 @@ impl<E> Value<E> {
                 ElementProperty::Object(Box::new(map))
             }
             Value::Element(handle) => element(handle),
+            Value::Path(elements) => {
+                ElementProperty::Array(elements.into_iter().map(&mut *element).collect())
+            }
         }
     }
 
@@ -277,6 +289,7 @@ impl<E> Value<E> {
             Value::List(_) => "a list",
             Value::Map(_) => "a map",
             Value::Element(_) => "an element",
+            Value::Path(_) => "a path",
         }
     }
 }
@@ -300,6 +313,25 @@ pub(crate) trait Env {
     fn has_any_label(&self, element: &Self::Element) -> bool;
     /// The element's labels in stored order, the primary label first (an edge: its one label).
     fn labels(&self, element: &Self::Element) -> Vec<CompactString>;
+    /// The result of the aggregate call `index` ([`Scope::aggregate`]) for the current group;
+    /// `NULL` when the row is not an aggregated one.
+    fn aggregate(&self, index: usize) -> Value<Self::Element> {
+        let _ = index;
+        Value::Null
+    }
+}
+
+/// An aggregate call met by [`compile`] ([`Scope::aggregate`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AggregateRef<'a> {
+    /// The aggregate function (`count`, `sum`, ...).
+    pub(crate) function: Function,
+    /// `DISTINCT` before the argument.
+    pub(crate) distinct: bool,
+    /// The argument; `*` only for `count`.
+    pub(crate) args: &'a CallArgs,
+    /// The whole call.
+    pub(crate) span: Span,
 }
 
 /// What [`compile`] resolves names against.
@@ -308,6 +340,13 @@ pub(crate) trait Scope {
     fn variable(&self, name: &str) -> Option<usize>;
     /// The value of the parameter `$name`, if one was given.
     fn parameter(&self, name: &str) -> Option<ElementProperty>;
+    /// Where the result of an aggregate call comes from: the index [`Env::aggregate`] reads, an
+    /// error, or `None` when no aggregate is allowed here (the default: [`compile`] then fails
+    /// with 0A000).
+    fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
+        let _ = call;
+        None
+    }
 }
 
 /// A compiled expression, evaluated per row against an [`Env`].
@@ -330,6 +369,8 @@ enum Node<E> {
     Chain(Box<Compiled<E>>, Vec<Link<E>>),
     Case(Box<Case<E>>),
     Call(Function, Vec<Compiled<E>>),
+    /// The result of an aggregate call, read through [`Env::aggregate`].
+    Aggregate(usize),
 }
 
 /// One link of a [`Node::Chain`].
@@ -498,9 +539,11 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         ExprKind::List(items) => compile_list(items, scope)?,
         ExprKind::Map(map) => compile_map(map, scope)?,
         ExprKind::Case(case) => compile_case(case, scope)?,
-        ExprKind::FunctionCall { name, args, .. } => {
-            compile_call(name.name.as_str(), args, scope, span)?
-        }
+        ExprKind::FunctionCall {
+            name,
+            args,
+            distinct,
+        } => compile_call(name.name.as_str(), args, *distinct, scope, span)?,
         ExprKind::Binary { .. }
         | ExprKind::Property { .. }
         | ExprKind::IsNull { .. }
@@ -577,6 +620,7 @@ fn compile_case<E: Clone>(case: &CaseExpr, scope: &impl Scope) -> Result<Node<E>
 fn compile_call<E: Clone>(
     name: &str,
     args: &CallArgs,
+    distinct: bool,
     scope: &impl Scope,
     span: Span,
 ) -> Result<Node<E>, EvalError> {
@@ -588,14 +632,7 @@ fn compile_call<E: Clone>(
         ));
     };
     if spec.kind == FunctionKind::Aggregate {
-        return Err(EvalError::new(
-            status::NOT_SUPPORTED,
-            format!(
-                "the aggregate function {}() is not supported here",
-                spec.name()
-            ),
-            span,
-        ));
+        return compile_aggregate_call(spec, args, distinct, scope, span);
     }
     let CallArgs::Exprs(exprs) = args else {
         return Err(EvalError::new(
@@ -616,6 +653,54 @@ fn compile_call<E: Clone>(
         .map(|arg| compile(arg, scope))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Node::Call(spec.function, args))
+}
+
+#[inline(never)]
+fn compile_aggregate_call<E>(
+    spec: &FunctionSpec,
+    args: &CallArgs,
+    distinct: bool,
+    scope: &impl Scope,
+    span: Span,
+) -> Result<Node<E>, EvalError> {
+    let not_here = || {
+        EvalError::new(
+            status::NOT_SUPPORTED,
+            format!(
+                "the aggregate function {}() is not supported here",
+                spec.name()
+            ),
+            span,
+        )
+    };
+    match args {
+        CallArgs::Star(_) if spec.function != Function::Count => {
+            return Err(EvalError::new(
+                status::SEMANTIC,
+                format!("only count(*) takes `*`, not {}()", spec.name()),
+                span,
+            ));
+        }
+        CallArgs::Star(_) => {}
+        CallArgs::Exprs(exprs) if exprs.len() < spec.min_args || exprs.len() > spec.max_args => {
+            return Err(EvalError::new(
+                status::SEMANTIC,
+                format!("{}() does not take {} arguments", spec.name(), exprs.len()),
+                span,
+            ));
+        }
+        CallArgs::Exprs(_) => {}
+    }
+    let call = AggregateRef {
+        function: spec.function,
+        distinct,
+        args,
+        span,
+    };
+    match scope.aggregate(call) {
+        Some(index) => Ok(Node::Aggregate(index?)),
+        None => Err(not_here()),
+    }
 }
 
 fn literal_value<E>(literal: &Literal) -> Value<E> {
@@ -668,7 +753,8 @@ impl<E> Compiled<E> {
     /// `parser::MAX_DEPTH` levels deep.
     pub(crate) fn variables(&self, slots: &mut Vec<usize>) {
         match &self.node {
-            Node::Const(_) => {}
+            // An aggregate's argument is compiled apart (`aggregate::AggregateCall`).
+            Node::Const(_) | Node::Aggregate(_) => {}
             Node::Variable(slot) => slots.push(*slot),
             Node::List(items) | Node::Call(_, items) => {
                 items.iter().for_each(|item| item.variables(slots));
@@ -753,6 +839,7 @@ impl<E: Clone + PartialEq> Compiled<E> {
             Node::Unary(UnaryOp::Not, operand) => operand.truth(env)?.not().into_value(),
             Node::Unary(op, operand) => unary(*op, &*operand.eval_cow(env)?, self.span)?,
             Node::Call(function, args) => call(*function, args, env, self.span)?,
+            Node::Aggregate(index) => env.aggregate(*index),
             Node::Const(value) => value.clone(),
             Node::Case(case) => case.eval(env)?.into_owned(),
             Node::Chain(first, links) => eval_chain(first, links, env)?.into_owned(),
@@ -929,6 +1016,7 @@ pub(crate) fn equals<E: PartialEq>(a: &Value<E>, b: &Value<E>) -> Truth {
             result
         }
         (Value::Element(a), Value::Element(b)) => Truth::of(a == b),
+        (Value::Path(a), Value::Path(b)) => Truth::of(a == b),
         _ => Truth::Unknown,
     }
 }
@@ -1229,8 +1317,11 @@ fn call<En: Env>(
                 None => wrong("a string or a list"),
             },
         },
-        // No value is a path yet (path variables are bound from stage 1b's path step on).
-        Function::PathLength => wrong("a path"),
+        Function::PathLength => match &*value {
+            // Vertices at the even positions, edges at the odd ones.
+            Value::Path(elements) => length(elements.len() / 2, span),
+            _ => wrong("a path"),
+        },
         // Handled above: it evaluates its arguments lazily.
         Function::Coalesce => Ok(Value::Null),
         Function::Count

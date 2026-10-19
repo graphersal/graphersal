@@ -30,13 +30,14 @@
 //!
 //! Rows sort by [`compare_order`], a total order over every value: first by kind, in Neo4j's
 //! global sort order of types where Graphersal has the type (map < vertex < edge < list <
-//! temporal < uuid < string < boolean < number < vector < other < `NULL`), then within the kind:
-//! numbers by value across integer and float, strings by code point, `false < true`, temporal
-//! values of one type by their own order, elements by id, lists element-wise then by length,
-//! maps entry-wise (key, then value) then by size. Values of one kind that do not compare (two
+//! path < temporal < uuid < string < boolean < number < vector < other < `NULL`), then within the
+//! kind: numbers by value across integer and float, strings by code point, `false < true`,
+//! temporal values of one type by their own order, elements by id, lists and paths element-wise
+//! then by length, maps entry-wise (key, then value) then by size. Values of one kind that do not compare (two
 //! temporal types, `NaN`) fall back to the crate's fixed total order (`compare_element_property`),
 //! so a sort over mixed input is deterministic. `NULL` is the largest value: last ascending, first
 //! descending, as in Neo4j (ISO GQL leaves the default null order to the implementation).
+//! [`compare_values`] is the same order over evaluator values (`min` / `max`, C5).
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -48,7 +49,7 @@ use crate::error::{BoxedTraverserError, GqlErrorBuilder, GqlErrorKind, Traverser
 use crate::graph::GraphStorage;
 use crate::traversal::{Traverser, TraverserContext};
 use crate::value::scalar::compare_scalars;
-use crate::value::{RecordKey, TraverserValue, compare_element_property};
+use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_property};
 use crate::{CompactString, ElementKind, ElementProperty};
 
 #[cfg(test)]
@@ -77,6 +78,23 @@ impl<S: GraphStorage> PartialEq for GqlElement<S> {
             (GqlElement::Edge(a), GqlElement::Edge(b)) => a == b,
             (GqlElement::Vertex(_), GqlElement::Edge(_))
             | (GqlElement::Edge(_), GqlElement::Vertex(_)) => false,
+        }
+    }
+}
+
+impl<S: GraphStorage> Eq for GqlElement<S> {}
+
+impl<S: GraphStorage> std::hash::Hash for GqlElement<S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            GqlElement::Vertex(v) => {
+                state.write_u8(0);
+                v.hash(state);
+            }
+            GqlElement::Edge(e) => {
+                state.write_u8(1);
+                e.hash(state);
+            }
         }
     }
 }
@@ -236,22 +254,42 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
                     .map(|(key, value)| (record_key_name(key), self.to_value(value)))
                     .collect(),
             ),
+            TraverserValue::Path(path) => match path_elements(path) {
+                Some(elements) => Value::Path(elements),
+                None => self.materialized(value),
+            },
             TraverserValue::VertexProperty(..)
             | TraverserValue::EdgeProperty(..)
             | TraverserValue::PathProperty(_)
-            | TraverserValue::Path(_)
             | TraverserValue::Object(_)
             | TraverserValue::Entry(_)
             | TraverserValue::Schema(_)
-            | TraverserValue::Graph(_) => match value.into_node_property(&*self.context.storage) {
-                Ok(property) => Value::from_property(property),
-                Err(error) => {
-                    self.failure.borrow_mut().get_or_insert(error);
-                    Value::Null
-                }
-            },
+            | TraverserValue::Graph(_) => self.materialized(value),
         }
     }
+
+    /// `value` materialized as a property value; a failure is kept for [`Self::finish`].
+    #[inline(never)]
+    fn materialized(&self, value: &TraverserValue<S>) -> RowValue<S> {
+        match value.into_node_property(&*self.context.storage) {
+            Ok(property) => Value::from_property(property),
+            Err(error) => {
+                self.failure.borrow_mut().get_or_insert(error);
+                Value::Null
+            }
+        }
+    }
+}
+
+/// The elements of a path made only of vertices and edges (a GQL path value), else `None`.
+fn path_elements<S: GraphStorage>(path: &TraverserPath<S>) -> Option<Vec<GqlElement<S>>> {
+    path.objects()
+        .map(|object| match object {
+            TraverserValue::Vertex(v) => Some(GqlElement::Vertex(*v)),
+            TraverserValue::Edge(e) => Some(GqlElement::Edge(*e)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The name of a record key as a GQL map key.
@@ -332,6 +370,12 @@ pub(crate) fn into_traverser_value<S: GraphStorage>(value: RowValue<S>) -> Trave
         Value::Scalar(property) => TraverserValue::Computed(property, None),
         Value::Element(GqlElement::Vertex(v)) => TraverserValue::Vertex(v),
         Value::Element(GqlElement::Edge(e)) => TraverserValue::Edge(e),
+        Value::Path(elements) => TraverserValue::Path(TraverserPath::from_objects(
+            elements.into_iter().map(|element| match element {
+                GqlElement::Vertex(v) => TraverserValue::Vertex(v),
+                GqlElement::Edge(e) => TraverserValue::Edge(e),
+            }),
+        )),
         Value::List(items) => {
             TraverserValue::Array(items.into_iter().map(into_traverser_value).collect())
         }
@@ -363,6 +407,8 @@ pub(crate) enum OrderValue {
     Map(Vec<(CompactString, OrderValue)>),
     /// A vertex or an edge, by id.
     Element(ElementKind, CompactString),
+    /// A path: its elements in order.
+    Path(Vec<OrderValue>),
 }
 
 impl OrderValue {
@@ -383,36 +429,70 @@ impl OrderValue {
             Value::Element(element) => {
                 OrderValue::Element(row.kind(&element), row.element_id(&element))
             }
+            Value::Path(elements) => OrderValue::Path(
+                elements
+                    .into_iter()
+                    .map(|element| {
+                        OrderValue::Element(row.kind(&element), row.element_id(&element))
+                    })
+                    .collect(),
+            ),
         }
     }
 
     /// The kind's place in the global order of types (see the module docs).
     fn rank(&self) -> u8 {
         match self {
-            OrderValue::Map(_) => 0,
-            OrderValue::Element(ElementKind::Vertex, _) => 1,
-            OrderValue::Element(ElementKind::Edge, _) => 2,
-            OrderValue::List(_) => 3,
-            OrderValue::Scalar(property) => match property {
-                ElementProperty::Temporal(_) => 4,
-                ElementProperty::Uuid(_) => 5,
-                ElementProperty::String(_)
-                | ElementProperty::Compressed(_)
-                | ElementProperty::Deduped(_) => 6,
-                ElementProperty::Boolean(_) => 7,
-                ElementProperty::Number(_) => 8,
-                ElementProperty::Vector(_) => 9,
-                // Never a scalar of the evaluator; ranked so the order stays total.
-                ElementProperty::Null
-                | ElementProperty::Object(_)
-                | ElementProperty::Array(_)
-                | ElementProperty::Vertex(_)
-                | ElementProperty::Edge(_)
-                | ElementProperty::Map(_) => 10,
-            },
-            OrderValue::Null => 11,
+            OrderValue::Map(_) => rank::MAP,
+            OrderValue::Element(kind, _) => rank::element(*kind),
+            OrderValue::List(_) => rank::LIST,
+            OrderValue::Path(_) => rank::PATH,
+            OrderValue::Scalar(property) => rank::scalar(property),
+            OrderValue::Null => rank::NULL,
         }
     }
+}
+
+/// The places of the kinds in the global order of types (see the module docs).
+mod rank {
+    use crate::{ElementKind, ElementProperty};
+
+    pub(super) const MAP: u8 = 0;
+    pub(super) const LIST: u8 = 3;
+    pub(super) const PATH: u8 = 4;
+    pub(super) const NULL: u8 = 12;
+
+    pub(super) fn element(kind: ElementKind) -> u8 {
+        match kind {
+            ElementKind::Vertex => 1,
+            ElementKind::Edge => 2,
+        }
+    }
+
+    pub(super) fn scalar(property: &ElementProperty) -> u8 {
+        match property {
+            ElementProperty::Temporal(_) => 5,
+            ElementProperty::Uuid(_) => 6,
+            ElementProperty::String(_)
+            | ElementProperty::Compressed(_)
+            | ElementProperty::Deduped(_) => 7,
+            ElementProperty::Boolean(_) => 8,
+            ElementProperty::Number(_) => 9,
+            ElementProperty::Vector(_) => 10,
+            // Never a scalar of the evaluator; ranked so the order stays total.
+            ElementProperty::Null
+            | ElementProperty::Object(_)
+            | ElementProperty::Array(_)
+            | ElementProperty::Vertex(_)
+            | ElementProperty::Edge(_)
+            | ElementProperty::Map(_) => 11,
+        }
+    }
+}
+
+/// Two scalars in the total order: by value where they compare, else the crate's fixed order.
+fn compare_scalar_total(a: &ElementProperty, b: &ElementProperty) -> Ordering {
+    compare_scalars(a, b).unwrap_or_else(|| compare_element_property(a, b))
 }
 
 /// The total `ORDER BY` order, ascending (see the module docs).
@@ -422,20 +502,66 @@ pub(crate) fn compare_order(a: &OrderValue, b: &OrderValue) -> Ordering {
         return by_rank;
     }
     match (a, b) {
-        (OrderValue::Scalar(a), OrderValue::Scalar(b)) => {
-            compare_scalars(a, b).unwrap_or_else(|| compare_element_property(a, b))
-        }
+        (OrderValue::Scalar(a), OrderValue::Scalar(b)) => compare_scalar_total(a, b),
         (OrderValue::Element(_, a), OrderValue::Element(_, b)) => a.cmp(b),
-        (OrderValue::List(a), OrderValue::List(b)) => a
-            .iter()
-            .zip(b)
-            .map(|(a, b)| compare_order(a, b))
-            .find(|order| *order != Ordering::Equal)
-            .unwrap_or_else(|| a.len().cmp(&b.len())),
+        (OrderValue::List(a), OrderValue::List(b)) | (OrderValue::Path(a), OrderValue::Path(b)) => {
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| compare_order(a, b))
+                .find(|order| *order != Ordering::Equal)
+                .unwrap_or_else(|| a.len().cmp(&b.len()))
+        }
         (OrderValue::Map(a), OrderValue::Map(b)) => a
             .iter()
             .zip(b)
             .map(|((ka, va), (kb, vb))| ka.cmp(kb).then_with(|| compare_order(va, vb)))
+            .find(|order| *order != Ordering::Equal)
+            .unwrap_or_else(|| a.len().cmp(&b.len())),
+        // Equal ranks hold equal variants; `NULL` equals `NULL`.
+        _ => Ordering::Equal,
+    }
+}
+
+/// The `ORDER BY` order ([`compare_order`]) over evaluator values, element ids read through
+/// `env`: what `min` / `max` compare by (C5). Recursive over nested lists and maps like the
+/// values themselves.
+pub(crate) fn compare_values<En: Env>(
+    a: &Value<En::Element>,
+    b: &Value<En::Element>,
+    env: &En,
+) -> Ordering {
+    let rank_of = |value: &Value<En::Element>| match value {
+        Value::Map(_) => rank::MAP,
+        Value::Element(element) => rank::element(env.kind(element)),
+        Value::List(_) => rank::LIST,
+        Value::Path(_) => rank::PATH,
+        Value::Scalar(property) => rank::scalar(property),
+        Value::Null => rank::NULL,
+    };
+    let by_rank = rank_of(a).cmp(&rank_of(b));
+    if by_rank != Ordering::Equal {
+        return by_rank;
+    }
+    let by_id = |a: &En::Element, b: &En::Element| env.element_id(a).cmp(&env.element_id(b));
+    match (a, b) {
+        (Value::Scalar(a), Value::Scalar(b)) => compare_scalar_total(a, b),
+        (Value::Element(a), Value::Element(b)) => by_id(a, b),
+        (Value::List(a), Value::List(b)) => a
+            .iter()
+            .zip(b)
+            .map(|(a, b)| compare_values(a, b, env))
+            .find(|order| *order != Ordering::Equal)
+            .unwrap_or_else(|| a.len().cmp(&b.len())),
+        (Value::Path(a), Value::Path(b)) => a
+            .iter()
+            .zip(b)
+            .map(|(a, b)| by_id(a, b))
+            .find(|order| *order != Ordering::Equal)
+            .unwrap_or_else(|| a.len().cmp(&b.len())),
+        (Value::Map(a), Value::Map(b)) => a
+            .iter()
+            .zip(b)
+            .map(|((ka, va), (kb, vb))| ka.cmp(kb).then_with(|| compare_values(va, vb, env)))
             .find(|order| *order != Ordering::Equal)
             .unwrap_or_else(|| a.len().cmp(&b.len())),
         // Equal ranks hold equal variants; `NULL` equals `NULL`.

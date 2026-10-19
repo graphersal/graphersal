@@ -583,3 +583,78 @@ fn source_steps_stay_untouched_by_the_optimizer() {
         "{steps:?}"
     );
 }
+
+#[test]
+fn path_values_convert_to_and_from_traverser_paths() {
+    let graph = graph();
+    let mut vertices = graph.vertices();
+    let (Some(a), Some(b)) = (vertices.next(), vertices.next()) else {
+        panic!("no vertices");
+    };
+    let Some(e) = graph.edges().next() else {
+        panic!("no edges");
+    };
+    let path: RowValue<TraversalGraph> = Value::Path(vec![
+        GqlElement::Vertex(a),
+        GqlElement::Edge(e),
+        GqlElement::Vertex(b),
+    ]);
+    let TraverserValue::Path(converted) = into_traverser_value(path.clone()) else {
+        panic!("not a path");
+    };
+    assert_eq!(converted.len(), 3);
+    assert!(converted.labels(0).is_none());
+    assert_eq!(path_elements(&converted).map(Value::Path), Some(path));
+    // A path holding another value is no GQL path value.
+    let mixed: TraverserPath<TraversalGraph> = TraverserPath::from_objects([
+        TraverserValue::Vertex(a),
+        TraverserValue::Computed(ElementProperty::from(1), None),
+    ]);
+    assert!(path_elements(&mixed).is_none());
+}
+
+#[test]
+fn compare_values_is_the_order_by_order() {
+    use crate::traversal::TraversalStrategy;
+    use std::collections::HashMap;
+
+    let mut graph = graph();
+    let Some(v) = graph.vertices().next() else {
+        panic!("no vertices");
+    };
+    let context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());
+    let traverser = Traverser::start(
+        &context,
+        TraverserValue::Computed(ElementProperty::Null, None),
+    );
+    let row = Row::new(&context, &traverser, &[]);
+    let values: Vec<RowValue<TraversalGraph>> = vec![
+        Value::Null,
+        Value::Scalar(ElementProperty::from(2.5)),
+        Value::Scalar(ElementProperty::from("a")),
+        Value::Path(vec![GqlElement::Vertex(v)]),
+        Value::List(vec![Value::Null]),
+        Value::Element(GqlElement::Vertex(v)),
+        Value::Map(Vec::new()),
+        Value::Scalar(ElementProperty::Boolean(true)),
+        Value::Scalar(ElementProperty::from(1)),
+    ];
+    for a in &values {
+        for b in &values {
+            let keys = (
+                OrderValue::of(a.clone(), &row),
+                OrderValue::of(b.clone(), &row),
+            );
+            assert_eq!(
+                compare_values(a, b, &row),
+                compare_order(&keys.0, &keys.1),
+                "{a:?} vs {b:?}"
+            );
+        }
+    }
+    assert_eq!(
+        compare_values(&values[3], &values[4], &row),
+        std::cmp::Ordering::Greater,
+        "a path sorts after a list"
+    );
+}
