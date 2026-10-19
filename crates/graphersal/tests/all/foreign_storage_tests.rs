@@ -489,6 +489,79 @@ const GQL_CURATED_2B: &[&str] = &[
     r#"let q = "MATCH (n) WHERE (n)-->()"; for i in 0..65 { q += " OR (n)-->()"; } q += " RETURN n"; g.gql(q).toList()"#,
 ];
 
+/// Stage 2c GQL (feature `gql`): map projections (`.k`, `.*` in stored order, variable items,
+/// entries, a `NULL` target), list comprehensions (filter, map, nesting, over a collected list)
+/// and pattern comprehensions in every `gql:*` host (`RETURN`, `WHERE`, `ORDER BY`, aggregates,
+/// `FOR`, `WITH`, a `LET`), nested, with a path variable, an element kept live, a `NULL`
+/// import, a lookup by property index inside the body, the JSON-shaped answer
+/// `p {.name, friends: [..]}` and the `gql:value` child asserted in the profile; the last two
+/// entries fail (a binder error, a limit).
+#[cfg(feature = "gql")]
+const GQL_CURATED_2C: &[&str] = &[
+    r#"g.gql("MATCH (p:person) RETURN p {.name, .age} AS m ORDER BY p.name").toList()"#,
+    r#"g.gql("MATCH (n) RETURN n {.*} AS m ORDER BY element_id(n)").toList()"#,
+    r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN p {.name, f, w: e.weight} AS m ORDER BY f.name").toList()"#,
+    r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s:software {lang: 'none'}) RETURN p.name AS n, s {.name} AS m ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, [x IN [p.age, 30, NULL] WHERE x >= 30 | x * 2] AS l ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person)-[:created]->(s) WITH p, collect_list(s.name) AS ns RETURN p.name AS n, [y IN ns WHERE y <> 'lop' | upper(y)] AS l ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.name, friends: [(p)-->(f) | f {.name}]} AS answer").toJson()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f] AS fs ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) WHERE size([(p)-[:created]->(s) WHERE s.lang = 'java' | s]) > 1 RETURN p.name AS n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)<--(x) | x]) DESC, n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN sum(size([(p)-->(x) | x])) AS s, collect_list(size([(p)<--(x) | x])) AS l").toList()"#,
+    r#"g.gql("MATCH (p:person {name: 'marko'}) FOR f IN [(p)-[:knows]->(f2) | f2.name] RETURN f ORDER BY f").toList()"#,
+    r#"g.gql("MATCH (p:person) WITH p, [(p)-[:created]->(s) | s.name] AS l WHERE size(l) > 0 LET k = [(p)<-[:knows]-(a) | a.name] RETURN p.name AS n, l, k ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS l, [q = (p)-[:knows]->(f) | [v IN nodes(q) | v.name]] AS ps ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s:software {lang: 'none'}) RETURN p.name AS n, [(s)<-[:created]-(c) | c.name] AS l ORDER BY n").toList()"#,
+    r#"g.gql("RETURN size([(a:person)-[:created]->(s:software) WHERE s.name = 'lop' | a.name]) AS c").toList()"#,
+    r#"g.create_index(#{label: "software", key: "name"}); g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:created]->(s) | size([(t:software {name: s.name})<-[:created]-(c) | c.name])] AS l ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | f.name] AS l").profile().to_string().contains("gql:value(")"#,
+    r#"g.gql("MATCH (p:person) RETURN [p IN [1] | p] AS l").toList()"#,
+    r#"g.with("traversal.max_materialized_bytes", 64).gql("MATCH (p:person {name: 'marko'}) RETURN [(p)-->(x) | x.name] AS l").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_2c_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_2C {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 2c, not fail on the way: only the two error cases fail.
+    assert_eq!(failing, 2, "only the two error cases fail");
+    let at = GQL_CURATED_2C.len() - 3;
+    let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2C[at]).result;
+    assert!(
+        result.as_deref().is_ok_and(|text| text.ends_with("true")),
+        "{result:?}"
+    );
+    // The JSON-shaped answer: marko's name and his three neighbours as maps.
+    let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2C[6]).result;
+    let text = result.unwrap_or_else(|e| panic!("{e}"));
+    for part in [
+        "\"answer\"",
+        "\"name\": \"marko\"",
+        "\"friends\"",
+        "\"name\": \"josh\"",
+    ] {
+        assert!(text.contains(part), "{text}");
+    }
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2b_scripts_give_the_same_result_on_both_storages() {

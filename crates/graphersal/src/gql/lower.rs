@@ -2010,13 +2010,13 @@ impl<'q> Lowering<'q> {
             span.start..span.end,
             format!(
                 "the query runs more than {MAX_LOWERED_SUBQUERIES} subquery bodies once its LET \
-                 variables are substituted (each place that reads a LET holding EXISTS runs its \
-                 own copy)"
+                 variables are substituted (each place that reads a LET holding EXISTS or a \
+                 pattern comprehension runs its own copy)"
             ),
         )
         .alternative(
-            "write the EXISTS where it is used instead of in a LET that is read many times, or \
-             join the patterns into fewer subqueries",
+            "write the EXISTS or the pattern comprehension where it is used instead of in a LET \
+             that is read many times, or join the patterns into fewer subqueries",
         )
         .topic(GqlHelpTopic::Subquery)
         .into_error(self.query)

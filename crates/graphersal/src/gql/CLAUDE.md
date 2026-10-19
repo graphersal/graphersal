@@ -46,12 +46,16 @@ Files appear as their stage lands; this table is the target layout.
   but keeps the GQL function names (`respell_keeping`, `parser::lookup_function`). Advice is
   built from the failing query where it can be (`lower::start_with_gql`, the `$param` fixes).
   A resource limit a `gql:*` step reaches gets GQL advice too (`gql_traverser_limit_help`,
-  `gql_materialized_limit_help`); every `gql:*` step calls `row.finish()` before it maps an
+  `gql_materialized_limit_help`; inside a subquery child the advice names the construct,
+  `GqlSubqueryPlace`: an EXISTS body / pattern predicate, or a pattern comprehension, whose
+  failing level ends in `gql:value`); every `gql:*` step calls `row.finish()` before it maps an
   evaluator error, so a refused `Env::reserve` surfaces as the real limit error, not 54001.
   Data errors carry targeted advice by GQLSTATUS (`gql_data_status_advice`) or by
   `GqlHelpTopic`. Tests: `error_diagnostics_tests.rs` (`mod gql`), robustness
   `random_gql_strings_never_panic`, `random_gql_1b_queries_never_panic`,
-  `random_gql_function_calls_never_panic`.
+  `random_gql_function_calls_never_panic`, the `random_gql_2a/2b/2c_*` families (2c: three
+  rewrite pairs per query: `size()` of a comprehension vs `OPTIONAL MATCH` + `count()`, `FOR`
+  over it vs a later `MATCH`, a map projection vs the record constructor).
 - **Read-only in version 1.** Write clauses are refused by the parser.
 - **Lower into the ordinary pipeline.** No separate executor: the lowering builds plans with the
   ordinary builders and lets the optimizer do pushdown. Never push a `<>` comparison down

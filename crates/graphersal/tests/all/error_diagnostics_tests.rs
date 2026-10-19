@@ -9028,4 +9028,237 @@ mod gql {
             );
         }
     }
+
+    // ----- stage 2c: help sweep (rule 6) -----
+
+    /// `all()` / `any()` / `none()` / `single()` / `reduce()` stay "not yet" (P0, E18); their
+    /// help names the comprehension forms with runnable `g.gql(..)` examples, a list
+    /// comprehension and a pattern comprehension among them.
+    #[test]
+    fn gql_quantifier_functions_name_runnable_comprehensions() {
+        for call in [
+            "all(x IN [1, 2] WHERE x > 0)",
+            "any(x IN [1, 2] WHERE x > 0)",
+            "none(x IN [1, 2] WHERE x > 0)",
+            "single(x IN [1, 2] WHERE x > 0)",
+            "reduce(s = 0, x IN [1, 2] | s + x)",
+        ] {
+            let query = format!("MATCH (p:person) RETURN {call} AS x");
+            let (err, _) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
+            let help = err.help().expect("help");
+            assert!(
+                help.contains(
+                    "as in g.gql(\"RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) \
+                     AS all_positive\")"
+                ),
+                "{help}"
+            );
+            assert!(
+                help.contains(
+                    "g.gql(\"MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | \
+                     f]) > 0 RETURN p.name\") for any()"
+                ),
+                "{help}"
+            );
+            assert_examples_run(&help);
+        }
+        // The equivalents give the answers of the functions they stand for.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        let one = |query: &str| {
+            let rows = locked.traversal().gql(query).to_list().unwrap();
+            assert_eq!(rows.len(), 1, "{query}");
+            rows.into_iter().next().unwrap()
+        };
+        assert_eq!(
+            one("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive"),
+            one("RETURN true AS all_positive")
+        );
+        assert_eq!(
+            one(
+                "MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 \
+                 RETURN p.name"
+            ),
+            one("MATCH (p:person)-[:knows]->(f) WHERE f.age > 30 RETURN DISTINCT p.name")
+        );
+    }
+
+    /// A loop or traverser limit reached by a quantified edge inside a pattern comprehension
+    /// names the pattern comprehension (it runs to its last match, it does not stop at the
+    /// first); an EXISTS inside a comprehension's `|` part keeps the EXISTS text, a
+    /// comprehension inside an EXISTS body names the comprehension.
+    #[test]
+    fn gql_limits_inside_a_pattern_comprehension_name_it() {
+        let comprehension = "[(p)-[]-{1,}(q) WHERE q.name = 'zzz' | q.name]";
+        let inside = [
+            format!("MATCH (p:person) RETURN p.name, {comprehension} AS e"),
+            format!("MATCH (p:person) WHERE size({comprehension}) > 0 RETURN p.name"),
+            format!("MATCH (p:person) RETURN p.name AS n ORDER BY size({comprehension})"),
+            format!("MATCH (p:person) RETURN collect_list({comprehension}) AS c"),
+            format!("MATCH (p:person) FOR x IN {comprehension} RETURN x"),
+            format!(
+                "MATCH (p:person) RETURN [(p)-->(x) | {}] AS e",
+                comprehension.replace("(p)", "(x)")
+            ),
+            format!(
+                "MATCH (p:person) WHERE EXISTS {{ MATCH (p)-->(x) WHERE size({}) > 0 }} RETURN p",
+                comprehension.replace("(p)", "(x)")
+            ),
+        ];
+        let loops = "The loop of the quantified edge -[]-{1,} inside a pattern comprehension \
+                     [(a)-->(b) | ..] of the gql() query ran 2 iterations, the limit of \
+                     repeat.max_loops.";
+        let collects = "A pattern comprehension collects every match of its pattern for each \
+                        row, so its loop runs until the row's last match is found. Give the \
+                        quantifier an upper bound, as in -[]-{1,5}, for example";
+        let traversers = "Each path a quantified edge (-[]-{1,}), inside a pattern \
+                          comprehension [(a)-->(b) | ..], matches is a traverser of its own";
+        for query in &inside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.starts_with(loops), "{query}: {help}");
+            assert!(help.contains(collects), "{query}: {help}");
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+            assert_examples_run(&help);
+            let (err, _) =
+                gql_failure(|g| g.with("traversal.max_traversers", 5).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.contains(traversers), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // An EXISTS in the `|` part: the loop is the EXISTS body's.
+        let query = "MATCH (p:person) RETURN [(p)-->(x) | EXISTS { MATCH (x)-[]-{1,}(q) WHERE \
+                     q.name = 'zzz' }] AS e";
+        let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "The loop of the quantified edge -[]-{1,} inside an EXISTS subquery (or pattern \
+                 predicate) of the gql() query"
+            ),
+            "{help}"
+        );
+        assert!(!help.contains("pattern comprehension"), "{help}");
+    }
+
+    /// A pattern comprehension's list over `traversal.max_materialized_bytes` gets the GQL
+    /// advice naming the comprehension and counting its matches instead.
+    #[test]
+    fn gql_pattern_comprehension_list_limit_names_it() {
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 300)
+                .gql("MATCH (p:person) RETURN [(p)-[]-{1,3}(f) | f.name] AS l")
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        for part in [
+            "as is the list of a pattern comprehension [(a)-->(b) | b.name], so the query stops",
+            "or, for the matches of a pattern, g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-->(f) \
+             RETURN p.name, count(f) AS n\")",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        assert_examples_run(&help);
+    }
+
+    /// A variable bound inside a pattern comprehension and read after it names the
+    /// comprehension (not EXISTS), with the comprehension advice; EXISTS keeps its text.
+    #[test]
+    fn gql_pattern_comprehension_scope_errors_name_it() {
+        for query in [
+            "MATCH (a) RETURN [(a)-->(c) | c] AS l, c",
+            "MATCH (a) WHERE size([(a)-->(c) | c]) > 0 RETURN c",
+            "MATCH (a) WITH a, [(a)-->(c) | c.name] AS l RETURN c",
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(
+                report.contains(
+                    "the variable `c` is not in scope: it is bound inside a pattern \
+                     comprehension, whose variables are visible only inside it"
+                ),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "bind `c` in the MATCH clause of the query to use it here, or read it in \
+                     the | part of the comprehension, as in [(a)-->(c) | c.name]. A pattern \
+                     comprehension, [(a)-[:knows]->(f) WHERE <condition> | <expression>], is \
+                     the list of its | part evaluated for every match of its pattern"
+                ),
+                "{query}: {help}"
+            );
+            assert!(!help.contains("EXISTS"), "{help}");
+            assert_examples_run(&help);
+        }
+        let report = gql_report("MATCH (a) WHERE EXISTS { (a)-->(c) } RETURN c");
+        assert!(
+            report.contains("it is bound inside a subquery (EXISTS or a pattern predicate)"),
+            "{report}"
+        );
+    }
+
+    /// Pattern comprehensions count against both subquery limits, and the messages say so.
+    #[test]
+    fn gql_subquery_limits_count_pattern_comprehensions() {
+        let many = vec!["size([(p)-->(q) | q])"; 65].join(" + ");
+        let written = format!("MATCH (p) RETURN {many} AS n");
+        let (err, report) = gql_failure(|g| g.gql(&written).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains(
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates), \
+                 pattern comprehensions included"
+            ),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "a pattern comprehension is a subquery too: collect the matches of several \
+                 patterns with OPTIONAL MATCH and collect_list() instead"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // A LET holding a pattern comprehension, read in 40 conditions of an EXISTS body that
+        // a LET holds and 40 conditions read: 1600 bodies.
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = size([(p)-->(x) | x]) > 0 LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        let (err, report) = gql_failure(|g| g.gql(&substituted).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "(each place that reads a LET holding EXISTS or a pattern comprehension runs its \
+                 own copy)"
+            ),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "write the EXISTS or the pattern comprehension where it is used instead of in a \
+                 LET that is read many times"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+    }
 }

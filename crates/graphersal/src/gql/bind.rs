@@ -716,12 +716,14 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
             span.start..span.end,
             format!(
                 "the query holds more than {MAX_SUBQUERIES} subqueries (EXISTS and pattern \
-                 predicates)"
+                 predicates), pattern comprehensions included"
             ),
         )
         .alternative(
             "join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several \
-             MATCH clauses and patterns), or add the patterns to the MATCH clause of the query",
+             MATCH clauses and patterns), or add the patterns to the MATCH clause of the query; \
+             a pattern comprehension is a subquery too: collect the matches of several patterns \
+             with OPTIONAL MATCH and collect_list() instead",
         )
         .topic(GqlHelpTopic::Subquery),
     )
@@ -986,8 +988,9 @@ struct Binder<'q> {
     /// The `MATCH` clauses whose path variables are not complete where a subquery body is
     /// bound (it stands in an inline filter of such a clause).
     incomplete_paths: Vec<usize>,
-    /// Names bound only inside a subquery body that is done, with its span (for the message).
-    hidden: HashMap<String, Span>,
+    /// Names bound only inside a subquery body that is done, with whether that subquery is a
+    /// pattern comprehension (for the message).
+    hidden: HashMap<String, bool>,
     /// Names the later `MATCH` clauses of the subquery bodies being bound declare (innermost
     /// last), for the "bound by a later MATCH clause" message inside a body.
     later_in_body: Vec<String>,
@@ -2190,7 +2193,22 @@ impl<'q> Binder<'q> {
             .topic(GqlHelpTopic::Subquery)
             .into();
         }
-        if self.hidden.contains_key(name) {
+        if let Some(&comprehension) = self.hidden.get(name) {
+            if comprehension {
+                return semantic(
+                    var.span,
+                    format!(
+                        "the variable `{name}` is not in scope: it is bound inside a pattern \
+                         comprehension, whose variables are visible only inside it"
+                    ),
+                )
+                .alternative(format!(
+                    "bind `{name}` in the MATCH clause of the query to use it here, or read it \
+                     in the | part of the comprehension, as in [(a)-->({name}) | {name}.name]"
+                ))
+                .topic(GqlHelpTopic::PatternComprehension)
+                .into();
+            }
             return semantic(
                 var.span,
                 format!(
@@ -2654,7 +2672,8 @@ impl<'q> Binder<'q> {
         let (clauses, map) = body?;
         for (name, _) in inner.entries {
             if self.scope.get(&name.name).is_none() {
-                self.hidden.insert(name.name, subquery.span);
+                self.hidden
+                    .insert(name.name, subquery.form == SubqueryForm::Comprehension);
             }
         }
         // Imports: every binding older than the body that the body (nested bodies included)

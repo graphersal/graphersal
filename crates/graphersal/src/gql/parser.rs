@@ -556,8 +556,11 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
          a list comprehension counts the items a condition keeps (an item whose condition is \
          NULL is not kept): all(x IN l WHERE c) as size([x IN l WHERE c]) = size(l), \
          any(x IN l WHERE c) as size([x IN l WHERE c]) > 0, none(x IN l WHERE c) as \
-         size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1; \
-         reduce() folds a list: aggregate its items with FOR, as in \
+         size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1, \
+         as in g.gql(\"RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS \
+         all_positive\"), and a pattern comprehension tests the matches of a pattern, as in \
+         g.gql(\"MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 \
+         RETURN p.name\") for any(); reduce() folds a list: aggregate its items with FOR, as in \
          g.gql(\"FOR x IN [1, 2, 3] RETURN sum(x) AS s\")",
     ),
     not_yet_function(

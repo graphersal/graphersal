@@ -310,6 +310,53 @@ mod twins {
             twin(&graph, gql, gremlin);
         }
     }
+
+    /// The JSON-shaped answer an LLM asks for, `p {.name, friends: [(p)-->(f) | f {.name}]}`,
+    /// renders as nested JSON objects and arrays exactly like its Gremlin twin
+    /// `project().by(__.out().project().fold())`; an element inside renders as the element.
+    #[test]
+    fn a_nested_answer_renders_as_json_like_its_twin() {
+        let render = |script: &str| {
+            let value = crate::script_host::eval_value(modern(), script)
+                .unwrap_or_else(|e| panic!("{script}: {e}"));
+            crate::script_host::try_render_value(
+                value,
+                graphersal::schema::VisualizeFormat::Auto,
+                &graphersal::exec::RenderOptions::unlimited(),
+            )
+            .unwrap_or_else(|e| panic!("{script}: {e}"))
+            .text
+        };
+        let gql = render(
+            r#"g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.name, friends: [(p)-->(f) | f {.name}]} AS answer").to_json()"#,
+        );
+        let twin = render(
+            r#"g.V().has("person", "name", "marko").project("answer").by(__.project("name", "friends").by("name").by(__.out().project("name").by("name").fold())).to_json()"#,
+        );
+        assert_eq!(gql, twin);
+        let expected = "[\n  {\n    \"answer\": {\n      \"name\": \"marko\",\n      \
+                        \"friends\": [\n        {\n          \"name\": \"josh\"\n        },\n        \
+                        {\n          \"name\": \"lop\"\n        },\n        {\n          \"name\": \
+                        \"vadas\"\n        }\n      ]\n    }\n  }\n]";
+        assert_eq!(gql, expected);
+        // An element kept in the nested answer renders as the element (id, label, properties),
+        // like the twin's vertex; a person without friends has an empty array.
+        let gql = render(
+            r#"g.gql("MATCH (p:person) WHERE p.name IN ['marko', 'peter'] RETURN p {.name, friends: [(p)-[:knows]->(f) | f]} AS answer ORDER BY p.name").to_json()"#,
+        );
+        let twin = render(
+            r#"g.V().has("person", "name", P.within(["marko", "peter"])).order().by("name").project("answer").by(__.project("name", "friends").by("name").by(__.out("knows").fold())).to_json()"#,
+        );
+        assert_eq!(gql, twin);
+        for part in [
+            "\"label\": \"person\"",
+            "\"name\": \"josh\"",
+            "\"age\": 27",
+            "\"friends\": []",
+        ] {
+            assert!(gql.contains(part), "{gql}");
+        }
+    }
 }
 
 // ----- map projections -----
@@ -807,4 +854,57 @@ fn pattern_comprehension_scope_errors() {
     // A list comprehension variable is not readable inside it yet.
     let text = failure(&graph, "MATCH (a) RETURN [x IN [1] | [(a)-->(c) | x]] AS l");
     assert!(text.contains("not yet"), "{text}");
+}
+
+/// The list a pattern comprehension collects is checked against the memory budget before it is
+/// built (the engine's estimate in this test binary: the graph's footprint plus what the query
+/// holds and is about to build): the host step fails with `memory.limit`, never a cut list; the
+/// same query runs without the budget.
+#[test]
+fn a_pattern_comprehension_list_obeys_the_memory_budget() {
+    let graph = modern();
+    let footprint = graph.read().memory_usage().unwrap().total_bytes();
+    let query = "RETURN size([(a)--(b)--(c)--(d) | [a, b, c, d]]) AS n";
+    let lock = graph.read();
+    let error = lock
+        .traversal()
+        .with("memory.limit", (footprint + 2_000) as i64)
+        .gql(query)
+        .to_list()
+        .expect_err("over the budget");
+    match error.root_cause() {
+        TraverserError::ResourceLimitExceeded { limit, .. } => {
+            assert_eq!(limit, "memory.limit", "{error}")
+        }
+        other => panic!("expected the memory budget, got {other}"),
+    }
+    // The host step (`gql:project`) refused the list, not a step of the child.
+    let mut failed = Vec::new();
+    let mut current: &TraverserError = &error;
+    while let TraverserError::StepFailed {
+        step_name, source, ..
+    } = current
+    {
+        failed.push(step_name.clone());
+        current = source;
+    }
+    assert_eq!(
+        failed.last().map(String::as_str),
+        Some("gql:project(\"n\")"),
+        "{failed:?}"
+    );
+    let rows = lock
+        .traversal()
+        .gql(query)
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rows.len(), 1);
+    // As many items as the pattern has matches (one path pattern: the same trail).
+    let count = lock
+        .traversal()
+        .gql("MATCH (a)--(b)--(c)--(d) RETURN count(*) AS n")
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(column(&rows[0], "n"), column(&count[0], "n"));
+    assert_ne!(column(&rows[0], "n"), &ElementProperty::from(0));
 }
