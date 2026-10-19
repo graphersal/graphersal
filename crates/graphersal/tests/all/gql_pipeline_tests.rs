@@ -379,6 +379,86 @@ fn order_by_reads_an_alias_only_where_the_key_names_it() {
     assert_eq!(texts(&result, "n"), ["peter", "josh", "marko", "vadas"]);
 }
 
+#[test]
+fn an_aggregation_orders_by_the_bindings_its_columns_hold() {
+    // `gql:aggregate` starts each group on a fresh path: a key reading a binding that a column
+    // holds (`p` of `WITH p, count(*)`) reads the column, not the dropped path label.
+    let graph = TraversalGraph::tinkerpop_modern();
+    let ascending = ["josh", "marko", "peter", "vadas"];
+    for (query, expected) in [
+        (
+            "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name RETURN p.name AS n",
+            &ascending[..],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name DESC RETURN p.name AS n",
+            &["vadas", "peter", "marko", "josh"][..],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name DESC OFFSET 1 LIMIT 2 \
+             RETURN p.name AS n",
+            &["peter", "marko"][..],
+        ),
+        (
+            "MATCH (p:person) WITH p AS q, count(*) AS c ORDER BY p.age RETURN q.name AS n",
+            &["vadas", "marko", "josh", "peter"][..],
+        ),
+        (
+            "MATCH (p:person) WITH DISTINCT p, count(*) AS c ORDER BY p.name RETURN p.name AS n",
+            &ascending[..],
+        ),
+        (
+            "MATCH (p:person) WITH DISTINCT p ORDER BY p.name RETURN p.name AS n",
+            &ascending[..],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name WHERE p.age > 28 \
+             RETURN p.name AS n",
+            &["josh", "marko", "peter"][..],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c WHERE p.age > 28 RETURN p.name AS n \
+             ORDER BY n DESC",
+            &["peter", "marko", "josh"][..],
+        ),
+        (
+            "MATCH (p:person)-[:created]->(s) WITH p, count(*) AS c ORDER BY c + 1 DESC, \
+             p.name DESC RETURN p.name AS n",
+            &["josh", "peter", "marko"][..],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name \
+             MATCH (p)-[:created]->(s) RETURN p.name AS n",
+            &["josh", "josh", "marko", "peter"][..],
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, p, count(*) AS c ORDER BY p.age DESC",
+            &["peter", "josh", "marko", "vadas"][..],
+        ),
+    ] {
+        assert_eq!(texts(&rows(&graph, query), "n"), expected, "{query}");
+    }
+    // An edge and a path a column holds.
+    let result = rows(
+        &graph,
+        "MATCH (:person)-[e:knows]->() RETURN e.weight AS w, e, count(*) AS c \
+         ORDER BY e.weight DESC",
+    );
+    assert_eq!(texts(&result, "w"), ["1", "0.5"]);
+    let result = rows(
+        &graph,
+        "MATCH x = (p:person)-[:knows]->{0,1}() WITH x, count(*) AS c ORDER BY length(x) DESC \
+         RETURN length(x) AS l",
+    );
+    assert_eq!(texts(&result, "l"), ["1", "1", "0", "0", "0", "0"]);
+    // On the row: the key reads the column, no row label.
+    let plan = steps(&profile(
+        &graph,
+        "MATCH (p:person) WITH p, count(*) AS c ORDER BY p.name RETURN p.name AS n",
+    ));
+    assert!(!plan.iter().any(|s| s.starts_with("as(\"#w")), "{plan:?}");
+}
+
 // ----- differential tests against Gremlin twins (Rhai) -----
 
 #[cfg(feature = "script")]

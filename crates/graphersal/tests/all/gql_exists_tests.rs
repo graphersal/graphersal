@@ -707,6 +707,74 @@ fn exists_runs_in_return_order_by_aggregates_and_for_lists() {
 }
 
 #[test]
+fn exists_in_the_order_by_of_an_aggregation_imports_the_columns() {
+    // After `gql:aggregate` (a fresh path) the body reads an import a column holds from the
+    // row: `gql:bind` instead of `select()`, a join to it a row check, a read inside the body
+    // through the row label.
+    let graph = modern();
+    for (query, expected) in [
+        (
+            "MATCH (p:person) WITH p AS q, count(*) AS c \
+             ORDER BY EXISTS { (p)-[:created]->() }, q.name RETURN q.name AS n",
+            ["vadas", "josh", "marko", "peter"],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c \
+             ORDER BY EXISTS { (p)-[:knows]->(f) WHERE f.age > p.age }, p.name \
+             RETURN p.name AS n",
+            ["josh", "peter", "vadas", "marko"],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c \
+             ORDER BY EXISTS { (:software {name: 'ripple'})<-[:created]-(p) } DESC, p.name \
+             RETURN p.name AS n",
+            ["josh", "marko", "peter", "vadas"],
+        ),
+        (
+            "MATCH (p:person) WITH p, count(*) AS c \
+             ORDER BY EXISTS { (p)-[:knows]->(f) \
+               WHERE EXISTS { (f)-[:created]->(s) WHERE p.age < 30 } } DESC, p.name \
+             RETURN p.name AS n",
+            ["marko", "josh", "peter", "vadas"],
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, p, count(*) AS c \
+             ORDER BY EXISTS { (p)-[:created]->() }, p.name DESC",
+            ["vadas", "peter", "marko", "josh"],
+        ),
+        (
+            "MATCH (p:person) WITH DISTINCT p \
+             ORDER BY EXISTS { (p)-[:created]->() }, p.name RETURN p.name AS n",
+            ["vadas", "josh", "marko", "peter"],
+        ),
+    ] {
+        let rows = table(&graph, query, true);
+        let expected: Vec<String> = expected.iter().map(|n| format!("n='{n}'")).collect();
+        let names: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.split(' ')
+                    .find(|cell| cell.starts_with("n="))
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, expected, "{query}");
+    }
+    // An edge import joined inside the body.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (:person)-[e:knows]->() WITH e, count(*) AS c \
+             ORDER BY EXISTS { (:person)-[e]->(:person {name: 'josh'}) } DESC \
+             RETURN e.weight AS w",
+            true
+        ),
+        vec!["w=1", "w=0.5"]
+    );
+}
+
+#[test]
 fn exists_composes_three_valued_and_a_null_import_is_false() {
     let graph = modern();
     // f is NULL for vadas, josh and peter (no knows edge): EXISTS over it is FALSE (E9), never

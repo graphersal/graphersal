@@ -32,7 +32,7 @@
 //! | several patterns / components | another `v()` per component (a Cartesian product, not optimized yet) |
 //! | `RETURN` / `RETURN *` | `gql:project(columns)` (written order, `NULL` columns kept) |
 //! | `DISTINCT` | `gql:distinct()` after `gql:project` (GQL equality, decision C3: `1` and `1.0` are one value, `NULL`s are equal) |
-//! | `ORDER BY` | `gql:order(keys)` after `gql:project` (and `gql:distinct()`): a returned column is read from the row, any other variable through its path label; an alias is read only where the key names it (a substituted `LET` / `WITH` variable of the same name stays the variable) |
+//! | `ORDER BY` | `gql:order(keys)` after `gql:project` (and `gql:distinct()`): a returned column is read from the row, any other variable through its path label; an alias is read only where the key names it (a substituted `LET` / `WITH` variable of the same name stays the variable). After `gql:aggregate` (a fresh path, no labels before it) a variable a column holds (`WITH p, count(*) AS c ORDER BY p.name`) is read from that column (`Site::ordered`), and a subquery body in a key reaches it through the row label (`as("#w<k>")`, `as("#r")` for `RETURN`, set before `gql:order` only when read) |
 //! | `OFFSET n` / `LIMIT m` | `skip(n)` / `limit(m)`; a `$param` value must be a non-negative integer (checked before the run) |
 //! | `LET x = expr`, a `WITH` that only projects | no step: the binder substitutes the definition, so the query lowers like the same query written without it (pushdown included) |
 //! | `FILTER cond`, the `WHERE` of a projecting `WITH` | conjuncts like `WHERE`: `has()` / `gql:filter` where their bindings are bound |
@@ -47,7 +47,7 @@
 //! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
 //! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored component a child-leading `v()`; no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
-//! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
+//! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`; after an aggregation an import a column holds through `gql:bind` from the row, `Site::ordered`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
 //! | trail of a single edge against a group variable | `gql:trail(["e"])` on the edge traverser (every iteration); single edges among themselves keep `where(P.neq(..))` |
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
@@ -268,11 +268,19 @@ pub(crate) fn rhai_map_key(name: &str) -> String {
 struct Site {
     /// The binding the traverser stands on.
     current: Option<BindingId>,
-    /// The segment of the materializing `WITH` or `FOR` whose row is the current object.
+    /// The segment of the materializing `WITH` or `FOR` whose row is the current object (the
+    /// `RETURN` row: `segments.len()`, see [`Site::ordered`]).
     row: Option<usize>,
     /// The `OPTIONAL MATCH` segment whose part the step runs in: a group variable of that part
     /// reads its list there without the part's anchor (the part matched so far).
     part: Option<usize>,
+    /// The aggregating result pipeline (a materializing `WITH` segment, or `segments.len()`
+    /// for `RETURN`) whose `ORDER BY` the step serves, a key or a subquery body the key holds.
+    /// `gql:aggregate` starts every output on a fresh path, so the labels of the bindings
+    /// before it are gone: a binding one of its columns holds (`WITH p, count(*) AS c ORDER
+    /// BY p.name`) is read from that column, `Binding::Column` on the row
+    /// (`row == ordered`), `Binding::RowColumn` through the row label after leaving it.
+    ordered: Option<usize>,
 }
 
 impl Site {
@@ -282,6 +290,7 @@ impl Site {
             current: Some(id),
             row: None,
             part: None,
+            ordered: None,
         }
     }
 
@@ -291,6 +300,27 @@ impl Site {
             current: None,
             row: Some(segment),
             part: None,
+            ordered: None,
+        }
+    }
+
+    /// On the row of the aggregating result pipeline `result` (see [`Site::ordered`]): its
+    /// `ORDER BY`.
+    fn ordered(result: usize) -> Self {
+        Site {
+            current: None,
+            row: Some(result),
+            part: None,
+            ordered: Some(result),
+        }
+    }
+
+    /// Away from the row of `ORDER BY` of `site` (a step of a subquery body it holds, a row
+    /// check): keeps only [`Site::ordered`].
+    fn away(site: Site) -> Self {
+        Site {
+            ordered: site.ordered,
+            ..Site::default()
         }
     }
 }
@@ -317,8 +347,9 @@ enum Instr<S: GraphStorage> {
     },
     /// `gql:filter(condition)` comparing the current element (the extra slot after the
     /// bindings) with a materializing `WITH` column binding: a join, an edge join or a trail
-    /// check against an element the row holds, which has no path label of its own.
-    RowCheck(RowExpr<S>),
+    /// check against an element the row holds, which has no path label of its own (or, at a
+    /// site with [`Site::ordered`], a binding an aggregating projection's column holds).
+    RowCheck(RowExpr<S>, Site),
     /// `as(label)` of the binding, emitted only when a label is needed.
     Label(BindingId),
     /// `as("#w<k>")` of the row of the materializing `WITH` of segment `k` (of a `FOR`:
@@ -348,10 +379,13 @@ enum Instr<S: GraphStorage> {
     },
     /// `gql:distinct()` (GQL equality, decision C3).
     Distinct,
-    /// `gql:order(keys)`, on the row map of the `gql:project` before it (`columns` columns).
+    /// `gql:order(keys)`, on the row map of the `gql:project` / `gql:aggregate` before it
+    /// (`columns` columns), at `site` (`Site::default()`, or [`Site::ordered`] after an
+    /// aggregation).
     Order {
         keys: Vec<GqlSortKey<S>>,
         columns: usize,
+        site: Site,
         subqueries: Bodies<S>,
     },
     /// `skip(n)`.
@@ -433,10 +467,14 @@ struct Lowered<S: GraphStorage> {
     labelled: Vec<bool>,
     /// The materializing `WITH` column each binding stands for (`None`: a pattern binding).
     columns: Vec<Option<ColumnRef>>,
-    /// The row label of each segment (`#w<k>`; used only for a materializing `WITH`).
+    /// The row label of each segment (`#w<k>`; used only for a materializing `WITH`), then
+    /// the one of the `RETURN` row (`#r`, read only by an aggregating `RETURN`'s `ORDER BY`).
     row_labels: Vec<CompactString>,
-    /// Whether the row of each segment gets its row label.
+    /// Whether the row of each segment (then the `RETURN` row) gets its row label.
     rows_labelled: Vec<bool>,
+    /// Per result pipeline (each segment, then `RETURN`): the binding each column holds, when
+    /// the column is a bare variable (see [`Site::ordered`]); empty for the other segments.
+    ordered: Vec<Vec<Option<BindingId>>>,
     /// Per segment: a `FOR` without an ordinal, whose row is the item itself (its item reads
     /// `Binding::Current` on the row, `Binding::Label` of the row label after it).
     items: Vec<bool>,
@@ -482,6 +520,15 @@ struct GroupRead {
 impl<S: GraphStorage> Lowered<S> {
     /// Where variable `slot` reads from at `site` (see [`Site`]).
     fn binding(&self, slot: usize, site: Site) -> Binding {
+        if let Some(column) = ordered_column(&self.ordered, site, slot) {
+            return match site.ordered {
+                Some(result) if site.row != Some(result) => Binding::RowColumn {
+                    label: self.row_label(result),
+                    column,
+                },
+                _ => Binding::Column(column),
+            };
+        }
         if let Some(Some(path)) = self.paths.get(slot) {
             // Inside its own part the part matched so far: no anchor to check.
             let anchor = path
@@ -534,20 +581,21 @@ impl<S: GraphStorage> Lowered<S> {
             .collect()
     }
 
-    /// The slots of `ORDER BY` on a new row map of `columns` columns: every binding read away
-    /// from its row, then the row's columns.
-    fn order_bindings(&self, columns: usize) -> Arc<[Binding]> {
+    /// The slots of `ORDER BY` at `site` on a new row map of `columns` columns: every binding
+    /// read away from its row (a binding a column of an aggregating projection holds from that
+    /// column, [`Site::ordered`]), then the row's columns.
+    fn order_bindings(&self, columns: usize, site: Site) -> Arc<[Binding]> {
         (0..self.labels.len())
-            .map(|slot| self.binding(slot, Site::default()))
+            .map(|slot| self.binding(slot, site))
             .chain((0..columns).map(Binding::Column))
             .collect()
     }
 
-    /// The slots of a [`Instr::RowCheck`]: every binding read away from its row, then the
-    /// current element.
-    fn check_bindings(&self) -> Arc<[Binding]> {
+    /// The slots of a [`Instr::RowCheck`] at `site`: every binding read away from its row,
+    /// then the current element.
+    fn check_bindings(&self, site: Site) -> Arc<[Binding]> {
         (0..self.labels.len())
-            .map(|slot| self.binding(slot, Site::default()))
+            .map(|slot| self.binding(slot, Site::away(site)))
             .chain(std::iter::once(Binding::Current))
             .collect()
     }
@@ -589,10 +637,10 @@ impl<S: GraphStorage> Lowered<S> {
                     self.bindings(site),
                     self.children(subqueries),
                 ),
-                Instr::RowCheck(condition) => g.gql_filter(
+                Instr::RowCheck(condition, site) => g.gql_filter(
                     Arc::clone(&self.query),
                     condition,
-                    self.check_bindings(),
+                    self.check_bindings(site),
                     Vec::new(),
                 ),
                 Instr::Label(id) => {
@@ -651,11 +699,12 @@ impl<S: GraphStorage> Lowered<S> {
                 Instr::Order {
                     keys,
                     columns,
+                    site,
                     subqueries,
                 } => g.gql_order(
                     Arc::clone(&self.query),
                     keys,
-                    self.order_bindings(columns),
+                    self.order_bindings(columns, site),
                     self.children(subqueries),
                 ),
                 Instr::Skip(n) => g.skip(n),
@@ -857,9 +906,11 @@ impl<S: GraphStorage> Lowered<S> {
                 self.bindings(site),
                 self.children(subqueries),
             ),
-            Instr::RowCheck(condition) => {
-                t.gql_filter(Arc::clone(&self.query), condition, self.check_bindings())
-            }
+            Instr::RowCheck(condition, site) => t.gql_filter(
+                Arc::clone(&self.query),
+                condition,
+                self.check_bindings(site),
+            ),
             Instr::Label(id) if self.is_labelled(id) => t.as_(self.label(id)),
             Instr::Same(id) => t.where_p(P::Eq(PValue::String(self.label(id)))),
             Instr::Differs(id) => t.where_p(P::Neq(PValue::String(self.label(id)))),
@@ -1317,13 +1368,14 @@ impl<'q> Lowering<'q> {
             &self.plan.result,
             &bound.columns,
             &bound.order_by,
-            site,
+            (site, bound.segments.len()),
             &mut instrs,
         )?;
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
-        let (mut labelled, rows_labelled) = self.labelled(&instrs, &columns);
+        let ordered = self.ordered_tables();
+        let (mut labelled, rows_labelled) = self.labelled(&instrs, &columns, &ordered);
         let items = self
             .bound
             .segments
@@ -1341,6 +1393,7 @@ impl<'q> Lowering<'q> {
             columns,
             row_labels,
             rows_labelled,
+            ordered,
             items,
             groups,
             part_labels,
@@ -1497,6 +1550,19 @@ impl<'q> Lowering<'q> {
             instrs.push(Instr::Select(id));
             return Ok(());
         }
+        instrs.push(self.bind(id, site)?);
+        // A path variable reads the element through a label set here (emitted only then).
+        instrs.push(Instr::Label(id));
+        Ok(())
+    }
+
+    /// `gql:bind`: moves to the element binding `id` holds, read at `site` (a materializing
+    /// `WITH` column binding, or a binding an aggregating projection's column holds,
+    /// [`Site::ordered`]).
+    fn bind<S: GraphStorage>(&self, id: BindingId, site: Site) -> Result<Instr<S>, TraverserError> {
+        let Some(binding) = self.bound.binding(id) else {
+            return Err(self.unlowered());
+        };
         let kind = match binding.kind {
             BindingKind::Node => ElementKind::Vertex,
             BindingKind::Edge => ElementKind::Edge,
@@ -1508,15 +1574,12 @@ impl<'q> Lowering<'q> {
             .map(|n| n.name.as_str())
             .or(binding.key.as_deref())
             .unwrap_or_default();
-        instrs.push(Instr::Bind {
+        Ok(Instr::Bind {
             id,
             site,
             name: CompactString::from(name),
             kind,
-        });
-        // A path variable reads the element through a label set here (emitted only then).
-        instrs.push(Instr::Label(id));
-        Ok(())
+        })
     }
 
     /// The check that the current element is the one bound earlier to `id` (a join).
@@ -1567,7 +1630,10 @@ impl<'q> Lowering<'q> {
             span,
         };
         let extra = self.bound.bindings.len();
-        Ok(Instr::RowCheck(self.compile(&expr, Some(extra), &[])?))
+        Ok(Instr::RowCheck(
+            self.compile(&expr, Some(extra), &[])?,
+            Site::default(),
+        ))
     }
 
     /// Lowers a materializing `WITH` (decision C2) at `site`: its result pipeline, its `WHERE`
@@ -1581,12 +1647,20 @@ impl<'q> Lowering<'q> {
         let Some(Segment::With(with)) = self.bound.segments.get(m.segment) else {
             return Err(self.unlowered());
         };
-        self.pipeline(&m.result, &with.columns, &with.order_by, site, instrs)?;
+        let row_labelled = self.pipeline(
+            &m.result,
+            &with.columns,
+            &with.order_by,
+            (site, m.segment),
+            instrs,
+        )?;
         let row = Site::row(m.segment);
         for &c in &m.filters {
             self.conjunct(c, row, instrs)?;
         }
-        instrs.push(Instr::RowLabel(m.segment));
+        if !row_labelled {
+            instrs.push(Instr::RowLabel(m.segment));
+        }
         Ok(row)
     }
 
@@ -1952,16 +2026,22 @@ impl<'q> Lowering<'q> {
         Ok(predicate.map(|p| (key.clone(), p)))
     }
 
-    /// A result pipeline (`RETURN`, or a materializing `WITH`) of `columns` at `site`.
+    /// A result pipeline (`RETURN`, or a materializing `WITH`) of `columns` at `site`; `result`
+    /// is its index (the `WITH` segment, `segments.len()` for `RETURN`). Returns whether it
+    /// already set its row label: an aggregating pipeline sets it before its `ORDER BY`
+    /// (read only when a key or a body reads a column after leaving the row,
+    /// [`Site::ordered`]).
     fn pipeline<S: GraphStorage>(
         &self,
         ops: &[ResultOp],
         columns: &[Column],
         order_by: &[SortKey],
-        site: Site,
+        (site, result): (Site, usize),
         instrs: &mut Vec<Instr<S>>,
-    ) -> Result<(), TraverserError> {
+    ) -> Result<bool, TraverserError> {
         let n = self.bound.bindings.len();
+        let aggregated = ops.contains(&ResultOp::Aggregate);
+        let mut row_labelled = false;
         for op in ops {
             match op {
                 ResultOp::Project => {
@@ -2025,19 +2105,132 @@ impl<'q> Lowering<'q> {
                             descending: key.direction == SortDirection::Desc,
                         });
                     }
-                    // The keys run on the row map: no current element, no row (as
-                    // `order_bindings`).
+                    // The keys run on the row map: no current element; after an aggregation the
+                    // bindings its columns hold are read from them (`Site::ordered`).
+                    let site = if aggregated {
+                        Site::ordered(result)
+                    } else {
+                        Site::default()
+                    };
+                    let mut subqueries = self.bodies(hooks, site)?;
+                    if aggregated {
+                        for body in &mut subqueries {
+                            self.in_order(body, result)?;
+                        }
+                        instrs.push(Instr::RowLabel(result));
+                        row_labelled = true;
+                    }
                     instrs.push(Instr::Order {
                         keys,
                         columns: columns.len(),
-                        subqueries: self.bodies(hooks, Site::default())?,
+                        site,
+                        subqueries,
                     });
                 }
                 ResultOp::Offset(count) => instrs.push(Instr::Skip(self.count(count, "OFFSET")?)),
                 ResultOp::Limit(count) => instrs.push(Instr::Limit(self.count(count, "LIMIT")?)),
             }
         }
+        Ok(row_labelled)
+    }
+
+    /// Marks every site of `body` (a subquery body an `ORDER BY` key of the aggregating result
+    /// pipeline `result` holds) with [`Site::ordered`], and reads the bindings that pipeline's
+    /// columns hold from their columns instead of their path labels, which the aggregation
+    /// dropped: `select()` becomes `gql:bind`, a join or trail check by label a row check.
+    fn in_order<S: GraphStorage>(
+        &self,
+        body: &mut [Instr<S>],
+        result: usize,
+    ) -> Result<(), TraverserError> {
+        let away = Site {
+            ordered: Some(result),
+            ..Site::default()
+        };
+        let held = |id: BindingId| self.ordered_column(result, id).is_some();
+        for instr in body.iter_mut() {
+            match instr {
+                Instr::Filter {
+                    site, subqueries, ..
+                }
+                | Instr::Project {
+                    site, subqueries, ..
+                }
+                | Instr::For {
+                    site, subqueries, ..
+                }
+                | Instr::Aggregate {
+                    site, subqueries, ..
+                }
+                | Instr::Order {
+                    site, subqueries, ..
+                } => {
+                    site.ordered = Some(result);
+                    for nested in subqueries.iter_mut() {
+                        self.in_order(nested, result)?;
+                    }
+                }
+                Instr::Lookup { site, .. }
+                | Instr::Bind { site, .. }
+                | Instr::RowCheck(_, site) => site.ordered = Some(result),
+                Instr::Hop(hop) => self.in_order(&mut hop.steps, result)?,
+                Instr::Optional(part) | Instr::Exists { body: part, .. } => {
+                    self.in_order(part, result)?;
+                }
+                Instr::Select(id) if held(*id) => *instr = self.bind(*id, away)?,
+                Instr::Same(id) if held(*id) => {
+                    *instr = self.row_check(*id, BinaryOp::Eq)?;
+                    self.in_order(std::slice::from_mut(instr), result)?;
+                }
+                Instr::Differs(id) if held(*id) => {
+                    *instr = self.row_check(*id, BinaryOp::Ne)?;
+                    self.in_order(std::slice::from_mut(instr), result)?;
+                }
+                Instr::Scan
+                | Instr::Unit
+                | Instr::HasLabel(_)
+                | Instr::Has(..)
+                | Instr::Label(_)
+                | Instr::RowLabel(_)
+                | Instr::Distinct
+                | Instr::Skip(_)
+                | Instr::Limit(_)
+                | Instr::Select(_)
+                | Instr::Same(_)
+                | Instr::Differs(_)
+                | Instr::Trail(_)
+                | Instr::PartLabel(_)
+                | Instr::Merge { .. } => {}
+            }
+        }
         Ok(())
+    }
+
+    /// The column of the aggregating result pipeline `result` that holds binding `id` (see
+    /// [`Site::ordered`]).
+    fn ordered_column(&self, result: usize, id: BindingId) -> Option<usize> {
+        let columns = match self.bound.segments.get(result) {
+            Some(Segment::With(with)) => &with.columns,
+            Some(_) => return None,
+            None if result == self.bound.segments.len() => &self.bound.columns,
+            None => return None,
+        };
+        columns.iter().position(|c| c.variable == Some(id))
+    }
+
+    /// The column variables of each result pipeline ([`Lowered::ordered`]).
+    fn ordered_tables(&self) -> Vec<Vec<Option<BindingId>>> {
+        self.bound
+            .segments
+            .iter()
+            .map(|segment| match segment {
+                Segment::With(with) => with.columns.iter().map(|c| c.variable).collect(),
+                Segment::Match(_) | Segment::Optional(_) | Segment::For(_) => Vec::new(),
+            })
+            .chain(std::iter::once(
+                self.bound.columns.iter().map(|c| c.variable).collect(),
+            ))
+            .collect()
     }
 
     /// An `ORDER BY` key that is not a whole column. An identifier the key names as a column
@@ -2118,6 +2311,7 @@ impl<'q> Lowering<'q> {
         &self,
         instrs: &[Instr<S>],
         columns: &[Option<ColumnRef>],
+        ordered: &[Vec<Option<BindingId>>],
     ) -> (Vec<bool>, Vec<bool>) {
         let n = self.bound.bindings.len();
         let mut labelled: Vec<bool> = self
@@ -2127,7 +2321,8 @@ impl<'q> Lowering<'q> {
             .map(|l| l.join || l.trail || l.branch || l.resume || l.optional || l.group || l.path)
             .collect();
         labelled.resize(n, false);
-        let mut rows = vec![false; self.bound.segments.len()];
+        // One more for the `RETURN` row (`Site::ordered`).
+        let mut rows = vec![false; self.bound.segments.len() + 1];
         for stage in &self.plan.stages {
             let (segment, labelled) = match stage {
                 Stage::Materialize(m) => (m.segment, m.labelled),
@@ -2142,6 +2337,7 @@ impl<'q> Lowering<'q> {
             instrs,
             &mut Marks {
                 columns,
+                ordered,
                 labelled: &mut labelled,
                 rows: &mut rows,
             },
@@ -2360,6 +2556,13 @@ impl<'q> Lowering<'q> {
                 }
                 Segment::Match(_) | Segment::Optional(_) => CompactString::default(),
             })
+            .chain(std::iter::once({
+                let mut label = String::from("#r");
+                while labels.iter().any(|l| l.as_str() == label) {
+                    label.insert(0, '#');
+                }
+                CompactString::from(label)
+            }))
             .collect()
     }
 }
@@ -2442,6 +2645,8 @@ fn list_pvalues(value: &ElementProperty) -> Option<Vec<PValue>> {
 struct Marks<'a> {
     /// The materializing `WITH` column each binding stands for.
     columns: &'a [Option<ColumnRef>],
+    /// The column variables of each result pipeline ([`Lowered::ordered`]).
+    ordered: &'a [Vec<Option<BindingId>>],
     /// Per binding: read away from its element (needs `as()`).
     labelled: &'a mut [bool],
     /// Per segment: its row is read after it was left (needs `as("#w<k>")`).
@@ -2453,6 +2658,16 @@ impl Marks<'_> {
     /// columns of `ORDER BY`, the current element of a row check) read no label.
     fn read(&mut self, slots: &mut Vec<usize>, site: Site) {
         for slot in slots.drain(..) {
+            if ordered_column(self.ordered, site, slot).is_some() {
+                // Read from the aggregating projection's row: through its label away from it.
+                if let Some(result) = site.ordered
+                    && site.row != Some(result)
+                    && let Some(flag) = self.rows.get_mut(result)
+                {
+                    *flag = true;
+                }
+                continue;
+            }
             if site.current == Some(BindingId(slot)) {
                 continue;
             }
@@ -2490,9 +2705,9 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 marks.read(&mut slots, *site);
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
-            Instr::RowCheck(condition) => {
+            Instr::RowCheck(condition, site) => {
                 condition.variables(&mut slots);
-                marks.read(&mut slots, Site::default());
+                marks.read(&mut slots, Site::away(*site));
             }
             Instr::Project {
                 columns,
@@ -2535,12 +2750,15 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Order {
-                keys, subqueries, ..
+                keys,
+                site,
+                subqueries,
+                ..
             } => {
                 for key in keys {
                     key.expr.variables(&mut slots);
                 }
-                marks.read(&mut slots, Site::default());
+                marks.read(&mut slots, *site);
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Bind { id, site, .. } => {
@@ -2600,7 +2818,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::Unit
             | Instr::HasLabel(_)
             | Instr::Has(..)
-            | Instr::RowCheck(_)
+            | Instr::RowCheck(..)
             | Instr::Label(_)
             | Instr::RowLabel(_)
             | Instr::Distinct
@@ -2614,6 +2832,15 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::Merge { .. } => {}
         }
     }
+}
+
+/// The column of the aggregating result pipeline `site` serves the `ORDER BY` of
+/// ([`Site::ordered`]) that holds binding `slot`; `None` elsewhere.
+fn ordered_column(ordered: &[Vec<Option<BindingId>>], site: Site, slot: usize) -> Option<usize> {
+    ordered
+        .get(site.ordered?)?
+        .iter()
+        .position(|v| *v == Some(BindingId(slot)))
 }
 
 /// The next expansion after `ops[at]` when it continues from the vertex `ops[at]` reached
