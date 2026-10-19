@@ -2301,4 +2301,54 @@ mod gql {
             )
         );
     }
+
+    /// Stage 2a: a query without `MATCH` (`FOR`, `RETURN`, a leading `FILTER`) starts from the
+    /// unit row `inject(0)` and reads no vertex, so it runs where vertex reads are denied, asking
+    /// what `g.inject(0)` asks; a `MATCH` after a `FOR` (a per-row scan or a lookup of another
+    /// label) asks what its Gremlin twin asks and is refused or allowed like it.
+    #[test]
+    fn for_and_unit_row_queries_ask_what_their_gremlin_twins_ask() {
+        let graph = modern();
+        for script in [
+            r#"g.gql("FOR x IN [1, 2] WITH ORDINALITY i RETURN x, i").toList()"#,
+            r#"g.gql("RETURN 1 AS x").toList()"#,
+            r#"g.gql("FILTER true UNWIND [1] AS x RETURN x").toList()"#,
+        ] {
+            assert!(run(&graph, script, NoPersons).is_ok(), "{script}");
+            assert_eq!(
+                requests(&graph, script),
+                requests(&graph, r#"g.inject(0).toList()"#),
+                "{script}"
+            );
+        }
+        // A per-row scan of persons after FOR: refused at v(), as g.inject(0).V().hasLabel(..).
+        let scan = r#"g.gql("FOR n IN ['marko'] MATCH (p:person) WHERE p.name = n RETURN p.age").toList()"#;
+        assert_denied(run(&graph, scan, NoPersons), "v", "Read Data(vertex");
+        assert_eq!(
+            requests(&graph, scan),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("person").values("age").toList()"#
+            )
+        );
+        // A lookup of software by id after FOR: allowed like g.inject(0).V().hasLabel("software").
+        let software = r#"g.gql("FOR id IN ['3'] MATCH (s:software) WHERE element_id(s) = id RETURN s.lang").toList()"#;
+        assert_eq!(
+            run(&graph, software, NoPersons).is_ok(),
+            run(
+                &graph,
+                r#"g.inject(0).V().hasLabel("software").values("lang").toList()"#,
+                NoPersons
+            )
+            .is_ok(),
+            "{software}"
+        );
+        assert_eq!(
+            requests(&graph, software),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("software").values("lang").toList()"#
+            )
+        );
+    }
 }

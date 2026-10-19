@@ -605,7 +605,19 @@ fn missing_return_suggests_return_star_and_the_variables() {
 fn expected_tokens_and_did_you_mean() {
     let f = fail("MATHC (a) RETURN a");
     assert_eq!(f.text, "MATHC");
-    assert_eq!(f.expected, ["MATCH"]);
+    assert_eq!(
+        f.expected,
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
+    );
     assert_eq!(f.suggestion.as_deref(), Some("MATCH"));
     let f = fail("MATCH (a) RETRUN a");
     assert_eq!(f.message, "unexpected `RETRUN`");
@@ -619,6 +631,8 @@ fn expected_tokens_and_did_you_mean() {
             "WITH",
             "LET",
             "FILTER",
+            "FOR",
+            "UNWIND",
             "RETURN"
         ]
     );
@@ -651,7 +665,19 @@ fn expected_tokens_and_did_you_mean() {
     assert_eq!(f.message, "unexpected end of input");
     assert_eq!(f.expected, ["`*`", "an expression"]);
     let f = fail("");
-    assert_eq!(f.expected, ["MATCH"]);
+    assert_eq!(
+        f.expected,
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
+    );
     let f = fail("MATCH (a) RETURN [1, 2");
     assert_eq!(f.expected, ["`,`", "`]`"]);
     let f = fail("MATCH (a) WHERE a.x IS 5 RETURN a");
@@ -1251,11 +1277,9 @@ fn with_forms_and_a_leading_optional_match() {
 
 #[test]
 fn pipeline_errors() {
-    // A pipeline clause cannot start the query.
-    let f = fail("FILTER true MATCH (a) RETURN a");
-    assert_eq!(f.kind, GqlErrorKind::NotYet);
-    assert_eq!(f.text, "FILTER");
-    assert!(f.message.contains("starts with"), "{}", f.message);
+    // A pipeline clause may start the query (stage 2a, FILTER included).
+    let q = ok("FILTER true MATCH (a) RETURN a");
+    assert_eq!(stage_kinds(&q), ["filter", "match"]);
     // OPTIONAL blocks.
     let f = fail("MATCH (a) OPTIONAL { MATCH (a)-->(b) } RETURN a");
     assert_eq!(f.kind, GqlErrorKind::NotYet);
@@ -1300,13 +1324,24 @@ fn pipeline_errors() {
             "WITH",
             "LET",
             "FILTER",
+            "FOR",
+            "UNWIND",
             "RETURN"
         ]
     );
     let f = fail("MATCH (a) WITH a WHERE a.x = 1 WHERE a RETURN a");
     assert_eq!(
         f.expected,
-        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
     );
     let f = fail("MATCH (a) LET x = 1 y = 2 RETURN a");
     assert_eq!(
@@ -1318,13 +1353,24 @@ fn pipeline_errors() {
             "WITH",
             "LET",
             "FILTER",
+            "FOR",
+            "UNWIND",
             "RETURN"
         ]
     );
     let f = fail("MATCH (a) FILTER a.x = 1 b RETURN a");
     assert_eq!(
         f.expected,
-        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
     );
     let f = fail("MATCH (a) WITH");
     assert_eq!(f.expected, ["`*`", "an expression"]);
@@ -2192,12 +2238,24 @@ fn queries_may_start_without_match() {
     let q = ok("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n");
     assert_eq!(stage_kinds(&q), ["for", "match"]);
     assert_eq!(q.matches.len(), 1);
-    // A leading FILTER stays "not yet"; an unknown first token still expects MATCH.
-    let f = fail("FILTER $flag RETURN 1");
-    assert_eq!(f.kind, GqlErrorKind::NotYet);
-    assert_eq!(f.text, "FILTER");
+    // A leading FILTER is accepted too; an unknown first token expects every clause a query
+    // may start with.
+    let q = ok("FILTER $flag RETURN 1");
+    assert_eq!(stage_kinds(&q), ["filter"]);
     let f = fail("FOO 1");
-    assert_eq!(f.expected, ["MATCH"]);
+    assert_eq!(
+        f.expected,
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
+    );
 }
 
 #[test]
@@ -2272,13 +2330,24 @@ fn for_and_unwind_errors() {
             "WITH",
             "LET",
             "FILTER",
+            "FOR",
+            "UNWIND",
             "RETURN"
         ]
     );
     let f = fail("FOR x IN [1] WITH OFFSET i y RETURN x");
     assert_eq!(
         f.expected,
-        ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"]
+        [
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "RETURN"
+        ]
     );
     let f = fail("FOR x IN [1]");
     assert!(f.message.starts_with("missing RETURN"), "{}", f.message);

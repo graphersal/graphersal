@@ -401,6 +401,68 @@ const GQL_CURATED_1C: &[&str] = &[
     r#"g.gql("MATCH (n) RETURN elements(n) AS x").toList()"#,
 ];
 
+/// Stage 2a GQL (feature `gql`): `FOR` / `UNWIND` with ordinals over constant, parameter,
+/// per-row and element lists, queries without `MATCH` (a leading `FILTER` included), E3 node
+/// items, `OPTIONAL MATCH` after `FOR`, and the correlated lookup `gql:lookup` by id (through
+/// `GraphStorage::get_vertex_by_id`) and by property index (through
+/// `GraphStorage::vertices_by_property_index`), whose plans name the lookup on both storages;
+/// the last two entries fail (a binder error, a data error).
+#[cfg(feature = "gql")]
+const GQL_CURATED_2A: &[&str] = &[
+    r#"g.gql("FOR x IN [1, 2, 2, null] WITH ORDINALITY i RETURN x, i").toList()"#,
+    r#"g.gql("FOR x IN [3, 1, [2]] WITH OFFSET i RETURN x, i").toList()"#,
+    r#"g.gql("RETURN 1 AS one, 'a' || 'b' AS s, $n + 1 AS m", #{n: 1}).toList()"#,
+    r#"g.gql("FILTER $on MATCH (p:person) RETURN count(*) AS c", #{on: true}).toList()"#,
+    r#"g.gql("LET k = 3 FOR x IN range(1, k) RETURN collect_list(x * k) AS l").toList()"#,
+    r#"g.gql("FOR n IN ['marko', 'josh', 'nobody'] MATCH (p:person {name: n})-[:created]->(s) RETURN n, s.name AS s ORDER BY n, s").toList()"#,
+    r#"g.gql("FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS n ORDER BY n", #{ids: ["1", "4", "99", 4, ()]}).toList()"#,
+    r#"let q = "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n.name AS n"; g.gql(q, #{ids: ["1"]}).profile().to_string().contains("[id]")"#,
+    r#"g.create_index(#{label: "person", key: "name"}); let q = "FOR n IN $names MATCH (p:person {name: n}) RETURN n, p.age AS a ORDER BY n"; [g.gql(q, #{names: ["marko", "josh", "zed", "marko"]}).toList(), g.gql(q, #{names: ["marko"]}).profile().to_string().contains("gql:lookup(\"(p:person)\", \"name: n\") [index: vertex person")]"#,
+    r#"g.create_index(#{label: "person", key: "age"}); g.gql("FOR a IN [29, 29.0, '29', 32, null] OPTIONAL MATCH (p:person {age: a}) RETURN a, p.name AS n ORDER BY n").toList()"#,
+    r#"g.create_index(#{label: "software", key: "name"}); g.gql("MATCH (a:person {name: 'josh'}), (s:software {name: 'lop'}) RETURN a.name AS a, s.name AS s").toList()"#,
+    r#"g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) FOR n IN nodes(p) MATCH (n)-[:created]->(s) RETURN n.name AS n, s.name AS s ORDER BY n, s").toList()"#,
+    r#"g.gql("MATCH (p:person)-[:created]->(s) WITH p, collect_list(s) AS ss FOR x IN ss WITH OFFSET i RETURN p.name AS p, x.name AS x, i ORDER BY p, x").toList()"#,
+    r#"g.gql("FOR n IN ['marko', 'lop'] OPTIONAL MATCH (p:person {name: n}) RETURN n, p.age AS a ORDER BY n").toList()"#,
+    r#"g.gql("MATCH ()-[e]->() FOR w IN [e.weight] FILTER w > 0.5 RETURN element_id(e) AS e, w ORDER BY e").toList()"#,
+    r#"g.gql("MATCH (a) FOR a IN [1] RETURN a").toList()"#,
+    r#"g.gql("FOR x IN [1, 0] RETURN 1 / x AS y").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_2a_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_2A {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise FOR and the lookup, not fail on the way.
+    assert_eq!(failing, 2, "only the two error cases fail");
+    // The plans name the lookup.
+    for at in [7, 8] {
+        let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2A[at]).result;
+        assert!(
+            result
+                .as_deref()
+                .is_ok_and(|text| text.ends_with("true") || text.ends_with("true]")),
+            "{at}: {result:?}"
+        );
+    }
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_1c_scripts_give_the_same_result_on_both_storages() {

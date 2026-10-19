@@ -9,7 +9,7 @@
 //! # Grammar
 //!
 //! ```text
-//! query      := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?   -- not FILTER first
+//! query      := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)? ';'?
 //! stage      := match | with | let | filter | for
 //! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
 //! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
@@ -56,9 +56,11 @@
 //! - **`RETURN` is mandatory** (design D10); its absence is a syntax error whose alternative names
 //!   `RETURN *` and the query's own variables.
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
-//!   `LET`, `WITH` or directly with `RETURN` (one unit row); [`Query::stages`] is then empty or
-//!   starts with that stage. A leading `FILTER` stays "not yet supported". A first token that
-//!   starts no clause still expects `MATCH` only (the expected-token lists are unchanged).
+//!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`Query::stages`] is then
+//!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
+//!   it is a plain filter of the unit row, so it is accepted like the others. A first token that
+//!   starts no clause expects every clause a query may start with (`MATCH`, `OPTIONAL MATCH`,
+//!   `WITH`, `LET`, `FILTER`, `FOR`, `UNWIND`, `RETURN`), the same list as after a clause.
 //! - **Result tail in GQL order:** `ORDER BY`, then `OFFSET` / `SKIP`, then `LIMIT`, each at most
 //!   once, as GQL and Neo4j write them. Another order is a syntax error naming the right one; the
 //!   standalone Cypher 25 forms before `RETURN` are "not yet supported".
@@ -148,8 +150,17 @@ const WRITE_ALTERNATIVE: &str = "gql() is read-only; use the Gremlin mutation st
 
 /// The alternative of the refused undirected edge forms.
 /// The clauses that may follow a clause of the pipeline, in the order the expected tokens
-/// name them.
-const NEXT_CLAUSES: [&str; 6] = ["MATCH", "OPTIONAL MATCH", "WITH", "LET", "FILTER", "RETURN"];
+/// name them; a query may start with any of them too (stage 2a, design E4).
+const NEXT_CLAUSES: [&str; 8] = [
+    "MATCH",
+    "OPTIONAL MATCH",
+    "WITH",
+    "LET",
+    "FILTER",
+    "FOR",
+    "UNWIND",
+    "RETURN",
+];
 
 const TILDE_ALTERNATIVE: &str = "edges in Graphersal are directed; use -[e]- for either direction";
 
@@ -482,7 +493,8 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         ],
         "a list conversion function",
         "convert the items one by one in Gremlin after gql(), for example \
-         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().as_number()",
+         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().as_number(), or with \
+         FOR in gql(), as in g.gql(\"FOR t IN ['1', '2'] RETURN collect_list(toInteger(t)) AS l\")",
     ),
     not_yet_function(
         &["normalize"],
@@ -493,7 +505,8 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         &["any", "all", "none", "single", "reduce"],
         "a list function that binds a variable inside the call",
         "test the items in Gremlin after gql(), for example \
-         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\")",
+         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\"), or with FOR \
+         in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' RETURN DISTINCT n\")",
     ),
     not_yet_function(
         &["elements"],
@@ -912,9 +925,6 @@ impl<'a> Parser<'a> {
                     matches.push(clause);
                     continue;
                 }
-                Some(Keyword::Filter) if stages.is_empty() => {
-                    return Err(self.leading_stage());
-                }
                 Some(keyword @ (Keyword::With | Keyword::Let | Keyword::Filter)) => {
                     stages.push(self.pipeline_stage(keyword)?);
                     continue;
@@ -929,7 +939,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if stages.is_empty() {
-                return Err(self.unexpected(&["MATCH"]));
+                return Err(self.unexpected(&NEXT_CLAUSES));
             }
             if matches!(self.peek().kind, TokenKind::Eof | TokenKind::Semicolon) {
                 return Err(self.missing_return());
@@ -1050,20 +1060,7 @@ impl<'a> Parser<'a> {
         self.unexpected(&expected)
     }
 
-    /// The error for `FILTER` as the first clause.
-    fn leading_stage(&self) -> Box<GqlErrorBuilder> {
-        let token = self.peek();
-        self.not_yet(
-            token.span,
-            &format!(
-                "a query that starts with {}",
-                token.text.to_ascii_uppercase()
-            ),
-            "start with a MATCH clause, or use Gremlin inject(), for example g.inject(1)",
-        )
-    }
-
-    /// `WITH`, `LET` or `FILTER` after the first clause.
+    /// `WITH`, `LET` or `FILTER`, first or after another clause.
     fn pipeline_stage(&mut self, keyword: Keyword) -> PResult<Stage> {
         Ok(match keyword {
             Keyword::Let => Stage::Let(self.let_clause()?),
@@ -2700,7 +2697,8 @@ impl<'a> Parser<'a> {
                 open,
                 "a list comprehension [x IN list | ...]",
                 "Gremlin unfold() and fold(), for example \
-                 g.inject([1, 2, 3]).unfold().is(P.gt(1)).fold()",
+                 g.inject([1, 2, 3]).unfold().is(P.gt(1)).fold(), or FOR in gql(), as in \
+                 g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN collect_list(x) AS l\")",
             ));
         }
         Ok(())

@@ -36,8 +36,8 @@
 //!   later as a node or edge variable (`FOR n IN nodes(p) MATCH (n)-->(m)`) takes that kind
 //!   (design E3: the lowering continues the pattern from it, a value of another kind gives no
 //!   row); the ordinal is always a number and never an element.
-//! - **Unit row (design M1, E4).** A query may start with `FOR`, `LET`, `WITH` or `RETURN`
-//!   ([`BoundQuery::unit`]): it starts from one row that holds no binding, so its first
+//! - **Unit row (design M1, E4).** A query may start with `FOR`, `LET`, `WITH`, `FILTER` or
+//!   `RETURN` ([`BoundQuery::unit`]): it starts from one row that holds no binding, so its first
 //!   expressions read only constants and parameters (`RETURN *` with no variable in scope is
 //!   still an error).
 //! - **Substitutions (decision C1).** `LET x = expr` and a `WITH` that only projects are not
@@ -458,7 +458,8 @@ pub(crate) struct BoundQuery {
     pub(crate) limit: Option<Count>,
     /// Every parameter reference in text order.
     pub(crate) parameters: Vec<ParameterRef>,
-    /// The query starts without `[OPTIONAL] MATCH` (with `FOR`, `LET`, `WITH` or `RETURN`): it
+    /// The query starts without `[OPTIONAL] MATCH` (with `FOR`, `LET`, `WITH`, `FILTER` or
+    /// `RETURN`): it
     /// starts from one unit row that holds no binding (design M1).
     pub(crate) unit: bool,
 }
@@ -1434,7 +1435,7 @@ impl<'q> Binder<'q> {
                     "give the position its own name, as in FOR {} IN ... WITH {spelled} {}_index",
                     var.name, var.name
                 ))
-                .topic(GqlHelpTopic::Names)
+                .topic(GqlHelpTopic::For)
                 .into());
             }
             self.check_new_for_name(name, keyword, clause.unwind)?;
@@ -1486,7 +1487,7 @@ impl<'q> Binder<'q> {
             ),
         )
         .alternative(format!("choose another name, as in {example}"))
-        .topic(GqlHelpTopic::Scope)
+        .topic(GqlHelpTopic::For)
         .into())
     }
 
@@ -2622,7 +2623,7 @@ fn ordinal_as_element(var: &Identifier, here: BindingKind) -> Box<GqlErrorBuilde
             "give the pattern element its own name, as in ({name}2), and compare the position \
              in WHERE"
         ))
-        .topic(GqlHelpTopic::PatternVariable),
+        .topic(GqlHelpTopic::For),
     )
 }
 

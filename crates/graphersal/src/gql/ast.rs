@@ -12,8 +12,8 @@
 //! function, `DISTINCT` and `count(*)` included). A query written in the 1a subset has exactly
 //! the 1a tree: every `MATCH` a non-optional [`Stage::Match`], no path variable, no quantifier.
 //! Stage 2a adds `FOR` / Cypher `UNWIND` ([`Stage::For`]) and queries that start with `FOR`,
-//! `LET`, `WITH` or `RETURN` (no `MATCH`: [`Query::stages`] may be empty or start with another
-//! stage).
+//! `LET`, `WITH`, `FILTER` or `RETURN` (no `MATCH`: [`Query::stages`] may be empty or start
+//! with another stage).
 
 use super::lexer::Span;
 
@@ -26,7 +26,7 @@ pub(crate) struct Query {
     pub(crate) matches: Vec<MatchClause>,
     /// The clauses before `RETURN` in text order (empty for a query that is only a result
     /// statement). A 1a / 1b query starts with a [`Stage::Match`]; a 2a query may start with
-    /// [`Stage::For`], [`Stage::Let`] or [`Stage::With`] (never [`Stage::Filter`]). A 1a query
+    /// [`Stage::For`], [`Stage::Let`], [`Stage::With`] or [`Stage::Filter`]. A 1a query
     /// holds one `Stage::Match(i)` per entry of `matches`, in order.
     pub(crate) stages: Vec<Stage>,
     /// `RETURN` (mandatory).

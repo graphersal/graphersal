@@ -373,7 +373,7 @@ fn list_parameters_drive_one_row_per_item() {
         found,
         sorted(&["'josh'|i:32", "'marko'|i:29", "'marko'|i:29"])
     );
-    // `element_id()` against a list of ids (a per-row scan until `gql:lookup`).
+    // `element_id()` against a list of ids (one `gql:lookup` by id per row, see `mod lookup`).
     let found = rows_with(
         &graph,
         "FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN n.name AS x",

@@ -4322,6 +4322,8 @@ pub(crate) enum GqlHelpTopic {
     PatternVariable,
     /// A name used twice (a column, a `LET` variable, a map key).
     Names,
+    /// The variable or the ordinal of a `FOR` / `UNWIND` (stage 2a).
+    For,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
@@ -6633,7 +6635,7 @@ impl TraverserError {
 
 /// The most expected tokens `help()` lists; the `expected` detail lists them all.
 #[cfg(feature = "gql")]
-const GQL_HELP_EXPECTED: usize = 8;
+const GQL_HELP_EXPECTED: usize = 10;
 
 /// The `details()` of a [`TraverserError::Gql`]: the offending source line (labelled `query`
 /// for a one-line query, `line N` otherwise) with a caret line under the span, then the
@@ -6737,7 +6739,10 @@ fn gql_help(
                  FILTER clauses, then RETURN <items>, for example \
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
                  g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
-                 AS n RETURN p.name, n\").",
+                 AS n RETURN p.name, n\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
+                 one row per item of a list, and a query may also start with FOR, LET, WITH, \
+                 FILTER or RETURN, as in \
+                 g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age\").",
             );
         }
         // Class 22 before the run: an OFFSET / LIMIT that is no non-negative integer.
@@ -6887,9 +6892,18 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              map a name of its own, as in \
              g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age\")."
         }
+        GqlHelpTopic::For => {
+            "FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of the list, \
+             which it reads on the row before the FOR; the item x and, with WITH ORDINALITY i \
+             (from 1) or WITH OFFSET i (from 0), its position i are two new variables with \
+             names of their own; a node item continues a pattern by its name, as in \
+             FOR n IN nodes(p) MATCH (n)-->(m), and any other item is compared in a property \
+             map or WHERE, as in g.gql(\"FOR n IN ['marko', 'josh'] WITH ORDINALITY i MATCH \
+             (p:person {name: n}) RETURN i, p.age\")."
+        }
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
-             it (LET and WITH define variables too), for example \
+             it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \
              $parameter a value in the parameters of gql()."
         }
@@ -9334,7 +9348,10 @@ mod tests {
                  FILTER clauses, then RETURN <items>, for example \
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
                  g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
-                 AS n RETURN p.name, n\")."
+                 AS n RETURN p.name, n\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
+                 one row per item of a list, and a query may also start with FOR, LET, WITH, \
+                 FILTER or RETURN, as in \
+                 g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age\")."
             );
         }
 
@@ -9472,7 +9489,7 @@ mod tests {
                 .into_error("x");
             let text = err.help().unwrap_or_default();
             assert!(
-                text.contains("Expected T0, T1, T2, T3, T4, T5, T6, T7, ... at"),
+                text.contains("Expected T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, ... at"),
                 "{text}"
             );
             assert!(report(&err).contains("T11\n"));

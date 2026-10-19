@@ -7265,14 +7265,17 @@ mod gql {
             "the caret must sit under `30` on line 2: {report}"
         );
         assert!(
-            report.contains("  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN"),
+            report.contains(
+                "  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN"
+            ),
             "{report}"
         );
         assert!(report.contains("  GQLSTATUS: 42001"), "{report}");
         assert!(
             report.contains(
-                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the marked \
-                 position. Fix the query at the marked position: a GQL read query is MATCH \
+                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN at \
+                 the marked position. Fix the query at the marked position: a GQL read query is \
+                 MATCH \
                  <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, \
                  LET or FILTER clauses, then RETURN <items>, for example \
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
@@ -7746,7 +7749,8 @@ mod gql {
         assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax);
         assert!(
             report.contains(
-                "  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN"
+                "  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, \
+                 UNWIND, RETURN"
             ),
             "{report}"
         );
@@ -7765,8 +7769,8 @@ mod gql {
         let help = gql_help("MATCH (p:person) RETRUN p");
         assert!(
             help.contains(
-                "Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, RETURN at the \
-                 marked position."
+                "Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, \
+                 RETURN at the marked position."
             ),
             "{help}"
         );
@@ -7780,8 +7784,8 @@ mod gql {
         let help = gql_help("MATCH (a) WITH a b RETURN a");
         assert!(
             help.starts_with(
-                "Expected `,`, AS, ORDER BY, OFFSET, SKIP, LIMIT, WHERE, MATCH, ... at the \
-                 marked position."
+                "Expected `,`, AS, ORDER BY, OFFSET, SKIP, LIMIT, WHERE, MATCH, OPTIONAL MATCH, \
+                 WITH, ... at the marked position."
             ),
             "{help}"
         );
@@ -8606,5 +8610,178 @@ mod gql {
         );
         let help = camel("MATCH (p) RETURN percentileCont(p.age, 0.5)");
         assert!(help.contains("collect_list(x)"), "{help}");
+    }
+
+    /// Stage 2a: the errors of `FOR` / `UNWIND` explain what `FOR` defines (rule 6), the syntax
+    /// advice and the expected tokens name `FOR` / `UNWIND` and the clauses a query may start
+    /// with, and every `g.gql(..)` example of that advice runs.
+    #[test]
+    fn gql_for_errors_explain_what_for_defines() {
+        let advice = "FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of the \
+                      list, which it reads on the row before the FOR; the item x and, with WITH \
+                      ORDINALITY i (from 1) or WITH OFFSET i (from 0), its position i are two \
+                      new variables with names of their own; a node item continues a pattern by \
+                      its name, as in FOR n IN nodes(p) MATCH (n)-->(m), and any other item is \
+                      compared in a property map or WHERE, as in g.gql(\"FOR n IN ['marko', \
+                      'josh'] WITH ORDINALITY i MATCH (p:person {name: n}) RETURN i, p.age\").";
+        for (query, message, alternative) in [
+            (
+                "MATCH (a) FOR a IN [1] RETURN a",
+                "the variable `a` is already defined; FOR defines a new variable",
+                "choose another name, as in FOR a2 IN <list>",
+            ),
+            (
+                "MATCH (a) UNWIND [1] AS a RETURN a",
+                "the variable `a` is already defined; UNWIND defines a new variable",
+                "choose another name, as in UNWIND <list> AS a2",
+            ),
+            (
+                "LET i = 1 FOR x IN [1] WITH ORDINALITY i RETURN x",
+                "the variable `i` is already defined; FOR defines a new variable",
+                "choose another name, as in FOR i2 IN <list>",
+            ),
+            (
+                "FOR x IN [1] WITH ORDINALITY x RETURN x",
+                "`x` names both the item and its position; WITH ORDINALITY defines a second \
+                 variable",
+                "give the position its own name, as in FOR x IN ... WITH ORDINALITY x_index",
+            ),
+            (
+                "FOR x IN [1] WITH OFFSET i MATCH (i)-->(b) RETURN b",
+                "the variable `i` is the position of a FOR item (a number), not a node",
+                "give the pattern element its own name, as in (i2), and compare the position \
+                 in WHERE",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert_eq!(help, format!("{alternative}. {advice}"), "{query}");
+        }
+        let help = gql_help("MATCH (a) FOR a IN [1] RETURN a");
+        assert_examples_run(&help);
+        // An aggregate in the list keeps the grouping advice: aggregate in a WITH first.
+        let help = gql_help("MATCH (p)-->(f) FOR x IN collect_list(f) RETURN x");
+        assert!(
+            help.starts_with(
+                "aggregate in a WITH first and iterate over its column, as in MATCH (p)-->(f) \
+                 WITH p, collect_list(f) AS fs FOR x IN fs RETURN p, x. A RETURN or WITH with \
+                 an aggregate"
+            ),
+            "{help}"
+        );
+        // An undefined variable: FOR defines variables too.
+        let help = gql_help("FOR x IN [1] RETURN y");
+        assert!(
+            help.contains("(LET, WITH and FOR define variables too)"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_syntax_advice_names_for_and_the_clauses_a_query_may_start_with() {
+        let all = "MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN";
+        for query in ["FOO 1", "", "(a) RETURN a"] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            assert!(
+                report.contains(&format!("  expected:     {all}"))
+                    || report.contains(&format!("  expected:  {all}")),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.contains(&format!("Expected {all} at the marked position.")),
+                "{query}: {help}"
+            );
+            assert!(
+                help.ends_with(
+                    "FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of a \
+                     list, and a query may also start with FOR, LET, WITH, FILTER or RETURN, as \
+                     in g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN \
+                     n, p.age\")."
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+        // A misspelt FOR / UNWIND gets its suggestion from the same list.
+        let report = gql_report("UNWIDN [1] AS x RETURN x");
+        assert!(report.contains("  did you mean: UNWIND"), "{report}");
+        let report = gql_report("MATCH (a) UNWIDN [1] AS x RETURN x");
+        assert!(report.contains("  did you mean: UNWIND"), "{report}");
+        // FOR / UNWIND after RETURN: RETURN ends the query.
+        let report = gql_report("MATCH (a) RETURN a UNWIND [1] AS x");
+        assert!(report.contains("RETURN ends the query"), "{report}");
+    }
+
+    /// Every clause a query may start with runs, a leading `FILTER` included (the 2a "not yet"
+    /// texts of a query without `MATCH` are gone).
+    #[test]
+    fn gql_queries_without_match_and_for_are_no_longer_refused() {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for query in [
+            "RETURN 1 AS x",
+            "FOR x IN [1, 2] RETURN x",
+            "UNWIND [1, 2] AS x RETURN x",
+            "LET x = 1 RETURN x",
+            "WITH 1 AS x RETURN x",
+            "FILTER true RETURN 1 AS x",
+            "FILTER WHERE 1 = 1 MATCH (p:person) RETURN p.name",
+            "MATCH (p:person) FOR x IN [p.age] RETURN x",
+        ] {
+            let rows = locked.traversal().gql(query).to_list();
+            assert!(rows.is_ok(), "{query}: {rows:?}");
+        }
+        let count = |query: &str| {
+            locked
+                .traversal()
+                .gql(query)
+                .to_list()
+                .map(|rows| rows.len())
+                .unwrap_or(usize::MAX)
+        };
+        assert_eq!(count("FILTER 1 > 2 RETURN 1 AS x"), 0);
+        assert_eq!(count("FILTER 1 < 2 MATCH (p:person) RETURN p"), 4);
+        assert_eq!(count("FILTER 1 > 2 MATCH (p:person) RETURN p"), 0);
+    }
+
+    /// The not-yet list constructs name FOR in gql() beside the Gremlin form (rule 6), and the
+    /// FOR examples run.
+    #[test]
+    fn gql_not_yet_list_constructs_name_for() {
+        for (query, keeps, names) in [
+            (
+                "MATCH (p) RETURN toIntegerList(p.tags)",
+                "convert the items one by one in Gremlin after gql()",
+                "or with FOR in gql(), as in g.gql(\"FOR t IN ['1', '2'] RETURN \
+                 collect_list(toInteger(t)) AS l\")",
+            ),
+            (
+                "MATCH (p) RETURN any(x IN p.tags WHERE x = 'a')",
+                "test the items in Gremlin after gql()",
+                "or with FOR in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' \
+                 RETURN DISTINCT n\")",
+            ),
+            (
+                "MATCH (p) RETURN [x IN [1, 2, 3] WHERE x > 1]",
+                "Gremlin unfold() and fold()",
+                "or FOR in gql(), as in g.gql(\"FOR x IN [1, 2, 3] FILTER x > 1 RETURN \
+                 collect_list(x) AS l\")",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(keeps), "{query}: {help}");
+            assert!(help.contains(names), "{query}: {help}");
+            assert_examples_run(&help);
+        }
     }
 }
