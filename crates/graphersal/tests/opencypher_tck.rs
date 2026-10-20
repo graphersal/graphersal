@@ -3,12 +3,20 @@
 //!
 //! A separate test target (an exception to the one-binary rule, like `tinkerpop_features.rs`):
 //! own process for parallel lanes, the panic hook and per-case timeouts. The harness lives under
-//! `tests/opencypher/harness/`; its unit tests run as part of this target. For now the target
-//! parses the whole tree; the runner, comparison and baseline come with the later harness steps.
+//! `tests/opencypher/harness/`; its unit tests run as part of this target. The target parses
+//! the whole tree and runs every case (`harness::execute`, `harness::classify`); the result
+//! comparison, the baseline and the report come with the later harness steps.
 #![cfg(feature = "gql")]
 
 #[path = "opencypher/harness/mod.rs"]
 mod harness;
+
+// The proof storage of `GRAPHERSAL_TEST_STORAGE=forwarding` (`harness::storage`), included by
+// path like `tinkerpop_features.rs` does: a dev-dependency on `graphersal-storage-tests` would
+// link a second copy of `graphersal` into this binary.
+#[allow(dead_code)]
+#[path = "../../graphersal-storage-tests/src/forwarding.rs"]
+mod forwarding;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -336,4 +344,129 @@ fn every_step_line_is_typed() {
     .into_iter()
     .collect();
     assert_eq!(parsed, expected);
+}
+
+/// Number of case lanes run in parallel (each lane owns one worker thread).
+fn lanes() -> usize {
+    std::env::var("OPENCYPHER_LANES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .max(1)
+}
+
+/// Whether the debug environment variable `name` is set (non-empty, not `0`).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Writes to the process's stderr directly, bypassing the test harness's output capture.
+fn stderr_uncaptured(text: &str) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(text.as_bytes());
+    let _ = err.flush();
+}
+
+/// Runs every case of the tree in parallel lanes and classifies it. Until the baseline lands
+/// (3b.T5) it only asserts that every case reports a class.
+///
+/// Debug output (TEMPORARY, until the report of 3b.T5): `OPENCYPHER_SUMMARY=1` prints the class
+/// counts (overall and per top directory), `OPENCYPHER_DETAILS=1` one line per case that does
+/// not pass. `OPENCYPHER_LANES` sets the number of lanes.
+#[test]
+fn opencypher_tck_runs_every_case() {
+    use harness::classify::{self, Class, Outcome};
+    use harness::execute::{self, RawOutcome};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let storage = harness::storage::current();
+    let features =
+        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let mut cases: Vec<(&str, &gherkin::Case)> = features
+        .iter()
+        .flat_map(|f| {
+            f.scenarios
+                .iter()
+                .flat_map(move |s| s.cases.iter().map(move |c| (f.path.as_str(), c)))
+        })
+        .collect();
+    cases.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+
+    let started = std::time::Instant::now();
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<RawOutcome>>> = Mutex::new(vec![None; cases.len()]);
+    std::thread::scope(|s| {
+        for _ in 0..lanes() {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((_, case)) = cases.get(i) else {
+                        break;
+                    };
+                    let run = execute::run(case);
+                    results.lock().unwrap_or_else(|p| p.into_inner())[i] = Some(run);
+                }
+            });
+        }
+    });
+    let elapsed = started.elapsed();
+    let results = results.into_inner().unwrap_or_else(|p| p.into_inner());
+
+    let mut outcomes: Vec<(&str, &gherkin::Case, Outcome)> = Vec::with_capacity(cases.len());
+    for ((path, case), run) in cases.iter().zip(results.iter()) {
+        let Some(run) = run else {
+            panic!("case {} did not report", case.id);
+        };
+        outcomes.push((path, case, classify::classify(case, run)));
+    }
+    assert_eq!(outcomes.len(), 3897);
+
+    if env_flag("OPENCYPHER_DETAILS") {
+        for (_, case, outcome) in &outcomes {
+            if outcome.class != Class::Pass {
+                eprintln!(
+                    "detail {} {}: {}",
+                    outcome.class.name(),
+                    case.id,
+                    outcome.detail
+                );
+            }
+        }
+    }
+    if env_flag("OPENCYPHER_SUMMARY") {
+        let mut total: BTreeMap<Class, usize> = BTreeMap::new();
+        let mut per_dir: BTreeMap<String, BTreeMap<Class, usize>> = BTreeMap::new();
+        let mut unchecked = 0usize;
+        for (path, _, outcome) in &outcomes {
+            *total.entry(outcome.class).or_default() += 1;
+            let dir = path.split('/').take(2).collect::<Vec<_>>().join("/");
+            *per_dir
+                .entry(dir)
+                .or_default()
+                .entry(outcome.class)
+                .or_default() += 1;
+            unchecked += usize::from(outcome.result_unchecked);
+        }
+        let render = |counts: &BTreeMap<Class, usize>| {
+            Class::ALL
+                .iter()
+                .filter_map(|c| counts.get(c).map(|n| format!("{} {n}", c.name())))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut text = format!(
+            "opencypher tck ({}): {} cases in {:.1} s ({} lanes): {}\n  of the passes, result not yet compared: {unchecked}\n",
+            storage.name(),
+            outcomes.len(),
+            elapsed.as_secs_f64(),
+            lanes(),
+            render(&total)
+        );
+        for (dir, counts) in &per_dir {
+            text.push_str(&format!("  {dir}: {}\n", render(counts)));
+        }
+        stderr_uncaptured(&text);
+    }
 }
