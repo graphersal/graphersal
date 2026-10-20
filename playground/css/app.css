@@ -1478,3 +1478,95 @@ input.ve-null { color: var(--text-muted); }
 .btn.share-btn { gap: 5px; background: var(--ok); border-color: var(--ok); color: var(--ok-soft); font-weight: 600; }
 .btn.share-btn:hover:not(:disabled) { background: var(--ok); filter: brightness(1.1); }
 .btn.share-btn svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
+
+/* The Examples panel (components/examples-panel.js): an overlay drawer below the Examples button,
+   over the editor and results (it never moves the layout); full width on narrow screens. */
+.examples-panel {
+  position: fixed;
+  z-index: var(--z-popover);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow), 0 12px 32px rgba(20, 30, 50, .14);
+  animation: ex-slide-in .14s ease-out;
+}
+@keyframes ex-slide-in { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .examples-panel { animation: none; } }
+@media (max-width: 639.98px) { .examples-panel { border-radius: 0; border-left: 0; border-right: 0; } }
+.ex-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border); }
+.ex-search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.ex-search:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.ex-count { flex: none; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ex-close { flex: none; width: 26px; height: 26px; border: 0; border-radius: 5px; background: none; color: var(--text-muted); font-size: 18px; line-height: 1; cursor: pointer; }
+.ex-close:hover { background: var(--surface-2); color: var(--text); }
+.ex-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 6px 10px; }
+.ex-empty { padding: 14px 8px; font-size: 13px; }
+.ex-group + .ex-group { margin-top: 6px; }
+/* Group and subgroup headers are bars on a grey background in the text colour, so they stand out
+   from the plain example rows they collapse. */
+.ex-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 2px 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+.ex-toggle.sub { width: calc(100% - 12px); margin-left: 12px; background: var(--surface-2); text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 600; }
+.ex-toggle:hover:not(:disabled) { background: var(--border-strong); color: var(--text); }
+.ex-toggle:disabled { cursor: default; }
+.ex-toggle:disabled .ex-caret { visibility: hidden; }
+.ex-caret { visibility: hidden; }
+.ex-caret { flex: none; width: 12px; font-size: 11px; }
+.ex-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-n { flex: none; margin-left: auto; font-weight: 400; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.ex-sub .ex-item { padding-left: 32px; }
+.ex-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 5px 8px 5px 22px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ex-item:hover { background: var(--surface-2); }
+.ex-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ex-item.last { border-left-color: var(--accent); background: var(--accent-soft); }
+.ex-item.ex-action { color: var(--text-muted); font-style: italic; }
+.ex-title { min-width: 0; }
+.ex-last { margin-left: 6px; padding: 0 5px; border-radius: 3px; background: var(--accent); color: var(--accent-contrast); font-size: 10.5px; font-style: normal; vertical-align: 1px; white-space: nowrap; }
+.ex-snippet { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11.5px; }
+.examples-panel mark { padding: 0 1px; border-radius: 2px; background: var(--warn-soft); color: var(--warn); font-weight: 700; }
