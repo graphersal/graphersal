@@ -27,6 +27,10 @@
 //! { query }` ([`Stage::Call`], [`CallClause`]; Cypher's importing `CALL { WITH a .. }` as
 //! [`LinearQuery::importing`]). A linear query has exactly the tree of the stages before:
 //! [`Query`] dereferences to its first linear query, which is the whole query then.
+//! Stage 2e adds parenthesized path patterns (quantified path patterns, `(a) ((x)-[e]->(y)
+//! WHERE c){1,3} (b)`): [`PathPattern::groups`], each a [`ParenthesizedPath`] with its
+//! juxtaposed node and the plain steps after it ([`GroupStep`]). A path without one has exactly
+//! the tree of the stages before (`groups` empty).
 
 use super::lexer::Span;
 
@@ -322,16 +326,66 @@ pub(crate) enum OrdinalKind {
     Offset,
 }
 
-/// A path pattern: `[p =] node (edge node)*`.
+/// A path pattern: `[p =] node (edge node)*`, and since stage 2e parenthesized path patterns
+/// between its nodes.
+///
+/// The text is a sequence of nodes and connectors (an edge or a parenthesized path pattern),
+/// read as `start steps (group node steps)*`: the plain part up to the first parenthesized path
+/// pattern is `start` and `steps` (the whole path when there is none, the tree of the stages
+/// before 2e), each parenthesized path pattern opens a [`GroupStep`] that holds it, the node
+/// after it and the plain steps up to the next one. Where the text has no node between two
+/// connectors or at an end of the path (`((x)-->(y)){2}`, `(a)-->((x)-->(y))+`, `((a)-->(b))
+/// ((c)-->(d))`), the parser puts an implicit empty node ([`NodePattern::is_implicit`]); it
+/// merges with the adjacent node of a parenthesized path pattern like a written one (P0: the
+/// node before a parenthesized path pattern is its first iteration's first node, the node after
+/// it the last iteration's last node).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PathPattern {
     /// The path variable of `p = ...`.
     pub(crate) variable: Option<Identifier>,
     /// The first node.
     pub(crate) start: NodePattern,
-    /// The following edges, each with the node it leads to.
+    /// The following edges, each with the node it leads to, up to the first parenthesized path
+    /// pattern.
     pub(crate) steps: Vec<PatternStep>,
+    /// The parenthesized path patterns in text order, each with the node and the plain steps
+    /// after it (stage 2e); empty for a path without one.
+    pub(crate) groups: Vec<GroupStep>,
     /// The whole pattern (the `p =` of a path variable included).
+    pub(crate) span: Span,
+}
+
+/// A parenthesized path pattern of a [`PathPattern`], the node juxtaposed after it and the plain
+/// steps up to the next one (stage 2e).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GroupStep {
+    /// The parenthesized path pattern; its first node merges with the node before it (the
+    /// last node of the steps before).
+    pub(crate) group: Box<ParenthesizedPath>,
+    /// The node after it (implicit when not written); merges with its last node.
+    pub(crate) node: NodePattern,
+    /// The following edges, each with the node it leads to, up to the next parenthesized path
+    /// pattern.
+    pub(crate) steps: Vec<PatternStep>,
+}
+
+/// `( chain [WHERE expr] )` with an optional quantifier: a parenthesized path pattern (GQL
+/// G035 / G037 / G050; Neo4j's quantified path pattern). Its body is one chain with at least
+/// one edge; a body path variable, a path mode prefix, several patterns, an alternation, a
+/// nested parenthesized path pattern and a quantified edge inside are refused by the parser
+/// (E17, "not yet supported").
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParenthesizedPath {
+    /// The body's first node.
+    pub(crate) start: NodePattern,
+    /// The body's edges, each with the node it leads to (at least one, none quantified).
+    pub(crate) steps: Vec<PatternStep>,
+    /// The body's `WHERE` (read per iteration).
+    pub(crate) where_clause: Option<Expr>,
+    /// `{m,n}`, `{m,}`, `{,n}`, `{n}`, `*`, `+` or `?` (`{0,1}`) after the `)`; `None`:
+    /// written without one (exactly one iteration).
+    pub(crate) quantifier: Option<Quantifier>,
+    /// From `(` to `)` (the quantifier is not part of it, as for an edge).
     pub(crate) span: Span,
 }
 
@@ -355,8 +409,21 @@ pub(crate) struct NodePattern {
     pub(crate) properties: Option<MapLiteral>,
     /// The inline `WHERE`.
     pub(crate) where_clause: Option<Expr>,
-    /// From `(` to `)`.
+    /// From `(` to `)`; empty (`start == end`) for an implicit node.
     pub(crate) span: Span,
+}
+
+impl NodePattern {
+    /// An implicit empty node the parser put where the text has no node next to a
+    /// parenthesized path pattern ([`PathPattern`]); every written node pattern spans at least
+    /// its `()`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the binder from stage 2e.T2 on")
+    )]
+    pub(crate) fn is_implicit(&self) -> bool {
+        self.span.start == self.span.end
+    }
 }
 
 /// The direction of an edge pattern. Undirected GQL edges (`~`) are refused: Graphersal edges
@@ -394,8 +461,9 @@ pub(crate) struct EdgePattern {
     pub(crate) span: Span,
 }
 
-/// How often a quantified edge repeats: `min..=max` times (`max` `None`: unbounded). The
-/// parser normalizes every spelling (module docs of `parser.rs`) and guarantees `min <= max`.
+/// How often a quantified edge (or a parenthesized path pattern) repeats: `min..=max` times
+/// (`max` `None`: unbounded). The parser normalizes every spelling (module docs of `parser.rs`)
+/// and guarantees `min <= max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Quantifier {
     /// The fewest repetitions (0 allows the zero-length match).
@@ -404,7 +472,8 @@ pub(crate) struct Quantifier {
     pub(crate) max: Option<u64>,
     /// Written in Cypher's bracket form (`[e*m..n]`, lower bound 1 by default), not GQL's.
     pub(crate) cypher: bool,
-    /// The quantifier text (`{1,3}`, `*`, `+`, or `*1..3` inside the brackets).
+    /// The quantifier text (`{1,3}`, `*`, `+`, `?` after a parenthesized path pattern, or
+    /// `*1..3` inside the brackets).
     pub(crate) span: Span,
 }
 
@@ -1022,6 +1091,7 @@ mod tests {
                         span: span(6, 9),
                     },
                     steps: Vec::new(),
+                    groups: Vec::new(),
                     span: span(6, 9),
                 }],
                 where_clause: None,

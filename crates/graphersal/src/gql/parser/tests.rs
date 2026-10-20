@@ -881,7 +881,11 @@ fn not_yet_supported_constructs() {
             "INTERSECT",
             Some("union("),
         ),
-        ("MATCH ((a)-->(b)){1,2} RETURN a", "((", Some("repeat(")),
+        (
+            "MATCH (((a)-->(b)){1,2}) RETURN a",
+            "(",
+            Some("((x)-->(y)-->(z))"),
+        ),
         (
             "MATCH shortestPath((a)-->(b)) RETURN a",
             "shortestPath",
@@ -1601,9 +1605,10 @@ fn quantifier_errors() {
     // Vendor path searches stay refused.
     let f = fail("MATCH (a)-[*BFS]->(b) RETURN a");
     assert_eq!(f.kind, GqlErrorKind::Refused);
-    // Quantified path patterns stay "not yet".
-    let f = fail("MATCH ((a)-->(b)){1,2} RETURN a");
-    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    // Quantified path patterns parse since stage 2e (their E17 refusals:
+    // `parenthesized_path_pattern_refusals`).
+    let q = ok("MATCH ((a)-->(b)){1,2} RETURN a");
+    assert_eq!(q.matches[0].patterns[0].groups.len(), 1);
 }
 
 // ----- stage 1b: path variables -----
@@ -2701,7 +2706,10 @@ fn subquery_errors() {
             "MATCH (n) WHERE EXISTS { MATCH (n)-->() UNION MATCH (n) } RETURN n",
             "UNION",
         ),
-        ("MATCH (n) WHERE EXISTS { ((n)-->()){2} } RETURN n", "(("),
+        (
+            "MATCH (n) WHERE EXISTS { ((n)-->{2}()){2} } RETURN n",
+            "{2}",
+        ),
         (
             "MATCH (n) WHERE EXISTS { ANY SHORTEST (n)-->() } RETURN n",
             "ANY SHORTEST",
@@ -3977,4 +3985,348 @@ fn otherwise_is_not_yet_supported() {
         );
     }
     ok("MATCH (otherwise) RETURN otherwise.name AS otherwise");
+}
+
+// ----- stage 2e: parenthesized path patterns -----
+
+/// `(min, max)` of a parenthesized path pattern's quantifier.
+fn bounds(group: &ParenthesizedPath) -> Option<(u64, Option<u64>)> {
+    group.quantifier.map(|q| (q.min, q.max))
+}
+
+/// The variable names of a path's nodes and connectors in text order (`_` anonymous, `.`
+/// implicit, a parenthesized path pattern as `(body){min,max}`).
+fn path_shape(path: &PathPattern) -> String {
+    fn node(n: &NodePattern) -> String {
+        if n.is_implicit() {
+            return ".".into();
+        }
+        n.variable.as_ref().map_or("_".into(), |v| v.name.clone())
+    }
+    fn chain(out: &mut String, steps: &[PatternStep]) {
+        for step in steps {
+            out.push('-');
+            out.push_str(step.edge.variable.as_ref().map_or("_", |v| v.name.as_str()));
+            out.push('-');
+            out.push_str(&node(&step.node));
+        }
+    }
+    let mut out = node(&path.start);
+    chain(&mut out, &path.steps);
+    for group in &path.groups {
+        out.push_str(" (");
+        out.push_str(&node(&group.group.start));
+        chain(&mut out, &group.group.steps);
+        if group.group.where_clause.is_some() {
+            out.push_str(" WHERE");
+        }
+        out.push(')');
+        match bounds(&group.group) {
+            Some((min, Some(max))) => out.push_str(&format!("{{{min},{max}}}")),
+            Some((min, None)) => out.push_str(&format!("{{{min},}}")),
+            None => {}
+        }
+        out.push(' ');
+        out.push_str(&node(&group.node));
+        chain(&mut out, &group.steps);
+    }
+    out
+}
+
+#[test]
+fn parenthesized_path_pattern_forms() {
+    let q = ok("MATCH (a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} (b) RETURN b");
+    let path = &q.matches[0].patterns[0];
+    assert_eq!(path_shape(path), "a (x-e-y WHERE){1,3} b");
+    let group = &path.groups[0];
+    assert_eq!(
+        q.text(group.group.span),
+        "((x)-[e:knows]->(y) WHERE x.age < y.age)"
+    );
+    assert_eq!(q.text(group.group.quantifier.unwrap().span), "{1,3}");
+    assert!(!group.group.quantifier.unwrap().cypher);
+    assert_eq!(
+        group.group.steps[0].edge.labels.as_ref().map(label),
+        Some("knows".into())
+    );
+    assert_eq!(q.text(group.node.span), "(b)");
+    assert_eq!(
+        q.text(path.span),
+        "(a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} (b)"
+    );
+    // Every quantifier form, `?` and none.
+    for (quantifier, expected) in [
+        ("{2}", Some((2, Some(2)))),
+        ("{2,}", Some((2, None))),
+        ("{,3}", Some((0, Some(3)))),
+        ("{,}", Some((0, None))),
+        ("{0}", Some((0, Some(0)))),
+        ("*", Some((0, None))),
+        ("+", Some((1, None))),
+        ("?", Some((0, Some(1)))),
+        ("", None),
+    ] {
+        let query = format!("MATCH (a) ((x)-->(y)){quantifier} (b) RETURN b");
+        let q = ok(&query);
+        let group = &q.matches[0].patterns[0].groups[0].group;
+        assert_eq!(bounds(group), expected, "{query}");
+        if let Some(written) = group.quantifier {
+            assert_eq!(q.text(written.span), quantifier, "{query}");
+        }
+    }
+    // Implicit nodes where the text has none: at either end, between an edge and a group,
+    // between two groups.
+    for (pattern, shape) in [
+        ("((x)-->(y)){2}", ". (x-_-y){2,2} ."),
+        ("(a)-->((x)-->(y))+", "a-_-. (x-_-y){1,} ."),
+        ("((x)-->(y))+-->(b)", ". (x-_-y){1,} .-_-b"),
+        (
+            "((a)-->(b))* ((c)-->(d))? (e)",
+            ". (a-_-b){0,} . (c-_-d){0,1} e",
+        ),
+        (
+            "(a) ((x)-[:k]->(m)<-[f]-(y)){1,2} (b)-[:k]->(c)",
+            "a (x-_-m-f-y){1,2} b-_-c",
+        ),
+        ("(a)-[e]->{1,3}((x)-->(y))", "a-e-. (x-_-y) ."),
+        ("(a) ((x)-->(y) WHERE x.v > 1) (b)", "a (x-_-y WHERE) b"),
+    ] {
+        let q = ok(&format!("MATCH {pattern} RETURN 1 AS one"));
+        let path = &q.matches[0].patterns[0];
+        assert_eq!(path_shape(path), shape, "{pattern}");
+        assert_eq!(q.text(path.span), pattern);
+        // An implicit node spans nothing, at the start of the token after it.
+        for n in std::iter::once(&path.start).chain(path.groups.iter().map(|g| &g.node)) {
+            assert_eq!(n.is_implicit(), q.text(n.span).is_empty(), "{pattern}");
+        }
+    }
+    let q = ok("MATCH ((x)-->(y)){2} RETURN x");
+    let path = &q.matches[0].patterns[0];
+    assert_eq!(
+        (
+            path.start.span.start,
+            path.start.span.line,
+            path.start.span.column
+        ),
+        (6, 1, 7)
+    );
+    assert_eq!(path.groups[0].node.span.start, 21);
+    // A path variable on the whole path, several patterns, OPTIONAL MATCH, EXISTS bodies.
+    let q = ok("MATCH p = (a) ((x)-->(y)){1,2} (b), (b)-->(c) RETURN p");
+    let paths = &q.matches[0].patterns;
+    assert_eq!(q.text(paths[0].span), "p = (a) ((x)-->(y)){1,2} (b)");
+    assert!(paths[1].groups.is_empty());
+    let q = ok("MATCH (a) OPTIONAL MATCH (a) ((x)-->(y))+ (b) RETURN b");
+    assert_eq!(q.matches[1].patterns[0].groups.len(), 1);
+    for body in [
+        "EXISTS { ((x)-->(y)){2} }",
+        "EXISTS { MATCH (n) ((x)-->(y)){2} (m) }",
+        "EXISTS { MATCH (n) ((x)-->(y)){2} (m) RETURN m }",
+        "COUNT { (n) ((x)-->(y))* (m) }",
+    ] {
+        ok(&format!("MATCH (n) WHERE {body} RETURN n"));
+    }
+    // Node patterns that start like a prefix or a path variable stay node patterns.
+    let q = ok("MATCH (trail:person), (any WHERE any.x > 1), (walk), (`all` IS x) RETURN trail");
+    assert!(q.matches[0].patterns.iter().all(|p| p.groups.is_empty()));
+    // The 1b quantified edge and plain paths keep their tree.
+    let q = ok("MATCH (a)-[:knows]->{1,3}(b)-[e*2]->(c) RETURN b");
+    let path = &q.matches[0].patterns[0];
+    assert!(path.groups.is_empty());
+    assert_eq!(path.steps.len(), 2);
+    assert!(path.steps.iter().all(|s| s.edge.quantifier.is_some()));
+}
+
+#[test]
+fn parenthesized_path_pattern_refusals() {
+    // E17: each "not yet supported" (0A000) at the construct, with an alternative.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "MATCH (((a)-->(b)){2}) RETURN a",
+            "(",
+            "MATCH (a) ((x)-->(y)-->(z)){1,3} (b)",
+        ),
+        (
+            "MATCH ((a)-->(b) ((c)-->(d)){2}) RETURN a",
+            "(",
+            "outer one",
+        ),
+        ("MATCH ((a)-->((c)-->(d)){2}) RETURN a", "(", "outer one"),
+        (
+            "MATCH ((a)-->{2}(b)){2} RETURN a",
+            "{2}",
+            "((x)-->()-->(y)){1,3}",
+        ),
+        (
+            "MATCH ((a)-[*2]->(b)){2} RETURN a",
+            "*2",
+            "-[:knows]->{1,3}",
+        ),
+        ("MATCH ((a)-->+(b)) RETURN a", "+", "((x)-->()-->(y)){1,3}"),
+        (
+            "MATCH (p = (a)-->(b)){2} RETURN a",
+            "p =",
+            "MATCH p = (a) ((x)-->(y)){1,3} (b) RETURN p",
+        ),
+        ("MATCH (`p` = (a)-->(b)){2} RETURN a", "`p` =", "MATCH p ="),
+        (
+            "MATCH (TRAIL (a)-->(b)){2} RETURN a",
+            "TRAIL (",
+            "DIFFERENT EDGES",
+        ),
+        (
+            "MATCH (any shortest (a)-->(b)) RETURN a",
+            "any shortest",
+            "without it",
+        ),
+        (
+            "MATCH (ACYCLIC PATH (a)-->(b)) RETURN a",
+            "ACYCLIC PATH",
+            "without it",
+        ),
+        (
+            "MATCH ((a)-->(b), (c)-->(d)){2} RETURN a",
+            ",",
+            "(b), (b)-->(c)",
+        ),
+        ("MATCH ((a)-->(b) | (c)-->(d)){2} RETURN a", "|", "UNION"),
+        (
+            "MATCH ((a)-->(b) |+| (c)-->(d)){2} RETURN a",
+            "|",
+            "[:knows|created]",
+        ),
+        (
+            "MATCH ((a) WHERE a.x = 1){2} RETURN a",
+            "((a) WHERE a.x = 1)",
+            "(a WHERE a.age > 30)",
+        ),
+        ("MATCH (n) ((a)) (m) RETURN n", "((a))", "((x)-->(y)){1,3}"),
+        (
+            "MATCH (n) WHERE EXISTS { ((n)-[*1..2]->()){2} } RETURN n",
+            "*1..2",
+            "{1,3}",
+        ),
+    ];
+    for (query, text, alternative) in cases {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(&f.text, text, "{query}");
+        assert!(
+            f.message.contains("parenthesized path pattern")
+                && f.message.contains("not yet supported"),
+            "{query}: {}",
+            f.message
+        );
+        let given = f.alternative.clone().unwrap_or_default();
+        assert!(given.contains(alternative), "{query}: {given}");
+    }
+}
+
+#[test]
+fn parenthesized_path_pattern_syntax_errors() {
+    let f = fail("MATCH ((a)-->(b)){2}{3} RETURN a");
+    assert_eq!((f.kind, f.text.as_str()), (GqlErrorKind::Syntax, "{"));
+    assert!(f.message.contains("takes one quantifier"), "{}", f.message);
+    let f = fail("MATCH ((a)-->(b))+? RETURN a");
+    assert_eq!((f.kind, f.text.as_str()), (GqlErrorKind::Syntax, "?"));
+    let f = fail("MATCH ((a)-->(b)){3,1} RETURN a");
+    assert_eq!((f.kind, f.text.as_str()), (GqlErrorKind::Syntax, "{3,1}"));
+    assert_eq!(
+        f.alternative.as_deref(),
+        Some("write the smaller bound first, for example {1,3}")
+    );
+    let f = fail("MATCH ((a)-->(b)){1 RETURN a");
+    assert_eq!(f.expected, ["`,`", "`}`"]);
+    let f = fail("MATCH ((a)-->(b) x) RETURN a");
+    assert_eq!(f.expected, ["an edge", "WHERE", "`)`"]);
+    let f = fail("MATCH ((a)-->(b) WHERE a.x = 1 x) RETURN a");
+    assert_eq!(f.expected, ["`)`"]);
+    let f = fail("MATCH ((a)-->(b) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    let f = fail("MATCH ((a)-->) RETURN a");
+    assert_eq!(f.expected, ["`{`", "`*`", "`+`", "`(`"]);
+    // `?` quantifies a parenthesized path pattern only.
+    let f = fail("MATCH (a)?-->(b) RETURN a");
+    assert!(
+        f.message
+            .contains("a quantifier cannot follow a node pattern"),
+        "{}",
+        f.message
+    );
+    let f = fail("MATCH (a)-[e]->?(b) RETURN a");
+    assert_eq!(
+        (f.text.as_str(), f.expected.clone()),
+        (
+            "?",
+            vec!["`{`".into(), "`*`".into(), "`+`".into(), "`(`".into()]
+        )
+    );
+    let f = fail("RETURN 1 ? 2");
+    assert_eq!((f.kind, f.text.as_str()), (GqlErrorKind::Syntax, "?"));
+}
+
+#[test]
+fn parenthesized_path_patterns_are_bounded() {
+    // Each parenthesized path pattern is one MAX_DEPTH level: nesting through body conditions
+    // and EXISTS stops at the depth limit, never with a stack overflow.
+    let nest = |n: usize| {
+        let mut inner = "(n)-->()".to_string();
+        for _ in 0..n {
+            inner = format!("(n) ((x WHERE EXISTS {{ {inner} }})-->(y)){{1,2}} (m)");
+        }
+        format!("MATCH {inner} RETURN 1 AS one")
+    };
+    // Three levels per round: the group, the EXISTS and the pattern of its body.
+    ok(&nest(MAX_DEPTH / 3 - 1));
+    for n in [MAX_DEPTH / 3 + 1, 300] {
+        let f = fail(&nest(n));
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{n}");
+        assert_eq!(f.gqlstatus, "54001");
+    }
+    // Through the body's own WHERE.
+    let mut inner = "(n)-->()".to_string();
+    for _ in 0..300 {
+        inner = format!("((x)-->(y) WHERE EXISTS {{ {inner} }})+");
+    }
+    let f = fail(&format!("MATCH {inner} RETURN 1 AS one"));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+}
+
+#[test]
+fn never_panics_on_mutated_parenthesized_path_patterns() {
+    const SEEDS: &[&str] = &[
+        "MATCH (a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} (b) RETURN b",
+        "MATCH p = ((x)-->(y))+ (b)-[f]->((c)<-[:k]-(d))? RETURN p",
+        "MATCH (n) WHERE EXISTS { (n) ((x)-->(y)){,2} } RETURN n",
+        "MATCH ((a) WHERE a.x)* , (p = (a)-->(b)){2} RETURN a",
+    ];
+    const PIECES: &[&str] = &[
+        "(", ")", "((", "))", "{", "}", "?", "*", "+", "{1,2}", "{0}", "-->", "<-[e]-", "|", ",",
+        "WHERE", "p =", "TRAIL", "(x)", " ",
+    ];
+    let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+    for seed in SEEDS {
+        check(seed);
+        for _ in 0..500 {
+            let mut text = seed.to_string();
+            for _ in 0..1 + rng.below(3) {
+                let mut at = rng.below(text.len() + 1);
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                match rng.below(3) {
+                    0 if at < text.len() => {
+                        let mut end = at + 1;
+                        while !text.is_char_boundary(end) {
+                            end += 1;
+                        }
+                        text.replace_range(at..end, "");
+                    }
+                    _ => text.insert_str(at, PIECES[rng.below(PIECES.len())]),
+                }
+            }
+            check(&text);
+        }
+    }
 }

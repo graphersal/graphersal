@@ -2847,3 +2847,63 @@ fn call_body_with_that_is_not_importing_says_why() {
         f.message
     );
 }
+
+// ----- stage 2e: parenthesized path patterns (not bound yet) -----
+
+#[test]
+fn parenthesized_path_patterns_are_not_yet_bound() {
+    // Until stage 2e.T2 the binder refuses them wherever a pattern stands, before any other
+    // check reads the clause (a body variable read outside is no "undefined variable" yet).
+    for (query, text) in [
+        (
+            "MATCH ((a)-[:knows]->(b)){1,3} RETURN b",
+            "((a)-[:knows]->(b)){1,3}",
+        ),
+        ("MATCH (a) ((x)-->(y))? (b) RETURN x", "((x)-->(y))?"),
+        (
+            "MATCH (a) ((x)-->(y) WHERE x.v > 1) (b) RETURN b",
+            "((x)-->(y) WHERE x.v > 1)",
+        ),
+        (
+            "MATCH (a) OPTIONAL MATCH (a)-->((x)-->(y))+ RETURN a",
+            "((x)-->(y))+",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { ((n)-->(m)){2} } RETURN n",
+            "((n)-->(m)){2}",
+        ),
+        (
+            "MATCH (n) WHERE COUNT { MATCH (n) ((x)-->(y))* (m) RETURN m } > 0 RETURN n",
+            "((x)-->(y))*",
+        ),
+        (
+            "MATCH (n) WHERE (n)-->((x)-->(y)){2} RETURN n",
+            "((x)-->(y)){2}",
+        ),
+        (
+            "CALL { MATCH ((x)-->(y)){2} RETURN x } RETURN x",
+            "((x)-->(y)){2}",
+        ),
+        (
+            "MATCH (n) RETURN [(n)-->(m) WHERE EXISTS { (m) ((x)-->(y)){2} } | m]",
+            "((x)-->(y)){2}",
+        ),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            "a parenthesized path pattern ((a)-->(b)){m,n} is not yet supported in this version",
+            "{query}"
+        );
+        assert!(
+            f.alternative
+                .as_deref()
+                .is_some_and(|a| a.contains("-[:knows]->{1,3}") && a.contains("repeat(")),
+            "{query}: {f:?}"
+        );
+    }
+}

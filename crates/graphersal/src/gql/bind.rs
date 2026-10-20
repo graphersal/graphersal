@@ -977,6 +977,31 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     )
 }
 
+/// Parenthesized path patterns (stage 2e) parse but are not bound yet: the first one of
+/// `matches` is "not yet supported", before any other check reads the clauses' patterns
+/// (every walk over a path's `steps` would miss its `groups`).
+fn refuse_parenthesized_paths(matches: &[MatchClause]) -> BResult<()> {
+    let Some(group) = matches
+        .iter()
+        .flat_map(|m| &m.patterns)
+        .flat_map(|path| &path.groups)
+        .next()
+    else {
+        return Ok(());
+    };
+    let span = match &group.group.quantifier {
+        Some(quantifier) => group.group.span.to(quantifier.span),
+        None => group.group.span,
+    };
+    Err(not_yet(
+        span,
+        "a parenthesized path pattern ((a)-->(b)){m,n}",
+        "quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; for a longer \
+         pattern, write the path out, or use Gremlin repeat(), for example \
+         g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
+    ))
+}
+
 /// Whether `name` is an aggregate function.
 fn is_aggregate(name: &Identifier) -> bool {
     lookup_function(&name.name).is_some_and(|spec| spec.kind == FunctionKind::Aggregate)
@@ -1875,6 +1900,7 @@ impl<'q> Binder<'q> {
     /// any other work on it), and no comprehension variable around a subquery body declared
     /// by one of them.
     fn enter_linear(&mut self, linear: &LinearQuery) -> BResult<()> {
+        refuse_parenthesized_paths(&linear.matches)?;
         for m in &linear.matches {
             if let Some(edge) = m
                 .patterns
@@ -3954,6 +3980,7 @@ impl<'q> Binder<'q> {
         if self.subqueries.len() >= MAX_SUBQUERIES {
             return Err(too_many_subqueries(subquery.span));
         }
+        refuse_parenthesized_paths(&subquery.matches)?;
         for m in &subquery.matches {
             if let Some(edge) = m
                 .patterns

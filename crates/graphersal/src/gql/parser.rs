@@ -1,4 +1,4 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 2d): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL read queries (stages 1a to 2e): tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -21,7 +21,9 @@
 //! filter     := FILTER WHERE? expr
 //! for        := FOR var IN expr (WITH (ORDINALITY | OFFSET) var)?   -- ORDINALITY: a contextual word
 //!             | UNWIND expr AS var
-//! path       := (var '=')? node (edge quantifier? node)*
+//! path       := (var '=')? (node | group) (edge quantifier? (node | group) | group | node)*
+//!                                          -- a node only right after a group (juxtaposed)
+//! group      := '(' node (edge node)+ (WHERE expr)? ')' (quantifier | '?')?   -- stage 2e
 //! node       := '(' var? ((':'|IS) labels)? map? (WHERE expr)? ')'
 //! edge       := '-[' filler ']->' | '<-[' filler ']-' | '-[' filler ']-' | '<-[' filler ']->'
 //!             | '-->' | '<--' | '--' | '<-->' | '->' | '<-' | '-' | '<->'
@@ -121,9 +123,29 @@
 //!   `[e*n]` = `{n}`, `[e*m..n]` = `{m,n}`, `[e*..n]` = `{1,n}`, `[e*m..]` = `{m,}` (Cypher's
 //!   lower bound defaults to 1, GQL's postfix `*` to 0). Bounds are unsigned integer literals; a
 //!   lower bound above the upper bound, a quantifier after a node, and both forms on one edge
-//!   are syntax errors; Memgraph's `*BFS`, `*WSHORTEST`, ... stay refused, and quantified path
-//!   patterns `((a)-->(b)){m,n}` stay "not yet supported". A GQL quantifier is not part of the
-//!   edge's span; a Cypher one is.
+//!   are syntax errors; Memgraph's `*BFS`, `*WSHORTEST`, ... stay refused. A GQL quantifier is
+//!   not part of the edge's span; a Cypher one is.
+//! - **Parenthesized path patterns** (stage 2e, design item 9, [`ParenthesizedPath`]; GQL G035
+//!   quantified paths, G037 questioned paths, G050 parenthesized path patterns with `WHERE`):
+//!   `( chain [WHERE c] )` followed by a GQL quantifier, `?` (`{0,1}`) or nothing (one
+//!   iteration), where a node or an edge's end may stand: `(a) ((x)-[e]->(y)){1,3} (b)`. `(`
+//!   starts one instead of a node pattern when a second `(` follows, or what only it may hold
+//!   first (`p =`, a path mode or search prefix word before `(`, a word, a count or
+//!   `SHORTEST`), so a node named `trail` or `any` stays a node. The path keeps its first plain
+//!   part in [`PathPattern::steps`] and each parenthesized path pattern with what follows it in
+//!   [`PathPattern::groups`]. Where the text has no node next to one (at an end of the path,
+//!   after an edge, between two of them) the parser puts an implicit empty node
+//!   ([`NodePattern::is_implicit`]), which the binder merges like a written one. E17 (P0):
+//!   the body is one chain with at least one edge; a nested parenthesized path pattern, a
+//!   quantified edge (GQL or Cypher form), a path variable, a path mode or search prefix,
+//!   several patterns (`,`), a path pattern union (`|`, `|+|`) and a body without an edge are
+//!   "not yet supported", naming the construct; a second quantifier after one is a syntax
+//!   error. `?` is a token for this form only (after a node or an edge it is a syntax error).
+//!   Each parenthesized path pattern is one [`MAX_DEPTH`] level; the functions from
+//!   [`Parser::path_pattern`] down to [`Parser::node_pattern`] are thin, out-of-line frames
+//!   that fill nodes in place, since they lie under every nested expression of a pattern.
+//!   The pattern-predicate and pattern-comprehension lookaheads do not look for them (a
+//!   parenthesized path pattern there is written in an `EXISTS { }` body).
 //! - **Path variables:** `p = path`; the path's span starts at the variable.
 //! - **`FOR` / `UNWIND`** ([`ForClause`]): GQL `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET
 //!   i]` and its Cypher alias `UNWIND expr AS x` (one meaning, no ordinal). The variables are
@@ -221,12 +243,13 @@ use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
     ComprehensionForm, CountClause, EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind,
-    FilterClause, ForClause, GroupBy, Identifier, ImportingWith, LabelExpr, LabelExprKind,
-    LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry,
-    MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind,
-    PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock,
-    ReduceAccumulator, ReturnClause, ReturnItem, SortDirection, SortItem, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
+    FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, LabelExpr,
+    LabelExprKind, LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal,
+    MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy, Ordinal,
+    OrdinalKind, ParenthesizedPath, PathPattern, PatternComprehension, PatternStep, ProjectionItem,
+    Quantifier, Query, QueryBlock, ReduceAccumulator, ReturnClause, ReturnItem, SortDirection,
+    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind,
+    UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
@@ -754,6 +777,30 @@ type SubqueryBody = (Vec<MatchClause>, Option<Box<CompositeQuery>>);
 /// How many edges the pattern-predicate lookahead follows through a chain of weak edges before
 /// it decides on an expression (a pattern this long is refused by the binder anyway).
 const PREDICATE_LOOKAHEAD_EDGES: usize = 64;
+
+/// The words that open a GQL path mode or path search prefix (`WALK`, `TRAIL`, `SIMPLE`,
+/// `ACYCLIC`, `ANY [SHORTEST]`, `ALL [SHORTEST]`); `SHORTEST` is a keyword. Inside a
+/// parenthesized path pattern they are "not yet supported" (E17).
+const PATH_PREFIX_WORDS: &[&str] = &["WALK", "TRAIL", "SIMPLE", "ACYCLIC", "ANY", "ALL"];
+
+/// What a parenthesized path pattern holds that is not yet supported (E17).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupNotYet {
+    /// A parenthesized path pattern inside another one.
+    Nested,
+    /// A quantified edge in the body.
+    QuantifiedEdge,
+    /// `( p = ... )`.
+    PathVariable,
+    /// `( TRAIL ... )` and the other path modes and search prefixes.
+    PathMode,
+    /// `( (a)-->(b), (c)-->(d) )`.
+    SeveralPatterns,
+    /// `( (a)-->(b) | (c)-->(d) )`, `|+|`.
+    Alternation,
+    /// A body without an edge, `( (a) WHERE .. )`.
+    NoEdge,
+}
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str, tokens: Vec<Token<'a>>) -> Self {
@@ -2018,6 +2065,24 @@ impl<'a> Parser<'a> {
 
     fn path_pattern(&mut self) -> PResult<PathPattern> {
         let variable = self.path_variable();
+        self.check_shortest_path()?;
+        let mut start = self.implicit_node();
+        self.path_node(&mut start)?;
+        let mut steps = Vec::new();
+        let mut groups: Vec<GroupStep> = Vec::new();
+        while self.path_step(&mut steps, &mut groups)? {}
+        let first = variable.as_ref().map_or(start.span, |v| v.span);
+        Ok(PathPattern {
+            span: first.to(self.last),
+            variable,
+            start,
+            steps,
+            groups,
+        })
+    }
+
+    /// Refuses Cypher's `shortestPath(..)` / `allShortestPaths(..)` at the start of a path.
+    fn check_shortest_path(&self) -> PResult<()> {
         let token = self.peek();
         if token.kind == TokenKind::Ident
             && (token.text.eq_ignore_ascii_case("shortestPath")
@@ -2030,25 +2095,312 @@ impl<'a> Parser<'a> {
                  g.v(\"1\").repeat(__.out().simple_path()).until(__.has_id(\"5\")).path().limit(1)",
             ));
         }
-        let start = self.node_pattern()?;
-        self.check_node_quantifier()?;
-        let mut steps = Vec::new();
-        while let Some(mut edge) = self.edge_pattern()? {
-            self.edge_quantifier(&mut edge)?;
-            if edge.quantifier.is_none() && !self.at(&TokenKind::LParen) {
-                return Err(self.unexpected(&["`{`", "`*`", "`+`", "`(`"]));
-            }
-            let node = self.node_pattern()?;
-            self.check_node_quantifier()?;
-            steps.push(PatternStep { edge, node });
+        Ok(())
+    }
+
+    /// One connector of a path after its first node: an edge with the node it leads to
+    /// (pushed onto the steps of the last group, else onto `steps`), or a parenthesized path
+    /// pattern with the node after it; `false` at the end of the path. Out of line, like every
+    /// function between [`Parser::path_pattern`] and [`Parser::node_pattern`], so the frames
+    /// under each nested expression stay small (unoptimized builds give every temporary a
+    /// stack slot).
+    #[inline(never)]
+    fn path_step(
+        &mut self,
+        steps: &mut Vec<PatternStep>,
+        groups: &mut Vec<GroupStep>,
+    ) -> PResult<bool> {
+        if self.group_ahead() {
+            self.group_step(groups)?;
+            return Ok(true);
         }
-        let first = variable.as_ref().map_or(start.span, |v| v.span);
-        Ok(PathPattern {
-            span: first.to(self.last),
-            variable,
-            start,
-            steps,
-        })
+        let target = match groups.last_mut() {
+            Some(group) => &mut group.steps,
+            None => steps,
+        };
+        if !self.path_edge(false, target)? {
+            return Ok(false);
+        }
+        if let Some(step) = target.last_mut() {
+            self.path_node(&mut step.node)?;
+        }
+        Ok(true)
+    }
+
+    /// The edge of a path step with its quantifier, and the check that a node follows it,
+    /// pushed onto `target` as a step with an implicit node for [`Parser::path_node`] to fill
+    /// in place (no node or step moves through the frames between [`Parser::path_pattern`]
+    /// and [`Parser::node_pattern`]); `false` at the end of the chain. In a parenthesized path
+    /// pattern's body (`in_body`) a quantified edge is "not yet supported" (E17).
+    #[inline(never)]
+    fn path_edge(&mut self, in_body: bool, target: &mut Vec<PatternStep>) -> PResult<bool> {
+        let Some(mut edge) = self.edge_pattern()? else {
+            return Ok(false);
+        };
+        self.edge_quantifier(&mut edge)?;
+        if in_body && let Some(quantifier) = &edge.quantifier {
+            return Err(self.group_not_yet(GroupNotYet::QuantifiedEdge, quantifier.span));
+        }
+        if edge.quantifier.is_none() && !self.at(&TokenKind::LParen) {
+            return Err(self.unexpected(&["`{`", "`*`", "`+`", "`(`"]));
+        }
+        let node = self.implicit_node();
+        target.push(PatternStep { edge, node });
+        Ok(true)
+    }
+
+    /// A node of a path where one may stand, written into `out`: the node pattern written
+    /// there, or an implicit empty one before a parenthesized path pattern (stage 2e,
+    /// [`PathPattern`]; `out` is left as it is, an implicit node).
+    #[inline(never)]
+    fn path_node(&mut self, out: &mut NodePattern) -> PResult<()> {
+        if self.group_ahead() {
+            return Ok(());
+        }
+        *out = self.node_pattern()?;
+        self.check_node_quantifier()
+    }
+
+    /// An implicit empty node pattern, spanning nothing at the start of the current token.
+    fn implicit_node(&self) -> NodePattern {
+        let at = self.peek().span;
+        NodePattern {
+            variable: None,
+            labels: None,
+            properties: None,
+            where_clause: None,
+            span: Span {
+                end: at.start,
+                ..at
+            },
+        }
+    }
+
+    /// At `(`: whether a parenthesized path pattern starts here rather than a node pattern: a
+    /// second `(`, or what only a parenthesized path pattern may hold first (a path variable
+    /// `p =`, a path mode prefix such as `TRAIL (`), which the parser then refuses (E17). A
+    /// node pattern never has these: a node's variable is followed by `:`, `IS`, `{`, `WHERE`
+    /// or `)`.
+    fn group_ahead(&self) -> bool {
+        if !self.at(&TokenKind::LParen) {
+            return false;
+        }
+        let next = self.nth(1);
+        match &next.kind {
+            TokenKind::LParen => true,
+            TokenKind::QuotedIdent(_) => self.nth(2).kind == TokenKind::Eq,
+            TokenKind::Ident => self.nth(2).kind == TokenKind::Eq || self.prefix_word_at(1),
+            _ => false,
+        }
+    }
+
+    /// Whether the token `i` ahead is a path mode or search prefix word ([`PATH_PREFIX_WORDS`])
+    /// followed by what continues a prefix (`(`, a word, a count, `SHORTEST`), which no node
+    /// pattern holds.
+    fn prefix_word_at(&self, i: usize) -> bool {
+        let token = self.nth(i);
+        let next = self.nth(i.saturating_add(1));
+        token.kind == TokenKind::Ident
+            && PATH_PREFIX_WORDS
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(token.text))
+            && (matches!(
+                next.kind,
+                TokenKind::LParen | TokenKind::Ident | TokenKind::Integer(_)
+            ) || next.keyword() == Some(Keyword::Shortest))
+    }
+
+    /// A parenthesized path pattern with its quantifier and the node juxtaposed after it (the
+    /// written one, else an implicit one), pushed onto `groups`. One [`MAX_DEPTH`] level.
+    #[inline(never)]
+    fn group_step(&mut self, groups: &mut Vec<GroupStep>) -> PResult<()> {
+        self.enter()?;
+        let result = self.parenthesized_path();
+        self.leave();
+        let group = result?;
+        let node = self.implicit_node();
+        groups.push(GroupStep {
+            group,
+            node,
+            steps: Vec::new(),
+        });
+        match groups.last_mut() {
+            Some(step) if self.at(&TokenKind::LParen) => self.path_node(&mut step.node),
+            _ => Ok(()),
+        }
+    }
+
+    /// `( chain [WHERE expr] )` and its quantifier, at the `(`. The body is one chain with at
+    /// least one edge and no quantifier; everything else GQL allows there is "not yet
+    /// supported" (E17).
+    #[inline(never)]
+    fn parenthesized_path(&mut self) -> PResult<Box<ParenthesizedPath>> {
+        let open = self.expect(&TokenKind::LParen, &["`(`"])?;
+        self.check_group_body_start()?;
+        let mut group = Box::new(ParenthesizedPath {
+            start: self.implicit_node(),
+            steps: Vec::new(),
+            where_clause: None,
+            quantifier: None,
+            span: open,
+        });
+        self.path_node(&mut group.start)?;
+        while self.body_step(&mut group.steps)? {}
+        self.check_group_body_end()?;
+        if self.eat_kw(Keyword::Where).is_some() {
+            group.where_clause = Some(self.expr()?);
+        }
+        group.span =
+            self.close_group(open, group.where_clause.is_some(), group.steps.is_empty())?;
+        group.quantifier = self.group_quantifier()?;
+        Ok(group)
+    }
+
+    /// One edge of a parenthesized path pattern's body with the node it leads to, pushed onto
+    /// `steps`; `false` at the end of the chain. A quantified edge and a nested parenthesized
+    /// path pattern are "not yet supported" (E17).
+    #[inline(never)]
+    fn body_step(&mut self, steps: &mut Vec<PatternStep>) -> PResult<bool> {
+        if !self.path_edge(true, steps)? {
+            return Ok(false);
+        }
+        if let Some(step) = steps.last_mut() {
+            self.path_node(&mut step.node)?;
+        }
+        Ok(true)
+    }
+
+    /// Refuses what may open a parenthesized path pattern's body but is not yet supported
+    /// there: a path variable, a path mode prefix, a nested parenthesized path pattern.
+    fn check_group_body_start(&self) -> PResult<()> {
+        let token = self.peek();
+        match &token.kind {
+            TokenKind::LParen if self.group_ahead() => {
+                Err(self.group_not_yet(GroupNotYet::Nested, token.span))
+            }
+            TokenKind::Ident | TokenKind::QuotedIdent(_) if self.nth(1).kind == TokenKind::Eq => {
+                Err(self.group_not_yet(GroupNotYet::PathVariable, token.span.to(self.nth(1).span)))
+            }
+            TokenKind::Ident if self.prefix_word_at(0) => {
+                Err(self.group_not_yet(GroupNotYet::PathMode, token.span.to(self.nth(1).span)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses what may follow a parenthesized path pattern's chain but is not yet supported
+    /// there: a parenthesized path pattern juxtaposed inside it, a second pattern after `,`, a
+    /// path pattern union `|` / `|+|`.
+    fn check_group_body_end(&self) -> PResult<()> {
+        let token = self.peek();
+        if self.group_ahead() {
+            return Err(self.group_not_yet(GroupNotYet::Nested, token.span));
+        }
+        match token.kind {
+            TokenKind::Comma => Err(self.group_not_yet(GroupNotYet::SeveralPatterns, token.span)),
+            TokenKind::Pipe => Err(self.group_not_yet(GroupNotYet::Alternation, token.span)),
+            _ => Ok(()),
+        }
+    }
+
+    /// The `)` of a parenthesized path pattern opened at `open`: the span from `(` to `)`. A
+    /// body without an edge is "not yet supported" (E17), once its text is complete.
+    fn close_group(&mut self, open: Span, has_where: bool, no_edge: bool) -> PResult<Span> {
+        if !self.at(&TokenKind::RParen) {
+            let expected: &[&str] = if has_where {
+                &["`)`"]
+            } else {
+                &["an edge", "WHERE", "`)`"]
+            };
+            return Err(self.unexpected(expected));
+        }
+        self.advance();
+        let span = open.to(self.last);
+        if no_edge {
+            return Err(self.group_not_yet(GroupNotYet::NoEdge, span));
+        }
+        Ok(span)
+    }
+
+    /// The quantifier after a parenthesized path pattern's `)`, if written: `{m,n}`, `{m,}`,
+    /// `{,n}`, `{n}`, `*`, `+`, or `?` (`{0,1}`, GQL G037). A second quantifier is a syntax
+    /// error.
+    fn group_quantifier(&mut self) -> PResult<Option<Quantifier>> {
+        let start = self.peek().span;
+        let (min, max) = match self.peek().kind {
+            TokenKind::Star => {
+                self.advance();
+                (0, None)
+            }
+            TokenKind::Plus => {
+                self.advance();
+                (1, None)
+            }
+            TokenKind::Question => {
+                self.advance();
+                (0, Some(1))
+            }
+            TokenKind::LBrace => self.braced_quantifier()?,
+            _ => return Ok(None),
+        };
+        let quantifier = self.quantifier(min, max, false, start.to(self.last))?;
+        if matches!(
+            self.peek().kind,
+            TokenKind::LBrace | TokenKind::Star | TokenKind::Plus | TokenKind::Question
+        ) {
+            let b = err(
+                GqlErrorKind::Syntax,
+                self.peek().span,
+                "a parenthesized path pattern takes one quantifier",
+            )
+            .alternative("keep one quantifier, for example ((a)-->(b)){1,3}");
+            return Err(Box::new(b));
+        }
+        Ok(Some(quantifier))
+    }
+
+    /// The "not yet supported" error of a construct inside a parenthesized path pattern (E17).
+    fn group_not_yet(&self, what: GroupNotYet, span: Span) -> Box<GqlErrorBuilder> {
+        let (text, alternative) = match what {
+            GroupNotYet::Nested => (
+                "a parenthesized path pattern nested in another one",
+                "quantify the outer one only and write the inner path out, as in \
+                 MATCH (a) ((x)-->(y)-->(z)){1,3} (b) RETURN b",
+            ),
+            GroupNotYet::QuantifiedEdge => (
+                "a quantified edge inside a parenthesized path pattern",
+                "write the edge out as often as needed inside the parentheses, as in \
+                 ((x)-->()-->(y)){1,3}, or quantify the edge outside them, as in \
+                 MATCH (a)-[:knows]->{1,3}(b) RETURN b",
+            ),
+            GroupNotYet::PathVariable => (
+                "a path variable inside a parenthesized path pattern",
+                "declare the path variable on the whole path, as in \
+                 MATCH p = (a) ((x)-->(y)){1,3} (b) RETURN p",
+            ),
+            GroupNotYet::PathMode => (
+                "a path mode or search prefix inside a parenthesized path pattern",
+                "write the body without it: MATCH binds each edge at most once per clause \
+                 (DIFFERENT EDGES, the GQL default)",
+            ),
+            GroupNotYet::SeveralPatterns => (
+                "several path patterns inside a parenthesized path pattern",
+                "write one chain inside the parentheses and the other pattern as a path of its \
+                 own in the MATCH clause, as in MATCH (a) ((x)-->(y)){1,3} (b), (b)-->(c) \
+                 RETURN c",
+            ),
+            GroupNotYet::Alternation => (
+                "a path pattern union (| or |+|) inside a parenthesized path pattern",
+                "use a label alternative on one edge, as in ((x)-[:knows|created]->(y)){1,3}, \
+                 or write one query per alternative joined by UNION",
+            ),
+            GroupNotYet::NoEdge => (
+                "a parenthesized path pattern without an edge",
+                "put the condition on the node, as in MATCH (a WHERE a.age > 30) RETURN a, or \
+                 give the body an edge, as in ((x)-->(y)){1,3}",
+            ),
+        };
+        self.not_yet(span, text, alternative)
     }
 
     /// The path variable of `p = ...` with its `=`, if written.
@@ -2068,13 +2420,13 @@ impl<'a> Parser<'a> {
         Some(Identifier { name, span })
     }
 
-    /// Refuses a quantifier after a node pattern: GQL quantifies edges (and parenthesized
-    /// paths, not yet supported), never a single node.
+    /// Refuses a quantifier after a node pattern: GQL quantifies edges and parenthesized path
+    /// patterns, never a single node.
     fn check_node_quantifier(&self) -> PResult<()> {
         let token = self.peek();
         if matches!(
             token.kind,
-            TokenKind::LBrace | TokenKind::Star | TokenKind::Plus
+            TokenKind::LBrace | TokenKind::Star | TokenKind::Plus | TokenKind::Question
         ) {
             let b = err(
                 GqlErrorKind::Syntax,
@@ -2325,17 +2677,9 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A node pattern at `(` (the callers check [`Parser::group_ahead`] first).
     fn node_pattern(&mut self) -> PResult<NodePattern> {
         let open = self.expect(&TokenKind::LParen, &["`(`"])?;
-        if self.at(&TokenKind::LParen) {
-            return Err(self.not_yet(
-                open.to(self.peek().span),
-                "a parenthesized path pattern ((a)-->(b)){m,n}",
-                "quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; for a \
-                 longer pattern, write the path out, or use Gremlin repeat(), for example \
-                 g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
-            ));
-        }
         let Filler {
             variable,
             labels,

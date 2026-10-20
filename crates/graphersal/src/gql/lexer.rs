@@ -46,7 +46,9 @@
 //!   quote character doubled (`'it''s'`) is one quote. Any other escape, and a `\u` that is not a
 //!   Unicode scalar value (e.g. a lone surrogate), is an error.
 //! - **Punctuation and operators:** `( ) [ ] { } : , . .. ;`, `| & ! % * + - / =`, `<> !=`
-//!   (both [`TokenKind::Ne`]), `< <= > >=`, `||`, `-> <-`, `~ ~> <~`.
+//!   (both [`TokenKind::Ne`]), `< <= > >=`, `||`, `-> <-`, `~ ~> <~`, `?` (stage 2e: the
+//!   quantifier `{0,1}` of a parenthesized path pattern; anywhere else the parser's syntax
+//!   error).
 
 use std::fmt;
 
@@ -183,6 +185,8 @@ pub(crate) enum TokenKind {
     Bang,
     /// `%`
     Percent,
+    /// `?` (the GQL quantifier `{0,1}` after a parenthesized path pattern)
+    Question,
     /// `*`
     Star,
     /// `+`
@@ -244,6 +248,7 @@ impl TokenKind {
             TokenKind::Ampersand => "`&`",
             TokenKind::Bang => "`!`",
             TokenKind::Percent => "`%`",
+            TokenKind::Question => "`?`",
             TokenKind::Star => "`*`",
             TokenKind::Plus => "`+`",
             TokenKind::Minus => "`-`",
@@ -302,6 +307,7 @@ impl Token<'_> {
             | TokenKind::Ampersand
             | TokenKind::Bang
             | TokenKind::Percent
+            | TokenKind::Question
             | TokenKind::Star
             | TokenKind::Plus
             | TokenKind::Minus
@@ -611,6 +617,7 @@ impl<'a> Lexer<'a> {
             ';' => TokenKind::Semicolon,
             '&' => TokenKind::Ampersand,
             '%' => TokenKind::Percent,
+            '?' => TokenKind::Question,
             '*' => TokenKind::Star,
             '+' => TokenKind::Plus,
             '/' => TokenKind::Slash,
@@ -1220,6 +1227,32 @@ mod tests {
         for kind in kinds("{ } [ ] : , . .. ; | & ! % * + / = <> < <= > >= || - -> <- ~ ~> <~") {
             assert!(!kind.describe().is_empty());
         }
+    }
+
+    #[test]
+    fn question_mark_is_a_token() {
+        // Stage 2e: `?` quantifies a parenthesized path pattern (`{0,1}`).
+        assert_eq!(
+            kinds("((a)-->(b))?"),
+            vec![
+                K::LParen,
+                K::LParen,
+                K::Ident,
+                K::RParen,
+                K::Minus,
+                K::RightArrow,
+                K::LParen,
+                K::Ident,
+                K::RParen,
+                K::RParen,
+                K::Question,
+                K::Eof,
+            ]
+        );
+        let tokens = tokenize("x ?").unwrap();
+        assert_eq!((tokens[1].text, tokens[1].span.start), ("?", 2));
+        assert_eq!(K::Question.describe(), "`?`");
+        assert_eq!(tokens[1].name(), None);
     }
 
     #[test]
