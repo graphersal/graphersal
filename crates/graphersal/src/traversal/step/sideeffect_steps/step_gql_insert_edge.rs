@@ -129,7 +129,8 @@ impl<'g, S: GraphStorage + 'g> StepGqlInsertEdge<'g, S> {
                 endpoint.name, self.label
             ),
         )
-        .gqlstatus(code);
+        .gqlstatus(code)
+        .topic(GqlHelpTopic::Insert);
         let builder = if code == status::NULL_VALUE {
             builder.alternative(format!(
                 "keep only the rows where it is bound before the INSERT: FILTER {} IS NOT NULL",

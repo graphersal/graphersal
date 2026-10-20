@@ -3403,7 +3403,7 @@ impl<'q> Binder<'q> {
             Symbol::Value(_) => return Err(value_as_element(var, BindingKind::Node)),
         };
         if node.labels.is_some() || node.properties.is_some() {
-            return Err(reference_with_parts(word, var, id.0 >= first));
+            return Err(reference_with_parts(word, var, node, id.0 >= first));
         }
         let binding = self.bindings.get(id.0).ok_or_else(|| {
             semantic(
@@ -3452,7 +3452,7 @@ impl<'q> Binder<'q> {
                 "give the new edge its own name, as in -[{}2:T]->",
                 var.name
             ))
-            .topic(GqlHelpTopic::PatternVariable)
+            .topic(GqlHelpTopic::Insert)
             .into());
         }
         let site = Site {
@@ -5761,7 +5761,12 @@ fn value_as_element(var: &Identifier, kind: BindingKind) -> Box<GqlErrorBuilder>
 
 /// The error of a node reference in an `INSERT` with labels or properties (design W5, 42002):
 /// `created` when the same clause creates the node earlier.
-fn reference_with_parts(word: &str, var: &Identifier, created: bool) -> Box<GqlErrorBuilder> {
+fn reference_with_parts(
+    word: &str,
+    var: &Identifier,
+    node: &NodePattern,
+    created: bool,
+) -> Box<GqlErrorBuilder> {
     let name = &var.name;
     let message = if created {
         format!(
@@ -5774,13 +5779,42 @@ fn reference_with_parts(word: &str, var: &Identifier, created: bool) -> Box<GqlE
              ({name}), without labels or properties"
         )
     };
+    let mut alternative = format!(
+        "write ({name}) to connect the node, or give a new node its own name, as in {word} \
+         ({name})-[:T]->({name}2:Label {{k: 1}})"
+    );
+    if !created {
+        // Changing the bound node itself is SET (stage 3c): name the Gremlin steps that do it,
+        // reading the node from the query's row.
+        let rhai = crate::value::literal::rhai_string;
+        let change = match node
+            .labels
+            .as_ref()
+            .map(label_names)
+            .unwrap_or_default()
+            .first()
+        {
+            Some(label) => format!("add_label({})", rhai(&label.name)),
+            None => {
+                let key = node
+                    .properties
+                    .as_ref()
+                    .and_then(|map| map.entries.first())
+                    .map_or("k", |entry| entry.key.name.as_str());
+                format!("property({}, 1)", rhai(key))
+            }
+        };
+        let text = crate::error::gql_key(name);
+        alternative.push_str(&format!(
+            "; to change the bound node itself use the Gremlin steps add_label() and \
+             property() on it, as in g.gql(\"MATCH ({text}) RETURN {text}\").select({}).{change}",
+            rhai(name)
+        ));
+    }
     Box::new(
         semantic(var.span, message)
-            .alternative(format!(
-                "write ({name}) to connect the node, or give a new node its own name, as in \
-                 {word} ({name})-[:T]->({name}2:Label {{k: 1}})"
-            ))
-            .topic(GqlHelpTopic::PatternVariable),
+            .alternative(alternative)
+            .topic(GqlHelpTopic::Insert),
     )
 }
 
@@ -5800,7 +5834,7 @@ fn creates_nothing(word: &str, node: &NodePattern, text: &str) -> Box<GqlErrorBu
             "connect it with a new edge, as in {word} ({name})-[:T]->(:Label), or give the new \
              node its own name, as in {word} ({name}2:Label)"
         ))
-        .topic(GqlHelpTopic::PatternVariable),
+        .topic(GqlHelpTopic::Insert),
     )
 }
 
@@ -5819,7 +5853,7 @@ fn group_as_end(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
             "name the node outside the quantified pattern and connect that one, or iterate the \
              list, as in FOR x IN {name} {word} (x)-[:T]->(:Label)"
         ))
-        .topic(GqlHelpTopic::PatternVariable),
+        .topic(GqlHelpTopic::Insert),
     )
 }
 

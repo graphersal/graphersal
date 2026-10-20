@@ -573,6 +573,138 @@ const GQL_CURATED_2E: &[&str] = &[
     r#"g.gql("MATCH (a) (((x)-->(y)){2}){1,3} (b) RETURN b").toList()"#,
 ];
 
+/// The canonical state dump that ends every stage 3a script: every element with its labels
+/// and properties, in element order (the same on both storages: ids are assigned alike).
+#[cfg(feature = "gql")]
+const DUMP_3A: &str =
+    r#"[g.V().elementMap().toList(), g.E().elementMap().toList(), g.statistics()]"#;
+
+/// Stage 3a: GQL writes (`INSERT` / `CREATE`, `FINISH`, write endings, `CALL` bodies that write,
+/// `RETURN` after writes), each script ending in [`DUMP_3A`]; `run_curated` builds a fresh graph
+/// per run, so every script starts from the modern graph. Errors: the last row fails, a NULL
+/// endpoint, a closed schema, a refused construct, an atomic script that throws.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3A: &[(Mode, &str)] = &[
+    (
+        Mode::Plain,
+        r#"g.gql("INSERT (:person {name: 'ann', age: 41})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes {w: 0.5}]->(f:fruit&food {name: 'apple'}) RETURN f.name AS f").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) INSERT (p)<-[:owned_by]-(:car {owner: p.name})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("FOR i IN range(1, 3) CREATE (:n {i: i})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("CREATE (a:x {k: 1}), (b:y), (a)-[:r]->(b) RETURN a.k AS k, labels(b) AS l").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a:person), (b:software) INSERT (a)-[:uses]->(b) RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) CALL (p) { INSERT (p)-[:tag]->(:t {of: p.name}) } RETURN p.name AS n ORDER BY n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) INSERT (:copy {of: n.name}) FINISH").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("INSERT (n:k {v: $v}) RETURN n", #{v: 7}).select("n").values("v").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("INSERT (n:X) WITH n MATCH (m:X) INSERT (m)-[:self]->(m) RETURN count(m) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.create_index(#{label: "person", key: "name"}); g.gql("FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) INSERT (p)-[:seen]->(:visit {who: n})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.set_schema(g.infer_schema(), SchemaMode.open); g.gql("INSERT (:person {name: 'ok', age: 3})").toList()"#,
+    ),
+    // Errors: nothing of the query stays.
+    (
+        Mode::Plain,
+        r#"g.gql("FOR x IN [1, 0] INSERT (:z {v: 1 / x})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) INSERT (p)-[:made]->(s)").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.set_schema(g.infer_schema(), SchemaMode.closed); g.gql("INSERT (:robot)").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("CALL { INSERT (:x) } IN TRANSACTIONS").toList()"#,
+    ),
+    // Whole-script units and dry runs.
+    (
+        Mode::Atomic,
+        r#"g.gql("INSERT (:a)").toList(); g.gql("INSERT (:b)").toList(); throw "boom""#,
+    ),
+    (
+        Mode::Atomic,
+        r#"g.gql("INSERT (:a)").toList(); g.gql("MATCH (a:a) INSERT (a)-[:to]->(:b)").toList(); g.V().count().next()"#,
+    ),
+    (
+        Mode::DryRun,
+        r#"g.gql("MATCH (p:person {name: 'josh'}) INSERT (p)-[:knows {since: 2020}]->(:person {name: 'dry'})").toList(); g.V().count().next()"#,
+    ),
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3a_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for (mode, script) in GQL_CURATED_3A {
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), *mode, &script);
+        let actual = run_curated(forwarded(), *mode, &script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 3a, not fail on the way: only the five error cases fail.
+    assert_eq!(failing, 5, "only the five error cases fail");
+    // A failed write leaves the modern graph as it was.
+    let modern = run_curated(reference(), Mode::Plain, "1").state;
+    for (mode, script) in &GQL_CURATED_3A[12..17] {
+        let outcome = run_curated(reference(), *mode, script);
+        assert!(outcome.result.is_err(), "{script}");
+        if !script.contains("set_schema") {
+            assert_eq!(outcome.state, modern, "{script}");
+        }
+    }
+    // A dry run reports the change set and keeps nothing.
+    let (mode, script) = GQL_CURATED_3A[GQL_CURATED_3A.len() - 1];
+    let outcome = run_curated(reference(), mode, script);
+    assert!(outcome.changes.is_some_and(|changes| !changes.is_empty()));
+    assert_eq!(outcome.state, modern);
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2e_scripts_give_the_same_result_on_both_storages() {

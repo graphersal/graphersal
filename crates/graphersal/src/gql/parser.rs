@@ -291,7 +291,7 @@ use super::ast::{
     UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
-use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
+use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
 
 /// The deepest nesting accepted: recursion levels of the parser (parentheses, `NOT`, unary
 /// minus, lists, maps, `CASE`, function arguments, label expressions).
@@ -1236,9 +1236,10 @@ impl<'a> Parser<'a> {
         )
         .alternative(
             "write the change as a clause of the query itself, after the clauses that find \
-             its rows, for example MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } \
-             INSERT (:maker {name: p.name})",
-        );
+             its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } \
+             INSERT (:maker {name: p.name})\")",
+        )
+        .topic(GqlHelpTopic::Insert);
         Box::new(b)
     }
 
@@ -2385,9 +2386,9 @@ impl<'a> Parser<'a> {
                 variable.span,
                 &format!("a path variable in {word}"),
                 &format!(
-                    "leave `{} =` out and name the nodes and edges instead, as in {word} \
-                     (a:person)-[e:knows]->(b:person)",
-                    variable.name
+                    "leave `{} =` out and name the nodes and edges instead, as in \
+                     g.gql(\"{word} (a:person)-[e:knows]->(b:person) RETURN a, e, b\")",
+                    gql_key(&variable.name)
                 ),
             ));
         }
@@ -2399,6 +2400,9 @@ impl<'a> Parser<'a> {
                      edge it creates"
                 ),
                 word,
+                "write the nodes and edges one after the other, each edge with its direction \
+                 and one label"
+                    .to_string(),
             ));
         }
         check_insert_node(&pattern.start, word)?;
@@ -5562,23 +5566,75 @@ fn body_without_return(span: Span, word: &str, kind: SubqueryKind) -> Box<GqlErr
     Box::new(b)
 }
 
-/// The example of a correct insert pattern in the errors of [`check_insert_node`] and
-/// [`check_insert_edge`].
-fn insert_error(span: Span, message: String, word: &str) -> Box<GqlErrorBuilder> {
-    let b = err(GqlErrorKind::Syntax, span, message).alternative(format!(
-        "write the nodes with their labels and properties and each edge with its direction \
-         and one label, as in {word} (a:person {{name: 'ann'}})-[:knows]->(b:person:admin)"
-    ));
+/// An error of an insert pattern (designs W6 / W7): `fix` built from the failing pattern, then
+/// a runnable `INSERT` of a correct one; the advice is the INSERT topic's.
+fn insert_error(span: Span, message: String, word: &str, fix: String) -> Box<GqlErrorBuilder> {
+    let b = err(GqlErrorKind::Syntax, span, message)
+        .alternative(format!(
+            "{fix}; for example g.gql(\"{word} (a:person {{name: 'ann'}})-[:knows]->(b:person:admin)\")"
+        ))
+        .topic(GqlHelpTopic::Insert);
     Box::new(b)
+}
+
+/// The variable of a pattern element as GQL text (`default` when it has none).
+fn variable_text(variable: Option<&Identifier>, default: &str) -> String {
+    variable.map_or_else(|| default.to_string(), |v| gql_key(&v.name))
+}
+
+/// The label names in `labels`, in written order, each once (walked without recursion; a
+/// negation's name counts too: it is the label most likely meant).
+fn written_label_names(labels: &LabelExpr) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut pending = vec![labels];
+    while let Some(label) = pending.pop() {
+        match &label.kind {
+            LabelExprKind::Label(name) => {
+                let name = gql_key(&name.name);
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            LabelExprKind::And(left, right) | LabelExprKind::Or(left, right) => {
+                pending.push(right);
+                pending.push(left);
+            }
+            LabelExprKind::Not(inner) => pending.push(inner),
+            LabelExprKind::Wildcard => {}
+        }
+    }
+    names
+}
+
+/// The edge `edge` as a valid insert edge: its variable, `label` (else its first written label
+/// name, else `T`) and `extra` inside the brackets, its direction (rightwards when it has
+/// none).
+fn insert_edge_text(edge: &EdgePattern, label: Option<&str>, extra: &str) -> String {
+    let first = edge
+        .labels
+        .as_ref()
+        .and_then(|labels| written_label_names(labels).into_iter().next());
+    let label = label.map_or_else(|| first.unwrap_or_else(|| "T".to_string()), str::to_string);
+    let variable = variable_text(edge.variable.as_ref(), "");
+    let inner = format!("{variable}:{label}{extra}");
+    match edge.direction {
+        EdgeDirection::Left => format!("<-[{inner}]-"),
+        EdgeDirection::Right | EdgeDirection::Any => format!("-[{inner}]->"),
+    }
 }
 
 /// A node pattern of an `INSERT` (design W7): no `WHERE`; labels a conjunction of names.
 fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
+    let variable = variable_text(node.variable.as_ref(), "n");
     if let Some(condition) = &node.where_clause {
         return Err(insert_error(
             condition.span,
             format!("a WHERE inside a node pattern cannot stand in {word}: it creates the node"),
             word,
+            format!(
+                "give the new node its properties in its map instead, as in ({variable}:Label \
+                 {{k: 1}}), and test conditions in a WHERE or FILTER before the {word}"
+            ),
         ));
     }
     let Some(labels) = &node.labels else {
@@ -5598,6 +5654,12 @@ fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
             LabelExprKind::Not(_) => "`!` (a label negation)",
             LabelExprKind::Wildcard => "`%` (any label)",
         };
+        let names = written_label_names(labels);
+        let names = if names.is_empty() {
+            "Label".to_string()
+        } else {
+            names.join("&")
+        };
         return Err(insert_error(
             label.span,
             format!(
@@ -5605,6 +5667,7 @@ fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
                  by `&` or `:`"
             ),
             word,
+            format!("write the labels the new node gets, as in ({variable}:{names})"),
         ));
     }
     Ok(())
@@ -5614,17 +5677,32 @@ fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
 /// no `WHERE`.
 fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
     if edge.direction == EdgeDirection::Any {
+        let right = insert_edge_text(edge, None, "");
+        let left = insert_edge_text(
+            &EdgePattern {
+                direction: EdgeDirection::Left,
+                ..edge.clone()
+            },
+            None,
+            "",
+        );
         return Err(insert_error(
             edge.span,
             format!("{word} needs a direction; write -[e:T]-> or <-[e:T]-"),
             word,
+            format!(
+                "give the new edge its direction, from the node before it ({right}) or to it \
+                 ({left})"
+            ),
         ));
     }
     if let Some(quantifier) = &edge.quantifier {
+        let one = insert_edge_text(edge, None, "");
         return Err(insert_error(
             quantifier.span,
             format!("a quantifier cannot stand in {word}: each edge pattern creates one edge"),
             word,
+            format!("write one edge pattern for each edge to create, as in (a){one}(m){one}(b)"),
         ));
     }
     match &edge.labels {
@@ -5633,6 +5711,10 @@ fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
                 edge.span,
                 format!("an edge in {word} needs exactly one label, its type: write -[:T]->"),
                 word,
+                format!(
+                    "give the new edge its type, as in {}",
+                    insert_edge_text(edge, Some("T"), "")
+                ),
             ));
         }
         Some(LabelExpr {
@@ -5647,6 +5729,10 @@ fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
                      here"
                 ),
                 word,
+                format!(
+                    "give the new edge one label, as in {}",
+                    insert_edge_text(edge, None, "")
+                ),
             ));
         }
     }
@@ -5655,6 +5741,11 @@ fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
             condition.span,
             format!("a WHERE inside an edge pattern cannot stand in {word}: it creates the edge"),
             word,
+            format!(
+                "give the new edge its properties in its map instead, as in {}, and test \
+                 conditions in a WHERE or FILTER before the {word}",
+                insert_edge_text(edge, None, " {k: 1}")
+            ),
         ));
     }
     Ok(())

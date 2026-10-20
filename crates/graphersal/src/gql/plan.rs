@@ -436,7 +436,8 @@ pub(crate) enum Stage {
 /// order, then its new edges in text order, once per incoming row (`gql:insert_node` /
 /// `gql:insert_edge`, design W-d), each element labelled only when read later (D11). After it
 /// the last element created is the current element (a row passes on with every element the
-/// clause created bound). A query that writes has no merge point of the lowering (design W15).
+/// clause created bound). A query that writes has no merge point of the lowering (design W15;
+/// the optimizer's general `lazy_barrier` rule may still place a pass-through one).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WriteStage {
     /// The segment (index into [`BoundQuery::segments`], a `Segment::Write`).

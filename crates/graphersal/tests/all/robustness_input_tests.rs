@@ -3937,3 +3937,432 @@ fn random_gql_2e_queries_never_panic_and_equal_their_rewrites() {
     }
     fatal.assert_empty("GQL 2e quantified path patterns");
 }
+
+// ----- stage 3a: GQL writes (INSERT / CREATE) -----
+
+/// One vertex as text for [`gql_3a_dump`]: its labels and its properties sorted by key.
+#[cfg(feature = "gql")]
+fn gql_3a_vertex<G: graphersal::storage::GraphStorage>(g: &G, v: G::VertexId) -> String {
+    let mut props: Vec<String> = g
+        .vertex_properties(v)
+        .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
+        .unwrap_or_default();
+    props.sort();
+    format!("{:?} {{{}}}", g.vertex_labels(v), props.join(", "))
+}
+
+/// The canonical state of `g`, independent of element ids: every vertex (labels, properties)
+/// and every edge (label, properties, both ends by their content), sorted.
+#[cfg(feature = "gql")]
+fn gql_3a_dump<G: graphersal::storage::GraphStorage>(g: &G) -> Vec<String> {
+    let mut lines: Vec<String> = g
+        .vertices()
+        .map(|v| format!("V {}", gql_3a_vertex(g, v)))
+        .collect();
+    for e in g.edges() {
+        let mut props: Vec<String> = g
+            .edge_properties(e)
+            .map(|map| map.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
+            .unwrap_or_default();
+        props.sort();
+        let ends = g
+            .edge_endpoints(e)
+            .map(|(from, to)| format!("{} -> {}", gql_3a_vertex(g, from), gql_3a_vertex(g, to)))
+            .unwrap_or_default();
+        lines.push(format!(
+            "E {} {{{}}} {ends}",
+            g.edge_label(e).unwrap_or_default(),
+            props.join(", ")
+        ));
+    }
+    lines.sort();
+    lines
+}
+
+/// A random `INSERT` / `CREATE` query and its Gremlin twin (Rhai), which create the same
+/// elements: the rows (one unit row, `MATCH (p:person)` or `FOR i IN [..]`), then a path of one
+/// to three nodes, each new (labels and a constant or row-dependent property map) or the
+/// bound `p`, joined by edges of either direction with one label. GQL creates the nodes in text
+/// order, then the edges in text order (design W-d); the twin does the same with `add_v()` /
+/// `add_e()` and `as()` labels. With `fail`, the rows come from `FOR x IN [1, .., 0]` and the
+/// first new node stores `1 / x`, so the last row fails.
+#[cfg(feature = "gql")]
+fn random_gql_3a_write(rng: &mut Rng, fail: bool) -> (String, String) {
+    let source = if fail { 3 } else { rng.below(3) };
+    let (mut gql, mut twin) = match source {
+        0 => (String::new(), "g.inject(0)".to_string()),
+        1 => (
+            "MATCH (p:person) ".to_string(),
+            "g.v().has_label(\"person\").as(\"p\")".to_string(),
+        ),
+        2 => {
+            let items = *rng.pick(&["[1]", "[1, 2]", "[1, 1, 2]", "[3, 2, 1]"]);
+            (
+                format!("FOR i IN {items} "),
+                format!("g.inject({})", &items[1..items.len() - 1]) + ".as(\"i\")",
+            )
+        }
+        _ => {
+            let items = *rng.pick(&["[1, 0]", "[2, 1, 0]", "[1, 1, 0]"]);
+            (
+                format!("FOR x IN {items} "),
+                format!("g.inject({})", &items[1..items.len() - 1]) + ".as(\"x\")",
+            )
+        }
+    };
+    // A failing query may also run on several rows per item: the last of them fails.
+    let with_match = source == 1 || (source == 3 && rng.chance(50));
+    if source == 3 && with_match {
+        gql.push_str("MATCH (p:person) ");
+        twin.push_str(".v().has_label(\"person\").as(\"p\")");
+    }
+    let nodes = 1 + rng.below(3);
+    // Per node: `None` for the bound `p`, else its labels and its properties (GQL, Gremlin).
+    let mut parts: Vec<Gql3aNode> = Vec::new();
+    for at in 0..nodes {
+        if with_match
+            && nodes > 1
+            && !(fail && at == 0)
+            && rng.chance(30)
+            && !parts.iter().any(Option::is_none)
+        {
+            parts.push(None);
+            continue;
+        }
+        let labels: Vec<&str> = match rng.below(4) {
+            0 => Vec::new(),
+            1 => vec!["A"],
+            2 => vec!["B"],
+            _ => vec!["A", "B"],
+        };
+        let mut props: Vec<(String, String)> = Vec::new();
+        if fail && at == 0 {
+            props.push((
+                "v: 1 / x".into(),
+                "property(\"v\", __.select(\"x\").math(\"1 / _\"))".into(),
+            ));
+        }
+        match rng.below(5) {
+            0 => {}
+            1 => props.push(("k: 1".into(), "property(\"k\", 1)".into())),
+            2 => props.push(("s: 'a'".into(), "property(\"s\", \"a\")".into())),
+            3 if with_match => props.push((
+                "of: p.name".into(),
+                "property(\"of\", __.select(\"p\").values(\"name\"))".into(),
+            )),
+            3 if source == 2 => {
+                props.push(("i: i".into(), "property(\"i\", __.select(\"i\"))".into()))
+            }
+            _ => {
+                props.push(("k: 2".into(), "property(\"k\", 2)".into()));
+                props.push(("f: 1.5".into(), "property(\"f\", 1.5)".into()));
+            }
+        }
+        parts.push(Some((labels, props)));
+    }
+    let name = |at: usize, part: &Gql3aNode| match part {
+        None => "p".to_string(),
+        Some(_) => format!("n{at}"),
+    };
+    let keyword = *rng.pick(&["INSERT", "CREATE"]);
+    gql.push_str(keyword);
+    gql.push(' ');
+    let mut edges: Vec<(String, String, &str, bool)> = Vec::new();
+    for (at, part) in parts.iter().enumerate() {
+        if at > 0 {
+            let label = *rng.pick(&["T", "U"]);
+            let props = rng.chance(30);
+            let map = if props { " {w: 1}" } else { "" };
+            let previous = name(at - 1, &parts[at - 1]);
+            let this = name(at, part);
+            if rng.chance(50) {
+                gql.push_str(&format!("-[:{label}{map}]->"));
+                edges.push((previous, this, label, props));
+            } else {
+                gql.push_str(&format!("<-[:{label}{map}]-"));
+                edges.push((this, previous, label, props));
+            }
+        }
+        match part {
+            None => gql.push_str("(p)"),
+            Some((labels, props)) => {
+                let written = if labels.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", labels.join(if rng.chance(50) { "&" } else { ":" }))
+                };
+                let map = if props.is_empty() {
+                    String::new()
+                } else {
+                    let entries: Vec<&str> = props.iter().map(|(g, _)| g.as_str()).collect();
+                    format!(" {{{}}}", entries.join(", "))
+                };
+                gql.push_str(&format!("(n{at}{written}{map})"));
+                let quoted: Vec<String> = labels.iter().map(|l| format!("\"{l}\"")).collect();
+                let add = if labels.is_empty() {
+                    "add_v()".to_string()
+                } else {
+                    format!("add_v([{}])", quoted.join(", "))
+                };
+                twin.push('.');
+                twin.push_str(&add);
+                for (_, step) in props {
+                    twin.push('.');
+                    twin.push_str(step);
+                }
+                twin.push_str(&format!(".as(\"n{at}\")"));
+            }
+        }
+    }
+    for (from, to, label, props) in edges {
+        twin.push_str(&format!(
+            ".add_e(\"{label}\").from(\"{from}\").to(\"{to}\")"
+        ));
+        if props {
+            twin.push_str(".property(\"w\", 1)");
+        }
+    }
+    gql.push_str(rng.pick(&["", " FINISH", " RETURN count(*) AS c"]));
+    twin.push_str(".iterate()");
+    (gql, twin)
+}
+
+/// One node of [`random_gql_3a_write`]: `None` for the bound `p`, else its labels and its
+/// properties (each as GQL and as a Gremlin step).
+#[cfg(feature = "gql")]
+type Gql3aNode = Option<(Vec<&'static str>, Vec<(String, String)>)>;
+
+/// The canonical state of the modern graph after `script` ran on it through Rhai, or the
+/// error text.
+#[cfg(feature = "gql")]
+fn gql_3a_script_state(script: &str) -> Result<Vec<String>, String> {
+    let graph = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
+    let _ = eval_value_with_limits(
+        graph.clone(),
+        script,
+        HashMap::new(),
+        &ScriptLimits::default(),
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(gql_3a_dump(&*graph.read()))
+}
+
+/// Runs `query` as a write on the modern graph: from Rust (rows, profile, the diagnostic in
+/// both spellings) and from Rhai (a writing unit, then the same with a following Gremlin step).
+#[cfg(feature = "gql")]
+fn exercise_gql_write(query: String) -> Result<(), Outcome> {
+    guarded(WATCHDOG, move || {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let params = [
+            ("n", ElementProperty::from(2)),
+            ("name", ElementProperty::from("x")),
+        ];
+        for camel in [false, true] {
+            let mut g = graph.traversal_mut();
+            if camel {
+                g = g.with("render.spelling", "camel");
+            }
+            if let Err(err) = g.gql_with(&query, params.clone()).to_list() {
+                let _ = format_diagnostic(&err);
+                let _ = err.help();
+            }
+        }
+        match graph.traversal_mut().gql(&query).profile() {
+            Ok(metrics) => {
+                let _ = metrics.to_string();
+            }
+            Err(err) => {
+                let _ = format_diagnostic(&err);
+            }
+        }
+        let graph = Arc::new(Graph::new(graph));
+        let script_params: HashMap<String, ElementProperty> =
+            [("q".to_string(), ElementProperty::from(query.as_str()))].into();
+        let _ = eval_value_with_limits(
+            graph,
+            r#"g.gql(q).toList();
+               g.gql(q, #{n: 2, name: "x"}).count().next();
+               g.with("render.spelling", "camel").gql(q).select("n0").out().toList();"#,
+            script_params,
+            &ScriptLimits::default(),
+        );
+    })
+}
+
+/// Adversarial and refused write queries of stage 3a: a write clause in every place, wrong
+/// patterns (designs W5-W7), NULL and non-node endpoints, huge row counts.
+#[cfg(feature = "gql")]
+const GQL_3A_CORPUS: &[&str] = &[
+    "INSERT (a:A {k: 1})-[:T {w: 2}]->(b:B)<-[:U]-(c)",
+    "CREATE (a), (b), (a)-[:T]->(b)",
+    "MATCH (p:person) INSERT (p)-[:T]->(p)",
+    "MATCH (p:person) OPTIONAL MATCH (p)-[:zzz]->(q) INSERT (p)-[:T]->(q)",
+    "FOR x IN [1, 'a', null] INSERT (:X {v: x})",
+    "FOR x IN [1, 2] INSERT (a)-[:T]->(x)",
+    "MATCH (p) INSERT (p:extra)",
+    "MATCH (a)-[e]->(b) INSERT (a)-[e:T]->(b)",
+    "INSERT (a)-[:T]-(b)",
+    "INSERT (a)-[:T|U]->(b)",
+    "INSERT (a:A|B)",
+    "INSERT (a:!A)",
+    "INSERT (a:%)",
+    "INSERT p = (a)-[:T]->(b)",
+    "INSERT ((a)-[:T]->(b)){2}",
+    "INSERT (a)-[:T*2]->(b)",
+    "INSERT (:X {k: count(*)})",
+    "INSERT (:X {k: 1, k: 2})",
+    "INSERT (:X {k: (:Y)})",
+    "MATCH (p) INSERT (:X {k: p})",
+    "MATCH (p) WHERE EXISTS { INSERT (:x) } RETURN p",
+    "MATCH (p) RETURN COUNT { CREATE (:x) } AS c",
+    "MATCH (p) RETURN [(p)-->(m) | CREATE (k)] AS l",
+    "MATCH (p) RETURN 1 AS a UNION INSERT (:x) RETURN 1 AS a",
+    "MATCH (p) CALL (p) { INSERT (p)-[:T]->(:X) } RETURN p",
+    "MATCH (p) OPTIONAL CALL (p) { INSERT (:X {of: p.name}) } RETURN count(*) AS c",
+    "INSERT (n:X) RETURN n NEXT MATCH (n)-->(m) RETURN m",
+    "INSERT (n:X) WITH n MATCH (m:X) RETURN count(m) AS c",
+    "INSERT (n:X) INSERT (n)-[:T]->(:Y) FINISH",
+    "FOR i IN range(1, 200) INSERT (:Many {i: i})",
+    "MATCH (a), (b) INSERT (a)-[:all]->(b)",
+    "MATCH (a), (b), (c) INSERT (:triple {a: a.name, b: b.name, c: c.name})",
+    "FOR x IN [1, 0] INSERT (:Z {v: 1 / x})",
+    "MATCH (n) WITH n, n.age AS old INSERT (:Copy {age: old}) RETURN old",
+    "INSERT (:X {m: {a: [1, 'b', {c: null}]}})",
+    "INSERT (:X {v: $n, w: $missing})",
+    "INSERT",
+    "INSERT (",
+    "CREATE INDEX FOR (n:X) ON (n.k)",
+    "LOAD CSV FROM 'x' AS row INSERT (:X)",
+    "MATCH (n) FOREACH (x IN [1] | CREATE (m))",
+];
+
+/// Tokens of stage 3a for the token soup (a new list: the existing ones stay as they are).
+#[cfg(feature = "gql")]
+const GQL_3A_TOKENS: &[&str] = &[
+    "INSERT",
+    "CREATE",
+    "FINISH",
+    "MATCH",
+    "FOR",
+    "IN",
+    "[1, 2]",
+    "x",
+    "(n)",
+    "(n:A)",
+    "(n:A&B {k: 1})",
+    "(:B)",
+    "(p)",
+    "-[:T]->",
+    "<-[:U]-",
+    "-[e:T {w: 1}]->",
+    "-[:T]-",
+    ",",
+    "RETURN",
+    "n",
+    "count(*)",
+    "OPTIONAL",
+    "CALL",
+    "{",
+    "}",
+    "WITH",
+    "WHERE",
+    "1 / 0",
+    "NULL",
+    "(m {v: n.k})",
+    "AS",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_3a_writes_never_panic_equal_their_twins_and_fail_without_trace() {
+    let mut fatal = Fatal::default();
+    let mut differences = Vec::new();
+    let mut traces = Vec::new();
+    let mut rng = Rng::new(0x3A1A_5E27);
+    let modern = gql_3a_dump(&TraversalGraph::tinkerpop_modern());
+    let mut texts: Vec<String> = GQL_3A_CORPUS.iter().map(|s| s.to_string()).collect();
+    let mut generated = Vec::new();
+    for _ in 0..budget(40) {
+        generated.push((random_gql_3a_write(&mut rng, false), false));
+        generated.push((random_gql_3a_write(&mut rng, true), true));
+    }
+    let mut twins = 0;
+    for ((query, twin), fail) in generated {
+        texts.push(query.clone());
+        let label = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            let rows = graph
+                .traversal_mut()
+                .gql(&query)
+                .to_list()
+                .map_err(|e| e.to_string());
+            let gql = rows.map(|_| gql_3a_dump(&graph));
+            let rhai = gql_3a_script_state(&format!(
+                "g.gql({}).iterate()",
+                graphersal_rhai_string(&query)
+            ));
+            let gremlin = gql_3a_script_state(&twin);
+            (query, twin, gql, rhai, gremlin, gql_3a_dump(&graph))
+        });
+        let Ok((query, twin, gql, rhai, gremlin, after)) = outcome else {
+            fatal.check(&label, outcome.map(|_| ()));
+            continue;
+        };
+        if fail {
+            // The last row fails: an error, and nothing of the earlier rows stays.
+            if gql.is_ok() || rhai.is_ok() || after != modern {
+                traces.push(format!("{query}\n  {gql:?}\n  rhai: {rhai:?}"));
+            }
+            if gremlin.is_ok() {
+                traces.push(format!("the twin of a failing query ran: {twin}"));
+            }
+            continue;
+        }
+        twins += 1;
+        match (&gql, &gremlin) {
+            (Ok(gql_state), Ok(gremlin_state)) if gql_state == gremlin_state && gql == rhai => {}
+            _ => differences.push(format!(
+                "{query}\n  GQL:     {gql:?}\n  Rhai:    {rhai:?}\n  {twin}\n  Gremlin: {gremlin:?}"
+            )),
+        }
+    }
+    assert!(twins >= budget(40) as usize, "only {twins} twins ran");
+    assert!(
+        differences.is_empty(),
+        "{} INSERT queries whose final graph differs from their Gremlin twin:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    assert!(
+        traces.is_empty(),
+        "{} failing INSERT queries left a trace:\n{}",
+        traces.len(),
+        traces.join("\n")
+    );
+    for _ in 0..budget(40) {
+        let base = rng.pick(GQL_3A_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(40) {
+        let len = 1 + rng.below(16);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_3A_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "INSERT");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql_write(text.clone()));
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 3a writes");
+}
+
+/// `text` as a Rhai string literal.
+#[cfg(feature = "gql")]
+fn graphersal_rhai_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}

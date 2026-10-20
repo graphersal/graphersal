@@ -10021,4 +10021,351 @@ mod gql {
             "{help}"
         );
     }
+
+    // ----- stage 3a: help sweep for INSERT / CREATE (rule 6) -----
+
+    /// The general advice of every error about an INSERT pattern.
+    const INSERT_ADVICE: &str = "INSERT (Cypher CREATE) creates its pattern once for each row: \
+         a new node with the labels written, joined by & or :, and a property map; a new edge \
+         with a direction and exactly one label; and a variable bound before, written alone as \
+         (p), connects the existing node, as in g.gql(\"MATCH (p:person {name: 'marko'}) INSERT \
+         (p)-[:likes]->(f:fruit&food {name: 'apple'}) RETURN f.name\"). A query may end with the \
+         INSERT (it then returns no rows), and FOR gives it one row per item, as in \
+         g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\").";
+
+    /// The example of a correct INSERT in the errors of a wrong pattern.
+    const INSERT_EXAMPLE: &str =
+        "; for example g.gql(\"INSERT (a:person {name: 'ann'})-[:knows]->(b:person:admin)\"). ";
+
+    /// The error of the GQL `query` run as a write on a fresh modern graph; the graph afterwards.
+    fn gql_write_failure(query: &str) -> (Box<TraverserError>, TraversalGraph) {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let err = graph
+            .traversal_mut()
+            .gql(query)
+            .to_list()
+            .expect_err("the GQL write must fail");
+        (err, graph)
+    }
+
+    /// Runs every `g.gql(..)` example of `help` as a write, each on a fresh modern graph.
+    fn assert_write_examples_run(help: &str) {
+        let examples = gql_examples(help);
+        assert!(!examples.is_empty(), "no g.gql(..) example in: {help}");
+        for (_, query) in examples {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            let rows = graph.traversal_mut().gql(&query).to_list();
+            assert!(rows.is_ok(), "{query}: {rows:?}");
+        }
+    }
+
+    /// Element counts of a graph.
+    fn counts(graph: &TraversalGraph) -> (usize, usize) {
+        (graph.vertices().count(), graph.edges().count())
+    }
+
+    #[test]
+    fn gql_insert_pattern_errors_build_the_fix_from_the_failing_pattern() {
+        for (query, status, fix) in [
+            (
+                "INSERT (a)-[e:T]-(b)",
+                "42001",
+                "give the new edge its direction, from the node before it (-[e:T]->) or to it \
+                 (<-[e:T]-)",
+            ),
+            (
+                "CREATE (a)<-[:T|U]-(b)",
+                "42001",
+                "give the new edge one label, as in <-[:T]-",
+            ),
+            (
+                "INSERT (a)-[e]->(b)",
+                "42001",
+                "give the new edge its type, as in -[e:T]->",
+            ),
+            (
+                "INSERT (a)-[:T*2]->(b)",
+                "42001",
+                "write one edge pattern for each edge to create, as in (a)-[:T]->(m)-[:T]->(b)",
+            ),
+            (
+                "INSERT (a:A|!B)",
+                "42001",
+                "write the labels the new node gets, as in (a:A&B)",
+            ),
+            (
+                "INSERT (a {x: 1} WHERE a.x > 1)",
+                "42001",
+                "give the new node its properties in its map instead, as in (a:Label {k: 1}), \
+                 and test conditions in a WHERE or FILTER before the INSERT",
+            ),
+            (
+                "INSERT ((a)-[:T]->(b)){2}",
+                "42001",
+                "write the nodes and edges one after the other, each edge with its direction \
+                 and one label",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            let (kind, code) = kind_and_status(&err);
+            assert_eq!(
+                (kind, code.as_str()),
+                (GqlErrorKind::Syntax, status),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            // The example keeps the keyword of the query.
+            let example = INSERT_EXAMPLE.replace("INSERT", &query[..6]);
+            assert_eq!(help, format!("{fix}{example}{INSERT_ADVICE}"), "{query}");
+            assert!(!help.contains("a GQL read query"), "{help}");
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6), "{query}");
+        }
+    }
+
+    #[test]
+    fn gql_insert_reference_errors_name_the_gremlin_steps_for_a_bound_node() {
+        for (query, start) in [
+            (
+                "MATCH (p:person) INSERT (p:x)",
+                "write (p) to connect the node, or give a new node its own name, as in INSERT \
+                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use the Gremlin \
+                 steps add_label() and property() on it, as in g.gql(\"MATCH (p) RETURN \
+                 p\").select(\"p\").add_label(\"x\"). ",
+            ),
+            (
+                "MATCH (p:person) CREATE (p {age: 1})",
+                "write (p) to connect the node, or give a new node its own name, as in CREATE \
+                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use the Gremlin \
+                 steps add_label() and property() on it, as in g.gql(\"MATCH (p) RETURN \
+                 p\").select(\"p\").property(\"age\", 1). ",
+            ),
+            (
+                "INSERT (a:x), (a:y)",
+                "write (a) to connect the node, or give a new node its own name, as in INSERT \
+                 (a)-[:T]->(a2:Label {k: 1}). ",
+            ),
+            (
+                "MATCH (p:person)-[e:knows]->(q) INSERT (p)-[e:knows]->(q)",
+                "give the new edge its own name, as in -[e2:T]->. ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(help, format!("{start}{INSERT_ADVICE}"), "{query}");
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6), "{query}");
+        }
+        // The Gremlin form of the advice runs: it labels every node.
+        let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+        let labelled = crate::script_host::eval(
+            graph,
+            r#"g.gql("MATCH (p) RETURN p").select("p").add_label("x").iterate(); g.v().has_label("x").count().next()"#,
+        )
+        .expect("the advice runs");
+        assert_eq!(labelled, "6");
+        // camelCase respells the Gremlin steps of the advice, not the GQL text.
+        let help = gql_failure(|g| {
+            g.with("render.spelling", "camel")
+                .gql("MATCH (p:person) INSERT (p:x)")
+                .to_list()
+        })
+        .0
+        .help()
+        .expect("help");
+        assert!(help.contains(".select(\"p\").addLabel(\"x\")"), "{help}");
+        assert!(help.contains("g.gql(\"MATCH (p) RETURN p\")"), "{help}");
+    }
+
+    #[test]
+    fn gql_write_inside_a_subquery_expression_names_the_clause_form() {
+        for (query, message) in [
+            (
+                "MATCH (p) WHERE EXISTS { INSERT (:x) } RETURN p",
+                "INSERT inside EXISTS { }: a subquery expression or a comprehension cannot write",
+            ),
+            (
+                "MATCH (p) RETURN COUNT { CREATE (:x) } AS c",
+                "CREATE inside COUNT { }: a subquery expression or a comprehension cannot write",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Syntax, "42001".to_string())
+            );
+            assert!(report.contains(message), "{report}");
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!(
+                    "write the change as a clause of the query itself, after the clauses that \
+                     find its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS {{ \
+                     (p)-[:created]->() }} INSERT (:maker {{name: p.name}})\"). {INSERT_ADVICE}"
+                )
+            );
+            assert_write_examples_run(&help);
+        }
+    }
+
+    #[test]
+    fn gql_null_insert_endpoint_names_the_filter_and_changes_nothing() {
+        let (err, graph) = gql_write_failure(
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) INSERT (p)-[:made]->(s)",
+        );
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22004".to_string())
+        );
+        let report = format_diagnostic(&err);
+        assert!(
+            report.contains("the destination node `s` of the inserted `:made` edge is NULL"),
+            "{report}"
+        );
+        let help = err.help().expect("help");
+        assert_eq!(
+            help,
+            "keep only the rows where it is bound before the INSERT: FILTER s IS NOT NULL. A \
+             row of the data gave the marked endpoint of the new edge no node: an edge connects \
+             two nodes, so a variable that OPTIONAL MATCH may leave NULL is filtered first, as \
+             in g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) FILTER s IS NOT \
+             NULL INSERT (p)-[:made]->(s)\"), and a value that is no node is turned into one by \
+             a MATCH, as in g.gql(\"FOR n IN ['lop'] MATCH (s:software {name: n}) INSERT \
+             (:review {stars: 5})-[:about]->(s)\")."
+        );
+        assert_write_examples_run(&help);
+        // The rows before the failing one (marko created lop) wrote nothing either.
+        assert_eq!(counts(&graph), (6, 6));
+        // The filtered query of the advice inserts one edge per creator.
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        graph
+            .traversal_mut()
+            .gql(
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) FILTER s IS NOT NULL \
+                 INSERT (p)-[:made]->(s)",
+            )
+            .to_list()
+            .expect("the fix runs");
+        assert_eq!(counts(&graph), (6, 10));
+    }
+
+    #[test]
+    fn gql_schema_violation_of_an_insert_names_the_gql_fix() {
+        let schema = GraphSchema::from_json(
+            r#"{"mode": "closed",
+              "vertices": {"person": {"schema": {"type": "object", "properties": {
+                  "name": {"type": "string"}, "age": {"type": "integer"}},
+                "required": ["name"]}}},
+              "edges": {"knows": {"schema": {"type": "object", "properties": {
+                  "weight": {"type": "number"}}},
+                "connections": [{"from": "person", "to": "person"}]}}}"#,
+        )
+        .expect("schema");
+        let graph_with_schema = || {
+            let mut graph = TraversalGraph::new();
+            graph.set_schema(schema.clone()).expect("set");
+            graph
+                .traversal_mut()
+                .gql("INSERT (:person {name: 'marko'}), (:person {name: 'josh'})")
+                .to_list()
+                .expect("people");
+            graph
+        };
+        let failure = |query: &str| {
+            let mut graph = graph_with_schema();
+            let err = graph
+                .traversal_mut()
+                .gql(query)
+                .to_list()
+                .expect_err("a schema violation");
+            assert_eq!(counts(&graph), (2, 0), "{query}");
+            err.help().expect("help")
+        };
+        let help = failure("INSERT (:person {name: 'ann', age: 'x'})");
+        assert_eq!(
+            help,
+            "Convert the value to the type 'int64' where the INSERT writes it, with \
+             toInteger(), as in g.gql(\"INSERT (:person {age: toInteger($v)})\", #{v: \"29\"}). \
+             toInteger() gives NULL for a value it cannot convert, and a NULL value is not \
+             stored; CAST(x AS ..) fails the query for it instead."
+        );
+        let help = failure(
+            "MATCH (a {name: 'marko'}), (b {name: 'josh'}) INSERT (a)-[:knows {weight: 'x'}]->(b)",
+        );
+        assert!(
+            help.starts_with(
+                "Convert the value to the type 'float64' where the INSERT writes it, with \
+                 toFloat(), as in g.gql(\"MATCH (a {name: 'marko'}), (b {name: 'josh'}) INSERT \
+                 (a)-[:knows {weight: toFloat($v)}]->(b)\", #{v: \"1.5\"})."
+            ),
+            "{help}"
+        );
+        let help = failure("INSERT (:person {age: 3})");
+        assert_eq!(
+            help,
+            "Give 'name' a value in the property map of the INSERT, as in \
+             g.gql(\"INSERT (:person {name: 'value'})\"); a NULL value (such as a property the \
+             matched element lacks) is not stored and so is missing too: give it a fallback, as \
+             in {name: coalesce(n.name, 'unknown')}. Or remove it from the label's \"required\" \
+             in the schema, or give it a \"default\" (or \"defaultFunction\") in the schema: it \
+             is stored when an element is created without the property."
+        );
+        // The suggested forms run on the same graph.
+        let mut graph = graph_with_schema();
+        for (query, value) in [
+            ("INSERT (:person {name: 'ann', age: toInteger($v)})", "29"),
+            (
+                "MATCH (a {name: 'marko'}), (b {name: 'josh'}) INSERT (a)-[:knows {weight: \
+                 toFloat($v)}]->(b)",
+                "1.5",
+            ),
+        ] {
+            graph
+                .traversal_mut()
+                .gql_with(query, [("v", ElementProperty::from(value))])
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {}", format_diagnostic(&e)));
+        }
+        assert_eq!(counts(&graph), (3, 1));
+        // A violation without Gremlin advice keeps its own help; the Gremlin write keeps the
+        // Gremlin advice.
+        let help = failure("INSERT (:robot)");
+        assert!(help.starts_with("A closed schema admits only declared vertex labels"));
+        let mut graph = graph_with_schema();
+        let err = graph
+            .traversal_mut()
+            .add_v("person")
+            .property("name", "ann")
+            .property("age", "x")
+            .to_list()
+            .expect_err("a schema violation");
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("values(\"age\").as_number(GType.LONG)"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_refused_constructs_no_longer_call_gql_read_only() {
+        let (err, _) = gql_write_failure("CREATE INDEX FOR (n:person) ON (n.age)");
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Refused);
+        let help = err.help().expect("help");
+        assert!(
+            help.ends_with(
+                "gql() does not support this construct; write this part of the query as \
+                 Gremlin steps."
+            ),
+            "{help}"
+        );
+        assert!(!help.contains("read"), "{help}");
+        let (err, _) = gql_write_failure("MATCH (n) RETURN n.name ORDER BY id(n)");
+        let help = err.help().expect("help");
+        assert!(!help.contains("read queries"), "{help}");
+    }
 }

@@ -596,7 +596,9 @@ struct Lowered<S: GraphStorage> {
     /// Per binding: how a path variable is assembled (`None`: not a path variable).
     paths: Vec<Option<PathRead>>,
     /// The query writes (stage 3a): no merge point of the lowering (design W15; the executor
-    /// never merges a mutating plan, so `lazy_barrier()` would be a no-op in the profile).
+    /// never merges a mutating plan, so its `lazy_barrier()` would be a no-op in the profile).
+    /// The optimizer's general `lazy_barrier` rule may still place its pass-through
+    /// `lazy_barrier()` between adjacent vertex steps, as in a Gremlin write.
     writes: bool,
 }
 

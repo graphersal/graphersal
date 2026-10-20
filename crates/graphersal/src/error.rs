@@ -4299,8 +4299,8 @@ pub struct GqlErrorContext {
     /// A close spelling of a misspelt keyword, function or variable ("did you mean ...").
     pub suggestion: Option<String>,
     /// The GQL form or the Gremlin alternative of a refused or not yet supported construct, in
-    /// canonical snake_case step spelling, such as "gql() is read-only; use the Gremlin mutation
-    /// steps add_v(), property(), drop() or merge_v()". `help()` leads with it.
+    /// canonical snake_case step spelling, such as "use the Gremlin step drop(), for example
+    /// g.v().has_label(\"person\").drop()". `help()` leads with it.
     pub alternative: Option<String>,
     /// Which general advice `help()` adds after the alternative (internal).
     pub(crate) topic: GqlHelpTopic,
@@ -4334,6 +4334,10 @@ pub(crate) enum GqlHelpTopic {
     PatternComprehension,
     /// The variable of a list comprehension `[x IN list | expr]` reusing a name (stage 2c).
     ComprehensionVariable,
+    /// An `INSERT` / `CREATE` pattern (stage 3a): what a new node, a new edge and a bound node
+    /// reference may carry (designs W5-W7), a write inside a subquery expression (W3), an edge
+    /// endpoint that is no node at run time.
+    Insert,
     /// `UNION` and `NEXT`: the column names of the operands, one kind of `UNION` per chain,
     /// what the statement after `NEXT` reads (stage 2d).
     Composite,
@@ -4369,12 +4373,14 @@ pub enum GqlErrorKind {
     /// The query parses but does not bind: an unknown or redeclared variable, a misplaced
     /// parameter, a variable used as the wrong kind of element.
     Semantic,
-    /// A construct `gql()` refuses for good: every write clause (`gql()` is read-only), the
-    /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL db.labels()`),
-    /// `CALL { } IN TRANSACTIONS`, Cypher `id()`.
+    /// A construct `gql()` refuses for good: the undirected edge forms `~[e]~`, `<~`, `~>`,
+    /// vendor procedures (`CALL db.labels()`) and commands (`LOAD CSV`, `CREATE DATABASE`),
+    /// catalog commands (`CREATE INDEX`, `CREATE CONSTRAINT`), `CALL { } IN TRANSACTIONS` (one
+    /// query is one unit), Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)` or `EXCEPT`.
+    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, or the write
+    /// clauses after `INSERT` / `CREATE` (`SET`, `REMOVE`, `DELETE`, `MERGE`).
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
@@ -4683,6 +4689,16 @@ impl TraverserError {
                     body,
                     self.outermost_steps(),
                 )),
+                // A schema violation of a GQL INSERT: the fix is GQL text, not Gremlin steps.
+                #[cfg(feature = "gql")]
+                TraverserError::Schema(schema)
+                | TraverserError::Graph(GraphError::Schema(schema))
+                    if self
+                        .innermost_failed_step()
+                        .is_some_and(|step| step.starts_with("gql:insert_")) =>
+                {
+                    gql_schema_help(schema).or_else(|| schema.help())
+                }
                 TraverserError::RepeatWithoutBody { modulator } => {
                     Some(repeat_without_body_help(modulator, self.failing_level_prefix()))
                 }
@@ -6752,6 +6768,10 @@ fn gql_help(
                 }
                 help.push_str(&format!("Expected {listed} at the marked position. "));
             }
+            if topic == GqlHelpTopic::Insert {
+                help.push_str(GQL_INSERT_ADVICE);
+                return help;
+            }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
                  [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
@@ -6778,13 +6798,12 @@ fn gql_help(
             help.push_str(gql_semantic_advice(topic))
         }
         GqlErrorKind::Refused if alternative.is_some() => help.push_str(
-            "gql() runs read queries (MATCH ... RETURN ...); write the rest of the query as \
-             Gremlin steps.",
+            "gql() does not support this construct; write this part of the query as Gremlin \
+             steps.",
         ),
         GqlErrorKind::Refused => help.push_str(
-            "Graphersal does not support this construct in gql(), which runs read queries \
-             (MATCH ... RETURN ...); write this part as Gremlin steps, for example \
-             g.v().has_label(\"person\").values(\"name\").",
+            "Graphersal does not support this construct in gql(); write this part of the query \
+             as Gremlin steps, for example g.v().has_label(\"person\").values(\"name\").",
         ),
         GqlErrorKind::NotYet => help.push_str(
             "This construct comes in a later version of gql(); until then, write the query \
@@ -6824,6 +6843,14 @@ fn gql_help(
              as in g.gql(\"MATCH (p) RETURN sum(CASE WHEN p.age >= 0 THEN p.age END)\") (an \
              aggregate skips NULL).",
         ),
+        GqlErrorKind::Data if topic == GqlHelpTopic::Insert => help.push_str(
+            "A row of the data gave the marked endpoint of the new edge no node: an edge \
+             connects two nodes, so a variable that OPTIONAL MATCH may leave NULL is filtered \
+             first, as in g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) FILTER s \
+             IS NOT NULL INSERT (p)-[:made]->(s)\"), and a value that is no node is turned into \
+             one by a MATCH, as in g.gql(\"FOR n IN ['lop'] MATCH (s:software {name: n}) \
+             INSERT (:review {stars: 5})-[:about]->(s)\").",
+        ),
         GqlErrorKind::Data => {
             if topic == GqlHelpTopic::TextAndNumber {
                 help.push_str(
@@ -6841,6 +6868,100 @@ fn gql_help(
         }
     }
     help
+}
+
+/// The general advice of an error about an `INSERT` / `CREATE` pattern
+/// ([`GqlHelpTopic::Insert`], stage 3a): what each part of the pattern may carry.
+#[cfg(feature = "gql")]
+const GQL_INSERT_ADVICE: &str = "INSERT (Cypher CREATE) creates its pattern once for each \
+     row: a new node with the labels written, joined by & or :, and a property map; a new \
+     edge with a direction and exactly one label; and a variable bound before, written alone \
+     as (p), connects the existing node, as in g.gql(\"MATCH (p:person {name: 'marko'}) \
+     INSERT (p)-[:likes]->(f:fruit&food {name: 'apple'}) RETURN f.name\"). A query may end \
+     with the INSERT (it then returns no rows), and FOR gives it one row per item, as \
+     in g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\").";
+
+/// The advice of a schema violation a GQL `INSERT` raised (stage 3a), with a runnable
+/// `INSERT` of the failing label and key: the conversion of a value of the wrong type, the
+/// value of a missing required property. `None` for the violations whose advice names no
+/// Gremlin step (labels, connections, undeclared keys): their own help fits.
+#[cfg(feature = "gql")]
+fn gql_schema_help(error: &SchemaError) -> Option<String> {
+    match error {
+        SchemaError::TypeMismatch {
+            element_type,
+            label,
+            property_name,
+            expected_type,
+            actual_type,
+        } if !is_nested_schema_path(property_name) && actual_type != "null" => {
+            let (function, sample) = match expected_type.to_lowercase().as_str() {
+                "int64" | "number" => ("toInteger", "\"29\""),
+                "float64" => ("toFloat", "\"1.5\""),
+                "string" => ("toString", "29"),
+                "boolean" => ("toBoolean", "\"true\""),
+                _ => return None,
+            };
+            let example = gql_insert_example(
+                element_type,
+                label,
+                &format!("{}: {function}($v)", gql_key(property_name)),
+            );
+            Some(format!(
+                "Convert the value to the type '{expected_type}' where the INSERT writes it, \
+                 with {function}(), as in g.gql(\"{example}\", #{{v: {sample}}}). {function}() \
+                 gives NULL for a value it cannot convert, and a NULL value is not stored; \
+                 CAST(x AS ..) fails the query for it instead."
+            ))
+        }
+        SchemaError::MissingRequiredProperty {
+            element_type,
+            label,
+            property_name,
+        } if !is_nested_schema_path(property_name) => {
+            let key = gql_key(property_name);
+            let example = gql_insert_example(element_type, label, &format!("{key}: 'value'"));
+            Some(format!(
+                "Give '{property_name}' a value in the property map of the INSERT, as in \
+                 g.gql(\"{example}\"); a NULL value (such as a property the matched element \
+                 lacks) is not stored and so is missing too: give it a fallback, as in \
+                 {{{key}: coalesce(n.{key}, 'unknown')}}. Or remove it from the label's \
+                 \"required\" in the schema, or give it a \"default\" (or \"defaultFunction\") \
+                 in the schema: it is stored when an element is created without the property."
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A runnable `INSERT` on the modern graph of one element of `label` with the property map
+/// `entries` (a node, or an edge between two of its people).
+#[cfg(feature = "gql")]
+fn gql_insert_example(element_type: &str, label: &str, entries: &str) -> String {
+    let label = gql_key(label);
+    if element_type == "edge" {
+        format!(
+            "MATCH (a {{name: 'marko'}}), (b {{name: 'josh'}}) INSERT (a)-[:{label} \
+             {{{entries}}}]->(b)"
+        )
+    } else {
+        format!("INSERT (:{label} {{{entries}}})")
+    }
+}
+
+/// A label or a property key as GQL text: back-quoted unless it is a plain name.
+#[cfg(feature = "gql")]
+pub(crate) fn gql_key(name: &str) -> String {
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain {
+        name.to_string()
+    } else {
+        format!("`{}`", name.replace('`', "``"))
+    }
 }
 
 /// The general advice of a [`GqlErrorKind::Data`] error.
@@ -7007,6 +7128,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              RETURN count(s) AS made } RETURN p.name, made\"). A row whose body returns no \
              record is dropped; OPTIONAL CALL keeps it with NULL columns."
         }
+        GqlHelpTopic::Insert => GQL_INSERT_ADVICE,
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
@@ -9854,7 +9976,7 @@ mod tests {
             assert!(
                 refused.starts_with(
                     "gql() is read-only; use the Gremlin mutation steps add_v(), property(), \
-                     drop() or merge_v(). gql() runs read queries"
+                     drop() or merge_v(). gql() does not support this construct"
                 ),
                 "{refused}"
             );
