@@ -10,6 +10,14 @@
 //! the chain does not state is left open (`Data { None, None }` covers every element), which
 //! keeps the inference sound: it may claim more than a body writes, never less.
 //!
+//! A `g.gql(query)` call with a literal query is lowered as the engine lowers it (on an empty
+//! scratch graph, [`crate::gql::lower::planned_writes`]) and its plan folded with the same
+//! rules, so a GQL write names the labels it creates exactly like its Gremlin twin. A query
+//! text the AST does not give (a variable, a concatenation), or one whose plan needs a
+//! parameter's value (`LIMIT $n`), may write anything: the body claims every data write, so it
+//! is saved as a writing query and a caller must be allowed to write. Pass values as
+//! parameters (`g.gql("... $name ...", #{name: name})`) to keep a read query read-only.
+//!
 //! | Body | Inferred |
 //! |---|---|
 //! | `add_v("person")`, `add_e("knows")` | `Create` on that label; a label from a variable: any label of the kind |
@@ -18,6 +26,8 @@
 //! | `merge_v` / `merge_e` | `Create` and `Update` on the kind |
 //! | a same-named method on something else (`map.drop()`) | counted as a write |
 //! | `g.query("name")` | the effects of that query (resolved when needed, [`transitive`]) |
+//! | `g.gql("INSERT ...")` (feature `gql`) | the writes of the lowered query's plan (a literal query text) |
+//! | `g.gql(text)` with a computed text | `Create`, `Update` and `Delete` on any data |
 //!
 //! Constructs that hide what a body calls (`Fn(..)`, `call`, `curry`, `eval`, `import`, a
 //! function pointer to a named function, `g.query(name)` with a computed name) make the body
@@ -74,6 +84,9 @@ pub(crate) enum StepClass {
     KeepPlain,
     /// `g.query(name, ..)`: calls a saved query.
     Query,
+    /// `g.gql(query, ..)`: the writes of the lowered GQL query (feature `gql`).
+    #[cfg(feature = "gql")]
+    Gql,
     /// `with_side_effect(name, graph)`: a `subgraph()` into another graph creates data.
     SideEffectTarget,
     /// Hides what is called (`Fn`, `call`, `curry`, `eval`).
@@ -232,6 +245,11 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
 /// The class of the DSL function `name` ([`CLASSES`]); `None` for a name the table does not
 /// list.
 pub(crate) fn classify(name: &str) -> Option<StepClass> {
+    // Outside the table: the name is registered only with the feature.
+    #[cfg(feature = "gql")]
+    if name == "gql" {
+        return Some(StepClass::Gql);
+    }
     CLASSES
         .iter()
         .find(|(names, _)| names.contains(&name))
@@ -411,6 +429,29 @@ impl Analysis {
                     _ => self.dynamic("g.query(name) with a computed name"),
                 }
                 *flow = AccessFlow::default();
+            }
+            #[cfg(feature = "gql")]
+            Gql => {
+                let planned = match args.first() {
+                    Some(Expr::StringConstant(query, _)) => {
+                        crate::gql::lower::planned_writes(query.as_str())
+                    }
+                    _ => None,
+                };
+                match planned {
+                    Some((writes, after)) => {
+                        for write in &writes {
+                            self.write(write.as_request());
+                        }
+                        *flow = after;
+                    }
+                    None => {
+                        for action in [Action::Create, Action::Update, Action::Delete] {
+                            self.write(AccessRequest::new(action, Resource::data(None, None)));
+                        }
+                        *flow = AccessFlow::default();
+                    }
+                }
             }
             SideEffectTarget => {
                 if args.len() > 1 && !args.iter().skip(1).all(is_constant) {

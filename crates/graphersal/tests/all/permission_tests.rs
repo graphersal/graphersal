@@ -2823,4 +2823,241 @@ mod gql {
             );
         }
     }
+
+    /// Denies every write of data labelled `secret` and of data whose label the request leaves
+    /// open (it could be `secret`); reads and other writes are allowed.
+    struct NoSecret;
+
+    impl Authorizer for NoSecret {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            let writes = matches!(
+                request.action,
+                Action::Create | Action::Update | Action::Delete
+            );
+            match request.resource {
+                Resource::Data { label, .. }
+                    if writes && label.is_none_or(|label| label == "secret") =>
+                {
+                    Err(Denied::new("secret data is protected"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Stage 3a: `INSERT` asks `Create` per label of each new node and per new edge, exactly
+    /// like `add_v(labels)` / `add_e(label)`, and nothing for its properties.
+    #[test]
+    fn gql_insert_asks_create_like_add_v_and_add_e() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("INSERT (:x)").iterate()"#,
+                r#"g.addV("x").iterate()"#,
+            ),
+            (
+                r#"g.gql("INSERT (:a&b)").iterate()"#,
+                r#"g.addV(["a", "b"]).iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) INSERT (p)-[:r]->(:x)").iterate()"#,
+                r#"g.V().hasLabel("person").as("p").addV("x").addE("r").from("p").iterate()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+        assert_eq!(
+            requests(&graph, r#"g.gql("INSERT (:x)-[:r]->(:y)").iterate()"#),
+            [
+                "Create Data(vertex \"x\")",
+                "Create Data(vertex \"y\")",
+                "Create Data(edge \"r\")",
+            ]
+        );
+    }
+
+    /// The one deliberate difference from the Gremlin twin (3a.T3): `INSERT` sets a new
+    /// element's properties as part of creating it and asks only `Create`; `add_v(..)
+    /// .property(..)` asks `Create` and `Update` (the authorization check runs on the plan as
+    /// written, before the optimizer folds the property into the creation). A policy denying
+    /// only `Update` therefore allows the GQL insert and refuses its Gremlin twin.
+    #[test]
+    fn gql_insert_with_properties_asks_only_create_unlike_add_v_property() {
+        let graph = modern();
+        assert_eq!(
+            requests(&graph, r#"g.gql("INSERT (:x {k: 1})").iterate()"#),
+            ["Create Data(vertex \"x\")"]
+        );
+        assert_eq!(
+            requests(&graph, r#"g.addV("x").property("k", 1).iterate()"#),
+            ["Create Data(vertex \"x\")", "Update Data(vertex \"x\")"]
+        );
+        let no_update = || AccessPolicy::allow_all().deny(ActionKind::Update, ResourceKind::Data);
+        let before = count(&graph);
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("INSERT (:x {k: 1})").iterate()"#,
+                no_update()
+            )
+            .is_ok()
+        );
+        assert_eq!(count(&graph), before + 1);
+        assert_denied(
+            run(
+                &graph,
+                r#"g.addV("x").property("k", 1).iterate()"#,
+                no_update(),
+            ),
+            "property",
+            "Update Data(vertex \"x\")",
+        );
+        assert_eq!(count(&graph), before + 1);
+    }
+
+    /// Label-level denials of `INSERT` mirror `add_v` / `add_e`: the same request, refused before
+    /// anything runs.
+    #[test]
+    fn a_denied_label_refuses_gql_insert_like_add_v_and_add_e() {
+        let graph = modern();
+        assert!(run(&graph, r#"g.gql("INSERT (:public)").iterate()"#, NoSecret).is_ok());
+        assert_eq!(count(&graph), 7);
+        for (script, step) in [
+            (r#"g.addV("secret").iterate()"#, "add_v"),
+            (r#"g.gql("INSERT (:secret)").iterate()"#, "gql:insert_node"),
+            (
+                r#"g.gql("CREATE (:secret {k: 1})").iterate()"#,
+                "gql:insert_node",
+            ),
+            // A multi-label vertex asks once per label.
+            (r#"g.addV(["public", "secret"]).iterate()"#, "add_v"),
+            (
+                r#"g.gql("INSERT (:public&secret)").iterate()"#,
+                "gql:insert_node",
+            ),
+            // The MATCH before it would run first: refused before it does.
+            (
+                r#"g.gql("MATCH (p:person) INSERT (:public), (:secret)").iterate()"#,
+                "gql:insert_node",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, NoSecret),
+                step,
+                "Create Data(vertex \"secret\")",
+            );
+        }
+        for (script, step) in [
+            (
+                r#"g.V("1").addE("secret").to(__.V("2")).iterate()"#,
+                "add_e",
+            ),
+            (
+                r#"g.gql("MATCH (a {name: 'marko'}), (b {name: 'josh'}) INSERT (a)-[:secret]->(b)").iterate()"#,
+                "gql:insert_edge",
+            ),
+            (
+                r#"g.gql("INSERT (:public)-[:secret]->(:public)").iterate()"#,
+                "gql:insert_edge",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, NoSecret),
+                step,
+                "Create Data(edge \"secret\")",
+            );
+        }
+        assert_eq!(count(&graph), 7);
+        assert_eq!(graph.read().edge_count(), 6);
+    }
+
+    /// A read-only host (`AccessPolicy::read_only()`, and the policy of the playground's and the
+    /// MCP server's read-only mode: every Create / Update / Delete on data, schema and
+    /// definitions denied) refuses a GQL write before anything runs, and still runs GQL reads.
+    #[test]
+    fn a_read_only_host_refuses_a_gql_write_before_it_runs() {
+        let graph = modern();
+        let mut mcp_read_only = AccessPolicy::allow_all().deny_resource(ResourceKind::File);
+        for resource in [
+            ResourceKind::Data,
+            ResourceKind::Schema,
+            ResourceKind::Definition,
+        ] {
+            for action in [ActionKind::Create, ActionKind::Update, ActionKind::Delete] {
+                mcp_read_only = mcp_read_only.deny(action, resource);
+            }
+        }
+        for policy in [AccessPolicy::read_only(), mcp_read_only] {
+            for (script, step, request) in [
+                (
+                    r#"g.gql("INSERT (:x)").iterate()"#,
+                    "gql:insert_node",
+                    "Create Data(vertex \"x\")",
+                ),
+                (
+                    r#"g.gql("MATCH (a {name: 'marko'}), (b {name: 'josh'}) INSERT (a)-[:r]->(b)").iterate()"#,
+                    "gql:insert_edge",
+                    "Create Data(edge \"r\")",
+                ),
+                (
+                    r#"g.gql("MATCH (p:person) CALL (p) { INSERT (p)-[:r]->(:x) } RETURN p.name").toList()"#,
+                    "gql:insert_node",
+                    "Create Data(vertex \"x\")",
+                ),
+            ] {
+                assert_denied(run(&graph, script, policy.clone()), step, request);
+            }
+            let rows = run(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN p.name").toList()"#,
+                policy,
+            )
+            .unwrap();
+            assert_eq!(rows.into_array().unwrap().len(), 4);
+        }
+        assert_eq!(count(&graph), 6);
+        assert_eq!(graph.read().edge_count(), 6);
+    }
+
+    /// A saved query whose body calls `g.gql("INSERT ...")` writes (dialect `/2`): its call asks
+    /// the effects (the labels the insert creates) of the caller first, so a host without the
+    /// right is refused before the body runs, like a Gremlin writing query.
+    #[test]
+    fn a_saved_query_running_a_gql_insert_is_bounded_by_the_callers_rights() {
+        let graph = modern();
+        let _ = run(
+            &graph,
+            r#"g.define_query(#{name: "adopt", body: `fn adopt() {
+                g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:owns]->(:secret)").iterate()
+            }`})"#,
+            AllowAll,
+        )
+        .unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(&graph, r#"g.query("adopt")"#, recorder.clone()).unwrap();
+        let seen = recorder.seen();
+        assert_eq!(
+            seen[..3],
+            [
+                r#"Execute Definition(query "adopt")"#.to_string(),
+                r#"Create Data(vertex "secret")"#.to_string(),
+                r#"Create Data(edge "owns")"#.to_string(),
+            ],
+            "{seen:?}"
+        );
+        assert_eq!(count(&graph), 7);
+        let err = run(&graph, r#"g.query("adopt")"#, NoSecret).unwrap_err();
+        assert!(
+            err.contains(
+                r#"Permission denied for 'query("adopt")' (Create Data(vertex "secret"))"#
+            ),
+            "{err}"
+        );
+        assert_denied(
+            run(&graph, r#"g.query("adopt")"#, AccessPolicy::read_only()),
+            "query(\"adopt\")",
+            "Create Data(vertex \"secret\")",
+        );
+        assert_eq!(count(&graph), 7);
+    }
 }

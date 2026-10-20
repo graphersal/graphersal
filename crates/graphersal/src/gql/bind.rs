@@ -1143,10 +1143,10 @@ impl BoundQuery {
 
 /// Binds `query` without checking parameter values (the caller checks them later).
 #[cfg_attr(
-    not(test),
+    not(any(test, feature = "script")),
     allow(
         dead_code,
-        reason = "used by the tests; queries bind with their parameters"
+        reason = "used by the tests and the saved-query effect inference; queries bind with their parameters"
     )
 )]
 pub(crate) fn bind(query: &Query) -> Result<BoundQuery, TraverserError> {

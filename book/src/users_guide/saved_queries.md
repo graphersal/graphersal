@@ -191,6 +191,8 @@ check can hold every write against it:
 | a chain from a variable or `__` (`t.drop()`, `side_effect(__.property(..))`) | `Delete` / `Update` on any data |
 | `merge_v(..)` / `merge_e(..)` | `Create` and `Update` on the kind |
 | `g.query("other")` | the effects of `other`, when it writes |
+| `g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet)")` | the writes of the lowered GQL query: `Create` on `pet` vertices and `owns` edges |
+| `g.gql(text)` with a computed text (a variable, a concatenation) | `Create`, `Update` and `Delete` on any data: pass values as `$parameters` to keep a GQL read read-only |
 | a method of the same name on something else (`m.drop()` on a map) | counted as a write |
 
 The inference may claim more than a body writes, never less. What it cannot see, it refuses:

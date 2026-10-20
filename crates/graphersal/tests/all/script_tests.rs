@@ -646,6 +646,49 @@ mod tests {
         );
     }
 
+    /// Rule 3: a GQL `INSERT` / `CREATE` mutates through the DSL: with a terminal, as a bare
+    /// (rendered) traversal, with parameters, returning rows, in camelCase scripts, and
+    /// persisting across separate evaluations on the same graph.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_script_eval_gql_insert_mutations() {
+        let graph = Arc::new(GraphSource::empty());
+        let script = r#"
+            g.gql("INSERT (:person {name: 'ann'})").iterate();
+            g.gql("CREATE (:person {name: $n})", #{n: "bob"}).toList();
+            let rows = g.gql("MATCH (a:person {name: 'ann'}), (b:person {name: 'bob'}) INSERT (a)-[k:knows {w: 1}]->(b) RETURN k.w AS w").toList();
+            g.V().count().next() * 100 + g.E().count().next() * 10 + rows.len()
+        "#;
+        assert_eq!(
+            eval_value(graph.clone(), script).unwrap().as_int().ok(),
+            Some(211)
+        );
+        // A bare writing traversal as the last statement is executed by the visualizer.
+        for bare in [
+            r#"g.gql("INSERT (:bare {n: 1})")"#,
+            r#"g.gql("MATCH (p:person) INSERT (p)-[:OWNS]->(:pet)")"#,
+        ] {
+            eval(graph.clone(), bare).expect("bare GQL write must run");
+        }
+        // camelCase steps after a GQL write.
+        let out = eval_value(
+            graph.clone(),
+            r#"g.gql("INSERT (x:tagged) RETURN x").select("x").property("k", 2).iterate();
+               g.V().hasLabel("tagged").has("k", 2).count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(out.as_int().ok(), Some(1));
+        // The writes persist across evaluations.
+        let check =
+            r#"g.V().hasLabel("pet").count().next() * 10 + g.V().hasLabel("bare").count().next()"#;
+        assert_eq!(
+            eval_value(graph.clone(), check).unwrap().as_int().ok(),
+            Some(21)
+        );
+        assert_eq!(graph.read().vertex_count(), 6);
+        assert_eq!(graph.read().edge_count(), 3);
+    }
+
     /// A mutating `by()` child traversal makes the plan mutating (behaviour change: it used to
     /// fail with "Cannot mutate immutable graph reference"): the child's writes reach the graph,
     /// once per evaluated traverser, also when nested deeper than one level.

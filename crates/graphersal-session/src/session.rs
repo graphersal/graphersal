@@ -2722,6 +2722,43 @@ mod tests {
         );
     }
 
+    /// A GQL write under the read-only authorizer (the dev server's read-only endpoint and MCP
+    /// `--mcp-read-only`) is refused before it runs and changes nothing; the same write runs
+    /// with the playground's authorizer and is reported as mutating.
+    #[test]
+    fn a_gql_write_is_refused_read_only_and_runs_otherwise() {
+        let mut s = modern();
+        let refused: Value = serde_json::from_str(&s.execute_with_authorizer(
+            r#"g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet)")"#,
+            &RunOptions::default(),
+            read_only_authorizer(),
+        ))
+        .unwrap();
+        assert_eq!(refused["ok"], false, "{refused}");
+        let diagnostic = refused["execution"]["error"]["diagnostic"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            diagnostic
+                .contains(r#"Permission denied for 'gql:insert_node' (Create Data(vertex "pet"))"#),
+            "{refused}"
+        );
+        assert_eq!(
+            run(&mut s, "g.V().count().next()")["execution"]["results"],
+            json!([6])
+        );
+        let written = run(
+            &mut s,
+            r#"g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet)")"#,
+        );
+        assert_eq!(written["ok"], true, "{written}");
+        assert_eq!(written["mutated"], true, "{written}");
+        assert_eq!(
+            run(&mut s, "g.V().count().next()")["execution"]["results"],
+            json!([10])
+        );
+    }
+
     #[test]
     fn the_script_budget_stops_a_loop() {
         let mut s = Session::with_presets(SessionPresets::new().with_script_timeout_ms(Some(50)));

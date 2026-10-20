@@ -187,6 +187,37 @@ impl Restrictions {
     }
 }
 
+/// Adds every write (`Create`, `Update`, `Delete`) that [`Restrictions::check`] asks for
+/// `steps` to `writes`, each once, in the same order and with the same [`AccessFlow`]s (child
+/// traversals depth first); returns the flow after the last step. The effect inference of a
+/// saved query's `g.gql(..)` call reads a lowered plan through it.
+#[cfg(all(feature = "gql", feature = "script"))]
+pub(crate) fn plan_write_requests<'g, S: GraphStorage + 'g>(
+    steps: &mut [GraphStep<'g, S>],
+    writes: &mut Vec<AccessRequestBuf>,
+) -> AccessFlow {
+    let mut flow = AccessFlow::default();
+    for step in steps {
+        let _ = step.for_each_access_in(&flow, |request| {
+            if matches!(
+                request.action,
+                Action::Create | Action::Update | Action::Delete
+            ) {
+                let request = request.to_owned_request();
+                if !writes.contains(&request) {
+                    writes.push(request);
+                }
+            }
+            Ok::<(), std::convert::Infallible>(())
+        });
+        for child in step.child_traversals_mut() {
+            plan_write_requests(&mut child.steps, writes);
+        }
+        flow = step.access_flow_after(flow);
+    }
+    flow
+}
+
 /// Whether some step of `steps`, child traversals included, changes the graph
 /// ([`GraphStep::mutates`]).
 #[cfg_attr(not(feature = "script"), allow(dead_code))]

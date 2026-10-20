@@ -1456,6 +1456,53 @@ fn prepare<S: GraphStorage>(
     Lowering::new(query, &bound, &plan, params).run()
 }
 
+/// The data writes the plan of `query` asks the authorization check for (each once, in plan
+/// order, child traversals depth first) and the [`AccessFlow`] the plan states after its last
+/// step: what a saved query's body calling `g.gql(query)` may write (`script/effects.rs`).
+/// `query` is lowered exactly as `gql()` lowers it, on an empty scratch graph (the write steps
+/// do not depend on the planner's statistics), each parameter it reads standing for a
+/// placeholder value (labels never come from parameters, so the requests do not depend on
+/// them). A query that does not parse or bind writes nothing (it fails before it runs);
+/// `None` when no placeholder lowers (a parameter whose value the plan itself needs, such as
+/// `LIMIT $n`), which the caller treats as "may write anything".
+#[cfg(feature = "script")]
+pub(crate) fn planned_writes(
+    query: &str,
+) -> Option<(
+    Vec<crate::graph::AccessRequestBuf>,
+    crate::traversal::step::AccessFlow,
+)> {
+    use crate::graph::TraversalGraph;
+    let nothing = || Some((Vec::new(), Default::default()));
+    let Ok(parsed) = parse(query) else {
+        return nothing();
+    };
+    let Ok(bound) = super::bind::bind(&parsed) else {
+        return nothing();
+    };
+    let scratch = TraversalGraph::new();
+    for placeholder in [ElementProperty::from(1), ElementProperty::Null] {
+        let params: Vec<(CompactString, ElementProperty)> = bound
+            .parameters
+            .iter()
+            .map(|p| (CompactString::new(&p.name), placeholder.clone()))
+            .collect();
+        let source = GraphTraversalSource::new(&scratch);
+        let lowered = {
+            let facts = StorageFacts::from_storage(&source.storage);
+            prepare::<&TraversalGraph>(query, &params, &facts)
+        };
+        if let Ok(lowered) = lowered {
+            let mut steps = lowered.emit(source).steps;
+            let mut writes = Vec::new();
+            let flow =
+                crate::traversal::permission_check::plan_write_requests(&mut steps, &mut writes);
+            return Some((writes, flow));
+        }
+    }
+    None
+}
+
 /// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a
 /// subquery gets its own child, and a `LET` value holding one puts it into every expression
 /// that reads the name, also inside other bodies, so nested bodies multiply. Far beyond any

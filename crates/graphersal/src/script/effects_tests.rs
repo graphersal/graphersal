@@ -315,3 +315,90 @@ fn transitive_effects_follow_calls_that_count_once() {
     );
     assert_eq!(dynamic, None);
 }
+
+#[cfg(feature = "gql")]
+#[test]
+fn gql_calls_infer_exactly_the_requests_of_the_authorization_check() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"g.gql("INSERT (:person {name: 'x'})").iterate()"#,
+            &[r#"Create Data(vertex "person")"#],
+        ),
+        (
+            r#"g.gql("INSERT (:a&b)-[:r]->(:c)").iterate()"#,
+            &[
+                r#"Create Data(vertex "a")"#,
+                r#"Create Data(vertex "b")"#,
+                r#"Create Data(vertex "c")"#,
+                r#"Create Data(edge "r")"#,
+            ],
+        ),
+        (
+            r#"g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet {owner: p.name})").iterate()"#,
+            &[
+                r#"Create Data(vertex "pet")"#,
+                r#"Create Data(edge "owns")"#,
+            ],
+        ),
+        (
+            r#"g.gql("MATCH (p:person) CALL (p) { INSERT (p)-[:owns]->(:pet) } RETURN p").iterate()"#,
+            &[
+                r#"Create Data(vertex "pet")"#,
+                r#"Create Data(edge "owns")"#,
+            ],
+        ),
+        (
+            r#"g.gql("FOR x IN $xs INSERT (:f {x: x})", #{xs: [1, 2]}).iterate()"#,
+            &[r#"Create Data(vertex "f")"#],
+        ),
+        // The flow after the query continues into Gremlin steps: the last created element.
+        (
+            r#"g.gql("INSERT (:a)-[e:r]->(:b) RETURN e").select("e").property("w", 1).iterate()"#,
+            &[
+                r#"Create Data(vertex "a")"#,
+                r#"Create Data(vertex "b")"#,
+                r#"Create Data(edge "r")"#,
+                "Update Data",
+            ],
+        ),
+        (r#"g.gql("MATCH (p) RETURN p").iterate()"#, &[]),
+        (
+            r#"g.gql("MATCH (p) RETURN p LIMIT $k", #{k: 1}).iterate()"#,
+            &[],
+        ),
+    ];
+    for (script, expected) in cases {
+        let (writes, outcome) = recorded(script);
+        assert!(outcome.is_ok(), "{script}: {outcome:?}");
+        let analysis = inferred(script).unwrap();
+        let mut expected: Vec<String> = expected.iter().map(ToString::to_string).collect();
+        expected.sort();
+        assert_eq!(texts(&analysis.writes), expected, "inferred for {script}");
+        assert_eq!(texts(&writes), expected, "asked for {script}");
+    }
+    // A query text the AST does not give claims every data write; it covers what runs.
+    let script = r#"let q = "INSERT (:x)"; g.gql(q).iterate()"#;
+    let (writes, outcome) = recorded(script);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    let analysis = inferred(script).unwrap();
+    assert_eq!(
+        texts(&analysis.writes),
+        ["Create Data", "Delete Data", "Update Data"]
+    );
+    for write in &writes {
+        assert!(
+            analysis
+                .writes
+                .iter()
+                .any(|effect| effects::covers(effect, &write.as_request())),
+            "{write} not covered"
+        );
+    }
+    // A query that does not parse writes nothing (it fails before it runs).
+    assert!(
+        inferred(r#"g.gql("INSERT (:x").iterate()"#)
+            .unwrap()
+            .writes
+            .is_empty()
+    );
+}
