@@ -13,6 +13,11 @@ edit-url-template = "https://github.com/graphersal/graphersal/edit/main/book/{pa
 additional-js = ["dsl-highlight.js", "playground-links.js"]
 additional-css = ["playground-links.css"]
 
+# No "Run" button on Rust code blocks: the Rust Playground does not have the graphersal crate, so
+# the examples would neither compile nor run there. The DSL blocks keep their own playground links.
+[output.html.playground]
+runnable = false
+
 # The sidebar shows the parts and their chapters; the pages below a chapter (the steps of the
 # step reference, the Store's pages) are folded until that chapter is open or its arrow is clicked.
 [output.html.fold]
