@@ -120,6 +120,8 @@ a meaning of their own, and no vendor function joins them (`apoc.*`, `text.*` ar
 | `keys(x)`, `properties(x)` | elements | `x.key` reads one property |
 | `startNode(e)`, `endNode(e)` | elements | the predicates `n IS SOURCE OF e`, `n IS DESTINATION OF e` |
 | `nodes(p)`, `relationships(p)` | paths | GQL's `elements(p)` (not supported yet) |
+| `all(x IN l WHERE c)`, `any(..)`, `none(..)`, `single(..)` | list predicates | none; a list comprehension counted with `size()` (below) |
+| `reduce(acc = init, x IN l \| expr)` | lists | none; `FOR x IN l` and an aggregate fold the rows of a query, not a list per row |
 
 **`CAST` is not an alias of `toInteger()`.** Both convert with the same rules, but they treat a
 text that does not convert differently: GQL's `CAST` fails the query with `22018`, Cypher's
@@ -134,6 +136,43 @@ g.gql("MATCH (n:person {name: 'marko'}) RETURN toInteger('forty') AS a").to_list
 g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST('forty' AS INTEGER) AS b")   // error: invalid character value for cast (22018)
 g.gql("MATCH (a)-[e:knows]-(b) WHERE startNode(e) = a RETURN a.name AS a, b.name AS b ORDER BY b").to_list()   // #{"a": "marko", "b": "josh"}, #{"a": "marko", "b": "vadas"}
 g.gql("MATCH (a)-[e:knows]-(b) WHERE a IS SOURCE OF e RETURN a.name AS a, b.name AS b ORDER BY b").to_list()   // #{"a": "marko", "b": "josh"}, #{"a": "marko", "b": "vadas"}
+```
+
+### List predicates and `reduce`
+
+`all(x IN l WHERE c)`, `any(..)`, `none(..)` and `single(..)` test the items of a list, and
+`reduce(acc = init, x IN l | expr)` folds them: `acc` starts at `init` and takes the value of
+`expr` for each item in list order. `x` (and `acc`) exist only inside the call and must be new
+names, like a [list comprehension's variable](#map-projections-and-comprehensions). The
+`WHERE` is required; an aggregate may stand in the list and in `init`, not in the condition or
+after `|`. Their `NULL` rules are the three-valued ones of the openCypher TCK, which Neo4j
+Cypher 25 follows:
+
+- a `NULL` list gives `NULL` (`reduce` too), a value that is not a list is error `22G03`;
+- a decided answer wins and stops at once: `all` is FALSE at the first FALSE item, `any` TRUE
+  and `none` FALSE at the first TRUE one, `single` FALSE at the second TRUE one (later items are
+  not evaluated);
+- otherwise an item whose condition is `NULL` makes the answer `NULL`;
+- otherwise `all` and `none` are TRUE, `any` FALSE, `single` whether exactly one item was TRUE;
+  so for an empty list `all` / `none` are TRUE, `any` / `single` FALSE, and `reduce` gives
+  `init`.
+
+A list comprehension counted with `size()` gives the same answer when no condition is `NULL`
+(it drops a `NULL` condition instead): `all` is `size([x IN l WHERE c]) = size(l)`, `any` is
+`> 0`, `none` is `= 0`, `single` is `= 1`. Over a pattern comprehension the predicates test the
+matches of a pattern per row, the Gremlin `where(__..)` / `not(__..)`:
+
+```rhai,graph=modern
+g.gql("RETURN all(x IN [1, NULL] WHERE x > 0) AS a, any(x IN [1, NULL] WHERE x > 0) AS b, single(x IN [1, 2] WHERE x > 1) AS c, none(x IN [] WHERE x > 1) AS d").to_list()   // #{"a": (), "b": true, "c": true, "d": true}
+g.gql("MATCH (p:person) WHERE any(a IN [(p)-[:knows]->(f) | f.age] WHERE a > 30) RETURN p.name AS name").to_list()   // #{"name": "marko"}
+g.V().hasLabel("person").where(__.out("knows").has("age", P.gt(30))).values("name").to_list()   // "marko"
+g.gql("MATCH (p:person) WHERE none(w IN [(p)-[:created]->(s) | s] WHERE w.name = 'lop') RETURN p.name AS name").to_list()   // #{"name": "vadas"}
+g.V().hasLabel("person").not(__.out("created").has("name", "lop")).values("name").to_list()   // "vadas"
+g.gql("MATCH (p:person) RETURN p.name AS name, reduce(total = 0, w IN [(p)-[e]->() | e.weight] | total + w) AS weight ORDER BY name").to_list()
+// josh 1.4, marko 1.9, peter 0.2, vadas 0 (reduce starts at 0)
+g.V().hasLabel("person").order().by("name").project("name", "weight").by("name").by(__.out_e().values("weight").fold().sum(Scope.local)).to_list()
+// josh 1.4, marko 1.9, peter 0.2, vadas without "weight" (the sum of no values is no value)
+g.gql("MATCH (p:person) RETURN reduce(s = '', n IN collect_list(p.name) | s || n) AS names").to_list()   // one string of the four names
 ```
 
 ## Map projections and comprehensions
@@ -160,9 +199,8 @@ g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name
 // josh [ripple, lop], marko [lop], peter [lop], vadas []
 ```
 
-Cypher's list predicates `all()`, `any()`, `none()`, `single()` and `reduce()` are not
-supported yet; their help shows the list-comprehension form (`size([x IN l WHERE c]) = size(l)`
-for `all`).
+Cypher's list predicates `all()`, `any()`, `none()`, `single()` and `reduce()` bind a variable
+the same way; they are [compatibility functions](#list-predicates-and-reduce).
 
 ## Cypher spellings that are not aliases
 
@@ -173,7 +211,7 @@ for `all`).
 | `x ^ y` | not supported yet; use GQL's `power(x, y)` |
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
 | map projections, list and pattern comprehensions | supported as [compatibility forms](#map-projections-and-comprehensions), not aliases |
-| `any()` / `all()` / `none()` / `single()`, `reduce()` | not supported yet; count with a list comprehension, `size([x IN l WHERE c]) > 0`, or aggregate with `FOR` |
+| `any()` / `all()` / `none()` / `single()`, `reduce()` | supported as [compatibility functions](#list-predicates-and-reduce), not aliases: GQL has no such functions |
 | `COUNT { pattern }` | not supported yet; `OPTIONAL MATCH` and `count()` count the matches, `EXISTS` tests for one |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |

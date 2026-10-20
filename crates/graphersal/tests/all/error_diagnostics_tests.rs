@@ -7927,7 +7927,10 @@ mod gql {
                       variable or column in scope, not the variable of a comprehension around \
                       it, and not a name that an earlier clause bound and dropped, as in \
                       g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, p.age + 1] WHERE a \
-                      > 30 | a * 2] AS l\").";
+                      > 30 | a * 2] AS l\"). The same holds for the variable of all(), any(), \
+                      none() and single() and for both variables of reduce(), as in \
+                      g.gql(\"MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS \
+                      old, reduce(s = 0, a IN [p.age, 1] | s + a) AS total\").";
         for (query, name) in [
             ("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l", "p"),
             (
@@ -8555,13 +8558,6 @@ mod gql {
                 "store normalized text, or compare with lower() / upper().",
             ),
             (
-                "all(x IN [1] WHERE x > 0)",
-                GqlErrorKind::NotYet,
-                "all() (a list function that binds a variable inside the call) is not yet \
-                 supported",
-                "test the items in Gremlin after gql()",
-            ),
-            (
                 "elements(p)",
                 GqlErrorKind::NotYet,
                 "elements() (a GQL path function pending verification) is not yet supported",
@@ -8799,27 +8795,16 @@ mod gql {
     /// FOR examples run.
     #[test]
     fn gql_not_yet_list_constructs_name_for() {
-        for (query, keeps, names) in [
-            (
-                "MATCH (p) RETURN toIntegerList(p.tags)",
-                "convert the items one by one in Gremlin after gql()",
-                "or with FOR in gql(), as in g.gql(\"FOR t IN ['1', '2'] RETURN \
-                 collect_list(toInteger(t)) AS l\")",
-            ),
-            (
-                "MATCH (p) RETURN any(x IN p.tags WHERE x = 'a')",
-                "test the items in Gremlin after gql()",
-                "or with FOR in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' \
-                 RETURN DISTINCT n\")",
-            ),
-        ] {
-            let (err, _) = gql_failure(|g| g.gql(query).to_list());
-            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
-            let help = err.help().unwrap();
-            assert!(help.starts_with(keeps), "{query}: {help}");
-            assert!(help.contains(names), "{query}: {help}");
-            assert_examples_run(&help);
-        }
+        let query = "MATCH (p) RETURN toIntegerList(p.tags)";
+        let keeps = "convert the items one by one in Gremlin after gql()";
+        let names = "or with FOR in gql(), as in g.gql(\"FOR t IN ['1', '2'] RETURN \
+                     collect_list(toInteger(t)) AS l\")";
+        let (err, _) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
+        let help = err.help().unwrap();
+        assert!(help.starts_with(keeps), "{query}: {help}");
+        assert!(help.contains(names), "{query}: {help}");
+        assert_examples_run(&help);
     }
 
     // ----- stage 2b: help sweep (rule 6) -----
@@ -9073,57 +9058,132 @@ mod gql {
 
     // ----- stage 2c: help sweep (rule 6) -----
 
-    /// `all()` / `any()` / `none()` / `single()` / `reduce()` stay "not yet" (P0, E18); their
-    /// help names the comprehension forms with runnable `g.gql(..)` examples, a list
-    /// comprehension and a pattern comprehension among them.
+    // ----- stage 2d.T5d: list predicates and reduce (D23) -----
+
+    /// A variable of `all()` / `any()` / `none()` / `single()` / `reduce()` that reuses a name
+    /// is E14 like a comprehension variable: the message names the form, the advice gives it a
+    /// variable of its own and its examples run.
     #[test]
-    fn gql_quantifier_functions_name_runnable_comprehensions() {
-        for call in [
-            "all(x IN [1, 2] WHERE x > 0)",
-            "any(x IN [1, 2] WHERE x > 0)",
-            "none(x IN [1, 2] WHERE x > 0)",
-            "single(x IN [1, 2] WHERE x > 0)",
-            "reduce(s = 0, x IN [1, 2] | s + x)",
+    fn gql_list_function_variables_must_be_new_names() {
+        for (query, message, alternative) in [
+            (
+                "MATCH (p:person) RETURN all(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of all() shadows the variable `p` in scope; it must be a new \
+                 name",
+                "give all() a variable of its own, as in all(p2 IN list WHERE p2 > 0).",
+            ),
+            (
+                "MATCH (p:person) RETURN single(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of single() shadows the variable `p` in scope",
+                "give single() a variable of its own, as in single(p2 IN list WHERE p2 > 0).",
+            ),
+            (
+                "MATCH (p:person) RETURN reduce(p = 0, x IN [1] | x) AS a",
+                "the accumulator `p` of reduce() shadows the variable `p` in scope",
+                "give reduce() an accumulator of its own, as in reduce(p2 = 0, item IN list | \
+                 p2 + item).",
+            ),
+            (
+                "RETURN reduce(s = 0, s IN [1] | s) AS a",
+                "the variable `s` of reduce() shadows the variable `s` in scope",
+                "give reduce() a variable of its own, as in reduce(total = 0, s2 IN list | \
+                 total + s2).",
+            ),
+            (
+                "MATCH (p:person) WITH p.name AS n RETURN any(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of any() is a name this query already uses",
+                "give any() a variable of its own, as in any(p2 IN list WHERE p2 > 0).",
+            ),
         ] {
-            let query = format!("MATCH (p:person) RETURN {call} AS x");
-            let (err, _) = gql_failure(|g| g.gql(&query).to_list());
-            assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
-            let help = err.help().expect("help");
-            assert!(
-                help.contains(
-                    "as in g.gql(\"RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) \
-                     AS all_positive\")"
-                ),
-                "{help}"
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
             );
-            assert!(
-                help.contains(
-                    "g.gql(\"MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | \
-                     f]) > 0 RETURN p.name\") for any()"
-                ),
-                "{help}"
-            );
+            assert!(text.contains(message), "{query}: {text}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(alternative), "{query}: {help}");
+            assert!(help.contains("both variables of reduce()"), "{help}");
             assert_examples_run(&help);
         }
-        // The equivalents give the answers of the functions they stand for.
+    }
+
+    /// An aggregate inside the condition of a list predicate or the `|` part of `reduce()` is
+    /// refused with a WITH example of that form; its initial value and its list lie outside.
+    #[test]
+    fn gql_list_function_aggregates_name_the_form() {
+        for (query, place, example) in [
+            (
+                "MATCH (p:person) RETURN any(x IN [1] WHERE x > count(*)) AS a",
+                "inside the WHERE part of all(), any(), none() or single()",
+                "aggregate in a WITH first and use its column in the condition, as in MATCH \
+                 (p)-->(f) WITH p, count(f.age) AS n RETURN all(x IN [1, 2, 3] WHERE x < n)",
+            ),
+            (
+                "MATCH (p:person) RETURN reduce(s = 0, x IN [1] | s + max(p.age)) AS a",
+                "inside the | part of reduce()",
+                "aggregate in a WITH first and use its column in the | part, as in MATCH \
+                 (p)-->(f) WITH p, max(f.age) AS n RETURN reduce(s = 0, x IN [1, 2, 3] | s + x \
+                 * n)",
+            ),
+        ] {
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Semantic, "{query}");
+            assert!(text.contains(place), "{query}: {text}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(example), "{query}: {help}");
+            assert_examples_run(&help);
+        }
         let graph = GraphSource::tinkerpop_modern();
         let locked = graph.read();
-        let one = |query: &str| {
-            let rows = locked.traversal().gql(query).to_list().unwrap();
-            assert_eq!(rows.len(), 1, "{query}");
-            rows.into_iter().next().unwrap()
-        };
-        assert_eq!(
-            one("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive"),
-            one("RETURN true AS all_positive")
-        );
-        assert_eq!(
-            one(
-                "MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 \
-                 RETURN p.name"
+        let rows = locked
+            .traversal()
+            .gql(
+                "MATCH (p:person) RETURN reduce(s = count(*), x IN collect_list(p.age) | s + x) \
+                 AS a",
+            )
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// A list function over a value that is not a list is a data error naming the function;
+    /// a missing `WHERE` or `|` is a syntax error naming the expected token.
+    #[test]
+    fn gql_list_function_errors_name_the_function() {
+        for (query, message) in [
+            (
+                "RETURN any(x IN 5 WHERE x > 1) AS a",
+                "any() iterates over a list, not a number",
             ),
-            one("MATCH (p:person)-[:knows]->(f) WHERE f.age > 30 RETURN DISTINCT p.name")
-        );
+            (
+                "RETURN all(x IN 'ab' WHERE x > 1) AS a",
+                "all() iterates over a list, not a string",
+            ),
+            (
+                "RETURN reduce(s = 0, x IN 5 | s + x) AS a",
+                "reduce() iterates over a list, not a number",
+            ),
+        ] {
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).1, "22G03", "{query}");
+            assert!(text.contains(message), "{query}: {text}");
+        }
+        for (query, expected) in [
+            ("RETURN all(x IN [1]) AS a", "Expected WHERE"),
+            ("RETURN reduce(s = 0, x IN [1]) AS a", "Expected `|`"),
+            ("RETURN reduce(s, x IN [1] | s) AS a", "Expected `=`"),
+            (
+                "RETURN none(1 IN [1] WHERE true) AS a",
+                "Expected a variable",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(expected), "{query}: {help}");
+        }
     }
 
     /// A loop or traverser limit reached by a quantified edge inside a pattern comprehension

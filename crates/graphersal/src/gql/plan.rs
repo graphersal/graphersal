@@ -370,6 +370,7 @@ pub(crate) fn subqueries_in(expr: &Expr, mut f: impl FnMut(Span)) {
                 }));
             }
             ExprKind::ListComprehension(comprehension) => {
+                stack.extend(comprehension.init());
                 stack.push(&comprehension.list);
                 stack.extend(comprehension.filter.as_ref());
                 stack.extend(comprehension.map.as_ref());
@@ -1047,6 +1048,7 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
                 }
             }
             ExprKind::ListComprehension(comprehension) => {
+                stack.extend(comprehension.init());
                 stack.push(&comprehension.list);
                 stack.extend(comprehension.filter.as_ref());
                 stack.extend(comprehension.map.as_ref());

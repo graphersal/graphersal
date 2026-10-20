@@ -3326,6 +3326,9 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
             }
         }
         ExprKind::ListComprehension(comprehension) => {
+            if let Some(init) = comprehension.init_mut() {
+                rename_aliases(init, within, renames);
+            }
             rename_aliases(&mut comprehension.list, within, renames);
             if let Some(filter) = &mut comprehension.filter {
                 rename_aliases(filter, within, renames);

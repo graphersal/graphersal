@@ -265,11 +265,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, CountClause,
-    EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr, LetClause,
-    LinearQuery, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection, MatchClause,
-    NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, QueryBlock, ReturnItem,
-    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
+    CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr,
+    LetClause, LinearQuery, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection,
+    MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, QueryBlock,
+    ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
+    UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -1020,6 +1021,9 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
             }
         }
         ExprKind::ListComprehension(comprehension) => {
+            if let Some(init) = comprehension.init() {
+                f(init);
+            }
             f(&comprehension.list);
             if let Some(filter) = &comprehension.filter {
                 f(filter);
@@ -3046,7 +3050,9 @@ impl<'q> Binder<'q> {
 
     /// A list comprehension: its list in the scope around it, its `WHERE` and `|` parts with
     /// its variable as a local (design M4) that may not shadow any other name (E14), no
-    /// aggregate inside them.
+    /// aggregate inside them. The list predicates and `reduce` (stage 2d, D23) bind the same
+    /// way; `reduce`'s initial value lies in the scope around it, its accumulator is a second
+    /// local of the `|` part (E14 too, and not the item variable's name).
     #[inline(never)]
     fn comprehension(
         &mut self,
@@ -3054,32 +3060,57 @@ impl<'q> Binder<'q> {
         comprehension: &ListComprehension,
         refs: &mut Refs,
     ) -> BResult<()> {
+        if let Some(init) = comprehension.init() {
+            self.resolve(ctx, init, refs)?;
+        }
         self.resolve(ctx, &comprehension.list, refs)?;
-        self.check_local(ctx, &comprehension.variable)?;
+        let place = match &comprehension.form {
+            ComprehensionForm::List => IN_COMPREHENSION,
+            ComprehensionForm::Predicate(_) => IN_LIST_PREDICATE,
+            ComprehensionForm::Reduce(_) => IN_REDUCE,
+        };
         let inner = Ctx {
-            aggregates: Aggregates::Refused(IN_COMPREHENSION),
+            aggregates: Aggregates::Refused(place),
             ..ctx
         };
-        self.locals.push(comprehension.variable.clone());
+        let pushed = self.locals.len();
         let mut result = Ok(());
-        for part in [&comprehension.filter, &comprehension.map]
-            .into_iter()
-            .flatten()
-        {
-            result = self.resolve(inner, part, refs);
-            if result.is_err() {
-                break;
+        if let ComprehensionForm::Reduce(accumulator) = &comprehension.form {
+            result = self.check_local(ctx, &accumulator.variable, comprehension);
+            if result.is_ok() {
+                self.locals.push(accumulator.variable.clone());
             }
         }
-        self.locals.pop();
+        if result.is_ok() {
+            result = self.check_local(ctx, &comprehension.variable, comprehension);
+        }
+        if result.is_ok() {
+            self.locals.push(comprehension.variable.clone());
+            for part in [&comprehension.filter, &comprehension.map]
+                .into_iter()
+                .flatten()
+            {
+                result = self.resolve(inner, part, refs);
+                if result.is_err() {
+                    break;
+                }
+            }
+        }
+        self.locals.truncate(pushed);
         result
     }
 
     /// A comprehension variable may not shadow a name (design E14, 42002): a variable or an
     /// alias in scope, another comprehension variable around it, or any name a binding of the
     /// query has or had (a substituted expression refers to bindings by those names, so a
-    /// local of the same name would capture them).
-    fn check_local(&self, ctx: Ctx<'_>, var: &Identifier) -> BResult<()> {
+    /// local of the same name would capture them). The same holds for the variables of the
+    /// list predicates and of `reduce` (`within`, for the message).
+    fn check_local(
+        &self,
+        ctx: Ctx<'_>,
+        var: &Identifier,
+        within: &ListComprehension,
+    ) -> BResult<()> {
         let name = &var.name;
         let in_scope = self.scope.get(name).is_some()
             || ctx.aliases.iter().any(|(alias, _)| alias == name)
@@ -3092,22 +3123,52 @@ impl<'q> Binder<'q> {
         if !in_scope && !used {
             return Ok(());
         }
+        let (what, alternative) = match &within.form {
+            ComprehensionForm::List => (
+                format!("the comprehension variable `{name}`"),
+                format!(
+                    "give the comprehension a variable of its own, as in [{name}2 IN list WHERE \
+                     {name}2 > 0 | {name}2]"
+                ),
+            ),
+            ComprehensionForm::Predicate(predicate) => {
+                let f = predicate.name();
+                (
+                    format!("the variable `{name}` of {f}()"),
+                    format!(
+                        "give {f}() a variable of its own, as in {f}({name}2 IN list WHERE \
+                         {name}2 > 0)"
+                    ),
+                )
+            }
+            ComprehensionForm::Reduce(accumulator) if accumulator.variable.span == var.span => (
+                format!("the accumulator `{name}` of reduce()"),
+                format!(
+                    "give reduce() an accumulator of its own, as in reduce({name}2 = 0, item IN \
+                     list | {name}2 + item)"
+                ),
+            ),
+            ComprehensionForm::Reduce(_) => (
+                format!("the variable `{name}` of reduce()"),
+                format!(
+                    "give reduce() a variable of its own, as in reduce(total = 0, {name}2 IN \
+                     list | total + {name}2)"
+                ),
+            ),
+        };
+        let rule = match within.form {
+            ComprehensionForm::List => "a comprehension variable must be a new name",
+            ComprehensionForm::Predicate(_) | ComprehensionForm::Reduce(_) => {
+                "it must be a new name"
+            }
+        };
         let message = if in_scope {
-            format!(
-                "the comprehension variable `{name}` shadows the variable `{name}` in scope; a \
-                 comprehension variable must be a new name"
-            )
+            format!("{what} shadows the variable `{name}` in scope; {rule}")
         } else {
-            format!(
-                "the comprehension variable `{name}` is a name this query already uses; a \
-                 comprehension variable must be a new name"
-            )
+            format!("{what} is a name this query already uses; {rule}")
         };
         Err(semantic(var.span, message)
-            .alternative(format!(
-                "give the comprehension a variable of its own, as in [{name}2 IN list WHERE \
-                 {name}2 > 0 | {name}2]"
-            ))
+            .alternative(alternative)
             .topic(GqlHelpTopic::ComprehensionVariable)
             .into())
     }
@@ -3717,6 +3778,15 @@ impl<'q> Binder<'q> {
             children.push((s, true));
             Ok(e)
         };
+        let form = match &comprehension.form {
+            ComprehensionForm::Reduce(accumulator) => {
+                ComprehensionForm::Reduce(Box::new(ReduceAccumulator {
+                    variable: accumulator.variable.clone(),
+                    init: one(self, &accumulator.init)?,
+                }))
+            }
+            form @ (ComprehensionForm::List | ComprehensionForm::Predicate(_)) => form.clone(),
+        };
         let list = one(self, &comprehension.list)?;
         let filter = match &comprehension.filter {
             Some(filter) => Some(one(self, filter)?),
@@ -3727,6 +3797,7 @@ impl<'q> Binder<'q> {
             None => None,
         };
         let kind = ExprKind::ListComprehension(Box::new(ListComprehension {
+            form,
             variable: comprehension.variable.clone(),
             list,
             filter,
@@ -4744,6 +4815,12 @@ fn ordinal_as_element(var: &Identifier, here: BindingKind) -> Box<GqlErrorBuilde
 /// The place of an aggregate inside a list comprehension's `WHERE` / `|` part (refused).
 const IN_COMPREHENSION: &str = "inside the WHERE or | part of a list comprehension";
 
+/// The place of an aggregate inside the `WHERE` of `all()` / `any()` / `none()` / `single()`.
+const IN_LIST_PREDICATE: &str = "inside the WHERE part of all(), any(), none() or single()";
+
+/// The place of an aggregate inside the `|` part of `reduce()`.
+const IN_REDUCE: &str = "inside the | part of reduce()";
+
 const IN_PATTERN_COMPREHENSION: &str = "inside the | part of a pattern comprehension";
 
 /// A comprehension variable named inside a subquery body (not yet: the body is a child
@@ -4777,6 +4854,17 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
         format!(
             "aggregate in a WITH first and use its column in the comprehension, as in \
              MATCH (p)-->(f) WITH p, {f}(f.age) AS n RETURN [x IN [1, 2, 3] WHERE x < n]"
+        )
+    } else if place == IN_LIST_PREDICATE {
+        format!(
+            "aggregate in a WITH first and use its column in the condition, as in \
+             MATCH (p)-->(f) WITH p, {f}(f.age) AS n RETURN all(x IN [1, 2, 3] WHERE x < n)"
+        )
+    } else if place == IN_REDUCE {
+        format!(
+            "aggregate in a WITH first and use its column in the | part, as in \
+             MATCH (p)-->(f) WITH p, {f}(f.age) AS n RETURN reduce(s = 0, x IN [1, 2, 3] | s + \
+             x * n)"
         )
     } else if place == "in FOR" || place == "in UNWIND" {
         format!(

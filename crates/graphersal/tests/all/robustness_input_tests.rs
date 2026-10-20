@@ -3093,3 +3093,232 @@ fn random_gql_2c_queries_never_panic_and_comprehensions_equal_their_rewrites() {
     }
     fatal.assert_empty("GQL 2c");
 }
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2d.T5d: the list predicates all / any / none / single and reduce (D23)
+// ---------------------------------------------------------------------------------------------
+
+/// Valid queries with the list predicates and `reduce`: the base documents of their mutations.
+#[cfg(feature = "gql")]
+const GQL_2D_LIST_FUNCTION_CORPUS: &[&str] = &[
+    "RETURN all(x IN [1, 2, NULL] WHERE x > 0) AS a, any(x IN [] WHERE x) AS b",
+    "MATCH (p:person) WHERE none(x IN [(p)-->(y) | y.age] WHERE x > 30) RETURN p.name AS n",
+    "MATCH (p:person) RETURN single(x IN [p.age, 29] WHERE x = 29) AS s",
+    "MATCH (p:person) RETURN reduce(s = 0, x IN [(p)-->(y) | y] | s + 1) AS n",
+    "MATCH (p:person) RETURN reduce(s = p.age, x IN [1, 2] | s * x) AS n ORDER BY n",
+    "MATCH (p:person) RETURN reduce(s = [], x IN collect_list(p.name) | [x] + s) AS l",
+    "MATCH (p:person) RETURN [x IN [1, 2] WHERE all(y IN [x, p.age] WHERE y > 0) | x] AS l",
+    "MATCH (p:person) FOR v IN reduce(s = [], x IN [1, 2] | s + [x * p.age]) RETURN v",
+    "MATCH (p:person) LET k = any(x IN [p.age] WHERE x > 30) FILTER k RETURN p",
+];
+
+/// Tokens of the list functions for their token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2D_LIST_FUNCTION_TOKENS: &[&str] = &[
+    "all(",
+    "any(",
+    "none(",
+    "single(",
+    "reduce(",
+    "reduce(s = 0,",
+    "s =",
+    "=",
+    "x IN",
+    "IN",
+    "WHERE",
+    "|",
+    "(",
+    ")",
+    "[",
+    "]",
+    ",",
+    "x",
+    "s",
+    "s + x",
+    "p.age",
+    "[1, NULL]",
+    "[(p)-->(y) | y]",
+    "NULL",
+    "1",
+    "AND",
+    "NOT",
+    "IS NULL",
+    "RETURN",
+];
+
+/// A random list function and its rewrite into list comprehensions, `CASE` and `size()`, with
+/// the same value on every row (`NULL` lists, `NULL` items and `NULL` conditions included; the
+/// conditions never fail, so the early return of a decided predicate is not observable).
+#[cfg(feature = "gql")]
+fn random_gql_2d_list_function_queries(rng: &mut Rng) -> [String; 2] {
+    let (head, keys): (&str, &str) = match rng.below(4) {
+        0 => ("MATCH (a:person)", "a"),
+        1 => ("MATCH (a)-[e]->(b)", "a, e, b"),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            "a, b",
+        ),
+        _ => ("MATCH (a) WITH a, a.age AS c", "a, c"),
+    };
+    let list = *rng.pick(&[
+        "[a.age, 30, NULL]",
+        "[(a)-->(y) | y.age]",
+        "a.missing",
+        "[]",
+        "[a.age, a.age + 1]",
+        "[(a)--(y) | y.name]",
+    ]);
+    let condition = *rng.pick(&[
+        "x > 30",
+        "x = 29",
+        "x IS NULL",
+        "x <> 27",
+        "x > a.age",
+        "x IN [27, 32, 'lop']",
+        "x STARTS WITH 'j'",
+    ]);
+    let kept = format!("size([x IN {list} WHERE {condition}])");
+    let unknown = format!("size([x IN {list} WHERE ({condition}) IS NULL])");
+    let any = format!(
+        "CASE WHEN {list} IS NULL THEN NULL WHEN {kept} > 0 THEN true WHEN {unknown} > 0 THEN \
+         NULL ELSE false END"
+    );
+    let (form, rewrite) = match rng.below(6) {
+        0 => (
+            format!("all(x IN {list} WHERE {condition})"),
+            format!(
+                "CASE WHEN {list} IS NULL THEN NULL WHEN size([x IN {list} WHERE NOT \
+                 ({condition})]) > 0 THEN false WHEN {unknown} > 0 THEN NULL ELSE true END"
+            ),
+        ),
+        1 => (format!("any(x IN {list} WHERE {condition})"), any),
+        2 => (
+            format!("none(x IN {list} WHERE {condition})"),
+            format!("NOT ({any})"),
+        ),
+        3 => (
+            format!("single(x IN {list} WHERE {condition})"),
+            format!(
+                "CASE WHEN {list} IS NULL THEN NULL WHEN {kept} > 1 THEN false WHEN {unknown} > \
+                 0 THEN NULL ELSE {kept} = 1 END"
+            ),
+        ),
+        4 => (
+            format!("reduce(s = [], x IN {list} | s + [x])"),
+            format!("[x IN {list} | x]"),
+        ),
+        _ => (
+            format!("reduce(s = 0, x IN {list} | s + 1)"),
+            format!("size({list})"),
+        ),
+    };
+    [
+        format!("{head} RETURN {keys}, {form} AS v"),
+        format!("{head} RETURN {keys}, {rewrite} AS v"),
+    ]
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2d_list_functions_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_D5D1);
+    let mut generated = Vec::new();
+    for _ in 0..budget(100) {
+        generated.push(random_gql_2d_list_function_queries(&mut rng));
+    }
+    let mut ran = 0;
+    for forms in &generated {
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| gql_2a_rows(q, false))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, result) in forms.iter().zip(&results) {
+                    match result {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if results[0] != results[1] {
+                    differences.push(format!(
+                        "{}\n  {:?}\n{}\n  {:?}",
+                        forms[0], results[0], forms[1], results[1]
+                    ));
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    let total = generated.len() * 2;
+    assert!(
+        ran * 4 >= total * 3,
+        "only {ran} of {total} generated list function queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated list function queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} list function queries that differ from their rewrites:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2D_LIST_FUNCTION_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting bounds, long lists and a quadratic fold: a result or a bounded error.
+    for (open, close) in [
+        ("reduce(s = 0, x IN ", " | s)"),
+        ("reduce(s = ", ", x IN [1] | s)"),
+        ("all(x IN [1] WHERE ", ")"),
+        ("any(x IN ", " WHERE true)"),
+    ] {
+        texts.push(format!(
+            "MATCH (n) RETURN {}1{} AS x",
+            open.repeat(300),
+            close.repeat(300)
+        ));
+    }
+    texts.push(format!(
+        "RETURN reduce(s = [], x IN [{}] | s + [x, x]) AS l",
+        vec!["1"; 1_000].join(", ")
+    ));
+    texts.push("RETURN all(x IN range(1, 9223372036854775807) WHERE x > 0) AS a".to_string());
+    texts.push("RETURN reduce(s = 0, x IN range(1, 100000) | s + x) AS a".to_string());
+    texts.push("RETURN reduce(s = 9223372036854775807, x IN [1] | s + x) AS a".to_string());
+    texts.push(
+        "MATCH (a), (b), (c) RETURN reduce(s = [], x IN [(a)--(d) | d] | s + [x, b, c]) AS l"
+            .to_string(),
+    );
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2D_LIST_FUNCTION_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len)
+            .map(|_| *rng.pick(GQL_2D_LIST_FUNCTION_TOKENS))
+            .collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) RETURN");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2d list functions");
+}

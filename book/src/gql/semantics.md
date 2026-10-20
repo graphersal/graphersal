@@ -195,6 +195,23 @@ g.gql("RETURN [x IN [1, NULL, 3] WHERE x > 1] AS kept, [x IN [1, NULL, 3] | x] A
 g.gql("RETURN [x IN 5 | x] AS m")   // error: a list comprehension iterates over a list, not a number (22G03)
 ```
 
+**List predicates and `reduce`.** `all()`, `any()`, `none()` and `single()` are three-valued,
+not counts: a `NULL` list gives `NULL`; an item that decides the answer wins (`all` FALSE at a
+FALSE item, `any` TRUE and `none` FALSE at a TRUE one, `single` FALSE at a second TRUE one) and
+the later items are not evaluated; otherwise a `NULL` condition gives `NULL`. This is the
+openCypher TCK (`Quantifier1` to `Quantifier4`), which Neo4j Cypher 25 follows; Neo4j's manual
+words the `NULL` rule of `any()` like that of `all()`, but its implementation and the TCK give
+`any(x IN [NULL, 2] WHERE x = 2)` TRUE, as here. `reduce(acc = init, x IN l | expr)` gives
+`NULL` for a `NULL` list, `init` for an empty one, and lets `NULL` items flow through `expr`.
+Their variables are new names like a comprehension's.
+
+```rhai,graph=modern
+g.gql("RETURN any(x IN [NULL, 2] WHERE x = 2) AS a, all(x IN [NULL, 2] WHERE x = 2) AS b, single(x IN [2, NULL] WHERE x = 2) AS c, single(x IN [2, NULL, 2] WHERE x = 2) AS d").to_list()
+// #{"a": true, "b": (), "c": (), "d": false}
+g.gql("RETURN reduce(s = 0, x IN [1, NULL] | s + x) AS a, reduce(s = 0, x IN [] | s + x) AS b, reduce(s = 0, x IN NULL | s + x) AS c").to_list()
+// #{"a": (), "b": 0, "c": ()}
+```
+
 **A comprehension variable is a new name.** It may not shadow a variable in scope, and `gql()`
 also refuses a name the query uses for another variable anywhere else: one a `WITH` dropped or
 renamed, one bound inside a subquery, one a later `LET` defines. This is stricter than Neo4j:
