@@ -42,7 +42,7 @@ additive (a new feature, new methods, a new `#[non_exhaustive]` error variant).
     on an indexed property and an id lookup per row are served directly.
   - **Everywhere:** Rust `GraphTraversalSource::gql` and `gql_with(query, params)` (feature `gql`,
     off by default, no dependencies, builds for wasm32), the Rhai DSL `g.gql(query)` /
-    `g.gql_with(query, params)`, the CLI and REPL, Python (`graph.query("g.gql(...)")`), the
+    `g.gql(query, params)`, the CLI and REPL, Python (`graph.query("g.gql(...)")`), the
     playground (GQL examples), and the MCP server's tool `gql`. New error
     `TraverserError::Gql` with `GqlErrorKind`.
   - **Not yet:** writes (`INSERT`, `SET`, `DELETE`, ...), `EXCEPT`/`INTERSECT`, path modes and
