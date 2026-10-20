@@ -1515,32 +1515,36 @@ input.ve-null { color: var(--text-muted); }
 .ex-close:hover { background: var(--surface-2); color: var(--text); }
 .ex-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 6px 10px; }
 .ex-empty { padding: 14px 8px; font-size: 13px; }
-.ex-group + .ex-group { margin-top: 2px; }
+.ex-group + .ex-group { margin-top: 6px; }
+/* Group and subgroup headers are bars on a grey background in the text colour, so they stand out
+   from the plain example rows they collapse. */
 .ex-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 6px 6px 4px;
+  margin: 2px 0;
+  padding: 6px 8px;
   border: 0;
   border-radius: 4px;
-  background: none;
-  color: var(--text-faint);
+  background: var(--surface-3);
+  color: var(--text);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: .04em;
   text-transform: uppercase;
   text-align: left;
   cursor: pointer;
 }
-.ex-toggle.sub { padding-left: 16px; text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-muted); font-weight: 600; }
-.ex-toggle:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.ex-toggle.sub { width: calc(100% - 12px); margin-left: 12px; background: var(--surface-2); text-transform: none; letter-spacing: 0; font-size: 12.5px; font-weight: 600; }
+.ex-toggle:hover:not(:disabled) { background: var(--border-strong); color: var(--text); }
 .ex-toggle:disabled { cursor: default; }
 .ex-toggle:disabled .ex-caret { visibility: hidden; }
-.ex-caret { flex: none; width: 10px; font-size: 10px; }
+.ex-caret { visibility: hidden; }
+.ex-caret { flex: none; width: 12px; font-size: 11px; }
 .ex-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ex-n { flex: none; margin-left: auto; font-weight: 400; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.ex-n { flex: none; margin-left: auto; font-weight: 400; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .ex-sub .ex-item { padding-left: 32px; }
 .ex-item {
   display: flex;
