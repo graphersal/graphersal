@@ -60,13 +60,13 @@ The mandatory core of a GQL read query, by construct.
 | G017 | all shortest path search | not yet | Gremlin `repeat()` |
 | G018 | any shortest path search | not yet | Gremlin `repeat()` |
 | G019 | counted shortest path search | not yet | |
-| G035 | quantified paths | not yet | a parenthesized path with a quantifier, `((a)-->(b)){1,3}`; quantify a single edge instead |
+| G035 | quantified paths *(provisional)* | partial | a parenthesized path pattern with `{m,n}`, `{n}`, `{m,}`, `{,n}`, `*`, `+` ([Quantified path patterns](subset.md#quantified-path-patterns)); body variables are group variables (lists), the outer nodes merge with the body's first and last node, trail per body edge; one chain per body, no quantifier, path variable, path mode or search prefix inside a body, a body variable is a new name (each refused with `0A000`) |
 | G036 | quantified edges | supported | `{m,n}`, `{n}`, `{m,}`, `{,n}`, `*`, `+` on full and abbreviated edges; Cypher `[*m..n]` and its forms are aliases; trail per clause |
-| G037 | questioned paths | not yet | |
+| G037 | questioned paths *(provisional)* | supported | `((..))?`: the body once or not at all; its variables are single elements, `NULL` when it did not match ([Semantics](semantics.md#quantified-path-patterns)) |
 | G043 | complete full edge patterns | partial | pointing left, right, either direction (`-[e]-`, `<-[e]->`); the undirected forms (`~[e]~` and its variants) are refused, Graphersal edges are directed |
 | G044 | basic abbreviated edge patterns | supported | `->`, `<-`, `-` (Cypher `-->`, `<--`, `--`) |
 | G045 | complete abbreviated edge patterns | partial | `<->` supported; `~`, `<~`, `~>` refused |
-| G050 | parenthesized path pattern: `WHERE` clause *(provisional)* | not yet | parenthesized path patterns are not supported yet |
+| G050 | parenthesized path pattern: `WHERE` clause *(provisional)* | partial | `((x)-[e]->(y) WHERE <condition>)` with or without a quantifier, run in every iteration; it reads the body's variables, parameters and values (a condition reading an outer variable is not yet supported); a parenthesized path pattern without a quantifier matches once and keeps singletons |
 | G074 | label expression: wildcard label | supported | `%` |
 | G100 | `ELEMENT_ID` function | supported | the id as a string; Cypher `elementId` alias |
 | G110 | `IS DIRECTED` predicate *(provisional)* | not yet | every edge is directed |
@@ -141,7 +141,9 @@ where it has one):
 | aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; provisional) |
 | `min` / `max` over values of different kinds | the `ORDER BY` order, never an error |
 | `sum` of integers | an integer; overflow is an error (`22003`) |
-| unbounded quantifiers | no own limit: trail ends them; `repeat.max_loops` and `traversal.max_traversers` are errors, never a shortened result |
+| unbounded quantifiers | no own limit: trail ends them; `repeat.max_loops` and `traversal.max_traversers` are errors, never a shortened result (quantified edges and quantified path patterns alike) |
+| outer nodes next to a quantified path pattern | merged with the body's first node of the first iteration and last node of the last iteration (Neo4j Cypher 25's reading) |
+| order of a group variable's list | the iterations in the order the text reads, also when the plan walks the pattern from its far end |
 | `WITH ... LIMIT ... WHERE` | the `WHERE` filters after `ORDER BY` / `OFFSET` / `LIMIT` (Cypher's order; provisional) |
 | name of an unaliased column | the expression as written (provisional) |
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |

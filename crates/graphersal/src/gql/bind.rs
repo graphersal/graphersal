@@ -1083,7 +1083,9 @@ fn too_many_edges(span: Span) -> Box<GqlErrorBuilder> {
     .alternative(
         "split the pattern into several MATCH clauses that share a variable, for example \
          MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness then holds \
-         within each clause only), or walk a long path with Gremlin repeat(), for example \
+         within each clause only), repeat a chain as a quantified path pattern, whose body \
+         edges count once however often it repeats, for example MATCH (a) (()-->()){65} (z) \
+         RETURN z, or walk a long path with Gremlin repeat(), for example \
          g.v().repeat(__.out()).times(100)",
     );
     Box::new(b)

@@ -7547,9 +7547,11 @@ mod gql {
             report.contains(
                 "Help: split the pattern into several MATCH clauses that share a variable, for \
                  example MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness \
-                 then holds within each clause only), or walk a long path with Gremlin repeat(), \
-                 for example g.v().repeat(__.out()).times(100). The query is larger than gql() \
-                 accepts."
+                 then holds within each clause only), repeat a chain as a quantified path \
+                 pattern, whose body edges count once however often it repeats, for example \
+                 MATCH (a) (()-->()){65} (z) RETURN z, or walk a long path with Gremlin \
+                 repeat(), for example g.v().repeat(__.out()).times(100). The query is larger \
+                 than gql() accepts."
             ),
             "{report}"
         );
@@ -8107,10 +8109,12 @@ mod gql {
     fn gql_pattern_variable_errors_explain_what_a_variable_names() {
         let pattern = "In a MATCH clause a node variable names one node (written twice, it joins \
                        on the same node), an edge variable one edge, a path variable the path \
-                       after its `=`, and the variable of a quantified edge the list of its \
-                       edges, as in g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, \
-                       b.name\"); a name defined by LET or WITH is a value, not a pattern \
-                       variable.";
+                       after its `=`, the variable of a quantified edge the list of its \
+                       edges, and a variable inside a quantified path pattern the list of its \
+                       nodes or edges, one per iteration, as in g.gql(\"MATCH p = \
+                       (a:person)-[e:knows]->(b) RETURN p, e, b.name\") and g.gql(\"MATCH \
+                       (a:person) ((x)-[e:knows]->(y)){1,2} (b) RETURN a.name, y\"); a name \
+                       defined by LET or WITH is a value, not a pattern variable.";
         let help = gql_help("MATCH (a)-[e]->(b), (c)-[e]->(d) RETURN a");
         assert_eq!(
             help,

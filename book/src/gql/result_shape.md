@@ -74,13 +74,15 @@ alphabetical order is the order you want.
 
 ## Paths
 
-A path variable (`RETURN p`) and a group variable (the variable of a quantified edge) hold
+A path variable (`RETURN p`) and a group variable (the variable of a quantified edge, or a
+variable inside a quantified path pattern) hold
 elements, so Gremlin can continue from them too:
 
 | Column | Value | JSON |
 |---|---|---|
 | a path variable `p` | a path: vertex, edge, vertex, ..., in the written order (Gremlin's `path()` value) | a list of the element objects |
 | a group variable `e` of `-[e]->{1,3}` | a list of the edges, in the written order; `[]` for a zero-length match | a list of edge objects |
+| a group variable `x` or `e` of `((x)-[e]->(y)){1,3}` | a list of the nodes or edges, one per iteration in the written order; `[]` for zero iterations (with `?`: the single element, or `NULL`) | a list of element objects |
 | either, from an `OPTIONAL MATCH` that did not match | `NULL` | `null` |
 
 ```rhai,graph=modern

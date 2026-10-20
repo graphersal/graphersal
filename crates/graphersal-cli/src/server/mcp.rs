@@ -444,7 +444,7 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
 const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
-traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL read queries (MATCH \
+traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL read queries (experimental; MATCH \
 ... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects; see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
@@ -594,9 +594,11 @@ const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like)
 against the shared graph and return its rows as JSON: one JSON object per row, its keys the \
 RETURN columns in the order written (bounded like query's: at most max_rows rows, default 100; \
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
-the graph. No Rhai escaping is needed: pass the GQL text as it is.
+the graph. No Rhai escaping is needed: pass the GQL text as it is. GQL support is \
+experimental (its subset and answers may still change between versions); the query tool with \
+Gremlin stays the complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c and 2d): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d and 2e): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -634,7 +636,14 @@ RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top 
 aggregates count(x), count(*), sum, avg, min, max, collect_list \
 (Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
 optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
-Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
+Cypher -[e*1..3]-> (a group variable e is the list of edges); quantified path patterns \
+(a) ((x)-[:knows]->(y) WHERE x.age < y.age){1,3} (b) repeat a whole chain with the same \
+quantifiers (? = 0 or 1): the outer node before the group is its first node, the one after it \
+its last, a variable inside is the list of its nodes or edges, one per iteration (with ? or no \
+quantifier a single value, NULL when ? matched nothing), the body WHERE reads only body \
+variables, every edge at most once per match, e.g. people one or two co-author hops apart \
+(sharing software): MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b) RETURN DISTINCT a.name, \
+b.name; path variables p = (a)-->(b) \
 returned as a path value, path_length(p) (Cypher alias length), nodes(p) and \
 relationships(p) (lists of the path's vertices and edges); CASE, coalesce, nullif; scalar \
 functions: conversions CAST(x AS INTEGER|FLOAT|STRING|BOOLEAN) (strict: bad text fails the query \
@@ -648,10 +657,10 @@ stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; RETURN (mandatory;
 with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
 SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text). \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
-(trail semantics), also inside quantified edges. Vertices and edges in a row come back as {id, \
+(trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
-quantified path patterns ((a)-->(b)){1,3}, EXCEPT and INTERSECT (filter the first query's \
+a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
 procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
 with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
@@ -2202,8 +2211,8 @@ mod tests {
         assert!(INSTRUCTIONS.contains("`gql`"));
     }
 
-    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c and 2d subset as supported and
-    /// still names what is refused; it stays a read-only tool.
+    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
+    /// calls GQL experimental and still names what is refused; it stays a read-only tool.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
         let (supported, refused) = GQL_DESCRIPTION
@@ -2259,11 +2268,16 @@ mod tests {
             "OPTIONAL CALL",
             "top k per group",
             "CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 }",
+            "quantified path patterns",
+            "((x)-[:knows]->(y) WHERE x.age < y.age){1,3}",
+            "one per iteration",
+            "NULL when ? matched nothing",
+            "MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)",
         ] {
             assert!(supported.contains(named), "{named}");
         }
         for named in [
-            "((a)-->(b)){1,3}",
+            "nested inside a quantified path pattern",
             "EXCEPT and INTERSECT",
             "IN TRANSACTIONS",
             "randomUUID",
@@ -2283,10 +2297,12 @@ mod tests {
             "UNION",
             "NEXT",
             "reduce()",
+            "((a)-->(b)){1,3}",
         ] {
             assert!(!refused.contains(gone), "{gone}");
         }
         assert!(GQL_DESCRIPTION.contains("never changes"));
+        assert!(GQL_DESCRIPTION.contains("experimental"));
     }
 
     #[test]

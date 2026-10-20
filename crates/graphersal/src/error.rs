@@ -6924,9 +6924,11 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::PatternVariable => {
             "In a MATCH clause a node variable names one node (written twice, it joins on the \
              same node), an edge variable one edge, a path variable the path after its `=`, \
-             and the variable of a quantified edge the list of its edges, as in \
-             g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, b.name\"); a name \
-             defined by LET or WITH is a value, not a pattern variable."
+             the variable of a quantified edge the list of its edges, and a variable inside \
+             a quantified path pattern the list of its nodes or edges, one per iteration, as \
+             in g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, b.name\") and \
+             g.gql(\"MATCH (a:person) ((x)-[e:knows]->(y)){1,2} (b) RETURN a.name, y\"); a \
+             name defined by LET or WITH is a value, not a pattern variable."
         }
         GqlHelpTopic::Names => {
             "Give every column of a RETURN or WITH, every variable of a LET and every key of a \

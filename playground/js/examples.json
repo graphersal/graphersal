@@ -302,6 +302,30 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "Quantified path pattern ((x)-[e]->(y)){1,2}: group lists",
+    "script": "// A variable inside the group is the list of its nodes or edges, one per iteration; (a) is the\n// first x and (b) the last y.\ng.gql(`\n  MATCH (a:person {name: 'marko'}) ((x)-[e:knows|created]->(y)){1,2} (b)\n  RETURN b.name AS reached, [n IN y | n.name] AS via, size(e) AS hops\n  ORDER BY hops, reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Quantified path pattern with a two-hop body: co-creators",
+    "script": "// The body repeats a whole chain: person -created-> software <-created- person, once or twice.\n// Every edge is used at most once per match, so x and y of one iteration differ.\ng.gql(`\n  MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)\n  RETURN DISTINCT a.name AS person, b.name AS co_creator\n  ORDER BY person, co_creator\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Body WHERE in a quantified path pattern: always to someone older",
+    "script": "// The body's WHERE is checked in every iteration and reads only the body's variables.\ng.gql(`\n  MATCH (a:person) ((x)-[:knows|created]-(y) WHERE y.age > x.age){1,3} (b)\n  RETURN a.name AS younger, b.name AS older, size(y) AS steps\n  ORDER BY younger, older\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Optional path pattern ((..))?: NULL when it matched nothing",
+    "script": "// With ? the body's variables are single values (ISO), NULL for the row where the part is\n// skipped; then (q) is (p) itself.\ng.gql(`\n  MATCH (p:person) ((x)-[:created]->(s:software) WHERE s.lang = 'java')? (q)\n  RETURN p.name AS who, s.name AS project, q.name AS last\n  ORDER BY who, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Path variable p = ...: the path and its length",
     "script": "g.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows]->{0,1}(b)-[:created]->(s:software)\n  RETURN s.name AS project, path_length(p) AS len, p\n  ORDER BY len, project, b.name\n`)"
   },

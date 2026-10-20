@@ -421,7 +421,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "GraphSource::file_tree().v().has(\"name\", \"/\").glob_path(\"*\").values(\"name\").to_list()" => "[]";
     #[cfg(feature = "gql")]
     "traversal" "gql":
-        "Runs a GQL read query (MATCH, OPTIONAL MATCH, WHERE, LET, FILTER, WITH, RETURN with aggregates, ORDER BY, OFFSET, LIMIT, quantified edges, path variables; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.",
+        "Runs a GQL read query (experimental: MATCH, OPTIONAL MATCH, WHERE, LET, FILTER, WITH, RETURN with aggregates, ORDER BY, OFFSET, LIMIT, quantified edges and path patterns, path variables; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.",
         "g.gql(\"MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name\", #{min: 30}).to_list()" => "[#{\"name\": \"josh\"}, #{\"name\": \"peter\"}]";
     "traversal" "group":
         "Groups the stream into a map: key by the first by(), values by the second by() (default: the elements); with a key it is a side effect.",

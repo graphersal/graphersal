@@ -18,7 +18,7 @@ all of them with two kinds of limit, both reported as one error,
 | | `traversal.max_materialized_bytes` | 1 GiB (256 MiB on wasm32) | estimated size of one value or buffer a step materializes |
 | | `traversal.max_string_bytes` | 16 MiB | the longest string a step builds (`replace()`, `concat()`, `format()`, ...) |
 | | `evaluationTimeout` | none | wall-clock budget, see [Query Limits](query_limits.md) |
-| | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) |
+| | `repeat.max_loops` | 10 000 | iterations of a `repeat()` without `times()`, also of an unbounded [GQL quantifier](../gql/semantics.md#quantified-edges) (`{m,}`, `*`, `+`, Cypher `[*]`) on an edge or a path pattern |
 | | `bulk.max_expansion` | 10 000 000 | values one bulk expansion may materialize |
 | | `memory.limit` | none | memory in use (live heap, or the estimate) during a traversal, an import into a live graph, an applied change set and at every outermost commit; `"auto"` = cgroup limit minus `memory.headroom` |
 
@@ -88,18 +88,20 @@ session: `g`, `_g` and `__` (also a traversal *started* from `__`, such as
 too; otherwise a script could escape a preset `evaluationTimeout` by building its own source.
 
 A `gql()` query is bounded by the same options. An unbounded quantified edge (`-[:knows]->{1,}`,
-`*`, `+`, Cypher `[*]`) has no limit of its own: trail matching ends it on a finite graph, and
-`repeat.max_loops` and `traversal.max_traversers` turn a walk that grows too far into an error,
-never into a shortened result. The help of that error names the quantifier, suggests an upper
-bound and shows `g.with(..).gql(..)` with a raised limit
+`*`, `+`, Cypher `[*]`) or quantified path pattern (`((x)-[:knows]->(y)-[:created]->(z))+`) has
+no limit of its own: trail matching ends it on a finite graph, and `repeat.max_loops` (counting
+iterations of the whole body) and `traversal.max_traversers` turn a walk that grows too far into
+an error, never into a shortened result. The help of that error names the quantified edge or
+path pattern, suggests an upper bound and shows `g.with(..).gql(..)` with a raised limit
 ([GQL Semantics](../gql/semantics.md#quantified-edges)):
 
 ```rhai,graph=modern
 g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN b.name AS b")   // error: repeat() exceeded the loop limit of 1 iterations
 g.with("repeat.max_loops", 5).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN count(*) AS n").to_list()   // #{"n": 6}
+g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'}) ((x:person)-[:knows]->(m)-[:created]->(y))+ (b) RETURN b.name AS b")   // error: repeat() exceeded the loop limit of 1 iterations
 ```
 
-The same holds for a quantified edge inside a subquery (`EXISTS`, `COUNT { }`, `COLLECT { }`, a
+The same holds for a quantified edge or path pattern inside a subquery (`EXISTS`, `COUNT { }`, `COLLECT { }`, a
 pattern comprehension, a `CALL` body), whose help names it. The list a pattern comprehension (`[(p)-->(f) | f.name]`) collects expands
 the bulk of its matches under `bulk.max_expansion` and is checked against
 `traversal.max_materialized_bytes` and the memory budget before it is built, like
@@ -110,7 +112,7 @@ them), each a `54001` error before the run ([GQL Errors](../gql/errors.md#gqlsta
 | Limit | Bounds |
 |---|---|
 | 128 levels | nesting of parentheses, brackets and subqueries; an expression at most 512 high |
-| 64 edge patterns | per `MATCH` clause, over all its comma-separated paths (also per clause inside a subquery) |
+| 64 edge patterns | per `MATCH` clause, over all its comma-separated paths (also per clause inside a subquery); an edge in the body of a quantified path pattern counts once, however often the body repeats |
 | 64 subqueries (`MAX_SUBQUERIES`) | `EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }` written in one query, nested ones included (not `CALL` bodies) |
 | 16 body levels (`MAX_BODY_DEPTH`) | `CALL` bodies and whole-query subquery bodies (`EXISTS` / `COUNT` / `COLLECT` with clauses other than `MATCH`) nested in each other; it keeps the deepest query within a 2 MiB thread stack (the wasm32 worker's 1 MiB) |
 | 1024 subquery bodies (`MAX_LOWERED_SUBQUERIES`) | bodies the query runs once its `LET` / `WITH` variables are substituted: a variable holding a subquery counts once for every place that reads it |

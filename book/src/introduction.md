@@ -4,7 +4,12 @@
 questions in **plain language** or in **Gremlin**. In the AI chat you simply write what you want to
 know, and the model of your choice turns it into queries, runs them and answers. Gremlin is the
 query language of [Apache TinkerPop&trade;](https://tinkerpop.apache.org): start somewhere in a
-graph, walk along its edges, filter, group and count.
+graph, walk along its edges, filter, group and count. Read queries may also be written in
+[GQL](gql/index.md), the ISO graph query language (Cypher-like patterns; **experimental**).
+
+**Try it now in the [live playground](https://play.graphersal.dev/)**: the real engine in your
+browser, nothing to install. The source code, releases and issues are on
+[GitHub](https://github.com/graphersal/graphersal).
 
 ## Why Graphersal
 
@@ -36,6 +41,9 @@ g.v().has("name", "marko").as("me")
   or write them as text in the Gremlin DSL, in snake_case or in Gremlin's own camelCase
   (`hasLabel`, `outE`). The text runs the same everywhere: in the browser, in the command line,
   from Python and through an AI agent.
+- **GQL patterns (experimental).** [`g.gql(..)`](gql/index.md) runs ISO GQL read queries
+  (`MATCH (p:person)-[:knows]->(f) RETURN f.name`, Cypher spellings as aliases) on the same
+  engine, and Gremlin steps may follow. Its subset and answers may still change between versions.
 - **A playground in the browser.** The real engine, compiled to WebAssembly: write a query, see a
   table, the graph drawing, the schema and the optimized plan. Nothing to install.
 - **A command line tool.** One-shot queries for shell scripts, an interactive REPL with completion
@@ -66,7 +74,8 @@ g.v().has("name", "marko").as("me")
 
 | You want to ... | Read |
 |---|---|
-| try it right now | [Try It in the Browser](getting_started/playground_tour.md) |
+| try it right now | the [live playground](https://play.graphersal.dev/) (nothing to install); a guided tour: [Try It in the Browser](getting_started/playground_tour.md) |
+| read the source, download a release or report an issue | the [GitHub repository](https://github.com/graphersal/graphersal) |
 | install the command-line tool, the Python package or the crate | [Installation](getting_started/installation.md) |
 | run queries from a terminal or a script | [The Command Line](getting_started/cli.md) |
 | let an AI agent work with your graph | [Dev Server, MCP and AI Chat](getting_started/server_mcp_ai.md) |
@@ -74,6 +83,7 @@ g.v().has("name", "marko").as("me")
 | understand graphs and Gremlin first | [Why a Graph?](concepts/why_graphs.md) |
 | use it from code | [Rust Quick Start](library/rust.md), [Python Quick Start](library/python.md) |
 | look up a step or a rule | [The Gremlin DSL](dsl/writing_queries.md), [Step Reference](traversal/step_reference.md) |
+| query with GQL or Cypher-like patterns (experimental) | [GQL Queries](gql/index.md) |
 | find a command | [Command Cheat Sheet](users_guide/command_cheat_sheet.md) |
 
 > **Graphersal is not a complete copy of TinkerPop.** It follows the TinkerPop specification for

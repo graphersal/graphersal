@@ -32,7 +32,7 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:aggregate([keys], [aggregates], [columns])` | groups the rows by the key values and builds one row map per group (a barrier) |
 | `gql:distinct()` | `DISTINCT` on the row maps, with GQL's equality (`1` = `1.0`) |
 | `gql:bind("p")` | continues the pattern from the element in a `WITH` column |
-| `gql:trail("#1", ...)` | the trail check of a quantified edge: the edge is none of the edges already bound under these labels |
+| `gql:trail("#1", ...)` | the trail check of a quantified edge or of an edge in the body of a quantified path pattern: the edge is none of the edges already bound under these labels |
 | `gql:filter("<condition>")` | a `WHERE` condition, or the part of it that cannot become `has()`, with GQL's three-valued logic |
 | `gql:order("<keys>")` | `ORDER BY` with GQL's `NULL` placement and type order; stable |
 | `gql:not_self_loop()` | keeps a self-loop from matching twice in an either-direction edge |
@@ -399,6 +399,48 @@ The labels keep the traversers of different matches apart, so there is no merge 
 quantified edge: a quantified pattern costs more than the plain `repeat()` that ignores trail.
 The plan never records full paths (`[path: labels(..)]`, never `full`).
 
+## Quantified path patterns
+
+A quantified path pattern is a `repeat()` of its whole body, with the same `emit()` / `times()`
+modulators as a quantified edge. Inside the loop each body edge is labelled and checked with
+`gql:trail` against every edge of the match so far that could be the same edge (the earlier
+iterations of each body edge, the other body edges, the edges of the clause outside), and each
+body variable the query reads is labelled with `as()`: the list of a group variable is read back
+from those labels, one per iteration. The plan records labels only, never full paths:
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'}) ((x)-[e:knows]->(m)-[f:created]->(y)){1,2} (b) RETURN b.name AS b, [n IN m | n.name] AS via").profile()
+```
+
+```text
+{p1}
+```
+
+The two `gql:trail` steps check one label each here: a `knows` edge can never be a `created`
+edge. A body condition on one element runs where it is matched, as a `has()` or `gql:filter`;
+one that reads several body elements runs as a `gql:filter` at the end of the body, in every
+iteration.
+
+`?` is `emit().repeat(B).times(1)` and a body without a quantifier is inlined, its steps run
+once in the plan as if the parentheses were not there:
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'josh'}) ((x)-[:created]->(s))? (q) RETURN s.name AS s, q.name AS q").profile()
+g.gql("MATCH ((x:person)-[:created]->(s) WHERE s.name = 'ripple') RETURN x.name AS who").profile()
+```
+
+```text
+{p2}
+```
+
+```text
+{p3}
+```
+
+The planner may walk a quantified path pattern from its far end when that end is the cheaper
+start (a label, an indexed property); the body then runs in reverse, and the group lists are
+still given in the order the text reads.
+
 ## Path variables
 
 A path variable is assembled from labels, not from Gremlin's `path()` (which would record the
@@ -711,11 +753,12 @@ A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 [resource limits](../users_guide/resource_limits.md) and [query limits](../users_guide/query_limits.md),
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
 which sees the reads of the lowered plan: reading a denied label through `gql()` is refused as
-the equivalent Gremlin is (also a label reached only through a quantified edge or an optional
+the equivalent Gremlin is (also a label reached only through a quantified edge, the body of a
+quantified path pattern or an optional
 part, or only inside an `EXISTS`, `COUNT` or `COLLECT` body, a pattern comprehension, a `CALL`
 body or a later `UNION` operand, whichever way it is lowered: a subquery's child is
-checked like a Gremlin child, even when no row reaches it). An unbounded quantifier is bounded
-by `repeat.max_loops` and `traversal.max_traversers` ([Semantics](semantics.md#quantified-edges)),
+checked like a Gremlin child, even when no row reaches it). An unbounded quantifier (on an edge or a path pattern) is
+bounded by `repeat.max_loops` and `traversal.max_traversers` ([Semantics](semantics.md#quantified-edges)),
 also inside a subquery. The list of a pattern comprehension expands the bulk of its child's
 results under `bulk.max_expansion` and is checked against `traversal.max_materialized_bytes` and
 the memory budget before it is built, like `collect_list()`. The parser bounds nesting (128

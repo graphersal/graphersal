@@ -66,6 +66,63 @@ Each match of a quantified edge is a row of its own (the edges it used keep the 
 the number of rows can grow fast on a densely connected graph: bound the quantifier where the
 question allows it.
 
+## Quantified path patterns
+
+A quantified path pattern (`(a) ((x)-[e]->(y)){1,3} (b)`,
+[The Supported Subset](subset.md#quantified-path-patterns)) repeats a whole chain. Graphersal
+follows ISO GQL and, where a detail is open, Neo4j's Cypher 25, which implements the same
+construct:
+
+- **Merge rule.** The node before the group is the first node of the first iteration, the node
+  after it the last node of the last iteration, and each iteration starts where the previous one
+  ended: in `(a) ((x)-->(y)){1,3} (b)`, `a` is the first `x`, `b` the last `y`, and the `y` of
+  one iteration is the `x` of the next. After zero iterations `a` and `b` are one node, so
+  `(a) ((x)-->(y))* (a)` matches the closed walks from `a` (the zero-length one included).
+- **Trail per body edge.** Within one match every edge is different: across the iterations,
+  between the body's edges and from the other edges of the `MATCH` clause, so a quantified
+  path pattern ends on every finite graph, like a quantified edge. A body edge that a `?` part
+  did not bind (zero iterations) clashes with nothing.
+- **Group lists.** With a quantifier other than `?`, each body variable is the list of its
+  elements, one per iteration, in the order the text reads (also when the plan walks the
+  pattern from its far end): `x` = `[x1, x2, ...]`. A zero-length match gives `[]`. A property
+  of a group variable has no single value outside the body (`42002`); inside the body, in its
+  conditions, the variable is the element of the current iteration.
+- **`?` gives nullable singletons (ISO).** `((x)-[e]->(y))?` matches its body once or not at
+  all; its variables are single elements, `NULL` for the match where it did not match (no
+  iteration), not lists. `{0,1}` matches the same paths but keeps group lists (`[]` or one
+  element).
+- **No quantifier: singletons.** A parenthesized path pattern without a quantifier matches its
+  body exactly once; its variables are single elements, as if the parentheses were not there,
+  and its `WHERE` is a condition on that part of the path.
+- **The body condition runs in every iteration** and reads only body variables, parameters and
+  values: an iteration whose condition is not `TRUE` ends that walk.
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'})-[e]->(m) ((x)-[f]-(y))? (b) RETURN m.name AS m, b.name AS b ORDER BY m, b").to_list()
+// josh/josh, josh/lop, josh/ripple, lop/josh, lop/lop, lop/peter, vadas/vadas: never back to marko over the edge e
+g.gql("MATCH (p:person {name: 'vadas'}) ((x)-[:created]->(s))? (q) RETURN s AS s, q.name AS q").to_list()   // #{"q": "vadas", "s": ()}
+g.gql("MATCH (p:person {name: 'vadas'}) ((x)-[:created]->(s)){0,1} (q) RETURN s AS s, q.name AS q").to_list()   // #{"q": "vadas", "s": []}
+```
+
+Limits that hold now (E17; each refused with `0A000` and a help line naming the rewrite): one
+chain per body, no quantifier nested inside a body (neither a group nor a quantified edge), no
+path variable inside a body (name the whole path instead), and a body variable is a new name:
+an outer variable written inside a body, a variable written twice in one body, a body condition
+reading an outer variable, and a subquery inside a body are not supported yet. Every body edge
+counts once toward the 64 edge patterns of a `MATCH` clause, however often the body repeats.
+
+The unbounded quantifiers (`{m,}`, `*`, `+`) are bounded as for a quantified edge:
+`repeat.max_loops` counts the iterations of the whole body, `traversal.max_traversers` the live
+rows, and reaching either is an error naming the pattern
+([Errors](errors.md#quantified-path-patterns)), never a shortened result.
+
+**Reading `((`.** Where an expression stands, `((` followed by a pattern and a closing `)` with
+`{..}`, `?`, a node, an edge, or `*` / `+` **not followed by an operand** reads as a quantified
+path pattern (a pattern predicate). So `((a)-->(b)) + (c)` is the pattern `((a)-->(b))+ (c)`,
+not the boolean of the pattern predicate `((a)-->(b))` plus `c`; with an operand after it
+(`((a)-->(b)) + [1]`, `+ x`, `+ 1`) it stays arithmetic. Arithmetic on a predicate's boolean is
+a type error (`22G03`) in either reading, so no working query changes meaning.
+
 ## OPTIONAL MATCH and NULL
 
 A row that reaches an `OPTIONAL MATCH` whose pattern does not match continues once, with every

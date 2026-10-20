@@ -1,5 +1,11 @@
 # GQL Queries
 
+> **Experimental.** GQL support is new in Graphersal 0.2.2 and marked experimental: it reads
+> only, its [subset](subset.md) grows from version to version, and the answers of a construct
+> (its rows, errors and plans) may still change in a later version. Gremlin stays the complete,
+> stable interface: a `gql()` query runs as ordinary Gremlin steps, and this chapter shows the
+> Gremlin twin of each construct.
+
 `g.gql(query)` runs a query written in **GQL**, the ISO standard graph query language
 (ISO/IEC 39075), on the same graph and the same engine as Gremlin. A GQL query describes the
 *pattern* you are looking for; Graphersal finds every match and returns one row per match:
@@ -47,11 +53,12 @@ and list and pattern comprehensions for nested, JSON-shaped answers
 (`p {.name, friends: [(p)-[:knows]->(f) | f.name]}`), Cypher's `COUNT { }` / `COLLECT { }` and
 list predicates (`all()`, `any()`, `reduce()`, ...), composite queries (`UNION`, `UNION ALL`,
 `NEXT`), `CALL { }` subqueries run per row (top k per group), node and edge
-patterns, quantified edges (`-[:knows]->{1,3}`), path variables, label expressions,
+patterns, quantified edges (`-[:knows]->{1,3}`), quantified path patterns that repeat a whole
+chain (`(a) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)`), path variables, label expressions,
 expressions, parameters, the GQL scalar functions and the common openCypher ones (`toInteger`,
 `substring`, `split`, `round`, `keys`, `nodes(p)`, ...) ([The Supported Subset](subset.md)).
-`EXCEPT` / `INTERSECT`, shortest paths and quantified parenthesized paths come later; until
-then the error names the form or the Gremlin step that does the same.
+`EXCEPT` / `INTERSECT`, shortest paths and a quantifier nested inside a quantified path pattern
+come later; until then the error names the form or the Gremlin step that does the same.
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, count(s) AS made ORDER BY made DESC, name").to_list()
@@ -120,7 +127,8 @@ graph.query('g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p
 
 - [The Supported Subset](subset.md): clauses, patterns, label expressions, expressions,
   functions, parameters, and what is not supported yet.
-- [Semantics](semantics.md): trail matching, quantified edges and their limits, `OPTIONAL MATCH`,
+- [Semantics](semantics.md): trail matching, quantified edges and path patterns and their
+  limits, `OPTIONAL MATCH`,
   `NULL` and three-valued logic, subqueries (`EXISTS`, `COUNT`, `COLLECT`, `CALL`), `UNION` and
   `NEXT`, aggregation, `DISTINCT` equality, comparisons, ordering, the
   rules of the functions (strict `CAST`, lenient `toInteger`, rounding, where they differ from

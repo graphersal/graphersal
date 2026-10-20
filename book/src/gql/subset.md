@@ -27,7 +27,8 @@ RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *, mandatory; items m
 ```
 
 A pattern is a path of node and edge patterns, optionally named (`p = (a)-->(b)`); an edge may
-carry a quantifier (`-[:knows]->{1,3}`). A query usually starts with `MATCH`, but it may start
+carry a quantifier (`-[:knows]->{1,3}`), and so may a parenthesized part of the path
+(`((x)-[:knows]->(y)){1,3}`, a quantified path pattern). A query usually starts with `MATCH`, but it may start
 with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-without-match)).
 Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
 ([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
@@ -164,15 +165,90 @@ g.v().has("name", "marko").repeat(__.out_e("knows", "created").has("weight", P.g
 // "josh", "ripple"
 ```
 
-Only single edges take a quantifier; a quantified parenthesized path `((a)-->(b)){1,3}` is not
-supported yet.
+To repeat more than one edge, put the chain in parentheses and quantify it:
+[a quantified path pattern](#quantified-path-patterns).
+
+### Quantified path patterns
+
+A parenthesized path pattern `( <chain> [WHERE <condition>] )` with a quantifier after its `)`
+repeats the whole chain, its nodes, edges and conditions included:
+`(a) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)` walks from `a` to `b` over one or two
+"created the same software" hops. It takes every quantifier of a quantified edge (`{m,n}`, `{n}`,
+`{m,}`, `{,n}`, `*`, `+`) and also `?` (0 or 1 times); without a quantifier it matches exactly
+once.
+
+- **The outer nodes merge with the body.** The node written before the group is the first node of
+  the first iteration, the node after it the last node of the last iteration, and consecutive
+  iterations join end to start: `(a) ((x)-->(y)){1,3} (b)` binds `a` = the first `x` and `b` = the
+  last `y`. Where the text has no node next to the group (at the start or end of the path, or
+  between two groups), an anonymous one stands. After zero iterations (`{0,n}`, `*`, `?`) the two
+  outer nodes are the same node.
+- **Body variables are group variables.** With a quantifier other than `?`, every variable inside
+  the body is, after the pattern, the list of its nodes or edges, one per iteration in walk
+  order, like the variable of a quantified edge. Read the list (`size(x)`, `[n IN x | n.name]`,
+  `RETURN x`), not a property of it: `x.name` outside the body is an error. With `?` or without a
+  quantifier the body variables are single values; with `?` they are `NULL` when the part
+  matched nothing ([Semantics](semantics.md#quantified-path-patterns)).
+- **The body condition runs in every iteration.** The `WHERE` before the closing parenthesis, and
+  the inline maps and `WHERE`s of the body's elements, test each iteration's elements, and read
+  only the body's variables, parameters and values; test an outer variable in the `WHERE` of the
+  `MATCH` clause.
+- **Trail holds across iterations.** No edge is bound twice in one match, across the iterations,
+  the body's edges and the other edges of the clause.
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'}) ((x)-[e:knows|created]->(y)){1,2} (b) RETURN b.name AS b, size(e) AS hops ORDER BY hops, b").to_list()
+// josh 1, lop 1, vadas 1, lop 2, ripple 2
+g.gql("MATCH (a {name: 'marko'}) ((x)-[:knows|created]->(y)){1,2} (b) RETURN [n IN x | n.name] AS xs, [n IN y | n.name] AS ys ORDER BY ys").to_list()
+// #{"xs": ["marko"], "ys": ["josh"]}, #{"xs": ["marko", "josh"], "ys": ["josh", "lop"]}, #{"xs": ["marko", "josh"], "ys": ["josh", "ripple"]}, #{"xs": ["marko"], "ys": ["lop"]}, #{"xs": ["marko"], "ys": ["vadas"]}
+g.gql("MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b) RETURN DISTINCT a.name AS a, b.name AS b ORDER BY a, b").to_list()
+// josh/marko, josh/peter, marko/josh, marko/peter, peter/josh, peter/marko
+g.gql("MATCH (a:person) ((x)-[:knows|created]-(y) WHERE y.age > x.age){1,3} (b) RETURN a.name AS a, b.name AS b, size(y) AS steps ORDER BY a, b").to_list()
+// #{"a": "marko", "b": "josh", "steps": 1}, #{"a": "vadas", "b": "josh", "steps": 2}, #{"a": "vadas", "b": "marko", "steps": 1}
+g.gql("MATCH (p:person {name: 'josh'}) ((x)-[:created]->(s) WHERE s.lang = 'java')? (q) RETURN s.name AS project, q.name AS last ORDER BY project").to_list()
+// #{"last": "lop", "project": "lop"}, #{"last": "ripple", "project": "ripple"}, #{"last": "josh", "project": ()}
+g.gql("MATCH ((x:person)-[:created]->(s) WHERE s.name = 'ripple') RETURN x.name AS who").to_list()   // #{"who": "josh"}
+```
+
+The Gremlin twin is a `repeat()` of the body's steps; the second-to-last query is a filter on the
+body run in every iteration:
+
+```rhai,graph=modern
+g.v().has_label("person").as("a").repeat(__.out_e("created").in_v().in_e("created").out_v()).emit().times(2).simple_path().as("b").select("a", "b").by("name").dedup().to_list()
+// the same six pairs (simple_path() stands in for trail here)
+```
+
+A quantified path pattern stands wherever a pattern does: in `MATCH` and `OPTIONAL MATCH`, in
+`EXISTS { }`, `COUNT { }` and `COLLECT { }`, in a pattern comprehension and in a Cypher pattern
+predicate (which names no new variable, so its body stays anonymous):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS p, [(p) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (q) | q.name] AS co ORDER BY p").to_list()
+// josh [peter, marko], marko [peter, josh], peter [josh, marko], vadas []
+g.gql("MATCH (p:person) WHERE EXISTS { (p) ((x)-[:knows]->(y)){1,3} (q:person {name: 'josh'}) } RETURN p.name AS p").to_list()   // #{"p": "marko"}
+g.gql("MATCH (p:person) WHERE (p) (()-[:knows]->()-[:created]->()){1} RETURN p.name AS p").to_list()   // #{"p": "marko"}
+```
+
+Not yet supported inside the body (each refused with GQLSTATUS `0A000` and a help line naming
+the rewrite): a nested parenthesized path pattern, a quantified edge, a path variable (`p =` goes
+on the whole path), a path mode or search prefix, several comma-separated patterns or a union
+(`|`), a body without an edge, a variable written twice in one body, a variable bound outside
+the body written again inside it, a condition reading an outer variable, and a subquery. A
+variable inside a quantified body must be a new name (`42002`).
+
+```rhai,graph=modern
+g.gql("MATCH (a) (((x)-->(y)){2})+ (b) RETURN b")   // error: a parenthesized path pattern nested in another one is not yet supported
+g.gql("MATCH (a) ((x)-->(y)-->(z)){1,3} (b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "lop"}, #{"b": "ripple"}
+g.gql("MATCH (a) ((x)-->(y))+ (b) RETURN x.name")   // error: `x` is a group variable of the quantified path pattern
+```
 
 ### Path variables
 
 `p = <path pattern>` names the whole path. `RETURN p` returns it as a path value (the
 alternating vertices and edges, the same value as Gremlin's `path()`;
 [Result Shape](result_shape.md#paths)), and `path_length(p)` (Cypher `length(p)`) is its number
-of edges. A quantified edge contributes all its edges and the vertices in between.
+of edges. A quantified edge or path pattern contributes all its edges and the vertices in
+between.
 
 ```rhai,graph=modern
 g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b)-[:created]->(s) RETURN p, path_length(p) AS len ORDER BY s.name").to_list()
@@ -1031,7 +1107,7 @@ construct and the alternative.
 |---|---|
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
-| quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
+| a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
 | `EXCEPT`, `INTERSECT`, `OTHERWISE` | `NOT EXISTS { }` / `EXISTS { }` on the rows of the first query, or `NEXT` |
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
@@ -1047,8 +1123,8 @@ construct and the alternative.
 | statistical aggregates (`percentileCont()`, `stDev()`, ...) | `collect_list(x)`, then compute after `gql()` |
 
 ```rhai,graph=modern
-g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path patterns are not yet supported
-g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
+g.gql("MATCH (((a)-[:knows]->(b)){1,2})+ RETURN b")   // error: a parenthesized path pattern nested in another one is not yet supported
+g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN [n IN b | n.name] AS b ORDER BY b").to_list()   // #{"b": ["josh"]}, #{"b": ["vadas"]}
 g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-[:created]->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
 g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN [x IN [p] | x.name] AS l ORDER BY l").to_list()   // #{"l": ["josh"]}, #{"l": ["marko"]}, #{"l": ["peter"]}
 g.gql("MATCH (p:person) RETURN p.name AS n EXCEPT MATCH (p:person)-[:created]->() RETURN p.name AS n")   // error: EXCEPT is not yet supported

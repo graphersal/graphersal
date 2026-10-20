@@ -388,16 +388,61 @@ A limit inside an operand of a `UNION` or a block after `NEXT` at the top level 
 text of a top-level clause; inside a subquery the place named is the innermost subquery
 (`CALL`, `COUNT`, `COLLECT`, `EXISTS` or a pattern comprehension).
 
+## Quantified path patterns
+
+The forms a [quantified path pattern](subset.md#quantified-path-patterns) does not take yet are
+refused before the run with `0A000`; each help names the rewrite. A body variable is a new name
+(`42002`), and outside a quantified body it is a list, so a property of it is an error whose help
+offers the body's `WHERE` or a list comprehension:
+
+```rhai,graph=modern
+g.gql("MATCH (a) ((x)-[:knows]->{1,2}(y)){1,3} (b) RETURN b")   // error: a quantified edge inside a parenthesized path pattern is not yet supported
+g.gql("MATCH (a) ((x)-->(y) WHERE y.age > a.age){1,3} (b) RETURN b")   // error: a condition inside a parenthesized path pattern that reads a variable declared outside it is not yet supported
+g.gql("MATCH (a) ((a)-->(y)){1,2} (b) RETURN b")   // error: `a` is already bound; a variable of a quantified path pattern must be a new name
+g.gql("MATCH (a) ((x)-->(y)){1,3} (b) RETURN x.name")   // error: `x` is a group variable of the quantified path pattern
+```
+
+```text
+Help: write the edge out as often as needed inside the parentheses, as in ((x)-->()-->(y)){1,3}, or quantify the edge outside them, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b. ...
+Help: compare the body's variables with each other, with values or with parameters inside it, as in ((x)-[e]->(y) WHERE e.weight > $w){1,3}, and test the outer variable in the WHERE of the MATCH clause. ...
+Help: give the element inside its own variable: the node before a parenthesized path pattern is the first node of its first iteration and the node after it the last node of its last iteration, as in (a) ((x)-->(y)){1,3} (b). ...
+Help: test each element inside the parenthesized path pattern, with WHERE x.name ... before its closing parenthesis, or read the list, as in [v IN x | v.name]. ...
+```
+
+An unbounded quantified path pattern that reaches `repeat.max_loops` or
+`traversal.max_traversers` fails like a quantified edge (`RepeatLimitExceeded`,
+`ResourceLimitExceeded`, no GQLSTATUS), never with fewer rows, and its help names **the pattern
+as the plan walks it**: read back from the lowered `repeat()` body, so it shows each node's
+labels but not its variable (a node without a label is `()`), each edge with its labels in the
+direction of the walk (the plan may walk the pattern from its far end), and a body of one edge
+with nothing on its nodes as the quantified edge it equals (`-[:knows]->{1,}`):
+
+```rhai,graph=modern
+g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'}) ((x:person)-[:knows]->(m)-[:created]->(y))+ (b) RETURN b.name AS b")   // error: repeat() exceeded the loop limit of 1 iterations
+```
+
+```text
+Help: The loop of the quantified path pattern ((:person)-[:knows]->()-[:created]->()){1,} of the gql() query ran 1 iterations, the limit of repeat.max_loops. A quantifier without an upper bound ({m,}, *, + or Cypher [*]) repeats the pattern until every path has used all the edges it can reach (trail), ... Give the quantifier an upper bound, as in ((:person)-[:knows]->()-[:created]->()){1,5}, ... Or raise the limit for the query, g.with("repeat.max_loops", 2).gql(..), ...
+```
+
+A `MATCH` clause holds at most 64 edge patterns; an edge in a quantified body counts once,
+however often the body repeats, so the help of that limit names a quantified path pattern as one
+of the fixes:
+
+```text
+Help: split the pattern into several MATCH clauses that share a variable, for example MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness then holds within each clause only), repeat a chain as a quantified path pattern, whose body edges count once however often it repeats, for example MATCH (a) (()-->()){65} (z) RETURN z, or walk a long path with Gremlin repeat(), for example g.v().repeat(__.out()).times(100). The query is larger than gql() accepts.
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery); also `gql()` after other steps |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
-| `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
+| `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths; a quantified body's edges count once); split it into several MATCH clauses that share a variable, repeat a chain as a quantified path pattern, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
 | `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |
 | `22012` | data | division or `%` by zero, also `mod(a, 0)` |
