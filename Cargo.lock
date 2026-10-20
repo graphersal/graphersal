@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bitmask-enum",
  "compact_str 0.10.0",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ctrlc",
  "graphersal",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "graphersal-session"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "graphersal",
  "graphersal-storage-tests",
@@ -680,14 +680,14 @@ dependencies = [
 
 [[package]]
 name = "graphersal-storage-tests"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "graphersal",
 ]
 
 [[package]]
 name = "graphersal-wasm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "graphersal",
  "graphersal-session",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "py-graphersal"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "graphersal",
  "pyo3",
