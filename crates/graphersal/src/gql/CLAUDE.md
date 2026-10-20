@@ -117,7 +117,15 @@ Files appear as their stage lands; this table is the target layout.
   element refused (22G03); one `add_vertex_with` / `add_edge_with` call per element, so schema
   defaults and `required` see every property; `set_create_time`; endpoints through `Binding`,
   `NULL` 22004, removed `ElementRemoved`; `Create` exactly like `add_v(labels)` / `add_e(label)`
-  and `access_flow_after` states the created element; tests `runtime/insert_step_tests.rs`).
+  and `access_flow_after` states the created element; tests `runtime/insert_step_tests.rs`);
+  stage 3c: `gql:set` / `gql:remove` (SideEffectMut, `sideeffect_steps/step_gql_set.rs` /
+  `step_gql_remove.rs`, the shared target and write code in `step_gql_set.rs`: items left to
+  right per row and per unit of bulk, rows emitted unchanged with bulk 1; a `NULL` value or
+  entry removes through `drop_*_property`, never a stored null; `=` evaluates and checks the
+  whole map before its first write; a `NULL` target is a no-op, a removed one
+  `ElementRemoved`, a non-element or an edge label item 22G03, a `NULL` map 22004; access from
+  the step's own `GqlWriteTarget` facts through `gql_updates()` / `gql_relabels()`, never the
+  flow; tests `runtime/set_step_tests.rs`).
   The others ask no permission of
   their own (value-only, like `has()`); `gql:filter`, `gql:project`, `gql:value`, `gql:order`,
   `gql:aggregate` and `gql:for` may hold subquery children (`runtime::SubqueryHost`), which every

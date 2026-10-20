@@ -139,6 +139,8 @@ use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLooku
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_edge::GqlEndpoint;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_node::GqlInsertProperty;
+use crate::traversal::step::sideeffect_steps::step_gql_remove::GqlRemoveItem;
+use crate::traversal::step::sideeffect_steps::step_gql_set::GqlSetItem;
 use crate::value::{Number, P, PValue};
 use crate::{
     AnonymousTraversal, ArgStrings, CompactString, ElementKind, ElementProperty,
@@ -1254,6 +1256,19 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         bindings: Arc<[Binding]>,
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
+    /// `gql:set(items)`: one `SET` clause (stage 3c); the values read the slots `bindings`
+    /// and host the subqueries `children`.
+    #[allow(dead_code, reason = "lowered from stage 3c.T3 on")]
+    fn gql_set(
+        self,
+        query: Arc<str>,
+        items: Vec<GqlSetItem<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
+    /// `gql:remove(items)`: one `REMOVE` clause (stage 3c).
+    #[allow(dead_code, reason = "lowered from stage 3c.T3 on")]
+    fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self;
     fn gql_order(
         self,
         query: Arc<str>,
@@ -1385,6 +1400,18 @@ macro_rules! sink {
                 children: Vec<AnonymousTraversal<'g, S>>,
             ) -> Self {
                 self.gql_insert_edge(query, label, from, to, properties, bindings, children)
+            }
+            fn gql_set(
+                self,
+                query: Arc<str>,
+                items: Vec<GqlSetItem<S>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_set(query, items, bindings, children)
+            }
+            fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self {
+                self.gql_remove(query, items)
             }
             fn gql_order(
                 self,

@@ -69,6 +69,8 @@ mod for_step_tests;
 #[cfg(test)]
 mod insert_step_tests;
 #[cfg(test)]
+mod set_step_tests;
+#[cfg(test)]
 mod step_tests;
 #[cfg(test)]
 mod tests;
@@ -305,6 +307,18 @@ pub(crate) fn labels_read_by(bindings: &[Binding]) -> Vec<CompactString> {
     let mut labels = Vec::new();
     for binding in bindings {
         binding.labels_into(&mut labels);
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
+
+/// Every step label `bindings` read in every occurrence (group variables, the groups of path
+/// variables): sorted, deduplicated.
+pub(crate) fn history_read_by(bindings: &[Binding]) -> Vec<CompactString> {
+    let mut labels = Vec::new();
+    for binding in bindings {
+        binding.history_into(&mut labels);
     }
     labels.sort_unstable();
     labels.dedup();

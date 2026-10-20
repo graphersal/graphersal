@@ -369,6 +369,11 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   known label, `Data { None, None }` when nothing is known;
     /// - `add_label` / `drop_label`: `Update` on `Data { Vertex, label }`; `set_label`: `Update`
     ///   on `Data { Edge, label }`, the labels again from `flow`;
+    /// - the GQL `SET` / `REMOVE` steps `gql:set` / `gql:remove`: `Update` per item on the data
+    ///   of its target as the step's own static facts state it (`Data { Vertex, None }` for a
+    ///   node, `Data { Edge, label }` per label the edge pattern states, `Data { None, None }`
+    ///   when the kind is unknown), a label item `Update` on `Data { Vertex, None }` per label;
+    ///   never from `flow` (the current object is not the target);
     /// - `drop()`: `Delete` on `Data` of the elements it receives, like `property`;
     /// - `schema()`: `Read` on `Schema`;
     /// - `v()` / `e()`: `Read` on `Data { Vertex | Edge, None }`; `out`/`in`/`both`: `Read` on
@@ -471,6 +476,28 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                             Resource::data(element, None),
                         ))
                     }
+                    // A GQL `SET` / `REMOVE` asks `Update` on the data of each item's target
+                    // as its own static facts state it (the current object is not the target,
+                    // so the flow says nothing about it): what `property()` /
+                    // `remove_property()` / `add_label()` / `drop_label()` ask on the same
+                    // elements.
+                    #[cfg(feature = "gql")]
+                    "gql:set" | "gql:remove" => {
+                        let updates = step.gql_updates();
+                        if updates.is_empty() {
+                            return visit(AccessRequest::new(
+                                Action::Update,
+                                Resource::data(None, None),
+                            ));
+                        }
+                        for (element, label) in updates {
+                            visit(AccessRequest::new(
+                                Action::Update,
+                                Resource::data(element, label),
+                            ))?;
+                        }
+                        Ok(())
+                    }
                     _ => received(flow, Action::Update, element, &mut visit),
                 }
             }
@@ -563,7 +590,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   `gql:order` and `gql:distinct`; their
     ///   `Scope.local` forms are map steps) and the writes of the received
     ///   elements (`property`, ...); `add_label` / `drop_label` / `set_label` keep the kind but
-    ///   forget the labels;
+    ///   forget the labels, and so do the GQL `gql:set` / `gql:remove` when an item changes
+    ///   labels (otherwise they keep the flow);
     /// - every other step yields something the plan does not state ([`AccessFlow::default`]).
     ///
     /// A child traversal starts from [`AccessFlow::default`]: the check never assumes what a
@@ -598,6 +626,19 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                 element: flow.element,
                 labels: Vec::new(),
             },
+            // A GQL `SET` / `REMOVE` passes its row on; a label item may change the labels of
+            // the current object, so they are forgotten then (like `add_label`).
+            #[cfg(feature = "gql")]
+            GraphStep::SideEffectMut("gql:set" | "gql:remove", step) => {
+                if step.gql_relabels() {
+                    AccessFlow {
+                        element: flow.element,
+                        labels: Vec::new(),
+                    }
+                } else {
+                    flow
+                }
+            }
             GraphStep::Filter("has_label", step) => match step.labels() {
                 Some(labels)
                     if flow.element == Some(ElementKind::Edge)
@@ -626,7 +667,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             // `FOR` list: the plan states none of them. No GQL write reads this flow: the GQL
             // `INSERT` steps (`gql:insert_node`, `gql:insert_edge`) state the element they
             // create from the labels the pattern writes (above), and a GQL write of an element
-            // a variable holds must state its kind and labels from its own static data.
+            // a variable holds states its kind and labels from its own static data
+            // (`gql:set` / `gql:remove`, `gql_updates`).
             GraphStep::FlatBarrier("gql:aggregate", _)
             | GraphStep::FlatMap("gql:bind" | "gql:for", _) => AccessFlow::default(),
             GraphStep::Init(_, _)
@@ -865,6 +907,20 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     /// element.
     #[cfg_attr(not(feature = "script"), allow(dead_code))]
     fn set_create_time(&mut self, _now: crate::value::temporal::DateTime) {}
+    /// The data a GQL `SET` / `REMOVE` step (`gql:set`, `gql:remove`) updates, from its own
+    /// static target facts, never from the flow (the current object is not the target): one
+    /// `(element kind, label)` per request, in item order ([`GraphStep::for_each_access_in`]).
+    /// Empty by default; only with the `gql` feature.
+    #[cfg(feature = "gql")]
+    fn gql_updates(&self) -> Vec<(Option<crate::graph::ElementKind>, Option<&str>)> {
+        Vec::new()
+    }
+    /// Whether a GQL `SET` / `REMOVE` step changes labels: the flow after it forgets its
+    /// labels ([`GraphStep::access_flow_after`]). `false` by default; only with `gql`.
+    #[cfg(feature = "gql")]
+    fn gql_relabels(&self) -> bool {
+        false
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,
