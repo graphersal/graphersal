@@ -7119,8 +7119,8 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              s.name AS name NEXT RETURN name ORDER BY name LIMIT 3\")."
         }
         GqlHelpTopic::Call => {
-            "A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query once \
-             for each incoming row: the body reads only the variables its scope clause names \
+            "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT / \
+             FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
              (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which \
              must be new names; its aggregates, ORDER BY and LIMIT apply to each row's \

@@ -9613,8 +9613,8 @@ mod gql {
     /// `IN TRANSACTIONS` included.
     #[test]
     fn gql_call_errors_explain_imports_and_returned_columns() {
-        let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query \
-             once for each incoming row: the body reads only the variables its scope clause \
+        let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write \
+             (INSERT / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
              names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which must \
              be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
