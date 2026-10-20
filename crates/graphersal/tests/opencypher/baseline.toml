@@ -543,138 +543,6 @@ reason = "not yet: MERGE"
 class = "missing"
 reason = "not yet: MERGE"
 
-["clauses/remove/Remove1.feature::[1] Remove a single node property"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[2] Remove multiple node properties"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[3] Remove a single relationship property"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[4] Remove multiple relationship properties"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[5] Ignore null when removing property from a node"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[6] Ignore null when removing property from a relationship"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove1.feature::[7] Remove a missing node property"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove2.feature::[1] Remove a single label from a node with a single label"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove2.feature::[2] Remove a single label from a node with two labels"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove2.feature::[3] Remove two labels from a node with three labels"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove2.feature::[4] Remove a non-existent node label"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove2.feature::[5] Ignore null when removing a node label"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[10] Skipping and limiting to a few results after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[11] Skipping zero result and limiting to all results after removing a label from nodes does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[12] Filtering after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[13] Aggregating in `RETURN` after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[14] Aggregating in `WITH` after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[15] Limiting to zero results after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[16] Skipping all results after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[17] Skipping and limiting to a few results after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[18] Skipping zero result and limiting to all results after removing a property from relationships does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[19] Filtering after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[1] Limiting to zero results after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[20] Aggregating in `RETURN` after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[21] Aggregating in `WITH` after removing a property from relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[2] Skipping all results after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[3] Skipping and limiting to a few results after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[4] Skipping zero results and limiting to all results after removing a property from nodes does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[5] Filtering after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[6] Aggregating in `RETURN` after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[7] Aggregating in `WITH` after removing a property from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[8] Limiting to zero results after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
-["clauses/remove/Remove3.feature::[9] Skipping all results after removing a label from nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: REMOVE"
-
 ["clauses/return-orderby/ReturnOrderBy1.feature::[11] ORDER BY should order distinct types in the expected order"]
 class = "unexpected_error"
 reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
@@ -762,210 +630,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 ["clauses/return/Return7.feature::[1] Return all variables"]
 class = "wrong_columns"
 reason = "columns differ: expected [\"a\", \"b\", \"p\"], actual [\"p\", \"a\", \"b\"]"
-
-["clauses/set/Set1.feature::[11] Set multiple node properties"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[1] Set a property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[2] Set a property to an expression"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[3] Set a property by selecting the node using a simple expression"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[4] Set a property by selecting the relationship using a simple expression"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[5] Adding a list property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[6] Concatenate elements onto a list property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[7] Concatenate elements in reverse onto a list property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set1.feature::[8] Ignore null when setting property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set2.feature::[1] Setting a node property to null removes the existing property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set2.feature::[2] Setting a node property to null removes the existing property, but not before SET"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set2.feature::[3] Setting a relationship property to null removes the existing property"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[1] Add a single label to a node with no label"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[2] Adding multiple labels to a node with no label"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[3] Add a single label to a node with an existing label"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[4] Adding multiple labels to a node with an existing label"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[5] Ignore whitespace before colon 1"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[6] Ignore whitespace before colon 2"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[7] Ignore whitespace before colon 3"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set3.feature::[8] Ignore null when setting label"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set4.feature::[1] Set multiple properties with a property map"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set4.feature::[2] Non-existent values in a property map are removed with SET"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set4.feature::[3] Null values in a property map are removed with SET"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set4.feature::[4] All properties are removed if node is set to empty property map"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set4.feature::[5] Ignore null when setting properties using an overriding map"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set5.feature::[1] Ignore null when setting properties using an appending map"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set5.feature::[2] Overwrite values when using +="]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set5.feature::[3] Retain old values when using +="]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set5.feature::[4] Explicit null values in a map remove old values"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set5.feature::[5] Set an empty map when using += has no effect"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[10] Skipping and limiting to a few results after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[11] Skipping zero result and limiting to all results after adding a label on nodes does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[12] Filtering after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[13] Aggregating in `RETURN` after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[14] Aggregating in `WITH` after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[15] Limiting to zero results after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[16] Skipping all results after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[17] Skipping and limiting to a few results after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[18] Skipping zero result and limiting to all results after setting a property on relationships does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[19] Filtering after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[1] Limiting to zero results after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[20] Aggregating in `RETURN` after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[21] Aggregating in `WITH` after setting a property on relationships affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[2] Skipping all results after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[3] Skipping and limiting to a few results after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[4] Skipping zero results and limiting to all results after setting a property on nodes does not affect the result set nor the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[5] Filtering after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[6] Aggregating in `RETURN` after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[7] Aggregating in `WITH` after setting a property on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[8] Limiting to zero results after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
-
-["clauses/set/Set6.feature::[9] Skipping all results after adding a label on nodes affects the result set but not the side effects"]
-class = "missing"
-reason = "not yet: SET"
 
 ["clauses/unwind/Unwind1.feature::[13] Multiple unwinds after each other"]
 class = "wrong_columns"
@@ -1671,14 +1335,6 @@ reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 class = "missing"
 reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
-["expressions/list/List12.feature::[1] Collect and extract using a list comprehension"]
-class = "missing"
-reason = "not yet: SET"
-
-["expressions/list/List12.feature::[2] Collect and filter using a list comprehension"]
-class = "missing"
-reason = "not yet: SET"
-
 ["expressions/list/List2.feature::[10] List slice with parameterised range"]
 class = "missing"
 reason = "not yet: list indexing and slicing (x[0], x[1..2])"
@@ -1843,10 +1499,6 @@ reason = "expected row 1 | false | has no partner (in any order) among: | | null
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
 
-["expressions/list/List6.feature::[2] Setting and returning the size of a list property"]
-class = "missing"
-reason = "not yet: SET"
-
 ["expressions/list/List6.feature::[5] Fail for `size()` on paths"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
@@ -1882,10 +1534,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 ["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::8"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List9.feature::[1] Returning nested expressions based on list property"]
-class = "missing"
-reason = "not yet: SET"
 
 ["expressions/literals/Literals7.feature::[21] Fail on a nested list with missing commas"]
 class = "missing"
@@ -1980,8 +1628,8 @@ class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
 ["expressions/pattern/Pattern1.feature::[24] Fail on using pattern in right-hand side of SET"]
-class = "missing"
-reason = "not yet: SET"
+class = "wrong_error"
+reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
 ["expressions/pattern/Pattern2.feature::[7] Use a pattern comprehension inside a list comprehension"]
 class = "missing"

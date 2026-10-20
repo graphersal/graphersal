@@ -238,15 +238,12 @@ own elements.
 
 | Construct | Until then |
 |---|---|
-| `SET n.k = v`, `SET n:A`, `SET n += {..}` | Gremlin `property()`, `add_label()` |
-| `REMOVE n.k`, `REMOVE n:A` | Gremlin `remove_property()`, `drop_label()` |
 | `DELETE n`, `DETACH DELETE n`, `NODETACH DELETE n` | Gremlin `drop()` |
 | `MERGE` | Gremlin `merge_v()`, `merge_e()` |
 | `FOREACH (x IN list \| ...)` | `FOR x IN list INSERT ...` |
 | `INSERT` in a `UNION` operand, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 
 ```rhai,graph=modern
-g.gql("MATCH (p:person) SET p.checked = true")   // error: SET is not yet supported in this version
 g.gql("MATCH (n) DETACH DELETE n")   // error: DETACH DELETE is not yet supported in this version
 g.gql("MERGE (n:person {name: 'ann'})")   // error: MERGE is not yet supported in this version
 g.gql("MATCH (p:person) RETURN p").select("p").property("checked", true).count().next()   // 4

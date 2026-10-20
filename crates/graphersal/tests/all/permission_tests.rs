@@ -2167,7 +2167,7 @@ mod gql {
             "MATCH (a)-[:created]->(s)<-[:created]-(b) WHERE a <> b RETURN DISTINCT s.name",
             "MATCH (a)-[e]-(b) RETURN element_id(e), labels(a), type(e)",
             // Write clauses not yet supported fail before anything is asked of the data.
-            "MATCH (p) SET p.age = 1 RETURN p",
+            "MATCH (p) FOREACH (x IN [1] | SET p.age = x) RETURN p",
             "MATCH (p) DETACH DELETE p",
         ] {
             let recorder = Arc::new(Recorder::default());
@@ -3174,5 +3174,162 @@ mod gql {
             "Create Data(vertex \"secret\")",
         );
         assert_eq!(count(&graph), 7);
+    }
+
+    /// Stage 3c: `SET` / `REMOVE` ask `Update` on the data of each item's target exactly like
+    /// their Gremlin twins `property()`, `remove_property()`, `add_label()`, `drop_label()`
+    /// (design C6, D3): a node `Data(vertex)`, an edge of a stated label `Data(edge "label")`,
+    /// a target whose kind only the run knows `Data` (each request once).
+    #[test]
+    fn gql_set_and_remove_ask_update_like_their_gremlin_twins() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) SET p.k = 1").iterate()"#,
+                r#"g.v().has_label("person").property("k", 1).iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) REMOVE p.age").iterate()"#,
+                r#"g.v().has_label("person").remove_property("age").iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) SET p:A:B").iterate()"#,
+                r#"g.v().has_label("person").add_label("A").add_label("B").iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) REMOVE p:A").iterate()"#,
+                r#"g.v().has_label("person").drop_label("A").iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p)-[e:knows]->() SET e.weight = 1").iterate()"#,
+                r#"g.v().out_e("knows").property("weight", 1).iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p)-[e]->() REMOVE e.weight").iterate()"#,
+                r#"g.v().out_e().remove_property("weight").iterate()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person)-[e:knows|created]->(x) SET p.k = 1, e.k = 2, p:L").iterate()"#
+            ),
+            [
+                "Read Data(vertex)",
+                "Read Data(edge)",
+                "Update Data(vertex)",
+                "Update Data(edge \"knows\")",
+                "Update Data(edge \"created\")",
+            ]
+        );
+        // A FOR / UNWIND item: the kind is known at run time only.
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) WITH collect(p) AS ps FOR x IN ps SET x.k = 1").iterate()"#
+            ),
+            ["Read Data(vertex)", "Update Data"]
+        );
+    }
+
+    /// A denied `Update` refuses a GQL `SET` / `REMOVE` before it runs, with the same request
+    /// as the Gremlin twin; an edge label the policy allows lets the edge write through.
+    #[test]
+    fn a_denied_update_refuses_gql_set_and_remove_like_their_gremlin_twins() {
+        let graph = modern();
+        let no_update = || AccessPolicy::allow_all().deny(ActionKind::Update, ResourceKind::Data);
+        for (script, step) in [
+            (
+                r#"g.v().has_label("person").property("k", 1).iterate()"#,
+                "property",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) SET p.k = 1").iterate()"#,
+                "gql:set",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) REMOVE p.age").iterate()"#,
+                "gql:remove",
+            ),
+            (r#"g.gql("MATCH (p) SET p:Seen").iterate()"#, "gql:set"),
+            (
+                r#"g.gql("MATCH (p) CALL (p) { REMOVE p:person } RETURN p").toList()"#,
+                "gql:remove",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, no_update()),
+                step,
+                "Update Data(vertex)",
+            );
+            assert_denied(run(&graph, script, NoSecret), step, "Update Data(vertex)");
+            assert_denied(
+                run(&graph, script, AccessPolicy::read_only()),
+                step,
+                "Update Data(vertex)",
+            );
+        }
+        // Label-level: an edge whose pattern states its label asks for that label only.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH ()-[e:knows]->() SET e.weight = 0.5").iterate()"#,
+                NoSecret,
+            )
+            .is_ok()
+        );
+        for (script, step) in [
+            (
+                r#"g.e().has_label("secret").property("weight", 1).iterate()"#,
+                "property",
+            ),
+            (
+                r#"g.gql("MATCH ()-[e:secret]->() SET e.weight = 1").iterate()"#,
+                "gql:set",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, NoSecret),
+                step,
+                "Update Data(edge \"secret\")",
+            );
+        }
+        assert_denied(
+            run(
+                &graph,
+                r#"g.gql("MATCH ()-[e]->() REMOVE e.weight").iterate()"#,
+                NoSecret,
+            ),
+            "gql:remove",
+            "Update Data(edge)",
+        );
+        // Only the allowed edge write happened.
+        let rows = run(
+            &graph,
+            r#"g.gql("MATCH (p) WHERE p.k IS NOT NULL OR NOT p:person RETURN p").toList()"#,
+            AllowAll,
+        )
+        .unwrap();
+        assert_eq!(rows.into_array().unwrap().len(), 2);
+        let weights = run(
+            &graph,
+            r#"g.e().has_label("knows").values("weight").toList()"#,
+            AllowAll,
+        )
+        .unwrap();
+        assert_eq!(weights.to_string(), "[0.5, 0.5]");
+        assert_eq!(
+            run(
+                &graph,
+                r#"g.v().has_label("person").count().next()"#,
+                AllowAll
+            )
+            .unwrap()
+            .as_int()
+            .ok(),
+            Some(4)
+        );
     }
 }

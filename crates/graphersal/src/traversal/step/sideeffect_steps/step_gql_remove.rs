@@ -10,7 +10,6 @@ use crate::*;
 
 /// One item of a GQL `REMOVE` clause, applied left to right on each row.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
 pub(crate) enum GqlRemoveItem {
     /// `n.k`: removes `k` (a missing key is a no-op).
     Property {
@@ -88,7 +87,6 @@ fn remove_step<'g, S: GraphStorage + 'g>(
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:remove(items)`: the items of one `REMOVE` clause; see [`StepGqlRemove`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
     pub(crate) fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self {
         self.push_step(remove_step(query, items))
     }
@@ -96,7 +94,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:remove(items)`; see [`StepGqlRemove`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
     pub(crate) fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self {
         self.push_step(remove_step(query, items))
     }

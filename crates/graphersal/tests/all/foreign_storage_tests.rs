@@ -328,9 +328,9 @@ const GQL_CURATED: &[&str] = &[
     r#"g.gql("MATCH (p {name: $name})-[:knows]->(f) RETURN f.name AS f", #{name: "marko"}).select("f").fold().next()"#,
     // A property index read by the planner: the same rows, and the plan reads the index on both.
     r#"g.create_index(#{label: "person", key: "name"}); let q = "MATCH (p:person {name: $n})-[:created]->(s) RETURN s.name AS s"; [g.gql(q, #{n: "josh"}).toList(), g.gql(q, #{n: "josh"}).profile().to_string().contains("[index: vertex person.name]")]"#,
-    // Errors: before the run (syntax, refused write) and during it (division by zero).
+    // Errors: before the run (syntax, refused construct) and during it (division by zero).
     r#"g.gql("MATCH (p:person) RETRUN p").toList()"#,
-    r#"g.gql("MATCH (p) SET p.x = 1 RETURN p").toList()"#,
+    r#"g.gql("MATCH (p) CALL (p) { RETURN 1 AS x } IN TRANSACTIONS RETURN p").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN 100 / (p.age - 29)").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name LIMIT $n", #{n: -1}).toList()"#,
     r#"g.v().gql("MATCH (p) RETURN p").toList()"#,

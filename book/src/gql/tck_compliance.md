@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2104** / 3712 | **56.7 %** |
-| Unsupported (not yet or refused) | 1458 / 3712 | 39.3 % |
-| **Wrong behaviour of supported constructs** | **150** / 3712 | **4.0 %** |
-| Passed without `expressions/temporal` | 2104 / 2708 | 77.7 % |
+| **Passed** | **2192** / 3712 | **59.1 %** |
+| Unsupported (not yet or refused) | 1369 / 3712 | 36.9 % |
+| **Wrong behaviour of supported constructs** | **151** / 3712 | **4.1 %** |
+| Passed without `expressions/temporal` | 2192 / 2708 | 80.9 % |
 
-Unsupported = missing 1368, setup 90. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 38, unexpected_error 77, timeout 0, panic 0.
+Unsupported = missing 1279, setup 90. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 77, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -69,11 +69,11 @@ Per sub-directory of the kit:
 | `clauses/match` | 96.9 % | 369 | 381 | 4 | 8 |
 | `clauses/match-where` | 97.1 % | 33 | 34 | · | 1 |
 | `clauses/merge` | 0.0 % | 0 | 75 | 75 | · |
-| `clauses/remove` | 0.0 % | 0 | 33 | 33 | · |
+| `clauses/remove` | 100.0 % | 33 | 33 | · | · |
 | `clauses/return` | 87.3 % | 55 | 63 | 6 | 2 |
 | `clauses/return-orderby` | 82.9 % | 29 | 35 | 1 | 5 |
 | `clauses/return-skip-limit` | 74.2 % | 23 | 31 | 1 | 7 |
-| `clauses/set` | 1.9 % | 1 | 52 | 51 | · |
+| `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 71.4 % | 10 | 14 | 2 | 2 |
 | `clauses/with` | 89.7 % | 26 | 29 | 1 | 2 |
@@ -86,13 +86,13 @@ Per sub-directory of the kit:
 | `expressions/conditional` | 100.0 % | 13 | 13 | · | · |
 | `expressions/existentialSubqueries` | 100.0 % | 10 | 10 | · | · |
 | `expressions/graph` | 82.0 % | 41 | 50 | 8 | 1 |
-| `expressions/list` | 58.4 % | 108 | 185 | 46 | 31 |
+| `expressions/list` | 60.5 % | 112 | 185 | 42 | 31 |
 | `expressions/literals` | 99.2 % | 130 | 131 | 1 | · |
 | `expressions/map` | 60.5 % | 23 | 38 | 15 | · |
 | `expressions/mathematical` | 100.0 % | 6 | 6 | · | · |
 | `expressions/null` | 100.0 % | 44 | 44 | · | · |
 | `expressions/path` | 42.9 % | 3 | 7 | · | 4 |
-| `expressions/pattern` | 90.0 % | 45 | 50 | 2 | 3 |
+| `expressions/pattern` | 90.0 % | 45 | 50 | 1 | 4 |
 | `expressions/precedence` | 86.0 % | 104 | 121 | 9 | 8 |
 | `expressions/quantifier` | 88.0 % | 521 | 592 | 63 | 8 |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
@@ -100,7 +100,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 5.3 % | 1 | 19 | · | 18 |
-| **all** | **56.7 %** | **2104** | **3712** | 1458 | 150 |
+| **all** | **59.1 %** | **2192** | **3712** | 1369 | 151 |
 <!-- opencypher:end directories -->
 
 ## Out of scope

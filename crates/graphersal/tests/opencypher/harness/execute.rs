@@ -512,7 +512,7 @@ mod tests {
         let data = error("UNWIND [1, 0] AS x RETURN 1 / x");
         assert_eq!(data.phase, Phase::Runtime);
         assert_eq!(data.gqlstatus(), Some("22012"));
-        let not_yet = error("MATCH (n) SET n.x = 1");
+        let not_yet = error("MATCH (n) FOREACH (x IN [1] | SET n.x = x)");
         assert!(not_yet.is_unsupported(), "{not_yet:?}");
         assert_eq!(not_yet.phase, Phase::Compile);
     }

@@ -3,7 +3,10 @@
 //! (`dump`: every element with its labels and properties, endpoints by their content, sorted),
 //! Halloween guards pin the step-at-a-time visibility rule (design W13), `FOR`, `CALL` bodies,
 //! `RETURN` after writes, the empty result of a write query, and the read plans stay as they
-//! were (a plan dump guard against the plans before stage 3a).
+//! were (a plan dump guard against the plans before stage 3a). Stage 3c: `SET` / `REMOVE`
+//! twins against `property()`, `remove_property()`, `add_label()`, `drop_label()` and
+//! `property(map)`, values read across a write (W10), one evaluation per row (W15),
+//! read-after-write (an index included), the schema, `CALL` bodies and saved queries.
 #![cfg(feature = "gql")]
 
 use graphersal::error::GqlErrorKind;
@@ -801,44 +804,385 @@ mod script {
         }
         assert_eq!(stamps, 7);
     }
+
+    /// Stage 3c: `SET` / `REMOVE` leave the graph their Gremlin twins leave (a NULL value
+    /// compares against `remove_property()`: GQL removes the key, `property(k, null)` would
+    /// store a null).
+    #[test]
+    fn set_and_remove_leave_the_graph_their_gremlin_twins_leave() {
+        for (query, gremlin) in [
+            (
+                "MATCH (p:person) SET p.k = 1",
+                r#"g.v().has_label("person").property("k", 1)"#,
+            ),
+            (
+                "MATCH (p {name: 'marko'}) SET p.k = p.age, p.j = p.k",
+                r#"g.v().has("name", "marko").property("k", 29).property("j", 29)"#,
+            ),
+            (
+                "MATCH (p {name: 'marko'}) SET p.age = NULL",
+                r#"g.v().has("name", "marko").remove_property("age")"#,
+            ),
+            (
+                "MATCH (p:person) REMOVE p.age",
+                r#"g.v().has_label("person").remove_property("age")"#,
+            ),
+            (
+                "MATCH (p:person) SET p:Old:Tall",
+                r#"g.v().has_label("person").add_label("Old").add_label("Tall")"#,
+            ),
+            (
+                "MATCH (p:person) SET p IS Old & Tall, p:Old",
+                r#"g.v().has_label("person").add_label("Old").add_label("Tall")"#,
+            ),
+            (
+                "MATCH (s:software) REMOVE s:software",
+                r#"g.v().has_label("software").drop_label("software")"#,
+            ),
+            (
+                "MATCH (p:person) SET p += {a: 1, b: 'x'}",
+                r#"g.v().has_label("person").property(#{a: 1, b: "x"})"#,
+            ),
+            (
+                "MATCH (p {name: 'marko'}) SET p = {x: 1}",
+                r#"g.v().has("name", "marko").remove_property(["name", "age"]).property("x", 1)"#,
+            ),
+            (
+                "MATCH ()-[e:knows]->() SET e.weight = 2.5",
+                r#"g.e().has_label("knows").property("weight", 2.5)"#,
+            ),
+            (
+                "MATCH (a)-[e:knows]->(b) REMOVE e.weight",
+                r#"g.e().has_label("knows").remove_property("weight")"#,
+            ),
+            (
+                "MATCH (p:person) CALL (p) { SET p.k = 1 } RETURN p",
+                r#"g.v().has_label("person").property("k", 1)"#,
+            ),
+            (
+                "MATCH (a)-[:created]->(s) SET s.by = 'x', a:Maker",
+                r#"g.v().as("a").out("created").property("by", "x").select("a").add_label("Maker")"#,
+            ),
+        ] {
+            twin(query, gremlin);
+        }
+    }
+
+    #[test]
+    fn a_gql_set_or_remove_is_mutating() {
+        for query in [
+            "MATCH (p) SET p.k = 1",
+            "MATCH (p) SET p:A RETURN p",
+            "MATCH (p) REMOVE p.age",
+            "MATCH (p) CALL (p) { REMOVE p:person } RETURN p",
+        ] {
+            let traversal = eval_value(modern(), &format!("g.gql({query:?})"))
+                .unwrap()
+                .cast::<ScriptGraphTraversalSource>();
+            assert!(traversal.is_mutating(), "{query}");
+        }
+    }
+
+    /// A saved GQL query with `SET` / `REMOVE` writes (dialect `/2`) with `Update` effects.
+    #[test]
+    fn a_saved_gql_query_with_set_writes_with_update_effects() {
+        use graphersal::catalog::GQL_WRITING_QUERY_DIALECT;
+        let graph = modern();
+        let text = |script: &str| {
+            eval_value(graph.clone(), script)
+                .unwrap_or_else(|e| panic!("{script}: {e}"))
+                .to_string()
+        };
+        let _ = text(
+            r#"g.define_query(#{name: "bump", language: "gql", params: #{n: "string"},
+                   body: "MATCH (p:person {name: $n}) SET p.age = p.age + 1, p:Old RETURN p.age AS age"});
+               g.define_query(#{name: "unweigh", language: "gql",
+                   body: "MATCH (a)-[e:knows]->(b) REMOVE e.weight"})"#,
+        );
+        assert_eq!(
+            text(r#"g.get_query("bump").dialect"#),
+            GQL_WRITING_QUERY_DIALECT
+        );
+        assert_eq!(text(r#"g.get_query("bump").writes"#), "true");
+        assert_eq!(
+            text(r#"g.get_query("bump").effects.map(|e| e.text)"#),
+            r#"["Update Data(vertex)"]"#
+        );
+        assert_eq!(
+            text(r#"g.get_query("unweigh").effects.map(|e| e.text)"#),
+            r#"["Update Data(edge \"knows\")"]"#
+        );
+        assert_eq!(
+            text(r#"g.query("bump", #{n: "marko"}).select("age").to_list()"#),
+            "[30]"
+        );
+        let _ = text(r#"g.query("unweigh").iterate()"#);
+        let read = graph.read();
+        let lines = dump(&*read);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "V [\"person\", \"Old\"] {age=30, name=\"marko\"}"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().filter(|l| l.starts_with("E knows {}")).count() == 2,
+            "{lines:?}"
+        );
+    }
 }
 
-// ----- stage 3c.T1: SET / REMOVE parse and bind, refused at the lowering until 3c.T3 -----
+// ----- stage 3c: SET / REMOVE -----
+
+/// The persons' column `key` on `graph`, ordered by name (josh, marko, peter, vadas).
+fn persons(graph: &mut TraversalGraph, key: &str) -> Vec<String> {
+    let rows = write(
+        graph,
+        &format!("MATCH (p:person) RETURN p.name AS n, p.{key} AS v ORDER BY n"),
+    );
+    column(&rows, "v")
+}
 
 #[test]
-fn bound_set_and_remove_are_refused_before_the_run() {
-    for (query, word) in [
-        ("MATCH (p:person) SET p.age = 1 RETURN p", "SET"),
-        (
-            "MATCH (p) SET p = {a: 1}, p += {b: 2}, (p).c = 3, p:A:B",
-            "SET",
-        ),
-        ("MATCH (p) REMOVE p.age, p:person", "REMOVE"),
-        ("MATCH (p) CALL (p) { SET p.k = 1 } RETURN p", "SET"),
-        (
-            "MATCH (p) WITH p, p.age AS old SET p.age = 1 RETURN old",
-            "SET",
-        ),
+fn set_and_remove_return_the_rows_with_the_new_state() {
+    // RETURN after SET reads the new values; the row and its element stay.
+    let (mut graph, rows) = after(
+        "MATCH (p:person) SET p.age = p.age + 1, p:Checked \
+         RETURN p.name AS n, p.age AS a, labels(p) AS l ORDER BY n",
+    );
+    assert_eq!(column(&rows, "a"), ["33", "30", "36", "28"]);
+    assert_eq!(count_label(&graph, "Checked"), 4);
+    assert_eq!(column(&rows, "l")[0], r#"["person", "Checked"]"#);
+    // REMOVE of a property and a label; a missing key or label is a no-op.
+    let rows = write(
+        &mut graph,
+        "MATCH (p:person) REMOVE p.age, p.nothing, p:Checked, p:Nothing RETURN p.age AS a",
+    );
+    assert_eq!(column(&rows, "a"), ["null", "null", "null", "null"]);
+    assert_eq!(count_label(&graph, "Checked"), 0);
+    assert_eq!(count_label(&graph, "person"), 4);
+    // A query ending in SET / REMOVE returns no row.
+    assert!(write(&mut graph, "MATCH (p:person) SET p.k = 1").is_empty());
+    assert!(write(&mut graph, "MATCH (p:person) REMOVE p.k").is_empty());
+    assert_eq!(persons(&mut graph, "k"), ["null", "null", "null", "null"]);
+}
+
+#[test]
+fn set_items_run_left_to_right_and_null_removes() {
+    let (mut graph, rows) = after(
+        "MATCH (p {name: 'marko'}) SET p.a = 1, p.b = p.a + 1, p.a = 3, (p).c = p.b \
+         RETURN p.a AS a, p.b AS b, p.c AS c",
+    );
+    assert_eq!(column(&rows, "a"), ["3"]);
+    assert_eq!(column(&rows, "b"), ["2"]);
+    assert_eq!(column(&rows, "c"), ["2"]);
+    // `= NULL` removes the key, `= {..}` replaces every property (NULL entries absent), `+=`
+    // merges (a NULL entry removes its key).
+    write(&mut graph, "MATCH (p {name: 'marko'}) SET p.a = NULL");
+    let rows = write(
+        &mut graph,
+        "MATCH (p {name: 'marko'}) RETURN keys(p) AS k ORDER BY k",
+    );
+    assert_eq!(column(&rows, "k"), [r#"["name", "age", "b", "c"]"#]);
+    let rows = write(
+        &mut graph,
+        "MATCH (p {name: 'vadas'}) SET p = {x: 1, y: NULL} RETURN properties(p) AS m",
+    );
+    assert_eq!(column(&rows, "m"), [r#"{"x": 1}"#]);
+    let rows = write(
+        &mut graph,
+        "MATCH (p {x: 1}) SET p += {x: NULL, z: 'z', w: [1, 2]} RETURN properties(p) AS m",
+    );
+    assert_eq!(column(&rows, "m"), [r#"{"z": "z", "w": [1, 2]}"#]);
+    // A NULL target (OPTIONAL MATCH without a match) is a no-op whatever its right side.
+    let before = dump(&graph);
+    let rows = write(
+        &mut graph,
+        "OPTIONAL MATCH (a:Nothing) SET a.k = 1 / 0, a:L REMOVE a.k, a:L RETURN a",
+    );
+    assert_eq!(column(&rows, "a"), ["null"]);
+    assert_eq!(dump(&graph), before);
+}
+
+/// Design W10: a value read across a SET is the value from before it, also through a list of
+/// the elements (TCK List12 shape).
+#[test]
+fn a_value_read_across_a_set_is_the_value_from_before_it() {
+    let (mut graph, rows) = after(
+        "MATCH (n:person) WITH n, n.age AS old SET n.age = 1 \
+         RETURN n.name AS n, old ORDER BY n",
+    );
+    assert_eq!(column(&rows, "old"), ["32", "29", "35", "27"]);
+    assert_eq!(persons(&mut graph, "age"), ["1", "1", "1", "1"]);
+    let (mut graph, rows) = after(
+        "MATCH (a:person) WITH collect(a) AS nodes \
+         WITH nodes, [x IN nodes | x.name] AS oldNames UNWIND nodes AS n \
+         SET n.name = n.name + '!' RETURN n.name AS new, oldNames ORDER BY new LIMIT 1",
+    );
+    assert_eq!(column(&rows, "new"), ["\"josh!\""]);
+    assert_eq!(
+        column(&rows, "oldNames"),
+        [r#"["marko", "vadas", "josh", "peter"]"#]
+    );
+    assert_eq!(
+        persons(&mut graph, "name"),
+        ["\"josh!\"", "\"marko!\"", "\"peter!\"", "\"vadas!\""]
+    );
+}
+
+/// Design W15: every row is one evaluation, also over duplicate rows of the same element; a
+/// `LIMIT 0` after the write limits the rows, not the writes (TCK Set6 / Remove3).
+#[test]
+fn every_row_sets_once_also_over_duplicate_rows() {
+    let (mut graph, _) = after("MATCH (n {name: 'marko'}) SET n.c = 0");
+    write(
+        &mut graph,
+        "MATCH (n {name: 'marko'}), (m:person) SET n.c = n.c + 1",
+    );
+    let rows = write(&mut graph, "MATCH (n {name: 'marko'}) RETURN n.c AS c");
+    assert_eq!(column(&rows, "c"), ["4"]);
+    write(
+        &mut graph,
+        "FOR i IN [1, 2, 3] MATCH (n {name: 'marko'}) SET n.c = n.c + i",
+    );
+    let rows = write(&mut graph, "MATCH (n {name: 'marko'}) RETURN n.c AS c");
+    assert_eq!(column(&rows, "c"), ["10"]);
+    let (mut graph, rows) = after("MATCH (n:person) SET n.k = 1 RETURN n LIMIT 0");
+    assert!(rows.is_empty());
+    assert_eq!(persons(&mut graph, "k"), ["1", "1", "1", "1"]);
+    let (graph, rows) = after("MATCH (n:person) REMOVE n:person RETURN count(*) AS c");
+    assert_eq!(column(&rows, "c"), ["4"]);
+    assert_eq!(count_label(&graph, "person"), 0);
+}
+
+/// A later clause sees the SET: a MATCH after it, also one an index serves (the index follows
+/// the write), and a query after the write.
+#[test]
+fn a_later_match_sees_the_set_also_through_a_property_index() {
+    use graphersal::catalog::PropertyIndexDefinition;
+    use graphersal::storage::ElementKind;
+    let (_, rows) = after(
+        "MATCH (n {name: 'marko'}) SET n.age = 77 WITH n MATCH (m:person {age: 77}) \
+         RETURN m.name AS m",
+    );
+    assert_eq!(column(&rows, "m"), ["\"marko\""]);
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    graph
+        .traversal_mut()
+        .create_index(
+            "person_age",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+        )
+        .unwrap();
+    write(&mut graph, "MATCH (n {name: 'marko'}) SET n.age = 77");
+    let query = "MATCH (p:person {age: 77}) RETURN p.name AS n";
+    assert_eq!(column(&write(&mut graph, query), "n"), ["\"marko\""]);
+    assert!(write(&mut graph, "MATCH (p:person {age: 29}) RETURN p").is_empty());
+    let plan = plan_dump(&graph, query);
+    assert!(
+        plan.starts_with("v(labels: [\"person\"]) [index: vertex person.age]\n"),
+        "{plan}"
+    );
+    write(&mut graph, "MATCH (n {name: 'marko'}) REMOVE n.age");
+    assert!(write(&mut graph, query).is_empty());
+}
+
+#[test]
+fn set_and_remove_lower_to_one_step_per_clause() {
+    assert_eq!(
+        write_plan("MATCH (p:person) SET p.age = 1, p:A RETURN p", &[]),
+        "v(labels: [\"person\"])\ngql:set(\"p.age = 1, p:A\")\ngql:project(\"p\")\n"
+    );
+    assert_eq!(
+        write_plan("MATCH (p:person) REMOVE p.age, p:A", &[]),
+        "v(labels: [\"person\"])\ngql:remove(\"p.age, p:A\")\ndiscard()\n"
+    );
+    // A target away from the current element is read through its path label.
+    let plan = write_plan("MATCH (a)-[e:knows]->(b) SET a.k = e.weight RETURN b", &[]);
+    assert!(
+        plan.contains("as(\"e\") [path: labels(a,e)]\nin_v() [path: labels(a,e)]\ngql:set(\"a.k = e.weight\")\n"),
+        "{plan}"
+    );
+}
+
+#[test]
+fn set_inside_a_call_body_runs_per_row_and_the_rows_pass_on() {
+    let (mut graph, rows) = after(
+        "MATCH (p:person) CALL (p) { SET p.k = 1 REMOVE p.age } RETURN p.name AS n ORDER BY n",
+    );
+    assert_eq!(rows.len(), 4);
+    assert_eq!(persons(&mut graph, "k"), ["1", "1", "1", "1"]);
+    assert_eq!(persons(&mut graph, "age"), ["null", "null", "null", "null"]);
+    let (mut graph, _) = after(
+        "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) SET s.by = p.name } \
+         RETURN p",
+    );
+    let rows = write(
+        &mut graph,
+        "MATCH (s:software) RETURN s.name AS n, s.by AS b ORDER BY n",
+    );
+    assert_eq!(column(&rows, "b").len(), 2);
+}
+
+#[test]
+fn the_schema_coerces_and_refuses_set_values() {
+    let mut graph = TraversalGraph::new();
+    graph
+        .set_schema(
+            GraphSchema::from_json(
+                r#"{"mode": "closed",
+                  "vertices": {"person": {"schema": {"type": "object", "properties": {
+                      "name": {"type": "string"}, "w": {"type": "number"}},
+                    "required": ["name"]}}}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    write(
+        &mut graph,
+        "INSERT (:person {name: 'ann'}), (:person {name: 'bob'})",
+    );
+    // Write-time coercion: an integer for a number is stored as a float.
+    write(&mut graph, "MATCH (p:person) SET p.w = 2");
+    for v in graph.vertices() {
+        let w = graph.vertex_properties(v).and_then(|p| p.get("w")).cloned();
+        assert_eq!(w, Some(ElementProperty::from(2.0)));
+    }
+    let before = dump(&graph);
+    for query in [
+        // A value of the wrong type, an undeclared key, a required key removed: the query
+        // fails and changes nothing, also for the rows before the failing one.
+        "MATCH (p:person) SET p.w = p.name",
+        "MATCH (p:person) SET p.other = 1",
+        "MATCH (p:person) REMOVE p.name",
+        "MATCH (p:person) SET p.name = NULL",
+        "MATCH (p:person) SET p = {w: 1}",
     ] {
-        let mut graph = TraversalGraph::tinkerpop_modern();
-        let before = dump(&graph);
-        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
-        match error.root_cause() {
-            TraverserError::Gql {
-                kind,
-                message,
-                gqlstatus,
-                ..
-            } => {
-                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
-                assert_eq!(gqlstatus, "0A000", "{query}");
-                assert_eq!(
-                    *message,
-                    format!("{word} is not yet supported in this version")
-                );
-            }
-            other => panic!("{query}: {other}"),
-        }
+        let err = graph.traversal_mut().gql(query).to_list().unwrap_err();
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::Graph(GraphError::Schema(_)) | TraverserError::Schema(_)
+            ),
+            "{query}: {err:?}"
+        );
+        assert_eq!(dump(&graph), before, "{query} changed the graph");
+    }
+}
+
+#[test]
+fn a_failing_set_row_changes_nothing() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let before = dump(&graph);
+    for query in [
+        "MATCH (p:person) SET p.k = 1, p.r = 100 / (p.age - 35)",
+        "MATCH (p:person) SET p:Seen REMOVE p.name SET p.k = 1 / (p.age - 35)",
+        "FOR x IN [1, 'a'] MATCH (p:person) SET p = x",
+    ] {
+        assert!(
+            graph.traversal_mut().gql(query).to_list().is_err(),
+            "{query}"
+        );
         assert_eq!(dump(&graph), before, "{query} changed the graph");
     }
 }

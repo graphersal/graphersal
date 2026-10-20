@@ -280,8 +280,8 @@
 //!   (42002, W26: an edge has exactly one label). The values are expressions over the scope
 //!   before the clause and parameters, without aggregates (42002); a map literal holds no key
 //!   twice (42002). Targets and what the values read are [`BoundSet::reads`] /
-//!   [`BoundRemove::reads`], all marked read. Until stage 3c.T3 lowers them, the lowering
-//!   refuses a bound `SET` / `REMOVE` as not yet supported.
+//!   [`BoundRemove::reads`], all marked read. The lowering emits one `gql:set` /
+//!   `gql:remove` step per clause on the row before it.
 //!
 //! The planner plans a write clause as a `Stage::Write` of its pipeline; a `CALL` whose body
 //! ends in `FINISH` or a write is a unit subquery ([`BoundCall::unit`]): the outer row passes
@@ -765,6 +765,18 @@ pub(crate) enum BoundSetKind {
     /// `v:A:B` / `v IS A & B`: the labels added, in written order, each once (W26, D1). The
     /// target is never known to be an edge.
     Labels(Vec<Identifier>),
+}
+
+impl BoundSetKind {
+    /// The value it writes (`None` for a label item).
+    pub(crate) fn value(&self) -> Option<&WriteValue> {
+        match self {
+            BoundSetKind::Property { value, .. }
+            | BoundSetKind::Replace(value)
+            | BoundSetKind::Merge(value) => Some(value),
+            BoundSetKind::Labels(_) => None,
+        }
+    }
 }
 
 /// The value expression of a `SET` item (design W8): any expression over the bindings before

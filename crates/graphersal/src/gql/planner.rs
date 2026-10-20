@@ -1629,7 +1629,8 @@ impl<'q> Planner<'q> {
     /// property values (and the ends of an edge) are read where its insert step runs, on the
     /// row before the clause for the first element, then on the element created just before
     /// (the lowering's insert chain); the subqueries the values hold are hosted there. Leaves
-    /// `current` on the last element created.
+    /// `current` on the last element created. A `SET` / `REMOVE` (stage 3c) reads its targets
+    /// and values on the row before it and leaves `current` and the row as they were.
     fn write_positions(
         &mut self,
         write: &BoundWrite,
@@ -1651,8 +1652,31 @@ impl<'q> Planner<'q> {
                     *current = Some(edge.binding);
                 }
             }
-            // Planned from stage 3c.T3 on (the lowering refuses them until then).
-            BoundWrite::Set(_) | BoundWrite::Remove(_) => {}
+            // `SET` / `REMOVE` (stage 3c): one step on the row before the clause reads every
+            // item's target and value there; it emits the row unchanged, so the current
+            // element and the row stay.
+            BoundWrite::Set(set) => {
+                let here = at.host(*current);
+                for item in &set.items {
+                    let target = [item.target.binding];
+                    self.body_reads_away(body, &target, *current);
+                    reads.extend_from_slice(&target);
+                    if let Some(value) = item.kind.value() {
+                        self.body_reads_away(body, &value.bindings, *current);
+                        reads.extend_from_slice(&value.bindings);
+                        self.expr_hosts(&value.expr, here, hosts);
+                    }
+                }
+                self.read_all(reads, at);
+            }
+            BoundWrite::Remove(remove) => {
+                for item in &remove.items {
+                    let target = [item.target.binding];
+                    self.body_reads_away(body, &target, *current);
+                    reads.extend_from_slice(&target);
+                }
+                self.read_all(reads, at);
+            }
         }
     }
 

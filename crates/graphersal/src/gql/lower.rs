@@ -114,9 +114,9 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemove,
-    BoundRemoveKind, BoundSet, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct,
-    Count, InsertProperty, Predicate, Segment, SortKey, bind_with_parameters,
+    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemoveKind,
+    BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count, InsertProperty,
+    Predicate, Segment, SortKey, TargetKind, WriteTarget, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -140,7 +140,7 @@ use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_edge::GqlEndpoint;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_node::GqlInsertProperty;
 use crate::traversal::step::sideeffect_steps::step_gql_remove::GqlRemoveItem;
-use crate::traversal::step::sideeffect_steps::step_gql_set::GqlSetItem;
+use crate::traversal::step::sideeffect_steps::step_gql_set::{GqlSetItem, GqlWriteTarget};
 use crate::value::{Number, P, PValue};
 use crate::{
     AnonymousTraversal, ArgStrings, CompactString, ElementKind, ElementProperty,
@@ -536,6 +536,22 @@ enum Instr<S: GraphStorage> {
         properties: Vec<GqlInsertProperty<S>>,
         site: Site,
         subqueries: Bodies<S>,
+    },
+    /// `gql:set(items)` at `site` (stage 3c): the items of one `SET` clause on every row, their
+    /// targets (`targets`, item order) and values read at `site`, hosting the subqueries the
+    /// values hold. The targets' bindings are set at emission ([`set_targets`]).
+    Set {
+        items: Vec<GqlSetItem<S>>,
+        targets: Vec<BindingId>,
+        site: Site,
+        subqueries: Bodies<S>,
+    },
+    /// `gql:remove(items)` at `site` (stage 3c): the items of one `REMOVE` clause on every row,
+    /// their targets (`targets`, item order) read at `site`.
+    Remove {
+        items: Vec<GqlRemoveItem>,
+        targets: Vec<BindingId>,
+        site: Site,
     },
     /// `discard()`: the end of a pipeline ending in `FINISH` or a write clause (stage 3a, design
     /// W2): every row has done its work, none is returned.
@@ -957,6 +973,42 @@ impl<S: GraphStorage> Lowered<S> {
                     self.bindings(site),
                     self.children(subqueries),
                 ),
+                Instr::Set {
+                    mut items,
+                    targets,
+                    site,
+                    subqueries,
+                } => {
+                    for (item, id) in items.iter_mut().zip(&targets) {
+                        let binding = self.binding(id.0, site);
+                        match item {
+                            GqlSetItem::Property { target, .. }
+                            | GqlSetItem::Replace { target, .. }
+                            | GqlSetItem::Merge { target, .. }
+                            | GqlSetItem::Labels { target, .. } => target.binding = binding,
+                        }
+                    }
+                    g.gql_set(
+                        Arc::clone(&self.query),
+                        items,
+                        self.bindings(site),
+                        self.children(subqueries),
+                    )
+                }
+                Instr::Remove {
+                    mut items,
+                    targets,
+                    site,
+                } => {
+                    for (item, id) in items.iter_mut().zip(&targets) {
+                        let binding = self.binding(id.0, site);
+                        match item {
+                            GqlRemoveItem::Property { target, .. }
+                            | GqlRemoveItem::Labels { target, .. } => target.binding = binding,
+                        }
+                    }
+                    g.gql_remove(Arc::clone(&self.query), items)
+                }
                 Instr::Discard => g.discard(),
             };
         }
@@ -1182,6 +1234,8 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Call(_)
             | Instr::InsertNode { .. }
             | Instr::InsertEdge { .. }
+            | Instr::Set { .. }
+            | Instr::Remove { .. }
             | Instr::Discard => t,
         }
     }
@@ -1258,7 +1312,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     ) -> Self;
     /// `gql:set(items)`: one `SET` clause (stage 3c); the values read the slots `bindings`
     /// and host the subqueries `children`.
-    #[allow(dead_code, reason = "lowered from stage 3c.T3 on")]
     fn gql_set(
         self,
         query: Arc<str>,
@@ -1267,7 +1320,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     /// `gql:remove(items)`: one `REMOVE` clause (stage 3c).
-    #[allow(dead_code, reason = "lowered from stage 3c.T3 on")]
     fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self;
     fn gql_order(
         self,
@@ -2024,76 +2076,100 @@ impl<'q> Lowering<'q> {
                     site = Site::on(edge.binding);
                 }
             }
-            // Bound since stage 3c.T1, lowered from 3c.T3 on: refused before the run.
-            BoundWrite::Set(set) => return Err(self.set_not_yet(set)),
-            BoundWrite::Remove(remove) => return Err(self.remove_not_yet(remove)),
+            // `SET` (stage 3c): one step on the row; it emits the row unchanged, the site stays.
+            BoundWrite::Set(set) => {
+                let hooks = Hooks::default();
+                let mut items = Vec::with_capacity(set.items.len());
+                let mut targets = Vec::with_capacity(set.items.len());
+                for item in &set.items {
+                    let target = self.write_target(&item.target);
+                    let span = item.span;
+                    items.push(match &item.kind {
+                        BoundSetKind::Property { key, value } => GqlSetItem::Property {
+                            target,
+                            key: CompactString::from(key.name.as_str()),
+                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
+                            span,
+                        },
+                        BoundSetKind::Replace(value) => GqlSetItem::Replace {
+                            target,
+                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
+                            span,
+                        },
+                        BoundSetKind::Merge(value) => GqlSetItem::Merge {
+                            target,
+                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
+                            span,
+                        },
+                        BoundSetKind::Labels(labels) => GqlSetItem::Labels {
+                            target,
+                            labels: label_names(labels),
+                            span,
+                        },
+                    });
+                    targets.push(item.target.binding);
+                }
+                instrs.push(Instr::Set {
+                    items,
+                    targets,
+                    site,
+                    subqueries: self.bodies(hooks, site)?,
+                });
+            }
+            // `REMOVE` (stage 3c): as `SET`, without values.
+            BoundWrite::Remove(remove) => {
+                let mut items = Vec::with_capacity(remove.items.len());
+                let mut targets = Vec::with_capacity(remove.items.len());
+                for item in &remove.items {
+                    let target = self.write_target(&item.target);
+                    let span = item.span;
+                    items.push(match &item.kind {
+                        BoundRemoveKind::Property(key) => GqlRemoveItem::Property {
+                            target,
+                            key: CompactString::from(key.name.as_str()),
+                            span,
+                        },
+                        BoundRemoveKind::Labels(labels) => GqlRemoveItem::Labels {
+                            target,
+                            labels: label_names(labels),
+                            span,
+                        },
+                    });
+                    targets.push(item.target.binding);
+                }
+                instrs.push(Instr::Remove {
+                    items,
+                    targets,
+                    site,
+                });
+            }
         }
         Ok(site)
     }
 
-    /// The error of a bound `SET` the lowering does not emit yet (until stage 3c.T3), at its
-    /// keyword: the Gremlin steps that do it, with an example built from a first item
-    /// `v.key = literal` (a number, a boolean or a plain string).
-    fn set_not_yet(&self, set: &BoundSet) -> TraverserError {
-        let example = set.items.first().and_then(|item| match &item.kind {
-            BoundSetKind::Property { key, value } => {
-                let value = match &value.expr.kind {
-                    ExprKind::Literal(Literal::Integer(i)) => i.to_string(),
-                    ExprKind::Literal(Literal::Float(f)) => f.to_string(),
-                    ExprKind::Literal(Literal::Bool(b)) => b.to_string(),
-                    ExprKind::Literal(Literal::String(text)) if !text.contains(['"', '\\']) => {
-                        format!("\"{text}\"")
-                    }
-                    _ => return None,
-                };
-                (!key.name.contains(['"', '\\'])).then(|| (key.name.clone(), value))
-            }
-            _ => None,
-        });
-        let (key, value) = example.unwrap_or_else(|| ("age".to_string(), "30".to_string()));
-        self.write_not_yet(
-            "SET",
-            set.keyword,
-            format!(
-                "write the update as Gremlin steps: property() sets a property and add_label() \
-                 adds a label, for example g.v().has_label(\"person\").property(\"{key}\", \
-                 {value})"
+    /// The target of a `SET` / `REMOVE` item with the static facts the access requests are
+    /// built from (design C6 of stage 3c); its row binding is set at emission (it depends on
+    /// the labelling, [`Instr::Set`]).
+    fn write_target(&self, target: &WriteTarget) -> GqlWriteTarget {
+        let (element, labels) = match &target.kind {
+            TargetKind::Node => (Some(ElementKind::Vertex), Vec::new()),
+            TargetKind::Edge { labels } => (
+                Some(ElementKind::Edge),
+                labels.as_deref().map(label_names).unwrap_or_default(),
             ),
-        )
-    }
-
-    /// The error of a bound `REMOVE` the lowering does not emit yet (until stage 3c.T3).
-    fn remove_not_yet(&self, remove: &BoundRemove) -> TraverserError {
-        let key = remove
-            .items
-            .first()
-            .and_then(|item| match &item.kind {
-                BoundRemoveKind::Property(key) if !key.name.contains(['"', '\\']) => {
-                    Some(key.name.clone())
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| "age".to_string());
-        self.write_not_yet(
-            "REMOVE",
-            remove.keyword,
-            format!(
-                "write the update as Gremlin steps: remove_property() removes a property and \
-                 drop_label() a label, for example \
-                 g.v().has_label(\"person\").remove_property(\"{key}\")"
+            TargetKind::Unknown => (None, Vec::new()),
+        };
+        GqlWriteTarget {
+            name: CompactString::from(
+                self.query
+                    .get(target.span.start..target.span.end)
+                    .unwrap_or_default(),
             ),
-        )
-    }
-
-    /// The "not yet" error of a bound write clause at its keyword.
-    fn write_not_yet(&self, word: &str, keyword: Span, alternative: String) -> TraverserError {
-        GqlErrorBuilder::new(
-            GqlErrorKind::NotYet,
-            keyword.start..keyword.end,
-            format!("{word} is not yet supported in this version"),
-        )
-        .alternative(alternative)
-        .into_error(self.query)
+            binding: Binding::Current,
+            span: target.span,
+            element,
+            labels,
+        }
     }
 
     /// The values of an inserted element, compiled for a step hosting the subqueries they
@@ -3136,6 +3212,9 @@ impl<'q> Lowering<'q> {
                 }
                 | Instr::InsertEdge {
                     site, subqueries, ..
+                }
+                | Instr::Set {
+                    site, subqueries, ..
                 } => {
                     site.ordered = Some(result);
                     for nested in subqueries.iter_mut() {
@@ -3144,6 +3223,7 @@ impl<'q> Lowering<'q> {
                 }
                 Instr::Lookup { site, .. }
                 | Instr::Bind { site, .. }
+                | Instr::Remove { site, .. }
                 | Instr::RowCheck(_, site) => site.ordered = Some(result),
                 Instr::Hop(hop) => self.in_order(&mut hop.steps, result)?,
                 Instr::Optional(part)
@@ -3880,6 +3960,28 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 marks.read(&mut slots, *site);
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
+            Instr::Set {
+                items,
+                targets,
+                site,
+                subqueries,
+            } => {
+                for item in items {
+                    match item {
+                        GqlSetItem::Property { value, .. }
+                        | GqlSetItem::Replace { value, .. }
+                        | GqlSetItem::Merge { value, .. } => value.variables(&mut slots),
+                        GqlSetItem::Labels { .. } => {}
+                    }
+                }
+                slots.extend(targets.iter().map(|id| id.0));
+                marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
+            }
+            Instr::Remove { targets, site, .. } => {
+                slots.extend(targets.iter().map(|id| id.0));
+                marks.read(&mut slots, *site);
+            }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part)
             | Instr::Exists { body: part, .. }
@@ -3935,6 +4037,9 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             }
             | Instr::InsertEdge {
                 site, subqueries, ..
+            }
+            | Instr::Set {
+                site, subqueries, ..
             } => {
                 site.part = Some(segment);
                 subqueries
@@ -3944,7 +4049,9 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             Instr::Order { subqueries, .. } => subqueries
                 .iter_mut()
                 .for_each(|body| in_part(body, segment)),
-            Instr::Lookup { site, .. } | Instr::Bind { site, .. } => site.part = Some(segment),
+            Instr::Lookup { site, .. } | Instr::Bind { site, .. } | Instr::Remove { site, .. } => {
+                site.part = Some(segment)
+            }
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
             Instr::Optional(part)
             | Instr::Exists { body: part, .. }
@@ -3974,6 +4081,14 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::Discard => {}
         }
     }
+}
+
+/// The names of `labels` as written (a `SET` / `REMOVE` label item, an edge pattern's labels).
+fn label_names(labels: &[Identifier]) -> Vec<CompactString> {
+    labels
+        .iter()
+        .map(|l| CompactString::from(l.name.as_str()))
+        .collect()
 }
 
 /// The column of the aggregating result pipeline `site` serves the `ORDER BY` of

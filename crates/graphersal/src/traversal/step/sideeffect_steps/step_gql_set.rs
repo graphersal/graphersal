@@ -42,7 +42,6 @@ pub(crate) struct GqlWriteTarget {
 }
 
 /// One item of a GQL `SET` clause, applied left to right on each row (W22).
-#[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
 pub(crate) enum GqlSetItem<S: GraphStorage> {
     /// `n.k = expr`: sets `k`; a `NULL` value removes it (W20).
     Property {
@@ -677,7 +676,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:set(items)`: the items of one `SET` clause, their values reading the
     /// variable slots `bindings` and hosting the subqueries `children` (child `i` answers the
     /// values' subquery `i`); see [`StepGqlSet`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
     pub(crate) fn gql_set(
         self,
         query: Arc<str>,
@@ -691,7 +689,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:set(items)` hosting the subqueries `children`; see [`StepGqlSet`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from stage 3c.T3 on"))]
     pub(crate) fn gql_set(
         self,
         query: Arc<str>,

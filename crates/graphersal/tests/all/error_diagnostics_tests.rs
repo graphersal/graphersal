@@ -7387,9 +7387,9 @@ mod gql {
     }
 
     #[test]
-    fn gql_set_is_not_yet_supported_with_the_gremlin_step() {
+    fn gql_foreach_is_not_yet_supported_with_the_for_form() {
         let (err, report) = gql_failure(|g| {
-            g.gql("MATCH (p:person) SET p.old = true RETURN p")
+            g.gql("MATCH (p:person) FOREACH (x IN [1] | SET p.old = true) RETURN p")
                 .to_list()
         });
         assert_eq!(
@@ -7397,14 +7397,13 @@ mod gql {
             (GqlErrorKind::NotYet, "0A000".to_string())
         );
         assert!(
-            report.contains("SET is not yet supported in this version"),
+            report.contains("FOREACH is not yet supported in this version"),
             "{report}"
         );
         assert!(
             report.contains(
-                "Help: write the update as Gremlin steps: property() sets a property and \
-                 add_label() adds a label, for example \
-                 g.v().has_label(\"person\").property(\"old\", true)."
+                "Help: write FOR x IN <list> followed by the write clause, for example \
+                 FOR name IN ['ann', 'bob'] INSERT (:person {name: name})."
             ),
             "{report}"
         );

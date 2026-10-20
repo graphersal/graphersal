@@ -476,15 +476,15 @@ Help: keep only the rows where it is bound before the INSERT: FILTER p IS NOT NU
 A schema violation of an `INSERT` is the schema's error, with a help line written for GQL: a
 missing `required` property names the `INSERT` map and `coalesce()`, a type mismatch the
 conversion function (`toInteger()`, ...) with a `$parameter` example
-([Writing with GQL](writes.md#schema)). The write clauses that are not supported yet (`SET`,
-`REMOVE`, `DELETE`, `MERGE`, `FOREACH`) are `0A000` with a help line naming the Gremlin step:
+([Writing with GQL](writes.md#schema)). The write clauses that are not supported yet (`DELETE`,
+`MERGE`, `FOREACH`) are `0A000` with a help line naming the Gremlin step or the GQL form:
 
 ```rhai,graph=modern
-g.gql("MATCH (p) SET p.x = 1")   // error: SET is not yet supported in this version
+g.gql("MATCH (p) DETACH DELETE p")   // error: DETACH DELETE is not yet supported in this version
 ```
 
 ```text
-Help: write the update as Gremlin steps: property() sets a property and add_label() adds a label, for example g.v().has_label("person").property("x", 1). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
+Help: remove the elements with the Gremlin step drop(), which removes a vertex with its edges, for example g.v().has_label("person").has("name", "marko").drop(). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
 ```
 
 ## GQLSTATUS codes

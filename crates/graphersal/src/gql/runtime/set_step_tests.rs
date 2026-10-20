@@ -1,5 +1,5 @@
-//! The stage 3c write steps `gql:set` and `gql:remove` on hand-built pipelines (the lowering
-//! that builds them is 3c.T3): property items (a `NULL` value removes, W20), `=` replace (W23,
+//! The stage 3c write steps `gql:set` and `gql:remove` on hand-built pipelines (built by the
+//! lowering since 3c.T3): property items (a `NULL` value removes, W20), `=` replace (W23,
 //! atomic per item) and `+=` merge (W24), label items (W26), `NULL` targets (W25), removed
 //! targets (W27), non-element targets, schema coercion and enforcement through the storage
 //! write path, bulk expansion (W15), access requests equal to the Gremlin twins, path

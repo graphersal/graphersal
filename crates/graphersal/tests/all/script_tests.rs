@@ -723,6 +723,70 @@ mod tests {
         assert_eq!(graph.read().edge_count(), 1);
     }
 
+    /// Rule 3: a GQL `SET` / `REMOVE` (stage 3c) mutates through the DSL: with a terminal, with
+    /// parameters, returning the new values, as a bare (rendered) traversal, followed by
+    /// camelCase steps, in a saved GQL query, and persisting across evaluations.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_script_eval_gql_set_and_remove_mutations() {
+        let graph = Arc::new(GraphSource::tinkerpop_modern());
+        let script = r#"
+            g.gql("MATCH (p:person) SET p.age = p.age + 1, p:Checked").iterate();
+            g.gql("MATCH (p:person {name: $n}) SET p.nick = $k", #{n: "marko", k: "m"}).toList();
+            let ages = g.gql("MATCH (p:person) REMOVE p:person RETURN p.age AS a ORDER BY a").select("a").toList();
+            g.V().hasLabel("Checked").count().next() * 1000
+                + g.V().hasLabel("person").count().next() * 100
+                + g.V().has("nick", "m").count().next() * 10
+                + ages.len()
+        "#;
+        assert_eq!(
+            eval_value(graph.clone(), script).unwrap().as_int().ok(),
+            Some(4014)
+        );
+        assert_eq!(
+            eval_value(
+                graph.clone(),
+                r#"g.V().hasLabel("Checked").values("age").order().toList()"#
+            )
+            .unwrap()
+            .to_string(),
+            "[28, 30, 33, 36]"
+        );
+        // A bare writing traversal as the last statement is executed by the visualizer.
+        eval(
+            graph.clone(),
+            r#"g.gql("MATCH (s:software) SET s.seen = true")"#,
+        )
+        .expect("bare GQL SET must run");
+        // camelCase steps after a GQL write.
+        let out = eval_value(
+            graph.clone(),
+            r#"g.gql("MATCH (s:software) REMOVE s.lang RETURN s").select("s").property("k", 2).iterate();
+               g.V().has("k", 2).has("seen", true).count().next() * 10 + g.V().has("lang").count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(out.as_int().ok(), Some(20));
+        // A saved GQL query with SET writes when called.
+        eval(
+            graph.clone(),
+            r#"g.defineQuery(#{name: "tag", language: "gql", params: #{n: "string"},
+                   body: "MATCH (p {name: $n}) SET p.tag = 'x'"});
+               g.query("tag", #{n: "lop"}).iterate()"#,
+        )
+        .expect("saved GQL SET must run");
+        // The writes persist across evaluations.
+        assert_eq!(
+            eval_value(
+                graph.clone(),
+                r#"g.V().has("tag", "x").values("name").toList()"#
+            )
+            .unwrap()
+            .to_string(),
+            r#"["lop"]"#
+        );
+        assert_eq!(graph.read().vertex_count(), 6);
+    }
+
     /// A mutating `by()` child traversal makes the plan mutating (behaviour change: it used to
     /// fail with "Cannot mutate immutable graph reference"): the child's writes reach the graph,
     /// once per evaluated traverser, also when nested deeper than one level.
