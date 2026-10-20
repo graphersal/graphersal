@@ -39,13 +39,21 @@
 //! [`Expand::quantifier`]; their edge binding is a group variable, labelled on every iteration
 //! ([`Labelling::group`]).
 //!
+//! **Parenthesized path patterns** (stage 2e, design item 9) are [`Op::Group`] walks
+//! ([`GroupExpand`]): from a bound outer node over the body's hops ([`BodyHop`], in walk
+//! order, reversed hop by hop when walked from the node after the pattern) to the outer node
+//! at the other end; body conditions run in every iteration where their elements are bound,
+//! and each body edge carries its trail list. Body elements read by a body condition away from
+//! the current element are labelled ([`Labelling::body`]).
+//!
 //! **Path labels (design D11).** [`LogicalPlan::labelling`] records per binding why it needs a
 //! path label (`as()`): read by a later expression ([`Binding::read`](super::bind::Binding)), the
 //! target of a join check, the target of a trail check, the origin of an expansion that does
 //! not continue from the current element (a branch, lowered as `select(x)`), the start of a
 //! later segment's component away from the current element, a read after an `OPTIONAL MATCH`
 //! part (no read goes to the current element there), a group variable, an element of a read
-//! path variable's pattern. Nothing else is labelled, so bulk merging is not lost to
+//! path variable's pattern, a body element a body condition reads (stage 2e). Nothing else is
+//! labelled, so bulk merging is not lost to
 //! bookkeeping the query never reads. A materializing `WITH` or `FOR` column binding gets no
 //! reason but `path` (a path variable reads it through a label set after `gql:bind` moved to
 //! it): it is read from its row, and [`Materialize::labelled`] / [`ForStage::labelled`] say
@@ -399,10 +407,11 @@ pub(crate) enum Stage {
         segment: usize,
         /// Its match pipeline, the segment's own conjuncts included.
         ops: Vec<Op>,
-        /// A node binding the part always binds when it matches (its first new node by id):
-        /// labelled ([`Labelling::optional`]) when a group variable of the part is read after
-        /// it, so that a missing label tells "not matched" (NULL) from a zero-length match
-        /// (`[]`). `None`: the part binds no new node (every node was bound before it).
+        /// A node binding the part always binds when it matches (its first new node by id that
+        /// is not in a parenthesized path pattern's body, stage 2e): labelled
+        /// ([`Labelling::optional`]) when a group variable of the part is read after it, so
+        /// that a missing label tells "not matched" (NULL) from a zero-length match (`[]`).
+        /// `None`: the part binds no such node.
         witness: Option<BindingId>,
     },
     /// A materializing `WITH` (decision C2).
@@ -501,6 +510,9 @@ pub(crate) enum Op {
     Lookup(Lookup),
     /// One pattern edge, walked from a bound node to the other end.
     Expand(Expand),
+    /// A parenthesized path pattern (stage 2e), walked from a bound outer node over its body
+    /// to the outer node at its other end ([`GroupExpand`]).
+    Group(GroupExpand),
     /// The current element (just reached by the preceding [`Op::Expand`]) must equal the
     /// element bound earlier to `binding` (lowered as `where(P.eq(x))`).
     Join {
@@ -598,6 +610,88 @@ pub(crate) struct Expand {
     pub(crate) to_filters: ElementFilters,
 }
 
+/// A parenthesized path pattern walked as one expansion (stage 2e, module docs "Parenthesized
+/// path patterns"): from the outer node `from` the body repeats (each iteration's first node
+/// in walk order is the node the iteration before ended on, the first one's `from`, the merge
+/// rule) and ends on `to`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GroupExpand {
+    /// Which parenthesized path pattern it is.
+    pub(crate) group: GroupRef,
+    /// The bound outer node the walk starts from: the node before the pattern
+    /// ([`BoundPath::node_before`](super::bind::BoundPath::node_before)), or the node after it
+    /// when `reversed`.
+    pub(crate) from: BindingId,
+    /// Whether `from` is the current element (else the lowering first returns to it with
+    /// `select(from)`, and `from` is labelled).
+    pub(crate) from_current: bool,
+    /// Walked from the node after the pattern: the body runs from its last node to its first,
+    /// each hop reversed (a path variable and a group list assemble the iterations in reverse).
+    pub(crate) reversed: bool,
+    /// The quantifier (`None`: exactly one iteration; `?` is `{0,1}` with
+    /// [`Self::conditional`]).
+    pub(crate) quantifier: Option<Quantifier>,
+    /// The quantifier is `?`: the body's variables are conditional singletons (ISO), NULL after
+    /// zero iterations.
+    pub(crate) conditional: bool,
+    /// The body node each iteration starts on (the body's first node, its last when
+    /// `reversed`): the current element at the start of the iteration.
+    pub(crate) first: BindingId,
+    /// `first`'s own conjuncts, checked at the start of every iteration.
+    pub(crate) first_filters: ElementFilters,
+    /// The body conditions over no body element (only constants and parameters), checked at
+    /// the start of every iteration (indexes into [`BoundQuery::conjuncts`]).
+    pub(crate) first_conjuncts: Vec<usize>,
+    /// The body's edges in walk order, each with the node it reaches.
+    pub(crate) hops: Vec<BodyHop>,
+    /// The outer node reached after the last iteration (the node after the pattern, or the
+    /// node before it when `reversed`).
+    pub(crate) to: BindingId,
+    /// `to` was bound earlier (or is `from`): an [`Op::Join`] follows, and `to_filters` is
+    /// empty.
+    pub(crate) to_bound: bool,
+    /// `to`'s own conjuncts.
+    pub(crate) to_filters: ElementFilters,
+}
+
+/// Where the parenthesized path pattern of a [`GroupExpand`] is in the bound query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupRef {
+    /// The `MATCH` clause (index into [`BoundQuery::matches`]).
+    pub(crate) clause: usize,
+    /// The path pattern (index into its `paths`).
+    pub(crate) path: usize,
+    /// The parenthesized path pattern (index into the path's `groups`).
+    pub(crate) index: usize,
+}
+
+/// One edge of a parenthesized path pattern's body, walked in each iteration from the current
+/// element `from` (the node the hop before reached).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BodyHop {
+    /// The body node the hop starts from (the current element).
+    pub(crate) from: BindingId,
+    /// The edge binding.
+    pub(crate) edge: BindingId,
+    /// The direction as seen from `from`.
+    pub(crate) direction: EdgeDirection,
+    /// The edges this edge must differ from (trail): the earlier walked edges of the `MATCH`
+    /// clause whose labels may overlap and the other body edges that may overlap (every one
+    /// of them, compared with every iteration, when the body repeats; the earlier ones of the
+    /// one iteration otherwise). Its own earlier iterations are not listed: a repeating body
+    /// always checks them.
+    pub(crate) trail: Vec<BindingId>,
+    /// The edge's own conjuncts.
+    pub(crate) edge_filters: ElementFilters,
+    /// The body node reached.
+    pub(crate) to: BindingId,
+    /// `to`'s own conjuncts.
+    pub(crate) to_filters: ElementFilters,
+    /// The body conditions over several body elements whose last element in walk order is
+    /// bound here, checked right after `to` in every iteration.
+    pub(crate) filters: Vec<usize>,
+}
+
 /// The conjuncts over one binding, applied where the binding is the current element.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ElementFilters {
@@ -658,7 +752,8 @@ pub(crate) struct Labelling {
     /// group variable is read after it.
     pub(crate) optional: bool,
     /// A group variable: every iteration of the quantified edge is labelled (`#g<id>`), for its
-    /// own trail check and the list the variable reads.
+    /// own trail check and the list the variable reads; of a parenthesized path pattern's body
+    /// (stage 2e) every edge, and a node when its list is read.
     pub(crate) group: bool,
     /// An element of the pattern of a path variable that is read: the path is assembled from
     /// its elements' labels (plan mechanism 6); for a group variable the inner vertices are
@@ -668,6 +763,10 @@ pub(crate) struct Labelling {
     /// element there (after the body moved on, or at the start of a body whose host stands on
     /// another element); stage 2b.
     pub(crate) subquery: bool,
+    /// A body element of a parenthesized path pattern that a body condition of its iteration
+    /// reads while it is not the current element (stage 2e): labelled in every iteration, the
+    /// condition reads this iteration's occurrence.
+    pub(crate) body: bool,
 }
 
 impl Labelling {
@@ -683,6 +782,7 @@ impl Labelling {
             || self.group
             || self.path
             || self.subquery
+            || self.body
     }
 }
 

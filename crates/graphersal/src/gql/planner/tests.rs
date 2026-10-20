@@ -90,10 +90,81 @@ fn shape(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
                 }
                 s
             }
+            Op::Group(g) => group_shape(b, g),
             Op::Join { binding } => format!("join {}", name(b, *binding)),
             Op::Filter(ids) => format!("filter {ids:?}"),
         })
         .collect()
+}
+
+/// A parenthesized path pattern's walk: `a=(x-[e]->y){1,3}=>b`, `^` for a branch, `rev` when
+/// walked from the node after it, ` trail e!=f,g` per hop with a trail, `if [i]` per hop with
+/// body conditions, `start [i]` for those at the start of each iteration.
+fn group_shape(b: &BoundQuery, g: &GroupExpand) -> String {
+    let mut body = name(b, g.first);
+    for hop in &g.hops {
+        let (l, r) = match hop.direction {
+            EdgeDirection::Right => ("-", "->"),
+            EdgeDirection::Left => ("<-", "-"),
+            EdgeDirection::Any => ("-", "-"),
+        };
+        body.push_str(&format!("{l}[{}]{r}{}", name(b, hop.edge), name(b, hop.to)));
+    }
+    let quantifier = match (g.quantifier, g.conditional) {
+        (_, true) => "?".to_owned(),
+        (None, false) => String::new(),
+        (Some(q), false) => match q.max {
+            Some(max) => format!("{{{},{max}}}", q.min),
+            None => format!("{{{},}}", q.min),
+        },
+    };
+    let mut s = format!(
+        "{}{}=({body}){quantifier}=>{}",
+        if g.from_current { "" } else { "^" },
+        name(b, g.from),
+        name(b, g.to)
+    );
+    if g.reversed {
+        s.push_str(" rev");
+    }
+    if !g.first_conjuncts.is_empty() {
+        s.push_str(&format!(" start {:?}", g.first_conjuncts));
+    }
+    for hop in &g.hops {
+        if !hop.trail.is_empty() {
+            let others: Vec<String> = hop.trail.iter().map(|&t| name(b, t)).collect();
+            s.push_str(&format!(
+                " trail {}!={}",
+                name(b, hop.edge),
+                others.join(",")
+            ));
+        }
+        if !hop.filters.is_empty() {
+            s.push_str(&format!(" if {:?}", hop.filters));
+        }
+    }
+    s
+}
+
+/// Every binding a parenthesized path pattern's walk binds: the body's, then `to`.
+fn group_reached(g: &GroupExpand) -> Vec<BindingId> {
+    std::iter::once(g.first)
+        .chain(g.hops.iter().flat_map(|h| [h.edge, h.to]))
+        .chain(std::iter::once(g.to))
+        .collect()
+}
+
+/// Every conjunct a parenthesized path pattern's walk places.
+fn group_placed(g: &GroupExpand) -> Vec<usize> {
+    let mut ids = element_ids(&g.first_filters);
+    ids.extend(&g.first_conjuncts);
+    for hop in &g.hops {
+        ids.extend(element_ids(&hop.edge_filters));
+        ids.extend(element_ids(&hop.to_filters));
+        ids.extend(&hop.filters);
+    }
+    ids.extend(element_ids(&g.to_filters));
+    ids
 }
 
 fn labelled(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
@@ -1458,6 +1529,7 @@ fn subquery_plans_are_deterministic_and_bind_every_local() {
                                     Op::Lookup(l) => vec![l.scan.binding],
                                     Op::Resume(r) => vec![r.binding],
                                     Op::Expand(e) => vec![e.edge, e.to],
+                                    Op::Group(g) => group_reached(g),
                                     Op::Join { .. } | Op::Filter(_) => vec![],
                                 })
                                 .collect();
@@ -1484,6 +1556,7 @@ fn subquery_plans_are_deterministic_and_bind_every_local() {
                                         ids.extend(element_ids(&e.to_filters));
                                         ids
                                     }
+                                    Op::Group(g) => group_placed(g),
                                     Op::Resume(_) | Op::Join { .. } => vec![],
                                 })
                                 .collect();
@@ -1935,6 +2008,10 @@ fn reached(p: &LogicalPlan) -> BTreeSet<BindingId> {
                     out.insert(e.from);
                     out.insert(e.to);
                 }
+                Op::Group(g) => {
+                    out.insert(g.from);
+                    out.insert(g.to);
+                }
                 Op::Join { .. } | Op::Filter(_) => {}
             }
         }
@@ -2022,4 +2099,447 @@ fn the_deepest_bodies_plan_within_the_stack() {
         let (b, p) = plan_with(&q, &NoFacts);
         assert_eq!(p, plan(&b, &NoFacts, None));
     }
+}
+
+// ----- parenthesized path patterns (stage 2e) -----
+
+/// The bindings with the labelling reason `f`, by name.
+fn with_reason(b: &BoundQuery, p: &LogicalPlan, f: impl Fn(&Labelling) -> bool) -> Vec<String> {
+    (0..p.labelling.len())
+        .filter(|&i| f(&p.labelling[i]))
+        .map(|i| name(b, BindingId(i)))
+        .collect()
+}
+
+#[test]
+fn a_parenthesized_path_pattern_is_one_group_expansion() {
+    let (b, p) = plan_with(
+        "MATCH (a:person) ((x)-[e:knows]->(y)){1,3} (b) RETURN b",
+        &NoFacts,
+    );
+    assert_eq!(shape(&b, &p), ["scan a", "a=(x-[e]->y){1,3}=>b"]);
+    let Some(Op::Group(g)) = p.ops.get(1) else {
+        panic!("{:?}", p.ops)
+    };
+    assert_eq!(
+        g.group,
+        GroupRef {
+            clause: 0,
+            path: 0,
+            index: 0
+        }
+    );
+    assert!(g.from_current && !g.reversed && !g.to_bound && !g.conditional);
+    // The group edge is labelled on every iteration (its trail checks them all); the group
+    // nodes nobody reads are not.
+    assert_eq!(with_reason(&b, &p, |l| l.group), ["e"]);
+    assert_eq!(labelled(&b, &p), ["e", "b"]);
+    // Without a quantifier: one iteration, the body walked the same way.
+    let (b, p) = plan_with("MATCH (a) ((x)-[e]->(y)-[f]->(z)) (b) RETURN b", &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        ["scan a", "a=(x-[e]->y-[f]->z)=>b trail f!=e"]
+    );
+    assert!(with_reason(&b, &p, |l| l.group).is_empty());
+    // The merge rule: the node after the pattern written as the node before closes a cycle.
+    let (b, p) = plan_with("MATCH (a) ((x)-->(y))+ (a) RETURN a", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a=(x-[_2]->y){1,}=>a", "join a"]);
+    // Implicit outer nodes: a body node never starts a component, even with a label.
+    let (b, p) = plan_with("MATCH ((x:person {k: 1})-->(y)){2} RETURN x", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan _0", "_0=(x-[_2]->y){2,2}=>_4"]);
+    // Two patterns in a row: the node between them is the last node of the first one's last
+    // iteration and the first node of the second one's first.
+    let (b, p) = plan_with(
+        "MATCH (a) ((x)-[e]->(y)){1,2} ((u)-[f]->(v)){2} (c) RETURN c",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a=(x-[e]->y){1,2}=>_4",
+            "_4=(u-[f]->v){2,2}=>c trail f!=e"
+        ]
+    );
+}
+
+#[test]
+fn a_parenthesized_path_pattern_walked_from_its_far_end_is_reversed_hop_by_hop() {
+    let q = "MATCH (a) ((x)-[e]->(y)-[f:likes]->(z)){2} (b:person {name: 'x'}) RETURN a";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan b",
+            "b=(z<-[f]-y<-[e]-x){2,2}=>a rev trail f!=e trail e!=f"
+        ]
+    );
+    let Some(Op::Group(g)) = p.ops.get(1) else {
+        panic!("{:?}", p.ops)
+    };
+    assert_eq!(
+        (name(&b, g.first), name(&b, g.to)),
+        ("z".into(), "a".into())
+    );
+    assert_eq!(
+        g.hops
+            .iter()
+            .map(|h| (name(&b, h.from), name(&b, h.to)))
+            .collect::<Vec<_>>(),
+        [("z".into(), "y".into()), ("y".into(), "x".into())]
+    );
+    // Either direction stays either direction.
+    let (b, p) = plan_with("MATCH (a) ((x)-[e]-(y)){1,2} (b:person) RETURN a", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan b", "b=(y-[e]-x){1,2}=>a rev"]);
+}
+
+#[test]
+fn plain_edges_are_walked_before_a_parenthesized_path_pattern() {
+    let (b, p) = plan_with(
+        "MATCH (c)<--(a:person) ((x)-->(y)){1,2} (b) RETURN c",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        ["scan a", "a-[_1]->c", "^a=(x-[_4]->y){1,2}=>b trail _4!=_1"]
+    );
+    assert_eq!(with_reason(&b, &p, |l| l.branch), ["a"]);
+    // A quantified edge and a parenthesized path pattern rank alike: text order.
+    let (b, p) = plan_with(
+        "MATCH (a:person) ((x)-->(y)){1,2} (b), (a)-[q]->{1,2}(c) RETURN c",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        ["scan a", "a=(x-[_2]->y){1,2}=>b", "^a-[q]->c trail!=_2"]
+    );
+}
+
+#[test]
+fn body_edges_differ_from_every_edge_of_the_clause() {
+    // Repeating: a body edge differs from the clause's earlier edges and from the other body
+    // edges of every iteration; a later edge from every body edge.
+    let (b, p) = plan_with(
+        "MATCH (a)-[r]->(b) ((x)-[e]->(y)-[f]->(z)){1,2} (c)-[s]->(d) RETURN d",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a-[r]->b",
+            "b=(x-[e]->y-[f]->z){1,2}=>c trail e!=r,f trail f!=r,e",
+            "c-[s]->d trail!=r,e,f"
+        ]
+    );
+    assert_eq!(with_reason(&b, &p, |l| l.trail), ["r", "e", "f"]);
+    // Labels that cannot overlap are left out (Phase 0 Q8).
+    let (b, p) = plan_with(
+        "MATCH (a)-[r:likes]->(b) ((x)-[e:knows]->(y)){1,2} (c)-[s:knows]->(d) RETURN d",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a-[r]->b",
+            "b=(x-[e]->y){1,2}=>c",
+            "c-[s]->d trail!=e"
+        ]
+    );
+    // One iteration (no quantifier, `?`): only the earlier body edges.
+    for q in [
+        "MATCH ((x)-[e]->(y)-[f]->(z)) RETURN z",
+        "MATCH ((x)-[e]->(y)-[f]->(z))? RETURN z",
+    ] {
+        let (b, p) = plan_with(q, &NoFacts);
+        let Some(Op::Group(g)) = p.ops.get(1) else {
+            panic!("{q}: {:?}", p.ops)
+        };
+        let trails: Vec<Vec<String>> = g
+            .hops
+            .iter()
+            .map(|h| h.trail.iter().map(|&t| name(&b, t)).collect())
+            .collect();
+        assert_eq!(trails, [vec![], vec!["e".to_owned()]], "{q}");
+    }
+    // Other patterns of the clause count; a later clause does not.
+    let (b, p) = plan_with(
+        "MATCH (a)-[r]->(b), (b) ((x)-[e]->(y)){2} (c) MATCH (c)-[s]->(d) RETURN d",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a-[r]->b",
+            "b=(x-[e]->y){2,2}=>c trail e!=r",
+            "c-[s]->d"
+        ]
+    );
+}
+
+#[test]
+fn body_conditions_run_in_every_iteration_where_their_elements_are_bound() {
+    let q = "MATCH (a) ((x {k: 1})-[e WHERE e.w > 0]->(y) WHERE x.v < y.v AND $p){1,3} (b) \
+             RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        ["scan a", "a=(x-[e]->y){1,3}=>b start [3] if [2]"]
+    );
+    let Some(Op::Group(g)) = p.ops.get(1) else {
+        panic!("{:?}", p.ops)
+    };
+    assert_eq!(element_ids(&g.first_filters), [0]);
+    assert_eq!(element_ids(&g.hops[0].edge_filters), [1]);
+    assert!(g.hops[0].to_filters.is_empty());
+    // `x.v < y.v` runs on y and reads x through its label (this iteration's occurrence).
+    assert_eq!(with_reason(&b, &p, |l| l.body), ["x"]);
+    // Walked from the far end the same condition runs on x and reads y.
+    let q = "MATCH (a) ((x)-[e]->(y) WHERE x.v < y.v){1,3} (b:person {name: 'n'}) RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan b", "b=(y<-[e]-x){1,3}=>a rev if [0]"]);
+    assert_eq!(with_reason(&b, &p, |l| l.body), ["y"]);
+    // On a body edge and the node before it: runs after the hop, reads the edge's label.
+    let q = "MATCH (a) ((x)-[e]->(y)-[f]->(z) WHERE e.w < y.w){2} (b) RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan a",
+            "a=(x-[e]->y-[f]->z){2,2}=>b trail e!=f if [0] trail f!=e"
+        ]
+    );
+    assert_eq!(with_reason(&b, &p, |l| l.body), ["e"]);
+    // The outer nodes' own conditions stay on them.
+    let q = "MATCH (a {k: 1}) ((x)-->(y)){2} (b {k: 2}) RETURN b";
+    let (b, p) = plan_with(q, &NoFacts);
+    let Some(Op::Group(g)) = p.ops.get(1) else {
+        panic!("{:?}", p.ops)
+    };
+    assert_eq!(element_ids(&g.to_filters), [1]);
+    assert_eq!(shape(&b, &p), ["scan a", "a=(x-[_2]->y){2,2}=>b"]);
+}
+
+#[test]
+fn a_question_mark_body_keeps_its_outer_conditions_after_it() {
+    // ISO conditional singletons: `y.k = 1` reads y after the body (NULL after zero
+    // iterations), the body's own condition runs inside.
+    let q = "MATCH (a) ((x)-[e]->(y) WHERE x.v < y.v)? (b) WHERE y.k = 1 RETURN x.name, e, y";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(
+        shape(&b, &p),
+        ["scan a", "a=(x-[e]->y)?=>b if [0]", "filter [1]"]
+    );
+    let Some(Op::Group(g)) = p.ops.get(1) else {
+        panic!("{:?}", p.ops)
+    };
+    assert!(g.conditional);
+    assert_eq!(g.quantifier.map(|q| (q.min, q.max)), Some((0, Some(1))));
+    // Singletons, not group variables: read, never `group`.
+    assert!(with_reason(&b, &p, |l| l.group).is_empty());
+    assert_eq!(with_reason(&b, &p, |l| l.read), ["x", "e", "y"]);
+    // `{0,1}` written out makes group variables.
+    let (b, p) = plan_with("MATCH (a) ((x)-[e]->(y)){0,1} (b) RETURN x", &NoFacts);
+    assert_eq!(shape(&b, &p), ["scan a", "a=(x-[e]->y){0,1}=>b"]);
+    assert_eq!(with_reason(&b, &p, |l| l.group), ["x", "e"]);
+}
+
+#[test]
+fn a_body_singleton_is_joined_or_continued_after_its_body() {
+    // Continued from a body node bound by the walk (a branch back to it).
+    let (b, p) = plan_with(
+        "MATCH (a) ((x)-[e]->(y))? (b) MATCH (y)-[f]->(z) RETURN z",
+        &NoFacts,
+    );
+    assert_eq!(shape(&b, &p), ["scan a", "a=(x-[e]->y)?=>b", "^y-[f]->z"]);
+    assert_eq!(with_reason(&b, &p, |l| l.branch), ["y"]);
+    // A start reaching the body node first does not walk into it: the body is walked from
+    // its own outer node (scanned), and the edge then closes on the body node.
+    let (b, p) = plan_with(
+        "MATCH ((x)-->(y)) MATCH (y)-->(z:person) RETURN z",
+        &NoFacts,
+    );
+    assert_eq!(
+        shape(&b, &p),
+        [
+            "scan z",
+            "scan _0",
+            "_0=(x-[_2]->y)=>_4",
+            "^y-[_5]->z",
+            "join z"
+        ]
+    );
+    // A later segment resumes at a body singleton.
+    let (b, p) = plan_with(
+        "MATCH ((x)-->(y)) OPTIONAL MATCH (y)-->(z) RETURN z",
+        &NoFacts,
+    );
+    assert_eq!(shape(&b, &p), ["scan _0", "_0=(x-[_2]->y)=>_4"]);
+    assert_eq!(stages(&b, &p), ["optional: resume ^y; y-[_5]->z witness z"]);
+}
+
+#[test]
+fn group_lists_and_paths_label_the_body() {
+    // A group list read outside: its nodes are labelled on every iteration.
+    let (b, p) = plan_with("MATCH (a) ((x)-[e]->(y)){1,3} (b) RETURN x", &NoFacts);
+    assert_eq!(with_reason(&b, &p, |l| l.group), ["x", "e"]);
+    assert_eq!(labelled(&b, &p), ["x", "e"]);
+    // A read path variable labels every element of its pattern, the body included.
+    let (b, p) = plan_with("MATCH p = (a) ((x)-[e]->(y)){1,3} (b) RETURN p", &NoFacts);
+    assert_eq!(with_reason(&b, &p, |l| l.path), ["a", "x", "e", "y", "b"]);
+    // Inside an OPTIONAL MATCH part the witness is the first new node outside the body.
+    let (b, p) = plan_with(
+        "MATCH (a) OPTIONAL MATCH (a) ((x)-[e]->(y)){0,2} (b) RETURN e",
+        &NoFacts,
+    );
+    assert_eq!(
+        stages(&b, &p),
+        ["optional: resume a; a=(x-[e]->y){0,2}=>b witness b"]
+    );
+    assert_eq!(with_reason(&b, &p, |l| l.optional), ["e", "b"]);
+    // No new node outside the body: no witness.
+    let (b, p) = plan_with(
+        "MATCH (a) OPTIONAL MATCH (a) ((x)-[e]->(y)){0,2} (a) RETURN e",
+        &NoFacts,
+    );
+    assert_eq!(
+        stages(&b, &p),
+        ["optional: resume a; a=(x-[e]->y){0,2}=>a; join a"]
+    );
+}
+
+#[test]
+fn a_parenthesized_path_pattern_in_a_subquery_body_starts_at_its_import() {
+    let (b, p) = plan_with(
+        "MATCH (n) WHERE EXISTS { (n) ((x)-->(y)){2} } RETURN n",
+        &NoFacts,
+    );
+    assert_eq!(shape(&b, &p), ["scan n"]);
+    assert_eq!(subplans(&b, &p), ["0@n: resume n; n=(x-[_2]->y){2,2}=>_4"]);
+}
+
+/// Planning never panics on combinations of parenthesized path patterns, is deterministic,
+/// walks every body exactly once (all its bindings, in walk order), and places every
+/// conjunct of the query's own segments exactly once.
+#[test]
+fn planning_parenthesized_path_patterns_keeps_its_invariants() {
+    let befores = ["", "(a:person)", "(a)-->", "(a)-[r]->(c {k: 1})", "p = (a)"];
+    let bodies = [
+        "((x)-[e]->(y))",
+        "((x:person {v: 1})-[e:knows WHERE e.w > x.w]->(y)<--(z) WHERE x.v < z.v AND $p)",
+        "(()-->())",
+        "((x)-[e]-(y)-[f]->(z) WHERE e.w < f.w)",
+    ];
+    let quantifiers = ["", "{1,3}", "?", "*", "{0}", "{0,1}"];
+    let afters = [
+        "",
+        " (b)",
+        " (b:person {name: 'n'})-->(d)",
+        " ((u)-->(w)){2}",
+        " (a)",
+    ];
+    let tails = [
+        "RETURN *",
+        "WHERE size(x) > 0 RETURN 1",
+        "WHERE x.v > 1 RETURN 1",
+        "MATCH (x)-->(q:person) RETURN q",
+        "OPTIONAL MATCH (y)-->(q) RETURN q",
+        "RETURN p",
+    ];
+    let facts = Facts {
+        indexes: vec![("person", "name")],
+        ..Facts::default()
+    };
+    let mut planned = 0;
+    for before in befores {
+        for body in bodies {
+            for quantifier in quantifiers {
+                for after in afters {
+                    for tail in tails {
+                        let q = format!("MATCH {before}{body}{quantifier}{after} {tail}");
+                        let Ok(parsed) = parse(&q) else { continue };
+                        let Ok(b) = bind(&parsed) else { continue };
+                        for f in [&NoFacts as &dyn PlannerFacts, &facts] {
+                            let p = plan(&b, f, None);
+                            assert_eq!(p, plan(&b, f, None), "{q}");
+                            check_group_plan(&q, &b, &p);
+                            planned += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(planned > 500, "{planned}");
+}
+
+/// The invariants of [`planning_parenthesized_path_patterns_keeps_its_invariants`].
+fn check_group_plan(q: &str, b: &BoundQuery, p: &LogicalPlan) {
+    let mut ops: Vec<&Op> = p.ops.iter().collect();
+    for stage in &p.stages {
+        if let Stage::Match { ops: o, .. } | Stage::Optional { ops: o, .. } = stage {
+            ops.extend(o);
+        }
+    }
+    let mut walked = Vec::new();
+    let mut placed = Vec::new();
+    for op in &ops {
+        match op {
+            Op::Group(g) => {
+                walked.push(g.group);
+                let path = &b.matches[g.group.clause].paths[g.group.path];
+                let group = &path.groups[g.group.index].group;
+                let mut body: Vec<BindingId> = std::iter::once(group.start)
+                    .chain(group.steps.iter().flat_map(|s| [s.edge, s.node]))
+                    .collect();
+                let mut reached: Vec<BindingId> = group_reached(g);
+                reached.pop();
+                if g.reversed {
+                    body.reverse();
+                }
+                assert_eq!(reached, body, "{q}");
+                let ends = (
+                    path.node_before(g.group.index),
+                    Some(path.groups[g.group.index].node),
+                );
+                let ends = if g.reversed { (ends.1, ends.0) } else { ends };
+                assert_eq!((Some(g.from), Some(g.to)), ends, "{q}");
+                for hop in &g.hops {
+                    assert!(!hop.trail.contains(&hop.edge), "{q}");
+                }
+                placed.extend(group_placed(g));
+            }
+            Op::Filter(ids) => placed.extend(ids),
+            Op::Scan(x) | Op::Anchor(x) => placed.extend(element_ids(&x.filters)),
+            Op::Lookup(l) => {
+                placed.extend(element_ids(&l.scan.filters));
+                placed.push(l.conjunct);
+            }
+            Op::Expand(e) => {
+                placed.extend(element_ids(&e.edge_filters));
+                placed.extend(element_ids(&e.to_filters));
+            }
+            Op::Resume(_) | Op::Join { .. } => {}
+        }
+    }
+    let groups: usize = b
+        .matches
+        .iter()
+        .flat_map(|m| &m.paths)
+        .map(|path| path.groups.len())
+        .sum();
+    walked.sort_by_key(|r| (r.clause, r.path, r.index));
+    walked.dedup();
+    assert_eq!(walked.len(), groups, "{q}");
+    placed.sort_unstable();
+    let before = placed.len();
+    placed.dedup();
+    assert_eq!(placed.len(), before, "{q}: a conjunct placed twice");
+    assert_eq!(
+        placed.len(),
+        b.conjuncts.len(),
+        "{q}: a conjunct not placed"
+    );
 }

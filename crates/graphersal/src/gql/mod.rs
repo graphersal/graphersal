@@ -15,8 +15,9 @@
 //! 2. **parser** (`parser.rs`, AST in `ast.rs`): hand-written recursive descent to an AST that
 //!    keeps every span and the source text, with bounded nesting and errors that name the
 //!    expected tokens (stage 2d: composite queries of `UNION` / `NEXT` and `CALL { }` bodies;
-//!    stage 2e: parenthesized path patterns, bound since 2e.T2 and refused "not yet" between
-//!    binding and planning, `bind::refuse_unplanned_groups`, until the planner takes them);
+//!    stage 2e: parenthesized path patterns, bound since 2e.T2, planned since 2e.T3
+//!    (`plan::Op::Group`), refused "not yet" before planning, `bind::refuse_unplanned_groups`,
+//!    until the lowering takes them);
 //!    its module docs are the grammar of the supported subset; its expressions
 //!    compile into the three-valued evaluator (`eval.rs`), which runs them per row, with the
 //!    stage 1c scalar functions in `functions/` (one file per family);

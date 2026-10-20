@@ -108,15 +108,20 @@
 //!   after it the last node of its last iteration, and consecutive iterations share a node
 //!   (`y_i = x_{i+1}`); after zero iterations the two are one node. The binder keeps them
 //!   separate bindings; the planner joins them.
-//! - **Group variables.** With a quantifier (`?` is `{0,1}`), every body variable is a group
+//! - **Group variables.** With a quantifier other than `?`, every body variable is a group
 //!   variable ([`Binding::group`]): one element of an iteration inside the body, the list of
 //!   them over the iterations in path order everywhere else (a property read of it outside is
 //!   42002; bound again anywhere is 42002). Without a quantifier (one iteration, ISO G050) the
-//!   body's variables are singletons.
+//!   body's variables are singletons. With `?` (ISO G037, P0 of stage 2e "After T2") they are
+//!   **conditional singletons** ([`BoundGroup::conditional`]): at most one iteration, single
+//!   elements that are NULL after zero iterations, so a condition outside the body that reads
+//!   one is a cross conjunct (it runs after the body), never listed on the element. `{0,1}`
+//!   written out makes group variables.
 //! - **New names.** Every body variable is a new binding, declared consecutively in text order:
-//!   a name in scope is 42002 for a quantified body (a group variable is always new) and
-//!   `NotYet` without a quantifier (a join into a body); a name written twice in one body is
-//!   `NotYet` (the alternative compares two variables in its `WHERE`).
+//!   a name in scope is 42002 for a body of group variables (a group variable is always new)
+//!   and `NotYet` for a body of singletons (a join into a body); a name written twice in one
+//!   body is `NotYet` (the alternative compares two variables in its `WHERE`). A singleton may
+//!   be written again after its body (a join).
 //! - **Body conditions** (inline maps, inline `WHERE`, the body's `WHERE`) see only the body's
 //!   variables, parameters and constants (a `LET` constant too): another variable is `NotYet`
 //!   (0A000), and so is a subquery inside a body. A condition on exactly one body element is
@@ -125,8 +130,9 @@
 //!   iteration needs a label from them).
 //! - **Edge limit.** Every body edge counts once toward [`MAX_MATCH_EDGES`].
 //!
-//! The planner and the lowering take them from stages 2e.T3 / T4 on; until then
-//! [`refuse_unplanned_groups`] refuses a bound query holding one between binding and planning.
+//! The planner takes them since stage 2e.T3 (one `plan::Op::Group` walk each), the lowering
+//! from stage 2e.T4 on; until then [`refuse_unplanned_groups`] refuses a bound query holding
+//! one between binding and planning.
 //!
 //! # Map projections and list comprehensions (stage 2c)
 //!
@@ -380,7 +386,7 @@ pub(crate) struct Binding {
     /// The segment of its first appearance (index into [`BoundQuery::segments`]).
     pub(crate) segment: usize,
     /// The edge variable of a quantified edge, or a variable of a quantified path pattern's
-    /// body: a group variable (module docs).
+    /// body (not one quantified by `?`): a group variable (module docs).
     pub(crate) group: bool,
     /// The materializing `WITH` or `FOR` column it stands for.
     pub(crate) column: Option<ColumnRef>,
@@ -462,7 +468,10 @@ impl BoundPath {
     /// steps before it): the first node of its first iteration (the merge rule, module docs).
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "read by the planner from stage 2e.T3 on")
+        allow(
+            dead_code,
+            reason = "read by the tests; the planner tracks it while collecting edges"
+        )
     )]
     pub(crate) fn node_before(&self, index: usize) -> Option<BindingId> {
         if index == 0 {
@@ -497,6 +506,10 @@ pub(crate) struct BoundGroup {
     /// How often the body repeats (`?` is `{0,1}`); `None`: written without one, exactly one
     /// iteration, and its variables are singletons.
     pub(crate) quantifier: Option<Quantifier>,
+    /// The quantifier is `?` (ISO conditional singletons, P0 of stage 2e): at most one
+    /// iteration, its variables are singletons (not group variables) that are NULL after zero
+    /// iterations; a condition outside the body reading one runs after the body.
+    pub(crate) conditional: bool,
     /// Indexes into [`BoundQuery::conjuncts`] of the body's conditions that read no single
     /// body element (several body variables, or only constants and parameters): evaluated
     /// per iteration once the iteration's elements are matched. A condition reading exactly
@@ -547,8 +560,11 @@ struct Body {
     range: BodyRange,
     /// Its text with the quantifier.
     text: Span,
-    /// Whether it has a quantifier (its variables are group variables).
+    /// Whether it has a quantifier other than `?` (its variables are group variables).
     quantified: bool,
+    /// Its quantifier is `?` (ISO conditional singletons, P0 of stage 2e: a condition outside
+    /// the body that reads one of its variables runs after it, where the variable may be NULL).
+    conditional: bool,
 }
 
 /// One edge of a bound path and the node after it.
@@ -1148,9 +1164,9 @@ fn check_edge_counts(matches: &[MatchClause]) -> BResult<()> {
     Ok(())
 }
 
-/// Parenthesized path patterns (stage 2e) bind but are not planned yet: the first one of
-/// `bound` is "not yet supported" (the guard between binding and planning until the planner
-/// and the lowering take them, stages 2e.T3 / T4).
+/// Parenthesized path patterns (stage 2e) bind and plan (`plan::Op::Group`, since 2e.T3) but
+/// are not lowered yet: the first one of `bound` is "not yet supported" (the guard before
+/// planning until the lowering takes them, stage 2e.T4).
 pub(crate) fn refuse_unplanned_groups(
     query: &Query,
     bound: &BoundQuery,
@@ -1666,7 +1682,8 @@ impl<'q> Binder<'q> {
     }
 
     /// The binding a conjunct is listed on (module docs): its only binding, a node or edge of
-    /// the conjunct's segment, unless a `WHERE` / `FILTER` reads a group variable.
+    /// the conjunct's segment, unless a `WHERE` / `FILTER` reads a group variable or a
+    /// conditional singleton (`?`, which may be NULL after the body: the condition runs there).
     fn local_binding(&self, index: usize) -> Option<BindingId> {
         let conjunct = self.conjuncts.get(index)?;
         let [only] = conjunct.bindings[..] else {
@@ -1680,11 +1697,12 @@ impl<'q> Binder<'q> {
                 | ConjunctOrigin::InlineWhere
                 | ConjunctOrigin::BodyWhere
         );
+        let conditional = || self.body_of(only).is_some_and(|b| b.conditional);
         (element
             && binding.column.is_none()
             && binding.segment == conjunct.segment
-            && (!binding.group || inline))
-            .then_some(only)
+            && (inline || !(binding.group || conditional())))
+        .then_some(only)
     }
 
     /// Appends `segment` to the segments and to the pipeline being bound; returns its index.
@@ -2559,13 +2577,19 @@ impl<'q> Binder<'q> {
             Some(quantifier) => group.span.to(quantifier.span),
             None => group.span,
         };
+        // `?` (ISO: conditional singletons) is the one quantifier whose variables stay single
+        // elements: `{0,1}` written out makes group variables (P0 of stage 2e, "After T2").
+        let conditional = group
+            .quantifier
+            .is_some_and(|q| self.query.text(q.span) == "?");
         let body = Body {
             range: BodyRange {
                 start: first,
                 end: usize::MAX,
             },
             text,
-            quantified: group.quantifier.is_some(),
+            quantified: group.quantifier.is_some() && !conditional,
+            conditional,
         };
         let site = |kind| Site {
             clause,
@@ -2598,6 +2622,7 @@ impl<'q> Binder<'q> {
             start,
             steps,
             quantifier: group.quantifier,
+            conditional: body.conditional,
             conjuncts: Vec::new(),
             span: group.span,
         })

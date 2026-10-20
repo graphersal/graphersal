@@ -61,7 +61,8 @@
 //! # Walk order
 //!
 //! From the start, the pattern edges with a bound end are walked greedily, ranked by: a plain
-//! edge before a quantified one (a loop multiplies the rows most); then an edge whose both ends
+//! edge before a quantified one or a parenthesized path pattern (a loop multiplies the rows
+//! most); then an edge whose both ends
 //! are bound first (it closes a cycle, an [`Op::Join`] check, the earliest
 //! filter there is); then the far node's filters (own conjuncts before label expressions before
 //! none); then continuing from the current element before branching back to an earlier node
@@ -96,6 +97,33 @@
 //!   that binds the last binding it reads (one with no binding right after the first scan).
 //! - A quantified edge walked from its written target reverses its direction like a plain
 //!   one ([`Expand::reversed`]); its trail list holds the earlier edges as for a plain edge.
+//!
+//! # Parenthesized path patterns (stage 2e, design item 9)
+//!
+//! A parenthesized path pattern `(a) ((x)-[e]->(y) WHERE ..){m,n} (b)` is one pattern edge
+//! between its outer nodes (the node before it, [`BoundPath::node_before`], and the node after
+//! it) and one [`Op::Group`] when walked ([`GroupExpand`]), ranked like a quantified edge. The
+//! merge rule (P0 of stage 2e) needs no join of its own: the walk starts on the outer node it
+//! comes from, which is the first node of the first iteration, every iteration starts on the
+//! node the one before ended on, and the last one ends on the outer node at the other end (an
+//! [`Op::Join`] when that one is bound already, as for an edge). Walked from the node after it
+//! the body is reversed hop by hop ([`GroupExpand::reversed`]: its last node first, each hop's
+//! direction flipped). Per iteration: the first node's own conjuncts and the body conditions on
+//! no element at its start, each hop's edge and node conjuncts, the body conditions over
+//! several elements ([`BoundGroup::conjuncts`]) right after the hop binding the last of them
+//! in walk order, reading the others through their labels ([`Labelling::body`]). Trail: each
+//! body edge lists the earlier walked edges of the clause and the other body edges whose labels
+//! may overlap (all of them when the body repeats, the earlier ones for one iteration); every
+//! edge walked after it lists the body edges. Body elements belong to the component of the
+//! outer nodes but never start one, and no other pattern edge reaches one before its body is
+//! walked (a singleton written again later is continued from or joined to afterwards; with
+//! `?` the outer conditions on it are cross conjuncts after the body, ISO conditional
+//! singletons). Labels: a group edge always (its trail), a group node when its list is read, a
+//! read path variable every element of its pattern, the body included; the witness of an
+//! `OPTIONAL MATCH` part is never a body node (zero iterations bind none).
+//!
+//! [`BoundPath::node_before`]: super::bind::BoundPath::node_before
+//! [`BoundGroup::conjuncts`]: super::bind::BoundGroup::conjuncts
 //!
 //! # Subqueries (stage 2b, design M2, E7, E11)
 //!
@@ -154,11 +182,12 @@ use super::bind::{
 use std::collections::BTreeSet;
 
 use super::ast::Expr;
+use super::bind::BoundGroupStep;
 use super::plan::{
-    CallStage, CompositePlan, EdgeLabels, ElementFilters, Expand, ForStage, Labelling, LogicalPlan,
-    Lookup, LookupBy, Materialize, Op, PipelinePlan, Pushdown, ResultOp, Resume, RowsStage, Scan,
-    Stage, SubqueryPlan, SubqueryUse, UnionPlan, and_factors, classify_all, element_filters,
-    lookup_form, scan_labels, subqueries_in, subquery_start,
+    BodyHop, CallStage, CompositePlan, EdgeLabels, ElementFilters, Expand, ForStage, GroupExpand,
+    GroupRef, Labelling, LogicalPlan, Lookup, LookupBy, Materialize, Op, PipelinePlan, Pushdown,
+    ResultOp, Resume, RowsStage, Scan, Stage, SubqueryPlan, SubqueryUse, UnionPlan, and_factors,
+    classify_all, element_filters, lookup_form, scan_labels, subqueries_in, subquery_start,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -234,15 +263,22 @@ impl PlannerFacts for StorageFacts<'_> {
     }
 }
 
-/// One occurrence of an edge in a path pattern, as written.
+/// One occurrence of an edge in a path pattern, as written, or a parenthesized path pattern
+/// (stage 2e) between the outer nodes it merges with.
 #[derive(Debug, Clone, Copy)]
 struct PatternEdge {
     clause: usize,
+    /// The node written before it (for a parenthesized path pattern the node before it,
+    /// [`BoundPath::node_before`](super::bind::BoundPath::node_before)).
     source: BindingId,
+    /// The edge binding (for a parenthesized path pattern its body's first edge).
     edge: BindingId,
     direction: EdgeDirection,
+    /// The node written after it.
     target: BindingId,
     quantifier: Option<Quantifier>,
+    /// The parenthesized path pattern it stands for; `None` for an edge.
+    group: Option<GroupRef>,
 }
 
 /// How a component starts.
@@ -294,34 +330,68 @@ struct Planner<'q> {
     uses: Vec<SubqueryUse>,
     /// The subquery bodies planned so far.
     subplans: Vec<SubqueryPlan>,
+    /// Per binding: an element of a parenthesized path pattern's body (stage 2e), bound only
+    /// by walking its body: never a start, never reached by another pattern edge first.
+    in_body: Vec<bool>,
 }
 
 impl<'q> Planner<'q> {
     fn new(bound: &'q BoundQuery, facts: &'q dyn PlannerFacts) -> Self {
+        let n = bound.bindings.len();
         let mut edges = Vec::new();
+        let mut in_body = vec![false; n];
         for (clause, m) in bound.matches.iter().enumerate() {
-            for path in &m.paths {
+            for (p, path) in m.paths.iter().enumerate() {
                 let mut source = path.start;
-                for step in &path.steps {
-                    edges.push(PatternEdge {
+                let plain = |source: &mut BindingId, step: &super::bind::BoundStep| {
+                    let edge = PatternEdge {
                         clause,
-                        source,
+                        source: *source,
                         edge: step.edge,
                         direction: step.direction,
                         target: step.node,
                         quantifier: step.quantifier,
+                        group: None,
+                    };
+                    *source = step.node;
+                    edge
+                };
+                for step in &path.steps {
+                    edges.push(plain(&mut source, step));
+                }
+                for (index, g) in path.groups.iter().enumerate() {
+                    let body = &g.group;
+                    for id in std::iter::once(body.start)
+                        .chain(body.steps.iter().flat_map(|s| [s.edge, s.node]))
+                    {
+                        if let Some(slot) = in_body.get_mut(id.0) {
+                            *slot = true;
+                        }
+                    }
+                    edges.push(PatternEdge {
+                        clause,
+                        source,
+                        edge: body.steps.first().map_or(body.start, |s| s.edge),
+                        direction: EdgeDirection::Right,
+                        target: g.node,
+                        quantifier: body.quantifier,
+                        group: Some(GroupRef {
+                            clause,
+                            path: p,
+                            index,
+                        }),
                     });
-                    source = step.node;
+                    source = g.node;
+                    for step in &g.steps {
+                        edges.push(plain(&mut source, step));
+                    }
                 }
             }
         }
-        let n = bound.bindings.len();
         let mut path_elements = vec![Vec::new(); n];
         for path in bound.matches.iter().flat_map(|m| &m.paths) {
             if let Some(slot) = path.variable.and_then(|p| path_elements.get_mut(p.0)) {
-                *slot = std::iter::once(path.start)
-                    .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]))
-                    .collect();
+                *slot = path.elements().collect();
             }
         }
         Planner {
@@ -344,7 +414,25 @@ impl<'q> Planner<'q> {
             path_elements,
             uses: bound.conjuncts.iter().map(SubqueryUse::of).collect(),
             subplans: Vec::new(),
+            in_body,
         }
+    }
+
+    /// Whether `id` is an element of a parenthesized path pattern's body.
+    fn in_body(&self, id: BindingId) -> bool {
+        self.in_body.get(id.0).copied().unwrap_or(false)
+    }
+
+    /// The parenthesized path pattern `r` points at.
+    fn group_step(&self, r: GroupRef) -> Option<&'q BoundGroupStep> {
+        let bound = self.bound;
+        bound
+            .matches
+            .get(r.clause)?
+            .paths
+            .get(r.path)?
+            .groups
+            .get(r.index)
     }
 
     fn run(mut self, anchor: Option<BindingId>) -> LogicalPlan {
@@ -564,8 +652,11 @@ impl<'q> Planner<'q> {
         let mut in_pattern = vec![false; n];
         for &clause in clauses {
             for path in bound.matches.get(clause).map_or(&[][..], |m| &m.paths) {
-                for node in std::iter::once(path.start).chain(path.steps.iter().map(|s| s.node)) {
-                    if let Some(slot) = in_pattern.get_mut(node.0) {
+                // Every element (the node filter below keeps the nodes), parenthesized path
+                // pattern bodies included: their nodes belong to the component (a singleton
+                // may be written again later), but never start it.
+                for id in path.elements() {
+                    if let Some(slot) = in_pattern.get_mut(id.0) {
                         *slot = true;
                     }
                 }
@@ -602,6 +693,7 @@ impl<'q> Planner<'q> {
                     (None, None) => {
                         let (level, size, id) = nodes
                             .iter()
+                            .filter(|&&id| !self.in_body(id))
                             .map(|&id| self.start_rank(id))
                             .min()
                             .unwrap_or((u8::MAX, u64::MAX, BindingId(usize::MAX)));
@@ -649,7 +741,7 @@ impl<'q> Planner<'q> {
         let bound = self.bound;
         type Rank = (u8, (u8, u64, BindingId), usize);
         let mut best: Option<(Rank, BindingId, LookupBy, &super::ast::Expr)> = None;
-        for &node in nodes {
+        for &node in nodes.iter().filter(|&&id| !self.in_body(id)) {
             let Some(binding) = bound.binding(node) else {
                 continue;
             };
@@ -705,12 +797,18 @@ impl<'q> Planner<'q> {
         })
     }
 
-    /// The first node an `OPTIONAL MATCH` segment binds (see `Stage::Optional`).
+    /// The first node an `OPTIONAL MATCH` segment binds (see `Stage::Optional`); never a body
+    /// node of a parenthesized path pattern, which zero iterations leave unbound (stage 2e).
     fn witness(&self, segment: usize) -> Option<BindingId> {
         self.bound
             .bindings
             .iter()
-            .find(|b| b.kind == BindingKind::Node && b.segment == segment && b.column.is_none())
+            .find(|b| {
+                b.kind == BindingKind::Node
+                    && b.segment == segment
+                    && b.column.is_none()
+                    && !self.in_body(b.id)
+            })
             .map(|b| b.id)
     }
 
@@ -781,6 +879,15 @@ impl<'q> Planner<'q> {
         for e in edges.iter().filter_map(|&i| self.edges.get(i)) {
             union(&mut parent, e.source.0, e.edge.0);
             union(&mut parent, e.edge.0, e.target.0);
+            // A parenthesized path pattern's body belongs to the component of its outer nodes.
+            if let Some(g) = e.group.and_then(|r| self.group_step(r)) {
+                let body = &g.group;
+                for id in std::iter::once(body.start)
+                    .chain(body.steps.iter().flat_map(|s| [s.edge, s.node]))
+                {
+                    union(&mut parent, e.source.0, id.0);
+                }
+            }
         }
         let mut components: Vec<(usize, Vec<BindingId>)> = Vec::new();
         for &id in nodes {
@@ -1005,7 +1112,7 @@ impl<'q> Planner<'q> {
                 .iter()
                 .filter_map(|&i| self.edges.get(i))
                 .flat_map(|e| [e.source, e.target])
-                .filter(|&n| !self.is_bound(n))
+                .filter(|&n| !self.is_bound(n) && !self.in_body(n))
                 .map(|n| self.start_rank(n))
                 .min()
                 .map(|(_, _, id)| id)
@@ -1039,10 +1146,14 @@ impl<'q> Planner<'q> {
                 }
                 let closing = s && t;
                 let (origin, far) = self.orient(e, current);
+                // A body element is bound only by walking its body (stage 2e).
+                if !closing && self.in_body(far) {
+                    return None;
+                }
                 let far_rank = if closing { 0 } else { self.filter_rank(far) };
                 Some((
                     (
-                        u8::from(e.quantifier.is_some()),
+                        u8::from(e.quantifier.is_some() || e.group.is_some()),
                         u8::from(!closing),
                         far_rank,
                         u8::from(origin != current),
@@ -1071,15 +1182,14 @@ impl<'q> Planner<'q> {
 
     /// Emits the expansion of `e`; returns the new current element.
     fn expand(&mut self, e: PatternEdge, current: BindingId) -> BindingId {
+        if let Some(r) = e.group {
+            return self.expand_group(e, r, current);
+        }
         let (from, to) = self.orient(&e, current);
         let direction = if from == e.source {
             e.direction
         } else {
-            match e.direction {
-                EdgeDirection::Right => EdgeDirection::Left,
-                EdgeDirection::Left => EdgeDirection::Right,
-                EdgeDirection::Any => EdgeDirection::Any,
-            }
+            flip(e.direction)
         };
         let from_current = from == current;
         if !from_current {
@@ -1149,12 +1259,169 @@ impl<'q> Planner<'q> {
         to
     }
 
+    /// Emits the walk of the parenthesized path pattern `r` (module docs, "Parenthesized path
+    /// patterns"); returns the new current element. Not recursive: a body holds no group.
+    #[inline(never)]
+    fn expand_group(&mut self, e: PatternEdge, r: GroupRef, current: BindingId) -> BindingId {
+        let (from, to) = self.orient(&e, current);
+        let Some(step) = self.group_step(r) else {
+            return current;
+        };
+        let group = &step.group;
+        let reversed = from != e.source;
+        let from_current = from == current;
+        if !from_current {
+            self.mark(from, |l| l.branch = true);
+        }
+        // The body in walk order: nodes `walk[0..=k]`, hop `i` from `walk[i]` to `walk[i + 1]`
+        // over `edges[i]` (its direction as seen from `walk[i]`).
+        let mut walk: Vec<BindingId> = std::iter::once(group.start)
+            .chain(group.steps.iter().map(|s| s.node))
+            .collect();
+        let mut edges: Vec<(BindingId, EdgeDirection)> =
+            group.steps.iter().map(|s| (s.edge, s.direction)).collect();
+        if reversed {
+            walk.reverse();
+            edges.reverse();
+            for (_, direction) in &mut edges {
+                *direction = flip(*direction);
+            }
+        }
+        // Body variables are group variables when the body repeats (lists over the
+        // iterations): every body edge then differs from every other body edge of every
+        // iteration; singletons (no quantifier, `?`) only from the earlier ones.
+        let repeats = group.quantifier.is_some() && !group.conditional;
+        let first = walk.first().copied().unwrap_or(group.start);
+        // Each body condition after the hop binding the last body element it reads (walk
+        // order); one reading none at the start of each iteration. Body ids are consecutive
+        // in text order (`start`, then each step's edge and node), so the hop binding one is
+        // computed, not searched.
+        let k = edges.len();
+        let hop_of = |b: BindingId| -> usize {
+            let offset = b.0.saturating_sub(group.start.0);
+            // Text order: node `j` at offset `2j`, the edge into node `i` at `2i - 1`; both
+            // bound by text hop `ceil(offset / 2)`.
+            let text = offset.div_ceil(2).min(k);
+            if !reversed {
+                text
+            } else if offset % 2 == 1 {
+                // The edge of text hop `i` is walked by hop `k - i + 1`.
+                (k + 1).saturating_sub(text)
+            } else {
+                k.saturating_sub(text)
+            }
+        };
+        let mut at_hop: Vec<Vec<usize>> = vec![Vec::new(); k + 1];
+        for &c in &group.conjuncts {
+            let h = self
+                .bound
+                .conjuncts
+                .get(c)
+                .and_then(|cj| cj.bindings.iter().map(|&b| hop_of(b)).max())
+                .unwrap_or(0);
+            if let Some(slot) = at_hop.get_mut(h) {
+                slot.push(c);
+            }
+        }
+        let mut at_hop = at_hop.into_iter();
+        let first_filters = self.filters_of(first, None);
+        let first_conjuncts = at_hop.next().unwrap_or_default();
+        self.bind(first);
+        // The earlier walked edges of the clause (before the body) the body edges compare with.
+        let outer: Vec<BindingId> = self.walked.get(e.clause).cloned().unwrap_or_default();
+        let labels_of = |planner: &Self, id: BindingId| {
+            planner
+                .bound
+                .binding(id)
+                .map_or(EdgeLabels::Any, |b| EdgeLabels::of(&b.labels))
+        };
+        let mut hops = Vec::with_capacity(edges.len());
+        for (i, &(edge, direction)) in edges.iter().enumerate() {
+            let hop_from = walk.get(i).copied().unwrap_or(first);
+            let hop_to = walk.get(i + 1).copied().unwrap_or(hop_from);
+            let mine = labels_of(self, edge);
+            let others = edges
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i && (repeats || j < i))
+                .map(|(_, &(other, _))| other);
+            let trail: Vec<BindingId> = outer
+                .iter()
+                .copied()
+                .chain(others)
+                .filter(|&other| other != edge && labels_of(self, other).may_overlap(&mine))
+                .collect();
+            for &other in &trail {
+                self.mark(other, |l| l.trail = true);
+            }
+            let filters = at_hop.next().unwrap_or_default();
+            // A condition reads every element but the one just reached through its label.
+            for &c in &filters {
+                let reads = self
+                    .bound
+                    .conjuncts
+                    .get(c)
+                    .map_or(&[][..], |cj| &cj.bindings[..]);
+                for &b in reads {
+                    if b != hop_to {
+                        self.mark(b, |l| l.body = true);
+                    }
+                }
+            }
+            hops.push(BodyHop {
+                from: hop_from,
+                edge,
+                direction,
+                trail,
+                edge_filters: self.filters_of(edge, None),
+                to: hop_to,
+                to_filters: self.filters_of(hop_to, None),
+                filters,
+            });
+            self.bind(edge);
+            self.bind(hop_to);
+        }
+        if let Some(w) = self.walked.get_mut(e.clause) {
+            w.extend(edges.iter().map(|(edge, _)| *edge));
+        }
+        let to_bound = self.is_bound(to);
+        let to_filters = if to_bound {
+            ElementFilters::default()
+        } else {
+            self.filters_of(to, None)
+        };
+        self.ops.push(Op::Group(GroupExpand {
+            group: r,
+            from,
+            from_current,
+            reversed,
+            quantifier: group.quantifier,
+            conditional: group.conditional,
+            first,
+            first_filters,
+            first_conjuncts,
+            hops,
+            to,
+            to_bound,
+            to_filters,
+        }));
+        if to_bound {
+            self.mark(to, |l| l.join = true);
+            self.ops.push(Op::Join { binding: to });
+        }
+        self.bind(to);
+        self.place_filters();
+        to
+    }
+
     /// The static labelling reasons: every group variable, every node and edge of a read path
     /// variable's pattern.
     fn mark_static(&mut self) {
         let bound = self.bound;
         for b in &bound.bindings {
-            if b.group {
+            // A group edge always (its trail checks every iteration); a group node of a
+            // parenthesized path pattern only when its list is read (stage 2e).
+            if b.group && (b.kind == BindingKind::Edge || b.read) {
                 self.mark(b.id, |l| l.group = true);
             }
         }
@@ -1166,10 +1433,9 @@ impl<'q> Planner<'q> {
             if !read {
                 continue;
             }
-            // A column binding too: the path reads it through a label set after `gql:bind`.
-            let ids = std::iter::once(path.start)
-                .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]));
-            for id in ids {
+            // A column binding too: the path reads it through a label set after `gql:bind`;
+            // every body element of a parenthesized path pattern (stage 2e).
+            for id in path.elements() {
                 if let Some(l) = self.labelling.get_mut(id.0) {
                     l.path = true;
                 }
@@ -1433,6 +1699,7 @@ impl<'q> Planner<'q> {
                     | Op::Anchor(_)
                     | Op::Resume(_)
                     | Op::Expand(_)
+                    | Op::Group(_)
                     | Op::Join { .. } => {}
                 }
             }
@@ -1474,6 +1741,8 @@ impl<'q> Planner<'q> {
                 on(&e.edge_filters, e.edge);
                 on(&e.to_filters, e.to);
             }
+            // A body holds no subquery (the binder refuses one); its outer end may.
+            Op::Group(g) => on(&g.to_filters, g.to),
             Op::Resume(_) | Op::Join { .. } => {}
         }
     }
@@ -1665,7 +1934,12 @@ impl<'q> Planner<'q> {
                     }
                 }
                 // Resume, branch and join targets have reasons of their own.
-                Op::Scan(_) | Op::Anchor(_) | Op::Resume(_) | Op::Expand(_) | Op::Join { .. } => {}
+                Op::Scan(_)
+                | Op::Anchor(_)
+                | Op::Resume(_)
+                | Op::Expand(_)
+                | Op::Group(_)
+                | Op::Join { .. } => {}
             }
             for id in away.drain(..) {
                 let import = bound.binding(id).is_some_and(|b| b.segment != segment);
@@ -1719,6 +1993,11 @@ impl<'q> Planner<'q> {
                 }
                 if e.edge_join {
                     reads.push(e.edge);
+                }
+            }
+            Op::Group(g) => {
+                if !g.from_current {
+                    reads.push(g.from);
                 }
             }
             Op::Scan(_) | Op::Anchor(_) => {}
@@ -1853,6 +2132,15 @@ enum SegmentKind {
     Later,
 }
 
+/// The direction of an edge seen from its other end.
+fn flip(direction: EdgeDirection) -> EdgeDirection {
+    match direction {
+        EdgeDirection::Right => EdgeDirection::Left,
+        EdgeDirection::Left => EdgeDirection::Right,
+        EdgeDirection::Any => EdgeDirection::Any,
+    }
+}
+
 /// The current element after `ops` when it was `current` before (as the lowering tracks it).
 fn current_after(ops: &[Op], current: Option<BindingId>) -> Option<BindingId> {
     ops.iter().fold(current, |current, op| match op {
@@ -1860,6 +2148,7 @@ fn current_after(ops: &[Op], current: Option<BindingId>) -> Option<BindingId> {
         Op::Lookup(l) => Some(l.scan.binding),
         Op::Resume(r) => Some(r.binding),
         Op::Expand(e) => Some(e.to),
+        Op::Group(g) => Some(g.to),
         Op::Join { binding } => Some(*binding),
         Op::Filter(_) => current,
     })

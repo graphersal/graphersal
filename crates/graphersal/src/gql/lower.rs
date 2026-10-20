@@ -1261,8 +1261,8 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    // Stage 2e.T2: parenthesized path patterns bind; the planner and the lowering take them in
-    // 2e.T3 / T4.
+    // Stage 2e: parenthesized path patterns bind (T2) and plan (T3, `Op::Group`); the lowering
+    // takes them in T4.
     refuse_unplanned_groups(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
@@ -1708,6 +1708,9 @@ impl<'q> Lowering<'q> {
                     }
                     site = Site::on(expand.to);
                 }
+                // Stage 2e.T4 lowers parenthesized path patterns; until then
+                // `bind::refuse_unplanned_groups` refuses them before planning (a guard only).
+                Op::Group(_) => return Err(self.unlowered()),
                 Op::Join { binding } => {
                     instrs.push(self.same(*binding)?);
                     if self.is_column(*binding) {
@@ -3227,7 +3230,12 @@ fn next_hop(ops: &[Op], at: usize) -> Option<&Expand> {
         match op {
             Op::Join { .. } | Op::Filter(_) => {}
             Op::Expand(next) if next.from_current => return Some(next),
-            Op::Expand(_) | Op::Scan(_) | Op::Lookup(_) | Op::Anchor(_) | Op::Resume(_) => {
+            Op::Expand(_)
+            | Op::Group(_)
+            | Op::Scan(_)
+            | Op::Lookup(_)
+            | Op::Anchor(_)
+            | Op::Resume(_) => {
                 return None;
             }
         }

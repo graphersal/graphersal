@@ -2974,18 +2974,21 @@ fn quantified_path_patterns_bind_group_variables() {
     // A group column is a value (the list), read like any column.
     assert_eq!(column_names(&q), ["a", "x", "e", "y", "b"]);
     assert!(q.binding(id(&q, "x")).unwrap().read);
-    // `?` is {0,1}, `*` {0,}, `+` {1,}: group variables too.
-    for (query, min, max) in [
-        ("MATCH (a) ((x)-->(y))? (b) RETURN x", 0, Some(1)),
-        ("MATCH (a) ((x)-->(y))* (b) RETURN x", 0, None),
-        ("MATCH (a) ((x)-->(y))+ (b) RETURN x", 1, None),
-        ("MATCH (a) ((x)-->(y)){0} (b) RETURN x", 0, Some(0)),
+    // `?` is {0,1} with conditional singletons (ISO, 2e P0 "After T2"); `{0,1}` written out,
+    // `*` {0,}, `+` {1,} make group variables too.
+    for (query, min, max, group) in [
+        ("MATCH (a) ((x)-->(y))? (b) RETURN x", 0, Some(1), false),
+        ("MATCH (a) ((x)-->(y)){0,1} (b) RETURN x", 0, Some(1), true),
+        ("MATCH (a) ((x)-->(y))* (b) RETURN x", 0, None, true),
+        ("MATCH (a) ((x)-->(y))+ (b) RETURN x", 1, None, true),
+        ("MATCH (a) ((x)-->(y)){0} (b) RETURN x", 0, Some(0), true),
     ] {
         let q = ok(query);
         let g = &q.matches[0].paths[0].groups[0].group;
         let quantifier = g.quantifier.unwrap();
         assert_eq!((quantifier.min, quantifier.max), (min, max), "{query}");
-        assert_eq!(shape_of(&q, "x"), (BindingKind::Node, true), "{query}");
+        assert_eq!(g.conditional, !group, "{query}");
+        assert_eq!(shape_of(&q, "x"), (BindingKind::Node, group), "{query}");
     }
 }
 
@@ -2999,6 +3002,31 @@ fn a_parenthesized_path_pattern_without_quantifier_binds_singletons() {
     // A later pattern may join a singleton like any variable.
     let q = ok("MATCH ((x)-->(y) WHERE x.v = 1) MATCH (y)-->(z) RETURN z");
     assert!(q.binding(id(&q, "y")).unwrap().joined());
+}
+
+#[test]
+fn a_question_mark_binds_conditional_singletons() {
+    // ISO (2e P0 "After T2"): `?` keeps single elements, NULL after zero iterations.
+    let q = ok("MATCH (a) ((x)-[e]->(y) WHERE x.v < y.v)? (b) WHERE y.k = 1 RETURN x.name, e, y");
+    assert!(q.matches[0].paths[0].groups[0].group.conditional);
+    assert_eq!(shape_of(&q, "x"), (BindingKind::Node, false));
+    assert_eq!(shape_of(&q, "e"), (BindingKind::Edge, false));
+    // The outer condition runs after the body (y may be NULL there): a cross conjunct; the
+    // body's own condition stays per iteration.
+    let y = id(&q, "y");
+    assert!(q.binding(y).unwrap().predicates.is_empty());
+    assert_eq!(q.cross.len(), 1);
+    assert_eq!(q.conjuncts[q.cross[0]].bindings, [y]);
+    assert_eq!(q.matches[0].paths[0].groups[0].group.conjuncts.len(), 1);
+    // An inline condition is the element's own.
+    let q = ok("MATCH (a) ((x {k: 1})-->(y))? (b) RETURN x");
+    assert_eq!(q.binding(id(&q, "x")).unwrap().predicates.len(), 1);
+    assert!(q.cross.is_empty());
+    // A singleton may be joined after its body; an outer name inside the body is not yet.
+    let q = ok("MATCH ((x)-->(y))? MATCH (y)-->(z) RETURN z");
+    assert!(q.binding(id(&q, "y")).unwrap().joined());
+    let f = failure_of("MATCH (x) ((x)-->(y))? RETURN y");
+    assert_eq!(f.kind, GqlErrorKind::NotYet, "{f:?}");
 }
 
 #[test]
@@ -3299,7 +3327,8 @@ fn every_body_edge_counts_toward_the_edge_limit() {
 }
 
 /// Binding never panics on combinations of parenthesized path patterns, and every bound body
-/// keeps its invariants: consecutive new bindings, group variables exactly when quantified,
+/// keeps its invariants: consecutive new bindings, group variables exactly when quantified
+/// (not by `?`),
 /// its conditions on its own bindings only and never cross.
 #[test]
 fn binding_never_panics_on_parenthesized_path_patterns() {
@@ -3340,7 +3369,11 @@ fn binding_never_panics_on_parenthesized_path_patterns() {
                                 for (i, id) in ids.enumerate() {
                                     assert_eq!(id.0, first + i, "{query}");
                                     let b = q.binding(id).unwrap();
-                                    assert_eq!(b.group, g.group.quantifier.is_some(), "{query}");
+                                    assert_eq!(
+                                        b.group,
+                                        g.group.quantifier.is_some() && !g.group.conditional,
+                                        "{query}"
+                                    );
                                 }
                                 let range = g.group.bindings();
                                 for c in &g.group.conjuncts {
