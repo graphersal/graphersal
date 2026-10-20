@@ -19,7 +19,8 @@
 //!   ([`ConjunctOrigin::Label`]). A path variable `p = ...` is a binding of kind
 //!   [`BindingKind::Path`]; the edge variable of a quantified edge is a **group variable**
 //!   ([`Binding::group`]): inside its own element pattern it is the edge of one iteration,
-//!   everywhere else the list of the matched edges. Each column of a materializing `WITH` is a
+//!   everywhere else the list of the matched edges. So is every node and edge variable of a
+//!   quantified path pattern's body (stage 2e, see "Parenthesized path patterns"). Each column of a materializing `WITH` is a
 //!   new binding ([`Binding::column`]): of the element's kind when the column is a node or edge
 //!   variable, else [`BindingKind::Value`].
 //! - **Segments (plan mechanism 2).** [`BoundQuery::segments`] cuts the pipeline where the rows
@@ -94,6 +95,38 @@
 //! the same way (its list reads the scope before the `FOR`). `WITH` replaces the scope by its columns
 //! (`WITH *` keeps it); a dropped name written again in a later pattern is a new binding (its
 //! key is `#<id>`, decision C14). `RETURN` and its `ORDER BY` see the final scope.
+//!
+//! # Parenthesized path patterns (stage 2e)
+//!
+//! `(a) ((x)-[e]->(y) WHERE cond){m,n} (b)` binds as [`BoundPath::groups`]: a
+//! [`BoundGroupStep`] per parenthesized path pattern with its body ([`BoundGroup`]), the node
+//! after it and the plain steps up to the next one; an implicit node (where the text has none)
+//! is an anonymous binding. Rules (design item 9, P0 of stage 2e):
+//!
+//! - **Merge (ISO, Neo4j Cypher 25 QPP semantics).** The node before a parenthesized path
+//!   pattern ([`BoundPath::node_before`]) is the first node of its first iteration, the node
+//!   after it the last node of its last iteration, and consecutive iterations share a node
+//!   (`y_i = x_{i+1}`); after zero iterations the two are one node. The binder keeps them
+//!   separate bindings; the planner joins them.
+//! - **Group variables.** With a quantifier (`?` is `{0,1}`), every body variable is a group
+//!   variable ([`Binding::group`]): one element of an iteration inside the body, the list of
+//!   them over the iterations in path order everywhere else (a property read of it outside is
+//!   42002; bound again anywhere is 42002). Without a quantifier (one iteration, ISO G050) the
+//!   body's variables are singletons.
+//! - **New names.** Every body variable is a new binding, declared consecutively in text order:
+//!   a name in scope is 42002 for a quantified body (a group variable is always new) and
+//!   `NotYet` without a quantifier (a join into a body); a name written twice in one body is
+//!   `NotYet` (the alternative compares two variables in its `WHERE`).
+//! - **Body conditions** (inline maps, inline `WHERE`, the body's `WHERE`) see only the body's
+//!   variables, parameters and constants (a `LET` constant too): another variable is `NotYet`
+//!   (0A000), and so is a subquery inside a body. A condition on exactly one body element is
+//!   listed on it ([`Binding::predicates`]); the others are [`BoundGroup::conjuncts`]; none is
+//!   in [`BoundQuery::cross`], and none marks a binding read (the planner reads where each
+//!   iteration needs a label from them).
+//! - **Edge limit.** Every body edge counts once toward [`MAX_MATCH_EDGES`].
+//!
+//! The planner and the lowering take them from stages 2e.T3 / T4 on; until then
+//! [`refuse_unplanned_groups`] refuses a bound query holding one between binding and planning.
 //!
 //! # Map projections and list comprehensions (stage 2c)
 //!
@@ -233,7 +266,11 @@
 //! returned column. `22G02` for a negative `OFFSET` / `LIMIT` literal,
 //! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable and a comprehension variable read inside a
-//! subquery (a pattern comprehension's body and `|` part included).
+//! subquery (a pattern comprehension's body and `|` part included); stage 2e: a condition
+//! inside a parenthesized path pattern reading a variable declared outside it, a subquery
+//! inside one, a variable written twice in one body, an outer name written in a body without
+//! a quantifier. Stage 2e 42002: a quantified body's variable that is bound already, a group
+//! variable of a body bound again or with a property read outside it.
 //!
 //! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies; every one of them
 //! lowers (`UNION` and `NEXT` since 2d.T4, `[OPTIONAL] CALL { }` since 2d.T5, `COUNT { }`,
@@ -242,7 +279,8 @@
 //! # Limits (kind `Limit`, `54001`)
 //!
 //! One `MATCH` clause holds at most [`MAX_MATCH_EDGES`] edge patterns over all its
-//! comma-separated paths (a quantified edge counts once). Edge uniqueness checks every edge
+//! comma-separated paths (a quantified edge counts once, each edge of a parenthesized path
+//! pattern's body once). Edge uniqueness checks every edge
 //! against every earlier edge of the same clause, so the plan grows with the square of a clause's
 //! edges; the limit keeps every query fast to prepare. It is checked for every clause before any
 //! other work (the parser itself is linear in a long path). Separate `MATCH` clauses are not
@@ -268,9 +306,9 @@ use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
     CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr,
     LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral,
-    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier,
-    Query, QueryBlock, ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern,
+    PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, ReduceAccumulator, ReturnItem,
+    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -341,7 +379,8 @@ pub(crate) struct Binding {
     pub(crate) clause: usize,
     /// The segment of its first appearance (index into [`BoundQuery::segments`]).
     pub(crate) segment: usize,
-    /// The edge variable of a quantified edge: a group variable (module docs).
+    /// The edge variable of a quantified edge, or a variable of a quantified path pattern's
+    /// body: a group variable (module docs).
     pub(crate) group: bool,
     /// The materializing `WITH` or `FOR` column it stands for.
     pub(crate) column: Option<ColumnRef>,
@@ -393,10 +432,123 @@ pub(crate) struct BoundPath {
     pub(crate) variable: Option<BindingId>,
     /// The first node.
     pub(crate) start: BindingId,
-    /// The edges, each with the node it leads to.
+    /// The edges, each with the node it leads to, up to the first parenthesized path pattern
+    /// (the whole path when it has none).
     pub(crate) steps: Vec<BoundStep>,
+    /// The parenthesized path patterns in text order (stage 2e), each with the node after it
+    /// and the plain steps up to the next one; empty for a path without one.
+    pub(crate) groups: Vec<BoundGroupStep>,
     /// The pattern.
     pub(crate) span: Span,
+}
+
+impl BoundPath {
+    /// Every element binding of the path in text order: the start, each step's edge and node,
+    /// then per parenthesized path pattern its body's bindings, the node after it and its
+    /// steps (not the path variable).
+    pub(crate) fn elements(&self) -> impl Iterator<Item = BindingId> + '_ {
+        let step = |s: &BoundStep| [s.edge, s.node];
+        std::iter::once(self.start)
+            .chain(self.steps.iter().flat_map(step))
+            .chain(self.groups.iter().flat_map(move |g| {
+                std::iter::once(g.group.start)
+                    .chain(g.group.steps.iter().flat_map(step))
+                    .chain(std::iter::once(g.node))
+                    .chain(g.steps.iter().flat_map(step))
+            }))
+    }
+
+    /// The node before the parenthesized path pattern `groups[index]` (the last node of the
+    /// steps before it): the first node of its first iteration (the merge rule, module docs).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the planner from stage 2e.T3 on")
+    )]
+    pub(crate) fn node_before(&self, index: usize) -> Option<BindingId> {
+        if index == 0 {
+            return Some(self.steps.last().map_or(self.start, |s| s.node));
+        }
+        let before = self.groups.get(index.checked_sub(1)?)?;
+        Some(before.steps.last().map_or(before.node, |s| s.node))
+    }
+}
+
+/// A bound parenthesized path pattern, the node after it and the plain steps up to the next
+/// one (stage 2e, [`BoundPath::groups`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundGroupStep {
+    /// The parenthesized path pattern.
+    pub(crate) group: BoundGroup,
+    /// The node after it (anonymous when implicit): the last node of its last iteration, or
+    /// the node before it ([`BoundPath::node_before`]) after zero iterations.
+    pub(crate) node: BindingId,
+    /// The following edges, each with the node it leads to.
+    pub(crate) steps: Vec<BoundStep>,
+}
+
+/// A bound `( chain [WHERE cond] )` with its quantifier (module docs, "Parenthesized path
+/// patterns"). Its bindings are new and consecutive: `start`, then each step's edge and node.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundGroup {
+    /// The body's first node (a group variable when quantified).
+    pub(crate) start: BindingId,
+    /// The body's edges, each with the node it leads to (at least one; none quantified).
+    pub(crate) steps: Vec<BoundStep>,
+    /// How often the body repeats (`?` is `{0,1}`); `None`: written without one, exactly one
+    /// iteration, and its variables are singletons.
+    pub(crate) quantifier: Option<Quantifier>,
+    /// Indexes into [`BoundQuery::conjuncts`] of the body's conditions that read no single
+    /// body element (several body variables, or only constants and parameters): evaluated
+    /// per iteration once the iteration's elements are matched. A condition reading exactly
+    /// one body element is listed on that element ([`Binding::predicates`]) and runs where it
+    /// is matched in each iteration. Neither kind is in [`BoundQuery::cross`].
+    pub(crate) conjuncts: Vec<usize>,
+    /// From `(` to `)` (the quantifier is not part of it).
+    pub(crate) span: Span,
+}
+
+impl BoundGroup {
+    /// The ids of its bindings: `start` to the last step's node.
+    fn bindings(&self) -> BodyRange {
+        let end = self.steps.last().map_or(self.start, |s| s.node);
+        BodyRange {
+            start: self.start.0,
+            end: end.0.saturating_add(1),
+        }
+    }
+
+    /// Its text with the quantifier (for messages).
+    pub(crate) fn text_span(&self) -> Span {
+        match &self.quantifier {
+            Some(quantifier) => self.span.to(quantifier.span),
+            None => self.span,
+        }
+    }
+}
+
+/// The consecutive binding ids `start..end` of one parenthesized path pattern's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyRange {
+    start: usize,
+    end: usize,
+}
+
+impl BodyRange {
+    fn contains(self, id: BindingId) -> bool {
+        (self.start..self.end).contains(&id.0)
+    }
+}
+
+/// A parenthesized path pattern's body as the binder knows it (for the scope of its
+/// conditions and the messages about its variables).
+#[derive(Debug, Clone, Copy)]
+struct Body {
+    /// Its bindings.
+    range: BodyRange,
+    /// Its text with the quantifier.
+    text: Span,
+    /// Whether it has a quantifier (its variables are group variables).
+    quantified: bool,
 }
 
 /// One edge of a bound path and the node after it.
@@ -646,6 +798,8 @@ pub(crate) enum ConjunctOrigin {
     InlineWhere,
     /// The `WHERE` of a `MATCH` clause.
     Where,
+    /// The `WHERE` of a parenthesized path pattern (stage 2e): read per iteration.
+    BodyWhere,
     /// `FILTER`, or the `WHERE` of a `WITH`.
     Filter,
     /// The label expression of an occurrence of a binding in a later segment than its first
@@ -841,7 +995,8 @@ pub(crate) fn bind_with_parameters<'a>(
 }
 
 /// The most edge patterns one `MATCH` clause may hold, over all its comma-separated paths
-/// (module docs, "Limits"); a quantified edge counts once.
+/// (module docs, "Limits"); a quantified edge counts once, so does each edge of a
+/// parenthesized path pattern's body.
 ///
 /// Every edge of a clause is checked against every earlier edge of the clause (edge
 /// uniqueness, one `where(P.neq(..))` per pair of edges whose labels may overlap), so a clause
@@ -977,29 +1132,46 @@ fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// Parenthesized path patterns (stage 2e) parse but are not bound yet: the first one of
-/// `matches` is "not yet supported", before any other check reads the clauses' patterns
-/// (every walk over a path's `steps` would miss its `groups`).
-fn refuse_parenthesized_paths(matches: &[MatchClause]) -> BResult<()> {
-    let Some(group) = matches
+/// Every `MATCH` clause of `matches` holds at most [`MAX_MATCH_EDGES`] edge patterns (each
+/// edge of a parenthesized path pattern's body once); checked before any other work on them.
+fn check_edge_counts(matches: &[MatchClause]) -> BResult<()> {
+    for m in matches {
+        if let Some(step) = m
+            .patterns
+            .iter()
+            .flat_map(PathPattern::all_steps)
+            .nth(MAX_MATCH_EDGES)
+        {
+            return Err(too_many_edges(step.edge.span));
+        }
+    }
+    Ok(())
+}
+
+/// Parenthesized path patterns (stage 2e) bind but are not planned yet: the first one of
+/// `bound` is "not yet supported" (the guard between binding and planning until the planner
+/// and the lowering take them, stages 2e.T3 / T4).
+pub(crate) fn refuse_unplanned_groups(
+    query: &Query,
+    bound: &BoundQuery,
+) -> Result<(), TraverserError> {
+    let Some(group) = bound
+        .matches
         .iter()
-        .flat_map(|m| &m.patterns)
+        .flat_map(|m| &m.paths)
         .flat_map(|path| &path.groups)
         .next()
     else {
         return Ok(());
     };
-    let span = match &group.group.quantifier {
-        Some(quantifier) => group.group.span.to(quantifier.span),
-        None => group.group.span,
-    };
-    Err(not_yet(
-        span,
+    Err((*not_yet(
+        group.group.text_span(),
         "a parenthesized path pattern ((a)-->(b)){m,n}",
         "quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; for a longer \
          pattern, write the path out, or use Gremlin repeat(), for example \
          g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
     ))
+    .into_error(&query.source))
 }
 
 /// Whether `name` is an aggregate function.
@@ -1365,6 +1537,12 @@ struct Binder<'q> {
     /// `WITH` that is no Cypher importing one: its span (an outer name it reads gets the
     /// message saying why nothing is imported).
     bare_with: Option<Span>,
+    /// Every parenthesized path pattern body bound so far (stage 2e), in binding order.
+    bodies: Vec<Body>,
+    /// While the conditions of a parenthesized path pattern's body are bound: its bindings
+    /// (one iteration's elements there; the conditions mark nothing read, the planner reads
+    /// [`BoundGroup::conjuncts`]).
+    in_body: Option<BodyRange>,
 }
 
 impl<'q> Binder<'q> {
@@ -1397,6 +1575,8 @@ impl<'q> Binder<'q> {
             calls: Vec::new(),
             body_depth: 0,
             bare_with: None,
+            bodies: Vec::new(),
+            in_body: None,
         }
     }
 
@@ -1408,14 +1588,28 @@ impl<'q> Binder<'q> {
             self.check_parameters(supplied)?;
         }
         let matches = self.finish_clauses()?;
+        // The conditions of parenthesized path pattern bodies on no single element run per
+        // iteration (`BoundGroup::conjuncts`), never as cross conjuncts.
+        let mut in_body = vec![false; self.conjuncts.len()];
+        for index in matches
+            .iter()
+            .flat_map(|m| &m.paths)
+            .flat_map(|path| &path.groups)
+            .flat_map(|g| &g.group.conjuncts)
+        {
+            if let Some(slot) = in_body.get_mut(*index) {
+                *slot = true;
+            }
+        }
         let mut cross = Vec::new();
-        for index in 0..self.conjuncts.len() {
+        for (index, in_body) in in_body.into_iter().enumerate() {
             match self.local_binding(index) {
                 Some(only) => {
                     if let Some(binding) = self.bindings.get_mut(only.0) {
                         binding.predicates.push(index);
                     }
                 }
+                None if in_body => {}
                 None => cross.push(index),
             }
         }
@@ -1482,7 +1676,9 @@ impl<'q> Binder<'q> {
         let element = matches!(binding.kind, BindingKind::Node | BindingKind::Edge);
         let inline = matches!(
             conjunct.origin,
-            ConjunctOrigin::InlineProperty | ConjunctOrigin::InlineWhere
+            ConjunctOrigin::InlineProperty
+                | ConjunctOrigin::InlineWhere
+                | ConjunctOrigin::BodyWhere
         );
         (element
             && binding.column.is_none()
@@ -1900,17 +2096,7 @@ impl<'q> Binder<'q> {
     /// any other work on it), and no comprehension variable around a subquery body declared
     /// by one of them.
     fn enter_linear(&mut self, linear: &LinearQuery) -> BResult<()> {
-        refuse_parenthesized_paths(&linear.matches)?;
-        for m in &linear.matches {
-            if let Some(edge) = m
-                .patterns
-                .iter()
-                .flat_map(|path| &path.steps)
-                .nth(MAX_MATCH_EDGES)
-            {
-                return Err(too_many_edges(edge.edge.span));
-            }
-        }
+        check_edge_counts(&linear.matches)?;
         if let Some(var) = linear
             .matches
             .iter()
@@ -2009,8 +2195,8 @@ impl<'q> Binder<'q> {
                 }
                 segment
             };
-            let bound = self.declare_clause(clause, m, segment)?;
-            self.clause_filters(clause, m, &bound)?;
+            let mut bound = self.declare_clause(clause, m, segment)?;
+            self.clause_filters(clause, m, &mut bound)?;
             if let Some(slot) = self.own.get_mut(clause) {
                 *slot = Some(bound);
             }
@@ -2191,8 +2377,7 @@ impl<'q> Binder<'q> {
         let elements = |m: &BoundMatch, ids: &mut Vec<BindingId>| {
             for path in &m.paths {
                 ids.extend(path.variable);
-                ids.push(path.start);
-                ids.extend(path.steps.iter().flat_map(|step| [step.edge, step.node]));
+                ids.extend(path.elements());
             }
         };
         for c in self.conjuncts.get(marks.conjunct..).unwrap_or(&[]) {
@@ -2265,52 +2450,17 @@ impl<'q> Binder<'q> {
                 None => None,
             };
             let start = self.node(clause, &path.start, segment)?;
-            let mut steps = Vec::with_capacity(path.steps.len());
-            for step in &path.steps {
-                let e = &step.edge;
-                let edge = self.declare(
-                    Site {
-                        clause,
-                        segment,
-                        kind: BindingKind::Edge,
-                        group: e.quantifier.is_some(),
-                    },
-                    e.variable.as_ref(),
-                    e.span,
-                    e.labels.as_ref(),
-                )?;
-                if let Some(var) = &e.variable {
-                    if edges_here.contains(&edge) {
-                        return Err(semantic(
-                            var.span,
-                            format!(
-                                "the edge variable `{}` is used for more than one edge in the \
-                                 same MATCH (an edge is bound once per MATCH)",
-                                var.name
-                            ),
-                        )
-                        .alternative(format!(
-                            "give the second edge its own variable, or put the second pattern \
-                             in a MATCH clause of its own to join on the same edge `{}`",
-                            var.name
-                        ))
-                        .topic(GqlHelpTopic::PatternVariable)
-                        .into());
-                    }
-                    edges_here.push(edge);
-                }
-                let node = self.node(clause, &step.node, segment)?;
-                steps.push(BoundStep {
-                    edge,
-                    direction: e.direction,
-                    node,
-                    quantifier: e.quantifier,
-                });
-            }
+            let steps = self.declare_steps(clause, &path.steps, segment, &mut edges_here)?;
+            let groups = if path.groups.is_empty() {
+                Vec::new()
+            } else {
+                self.declare_groups(clause, path, segment, &mut edges_here)?
+            };
             paths.push(BoundPath {
                 variable,
                 start,
                 steps,
+                groups,
                 span: path.span,
             });
         }
@@ -2322,14 +2472,163 @@ impl<'q> Binder<'q> {
         })
     }
 
+    /// The plain steps `steps` of a path (edges with the nodes they lead to); `edges_here`
+    /// collects the named edges of the clause (edge uniqueness of a variable).
+    fn declare_steps(
+        &mut self,
+        clause: usize,
+        steps: &[PatternStep],
+        segment: usize,
+        edges_here: &mut Vec<BindingId>,
+    ) -> BResult<Vec<BoundStep>> {
+        let mut bound = Vec::with_capacity(steps.len());
+        for step in steps {
+            let e = &step.edge;
+            let edge = self.declare(
+                Site {
+                    clause,
+                    segment,
+                    kind: BindingKind::Edge,
+                    group: e.quantifier.is_some(),
+                },
+                e.variable.as_ref(),
+                e.span,
+                e.labels.as_ref(),
+            )?;
+            if let Some(var) = &e.variable {
+                if edges_here.contains(&edge) {
+                    return Err(semantic(
+                        var.span,
+                        format!(
+                            "the edge variable `{}` is used for more than one edge in the same \
+                             MATCH (an edge is bound once per MATCH)",
+                            var.name
+                        ),
+                    )
+                    .alternative(format!(
+                        "give the second edge its own variable, or put the second pattern in a \
+                         MATCH clause of its own to join on the same edge `{}`",
+                        var.name
+                    ))
+                    .topic(GqlHelpTopic::PatternVariable)
+                    .into());
+                }
+                edges_here.push(edge);
+            }
+            let node = self.node(clause, &step.node, segment)?;
+            bound.push(BoundStep {
+                edge,
+                direction: e.direction,
+                node,
+                quantifier: e.quantifier,
+            });
+        }
+        Ok(bound)
+    }
+
+    /// The parenthesized path patterns of `path` (stage 2e), each with the node after it and
+    /// its plain steps, in text order.
+    #[inline(never)]
+    fn declare_groups(
+        &mut self,
+        clause: usize,
+        path: &PathPattern,
+        segment: usize,
+        edges_here: &mut Vec<BindingId>,
+    ) -> BResult<Vec<BoundGroupStep>> {
+        let mut groups = Vec::with_capacity(path.groups.len());
+        for g in &path.groups {
+            let group = self.declare_body(clause, &g.group, segment)?;
+            let node = self.node(clause, &g.node, segment)?;
+            let steps = self.declare_steps(clause, &g.steps, segment, edges_here)?;
+            groups.push(BoundGroupStep { group, node, steps });
+        }
+        Ok(groups)
+    }
+
+    /// The body of one parenthesized path pattern: every variable a new binding (a group
+    /// variable when quantified), declared consecutively ([`BodyRange`]).
+    fn declare_body(
+        &mut self,
+        clause: usize,
+        group: &ParenthesizedPath,
+        segment: usize,
+    ) -> BResult<BoundGroup> {
+        let first = self.bindings.len();
+        let text = match &group.quantifier {
+            Some(quantifier) => group.span.to(quantifier.span),
+            None => group.span,
+        };
+        let body = Body {
+            range: BodyRange {
+                start: first,
+                end: usize::MAX,
+            },
+            text,
+            quantified: group.quantifier.is_some(),
+        };
+        let site = |kind| Site {
+            clause,
+            segment,
+            kind,
+            group: body.quantified,
+        };
+        let start = self.body_element(body, site(BindingKind::Node), node_parts(&group.start))?;
+        let mut steps = Vec::with_capacity(group.steps.len());
+        for step in &group.steps {
+            let e = &step.edge;
+            let edge = (e.variable.as_ref(), e.labels.as_ref(), e.span);
+            let edge = self.body_element(body, site(BindingKind::Edge), edge)?;
+            let node = self.body_element(body, site(BindingKind::Node), node_parts(&step.node))?;
+            steps.push(BoundStep {
+                edge,
+                direction: e.direction,
+                node,
+                quantifier: None,
+            });
+        }
+        self.bodies.push(Body {
+            range: BodyRange {
+                start: first,
+                end: self.bindings.len(),
+            },
+            ..body
+        });
+        Ok(BoundGroup {
+            start,
+            steps,
+            quantifier: group.quantifier,
+            conjuncts: Vec::new(),
+            span: group.span,
+        })
+    }
+
+    /// One element of a parenthesized path pattern's body: always a new binding (a name in
+    /// scope is refused: a group variable is always a new name, a join inside a body is not
+    /// yet supported).
+    fn body_element(
+        &mut self,
+        body: Body,
+        site: Site,
+        (variable, labels, span): (Option<&Identifier>, Option<&LabelExpr>, Span),
+    ) -> BResult<BindingId> {
+        if let Some(var) = variable
+            && let Some(symbol) = self.scope.get(&var.name)
+        {
+            let inside = matches!(symbol, Symbol::Binding(id) if id.0 >= body.range.start);
+            return Err(body_variable_bound(var, body, inside));
+        }
+        Ok(self.new_binding(site, variable, span, labels, None))
+    }
+
     fn clause_filters(
         &mut self,
         clause: usize,
         m: &MatchClause,
-        bound: &BoundMatch,
+        bound: &mut BoundMatch,
     ) -> BResult<()> {
         let segment = bound.segment;
-        for (path, bound) in m.patterns.iter().zip(&bound.paths) {
+        for (path, bound) in m.patterns.iter().zip(&mut bound.paths) {
             self.element_filters(
                 clause,
                 segment,
@@ -2337,21 +2636,9 @@ impl<'q> Binder<'q> {
                 path.start.properties.as_ref(),
                 path.start.where_clause.as_ref(),
             )?;
-            for (step, bound_step) in path.steps.iter().zip(&bound.steps) {
-                self.element_filters(
-                    clause,
-                    segment,
-                    bound_step.edge,
-                    step.edge.properties.as_ref(),
-                    step.edge.where_clause.as_ref(),
-                )?;
-                self.element_filters(
-                    clause,
-                    segment,
-                    bound_step.node,
-                    step.node.properties.as_ref(),
-                    step.node.where_clause.as_ref(),
-                )?;
+            self.step_filters(clause, segment, &path.steps, &bound.steps)?;
+            if !path.groups.is_empty() {
+                self.group_filters(clause, segment, path, bound)?;
             }
         }
         if let Some(where_clause) = &m.where_clause {
@@ -2361,6 +2648,102 @@ impl<'q> Binder<'q> {
                 ConjunctOrigin::Where,
                 segment,
             )?;
+        }
+        Ok(())
+    }
+
+    /// The inline filters of the edges and nodes of `steps`.
+    fn step_filters(
+        &mut self,
+        clause: usize,
+        segment: usize,
+        steps: &[PatternStep],
+        bound: &[BoundStep],
+    ) -> BResult<()> {
+        for (step, bound_step) in steps.iter().zip(bound) {
+            self.element_filters(
+                clause,
+                segment,
+                bound_step.edge,
+                step.edge.properties.as_ref(),
+                step.edge.where_clause.as_ref(),
+            )?;
+            self.element_filters(
+                clause,
+                segment,
+                bound_step.node,
+                step.node.properties.as_ref(),
+                step.node.where_clause.as_ref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The conditions of the parenthesized path patterns of `path` (stage 2e) and the inline
+    /// filters of the nodes and steps after them.
+    #[inline(never)]
+    fn group_filters(
+        &mut self,
+        clause: usize,
+        segment: usize,
+        path: &PathPattern,
+        bound: &mut BoundPath,
+    ) -> BResult<()> {
+        for (g, bound_g) in path.groups.iter().zip(&mut bound.groups) {
+            let first = self.conjuncts.len();
+            let range = bound_g.group.bindings();
+            self.in_body = Some(range);
+            let result = self.body_filters(clause, segment, &g.group, &bound_g.group);
+            self.in_body = None;
+            result?;
+            let mut conjuncts = Vec::new();
+            for index in first..self.conjuncts.len() {
+                let Some(conjunct) = self.conjuncts.get(index) else {
+                    continue;
+                };
+                if conjunct.bindings.iter().any(|id| !range.contains(*id)) {
+                    return Err(body_reads_outside(conjunct.span));
+                }
+                if self.local_binding(index).is_none() {
+                    conjuncts.push(index);
+                }
+            }
+            bound_g.group.conjuncts = conjuncts;
+            self.element_filters(
+                clause,
+                segment,
+                bound_g.node,
+                g.node.properties.as_ref(),
+                g.node.where_clause.as_ref(),
+            )?;
+            self.step_filters(clause, segment, &g.steps, &bound_g.steps)?;
+        }
+        Ok(())
+    }
+
+    /// The inline filters of a parenthesized path pattern's body elements, then its `WHERE`
+    /// (while [`Self::in_body`] holds its bindings).
+    fn body_filters(
+        &mut self,
+        clause: usize,
+        segment: usize,
+        group: &ParenthesizedPath,
+        bound: &BoundGroup,
+    ) -> BResult<()> {
+        self.element_filters(
+            clause,
+            segment,
+            bound.start,
+            group.start.properties.as_ref(),
+            group.start.where_clause.as_ref(),
+        )?;
+        self.step_filters(clause, segment, &group.steps, &bound.steps)?;
+        if let Some(where_clause) = &group.where_clause {
+            let ctx = Ctx {
+                inline_clause: Some(clause),
+                ..Ctx::refusing("in a pattern")
+            };
+            self.conjuncts_of(ctx, where_clause, ConjunctOrigin::BodyWhere, segment)?;
         }
         Ok(())
     }
@@ -2510,6 +2893,9 @@ impl<'q> Binder<'q> {
             return Err(kind_conflict(var, site.kind, binding.kind));
         }
         if binding.group || site.group {
+            if let Some(body) = self.body_of(id) {
+                return Err(body_group_rebound(var, self.query.text(body.text)));
+            }
             return Err(semantic(
                 var.span,
                 format!(
@@ -2602,7 +2988,8 @@ impl<'q> Binder<'q> {
         if let Some(where_clause) = where_clause {
             self.conjuncts_of(ctx, where_clause, ConjunctOrigin::InlineWhere, segment)?;
         }
-        let group = self.bindings.get(binding.0).is_some_and(|b| b.group);
+        // Inside a parenthesized path pattern's body the caller checks the scope.
+        let group = self.in_body.is_none() && self.bindings.get(binding.0).is_some_and(|b| b.group);
         if group {
             let other = self
                 .conjuncts
@@ -2648,7 +3035,8 @@ impl<'q> Binder<'q> {
     fn push_conjunct(&mut self, conjunct: Conjunct) {
         self.conjuncts.push(conjunct);
         let index = self.conjuncts.len() - 1;
-        if self.local_binding(index).is_none()
+        if self.in_body.is_none()
+            && self.local_binding(index).is_none()
             && let Some(conjunct) = self.conjuncts.get(index)
         {
             // Inside a subquery body only the body's own locals: whether an import is read
@@ -3240,7 +3628,13 @@ impl<'q> Binder<'q> {
             .into())
     }
 
-    /// `g.key` of a group variable `g` outside its own element reads the list: refused.
+    /// The parenthesized path pattern body declaring `id` (stage 2e).
+    fn body_of(&self, id: BindingId) -> Option<Body> {
+        self.bodies.iter().copied().find(|b| b.range.contains(id))
+    }
+
+    /// `g.key` of a group variable `g` outside its own element (or outside the body of its
+    /// quantified path pattern) reads the list: refused.
     fn check_group_property(
         &self,
         ctx: Ctx<'_>,
@@ -3254,8 +3648,11 @@ impl<'q> Binder<'q> {
             return Ok(());
         };
         let group = self.bindings.get(id.0).is_some_and(|b| b.group);
-        if !group || ctx.element == Some(*id) {
+        if !group || ctx.element == Some(*id) || self.in_body.is_some_and(|b| b.contains(*id)) {
             return Ok(());
+        }
+        if let Some(body) = self.body_of(*id) {
+            return Err(body_group_property(var, key, self.query.text(body.text)));
         }
         Err(semantic(
             var.span,
@@ -3967,6 +4364,9 @@ impl<'q> Binder<'q> {
         subquery: &SubqueryExpr,
         map: Option<&Expr>,
     ) -> BResult<usize> {
+        if self.in_body.is_some() {
+            return Err(subquery_in_body(subquery.span));
+        }
         // An expression is resolved once; a repeat (none today) would read the same body.
         if let Some(index) = self.subqueries.iter().position(|s| s.span == subquery.span) {
             return Ok(index);
@@ -3980,17 +4380,7 @@ impl<'q> Binder<'q> {
         if self.subqueries.len() >= MAX_SUBQUERIES {
             return Err(too_many_subqueries(subquery.span));
         }
-        refuse_parenthesized_paths(&subquery.matches)?;
-        for m in &subquery.matches {
-            if let Some(edge) = m
-                .patterns
-                .iter()
-                .flat_map(|path| &path.steps)
-                .nth(MAX_MATCH_EDGES)
-            {
-                return Err(too_many_edges(edge.edge.span));
-            }
-        }
+        check_edge_counts(&subquery.matches)?;
         // A comprehension variable is not visible inside a subquery yet: a body naming one
         // would silently bind a new variable instead.
         if let Some(var) = subquery
@@ -4098,32 +4488,8 @@ impl<'q> Binder<'q> {
         }
         // Imports: every binding older than the body that the body (nested bodies included)
         // reads, in a pattern or in a condition.
-        let outside = |id: &BindingId| id.0 < first_binding;
-        let mut imports: Vec<BindingId> = self
-            .conjuncts
-            .get(first_conjunct..)
-            .unwrap_or(&[])
-            .iter()
-            .flat_map(|c| c.bindings.iter().copied())
-            .filter(outside)
-            .collect();
-        for m in self
-            .sub_matches
-            .get(first_clause..)
-            .unwrap_or(&[])
-            .iter()
-            .flatten()
-        {
-            for path in &m.paths {
-                let elements = std::iter::once(path.start)
-                    .chain(path.variable)
-                    .chain(path.steps.iter().flat_map(|step| [step.edge, step.node]));
-                imports.extend(elements.filter(outside));
-            }
-        }
-        if let Some(map) = &map {
-            imports.extend(map.refs.bindings.iter().copied().filter(outside));
-        }
+        let mut imports =
+            self.body_imports(first_binding, first_conjunct, first_clause, map.as_ref());
         let query = match query {
             Some((query, _)) => {
                 if subquery.kind == SubqueryKind::Collect && query.last().first.columns.len() != 1 {
@@ -4146,6 +4512,45 @@ impl<'q> Binder<'q> {
             }
         }
         Ok(index)
+    }
+
+    /// The imports of a body of `MATCH` clauses: every binding older than `first_binding` its
+    /// conjuncts (from `first_conjunct`), its clauses (from `first_clause` of the subquery
+    /// clauses) and its `|` part `map` read; unsorted. A function of its own: its iterators
+    /// would widen the frame of [`Self::subquery_with`], which lies under every nested body.
+    #[inline(never)]
+    fn body_imports(
+        &self,
+        first_binding: usize,
+        first_conjunct: usize,
+        first_clause: usize,
+        map: Option<&Resolved>,
+    ) -> Vec<BindingId> {
+        let outside = |id: &BindingId| id.0 < first_binding;
+        let mut imports: Vec<BindingId> = self
+            .conjuncts
+            .get(first_conjunct..)
+            .unwrap_or(&[])
+            .iter()
+            .flat_map(|c| c.bindings.iter().copied())
+            .filter(outside)
+            .collect();
+        for m in self
+            .sub_matches
+            .get(first_clause..)
+            .unwrap_or(&[])
+            .iter()
+            .flatten()
+        {
+            for path in &m.paths {
+                let elements = path.elements().chain(path.variable);
+                imports.extend(elements.filter(outside));
+            }
+        }
+        if let Some(map) = map {
+            imports.extend(map.refs.bindings.iter().copied().filter(outside));
+        }
+        imports
     }
 
     /// A whole-query subquery body (stage 2d): a composite whose operands start with every
@@ -4201,8 +4606,8 @@ impl<'q> Binder<'q> {
             let clause = base.saturating_add(slot);
             self.sub_matches.push(None);
             self.clause = clause;
-            let bound = self.declare_clause(clause, m, segment)?;
-            self.clause_filters(clause, m, &bound)?;
+            let mut bound = self.declare_clause(clause, m, segment)?;
+            self.clause_filters(clause, m, &mut bound)?;
             if let Some(entry) = self.sub_matches.get_mut(slot) {
                 *entry = Some(bound);
             }
@@ -4216,12 +4621,7 @@ impl<'q> Binder<'q> {
     /// must be in scope.
     fn check_pattern_predicate(&self, ctx: Ctx<'_>, subquery: &SubqueryExpr) -> BResult<()> {
         for path in subquery.matches.iter().flat_map(|m| &m.patterns) {
-            let names = path.variable.iter().chain(&path.start.variable).chain(
-                path.steps
-                    .iter()
-                    .flat_map(|step| step.edge.variable.iter().chain(&step.node.variable)),
-            );
-            for var in names {
+            for var in path.variable.iter().chain(path.element_variables()) {
                 if self.scope.get(&var.name).is_some() {
                     continue;
                 }
@@ -4839,7 +5239,8 @@ struct Site {
     clause: usize,
     segment: usize,
     kind: BindingKind,
-    /// The edge of a quantified edge pattern.
+    /// The edge of a quantified edge pattern, or an element of a quantified path pattern's
+    /// body.
     group: bool,
 }
 
@@ -4940,6 +5341,115 @@ enum LocalOwner {
     Accumulator,
     /// The variable `x` of `reduce(s = init, x IN list | ..)`.
     ReduceItem,
+}
+
+/// The parts of a node pattern [`Binder::body_element`] declares.
+fn node_parts(n: &NodePattern) -> (Option<&Identifier>, Option<&LabelExpr>, Span) {
+    (n.variable.as_ref(), n.labels.as_ref(), n.span)
+}
+
+/// The error of a variable written in a parenthesized path pattern's body that is bound
+/// already: earlier in the same body (`inside`), or outside it.
+fn body_variable_bound(var: &Identifier, body: Body, inside: bool) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    if inside {
+        return not_yet(
+            var.span,
+            "a variable written twice inside a parenthesized path pattern",
+            &format!(
+                "give each element its own variable and compare them in the WHERE of the \
+                 parenthesized path pattern, as in (({name})-->({name}2) WHERE \
+                 element_id({name}) = element_id({name}2)){{1,3}}"
+            ),
+        );
+    }
+    let alternative = format!(
+        "give the element inside its own variable: the node before a parenthesized path \
+         pattern is the first node of its first iteration and the node after it the last node \
+         of its last iteration, as in ({name}) ((x)-->(y)){{1,3}} (b)"
+    );
+    if !body.quantified {
+        return not_yet(
+            var.span,
+            "a variable bound outside a parenthesized path pattern and written again inside it",
+            &alternative,
+        );
+    }
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is already bound; a variable of a quantified path pattern is a group \
+                 variable (outside it, the list of its elements over the iterations) and must be \
+                 a new name"
+            ),
+        )
+        .alternative(alternative)
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a group variable of a quantified path pattern's body (`text`) bound again
+/// outside it.
+fn body_group_rebound(var: &Identifier, text: &str) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a group variable of the quantified path pattern {text} (outside it, \
+                 the list of its elements over the iterations) and cannot be bound again"
+            ),
+        )
+        .alternative(format!(
+            "give this element its own variable and compare it with the list in WHERE, as in \
+             WHERE {name}2 IN {name}"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// `g.key` of a group variable `g` of the quantified path pattern `text` outside its body.
+fn body_group_property(var: &Identifier, key: &Identifier, text: &str) -> Box<GqlErrorBuilder> {
+    let (name, key) = (&var.name, &key.name);
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a group variable of the quantified path pattern {text}: outside it, \
+                 it is the list of its elements over the iterations, so `{name}.{key}` has no \
+                 single value"
+            ),
+        )
+        .alternative(format!(
+            "test each element inside the parenthesized path pattern, with WHERE {name}.{key} \
+             ... before its closing parenthesis, or read the list, as in [v IN {name} | v.{key}]"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a subquery inside a parenthesized path pattern's body (stage 2e).
+#[inline(never)]
+fn subquery_in_body(span: Span) -> Box<GqlErrorBuilder> {
+    not_yet(
+        span,
+        "a subquery inside a parenthesized path pattern",
+        "test the subquery in the WHERE of the MATCH clause, or write its pattern into the \
+         parenthesized path pattern",
+    )
+}
+
+/// The error of a condition inside a parenthesized path pattern's body reading something
+/// else than the body's variables, parameters and constants.
+fn body_reads_outside(span: Span) -> Box<GqlErrorBuilder> {
+    not_yet(
+        span,
+        "a condition inside a parenthesized path pattern that reads a variable declared outside it",
+        "compare the body's variables with each other, with values or with parameters inside \
+         it, as in ((x)-[e]->(y) WHERE e.weight > $w){1,3}, and test the outer variable in the \
+         WHERE of the MATCH clause",
+    )
 }
 
 /// A variable of a list comprehension, a list predicate or `reduce` named inside a subquery
@@ -5084,13 +5594,9 @@ fn hidden_count_or_collect(hidden: Hidden, name: &str) -> Option<(&'static str, 
 
 /// The variables `m` names: path, node and edge variables of every path.
 fn declared_names(m: &MatchClause) -> impl Iterator<Item = &Identifier> {
-    m.patterns.iter().flat_map(|path| {
-        path.variable.iter().chain(&path.start.variable).chain(
-            path.steps
-                .iter()
-                .flat_map(|s| s.edge.variable.iter().chain(&s.node.variable)),
-        )
-    })
+    m.patterns
+        .iter()
+        .flat_map(|path| path.variable.iter().chain(path.element_variables()))
 }
 
 /// The shape of a node over `children` (`true`: a child the evaluator nests on; `false`: a link

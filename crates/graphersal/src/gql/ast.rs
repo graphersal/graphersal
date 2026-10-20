@@ -355,6 +355,38 @@ pub(crate) struct PathPattern {
     pub(crate) span: Span,
 }
 
+impl PathPattern {
+    /// Every edge pattern with the node it leads to, in text order: the plain steps and the
+    /// steps of every parenthesized path pattern's body (stage 2e; each body edge once).
+    pub(crate) fn all_steps(&self) -> impl Iterator<Item = &PatternStep> {
+        self.steps.iter().chain(
+            self.groups
+                .iter()
+                .flat_map(|g| g.group.steps.iter().chain(&g.steps)),
+        )
+    }
+
+    /// Every node and edge variable written in the pattern (not the path variable), in text
+    /// order, those inside the parenthesized path patterns included.
+    pub(crate) fn element_variables(&self) -> impl Iterator<Item = &Identifier> {
+        let step = PatternStep::variables;
+        let plain = self
+            .start
+            .variable
+            .iter()
+            .chain(self.steps.iter().flat_map(step));
+        plain.chain(self.groups.iter().flat_map(move |g| {
+            g.group
+                .start
+                .variable
+                .iter()
+                .chain(g.group.steps.iter().flat_map(step))
+                .chain(&g.node.variable)
+                .chain(g.steps.iter().flat_map(step))
+        }))
+    }
+}
+
 /// A parenthesized path pattern of a [`PathPattern`], the node juxtaposed after it and the plain
 /// steps up to the next one (stage 2e).
 #[derive(Debug, Clone, PartialEq)]
@@ -396,6 +428,13 @@ pub(crate) struct PatternStep {
     pub(crate) edge: EdgePattern,
     /// The node it leads to.
     pub(crate) node: NodePattern,
+}
+
+impl PatternStep {
+    /// The edge variable and the node variable, when written.
+    fn variables(&self) -> impl Iterator<Item = &Identifier> {
+        self.edge.variable.iter().chain(&self.node.variable)
+    }
 }
 
 /// `(v:Label {k: expr} WHERE expr)`, every part optional.

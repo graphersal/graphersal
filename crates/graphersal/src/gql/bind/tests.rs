@@ -2851,9 +2851,9 @@ fn call_body_with_that_is_not_importing_says_why() {
 // ----- stage 2e: parenthesized path patterns (not bound yet) -----
 
 #[test]
-fn parenthesized_path_patterns_are_not_yet_bound() {
-    // Until stage 2e.T2 the binder refuses them wherever a pattern stands, before any other
-    // check reads the clause (a body variable read outside is no "undefined variable" yet).
+fn parenthesized_path_patterns_are_not_yet_planned() {
+    // Since stage 2e.T2 they bind wherever a pattern stands; the guard between binding and
+    // planning refuses them with the text of stage 2e.T1 until the planner takes them.
     for (query, text) in [
         (
             "MATCH ((a)-[:knows]->(b)){1,3} RETURN b",
@@ -2869,16 +2869,16 @@ fn parenthesized_path_patterns_are_not_yet_bound() {
             "((x)-->(y))+",
         ),
         (
-            "MATCH (n) WHERE EXISTS { ((n)-->(m)){2} } RETURN n",
-            "((n)-->(m)){2}",
+            "MATCH (n) WHERE EXISTS { (n) ((x)-->(m)){2} } RETURN n",
+            "((x)-->(m)){2}",
         ),
         (
             "MATCH (n) WHERE COUNT { MATCH (n) ((x)-->(y))* (m) RETURN m } > 0 RETURN n",
             "((x)-->(y))*",
         ),
         (
-            "MATCH (n) WHERE (n)-->((x)-->(y)){2} RETURN n",
-            "((x)-->(y)){2}",
+            "MATCH (n) WHERE (n)-->(()-->()){2} RETURN n",
+            "(()-->()){2}",
         ),
         (
             "CALL { MATCH ((x)-->(y)){2} RETURN x } RETURN x",
@@ -2890,7 +2890,11 @@ fn parenthesized_path_patterns_are_not_yet_bound() {
         ),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind(&parsed));
+        let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
+        let f = failure(
+            query,
+            refuse_unplanned_groups(&parsed, &bound).map(|()| bound),
+        );
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
         assert_eq!(f.gqlstatus, "0A000", "{query}");
         assert_eq!(f.text, text, "{query}");
@@ -2906,4 +2910,453 @@ fn parenthesized_path_patterns_are_not_yet_bound() {
             "{query}: {f:?}"
         );
     }
+    // A query without one passes the guard.
+    let query = "MATCH (a)-[e]->{1,3}(b) RETURN b";
+    let parsed = parse(query).unwrap_or_else(|e| panic!("{e}"));
+    assert!(refuse_unplanned_groups(&parsed, &ok(query)).is_ok());
+}
+
+// ----- stage 2e: parenthesized path patterns -----
+
+/// The kind of a binding by name and whether it is a group variable.
+fn shape_of(q: &BoundQuery, name: &str) -> (BindingKind, bool) {
+    let b = q.binding(id(q, name)).unwrap();
+    (b.kind, b.group)
+}
+
+fn not_yet_of(query: &str) -> Failure {
+    let f = failure_of(query);
+    assert_eq!(
+        (f.kind, f.gqlstatus.as_str()),
+        (GqlErrorKind::NotYet, "0A000"),
+        "{query}: {f:?}"
+    );
+    f
+}
+
+#[test]
+fn quantified_path_patterns_bind_group_variables() {
+    let q = ok("MATCH (a) ((x:person)-[e:knows]->(y)){1,3} (b) RETURN a, x, e, y, b");
+    let path = &q.matches[0].paths[0];
+    assert_eq!(path.start, id(&q, "a"));
+    assert!(path.steps.is_empty());
+    let [g] = &path.groups[..] else {
+        panic!("{path:?}")
+    };
+    assert_eq!(g.group.start, id(&q, "x"));
+    assert_eq!(g.group.steps.len(), 1);
+    assert_eq!(
+        (g.group.steps[0].edge, g.group.steps[0].node),
+        (id(&q, "e"), id(&q, "y"))
+    );
+    assert_eq!(g.group.steps[0].quantifier, None);
+    assert_eq!(g.group.steps[0].direction, EdgeDirection::Right);
+    let quantifier = g.group.quantifier.unwrap();
+    assert_eq!((quantifier.min, quantifier.max), (1, Some(3)));
+    assert_eq!(g.node, id(&q, "b"));
+    assert!(g.steps.is_empty());
+    // The merge rule: `a` is the first iteration's `x`, `b` the last one's `y`.
+    assert_eq!(path.node_before(0), Some(id(&q, "a")));
+    assert_eq!(path.node_before(1), Some(id(&q, "b")));
+    assert_eq!(path.node_before(2), None);
+    // Body variables are group variables (lists outside the body), the outer nodes are not.
+    assert_eq!(shape_of(&q, "x"), (BindingKind::Node, true));
+    assert_eq!(shape_of(&q, "e"), (BindingKind::Edge, true));
+    assert_eq!(shape_of(&q, "y"), (BindingKind::Node, true));
+    assert_eq!(shape_of(&q, "a"), (BindingKind::Node, false));
+    assert_eq!(shape_of(&q, "b"), (BindingKind::Node, false));
+    // Ids follow the text; the body's labels stay on its bindings.
+    assert_eq!(
+        names(&q, &path.elements().collect::<Vec<_>>()),
+        ["a", "x", "e", "y", "b"]
+    );
+    assert_eq!(q.binding(id(&q, "x")).unwrap().labels.len(), 1);
+    // A group column is a value (the list), read like any column.
+    assert_eq!(column_names(&q), ["a", "x", "e", "y", "b"]);
+    assert!(q.binding(id(&q, "x")).unwrap().read);
+    // `?` is {0,1}, `*` {0,}, `+` {1,}: group variables too.
+    for (query, min, max) in [
+        ("MATCH (a) ((x)-->(y))? (b) RETURN x", 0, Some(1)),
+        ("MATCH (a) ((x)-->(y))* (b) RETURN x", 0, None),
+        ("MATCH (a) ((x)-->(y))+ (b) RETURN x", 1, None),
+        ("MATCH (a) ((x)-->(y)){0} (b) RETURN x", 0, Some(0)),
+    ] {
+        let q = ok(query);
+        let g = &q.matches[0].paths[0].groups[0].group;
+        let quantifier = g.quantifier.unwrap();
+        assert_eq!((quantifier.min, quantifier.max), (min, max), "{query}");
+        assert_eq!(shape_of(&q, "x"), (BindingKind::Node, true), "{query}");
+    }
+}
+
+#[test]
+fn a_parenthesized_path_pattern_without_quantifier_binds_singletons() {
+    // ISO: no quantifier, exactly one iteration; its variables keep a single value.
+    let q = ok("MATCH (a) ((x)-[e]->(y) WHERE x.age < y.age) (b) RETURN x.name, e, y");
+    assert_eq!(q.matches[0].paths[0].groups[0].group.quantifier, None);
+    assert_eq!(shape_of(&q, "x"), (BindingKind::Node, false));
+    assert_eq!(shape_of(&q, "e"), (BindingKind::Edge, false));
+    // A later pattern may join a singleton like any variable.
+    let q = ok("MATCH ((x)-->(y) WHERE x.v = 1) MATCH (y)-->(z) RETURN z");
+    assert!(q.binding(id(&q, "y")).unwrap().joined());
+}
+
+#[test]
+fn implicit_nodes_around_parenthesized_path_patterns_are_anonymous_bindings() {
+    let q = ok("MATCH ((x)-->(y)){2} RETURN x");
+    let path = &q.matches[0].paths[0];
+    let anonymous = |id: BindingId| q.binding(id).unwrap().name.is_none();
+    assert!(anonymous(path.start));
+    assert!(anonymous(path.groups[0].node));
+    assert_eq!(path.node_before(0), Some(path.start));
+    // After an edge, between two groups, and with plain steps after a group.
+    let q = ok("MATCH (a)-->((x)-->(y))+ ((u)-[f]->(v)){2} (b)<--(c) RETURN a, b, c");
+    let path = &q.matches[0].paths[0];
+    let anonymous = |id: BindingId| q.binding(id).unwrap().name.is_none();
+    assert_eq!(path.steps.len(), 1);
+    assert_eq!(path.groups.len(), 2);
+    let [first, second] = &path.groups[..] else {
+        panic!("{path:?}")
+    };
+    assert_eq!(path.node_before(0), Some(path.steps[0].node));
+    assert!(anonymous(path.steps[0].node));
+    assert!(anonymous(first.node));
+    assert_eq!(path.node_before(1), Some(first.node));
+    assert_eq!(second.node, id(&q, "b"));
+    assert_eq!(second.steps[0].node, id(&q, "c"));
+    assert_eq!(second.steps[0].direction, EdgeDirection::Left);
+    assert_eq!(path.node_before(2), Some(id(&q, "c")));
+    assert_eq!(
+        names(&q, &path.elements().collect::<Vec<_>>())
+            .iter()
+            .filter(|n| !n.starts_with('#'))
+            .collect::<Vec<_>>(),
+        ["a", "x", "y", "u", "f", "v", "b", "c"]
+    );
+    // A path variable spans the whole pattern.
+    let q = ok("MATCH p = (a) ((x)-->(y)){1,2} (b) WHERE path_length(p) > 1 RETURN p");
+    assert_eq!(q.matches[0].paths[0].variable, Some(id(&q, "p")));
+    assert_eq!(q.cross.len(), 1);
+}
+
+#[test]
+fn body_conditions_run_per_iteration() {
+    let query = "MATCH (a) ((x {name: 'n'})-[e WHERE e.w > x.w]->(y WHERE y.v > 1) WHERE x.age < \
+                 y.age AND e.w > $min AND $flag AND x.k = 2){1,3} (b) WHERE size(e) > 1 RETURN b";
+    let q = ok(query);
+    assert_eq!(
+        conjuncts(query, &q),
+        [
+            "name: 'n' [\"x\"]",
+            "e.w > x.w [\"x\", \"e\"]",
+            "y.v > 1 [\"y\"]",
+            "x.age < y.age [\"x\", \"y\"]",
+            "e.w > $min [\"e\"]",
+            "$flag []",
+            "x.k = 2 [\"x\"]",
+            "size(e) > 1 [\"e\"]",
+        ]
+    );
+    let g = &q.matches[0].paths[0].groups[0].group;
+    // On one body element: listed on it (run where it is matched in each iteration).
+    assert_eq!(q.binding(id(&q, "x")).unwrap().predicates, [0, 6]);
+    assert_eq!(q.binding(id(&q, "e")).unwrap().predicates, [4]);
+    assert_eq!(q.binding(id(&q, "y")).unwrap().predicates, [2]);
+    // On several body elements or none: the group's, never cross.
+    assert_eq!(g.conjuncts, [1, 3, 5]);
+    assert_eq!(q.conjuncts[3].origin, ConjunctOrigin::BodyWhere);
+    // The clause WHERE reads the list: cross.
+    assert_eq!(q.cross, [7]);
+    // A body condition marks nothing read; reading the list outside does.
+    assert!(!q.binding(id(&q, "x")).unwrap().read);
+    assert!(!q.binding(id(&q, "y")).unwrap().read);
+    assert!(q.binding(id(&q, "e")).unwrap().read);
+    // A LET constant and a comprehension inside the body read no variable outside it.
+    ok("LET k = 2 MATCH ((x)-->(y) WHERE x.v = k AND all(i IN [1] WHERE i < y.v)){2} RETURN y");
+}
+
+#[test]
+fn body_conditions_read_only_the_body() {
+    for (query, text) in [
+        (
+            "MATCH (a) ((x)-->(y) WHERE x.age < a.age){1,3} RETURN y",
+            "x.age < a.age",
+        ),
+        (
+            "MATCH (a) ((x {name: a.name})-->(y)){2} RETURN y",
+            "name: a.name",
+        ),
+        (
+            "MATCH (a) ((x)-[e WHERE e.w > a.w]->(y)){2} RETURN y",
+            "e.w > a.w",
+        ),
+        (
+            "MATCH (a) LET n = a.name MATCH ((x)-->(y) WHERE y.name = n){2} RETURN y",
+            "y.name = n",
+        ),
+        // A singleton body too (P0: one scope rule for every body).
+        (
+            "MATCH (a) ((x)-->(y) WHERE x.v = a.v) RETURN y",
+            "x.v = a.v",
+        ),
+        // A variable of a later pattern of the clause is outside too.
+        (
+            "MATCH ((x)-->(y) WHERE x.v = c.v){2}, (c) RETURN y",
+            "x.v = c.v",
+        ),
+    ] {
+        let f = not_yet_of(query);
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            "a condition inside a parenthesized path pattern that reads a variable declared \
+             outside it is not yet supported in this version",
+            "{query}"
+        );
+        assert!(
+            f.alternative
+                .as_deref()
+                .is_some_and(|a| a.contains("WHERE of the MATCH clause")),
+            "{query}: {f:?}"
+        );
+    }
+    // A subquery inside a body is not yet supported (its body would run per iteration).
+    for (query, text) in [
+        (
+            "MATCH ((x)-->(y) WHERE EXISTS { (y)-->() }){2} RETURN y",
+            "EXISTS { (y)-->() }",
+        ),
+        ("MATCH ((x)-->(y WHERE (y)-->())){2} RETURN y", "(y)-->()"),
+        (
+            "MATCH ((x)-->(y) WHERE size([(y)-->(z) | z]) > 1){2} RETURN y",
+            "[(y)-->(z) | z]",
+        ),
+        (
+            "MATCH ((x)-->(y) WHERE COUNT { MATCH (y)-->(z) RETURN z } > 1){2} RETURN y",
+            "COUNT { MATCH (y)-->(z) RETURN z }",
+        ),
+    ] {
+        let f = not_yet_of(query);
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message
+                .starts_with("a subquery inside a parenthesized path pattern"),
+            "{query}"
+        );
+    }
+    // An aggregate is refused as in any pattern.
+    let f = fail("MATCH ((x)-->(y) WHERE count(x) > 1){2} RETURN y");
+    assert!(f.message.contains("in a pattern"), "{}", f.message);
+}
+
+#[test]
+fn body_variables_are_new_names() {
+    // A name bound outside: a group variable must be new (42002); in a body without a
+    // quantifier, a join is not yet supported.
+    let f = fail("MATCH (a) ((a)-->(y)){2} RETURN y");
+    assert_eq!(f.text, "a");
+    assert!(f.message.contains("must be a new name"), "{}", f.message);
+    assert!(
+        f.alternative
+            .as_deref()
+            .is_some_and(|a| a.contains("first node of its first iteration"))
+    );
+    let f = fail("MATCH (a)-[e]->(b) MATCH ((x)-[e]->(y)){2} RETURN y");
+    assert_eq!(f.text, "e");
+    let f = fail("LET a = 1 MATCH ((a)-->(y)){2} RETURN y");
+    assert_eq!(f.text, "a");
+    let f = fail("MATCH ((x)-->(y)){2} ((x)-->(z)){2} RETURN z");
+    assert!(f.message.contains("must be a new name"), "{}", f.message);
+    let f = not_yet_of("MATCH (a) ((a)-->(y) WHERE y.v = 1) RETURN y");
+    assert_eq!(f.text, "a");
+    assert!(
+        f.message
+            .starts_with("a variable bound outside a parenthesized path pattern")
+    );
+    // Twice inside one body: not yet (the alternative compares two variables).
+    let f = not_yet_of("MATCH ((x)-->(x)){2} RETURN x");
+    assert_eq!(
+        (f.text.as_str(), f.message.as_str()),
+        (
+            "x",
+            "a variable written twice inside a parenthesized path pattern is not yet supported in this version"
+        )
+    );
+    assert!(
+        f.alternative
+            .as_deref()
+            .is_some_and(|a| a.contains("element_id(x) = element_id(x2)"))
+    );
+    let f = not_yet_of("MATCH ((x)-[e]->(y)-[e]->(z)){2} RETURN x");
+    assert_eq!(f.text, "e");
+    // A group variable bound again after its body: in the same clause, a later clause, a
+    // subquery, another body.
+    for (query, text) in [
+        ("MATCH ((x)-->(y)){2}, (x)-->(z) RETURN z", "x"),
+        ("MATCH ((x)-->(y)){2} (b) MATCH (y)-->(b) RETURN b", "y"),
+        ("MATCH ((x)-[e]->(y)){2} (b)-[e]->(c) RETURN c", "e"),
+        (
+            "MATCH ((x)-->(y)){2} WHERE EXISTS { (x)-->() } RETURN y",
+            "x",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message
+                .contains("group variable of the quantified path pattern"),
+            "{query}: {}",
+            f.message
+        );
+    }
+    // A singleton body variable read again later is a join (above); a path variable inside
+    // the body is refused by the parser (E17).
+}
+
+#[test]
+fn group_variables_of_a_body_are_lists_outside_it() {
+    // A property of a group variable outside its body has no single value.
+    for (query, text) in [
+        ("MATCH ((x)-->(y)){2} RETURN x.name", "x"),
+        ("MATCH ((x)-->(y)){2} WHERE y.age > 1 RETURN x", "y"),
+        ("MATCH ((x)-[e]->(y)){2} (b WHERE b.v = e.w) RETURN b", "e"),
+        ("MATCH ((x)-->(y)){2} RETURN x ORDER BY y.age", "y"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message
+                .contains("is a group variable of the quantified path pattern ((x)-")
+                && f.message.contains("has no single value"),
+            "{query}: {}",
+            f.message
+        );
+    }
+    // The list itself may be read anywhere.
+    ok("MATCH ((x)-->(y)){1,3} (b) WHERE size(x) > 1 RETURN [v IN y | v.name] AS names, x");
+    let q = ok("MATCH ((x)-->(y)){1,3} WITH x, count(*) AS c RETURN x, c");
+    let with = q.segments.iter().find_map(|s| match s {
+        Segment::With(w) => Some(w),
+        _ => None,
+    });
+    let x = with.unwrap().outputs[0];
+    assert_eq!(q.binding(x).unwrap().kind, BindingKind::Value);
+}
+
+#[test]
+fn parenthesized_path_patterns_in_subqueries_and_bodies() {
+    // A body's group variables are locals of the subquery; the node before is an import.
+    let q = ok("MATCH (n) WHERE EXISTS { (n) ((x)-->(y)){2} (m) } RETURN n");
+    let sub = &q.subqueries[0];
+    assert_eq!(names(&q, &sub.imports), ["n"]);
+    assert_eq!(q.binding(id(&q, "x")).unwrap().subquery, Some(0));
+    assert_eq!(shape_of(&q, "x"), (BindingKind::Node, true));
+    let f = fail("MATCH (n) WHERE EXISTS { (n) ((x)-->(y)){2} } RETURN x");
+    assert_eq!(f.text, "x");
+    // OPTIONAL MATCH, a CALL body (its imports), inside a pattern comprehension's body (the
+    // pattern of a comprehension does not parse a parenthesized path pattern yet).
+    ok("MATCH (a) OPTIONAL MATCH (a) ((x)-->(y)){1,2} (b) RETURN a, x, b");
+    let q = ok("MATCH (a) CALL (a) { MATCH (a) ((x)-->(y)){2} (b) RETURN b } RETURN b");
+    let call = q.segments.iter().find_map(|s| match s {
+        Segment::Call(c) => Some(c),
+        _ => None,
+    });
+    assert_eq!(names(&q, &call.unwrap().imports), ["a"]);
+    ok("MATCH (a) RETURN [(a)-->(m) WHERE EXISTS { (m) ((x)-->(y)){2} } | m] AS l");
+    // A pattern predicate may not introduce a body variable.
+    let f = fail("MATCH (n) WHERE (n)-->((x)-->(y)){2} RETURN n");
+    assert_eq!(f.text, "x");
+    assert!(
+        f.message.contains("introduces the new variable `x`"),
+        "{}",
+        f.message
+    );
+    ok("MATCH (n) WHERE (n)-->(()-->()){2} RETURN n");
+    // A body variable named by a later MATCH clause is not defined before it.
+    let f = fail("MATCH (a) WHERE x IS NOT NULL MATCH (a) ((x)-->(y)){2} RETURN a");
+    assert_eq!(f.text, "x");
+    // A comprehension variable may not be named in a body inside a subquery (E14).
+    let f = failure_of("MATCH (a) RETURN [x IN [1] WHERE EXISTS { (a) ((x)-->(y)){2} }] AS l");
+    assert_eq!(f.text, "x");
+}
+
+#[test]
+fn every_body_edge_counts_toward_the_edge_limit() {
+    // 64 edges with the body's: accepted; one more: refused at the 65th.
+    let body = format!("((x){}){{1,3}}", "-->()".repeat(4));
+    let plain = "-->()".repeat(MAX_MATCH_EDGES - 4);
+    ok(&format!("MATCH (a){plain} {body} RETURN a"));
+    let query = format!("MATCH (a){plain} {body}-[z]->() RETURN a");
+    let f = failure_of(&query);
+    assert_eq!((f.kind, f.text.as_str()), (GqlErrorKind::Limit, "-[z]->"));
+    // In a subquery body too, and a long body alone.
+    let query = format!(
+        "MATCH (n) WHERE EXISTS {{ (n) ((x){}) }} RETURN n",
+        "-->()".repeat(65)
+    );
+    let f = failure_of(&query);
+    assert_eq!(f.kind, GqlErrorKind::Limit, "{f:?}");
+}
+
+/// Binding never panics on combinations of parenthesized path patterns, and every bound body
+/// keeps its invariants: consecutive new bindings, group variables exactly when quantified,
+/// its conditions on its own bindings only and never cross.
+#[test]
+fn binding_never_panics_on_parenthesized_path_patterns() {
+    let befores = ["", "(a)", "(a)-->", "(a)-[r]->(c)", "p = (a)"];
+    let bodies = [
+        "((x)-[e]->(y))",
+        "((x:person {v: 1})-[e:knows WHERE e.w > x.w]->(y)<--(z) WHERE x.v < z.v AND $p)",
+        "(()-->())",
+        "((x)-->(a))",
+        "((x)-->(x))",
+        "((x)-->(y) WHERE x.v = a.v)",
+        "((x)-->(y) WHERE EXISTS { (y)-->() })",
+    ];
+    let quantifiers = ["", "{1,3}", "?", "*", "+", "{0}"];
+    let afters = ["", " (b)", " (b)-->(d)", " ((u)-->(w)){2}", "-->(x)"];
+    let tails = [
+        "RETURN *",
+        "WHERE size(x) > 0 RETURN x",
+        "WHERE x.v > 1 RETURN 1",
+        "MATCH (x)-->() RETURN 1",
+        "RETURN [v IN y | v.name] AS l",
+    ];
+    let mut bound_bodies = 0;
+    for before in befores {
+        for body in bodies {
+            for quantifier in quantifiers {
+                for after in afters {
+                    for tail in tails {
+                        let query = format!("MATCH {before}{body}{quantifier}{after} {tail}");
+                        let Ok(parsed) = parse(&query) else { continue };
+                        let Ok(q) = bind(&parsed) else { continue };
+                        for path in q.matches.iter().flat_map(|m| &m.paths) {
+                            for g in &path.groups {
+                                bound_bodies += 1;
+                                let ids = std::iter::once(g.group.start)
+                                    .chain(g.group.steps.iter().flat_map(|s| [s.edge, s.node]));
+                                let first = g.group.start.0;
+                                for (i, id) in ids.enumerate() {
+                                    assert_eq!(id.0, first + i, "{query}");
+                                    let b = q.binding(id).unwrap();
+                                    assert_eq!(b.group, g.group.quantifier.is_some(), "{query}");
+                                }
+                                let range = g.group.bindings();
+                                for c in &g.group.conjuncts {
+                                    assert!(!q.cross.contains(c), "{query}");
+                                    let bindings = &q.conjuncts[*c].bindings;
+                                    assert!(
+                                        bindings.iter().all(|id| range.contains(*id)),
+                                        "{query}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(bound_bodies > 300, "{bound_bodies}");
 }

@@ -109,7 +109,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, Column, ColumnRef, Conjunct,
-    Count, Predicate, Segment, SortKey, bind_with_parameters,
+    Count, Predicate, Segment, SortKey, bind_with_parameters, refuse_unplanned_groups,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -1261,6 +1261,9 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
+    // Stage 2e.T2: parenthesized path patterns bind; the planner and the lowering take them in
+    // 2e.T3 / T4.
+    refuse_unplanned_groups(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }

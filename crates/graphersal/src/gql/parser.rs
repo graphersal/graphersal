@@ -135,7 +135,7 @@
 //!   part in [`PathPattern::steps`] and each parenthesized path pattern with what follows it in
 //!   [`PathPattern::groups`]. Where the text has no node next to one (at an end of the path,
 //!   after an edge, between two of them) the parser puts an implicit empty node
-//!   ([`NodePattern::is_implicit`]), which the binder merges like a written one. E17 (P0):
+//!   ([`NodePattern::is_implicit`]), which merges like a written one (an anonymous binding). E17 (P0):
 //!   the body is one chain with at least one edge; a nested parenthesized path pattern, a
 //!   quantified edge (GQL or Cypher form), a path variable, a path mode or search prefix,
 //!   several patterns (`,`), a path pattern union (`|`, `|+|`) and a body without an edge are
