@@ -7380,23 +7380,32 @@ mod gql {
     }
 
     #[test]
-    fn gql_quantified_path_pattern_not_yet_names_the_gremlin_step() {
-        let (err, report) =
-            gql_failure(|g| g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b").to_list());
-        assert_eq!(
-            kind_and_status(&err),
-            (GqlErrorKind::NotYet, "0A000".to_string())
-        );
+    fn gql_quantified_path_pattern_past_the_loop_limit_names_the_pattern() {
+        // Stage 2e.T4: parenthesized path patterns run (the "not yet" this test asserted
+        // before is gone); a loop limit of one names the pattern, read back from its body.
+        let (err, report) = gql_failure(|g| {
+            g.with("repeat.max_loops", 1)
+                .gql("MATCH (a) ((x)-[e:knows]-(m)-[f]-(y)){1,} (b) RETURN b")
+                .to_list()
+        });
         assert!(
-            report.contains("a parenthesized path pattern ((a)-->(b)){m,n} is not yet supported"),
+            matches!(
+                err.root_cause(),
+                TraverserError::RepeatLimitExceeded { max_loops: 1, .. }
+            ),
             "{report}"
         );
         assert!(
             report.contains(
-                "Help: quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; \
-                 for a longer pattern, write the path out, or use Gremlin repeat(), for example \
-                 g.v(\"1\").repeat(__.out(\"knows\")).times(2)."
+                "Help: The loop of the quantified path pattern (()-[e:knows]-()-[f]-()){1,} of \
+                 the gql() query ran 1 iterations, the limit of repeat.max_loops. A quantifier \
+                 without an upper bound ({m,}, *, + or Cypher [*]) repeats the pattern until \
+                 every path has used all the edges it can reach (trail)"
             ),
+            "{report}"
+        );
+        assert!(
+            report.contains("as in (()-[e:knows]-()-[f]-()){1,5}, for example"),
             "{report}"
         );
     }

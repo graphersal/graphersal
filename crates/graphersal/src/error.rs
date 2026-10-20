@@ -7019,12 +7019,16 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
 #[cfg(feature = "gql")]
 const GQL_TRAIL: &str = "gql:trail(";
 
-/// A quantified edge of a GQL query, read back from its lowered loop for the advice of a limit.
+/// A quantified edge of a GQL query, or a quantified path pattern (stage 2e), read back from
+/// its lowered loop for the advice of a limit.
 #[cfg(feature = "gql")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GqlQuantifiedEdge {
-    /// The edge pattern without its quantifier, such as `-[e:knows]->`.
+    /// The edge pattern without its quantifier, such as `-[e:knows]->`, or the parenthesized
+    /// path pattern, such as `((x)-[e:knows]->(y)-[f]->())` (in walk order).
     pattern: String,
+    /// A quantified path pattern, not a single quantified edge.
+    group: bool,
     /// The lower bound of the quantifier.
     min: u64,
     /// The upper bound; `None` for none.
@@ -7163,13 +7167,124 @@ fn gql_quantified_edges(plan: &str) -> Vec<GqlQuantifiedEdge> {
             }
         }
         let min = min.or(max).unwrap_or(1);
+        let (pattern, group) = match gql_group_pattern(body) {
+            Some(pattern) => (pattern, true),
+            None => (gql_edge_pattern(body), false),
+        };
         edges.push(GqlQuantifiedEdge {
-            pattern: gql_edge_pattern(body),
+            pattern,
+            group,
             min,
             max,
         });
     }
     edges
+}
+
+/// The steps of rendered step text at the top level (split at `.` outside parentheses and
+/// quoted strings), without a leading `__`.
+#[cfg(feature = "gql")]
+fn top_level_steps(text: &str) -> Vec<&str> {
+    let mut steps = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '.' if depth == 0 => {
+                steps.extend(text.get(start..at));
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    steps.extend(text.get(start..));
+    steps.retain(|step| *step != "__" && !step.is_empty());
+    steps
+}
+
+/// The parenthesized path pattern of a lowered quantified path pattern's loop body (stage
+/// 2e), in walk order, such as `((x)-[e:knows]->(y)-[f]->())`: its hops (an edge step, the
+/// steps on the edge up to the vertex step, or the `union` of either direction) and the node
+/// parts between them (a variable from `as()`, labels from `has_label()`). `None` for the body
+/// of a single quantified edge: one hop whose node parts hold nothing but an internal label (a
+/// one-edge body with nothing on its nodes reads like one, which it equals).
+#[cfg(feature = "gql")]
+fn gql_group_pattern(body: &str) -> Option<String> {
+    let steps = top_level_steps(body);
+    let mut nodes: Vec<(Option<String>, Vec<String>)> = vec![(None, Vec::new())];
+    let mut edges: Vec<String> = Vec::new();
+    let mut on_nodes = false;
+    let mut hop: Option<Vec<&str>> = None;
+    for step in steps {
+        if let Some(open) = hop.as_mut() {
+            open.push(step);
+            if ["in_v()", "inV()", "out_v()", "outV()"].contains(&step) {
+                edges.push(gql_edge_pattern(&format!("__.{}", open.join("."))));
+                nodes.push((None, Vec::new()));
+                hop = None;
+            }
+            continue;
+        }
+        let name = step.split('(').next().unwrap_or_default();
+        match name {
+            "out_e" | "outE" | "in_e" | "inE" => hop = Some(vec![step]),
+            "union" => {
+                edges.push(gql_edge_pattern(&format!("__.{step}")));
+                nodes.push((None, Vec::new()));
+            }
+            "as" => {
+                let label = quoted_strings(step).into_iter().next().unwrap_or_default();
+                if let Some(node) = nodes.last_mut()
+                    && !label.starts_with('#')
+                    && node.0.is_none()
+                {
+                    node.0 = Some(label);
+                    on_nodes = true;
+                }
+            }
+            "has_label" | "hasLabel" => {
+                if let Some(node) = nodes.last_mut() {
+                    node.1.push(quoted_strings(step).join("|"));
+                    on_nodes = true;
+                }
+            }
+            _ => on_nodes = true,
+        }
+    }
+    if edges.len() < 2 && !on_nodes {
+        return None;
+    }
+    let node = |(name, labels): &(Option<String>, Vec<String>)| {
+        let mut text = name.clone().unwrap_or_default();
+        for label in labels {
+            text.push(':');
+            text.push_str(label);
+        }
+        format!("({text})")
+    };
+    let mut pattern = String::from("(");
+    for (at, n) in nodes.iter().enumerate() {
+        pattern.push_str(&node(n));
+        if let Some(edge) = edges.get(at) {
+            pattern.push_str(edge);
+        }
+    }
+    pattern.push(')');
+    Some(pattern)
 }
 
 /// The GQL edge pattern of a lowered quantifier body (without the quantifier): the direction
@@ -7297,25 +7412,28 @@ fn gql_repeat_limit_help(max_loops: u32, step: &str, place: GqlSubqueryPlace) ->
         .min(u64::from(u32::MAX));
     let subquery = place.why_it_runs();
     let place = place.phrase();
-    let (edge, bounded) = match gql_quantified_edges(step).into_iter().next() {
+    let (edge, bounded, repeated) = match gql_quantified_edges(step).into_iter().next() {
         Some(edge) => (
             format!(
-                "the quantified edge {}{place} of the gql() query",
+                "the quantified {} {}{place} of the gql() query",
+                if edge.group { "path pattern" } else { "edge" },
                 edge.render()
             ),
             format!("{}, ", edge.bounded()),
+            if edge.group { "pattern" } else { "edge" },
         ),
         None => (
             format!("a quantified edge{place} of the gql() query"),
             String::new(),
+            "edge",
         ),
     };
     format!(
         "The loop of {edge} ran {max_loops} iterations, the limit of repeat.max_loops. A \
-         quantifier without an upper bound ({{m,}}, *, + or Cypher [*]) repeats the edge until \
-         every path has used all the edges it can reach (trail), which takes more iterations \
-         than the limit on a large or densely connected graph; the result is never cut \
-         short.{subquery} Give the quantifier an upper bound, as in {bounded}for example \
+         quantifier without an upper bound ({{m,}}, *, + or Cypher [*]) repeats the \
+         {repeated} until every path has used all the edges it can reach (trail), which takes \
+         more iterations than the limit on a large or densely connected graph; the result is \
+         never cut short.{subquery} Give the quantifier an upper bound, as in {bounded}for example \
          g.gql(\"MATCH (a:person)-[:knows]->{{1,3}}(b) RETURN b.name\"). Or raise the limit for \
          the query, g.with(\"repeat.max_loops\", {raised}).gql(..), for example \
          g.with(\"repeat.max_loops\", {raised}).gql(\"MATCH (a)-[:knows]->{{1,}}(b) RETURN \
@@ -7344,10 +7462,15 @@ fn gql_traverser_limit_help(
         ),
         None => (gql_quantified_edges(&steps.join(".")), String::new()),
     };
+    let noun = match (edges.iter().any(|e| e.group), edges.iter().all(|e| e.group)) {
+        (false, _) => "quantified edge",
+        (true, true) => "quantified path pattern",
+        (true, false) => "quantified edge or path pattern",
+    };
     let quantified = match edges.as_slice() {
         [] => String::new(),
         [first, ..] => format!(
-            "Each path a quantified edge ({}){place} matches is a traverser of its own (trail \
+            "Each path a {noun} ({}){place} matches is a traverser of its own (trail \
              keeps them apart, so they do not merge), and their number grows with every \
              iteration: give it a lower upper bound, as in {}. ",
             edges

@@ -16,11 +16,13 @@
 //!   names a returned alias);
 //! - [`Binding::RowColumn`]: a column of a row map the path labels (`as("#w1")` after a
 //!   materializing `WITH`): the map under the label, then the column, read in place;
-//! - [`Binding::Group`]: the group variable of a quantified edge outside its element pattern:
-//!   the list of every occurrence of its label in text order (an empty list for a zero-length
-//!   match; `NULL` when its anchor label is absent, an `OPTIONAL MATCH` that did not match);
+//! - [`Binding::Group`]: the group variable of a quantified edge outside its element pattern
+//!   (stage 2e: a body variable of a quantified path pattern outside its body): the list of
+//!   every occurrence of its label in text order (an empty list for a zero-length match;
+//!   `NULL` when its anchor label is absent, an `OPTIONAL MATCH` that did not match);
 //! - [`Binding::Path`]: a path variable, assembled in text order from the labels of the
-//!   pattern's elements ([`PathPart`]), never from `path()` (no Full path, design C11).
+//!   pattern's elements ([`PathPart`], a parenthesized path pattern's iterations from its
+//!   body's labels: [`PathPart::Body`]), never from `path()` (no Full path, design C11).
 //!
 //! A variable whose source holds nothing reads as `NULL`.
 //!
@@ -179,6 +181,19 @@ pub(crate) enum PathPart {
         /// Walked against the text direction.
         reversed: bool,
     },
+    /// The iterations of a parenthesized path pattern (stage 2e, design M5): `labels` are the
+    /// labels of its body's elements after the first node, in text order (each edge and the
+    /// node it reaches), each set once per iteration. Iteration `t` in text order is the `t`-th
+    /// occurrence of every label, or the `t`-th from the end when `reversed` (walked from the
+    /// node after the pattern). The first node of each iteration is the node before it (the
+    /// node before the pattern, merge rule), the last node of the last iteration the node
+    /// after the pattern: a vertex next to the same vertex appears once.
+    Body {
+        /// The labels of the body's elements after its first node, in text order.
+        labels: Arc<[CompactString]>,
+        /// Walked against the text direction.
+        reversed: bool,
+    },
     /// No object: a label the path holds whenever its pattern matched (the witness node or the
     /// part label of an `OPTIONAL MATCH` part); its absence makes the whole path `NULL`, also
     /// when every element of the path was bound before the part.
@@ -205,6 +220,7 @@ impl Binding {
                             out.push(edges.clone());
                             out.push(vertices.clone());
                         }
+                        PathPart::Body { labels, .. } => out.extend(labels.iter().cloned()),
                     }
                 }
             }
@@ -232,6 +248,7 @@ impl Binding {
                             out.push(edges.clone());
                             out.push(vertices.clone());
                         }
+                        PathPart::Body { labels, .. } => out.extend(labels.iter().cloned()),
                     }
                 }
             }
@@ -497,9 +514,35 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
                         }
                     }
                 }
+                PathPart::Body { labels, reversed } => {
+                    self.body_path(labels, *reversed, &mut objects)?
+                }
             }
         }
         Some(TraverserValue::Path(TraverserPath::from_objects(objects)))
+    }
+
+    /// Appends the iterations of a parenthesized path pattern ([`PathPart::Body`]) to
+    /// `objects`; `None` when its labels do not occur equally often (not one walk of the body).
+    fn body_path(
+        &self,
+        labels: &[CompactString],
+        reversed: bool,
+        objects: &mut Vec<TraverserValue<S>>,
+    ) -> Option<()> {
+        let occurrences: Vec<Vec<TraverserValue<S>>> =
+            labels.iter().map(|label| self.occurrences(label)).collect();
+        let count = occurrences.first().map_or(0, Vec::len);
+        if occurrences.iter().any(|o| o.len() != count) {
+            return None;
+        }
+        for t in 0..count {
+            let at = if reversed { count - 1 - t } else { t };
+            for found in &occurrences {
+                push_path_object(objects, found.get(at)?.clone());
+            }
+        }
+        Some(())
     }
 
     /// `value` as a GQL value (a row map's column, a sort key); a materialization error is kept

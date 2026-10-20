@@ -79,6 +79,7 @@ mod gql_for_tests;
 mod gql_function_tests;
 mod gql_path_tests;
 mod gql_pipeline_tests;
+mod gql_qpp_tests;
 mod gql_quantifier_tests;
 mod gql_script_tests;
 mod gql_tests;

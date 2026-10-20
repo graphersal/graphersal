@@ -2848,72 +2848,59 @@ fn call_body_with_that_is_not_importing_says_why() {
     );
 }
 
-// ----- stage 2e: parenthesized path patterns (not bound yet) -----
+// ----- stage 2e: parenthesized path patterns, wherever a pattern stands -----
 
 #[test]
-fn parenthesized_path_patterns_are_not_yet_planned() {
-    // Since stage 2e.T2 they bind wherever a pattern stands; the guard between binding and
-    // planning refuses them with the text of stage 2e.T1 until the planner takes them.
+fn parenthesized_path_patterns_bind_wherever_a_pattern_stands() {
+    // Since stage 2e.T2 they bind wherever a pattern stands; since stage 2e.T4 they lower
+    // (`gql_qpp_tests::the_former_not_yet_forms_lower_and_run` runs these queries).
     for (query, text) in [
         (
             "MATCH ((a)-[:knows]->(b)){1,3} RETURN b",
-            "((a)-[:knows]->(b)){1,3}",
+            "((a)-[:knows]->(b))",
         ),
-        ("MATCH (a) ((x)-->(y))? (b) RETURN x", "((x)-->(y))?"),
+        ("MATCH (a) ((x)-->(y))? (b) RETURN x", "((x)-->(y))"),
         (
             "MATCH (a) ((x)-->(y) WHERE x.v > 1) (b) RETURN b",
             "((x)-->(y) WHERE x.v > 1)",
         ),
         (
             "MATCH (a) OPTIONAL MATCH (a)-->((x)-->(y))+ RETURN a",
-            "((x)-->(y))+",
+            "((x)-->(y))",
         ),
         (
             "MATCH (n) WHERE EXISTS { (n) ((x)-->(m)){2} } RETURN n",
-            "((x)-->(m)){2}",
+            "((x)-->(m))",
         ),
         (
             "MATCH (n) WHERE COUNT { MATCH (n) ((x)-->(y))* (m) RETURN m } > 0 RETURN n",
-            "((x)-->(y))*",
+            "((x)-->(y))",
         ),
-        (
-            "MATCH (n) WHERE (n)-->(()-->()){2} RETURN n",
-            "(()-->()){2}",
-        ),
+        ("MATCH (n) WHERE (n)-->(()-->()){2} RETURN n", "(()-->())"),
         (
             "CALL { MATCH ((x)-->(y)){2} RETURN x } RETURN x",
-            "((x)-->(y)){2}",
+            "((x)-->(y))",
         ),
         (
             "MATCH (n) RETURN [(n)-->(m) WHERE EXISTS { (m) ((x)-->(y)){2} } | m]",
-            "((x)-->(y)){2}",
+            "((x)-->(y))",
         ),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
         let bound = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
-        let f = failure(
-            query,
-            refuse_unplanned_groups(&parsed, &bound).map(|()| bound),
-        );
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000", "{query}");
-        assert_eq!(f.text, text, "{query}");
+        let group = bound
+            .matches
+            .iter()
+            .flat_map(|m| &m.paths)
+            .flat_map(|path| &path.groups)
+            .next()
+            .unwrap_or_else(|| panic!("{query:?}: no parenthesized path pattern bound"));
         assert_eq!(
-            f.message,
-            "a parenthesized path pattern ((a)-->(b)){m,n} is not yet supported in this version",
+            query.get(group.group.span.start..group.group.span.end),
+            Some(text),
             "{query}"
         );
-        assert!(
-            f.alternative
-                .as_deref()
-                .is_some_and(|a| a.contains("-[:knows]->{1,3}") && a.contains("repeat(")),
-            "{query}: {f:?}"
-        );
     }
-    // A query without one passes the guard.
-    let query = "MATCH (a)-[e]->{1,3}(b) RETURN b";
-    let parsed = parse(query).unwrap_or_else(|e| panic!("{e}"));
-    assert!(refuse_unplanned_groups(&parsed, &ok(query)).is_ok());
 }
 
 // ----- stage 2e: parenthesized path patterns -----

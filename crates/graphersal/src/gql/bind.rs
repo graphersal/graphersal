@@ -131,8 +131,7 @@
 //! - **Edge limit.** Every body edge counts once toward [`MAX_MATCH_EDGES`].
 //!
 //! The planner takes them since stage 2e.T3 (one `plan::Op::Group` walk each), the lowering
-//! from stage 2e.T4 on; until then [`refuse_unplanned_groups`] refuses a bound query holding
-//! one between binding and planning.
+//! since stage 2e.T4 (`repeat()` of the body).
 //!
 //! # Map projections and list comprehensions (stage 2c)
 //!
@@ -527,14 +526,6 @@ impl BoundGroup {
         BodyRange {
             start: self.start.0,
             end: end.0.saturating_add(1),
-        }
-    }
-
-    /// Its text with the quantifier (for messages).
-    pub(crate) fn text_span(&self) -> Span {
-        match &self.quantifier {
-            Some(quantifier) => self.span.to(quantifier.span),
-            None => self.span,
         }
     }
 }
@@ -1162,32 +1153,6 @@ fn check_edge_counts(matches: &[MatchClause]) -> BResult<()> {
         }
     }
     Ok(())
-}
-
-/// Parenthesized path patterns (stage 2e) bind and plan (`plan::Op::Group`, since 2e.T3) but
-/// are not lowered yet: the first one of `bound` is "not yet supported" (the guard before
-/// planning until the lowering takes them, stage 2e.T4).
-pub(crate) fn refuse_unplanned_groups(
-    query: &Query,
-    bound: &BoundQuery,
-) -> Result<(), TraverserError> {
-    let Some(group) = bound
-        .matches
-        .iter()
-        .flat_map(|m| &m.paths)
-        .flat_map(|path| &path.groups)
-        .next()
-    else {
-        return Ok(());
-    };
-    Err((*not_yet(
-        group.group.text_span(),
-        "a parenthesized path pattern ((a)-->(b)){m,n}",
-        "quantify a single edge, as in MATCH (a)-[:knows]->{1,3}(b) RETURN b; for a longer \
-         pattern, write the path out, or use Gremlin repeat(), for example \
-         g.v(\"1\").repeat(__.out(\"knows\")).times(2)",
-    ))
-    .into_error(&query.source))
 }
 
 /// Whether `name` is an aggregate function.

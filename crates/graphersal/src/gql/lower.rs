@@ -58,6 +58,7 @@
 //! | `q1 NEXT q2` (stage 2d, design E19) | after a linear query: the `WITH` it desugars to (the binder makes one pipeline). After a `UNION` block, or a `UNION` block after `NEXT`: each operand starts from the records ([`Stage::Rows`], read like the row of a materializing `WITH`: `Binding::Column` on the row, `RowColumn` through `as("#n<k>")` only when read after leaving it, `gql:bind` to continue a pattern from an element column); several operands are a mid-traversal `union()`, whose children each see every record (an aggregation in an operand reads the whole table) |
 //! | `CALL (a) { body }`, `CALL (*) { .. }`, `CALL { .. }`, Cypher `CALL { WITH a .. }` (stage 2d, design mechanism 6, E16) | `flat_map(__.<body>)`: the body (a whole query: stages, `UNION`, `NEXT`) lowered onto the child from the site of the `CALL`, so it starts on the incoming row (no unit row): an import that is the current element needs no step (`Op::Resume` from it), another import is read where it is (`select("a")`, `gql:bind` from a `WITH` column, `Binding::Label` / `RowColumn` in expressions), an unanchored first component is a child-leading `v()` with its pushdown and index, or `gql:lookup` when its equality reads an import; the body's aggregation, `DISTINCT`, `ORDER BY`, `OFFSET` / `LIMIT` and `UNION` run per incoming row (`flat_map` runs the child once per traverser and multiplies its records by the bulk); an uncorrelated body runs per row too (E16). Its records continue the incoming path (outer labels stay readable); its `RETURN` row is the current object after it (`Binding::Column`), labelled `as("#c<k>")` only when a later step reads a column after leaving it; no `Binding::Current` of an outer binding after it. `MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.age DESC LIMIT 2 } RETURN p.name, f.name` is `v(labels: ["person"]).as("p").flat_map(__.out().as("f").gql:project("f").gql:order("f.age DESC").limit(2)).gql:project(..)` |
 //! | `OPTIONAL CALL (a) { body }` | `optional(__.flat_map(__.<body>).as("#c<k>"))`: the row label inside, so a row the body gives no record continues unchanged and reads the returned names `NULL` (absent label); every later read of a returned name goes through `#c<k>` |
+//! | parenthesized path pattern `(a) ((x)-[e:T]->(y)-[f]->(z) WHERE cond){m,n} (b)` (stage 2e, design item 9 and M5; also `*`, `+`, `?`, no quantifier) | `repeat(B)` with the modulators of a quantified edge (`?` is `{0,1}`: `emit().repeat(B).times(1)`; `{0}` no step, `b` is `a`; without a quantifier `B` inline, once). `B` is one iteration in walk order from the current element, which is the node the iteration before ended on (the merge rule: `a` for the first): `x`'s label factors, filters and `as("x")` (when read), then per body edge its 1a hop with `gql:trail([e, f, ..])` before `as("e")` (its own earlier iterations, every other body edge, the clause's other edges; without a repeating body a single edge is compared by `where(P.neq(..))`, a `?` edge always by `gql:trail`, which an absent edge passes), the node reached with its filters and `as()`, and the body conditions over several body elements as `gql:filter` right after the last of them, reading this iteration's elements (the latest occurrence of each label). Walked from `b` the body runs from its last node, hop by hop reversed. After the loop `b`'s filters and `as("b")`, or a join when `b` was bound earlier (`(a) ((x)-->(y))+ (a)`). No merge point of the lowering (every iteration labels its edges). A body variable read outside the body is a group list (`Binding::Group`, reversed when walked from `b`); with `?` a singleton, `NULL` after zero iterations; a path variable assembles the iterations from the body labels (`PathPart::Body`) |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
@@ -86,9 +87,10 @@
 //!
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
-//! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
-//! binder. Every construct the binder accepts lowers (stage 2d.T5c lowered the last ones:
-//! `COUNT { }`, `COLLECT { }` and whole-query subquery bodies). A component that is not the
+//! refused by the parser (shortest paths, `EXCEPT`, the E17 forms of a parenthesized path
+//! pattern, ...) and the binder. Every construct the binder accepts lowers (stage 2d.T5c
+//! lowered `COUNT { }`, `COLLECT { }` and whole-query subquery bodies, stage 2e.T4
+//! parenthesized path patterns). A component that is not the
 //! root scan and has no equality an id or index serves stays a mid-traversal `v()` plus filters
 //! per row (design E5).
 //!
@@ -108,16 +110,16 @@ use super::ast::{
     ProjectionItem, Quantifier, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, Column, ColumnRef, Conjunct,
-    Count, Predicate, Segment, SortKey, bind_with_parameters, refuse_unplanned_groups,
+    BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, BoundStep, Column, ColumnRef,
+    Conjunct, Count, Predicate, Segment, SortKey, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    CallStage, CompositePlan, ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy,
-    Materialize, Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage, SubqueryUse,
-    UnionPlan, and_factors, exists_conjunct, label_disjuncts,
+    CallStage, CompositePlan, ElementFilters, Expand, ForStage, GroupExpand, LogicalPlan, Lookup,
+    LookupBy, Materialize, Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage,
+    SubqueryUse, UnionPlan, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
@@ -292,6 +294,10 @@ struct Site {
     /// BY p.name`) is read from that column, `Binding::Column` on the row
     /// (`row == ordered`), `Binding::RowColumn` through the row label after leaving it.
     ordered: Option<usize>,
+    /// Inside the body of a parenthesized path pattern (stage 2e): a body variable is one
+    /// element there (this iteration's, `Binding::Label` of its latest occurrence), not the
+    /// list it is outside the body.
+    body: bool,
 }
 
 impl Site {
@@ -302,6 +308,16 @@ impl Site {
             row: None,
             part: None,
             ordered: None,
+            body: false,
+        }
+    }
+
+    /// On the element of body binding `id` inside the body of a parenthesized path pattern
+    /// (see [`Site::body`]).
+    fn in_body(id: BindingId) -> Self {
+        Site {
+            body: true,
+            ..Site::on(id)
         }
     }
 
@@ -312,6 +328,7 @@ impl Site {
             row: Some(segment),
             part: None,
             ordered: None,
+            body: false,
         }
     }
 
@@ -323,6 +340,7 @@ impl Site {
             row: Some(result),
             part: None,
             ordered: Some(result),
+            body: false,
         }
     }
 
@@ -405,6 +423,13 @@ enum Instr<S: GraphStorage> {
     Limit(usize),
     /// One pattern edge walked from the current vertex ([`Op::Expand`]); see [`Hop`].
     Hop(Hop<S>),
+    /// `repeat(__.<body>)` with the modulators of `quantifier` (as for a quantified edge,
+    /// [`Lowered::looped`]): the body of a quantified parenthesized path pattern (stage 2e,
+    /// [`Op::Group`]), one iteration from the node the iteration before ended on.
+    Repeat {
+        body: Vec<Instr<S>>,
+        quantifier: Quantifier,
+    },
     /// `select(label)`: back to a binding labelled earlier (a branch of the pattern, a later
     /// segment starting at a node bound before it).
     Select(BindingId),
@@ -547,6 +572,17 @@ struct PathRead {
     anchor: Option<CompactString>,
 }
 
+/// What [`Lowering::groups`] finds: how each group variable is read, the part label of each
+/// `OPTIONAL MATCH` segment that needs one, the anchor of each segment, and per binding
+/// whether it was walked against the text direction (a quantified edge's edge, every variable
+/// of a parenthesized path pattern's body).
+struct GroupTables {
+    groups: Vec<Option<GroupRead>>,
+    part_labels: Vec<CompactString>,
+    anchors: Vec<Option<CompactString>>,
+    reversed: Vec<bool>,
+}
+
 /// How a group variable is read outside its element pattern (`Binding::Group`).
 #[derive(Debug, Clone)]
 struct GroupRead {
@@ -587,6 +623,11 @@ impl<S: GraphStorage> Lowered<S> {
         }
         if site.current == Some(BindingId(slot)) {
             return Binding::Current;
+        }
+        // Inside the body of a parenthesized path pattern a body variable is this iteration's
+        // element (a body condition reads only the body's variables).
+        if site.body && matches!(self.groups.get(slot), Some(Some(_))) {
+            return Binding::Label(self.labels.get(slot).cloned().unwrap_or_default());
         }
         if let Some(Some(group)) = self.groups.get(slot) {
             return Binding::Group {
@@ -756,6 +797,10 @@ impl<S: GraphStorage> Lowered<S> {
                     Some(quantifier) => self.quantified(g, hop, quantifier),
                     None => self.hop(g, hop),
                 },
+                Instr::Repeat { body, quantifier } => {
+                    let body = self.emit_into(AnonymousTraversal::<'g, S>::new(), body);
+                    self.looped(g, body, quantifier)
+                }
                 Instr::Select(id) => g.select(self.label(id)),
                 Instr::Bind {
                     id,
@@ -924,6 +969,20 @@ impl<S: GraphStorage> Lowered<S> {
             Some(label) => body.as_(label),
             None => body,
         };
+        self.looped(g, body, quantifier)
+    }
+
+    /// Emits `repeat(body)` with the modulators of `quantifier` (see [`Self::quantified`]): the
+    /// loop of a quantified edge, and of a quantified parenthesized path pattern (stage 2e).
+    fn looped<'g, T: Sink<'g, S>>(
+        &self,
+        g: T,
+        body: AnonymousTraversal<'g, S>,
+        quantifier: Quantifier,
+    ) -> T
+    where
+        S: 'g,
+    {
         let max = quantifier.max.and_then(|n| u32::try_from(n).ok());
         let at_least = || {
             let min = i64::try_from(quantifier.min).unwrap_or(i64::MAX);
@@ -1002,6 +1061,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Skip(_)
             | Instr::Limit(_)
             | Instr::Hop(_)
+            | Instr::Repeat { .. }
             | Instr::Select(_)
             | Instr::Bind { .. }
             | Instr::Merge { .. }
@@ -1261,9 +1321,6 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    // Stage 2e: parenthesized path patterns bind (T2) and plan (T3, `Op::Group`); the lowering
-    // takes them in T4.
-    refuse_unplanned_groups(&parsed, &bound)?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -1365,6 +1422,11 @@ struct Lowering<'q> {
     /// whole-query subquery bodies. The `RETURN` row of linear query `p` is result pipeline
     /// `segments.len() + p` ([`Site::ordered`], [`Lowering::result_of`]).
     linears: Vec<&'q BoundLinear>,
+    /// Per binding: a variable of the body of a parenthesized path pattern quantified by `?`
+    /// (stage 2e, ISO conditional singletons): absent (`NULL`) after zero iterations, so a
+    /// trail check against it reads every occurrence (`gql:trail`, none passes) instead of
+    /// `where(P.neq(..))`, which would drop the row.
+    conditional: Vec<bool>,
 }
 
 impl<'q> Lowering<'q> {
@@ -1383,6 +1445,7 @@ impl<'q> Lowering<'q> {
             names: bound.bindings.iter().map(|b| b.key.clone()).collect(),
             children: std::cell::Cell::new(0),
             linears: linears(bound),
+            conditional: conditional_bindings(bound),
         }
     }
 
@@ -1493,9 +1556,14 @@ impl<'q> Lowering<'q> {
             .iter()
             .map(|segment| matches!(segment, Segment::For(f) if f.ordinal.is_none()))
             .collect();
-        let (groups, part_labels, anchors) = self.groups(&labels, &mut labelled);
+        let GroupTables {
+            groups,
+            part_labels,
+            anchors,
+            reversed,
+        } = self.groups(&labels, &mut labelled);
         let inner_labels = self.inner_labels(&labels);
-        let paths = self.paths(&labels, &inner_labels, &groups, &anchors);
+        let paths = self.paths(&labels, &inner_labels, &reversed, &anchors);
         Ok(Lowered {
             query: self.shared,
             instrs,
@@ -1708,9 +1776,7 @@ impl<'q> Lowering<'q> {
                     }
                     site = Site::on(expand.to);
                 }
-                // Stage 2e.T4 lowers parenthesized path patterns; until then
-                // `bind::refuse_unplanned_groups` refuses them before planning (a guard only).
-                Op::Group(_) => return Err(self.unlowered()),
+                Op::Group(group) => site = self.group(group, site, instrs)?,
                 Op::Join { binding } => {
                     instrs.push(self.same(*binding)?);
                     if self.is_column(*binding) {
@@ -2079,7 +2145,7 @@ impl<'q> Lowering<'q> {
             every.push(id);
         }
         for &other in &expand.trail {
-            if expand.quantifier.is_some() || self.is_group(other) {
+            if expand.quantifier.is_some() || self.is_group(other) || self.is_conditional(other) {
                 every.push(other);
             } else {
                 checks.push(self.differs(other)?);
@@ -2108,9 +2174,119 @@ impl<'q> Lowering<'q> {
         })
     }
 
-    /// Whether `id` is a group variable (the edge of a quantified edge).
+    /// Whether `id` is a group variable (the edge of a quantified edge, a variable of a
+    /// quantified parenthesized path pattern's body).
     fn is_group(&self, id: BindingId) -> bool {
         self.bound.binding(id).is_some_and(|b| b.group)
+    }
+
+    /// Whether `id` is a conditional singleton (see [`Lowering::conditional`]).
+    fn is_conditional(&self, id: BindingId) -> bool {
+        self.conditional.get(id.0).copied().unwrap_or(false)
+    }
+
+    /// Lowers a parenthesized path pattern (stage 2e, [`Op::Group`]) at `site`: back to `from`
+    /// when the walk does not continue from the current element, then the body
+    /// ([`Self::group_body`]) once without a quantifier, as `repeat(__.<body>)` with the
+    /// modulators of a quantified edge otherwise (`?` is `{0,1}`: `emit().repeat(B).times(1)`;
+    /// `{0}` no step, the far node is the near one), then the outer node `to` with its filters
+    /// and `as()` (a join follows when it was bound earlier). No merge point: every iteration
+    /// labels its edges, so traversers never merge there. Returns the site after it.
+    #[inline(never)]
+    fn group<S: GraphStorage>(
+        &self,
+        group: &GroupExpand,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        if !group.from_current {
+            self.move_to(group.from, site, instrs)?;
+        }
+        let zero_only = group.quantifier.is_some_and(|q| q.max == Some(0));
+        if !zero_only {
+            let body = self.group_body(group)?;
+            match group.quantifier {
+                None => instrs.extend(body),
+                Some(quantifier) => instrs.push(Instr::Repeat { body, quantifier }),
+            }
+        }
+        if !group.to_bound {
+            let (labels, steps, exists) = self.element(group.to, &group.to_filters, Vec::new())?;
+            if let Some(labels) = labels {
+                instrs.push(Instr::HasLabel(labels));
+            }
+            instrs.extend(steps);
+            instrs.push(Instr::Label(group.to));
+            instrs.extend(exists);
+        }
+        Ok(Site::on(group.to))
+    }
+
+    /// One iteration of a parenthesized path pattern's body, in walk order from the current
+    /// element (design item 9): the body conditions over no element, `first`'s label factors,
+    /// filters and `as()`; per hop the edge in its 1a form with its trail check before its
+    /// `as()` (`gql:trail` of its own label and of every other edge it must differ from when
+    /// the body repeats, or against a group variable or a conditional singleton; else
+    /// `where(P.neq(..))`), the node reached with its filters and `as()`, then the body
+    /// conditions whose last element in walk order is bound there (`gql:filter`, reading this
+    /// iteration's elements: [`Site::body`]).
+    fn group_body<S: GraphStorage>(
+        &self,
+        group: &GroupExpand,
+    ) -> Result<Vec<Instr<S>>, TraverserError> {
+        let repeats = group.quantifier.is_some() && !group.conditional;
+        let mut body = Vec::new();
+        for &c in &group.first_conjuncts {
+            self.conjunct(c, Site::in_body(group.first), &mut body)?;
+        }
+        let (labels, steps, exists) =
+            self.element(group.first, &group.first_filters, Vec::new())?;
+        if let Some(labels) = labels {
+            body.push(Instr::HasLabel(labels));
+        }
+        body.extend(steps);
+        body.push(Instr::Label(group.first));
+        body.extend(exists);
+        for hop in &group.hops {
+            let mut checks = Vec::new();
+            let mut every = Vec::new();
+            if repeats {
+                every.push(hop.edge);
+            }
+            for &other in &hop.trail {
+                if self.is_column(other) {
+                    checks.push(self.differs(other)?);
+                } else if repeats || self.is_group(other) || self.is_conditional(other) {
+                    every.push(other);
+                } else {
+                    checks.push(self.differs(other)?);
+                }
+            }
+            if !every.is_empty() {
+                checks.push(Instr::Trail(every));
+            }
+            let (labels, mut steps, exists) = self.element(hop.edge, &hop.edge_filters, checks)?;
+            steps.push(Instr::Label(hop.edge));
+            steps.extend(exists);
+            body.push(Instr::Hop(Hop {
+                direction: hop.direction,
+                labels,
+                steps,
+                quantifier: None,
+                inner: None,
+            }));
+            let (labels, steps, exists) = self.element(hop.to, &hop.to_filters, Vec::new())?;
+            if let Some(labels) = labels {
+                body.push(Instr::HasLabel(labels));
+            }
+            body.extend(steps);
+            body.push(Instr::Label(hop.to));
+            body.extend(exists);
+            for &c in &hop.filters {
+                self.conjunct(c, Site::in_body(hop.to), &mut body)?;
+            }
+        }
+        Ok(body)
     }
 
     /// The adjacency labels of an expansion's edge (the first label disjunction factor), as
@@ -2493,7 +2669,10 @@ impl<'q> Lowering<'q> {
                 | Instr::Bind { site, .. }
                 | Instr::RowCheck(_, site) => site.ordered = Some(result),
                 Instr::Hop(hop) => self.in_order(&mut hop.steps, result)?,
-                Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
+                Instr::Optional(part)
+                | Instr::Exists { body: part, .. }
+                | Instr::Call(part)
+                | Instr::Repeat { body: part, .. } => {
                     self.in_order(part, result)?;
                 }
                 Instr::Union(operands) => {
@@ -2649,7 +2828,16 @@ impl<'q> Lowering<'q> {
             .plan
             .labelling
             .iter()
-            .map(|l| l.join || l.trail || l.branch || l.resume || l.optional || l.group || l.path)
+            .map(|l| {
+                l.join
+                    || l.trail
+                    || l.branch
+                    || l.resume
+                    || l.optional
+                    || l.group
+                    || l.path
+                    || l.body
+            })
             .collect();
         labelled.resize(n, false);
         // One more per `RETURN` row (`Site::ordered`).
@@ -2685,15 +2873,7 @@ impl<'q> Lowering<'q> {
     /// node (`OPTIONAL MATCH (a)-[e]->{0,2}(a)`), on the part label `#o<k>` set at the end of
     /// the part. Without the anchor a part not matched (`NULL`) and a zero-length match (`[]`)
     /// would read alike, and a path over elements bound before the part would read as matched.
-    fn groups(
-        &self,
-        labels: &[CompactString],
-        labelled: &mut [bool],
-    ) -> (
-        Vec<Option<GroupRead>>,
-        Vec<CompactString>,
-        Vec<Option<CompactString>>,
-    ) {
+    fn groups(&self, labels: &[CompactString], labelled: &mut [bool]) -> GroupTables {
         let mut part_labels = vec![CompactString::default(); self.bound.segments.len()];
         let mut anchors: Vec<Option<CompactString>> = vec![None; self.bound.segments.len()];
         let pipelines = self.pipelines();
@@ -2751,6 +2931,17 @@ impl<'q> Lowering<'q> {
             {
                 *flag = e.reversed;
             }
+            // Every variable of a parenthesized path pattern's body: its iterations were walked
+            // from the node after the pattern (stage 2e).
+            if let Op::Group(g) = op {
+                let body =
+                    std::iter::once(g.first).chain(g.hops.iter().flat_map(|h| [h.edge, h.to]));
+                for id in body {
+                    if let Some(flag) = reversed.get_mut(id.0) {
+                        *flag = g.reversed;
+                    }
+                }
+            }
         }
         let groups = self
             .bound
@@ -2764,7 +2955,12 @@ impl<'q> Lowering<'q> {
                 })
             })
             .collect();
-        (groups, part_labels, anchors)
+        GroupTables {
+            groups,
+            part_labels,
+            anchors,
+            reversed,
+        }
     }
 
     /// The inner label of each group variable a read path variable passes through
@@ -2797,11 +2993,26 @@ impl<'q> Lowering<'q> {
         &self,
         labels: &[CompactString],
         inner_labels: &[CompactString],
-        groups: &[Option<GroupRead>],
+        reversed: &[bool],
         anchors: &[Option<CompactString>],
     ) -> Vec<Option<PathRead>> {
         let mut paths: Vec<Option<PathRead>> = vec![None; self.bound.bindings.len()];
         let label = |id: BindingId| labels.get(id.0).cloned().unwrap_or_default();
+        let walked_back = |id: BindingId| reversed.get(id.0).copied().unwrap_or(false);
+        let step_parts = |parts: &mut Vec<PathPart>, steps: &[BoundStep]| {
+            for step in steps {
+                if step.quantifier.is_some() {
+                    parts.push(PathPart::Group {
+                        edges: label(step.edge),
+                        vertices: inner_labels.get(step.edge.0).cloned().unwrap_or_default(),
+                        reversed: walked_back(step.edge),
+                    });
+                } else {
+                    parts.push(PathPart::Element(label(step.edge)));
+                }
+                parts.push(PathPart::Element(label(step.node)));
+            }
+        };
         for path in self.bound.matches.iter().flat_map(|m| &m.paths) {
             let Some(variable) = path.variable else {
                 continue;
@@ -2809,22 +3020,24 @@ impl<'q> Lowering<'q> {
             let Some(binding) = self.bound.binding(variable) else {
                 continue;
             };
-            let mut parts = Vec::with_capacity(2 * path.steps.len() + 1);
+            let mut parts = Vec::with_capacity(2 * path.steps.len() + 1 + 3 * path.groups.len());
             parts.push(PathPart::Element(label(path.start)));
-            for step in &path.steps {
-                if step.quantifier.is_some() {
-                    parts.push(PathPart::Group {
-                        edges: label(step.edge),
-                        vertices: inner_labels.get(step.edge.0).cloned().unwrap_or_default(),
-                        reversed: groups
-                            .get(step.edge.0)
-                            .and_then(Option::as_ref)
-                            .is_some_and(|g| g.reversed),
-                    });
-                } else {
-                    parts.push(PathPart::Element(label(step.edge)));
-                }
-                parts.push(PathPart::Element(label(step.node)));
+            step_parts(&mut parts, &path.steps);
+            // A parenthesized path pattern (stage 2e): its iterations from the labels of its
+            // body's elements after the first node (which is the node before it, merge rule),
+            // then the node after it (the last iteration's last node).
+            for group in &path.groups {
+                let body = &group.group;
+                parts.push(PathPart::Body {
+                    labels: body
+                        .steps
+                        .iter()
+                        .flat_map(|s| [label(s.edge), label(s.node)])
+                        .collect(),
+                    reversed: walked_back(body.start),
+                });
+                parts.push(PathPart::Element(label(group.node)));
+                step_parts(&mut parts, &group.steps);
             }
             if let Some(slot) = paths.get_mut(variable.0) {
                 *slot = Some(PathRead {
@@ -2923,6 +3136,28 @@ fn linears(bound: &BoundQuery) -> Vec<&BoundLinear> {
         .chain(bodies)
         .flat_map(BoundComposite::linears)
         .collect()
+}
+
+/// Per binding of `bound`: a variable of a parenthesized path pattern's body quantified by `?`
+/// ([`Lowering::conditional`]).
+fn conditional_bindings(bound: &BoundQuery) -> Vec<bool> {
+    let mut conditional = vec![false; bound.bindings.len()];
+    let groups = bound
+        .matches
+        .iter()
+        .flat_map(|m| &m.paths)
+        .flat_map(|path| &path.groups)
+        .filter(|g| g.group.conditional);
+    for group in groups {
+        let body = std::iter::once(group.group.start)
+            .chain(group.group.steps.iter().flat_map(|s| [s.edge, s.node]));
+        for id in body {
+            if let Some(flag) = conditional.get_mut(id.0) {
+                *flag = true;
+            }
+        }
+    }
+    conditional
 }
 
 /// `this IS LABELED <factor>` over the reserved name.
@@ -3133,7 +3368,10 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
-            Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
+            Instr::Optional(part)
+            | Instr::Exists { body: part, .. }
+            | Instr::Call(part)
+            | Instr::Repeat { body: part, .. } => {
                 mark_reads(part, marks);
             }
             Instr::Union(operands) => operands.iter().for_each(|o| mark_reads(o, marks)),
@@ -3188,7 +3426,10 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 .for_each(|body| in_part(body, segment)),
             Instr::Lookup { site, .. } | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
-            Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
+            Instr::Optional(part)
+            | Instr::Exists { body: part, .. }
+            | Instr::Call(part)
+            | Instr::Repeat { body: part, .. } => {
                 in_part(part, segment);
             }
             Instr::Union(operands) => operands.iter_mut().for_each(|o| in_part(o, segment)),
