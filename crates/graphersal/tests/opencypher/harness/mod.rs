@@ -8,4 +8,6 @@
 // silence dead-code warnings until they are wired in.
 #![allow(dead_code)]
 
+pub mod compare;
 pub mod gherkin;
+pub mod values;
