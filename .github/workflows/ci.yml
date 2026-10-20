@@ -26,7 +26,7 @@ env:
   # Incremental compilation only costs time and cache space on a fresh CI runner.
   CARGO_INCREMENTAL: 0
   # The graphersal feature set of local acceptance (tests and rustdoc).
-  ACCEPTANCE_FEATURES: script,io,display,serde,persist,persist-zip
+  ACCEPTANCE_FEATURES: script,io,display,serde,persist,gql,persist-zip
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -92,7 +92,7 @@ jobs:
           # shellcheck disable=SC2086
           for f in "--no-default-features" "--features script" "--features display" \
                    "--features serde" "--features io" "--features persist" "--features persist-zstd" \
-                   "--features persist-zip" "--features alloc-tracking" "--all-features" \
+                   "--features persist-zip" "--features gql" "--features alloc-tracking" "--all-features" \
                    "--no-default-features --features script,serde,display"; do
             echo "::group::cargo check --package graphersal $f"
             cargo check --package graphersal $f
@@ -108,8 +108,9 @@ jobs:
                    "--no-default-features --features io" \
                    "--no-default-features --features persist-zstd" \
                    "--no-default-features --features persist-zip" \
-                   "--no-default-features --features script,io,display,serde,persist" \
-                   "--no-default-features --features script,io,display,serde,persist,persist-zip"; do
+                   "--no-default-features --features gql" \
+                   "--no-default-features --features script,io,display,serde,persist,gql" \
+                   "--no-default-features --features script,io,display,serde,persist,gql,persist-zip"; do
             echo "::group::cargo check --package graphersal --target wasm32-unknown-unknown $f"
             cargo check --package graphersal --target wasm32-unknown-unknown $f
             echo "::endgroup::"

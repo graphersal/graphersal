@@ -445,7 +445,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Keeps elements that do not have the given property.",
         "g.v().has_not(\"age\").values(\"name\").to_list()" => "[\"lop\", \"ripple\"]";
     "traversal" "has_p":
-        "Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2.2 a string naming a label compared with the labelled element).",
         "g.v(1).as(\"vadas\").out(\"knows\").has_p(\"name\", P.eq(\"vadas\")).values(\"name\").to_list()" => "[\"vadas\"]";
     "traversal" "has_value":
         "Keeps properties whose value is one of the given values (or matches a predicate, whose string operand is a value, never a path label).",
@@ -454,7 +454,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Graphersal alias of has_value(v1, v2, ...).",
         "g.v().properties(\"name\").has_value_any(\"marko\", \"josh\").value().to_list()" => "[\"marko\", \"josh\"]";
     "traversal" "has_value_p":
-        "Graphersal form of has_value(predicate); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "Graphersal form of has_value(predicate); a string operand is always a value, never a path label (only where() reads labels; before 0.2.2 a string naming a label compared with the labelled element).",
         "g.v(1).as(\"vadas\").out(\"knows\").properties(\"name\").has_value_p(P.eq(\"vadas\")).value().to_list()" => "[\"vadas\"]";
     "traversal" "id":
         "Yields the id of each vertex or edge (a string), never a property named id.",
@@ -493,7 +493,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Keeps the elements of the incoming list that are also in the given list.",
         "g.inject([1, 2, 3]).intersect([2, 3, 4]).next()" => "[2, 3]";
     "traversal" "is":
-        "Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2.2 a string naming a label compared with the labelled element).",
         "g.v(1).as(\"vadas\").out(\"knows\").values(\"name\").is(P.eq(\"vadas\")).to_list()" => "[\"vadas\"]";
     "traversal" "iterate":
         "Runs the traversal for its side effects and returns unit; the results are discarded, never materialized.",

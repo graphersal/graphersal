@@ -3,7 +3,7 @@
 
 `has_p` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).
+Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2.2 a string naming a label compared with the labelled element).
 
 ## Forms
 

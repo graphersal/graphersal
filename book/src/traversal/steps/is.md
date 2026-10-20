@@ -3,7 +3,7 @@
 
 `is` · `is_` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).
+Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2.2 a string naming a label compared with the labelled element).
 
 ## Forms
 

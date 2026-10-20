@@ -71,7 +71,7 @@ Rust the predicate is `P::regex("^mar")?` / `P::not_regex(..)?`.
   `g.V().as("vadas").out("knows").has("name", P.eq("vadas"))` finds vadas.
 - **`eq`/`neq` with a string on a vertex** compares the vertex's id (`is(P.eq("1"))`, kept from
   the original implementation); under `where(P)` a step label of that name comes first.
-- **Changed in 0.2:** before, a value filter compared a string naming a step label with the
+- **Changed in 0.2.2:** before, a value filter compared a string naming a step label with the
   labelled element (so the first query below returned nothing). TinkerPop compares the literal;
   only `where(P)` resolves labels.
 
