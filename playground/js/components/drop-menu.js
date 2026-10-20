@@ -15,6 +15,11 @@ let openMenu = null; // only one menu is open at a time
 /** Dispatched by the workspace whenever the panel layout changes. */
 export const LAYOUT_EVENT = 'playground:layout';
 
+/** Closes the open dropdown menu, if any (the Examples panel opens on hover). */
+export function closeOpenMenu() {
+  if (openMenu) openMenu();
+}
+
 export const DropMenu = {
   props: {
     /** Classes of the trigger button. */

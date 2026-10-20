@@ -98,6 +98,7 @@ playground/
   tests/ai-chat.test.mjs       Node tests of the AI Chat tab model and controller (fake server), the wasm stub, the HTTP calls
   tests/link.test.mjs          Node tests of playground links: parse/build, graph data encoding, damage, share size
   tests/markdown.test.mjs      Node tests of the chat's Markdown renderer and the table -> Markdown copy
+  tests/examples-panel.test.mjs  Node tests of the Examples panel model and the shape of examples.json
   js/
     main.js                Vue app root, global shortcuts, dialogs, toasts
     router.js              hash routing (#/ and #/play), applies playground links
@@ -111,8 +112,10 @@ playground/
     ai-chat.js             the AI Chat tab: chat state, event merging, /commands, one controller per tab (pure, Node-tested)
     markdown.js            the chat's safe Markdown subset as a plain tree, GFM tables, table -> Markdown (pure, Node-tested)
     config.js              external links; re-exports examples.json
-    examples.json          the Examples menu (grouped, per sample graph; every entry is run by
-                           graphersal-wasm's test playground_examples_run_against_the_engine)
+    examples.json          the Examples panel (`group`, optional `subgroup` (GQL), per sample graph; every
+                           entry is run by graphersal-wasm's test playground_examples_run_against_the_engine)
+    examples-panel.js      the Examples panel's model: group tree, plain search + snippets, keyboard order,
+                           remembered state (pure, Node-tested)
     util.js                storage (try/catch-wrapped localStorage), formatting
     export.js              file names and downloads (drawings, Save menu)
     profile-text.js        TraversalMetrics as the CLI-style text table (Profile panel, Text tab)

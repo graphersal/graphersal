@@ -4,8 +4,9 @@
 // selection, undo history), swapped in when the tab becomes active. Mod-Shift-Enter runs all tabs.
 // Run (button, Mod-Enter) executes the main selection when it holds more than whitespace, else the
 // whole tab (js/editor/run-selection.js).
-// The Examples menu's GQL group starts with "Wrap as GQL": the selection (or the whole tab) holding
-// a GQL query becomes the script g.gql(`...`) that runs it (js/editor/gql-wrap.js).
+// The Examples button opens the Examples panel (examples-panel.js: an overlay drawer with search and
+// collapsible groups). Its GQL group starts with "Wrap as GQL": the selection (or the whole tab)
+// holding a GQL query becomes the script g.gql(`...`) that runs it (js/editor/gql-wrap.js).
 // An AI Chat tab (tab kind 'ai') shows the chat (ai-chat.js) in place of the editor; the editor
 // view stays mounted (hidden) so the query tabs keep their editor states.
 
@@ -32,6 +33,7 @@ import { runText } from '../editor/run-selection.js';
 import { wrapGql } from '../editor/gql-wrap.js';
 import { PanelFrame } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
+import { ExamplesPanel } from './examples-panel.js';
 import { QueryTabs } from './query-tabs.js';
 import { AiChat } from './ai-chat.js';
 
@@ -58,7 +60,7 @@ export const editorTheme = EditorView.theme({
 });
 
 export const QueryEditor = {
-  components: { PanelFrame, DropMenu, QueryTabs, AiChat },
+  components: { PanelFrame, DropMenu, ExamplesPanel, QueryTabs, AiChat },
   setup(props, { expose }) {
     const host = ref(null);
     const cursor = ref({ line: 1, col: 1 });
@@ -235,13 +237,6 @@ export const QueryEditor = {
     });
     const cursorText = computed(() => cursorTexts(cursor.value));
 
-    /** The examples as `[{ group, items }]`, in file order. */
-    const exampleGroups = EXAMPLES.reduce((groups, ex) => {
-      const last = groups[groups.length - 1];
-      if (last && last.group === ex.group) last.items.push(ex);
-      else groups.push({ group: ex.group, items: [ex] });
-      return groups;
-    }, []);
     const SAMPLE_TITLES = { empty: 'Empty graph', modern: 'Modern (TinkerPop)', large: 'Large generated graph', tree: 'File tree' };
     /**
      * An example goes into the active tab when that tab is empty or still holds an unmodified
@@ -290,7 +285,7 @@ export const QueryEditor = {
     expose({ focus: () => view && view.focus() });
 
     return {
-      state, host, cursorText, status, runningHere, isChat, runningText, exampleGroups, modKey, setRunOption, stopRun,
+      state, host, cursorText, status, runningHere, isChat, runningText, examples: EXAMPLES, modKey, setRunOption, stopRun,
       useExample, useHistory, wrapAsGql, oneLine, clearHistory, runNow, hasSelection, runTitle,
     };
   },
@@ -319,19 +314,7 @@ export const QueryEditor = {
         <input type="checkbox" :checked="state.tab.runOptions.memory" :disabled="!state.tab.runOptions.profile"
                @change="setRunOption('memory', $event.target.checked)"> Memory
       </label>
-      <drop-menu title="Example queries and scripts" menu-style="width: min(480px, 90vw); max-height: 70vh; overflow-y: auto">
-        <template #trigger>Examples ▾</template>
-          <template v-for="grp in exampleGroups" :key="grp.group">
-            <div class="menu-title">{{ grp.group }}</div>
-            <button v-if="grp.group === 'GQL'" class="menu-item" @click="wrapAsGql()"
-                    title="Turn the GQL query in the editor (the selection, or the whole tab) into the script g.gql(\`...\`) that runs it; an empty tab gets a template">
-              <span style="flex:none;min-width:0">Wrap as GQL: g.gql(\`…\`)</span>
-            </button>
-            <button v-for="ex in grp.items" :key="ex.title" class="menu-item" @click="useExample(ex)" :title="ex.script">
-              <span style="flex:none;min-width:0">{{ ex.title }}</span>
-            </button>
-          </template>
-      </drop-menu>
+      <examples-panel :examples="examples" @use="useExample" @wrap-gql="wrapAsGql()"></examples-panel>
       <drop-menu title="Query history (Alt+Up / Alt+Down in the editor)" menu-style="width: min(460px, 90vw); max-height: 60vh; overflow-y: auto">
         <template #trigger>History ▾</template>
           <div class="menu-title">Recent queries</div>

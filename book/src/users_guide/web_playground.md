@@ -35,6 +35,12 @@ answers questions by querying the served graph. In the WebAssembly playground th
   **Profile** on, the metrics; **Memory** adds the exact per-step memory figures (the module installs
   the counting allocator, so the source is `tracked`). Results are shown as a table, JSON and the raw
   text the CLI prints, within the CLI's display limits (see [Displaying Results](displaying_results.md)).
+- **Examples**: the Query panel's **Examples** button (a click, or resting the pointer on it) opens
+  a panel over the editor with every example, in collapsible groups (GQL split by topic). Its search
+  field finds a plain text in titles and scripts, case-insensitive (`.order(` lists every example
+  that uses it, with the matching line); `Up`/`Down` move, `Enter` opens, `Esc` clears the search
+  and then closes. Reopening returns to where you were and marks the example opened last, so the
+  next one is right below it.
 - **Query tabs**: the Query panel holds several queries side by side. Each tab has its own text,
   Profile/Memory toggles, last result and last profile; switching tabs shows that tab's results
   without running anything. The graph is shared: when a run in one tab changes it, the other tabs'
