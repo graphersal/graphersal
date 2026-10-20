@@ -1677,6 +1677,17 @@ impl<'q> Planner<'q> {
                 }
                 self.read_all(reads, at);
             }
+            // `DELETE` (stage 3d): as `SET`, one step on the row before the clause reads every
+            // target there and emits the row unchanged.
+            BoundWrite::Delete(delete) => {
+                let here = at.host(*current);
+                for target in &delete.targets {
+                    self.body_reads_away(body, &target.value.bindings, *current);
+                    reads.extend_from_slice(&target.value.bindings);
+                    self.expr_hosts(&target.value.expr, here, hosts);
+                }
+                self.read_all(reads, at);
+            }
         }
     }
 
@@ -2273,8 +2284,8 @@ fn write_created(write: &BoundWrite) -> Vec<BindingId> {
             .map(|n| n.binding)
             .chain(insert.edges.iter().map(|e| e.binding))
             .collect(),
-        // `SET` / `REMOVE` declare nothing.
-        BoundWrite::Set(_) | BoundWrite::Remove(_) => Vec::new(),
+        // `SET`, `REMOVE` and `DELETE` declare nothing.
+        BoundWrite::Set(_) | BoundWrite::Remove(_) | BoundWrite::Delete(_) => Vec::new(),
     }
 }
 

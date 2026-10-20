@@ -282,6 +282,16 @@
 //!   twice (42002). Targets and what the values read are [`BoundSet::reads`] /
 //!   [`BoundRemove::reads`], all marked read. The lowering emits one `gql:set` /
 //!   `gql:remove` step per clause on the row before it.
+//! - **`[DETACH | NODETACH] DELETE` (stage 3d, design W27-W29)** is a cut like `SET`
+//!   ([`BoundDelete`] in a [`Segment::Write`]), preceded by the W10 materialization (so a
+//!   `WITH n, n.num AS num DELETE n RETURN num` reads the value from before the delete). Its
+//!   targets are expressions over the scope before the clause and parameters, without
+//!   aggregates (42002), each with the kind the binder knows ([`DeleteTarget`],
+//!   [`DeleteKind`]: a node, an edge with its pattern's label names, a path, a list, `NULL` or
+//!   a value only the run knows). A target the binder knows is no element (a number, text, a
+//!   boolean, a map, an arithmetic, comparison or boolean operator, a `FOR` ordinal) is refused
+//!   (42002, design E2); a value whose kind only the run knows is checked there (22G03). What
+//!   the targets read is [`BoundDelete::reads`], all marked read.
 //!
 //! The planner plans a write clause as a `Stage::Write` of its pipeline; a `CALL` whose body
 //! ends in `FINISH` or a write is a unit subquery ([`BoundCall::unit`]): the outer row passes
@@ -362,14 +372,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::ast::{
-    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
-    CountClause, EdgeDirection, EdgePattern, Expr, ExprKind, ForClause, GroupBy, Identifier,
-    InsertClause, LabelExpr, LabelExprKind, LabelItem, LetClause, LinearQuery, ListComprehension,
-    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy,
-    OrdinalKind, ParenthesizedPath, PathPattern, PatternStep, ProjectionItem, Quantifier, Query,
-    QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnItem, SetClause,
-    SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind,
-    WithClause,
+    BinaryOp, CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery,
+    ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Expr, ExprKind,
+    ForClause, GroupBy, Identifier, InsertClause, LabelExpr, LabelExprKind, LabelItem, LetClause,
+    LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral, MapProjection,
+    MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern, PatternStep,
+    ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause,
+    RemoveItemKind, ReturnItem, SetClause, SetItemKind, SortDirection, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -697,7 +707,7 @@ pub(crate) struct BoundRows {
 }
 
 /// A bound write clause (stage 3a, [`Segment::Write`]; module docs, "Writes"). One variant per
-/// write clause; `DELETE` and `MERGE` join in later stages.
+/// write clause; `MERGE` joins in a later stage.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BoundWrite {
     /// `INSERT` / Cypher `CREATE`.
@@ -706,6 +716,8 @@ pub(crate) enum BoundWrite {
     Set(BoundSet),
     /// `REMOVE` (stage 3c).
     Remove(BoundRemove),
+    /// `[DETACH | NODETACH] DELETE` (stage 3d).
+    Delete(BoundDelete),
 }
 
 impl BoundWrite {
@@ -717,6 +729,7 @@ impl BoundWrite {
             BoundWrite::Insert(insert) => &insert.reads,
             BoundWrite::Set(set) => &set.reads,
             BoundWrite::Remove(remove) => &remove.reads,
+            BoundWrite::Delete(delete) => &delete.reads,
         }
     }
 }
@@ -822,6 +835,61 @@ pub(crate) enum BoundRemoveKind {
     /// `v:A:B` / `v IS A & B`: the labels, in written order, each once (a missing label:
     /// no-op). The target is never known to be an edge.
     Labels(Vec<Identifier>),
+}
+
+/// A bound `[DETACH | NODETACH] DELETE expr, ..` (stage 3d, design W27-W29): on every incoming
+/// row the elements the targets hold are removed (a path's and a list's elements too; `NULL`
+/// ignored); without `detach` a node that keeps an edge the clause does not remove is an
+/// error.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundDelete {
+    /// Written `DETACH DELETE`: a node's edges go with it (`NODETACH`, the default, otherwise).
+    pub(crate) detach: bool,
+    /// The targets in written order.
+    pub(crate) targets: Vec<DeleteTarget>,
+    /// What the targets read, sorted, without duplicates.
+    pub(crate) reads: Vec<BindingId>,
+    /// The keywords as written (`DELETE`, `DETACH DELETE`, `NODETACH DELETE`).
+    pub(crate) keyword: Span,
+    /// The clause.
+    pub(crate) span: Span,
+}
+
+/// One target of a [`BoundDelete`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeleteTarget {
+    /// The expression (`LET` / `WITH` names substituted) and the bindings it reads.
+    pub(crate) value: WriteValue,
+    /// What it holds, as far as the binder knows (the static facts the access requests are
+    /// built from, P0 C3 of stage 3d).
+    pub(crate) kind: DeleteKind,
+    /// The target as written.
+    pub(crate) span: Span,
+}
+
+/// What a [`DeleteTarget`] holds, as far as the binder knows. Closed by definition: an
+/// element, the containers of elements a `DELETE` takes (a path, a list), `NULL`, or a value
+/// only the run knows.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DeleteKind {
+    /// A node variable (a node pattern variable, or a column holding one).
+    Node,
+    /// An edge variable (an edge pattern variable, or a column holding one).
+    Edge {
+        /// The label names its pattern allows, as [`TargetKind::Edge`].
+        labels: Option<Vec<Identifier>>,
+    },
+    /// A path variable: its edges, then its nodes.
+    Path,
+    /// A list: a group variable, a list literal, a list comprehension, a pattern
+    /// comprehension or a `COLLECT { }` (its items elements, paths, lists or `NULL`).
+    List,
+    /// The literal `NULL`: nothing to remove.
+    Null,
+    /// A value whose kind only the run knows (a `FOR` item, a `WITH` / `CALL` / `NEXT`
+    /// column, a `LET` / `WITH` value name, a map member, a parameter, a function result):
+    /// a node, an edge, a path, a list or `NULL` then, or a value the step refuses (22G03).
+    Unknown,
 }
 
 /// The target of a `SET` / `REMOVE` item: a binding declared before the clause, and what the
@@ -2496,6 +2564,7 @@ impl<'q> Binder<'q> {
             Stage::Insert(clause) => self.insert_clause(clause),
             Stage::Set(clause) => self.set_clause(clause),
             Stage::Remove(clause) => self.remove_clause(clause),
+            Stage::Delete(clause) => self.delete_clause(clause),
         }
     }
 
@@ -3761,6 +3830,132 @@ impl<'q> Binder<'q> {
         self.push_write(BoundWrite::Remove(remove), clause.span)
     }
 
+    /// `[DETACH | NODETACH] DELETE expr, ..` (stage 3d, module docs "Writes"): a cut like
+    /// `SET` after the W10 materialization; every target an expression over the scope before
+    /// it, refused when the binder knows it holds no element (design E2).
+    #[inline(never)]
+    fn delete_clause(&mut self, clause: &DeleteClause) -> BResult<()> {
+        let word = match (clause.detach, clause.explicit_nodetach) {
+            (true, _) => "DETACH DELETE",
+            (false, true) => "NODETACH DELETE",
+            (false, false) => "DELETE",
+        };
+        self.write_prelude(word, clause.keyword)?;
+        let mut reads: Vec<BindingId> = Vec::new();
+        let mut targets = Vec::with_capacity(clause.targets.len());
+        for target in &clause.targets {
+            // Resolved first: an unknown name or an aggregate gets its own error.
+            let value = self.write_value_in(target, IN_DELETE, &mut reads)?;
+            let kind = self.delete_kind(word, target)?;
+            targets.push(DeleteTarget {
+                value,
+                kind,
+                span: target.span,
+            });
+        }
+        reads.sort_unstable();
+        reads.dedup();
+        self.mark_read(&reads);
+        let delete = BoundDelete {
+            detach: clause.detach,
+            targets,
+            reads,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        self.push_write(BoundWrite::Delete(delete), clause.span)
+    }
+
+    /// What a `DELETE` target as written holds, as far as the binder knows (see
+    /// [`DeleteKind`]); a target it knows holds no element is refused (42002, design E2).
+    fn delete_kind(&self, word: &str, target: &Expr) -> BResult<DeleteKind> {
+        let refuse = |what: &str| -> BResult<DeleteKind> {
+            Err(no_element_target(
+                word,
+                target.span,
+                self.query.text(target.span),
+                what,
+            ))
+        };
+        match &target.kind {
+            ExprKind::Literal(Literal::Null) => Ok(DeleteKind::Null),
+            ExprKind::Literal(Literal::String(_)) => refuse("a text"),
+            ExprKind::Literal(Literal::Bool(_)) => refuse("a boolean"),
+            ExprKind::Literal(Literal::Integer(_) | Literal::Float(_)) => refuse("a number"),
+            ExprKind::Variable(var) => self.delete_variable_kind(word, var, target),
+            ExprKind::Parameter(_)
+            | ExprKind::Property { .. }
+            | ExprKind::FunctionCall { .. }
+            | ExprKind::Case(_) => Ok(DeleteKind::Unknown),
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Concat,
+                ..
+            } => {
+                // `[a] + [b]` is a list: only a chain of scalar operands is known to be none.
+                if scalar_chain(target) {
+                    refuse("a computed value")
+                } else {
+                    Ok(DeleteKind::Unknown)
+                }
+            }
+            ExprKind::Binary { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::IsNull { .. }
+            | ExprKind::IsLabeled { .. }
+            | ExprKind::IsEndpoint { .. } => refuse("a computed value"),
+            ExprKind::Map(_) | ExprKind::MapProjection(_) => refuse("a map"),
+            ExprKind::Subquery(subquery) => match subquery.kind {
+                SubqueryKind::Exists => refuse("a boolean"),
+                SubqueryKind::Count => refuse("a number"),
+                SubqueryKind::Collect => Ok(DeleteKind::List),
+            },
+            ExprKind::List(_)
+            | ExprKind::ListComprehension(_)
+            | ExprKind::PatternComprehension(_) => Ok(DeleteKind::List),
+        }
+    }
+
+    /// The [`DeleteKind`] of a variable target (resolved already, so it is in scope).
+    fn delete_variable_kind(
+        &self,
+        word: &str,
+        var: &Identifier,
+        target: &Expr,
+    ) -> BResult<DeleteKind> {
+        let Some(Symbol::Binding(id)) = self.scope.get(&var.name) else {
+            // A `LET` / `WITH` value name: its kind is the run's to check (22G03).
+            return Ok(DeleteKind::Unknown);
+        };
+        let id = *id;
+        let binding = self.bindings.get(id.0).ok_or_else(|| {
+            semantic(
+                var.span,
+                "internal error: a binding id out of range in the binder",
+            )
+        })?;
+        if binding.group {
+            return Ok(DeleteKind::List);
+        }
+        Ok(match binding.kind {
+            BindingKind::Node => DeleteKind::Node,
+            BindingKind::Edge => DeleteKind::Edge {
+                labels: edge_label_names(&binding.labels),
+            },
+            BindingKind::Path => DeleteKind::Path,
+            BindingKind::Value => {
+                if self.for_column(id) == Some(FOR_ORDINAL) {
+                    return Err(no_element_target(
+                        word,
+                        target.span,
+                        self.query.text(target.span),
+                        "the position of a FOR item (a number)",
+                    ));
+                }
+                DeleteKind::Unknown
+            }
+        })
+    }
+
     /// A label item on a target the binder knows is an edge (design W26, P0 C1, 42002): an edge
     /// has exactly one label, its type.
     fn edge_label_item(
@@ -3929,10 +4124,21 @@ impl<'q> Binder<'q> {
     /// The value of a `SET` item (design W8): no aggregate, no key twice in a map literal;
     /// what it reads is added to `reads`.
     fn write_value(&mut self, value: &Expr, reads: &mut Vec<BindingId>) -> BResult<WriteValue> {
+        self.write_value_in(value, IN_SET, reads)
+    }
+
+    /// A write clause's expression (a `SET` value, a `DELETE` target) at `place`, for the
+    /// message of a refused aggregate.
+    fn write_value_in(
+        &mut self,
+        value: &Expr,
+        place: &'static str,
+        reads: &mut Vec<BindingId>,
+    ) -> BResult<WriteValue> {
         if let ExprKind::Map(map) = &value.kind {
             check_map_keys(map)?;
         }
-        let resolved = self.expression(Ctx::refusing(IN_SET), value)?;
+        let resolved = self.expression(Ctx::refusing(place), value)?;
         reads.extend_from_slice(&resolved.refs.bindings);
         Ok(WriteValue {
             expr: resolved.expr,
@@ -6324,6 +6530,53 @@ fn ordinal_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
     )
 }
 
+/// The error of a `DELETE` target the binder knows holds no element (42002, design E2):
+/// `written` is the target as written, `what` what it is.
+fn no_element_target(word: &str, span: Span, written: &str, what: &str) -> Box<GqlErrorBuilder> {
+    Box::new(
+        semantic(
+            span,
+            format!(
+                "`{written}` is {what}, not a node, an edge, a path or a list of them; {word} \
+                 removes elements"
+            ),
+        )
+        .alternative(format!(
+            "name the element to remove by its variable, as in MATCH (p:person)-[e:knows]->() \
+             {word} e"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// Whether `expr`, a chain of `+` / `||`, has only operands the binder knows are no list
+/// (literals other than `NULL`, arithmetic), so its value is no element (walked without
+/// recursion).
+fn scalar_chain(expr: &Expr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(e) = pending.pop() {
+        match &e.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Concat,
+                left,
+                right,
+            } => {
+                pending.push(left);
+                pending.push(right);
+            }
+            ExprKind::Literal(Literal::Null) => return false,
+            ExprKind::Literal(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::IsNull { .. }
+            | ExprKind::IsLabeled { .. }
+            | ExprKind::IsEndpoint { .. } => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// A `SET` / `REMOVE` item on `var`, for an alternative.
 fn target_example(word: &str, var: &str) -> String {
     if word == "SET" {
@@ -6475,7 +6728,9 @@ fn composite_writes(composite: &CompositeQuery) -> bool {
         for linear in linears {
             for stage in &linear.stages {
                 match stage {
-                    Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) => return true,
+                    Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) | Stage::Delete(_) => {
+                        return true;
+                    }
                     Stage::Call(call) => pending.push(&call.body),
                     Stage::Match(_)
                     | Stage::Let(_)
@@ -6497,6 +6752,9 @@ const IN_CREATE: &str = "in CREATE";
 
 /// The place of an aggregate inside a `SET` value (refused, design W8).
 const IN_SET: &str = "in SET";
+
+/// The place of an aggregate inside a `DELETE` target (refused, design W8).
+const IN_DELETE: &str = "in DELETE";
 
 /// `ORDINALITY` / `OFFSET` as written.
 fn ordinal_word(kind: OrdinalKind) -> &'static str {

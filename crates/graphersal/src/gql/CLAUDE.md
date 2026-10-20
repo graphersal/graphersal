@@ -77,7 +77,11 @@ Files appear as their stage lands; this table is the target layout.
   since 3c.T1 (`Stage::Set` / `Stage::Remove`, `BoundWrite::Set` / `Remove`, targets with their
   static kind `bind::TargetKind`), lowered since 3c.T3 to one `gql:set` / `gql:remove` per clause
   (`Instr::Set` / `Remove`; the row and the current element stay, targets bound at emission);
-  `DELETE`, `MERGE` are refused by the parser as not yet supported.
+  `[DETACH | NODETACH] DELETE` parsed and bound since 3d.T1 (`Stage::Delete`,
+  `BoundWrite::Delete`, expression targets with their static kind `bind::DeleteKind`; E1 label
+  predicates refused by the parser, E2 known non-elements by the binder), refused by the
+  lowering (`Lowering::delete_not_yet`) until 3d.T3; `MERGE` is refused by the parser as not
+  yet supported.
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the

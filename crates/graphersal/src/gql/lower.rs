@@ -114,9 +114,9 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemoveKind,
-    BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count, InsertProperty,
-    Predicate, Segment, SortKey, TargetKind, WriteTarget, bind_with_parameters,
+    BindingId, BindingKind, BoundComposite, BoundDelete, BoundInsert, BoundLinear, BoundQuery,
+    BoundRemoveKind, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count,
+    InsertProperty, Predicate, Segment, SortKey, TargetKind, WriteTarget, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -2146,8 +2146,34 @@ impl<'q> Lowering<'q> {
                     site,
                 });
             }
+            // Bound since stage 3d.T1, lowered from 3d.T3 on: refused before the run.
+            BoundWrite::Delete(delete) => return Err(self.delete_not_yet(delete)),
         }
         Ok(site)
+    }
+
+    /// The error of a bound `DELETE` the lowering does not emit yet (until stage 3d.T3), at
+    /// its keywords: the Gremlin step that does it.
+    fn delete_not_yet(&self, delete: &BoundDelete) -> TraverserError {
+        let keyword = delete.keyword;
+        let word = self
+            .query
+            .get(keyword.start..keyword.end)
+            .unwrap_or("DELETE")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            keyword.start..keyword.end,
+            format!("{word} is not yet supported in this version"),
+        )
+        .alternative(
+            "remove the elements with the Gremlin step drop(), which removes a vertex with its \
+             edges, for example g.v().has_label(\"person\").has(\"name\", \"marko\").drop()",
+        )
+        .into_error(self.query)
     }
 
     /// The target of a `SET` / `REMOVE` item with the static facts the access requests are

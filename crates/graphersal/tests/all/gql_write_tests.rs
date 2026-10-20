@@ -1186,3 +1186,49 @@ fn a_failing_set_row_changes_nothing() {
         assert_eq!(dump(&graph), before, "{query} changed the graph");
     }
 }
+
+// ----- stage 3d.T1: DELETE parses and binds, refused at the lowering until 3d.T3 -----
+
+#[test]
+fn bound_delete_is_refused_before_the_run() {
+    for (query, words) in [
+        ("MATCH (p:person) DELETE p", "DELETE"),
+        (
+            "MATCH (p:person) DETACH DELETE p RETURN count(*)",
+            "DETACH DELETE",
+        ),
+        ("MATCH (p) NODETACH DELETE p", "NODETACH DELETE"),
+        ("MATCH path = (p)-->() DELETE path, [p], NULL", "DELETE"),
+        (
+            "MATCH (p) CALL (p) { DETACH DELETE p } RETURN 1",
+            "DETACH DELETE",
+        ),
+        (
+            "MATCH (p) WITH p, p.age AS old DELETE p RETURN old",
+            "DELETE",
+        ),
+    ] {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let before = dump(&graph);
+        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
+        match error.root_cause() {
+            TraverserError::Gql {
+                kind,
+                message,
+                gqlstatus,
+                ..
+            } => {
+                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
+                assert_eq!(gqlstatus, "0A000", "{query}");
+                assert_eq!(
+                    *message,
+                    format!("{words} is not yet supported in this version")
+                );
+                let help = error.help().unwrap_or_default();
+                assert!(help.contains(".drop()"), "{query}: {help}");
+            }
+            other => panic!("{query}: {other}"),
+        }
+        assert_eq!(dump(&graph), before, "{query} changed the graph");
+    }
+}

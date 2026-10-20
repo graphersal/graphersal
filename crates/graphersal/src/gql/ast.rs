@@ -35,7 +35,8 @@
 //! ([`Stage::Insert`], [`InsertClause`]), and linear queries without a result statement: one
 //! ending in a write clause or in `FINISH` ([`LinearQuery::end`]). A query without writes has
 //! exactly the tree of the stages before. Stage 3c adds `SET` ([`Stage::Set`], [`SetClause`])
-//! and `REMOVE` ([`Stage::Remove`], [`RemoveClause`]).
+//! and `REMOVE` ([`Stage::Remove`], [`RemoveClause`]). Stage 3d adds `[DETACH | NODETACH]
+//! DELETE` ([`Stage::Delete`], [`DeleteClause`]).
 
 use super::lexer::Span;
 
@@ -234,6 +235,27 @@ pub(crate) enum Stage {
     Set(SetClause),
     /// `REMOVE item, ...` (stage 3c).
     Remove(RemoveClause),
+    /// `[DETACH | NODETACH] DELETE expr, ...` (stage 3d).
+    Delete(DeleteClause),
+}
+
+/// `[DETACH | NODETACH] DELETE expr, expr, ...` (stage 3d, design W27-W29): once per incoming
+/// row, every element the targets hold is removed (an edge, a node, the elements of a path or
+/// of a list; `NULL` is ignored). Without `DETACH` (`NODETACH`, the default) a node that keeps
+/// an edge the clause does not remove is an error.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DeleteClause {
+    /// Written `DETACH DELETE`: a node's edges are removed with it.
+    pub(crate) detach: bool,
+    /// Written `NODETACH DELETE` (the default spelled out; `detach` is then `false`).
+    pub(crate) explicit_nodetach: bool,
+    /// The comma-separated target expressions in written order (at least one; never a label
+    /// predicate `n:L`, which the parser refuses, design E1).
+    pub(crate) targets: Vec<Expr>,
+    /// The keywords as written: from `DETACH` / `NODETACH` (when written) to `DELETE`.
+    pub(crate) keyword: Span,
+    /// From the first keyword to the end of the last target.
+    pub(crate) span: Span,
 }
 
 /// `SET item, item, ...` (stage 3c, design W20-W26): each item changes the element a variable

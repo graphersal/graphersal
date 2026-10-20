@@ -645,6 +645,7 @@ fn segment_shapes(q: &BoundQuery) -> Vec<String> {
                 }
                 BoundWrite::Set(set) => format!("set{}", set.items.len()),
                 BoundWrite::Remove(remove) => format!("remove{}", remove.items.len()),
+                BoundWrite::Delete(delete) => format!("delete{}", delete.targets.len()),
             },
         })
         .collect()
@@ -4061,4 +4062,234 @@ fn set_and_remove_errors() {
     // A read error before the SET comes first.
     let f = fail("MATCH (n) WHERE x > 1 SET n.k = 1");
     assert_eq!(f.text, "x");
+}
+
+// ----- stage 3d.T1: DELETE -----
+
+fn delete_of(q: &BoundQuery, segment: usize) -> &BoundDelete {
+    match q.segments.get(segment) {
+        Some(Segment::Write(write)) => match &**write {
+            BoundWrite::Delete(delete) => delete,
+            other => panic!("segment {segment} is no DELETE: {other:?}"),
+        },
+        other => panic!("segment {segment} is no write: {other:?}"),
+    }
+}
+
+/// The kind of the last segment's only DELETE target.
+fn delete_kind_of(query: &str) -> DeleteKind {
+    let q = ok(query);
+    let delete = delete_of(&q, q.segments.len() - 1);
+    assert_eq!(delete.targets.len(), 1, "{query}");
+    delete.targets[0].kind.clone()
+}
+
+#[test]
+fn delete_binds_targets_kinds_and_reads() {
+    let query = "MATCH p = (n:person)-[e:knows|likes]->(m) DETACH DELETE e, n, p, [m], NULL, \
+                 $x, {a: n}.a";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["match[0]", "delete7"]);
+    assert!(q.writes());
+    assert_eq!(q.end, QueryEnd::Write);
+    let (n, e, m, p) = (id(&q, "n"), id(&q, "e"), id(&q, "m"), id(&q, "p"));
+    let delete = delete_of(&q, 1);
+    assert!(delete.detach);
+    assert_eq!(
+        &query[delete.keyword.start..delete.keyword.end],
+        "DETACH DELETE"
+    );
+    assert!(query[delete.span.start..delete.span.end].ends_with("{a: n}.a"));
+    let kinds: Vec<&DeleteKind> = delete.targets.iter().map(|t| &t.kind).collect();
+    match kinds[0] {
+        DeleteKind::Edge {
+            labels: Some(labels),
+        } => assert_eq!(label_texts(labels), ["knows", "likes"]),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        kinds[1..],
+        [
+            &DeleteKind::Node,
+            &DeleteKind::Path,
+            &DeleteKind::List,
+            &DeleteKind::Null,
+            &DeleteKind::Unknown,
+            &DeleteKind::Unknown
+        ]
+    );
+    let spans: Vec<&str> = delete
+        .targets
+        .iter()
+        .map(|t| &query[t.span.start..t.span.end])
+        .collect();
+    assert_eq!(spans, ["e", "n", "p", "[m]", "NULL", "$x", "{a: n}.a"]);
+    assert_eq!(delete.targets[0].value.bindings, [e]);
+    assert_eq!(delete.targets[3].value.bindings, [m]);
+    assert!(delete.targets[4].value.bindings.is_empty());
+    let mut reads = vec![n, e, m, p];
+    reads.sort_unstable();
+    assert_eq!(delete.reads, reads);
+    // The default and the spelled-out NODETACH.
+    for query in ["MATCH (n) DELETE n", "MATCH (n) NODETACH DELETE n"] {
+        let q = ok(query);
+        let delete = delete_of(&q, 1);
+        assert!(!delete.detach, "{query}");
+        assert_eq!(delete.targets[0].kind, DeleteKind::Node, "{query}");
+    }
+    // An edge without a label name: any label.
+    assert_eq!(
+        delete_kind_of("MATCH ()-[r]->() DELETE r"),
+        DeleteKind::Edge { labels: None }
+    );
+    // Lists: a group variable, comprehensions, COLLECT { }.
+    for query in [
+        "MATCH (a) ((x)-->(y)){1,2} (b) DELETE x",
+        "MATCH (n) DELETE [x IN [n] | x]",
+        "MATCH (n) DELETE [(n)-->(m) | m]",
+        "MATCH (n) DELETE COLLECT { MATCH (n)-->(m) RETURN m }",
+    ] {
+        assert_eq!(delete_kind_of(query), DeleteKind::List, "{query}");
+    }
+    // Kinds only the run knows: a FOR item, a WITH value column, a LET value name, a
+    // function result, a CASE, a list concatenation, arithmetic with NULL.
+    for query in [
+        "FOR x IN [1, 2] DELETE x",
+        "MATCH (n) WITH head(collect(n)) AS x DELETE x",
+        "MATCH (n) LET l = [n] DELETE l",
+        "LET c = 1 DELETE c",
+        "MATCH (n) DELETE head([n])",
+        "MATCH (n) DELETE CASE WHEN true THEN n END",
+        "MATCH (n) DELETE [n] + [n]",
+        "DELETE 1 + NULL",
+        "MATCH (n) CALL (n) { RETURN head([n]) AS x } DELETE x",
+    ] {
+        assert_eq!(delete_kind_of(query), DeleteKind::Unknown, "{query}");
+    }
+    // A column holding a node variable is a node.
+    assert_eq!(
+        delete_kind_of("MATCH (n) CALL (n) { RETURN n AS x } DELETE x"),
+        DeleteKind::Node
+    );
+    assert_eq!(
+        delete_kind_of("MATCH (n) WITH n AS x DELETE x"),
+        DeleteKind::Node
+    );
+}
+
+#[test]
+fn delete_materializes_substitutions_first() {
+    // Design W10 (TCK Delete6 [5]): `num` stands for `n.num`; read after the DELETE, it is the
+    // value from before.
+    let q = ok("MATCH (n) WITH n, n.num AS num DELETE n RETURN num");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "delete1"]);
+    let num = id(&q, "num");
+    assert_eq!(q.columns[0].bindings, [num]);
+    let delete = delete_of(&q, 2);
+    assert_ne!(delete.targets[0].value.bindings, [id(&q, "n")]);
+    assert_eq!(delete.targets[0].kind, DeleteKind::Node);
+    let q = ok("MATCH (n) LET a = n.age DETACH DELETE n RETURN sum(a)");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "delete1"]);
+    // A constant stays a substitution.
+    let q = ok("MATCH (n) LET a = 1 DELETE n RETURN a");
+    assert_eq!(segment_shapes(&q), ["match[0]", "delete1"]);
+}
+
+#[test]
+fn delete_inside_call_bodies() {
+    let q = ok("MATCH (p) CALL (p) { DETACH DELETE p } RETURN count(*)");
+    assert_eq!(segment_shapes(&q), ["match[0]", "delete1", "call0"]);
+    let Some(Segment::Call(call)) = q.segments.get(2) else {
+        panic!("{:?}", q.segments);
+    };
+    assert!(call.unit(), "a body ending in DELETE is a unit subquery");
+    assert_eq!(delete_of(&q, 1).targets[0].value.bindings, [id(&q, "p")]);
+    let q = ok("MATCH (p) OPTIONAL CALL { WITH p DELETE p } RETURN 1");
+    assert!(q.writes());
+    // A CALL whose body deletes is a write: values are materialized before it.
+    let q = ok("MATCH (n) LET a = n.age CALL (n) { DETACH DELETE n } RETURN a");
+    assert_eq!(
+        segment_shapes(&q),
+        ["match[0]", "with2", "delete1", "call0"]
+    );
+    // After NEXT.
+    let q = ok("MATCH (n) RETURN n NEXT DETACH DELETE n");
+    assert!(q.writes());
+}
+
+#[test]
+fn delete_errors() {
+    // Targets the binder knows hold no element (design E2, TCK Delete5 [9]): 42002 at the
+    // target.
+    for (query, text, what) in [
+        ("MATCH (n) DELETE 1 + 1", "1 + 1", "a computed value"),
+        ("MATCH (n) DELETE n, 1", "1", "a number"),
+        ("MATCH (n) DETACH DELETE 'n'", "'n'", "a text"),
+        ("DELETE true", "true", "a boolean"),
+        ("MATCH (n) DELETE n.k = 1", "n.k = 1", "a computed value"),
+        ("MATCH (n) DELETE NOT n", "NOT n", "a computed value"),
+        (
+            "MATCH (n) DELETE n IS NULL",
+            "n IS NULL",
+            "a computed value",
+        ),
+        (
+            "MATCH (n) DELETE 'a' || 'b'",
+            "'a' || 'b'",
+            "a computed value",
+        ),
+        ("MATCH (n) DELETE {a: n}", "{a: n}", "a map"),
+        ("MATCH (n) DELETE n {.name}", "n {.name}", "a map"),
+        (
+            "MATCH (n) DELETE EXISTS { (n)-->() }",
+            "EXISTS { (n)-->() }",
+            "a boolean",
+        ),
+        (
+            "MATCH (n) DELETE COUNT { (n)-->() }",
+            "COUNT { (n)-->() }",
+            "a number",
+        ),
+        (
+            "FOR x IN [1] WITH ORDINALITY i DELETE i",
+            "i",
+            "the position of a FOR item (a number)",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        let word = if query.contains("DETACH") {
+            "DETACH DELETE"
+        } else {
+            "DELETE"
+        };
+        assert_eq!(
+            f.message,
+            format!(
+                "`{text}` is {what}, not a node, an edge, a path or a list of them; {word} \
+                 removes elements"
+            ),
+            "{query}"
+        );
+        assert!(
+            f.alternative.unwrap_or_default().contains("e:knows"),
+            "{query}"
+        );
+    }
+    // Unbound names (TCK Delete5 [8]): 42002 with the message of any unknown name.
+    for (query, text) in [
+        ("MATCH (n) DELETE x", "x"),
+        ("MATCH (n) DELETE n, [m]", "m"),
+        ("DELETE n", "n"),
+        ("MATCH (p) WITH p.age AS a DELETE p", "p"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    // An aggregate in a target (design W8).
+    let f = fail("MATCH (n) DELETE head(collect(n))");
+    assert_eq!(f.text, "collect");
+    assert!(f.message.contains("in DELETE"), "{}", f.message);
 }

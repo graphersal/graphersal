@@ -55,10 +55,6 @@ reason = "not yet: DETACH DELETE"
 class = "missing"
 reason = "not yet: DELETE"
 
-["clauses/delete/Delete1.feature::[8] Failing when deleting a label"]
-class = "missing"
-reason = "not yet: DELETE"
-
 ["clauses/delete/Delete2.feature::[1] Delete relationships"]
 class = "missing"
 reason = "not yet: DELETE"
@@ -72,10 +68,6 @@ class = "missing"
 reason = "not yet: DELETE"
 
 ["clauses/delete/Delete2.feature::[4] Ignore null when deleting relationship"]
-class = "missing"
-reason = "not yet: DELETE"
-
-["clauses/delete/Delete2.feature::[5] Failing when deleting a relationship type"]
 class = "missing"
 reason = "not yet: DELETE"
 
@@ -101,11 +93,11 @@ reason = "not yet: DELETE"
 
 ["clauses/delete/Delete5.feature::[1] Delete node from a list"]
 class = "missing"
-reason = "not yet: DETACH DELETE"
+reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/delete/Delete5.feature::[2] Delete relationship from a list"]
 class = "missing"
-reason = "not yet: DETACH DELETE"
+reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/delete/Delete5.feature::[3] Delete nodes from a map"]
 class = "missing"
@@ -117,23 +109,15 @@ reason = "not yet: DELETE"
 
 ["clauses/delete/Delete5.feature::[5] Detach delete nodes from nested map/list"]
 class = "missing"
-reason = "not yet: DETACH DELETE"
+reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/delete/Delete5.feature::[6] Delete relationships from nested map/list"]
 class = "missing"
-reason = "not yet: DELETE"
+reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/delete/Delete5.feature::[7] Delete paths from nested map/list"]
 class = "missing"
-reason = "not yet: DELETE"
-
-["clauses/delete/Delete5.feature::[8] Failing when using undefined variable in DELETE"]
-class = "missing"
-reason = "not yet: DELETE"
-
-["clauses/delete/Delete5.feature::[9] Failing when deleting an integer expression"]
-class = "missing"
-reason = "not yet: DELETE"
+reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/delete/Delete6.feature::[10] Skipping and limiting to a few results after deleting relationships affects the result set but not the side effects"]
 class = "missing"
@@ -261,7 +245,7 @@ reason = "not yet: MERGE"
 
 ["clauses/merge/Merge1.feature::[14] Merges should not be able to match on deleted nodes"]
 class = "missing"
-reason = "not yet: DELETE"
+reason = "not yet: MERGE"
 
 ["clauses/merge/Merge1.feature::[15] Fail when merge a node that is already bound"]
 class = "missing"
@@ -409,11 +393,11 @@ reason = "not yet: MERGE"
 
 ["clauses/merge/Merge5.feature::[20] Do not match on deleted entities"]
 class = "missing"
-reason = "not yet: DELETE"
+reason = "not yet: MERGE"
 
 ["clauses/merge/Merge5.feature::[21] Do not match on deleted relationships"]
 class = "missing"
-reason = "not yet: DELETE"
+reason = "not yet: MERGE"
 
 ["clauses/merge/Merge5.feature::[22] Fail when imposing new predicates on a variable that is already bound"]
 class = "missing"

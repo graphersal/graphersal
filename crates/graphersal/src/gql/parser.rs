@@ -102,12 +102,11 @@
 //!   followed by a word (`INDEX`, `CONSTRAINT`, `GRAPH`, `OR REPLACE`, Neo4j's `DATABASE`, ...)
 //!   is a refused catalog or administration command naming `g.create_index(..)` /
 //!   `g.set_schema(..)`; `LOAD CSV` is refused (vendor), Cypher `FOREACH` is "not yet"
-//!   naming `FOR x IN l INSERT ..`. The other write clauses (`[DETACH |
-//!   NODETACH] DELETE`, `MERGE`) are "not yet supported", naming the Gremlin step that does
-//!   the work (`drop()`, `merge_v()`); a write clause after `RETURN` is the "RETURN ends the
+//!   naming `FOR x IN l INSERT ..`. `MERGE` is "not yet supported", naming the Gremlin step
+//!   that does the work (`merge_v()`); a write clause after `RETURN` is the "RETURN ends the
 //!   query" syntax error. The expected tokens after a clause do not name the write clauses
-//!   (coordinator default K9); after an `INSERT`, `SET` or `REMOVE` they name `,` and the
-//!   clauses.
+//!   (coordinator default K9); after an `INSERT`, `SET`, `REMOVE` or `DELETE` they name `,`
+//!   and the clauses.
 //! - **`SET` / `REMOVE` (stage 3c, design W20-W26, D1, D2)** stand where `INSERT` stands
 //!   (same placement rules, [`Parser::writes`], [`Parser::write_ban`]). An item's target is a
 //!   variable: `v.key` or `(v).key` for a property item, `v` for `SET v = e` (replace every
@@ -115,6 +114,11 @@
 //!   `v :A :B`, `v:A&B`, `v IS A & B` (a conjunction of names as in `INSERT`; `|`, `!`, `%` are
 //!   syntax errors). Any other target (`head(l).k`, `n.a.b`, `n[key]`) is read as an
 //!   expression and is "not yet supported" ([`SetClause`], [`RemoveClause`]).
+//! - **`[DETACH | NODETACH] DELETE expr, ...` (stage 3d, design W27-W29)** stands where `SET`
+//!   stands (same placement rules). `NODETACH` is the default spelled out. A target is any
+//!   expression (an element variable, a path, a list, a map member, `NULL`; the binder refuses
+//!   the kinds it knows are no element, E2) except a label predicate (`n:L`, `n IS L`, `n IS
+//!   LABELED L`), a syntax error naming `REMOVE n:L` (design E1) ([`DeleteClause`]).
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
 //!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`LinearQuery::stages`] is then
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
@@ -294,8 +298,8 @@
 use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
-    ComprehensionForm, CountClause, EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind,
-    FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
+    ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Endpoint, Expr,
+    ExprKind, FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
     LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery, ListComprehension,
     ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock,
     NodePattern, OrderBy, Ordinal, OrdinalKind, ParenthesizedPath, PathPattern,
@@ -1081,32 +1085,20 @@ impl<'a> Parser<'a> {
                 self.write_ban
                     .map(|place| self.banned_write(span, &text, place))
             }
-            // `SET` / `REMOVE` (stage 3c): where no clause can stand, a plain syntax error.
-            Keyword::Set | Keyword::Remove => self
+            // `SET` / `REMOVE` (stage 3c), `DELETE` (stage 3d): where no clause can stand, a
+            // plain syntax error.
+            Keyword::Set | Keyword::Remove | Keyword::Delete => self
                 .write_ban
                 .map(|place| self.banned_write(span, &text, place)),
-            keyword @ (Keyword::Delete | Keyword::Merge) => {
+            Keyword::Detach | Keyword::Nodetach => self.write_ban.map(|place| {
+                let (whole, what) = self.delete_keywords();
+                self.banned_write(whole, &what, place)
+            }),
+            Keyword::Merge => {
                 if let Some(place) = self.write_ban {
                     return Some(self.banned_write(span, &text, place));
                 }
-                not_yet(&text, &self.write_alternative(keyword))
-            }
-            Keyword::Detach | Keyword::Nodetach => {
-                let mut whole = span;
-                if self.nth(1).keyword() == Some(Keyword::Delete) {
-                    whole = span.to(self.nth(1).span);
-                }
-                let what = format!("{text} DELETE");
-                if let Some(place) = self.write_ban {
-                    return Some(self.banned_write(whole, &what, place));
-                }
-                let b = err(
-                    GqlErrorKind::NotYet,
-                    whole,
-                    format!("{what} is not yet supported in this version"),
-                )
-                .alternative(self.write_alternative(Keyword::Delete));
-                Some(Box::new(b))
+                not_yet(&text, &self.write_alternative())
             }
             // An inline `CALL { }` / `CALL (..) { }` where no clause stands: a plain syntax error.
             Keyword::Call if matches!(self.nth(1).kind, TokenKind::LBrace | TokenKind::LParen) => {
@@ -1273,17 +1265,27 @@ impl<'a> Parser<'a> {
         Box::new(b)
     }
 
-    /// The Gremlin alternative of a write clause that is not yet supported (`DELETE` and its
-    /// `DETACH` / `NODETACH` forms, `MERGE`), at its keyword: the step that does it.
-    fn write_alternative(&self, keyword: Keyword) -> String {
-        match keyword {
-            Keyword::Merge => "find or create the element with the Gremlin steps merge_v() and \
-                 merge_e(), for example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})"
-                .to_string(),
-            _ => "remove the elements with the Gremlin step drop(), which removes a vertex with \
-                 its edges, for example g.v().has_label(\"person\").has(\"name\", \"marko\").drop()"
-                .to_string(),
+    /// The Gremlin alternative of `MERGE`, the write clause that is not yet supported, at its
+    /// keyword: the steps that do it.
+    fn write_alternative(&self) -> String {
+        "find or create the element with the Gremlin steps merge_v() and merge_e(), for example \
+         g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})"
+            .to_string()
+    }
+
+    /// At `DETACH` / `NODETACH` (or `DELETE`): the span of the keywords up to `DELETE` and their
+    /// upper-case text (`DETACH DELETE`).
+    fn delete_keywords(&self) -> (Span, String) {
+        let token = self.peek();
+        let text = token.text.to_ascii_uppercase();
+        if token.keyword() == Some(Keyword::Delete) {
+            return (token.span, text);
         }
+        let mut whole = token.span;
+        if self.nth(1).keyword() == Some(Keyword::Delete) {
+            whole = whole.to(self.nth(1).span);
+        }
+        (whole, format!("{text} DELETE"))
     }
 
     fn not_yet(&self, span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
@@ -1594,6 +1596,9 @@ impl<'a> Parser<'a> {
             Some(Keyword::Insert | Keyword::Create) => Stage::Insert(self.insert_clause()?),
             Some(Keyword::Set) => Stage::Set(self.set_clause()?),
             Some(Keyword::Remove) => Stage::Remove(self.remove_clause()?),
+            Some(Keyword::Delete | Keyword::Detach | Keyword::Nodetach) => {
+                Stage::Delete(self.delete_clause()?)
+            }
             _ => return Ok(false),
         };
         stages.push(stage);
@@ -1907,7 +1912,9 @@ impl<'a> Parser<'a> {
             Some(Stage::For(clause)) if !clause.unwind && clause.ordinal.is_none() => {
                 vec!["WITH ORDINALITY", "WITH OFFSET"]
             }
-            Some(Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_)) => vec!["`,`"],
+            Some(Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) | Stage::Delete(_)) => {
+                vec!["`,`"]
+            }
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
@@ -2477,6 +2484,93 @@ impl<'a> Parser<'a> {
             keyword,
             span: keyword.to(self.last),
         })
+    }
+
+    /// `[DETACH | NODETACH] DELETE expr, ...`, at the first keyword (stage 3d,
+    /// [`DeleteClause`]); inside a subquery expression or a comprehension the refusal (design
+    /// W3). A target written as a label predicate (`n:L`, `n IS L`) is a syntax error (design
+    /// E1): it is a boolean, and `DELETE` removes whole elements.
+    fn delete_clause(&mut self) -> PResult<DeleteClause> {
+        let (whole, what) = self.delete_keywords();
+        if let Some(place) = self.write_ban {
+            return Err(self.banned_write(whole, &what, place));
+        }
+        let first = self.advance();
+        let detach = first.keyword() == Some(Keyword::Detach);
+        let explicit_nodetach = first.keyword() == Some(Keyword::Nodetach);
+        let start = first.span;
+        if detach || explicit_nodetach {
+            self.expect_kw(Keyword::Delete, &["DELETE"])?;
+        }
+        let keyword = start.to(self.last);
+        self.writes.push(keyword);
+        let mut targets = vec![self.delete_target(&what)?];
+        while self.eat(&TokenKind::Comma).is_some() {
+            targets.push(self.delete_target(&what)?);
+        }
+        Ok(DeleteClause {
+            detach,
+            explicit_nodetach,
+            targets,
+            keyword,
+            span: keyword.to(self.last),
+        })
+    }
+
+    /// One target of a `DELETE` (`what`: its keywords as written in upper case): any
+    /// expression but a label predicate (design E1).
+    fn delete_target(&mut self, what: &str) -> PResult<Expr> {
+        // `n IS Label` (the label form of SET / REMOVE items) is no expression: read as one.
+        let is_label = self.peek().name().is_some()
+            && self.nth(1).keyword() == Some(Keyword::Is)
+            && self.nth(2).name().is_some()
+            && !matches!(
+                self.nth(2).keyword(),
+                Some(Keyword::Not | Keyword::Null | Keyword::Labeled)
+            )
+            && !((is_word(self.nth(2), "SOURCE") || is_word(self.nth(2), "DESTINATION"))
+                && is_word(self.nth(3), "OF"));
+        if is_label {
+            let element = self.advance().span;
+            self.advance();
+            let (labels, _) = self.label_expr()?;
+            return Err(self.label_target(what, element.to(self.last), element, labels.span));
+        }
+        let target = self.expr()?;
+        if let ExprKind::IsLabeled {
+            operand, labels, ..
+        } = &target.kind
+        {
+            return Err(self.label_target(what, target.span, operand.span, labels.span));
+        }
+        Ok(target)
+    }
+
+    /// The syntax error of a `DELETE` target written as a label predicate (design E1): `span`
+    /// the target, `element` its operand, `labels` its label expression.
+    fn label_target(
+        &self,
+        what: &str,
+        span: Span,
+        element: Span,
+        labels: Span,
+    ) -> Box<GqlErrorBuilder> {
+        let written = self.text(span);
+        let element = self.text(element);
+        let b = err(
+            GqlErrorKind::Syntax,
+            span,
+            format!(
+                "`{written}` is a label test (a boolean), not an element; {what} removes whole \
+                 nodes and edges"
+            ),
+        )
+        .alternative(format!(
+            "delete the element itself with {what} {element}, or remove the label and keep the \
+             element with REMOVE {element}:{}",
+            self.text(labels)
+        ));
+        Box::new(b)
     }
 
     /// One `REMOVE` item: `v.key`, `(v).key`, `v:A:B` / `v IS A & B`; its errors get the SET

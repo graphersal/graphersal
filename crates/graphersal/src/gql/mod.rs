@@ -4,7 +4,8 @@
 //! Cypher `CREATE`, since stage 3c `SET` and `REMOVE`) is turned into an ordinary traversal
 //! plan: it runs through the same optimizer, profile, limits, permissions and storages as a
 //! Gremlin traversal. ISO GQL is the normative spelling; common Cypher spellings are accepted as
-//! aliases. `DELETE` and `MERGE` are refused as not yet supported.
+//! aliases. `DELETE` is parsed and bound since stage 3d.T1 and refused by the lowering as not
+//! yet supported until it is lowered; `MERGE` is refused as not yet supported.
 //!
 //! The entry points are [`GraphTraversalSource::gql`](crate::GraphTraversalSource::gql) and
 //! [`GraphTraversalSource::gql_with`](crate::GraphTraversalSource::gql_with) (in `lower.rs`).

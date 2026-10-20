@@ -791,11 +791,8 @@ fn lexer_errors_are_gql_syntax_errors() {
 #[test]
 fn writes_not_yet_supported_are_refused() {
     for (query, text, step) in [
-        ("MATCH (n) DELETE n", "DELETE", "drop()"),
-        ("MATCH (n) DETACH DELETE n", "DETACH DELETE", "drop()"),
-        ("MATCH (n) NODETACH DELETE n", "NODETACH DELETE", "drop()"),
         ("MERGE (n:person {name: 'x'})", "MERGE", "merge_v("),
-        ("match (n) delete n", "delete", "drop()"),
+        ("merge (n:person)", "merge", "merge_v("),
     ] {
         let f = fail(query);
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
@@ -1218,6 +1215,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::Insert(_) => "insert",
             Stage::Set(_) => "set",
             Stage::Remove(_) => "remove",
+            Stage::Delete(_) => "delete",
         })
         .collect()
 }
@@ -3491,6 +3489,7 @@ fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
             Stage::Insert(_) => "insert",
             Stage::Set(_) => "set",
             Stage::Remove(_) => "remove",
+            Stage::Delete(_) => "delete",
         })
         .collect()
 }
@@ -5023,8 +5022,6 @@ fn catalog_and_vendor_commands_are_refused() {
 #[test]
 fn not_yet_write_clauses_build_the_gremlin_example_from_the_clause() {
     for (query, example) in [
-        ("MATCH (p) DELETE p", ".drop()"),
-        ("MATCH (p) DETACH DELETE p", ".drop()"),
         ("MERGE (p:person)", "merge_v("),
         ("MATCH (p) FOREACH (x IN [1] | SET p.k = x)", "FOR name IN"),
     ] {
@@ -5344,4 +5341,239 @@ fn set_and_remove_errors() {
     assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
     let f = fail("MATCH (n) REMOVE n:A )");
     assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
+}
+
+// ----- stage 3d.T1: DELETE -----
+
+/// Stage `index` of `linear` as a DELETE clause.
+fn delete_of(linear: &LinearQuery, index: usize) -> &DeleteClause {
+    match linear.stages.get(index) {
+        Some(Stage::Delete(clause)) => clause,
+        other => panic!("stage {index} is no DELETE: {other:?}"),
+    }
+}
+
+#[test]
+fn delete_forms_and_spans() {
+    for (query, keyword, detach, nodetach) in [
+        ("MATCH (n) DELETE n", "DELETE", false, false),
+        ("MATCH (n) DETACH DELETE n", "DETACH DELETE", true, false),
+        (
+            "MATCH (n) NODETACH DELETE n",
+            "NODETACH DELETE",
+            false,
+            true,
+        ),
+        ("match (n) detach  delete n", "detach  delete", true, false),
+    ] {
+        let q = ok(query);
+        assert_eq!(stage_kinds(&q), ["match", "delete"], "{query}");
+        assert_eq!(q.end(), QueryEnd::Write, "{query}");
+        let delete = delete_of(&q, 1);
+        assert_eq!(q.text(delete.keyword), keyword, "{query}");
+        assert_eq!(delete.detach, detach, "{query}");
+        assert_eq!(delete.explicit_nodetach, nodetach, "{query}");
+        assert_eq!(q.text(delete.span), format!("{keyword} n"), "{query}");
+    }
+    // Expression targets (design W29): variables, paths, lists, map members, NULL, calls.
+    let q = ok("MATCH p = (n)-[r]->(m) DELETE r, n, p, [m], NULL, {a: n}.a, nodes(p), $x");
+    let delete = delete_of(&q, 1);
+    let targets: Vec<&str> = delete.targets.iter().map(|t| q.text(t.span)).collect();
+    assert_eq!(
+        targets,
+        ["r", "n", "p", "[m]", "NULL", "{a: n}.a", "nodes(p)", "$x"]
+    );
+    assert!(matches!(delete.targets[0].kind, ExprKind::Variable(_)));
+    assert!(matches!(delete.targets[3].kind, ExprKind::List(_)));
+    assert!(matches!(
+        delete.targets[4].kind,
+        ExprKind::Literal(Literal::Null)
+    ));
+    assert!(matches!(delete.targets[5].kind, ExprKind::Property { .. }));
+    // A computed target parses (the binder refuses it, design E2).
+    let q = ok("MATCH (n) DELETE 1 + 1");
+    assert_eq!(q.text(delete_of(&q, 1).targets[0].span), "1 + 1");
+}
+
+#[test]
+fn delete_stands_where_set_stands() {
+    for (query, kinds) in [
+        (
+            "MATCH (n) DELETE n RETURN count(*)",
+            vec!["match", "delete"],
+        ),
+        (
+            "MATCH (n) DETACH DELETE n MATCH (m) DELETE m RETURN 1",
+            vec!["match", "delete", "match", "delete"],
+        ),
+        ("MATCH (n) DELETE n;", vec!["match", "delete"]),
+        ("MATCH (n) DELETE n FINISH", vec!["match", "delete"]),
+        ("DELETE NULL", vec!["delete"]),
+        (
+            "MATCH (n) SET n.k = 1 DELETE n DELETE n",
+            vec!["match", "set", "delete", "delete"],
+        ),
+        (
+            "MATCH (n) WITH n, n.k AS k DELETE n RETURN k",
+            vec!["match", "with", "delete"],
+        ),
+    ] {
+        assert_eq!(stage_kinds(&ok(query)), kinds, "{query}");
+    }
+    assert!(matches!(
+        ok("MATCH (n) DELETE n FINISH").end(),
+        QueryEnd::Finish(_)
+    ));
+    assert_eq!(ok("MATCH (n) DELETE n RETURN 1").end(), QueryEnd::Return);
+    let q = ok("MATCH (n) RETURN n NEXT MATCH (n) DETACH DELETE n");
+    assert_eq!(q.body.next.len(), 1);
+    // A CALL body may end in DELETE (a unit subquery) or return after it.
+    for query in [
+        "MATCH (n) CALL (n) { DETACH DELETE n } RETURN count(*)",
+        "MATCH (n) CALL (n) { NODETACH DELETE n RETURN 1 AS one } RETURN one",
+        "MATCH (n) OPTIONAL CALL { WITH n DELETE n } RETURN 1",
+    ] {
+        let q = ok(query);
+        let Some(Stage::Call(call)) = q.stages.get(1) else {
+            panic!("{query}: {:?}", q.stages);
+        };
+        let kinds = stage_kinds_of(&call.body.first.first);
+        assert!(kinds.contains(&"delete"), "{query}: {kinds:?}");
+    }
+    // A UNION operand that writes: not yet, at its keywords.
+    for (query, text) in [
+        (
+            "MATCH (n) DELETE n RETURN 1 AS x UNION RETURN 2 AS x",
+            "DELETE",
+        ),
+        (
+            "RETURN 2 AS x UNION MATCH (n) DETACH DELETE n RETURN 1 AS x",
+            "DETACH DELETE",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("in an operand of UNION"),
+            "{}",
+            f.message
+        );
+    }
+    // After RETURN: RETURN ends the query.
+    for (query, text) in [
+        ("MATCH (n) RETURN n DELETE n", "DELETE"),
+        ("MATCH (n) RETURN n DETACH DELETE n", "DETACH"),
+        ("MATCH (n) RETURN n NODETACH DELETE n", "NODETACH"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.ends_with("after RETURN: RETURN ends the query"),
+            "{query}: {}",
+            f.message
+        );
+    }
+    // Inside subquery expressions and comprehensions: the write ban (design W3), the keywords
+    // underlined.
+    for (query, text, place) in [
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) DELETE n RETURN n } RETURN n",
+            "DELETE",
+            "EXISTS",
+        ),
+        (
+            "MATCH (n) RETURN COUNT { MATCH (n) NODETACH DELETE n RETURN n } AS c",
+            "NODETACH DELETE",
+            "COUNT",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [n] | DETACH DELETE x] AS l",
+            "DETACH DELETE",
+            "list comprehension",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(place), "{query}: {}", f.message);
+        assert!(f.message.contains("cannot write"), "{}", f.message);
+    }
+    // Inside an expression: a clause, not a function.
+    let f = fail("MATCH (n) RETURN DELETE(n)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "DELETE");
+    assert!(f.message.contains("is a clause"), "{}", f.message);
+}
+
+#[test]
+fn delete_errors() {
+    // A label predicate as a target (design E1, TCK Delete1 [8], Delete2 [5]): a syntax error
+    // at the target naming REMOVE.
+    for (query, text, element, remove) in [
+        (
+            "MATCH (n) DELETE n:Person",
+            "n:Person",
+            "n",
+            "REMOVE n:Person",
+        ),
+        ("MATCH ()-[r]->() DELETE r:T", "r:T", "r", "REMOVE r:T"),
+        (
+            "MATCH (n) DETACH DELETE n IS Person",
+            "n IS Person",
+            "n",
+            "REMOVE n:Person",
+        ),
+        (
+            "MATCH (n) DELETE n IS LABELED Person",
+            "n IS LABELED Person",
+            "n",
+            "REMOVE n:Person",
+        ),
+        (
+            "MATCH (n), (m) DELETE m, n:A:B",
+            "n:A:B",
+            "n",
+            "REMOVE n:A:B",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.starts_with(&format!(
+                "`{text}` is a label test (a boolean), not an element"
+            )),
+            "{query}: {}",
+            f.message
+        );
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(alternative.contains(remove), "{query}: {alternative}");
+        assert!(
+            alternative.contains(&format!("DELETE {element}")),
+            "{query}: {alternative}"
+        );
+    }
+    // Missing or wrong pieces: the expected tokens.
+    for (query, text, expected) in [
+        ("MATCH (n) DETACH n", "n", vec!["DELETE"]),
+        ("MATCH (n) NODETACH", "", vec!["DELETE"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, expected, "{query}");
+    }
+    for query in ["MATCH (n) DELETE", "MATCH (n) DELETE n,"] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, "", "{query}");
+    }
+    // After a target: `,` and the clauses (K9).
+    let f = fail("MATCH (n) DELETE n )");
+    assert_eq!(f.text, ")");
+    assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
+    assert!(f.expected.iter().any(|e| e == "RETURN"), "{:?}", f.expected);
 }
