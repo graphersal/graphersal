@@ -2,3 +2,7 @@
 * text=auto eol=lf
 *.png binary
 *.whl binary
+# The vendored openCypher TCK is kept byte-identical to upstream: 9 of its feature files use CRLF
+# line endings there (clauses/return-orderby, clauses/return-skip-limit), so no normalization.
+crates/graphersal/tests/opencypher/features/** -text
+crates/graphersal/tests/opencypher/graphs/** -text

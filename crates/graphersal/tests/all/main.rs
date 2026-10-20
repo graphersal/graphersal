@@ -2,9 +2,11 @@
 //!
 //! Every integration test lives in a module of this target (one binary means one link and one
 //! first-run scan instead of ~60). Add a new test file as `tests/all/<name>.rs` and register it
-//! here; run it with `cargo test --test all <name>::`. The only separate target is
-//! `tinkerpop_features.rs` (own process: parallel lanes, panic hook, report). Per-file feature
-//! gates (`#![cfg(feature = ..)]`) stay at the top of the module files themselves.
+//! here; run it with `cargo test --test all <name>::`. The only separate targets are
+//! `tinkerpop_features.rs` (the TinkerPop conformance suite) and `opencypher_tck.rs` (the
+//! openCypher TCK against GQL), both for the same reason: own process for parallel lanes, a panic
+//! hook, per-scenario timeouts and a report. Per-file feature gates (`#![cfg(feature = ..)]`) stay
+//! at the top of the module files themselves.
 
 mod add_edge_endpoint_tests;
 mod add_element_parameters_tests;
