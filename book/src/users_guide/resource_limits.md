@@ -99,8 +99,8 @@ g.with("repeat.max_loops", 1).gql("MATCH (a {name: 'marko'})-[:knows|created]->*
 g.with("repeat.max_loops", 5).gql("MATCH (a {name: 'marko'})-[:knows|created]->*(b) RETURN count(*) AS n").to_list()   // #{"n": 6}
 ```
 
-The same holds for a quantified edge inside an `EXISTS` subquery or a pattern comprehension,
-whose help says so. The list a pattern comprehension (`[(p)-->(f) | f.name]`) collects expands
+The same holds for a quantified edge inside a subquery (`EXISTS`, `COUNT { }`, `COLLECT { }`, a
+pattern comprehension, a `CALL` body), whose help names it. The list a pattern comprehension (`[(p)-->(f) | f.name]`) collects expands
 the bulk of its matches under `bulk.max_expansion` and is checked against
 `traversal.max_materialized_bytes` and the memory budget before it is built, like
 `collect_list()` ([GQL Errors](../gql/errors.md#map-projections-and-comprehensions)). Besides
@@ -111,7 +111,8 @@ them), each a `54001` error before the run ([GQL Errors](../gql/errors.md#gqlsta
 |---|---|
 | 128 levels | nesting of parentheses, brackets and subqueries; an expression at most 512 high |
 | 64 edge patterns | per `MATCH` clause, over all its comma-separated paths (also per clause inside a subquery) |
-| 64 subqueries (`MAX_SUBQUERIES`) | `EXISTS`, pattern predicates and pattern comprehensions written in one query, nested ones included |
+| 64 subqueries (`MAX_SUBQUERIES`) | `EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }` written in one query, nested ones included (not `CALL` bodies) |
+| 16 body levels (`MAX_BODY_DEPTH`) | `CALL` bodies and whole-query subquery bodies (`EXISTS` / `COUNT` / `COLLECT` with clauses other than `MATCH`) nested in each other; it keeps the deepest query within a 2 MiB thread stack (the wasm32 worker's 1 MiB) |
 | 1024 subquery bodies (`MAX_LOWERED_SUBQUERIES`) | bodies the query runs once its `LET` / `WITH` variables are substituted: a variable holding a subquery counts once for every place that reads it |
 
 ## Memory: materialized bytes and expansions

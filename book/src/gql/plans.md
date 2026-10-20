@@ -42,10 +42,12 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 `gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
-the bodies of the `EXISTS` subqueries and pattern comprehensions their expressions contain as
-child traversals, shown as `\>` lines under the step
+the bodies of the `EXISTS`, `COUNT { }` and `COLLECT { }` subqueries and pattern comprehensions
+their expressions contain as child traversals, shown as `\>` lines under the step
 ([EXISTS and pattern predicates](#exists-and-pattern-predicates),
-[comprehensions](#map-projections-and-comprehensions)).
+[comprehensions](#map-projections-and-comprehensions), [COUNT and COLLECT](#count-and-collect)).
+`UNION` and `CALL` need no step of their own: they are Gremlin's `union()`, `flat_map()` and
+`optional()` ([UNION, NEXT and CALL](#union-next-and-call)).
 They exist only in plans of `gql()`; they are not DSL steps. Everything else in a GQL plan is an
 ordinary step.
 
@@ -561,6 +563,148 @@ nested Gremlin `fold()` children do ([Semantics](semantics.md#map-projections-an
 The collected list is checked against the limits before it is built
 ([Limits](#limits-cancellation-permissions)).
 
+## COUNT and COLLECT
+
+`COUNT { }` and `COLLECT { }` are hosted like an `EXISTS` in an expression: the step evaluating
+the expression holds the body as its child and runs it once per row that reaches it. A `COUNT`
+child ends in `count()`, which counts the body's traversers with their bulk, and a `COLLECT`
+child in `gql:value(..)`, the `RETURN` item, which the host collects in arrival order (after the
+body's own `gql:order`). A `COUNT` body whose `RETURN` only projects keeps its `gql:project`,
+which `count()` never reads, so its items are not evaluated
+([Semantics](semantics.md#count-and-collect)):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS who, COUNT { (p)-[:created]->() } AS n").profile()
+g.gql("MATCH (p:person) RETURN p.name AS who, COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY s.name } AS sw").profile()
+g.gql("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 1 RETURN p.name AS who").profile()
+```
+
+```text
+v(labels: ["person"])                                                     1       0       4
+gql:project("who", "n")                                                   1       4       4
+  \> out("created")                                                       4       4       4
+  \> count()                                                              4       4       4
+
+v(labels: ["person"])                                                     1       0       4
+gql:project("who", "sw")                                                  1       4       4
+  \> out("created")                                                       4       4       4
+  \> gql:project("s.name")                                                4       4       4
+  \> gql:order("s.name")                                                  4       4       4
+  \> gql:value("s.name")                                                  4       4       4
+
+v(labels: ["person"])                                                     1       0       4
+gql:filter("COUNT { (p)-[:created]->() } > 1")                            1       4       1
+  \> out("created")                                                       4       4       4
+  \> count()                                                              4       4       4
+gql:project("who")                                                        1       1       1
+```
+
+A whole-query body (`WITH`, an aggregate, `RETURN`) is lowered like a top-level query onto the
+child, so an `EXISTS` with one keeps the fast path when it stands alone in a `WHERE`; the child
+ends in the body's own steps, and `filter()` asks only whether one traverser comes out:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH count(s) AS c WHERE c > 1 RETURN c } RETURN p.name AS who").profile()
+```
+
+```text
+v(labels: ["person"])                                                                                    1       0       4
+filter(__.out("created").gql:aggregate([], ["count(s)"], ["c"]).gql:filter("c > 1").gql:project("c"))    1       4       1
+  \> out("created")                                                                                      4       4       4
+  \> gql:aggregate([], ["count(s)"], ["c"])                                                              4       4       4
+  \> gql:filter("c > 1")                                                                                 4       4       1
+  \> gql:project("c")                                                                                    4       1       1
+gql:project("who")                                                                                       1       1       1
+```
+
+A body that starts from an import with an equality the id or a property index serves starts with
+`gql:lookup`, as a later pattern of the query does
+([FOR and the correlated lookup](#for-and-the-correlated-lookup)); this holds for `EXISTS`,
+`COUNT`, `COLLECT`, pattern comprehensions and `CALL` bodies alike.
+
+## UNION, NEXT and CALL
+
+**`UNION`** is Gremlin's `union()` as the start step: each operand is lowered onto its own child
+exactly as a query of its own, so its scan keeps the label, the pushed `has()` and an index, and
+`UNION` (not `ALL`) adds `gql:distinct()` after it. Each operand's `ORDER BY` and `LIMIT` stay
+inside its child:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name UNION MATCH (s:software) RETURN s.name AS name").profile()
+```
+
+```text
+union(__.v(labels: ["person"]).has("age", P.gt(30)).gql:project("name"), __.v(labels: ["software"]).gql:project("name"))    1       1       4
+  \> v(labels: ["person"])                                                                                                  1       1       4
+  \> has("age", P.gt(30))                                                                                                   1       4       2
+  \> gql:project("name")                                                                                                    1       2       2
+  \> v(labels: ["software"])                                                                                                1       1       2
+  \> gql:project("name")                                                                                                    1       2       2
+gql:distinct()                                                                                                              1       4       4
+```
+
+**`NEXT`** adds no step. After a plain query it is the `WITH` of the same items, so it gives the
+same plan (here the `FILTER` after `NEXT` became the `has()` of the scan); after a `UNION` the
+next statement continues from the union's row maps:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, p.age AS age NEXT FILTER age > 30 RETURN name").profile()
+g.gql("MATCH (p:person) RETURN p.name AS name UNION ALL MATCH (s:software) RETURN s.name AS name NEXT RETURN name ORDER BY name LIMIT 3").profile()
+```
+
+```text
+v(labels: ["person"])                                           1       0       4
+has("age", P.gt(30))                                            1       4       2
+gql:project("name")                                             1       2       2
+
+union(__.v(labels: ["person"]).gql:project("name"), __.v(labels: ["software"]).gql:project("name"))    1       1       6
+  \> v(labels: ["person"])                                                                             1       1       4
+  \> gql:project("name")                                                                               1       4       4
+  \> v(labels: ["software"])                                                                           1       1       2
+  \> gql:project("name")                                                                               1       2       2
+gql:project("name")                                                                                    1       6       6
+gql:order("name")                                                                                      1       6       6
+limit(3)                                                                                               1       6       3
+```
+
+**`CALL`** is `flat_map(__.<body>)`: the body is lowered onto the child from the row's current
+element, so a body that continues from an import needs no step to reach it, and its
+`gql:order` and `limit()` run per call (`Call` 4: once per person). `OPTIONAL CALL` wraps it in
+`optional(..)` and labels the body's row (`as("#c<k>")`) so a row without results reads `NULL`
+columns. After a `CALL`, the outer variables are read through their labels (`as("p")`):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top").profile()
+g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw } RETURN p.name AS who, sw").profile()
+```
+
+```text
+v(labels: ["person"])                                                                                                    1       0       4
+as("p") [path: labels(p)]                                                                                                1       4       4
+flat_map(__.out_e("created").as("e").in_v().gql:project("top").gql:order("e.weight DESC").limit(1)) [path: labels(p)]    1       4       3
+  \> out_e("created")                                                                                                    4       4       4
+  \> as("e") [path: labels(e)]                                                                                           4       4       4
+  \> in_v() [path: labels(e)]                                                                                            4       4       4
+  \> gql:project("top") [path: labels(e)]                                                                                4       4       4
+  \> gql:order("e.weight DESC")                                                                                          4       4       4
+  \> limit(1)                                                                                                            4       4       3
+gql:project("who", "top")                                                                                                1       3       3
+
+v(labels: ["person"]) [path: labels(#c2)]                                                     1       0       4
+as("p") [path: labels(#c2,p)]                                                                 1       4       4
+optional(__.flat_map(__.out("created").gql:project("sw")).as("#c2")) [path: labels(#c2,p)]    1       4       5
+  \> flat_map(__.out("created").gql:project("sw")) [path: labels(p)]                          4       4       4
+        \> out("created")                                                                     4       4       4
+        \> gql:project("sw")                                                                  4       4       4
+  \> as("#c2") [path: labels(#c2,p)]                                                          4       4       4
+gql:project("who", "sw")                                                                      1       5       5
+```
+
+`flat_map()` builds the results of one call before the first moves on, so an outer `LIMIT`
+does not shorten a call that has started ([Semantics](semantics.md#call-subqueries)); a body
+that imports nothing still runs once per row. A `UNION` or `NEXT` inside a body is a `union()`
+or the next steps inside the `flat_map` child, run per row.
+
 ## Limits, cancellation, permissions
 
 A GQL query is a traversal, so everything that bounds a traversal bounds it too:
@@ -568,12 +712,14 @@ A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
 which sees the reads of the lowered plan: reading a denied label through `gql()` is refused as
 the equivalent Gremlin is (also a label reached only through a quantified edge or an optional
-part, or only inside an `EXISTS` body or a pattern comprehension, whichever way it is lowered: a subquery's child is
+part, or only inside an `EXISTS`, `COUNT` or `COLLECT` body, a pattern comprehension, a `CALL`
+body or a later `UNION` operand, whichever way it is lowered: a subquery's child is
 checked like a Gremlin child, even when no row reaches it). An unbounded quantifier is bounded
 by `repeat.max_loops` and `traversal.max_traversers` ([Semantics](semantics.md#quantified-edges)),
 also inside a subquery. The list of a pattern comprehension expands the bulk of its child's
 results under `bulk.max_expansion` and is checked against `traversal.max_materialized_bytes` and
 the memory budget before it is built, like `collect_list()`. The parser bounds nesting (128
-levels, `54001`) so no query can exhaust the stack, and a query holds at most 64 subqueries
-(pattern comprehensions included) and runs at most 1024 subquery bodies
-([Errors](errors.md#subqueries)).
+levels, `54001`) so no query can exhaust the stack, `CALL` bodies and whole-query subquery
+bodies nest at most 16 levels, and a query holds at most 64 subqueries (pattern comprehensions,
+`COUNT { }` and `COLLECT { }` included; `CALL` bodies are not counted) and runs at most 1024
+subquery bodies ([Errors](errors.md#subqueries)).

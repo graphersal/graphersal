@@ -242,6 +242,107 @@ still runs per row. Comprehensions nested from the same element multiply the wor
 like nested Gremlin `map(..fold())` children, and only the resource limits bound a deep chain of
 them ([Resource limits](../users_guide/resource_limits.md)).
 
+## COUNT and COLLECT
+
+**An aggregating answer for every row.** `COUNT { }` and `COLLECT { }` run their body once per
+row, like `EXISTS`, but read it to the end: `COUNT { }` is the number of rows the body returns
+(0, never `NULL`, when there are none) and `COLLECT { }` the list of its one `RETURN` item
+(`[]` when there are none). An imported `NULL` variable matches nothing, as in `EXISTS`, so both
+give 0 and `[]`. `COLLECT { }` keeps `NULL` items, unlike `collect_list()`, and keeps the body's
+row order, so an `ORDER BY` inside it orders the list; without one the order is unspecified, as
+for a pattern comprehension.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s {name: 'ripple'}) RETURN p.name AS name, COUNT { (s)<-[:created]-() } AS n, COLLECT { MATCH (s)<-[:created]-(c) RETURN c.name } AS l ORDER BY name").to_list()
+// josh 1 ["josh"]; marko, peter, vadas (s is NULL): 0 []
+g.gql("MATCH (p:person {name: 'marko'}) RETURN COLLECT { MATCH (p)-[:knows]->(f) RETURN f.lang } AS l, [(p)-[:knows]->(f) | f.lang] AS c").to_list()   // #{"c": [(), ()], "l": [(), ()]}
+```
+
+**A deviation: the `RETURN` of a counted body is not evaluated.** When a `COUNT { }` body is one
+query whose final `RETURN` only projects (no aggregate, `DISTINCT`, `ORDER BY` or `UNION`, which
+need the values), `gql()` counts the body's rows without evaluating the `RETURN` items, nor the
+values a projecting `WITH` names only for them: the count is the same, but an expression there
+that would fail on a row (a division by zero, a value of the wrong kind) raises no error, while
+the same body run as a query (or in `CALL`) raises it. `EXISTS` and `COLLECT { }` evaluate
+theirs.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, COUNT { MATCH (p)-[:created]->(s) RETURN 1 / 0 AS x } AS n ORDER BY name").to_list()   // josh 2, marko 1, peter 1, vadas 0
+g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:created]->(s) RETURN DISTINCT 1 / 0 AS x } AS n")   // error: division by zero: DISTINCT needs the value
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN 1 / 0 AS x } RETURN p.name AS name")   // error: division by zero: EXISTS evaluates its RETURN
+```
+
+## UNION and NEXT
+
+**Columns by name.** The operands of a `UNION` are matched by column name, not by position: an
+operand may list the same names in another order, and the result takes the first operand's
+order. (Whether the standard also allows another order is still to be checked; `gql()` takes
+the permissive reading.)
+`UNION` removes duplicate rows with GQL's equality, as `DISTINCT` does (`1` and `1.0` are one
+value, [DISTINCT](#distinct-and-grouping-equality)); which of two equal rows is kept is
+unspecified.
+
+```rhai,graph=modern
+g.gql("RETURN 1 AS x UNION RETURN 1.0 AS x").to_list()   // #{"x": 1}: one row
+g.gql("RETURN 1 AS x UNION ALL RETURN 1.0 AS x").to_list()   // #{"x": 1}, #{"x": 1.0}
+```
+
+**Per operand.** Each operand is a query of its own: its variables are its own, and its
+`ORDER BY`, `OFFSET` and `LIMIT` apply to it before the union. The rows of a union come in no
+defined order: the operands' rows are not interleaved in any documented way, so an order within
+an operand is not an order of the result. Sort or page the whole union after `NEXT`.
+
+**`NEXT` passes on the columns, not the variables.** After `NEXT` the next statement sees the
+`RETURN` columns of the statement before it as its variables and nothing else; an element column
+is the live element, so a `MATCH` after `NEXT` continues from it. `NEXT` after one plain query is
+that query with a `WITH` of the same items, so it gives the same rows and the same plan; after a
+`UNION` the union's rows are the input. The order a `RETURN .. ORDER BY` makes before `NEXT` is
+not kept by later clauses ([Ordering](#ordering)): sort in the last `RETURN`.
+
+## CALL subqueries
+
+**Per row, joined.** A `CALL` runs its body once for each incoming row, with the imported
+variables set to the row's values, and each row the body returns extends the incoming row: an
+incoming row with three results becomes three rows, one with none is dropped (`OPTIONAL CALL`
+keeps it once, the returned names `NULL`). A body that aggregates without grouping keys always
+returns one row (`count` 0, `collect_list` `[]`), so it never drops a row. The body's
+`DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` apply to one row's results: `ORDER BY .. LIMIT k`
+in a body is the top k per row, which a `LIMIT` of the whole query cannot express.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS friend ORDER BY f.age DESC LIMIT 1 } RETURN p.name AS who, friend").to_list()   // #{"friend": "josh", "who": "marko"}
+g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS friend ORDER BY f.age DESC LIMIT 1 } RETURN p.name AS who, friend ORDER BY who").to_list()
+// josh (), marko josh, peter (), vadas ()
+```
+
+**Imports.** The body reads only what it imports: `CALL (a, b)` names them, `CALL (*)` takes
+every variable in scope, `CALL { }` and `CALL () { }` take none, and Cypher's importing `WITH`
+names them as the body's first clause ([Cypher Aliases](aliases.md#the-cypher-clause-with)). A
+name the body binds that is also an outer name it did not import is a new variable of the body:
+`MATCH (p) CALL { MATCH (p)-->(x) RETURN x }` matches every `p` in the body, for every outer row.
+An imported `NULL` (from an `OPTIONAL MATCH`) matches nothing in the body's patterns, as in
+`EXISTS`.
+
+**An uncorrelated body still runs per row.** A body that imports nothing gives the same rows for
+every incoming row, but `gql()` does not cache them yet: it runs once for each row, so its cost
+multiplies with the rows before the `CALL`. Put such a `CALL` first, or compute the value once
+with a `WITH` before the `MATCH` that multiplies the rows:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) CALL { MATCH (s:software) RETURN count(s) AS n } RETURN p.name AS who, n ORDER BY who").to_list()   // four rows with n 2: the count ran four times
+g.gql("CALL { MATCH (s:software) RETURN count(s) AS n } MATCH (p:person) RETURN p.name AS who, n ORDER BY who").to_list()   // the same rows: the count ran once
+```
+
+**Not lazy inside one row.** A `CALL` builds all the results of its body for one incoming row
+before the first of them moves on (Gremlin's `flat_map()`), so a `LIMIT` after the `CALL` stops
+the incoming rows, not a body run that has started: `MATCH (p) CALL (p) { MATCH (p)-->{1,}(x)
+RETURN x } RETURN x LIMIT 1` still finds every `x` of the first `p`. Bound the body itself with
+its own `LIMIT` when only a few results per row are needed. The rows the body builds count
+against the [resource limits](../users_guide/resource_limits.md) like any other traversers.
+
+**Labels in the body stay in the body.** Variables the body binds and does not return are gone
+after it; reading one is an error, as for a subquery. Returned names must be new names.
+
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,

@@ -39,10 +39,11 @@ are not implemented yet in [TinkerPop Compliance](../for_developers/tinkerpop_co
 - **No `g.tx()`.** Every traversal is one unit of work; a host can run a whole script as one unit
   ([Transactions](transactions.md)).
 - **GQL reads only.** [`g.gql()`](../gql/index.md) runs ISO GQL read queries (Cypher spellings
-  as aliases, Cypher's map projections and comprehensions) as a start step; composite queries
-  (`UNION`, `NEXT`), subqueries other than `EXISTS` and pattern comprehensions (`COUNT { }`,
-  `CALL { }`), shortest paths and quantified parenthesized paths are not supported yet, and GQL
-  writes are refused (use the Gremlin mutation steps).
+  as aliases, Cypher's map projections, comprehensions, `COUNT { }` / `COLLECT { }` and list
+  predicates, `UNION` / `NEXT` and `CALL { }` subqueries) as a start step; `EXCEPT` /
+  `INTERSECT`, shortest paths and quantified parenthesized paths are not supported yet, an
+  uncorrelated `CALL` body runs once per row (no caching), and GQL writes are refused (use the
+  Gremlin mutation steps).
 - **Saved queries only read** and are called at the start of a traversal (`g.query(..)`), not on
   incoming traversers ([Saved Queries](saved_queries.md)).
 

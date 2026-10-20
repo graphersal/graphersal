@@ -596,7 +596,7 @@ RETURN columns in the order written (bounded like query's: at most max_rows rows
 a note says when something was cut). It runs the script g.gql(query, params) and never changes \
 the graph. No Rhai escaping is needed: pass the GQL text as it is.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b and 2c): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c and 2d): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -618,7 +618,20 @@ comprehensions [(p)-[:knows]->(f) WHERE f.age > 30 | f.name] (per row the list o
 pattern's matches, [] when none, in no defined order), anywhere an expression stands and \
 nested: use them for JSON-shaped answers, one row per entity with its related data inside, e.g. \
 MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]} AS person ORDER BY \
-person.name; aggregates count(x), count(*), sum, avg, min, max, collect_list \
+person.name; list predicates all(x IN list WHERE cond), any, none, single (NULL when a NULL \
+item could decide) and reduce(acc = 0, x IN list | acc + x); COUNT { <pattern> } (the number \
+of matches per row, never NULL) and COLLECT { MATCH ... RETURN x } (the list of its one RETURN \
+column per row); the body of EXISTS { }, COUNT { } and COLLECT { } may be a whole query with \
+WITH, ORDER BY, LIMIT and RETURN; composite queries q1 UNION q2 (duplicate rows removed; UNION \
+ALL keeps them; every operand returns the same column names, in any order; ORDER BY and LIMIT \
+belong to their operand) and q1 NEXT q2 (the RETURN columns of q1 are the rows of q2, e.g. \
+... UNION ... NEXT RETURN name ORDER BY name LIMIT 3); CALL (p) { MATCH ... RETURN ... } runs \
+its body once per incoming row and joins the row with each of the body's rows (a row with none \
+is dropped; OPTIONAL CALL keeps it with NULL columns; Cypher CALL { WITH p ... } imports p \
+too); the body's aggregates, ORDER BY and LIMIT apply per row, so CALL gives top k per group, \
+e.g. each person's heaviest software: MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) \
+RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top ORDER BY who; \
+aggregates count(x), count(*), sum, avg, min, max, collect_list \
 (Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
 optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
 Cypher -[e*1..3]-> (a group variable e is the list of edges); path variables p = (a)-->(b) \
@@ -638,10 +651,9 @@ String literals use single quotes. A missing property is NULL. Edges in one matc
 (trail semantics), also inside quantified edges. Vertices and edges in a row come back as {id, \
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
-quantified path patterns ((a)-->(b)){1,3}, all(), any(), none(), single() and reduce() \
-(write size([x IN list WHERE cond]) = size(list) for all, > 0 for any, = 0 for none), COUNT { } \
-subqueries (use OPTIONAL MATCH and count()), UNION, SHORTEST, \
-non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
+quantified path patterns ((a)-->(b)){1,3}, EXCEPT and INTERSECT (filter the first query's \
+rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
 with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
@@ -2190,7 +2202,7 @@ mod tests {
         assert!(INSTRUCTIONS.contains("`gql`"));
     }
 
-    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b and 2c subset as supported and
+    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c and 2d subset as supported and
     /// still names what is refused; it stays a read-only tool.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
@@ -2236,16 +2248,26 @@ mod tests {
             "pattern comprehensions [(p)-[:knows]->(f)",
             "JSON-shaped answers",
             "RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]}",
+            "all(x IN list WHERE cond)",
+            "reduce(acc = 0, x IN list | acc + x)",
+            "COUNT { <pattern> }",
+            "COLLECT { MATCH ... RETURN x }",
+            "q1 UNION q2",
+            "UNION ALL",
+            "q1 NEXT q2",
+            "CALL (p) { MATCH ... RETURN ... }",
+            "OPTIONAL CALL",
+            "top k per group",
+            "CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 }",
         ] {
             assert!(supported.contains(named), "{named}");
         }
         for named in [
             "((a)-->(b)){1,3}",
-            "all(), any(), none(), single() and reduce()",
-            "size([x IN list WHERE cond]) = size(list)",
+            "EXCEPT and INTERSECT",
+            "IN TRANSACTIONS",
             "randomUUID",
             "INSERT",
-            "COUNT { }",
             "use the query tool",
         ] {
             assert!(refused.contains(named), "{named}");
@@ -2256,6 +2278,11 @@ mod tests {
             "EXISTS",
             "comprehension",
             "projection",
+            "COUNT { }",
+            "COLLECT",
+            "UNION",
+            "NEXT",
+            "reduce()",
         ] {
             assert!(!refused.contains(gone), "{gone}");
         }

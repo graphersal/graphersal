@@ -260,6 +260,36 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "CALL { } per row: each person's heaviest software (top k per group)",
+    "script": "// The body runs once per person; its ORDER BY and LIMIT apply per row. A person without a match\n// is dropped (vadas); OPTIONAL CALL would keep him with NULL columns.\ng.gql(`\n  MATCH (p:person)\n  CALL (p) {\n    MATCH (p)-[e:created]->(s)\n    RETURN s.name AS top, e.weight AS weight ORDER BY weight DESC LIMIT 1\n  }\n  RETURN p.name AS who, top, weight\n  ORDER BY who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL CALL with an aggregate: a count per row, 0 included",
+    "script": "// OPTIONAL CALL keeps a row whose body returns nothing; an aggregating body returns one row\n// anyway, so every person gets a count, 0 included.\ng.gql(`\n  MATCH (p:person)\n  OPTIONAL CALL (p) {\n    MATCH (p)-[:knows]->(f)\n    RETURN count(f) AS friends, collect_list(f.name) AS names\n  }\n  RETURN p.name AS who, friends, names\n  ORDER BY friends DESC, who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "COUNT { } and COLLECT { }: related data per row",
+    "script": "// COUNT { } is the number of matches (never NULL); COLLECT { } the list of its one RETURN column.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS who,\n         COUNT { (p)-[:created]->() } AS projects,\n         COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY s.name } AS names\n  ORDER BY projects DESC, who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "UNION and NEXT: one name list from two labels, sorted",
+    "script": "// UNION removes duplicate rows (UNION ALL keeps them); NEXT sorts and cuts the whole union.\ng.gql(`\n  MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name\n  UNION\n  MATCH (s:software) RETURN s.name AS name\n  NEXT RETURN name ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "all() / any() and reduce(): list predicates and a fold per row",
+    "script": "// openCypher compatibility forms; all/any/none/single are three-valued (NULL items count).\ng.gql(`\n  MATCH (p:person)\n  LET weights = [(p)-[e:created]->() | e.weight]\n  RETURN p.name AS who,\n         all(w IN weights WHERE w >= 0.4) AS all_heavy,\n         any(w IN weights WHERE w = 1.0) AS one_full,\n         reduce(total = 0, w IN weights | total + w) AS total\n  ORDER BY who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "Quantified edges {1,2}: reachable in one or two hops",
     "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
   },

@@ -6791,13 +6791,19 @@ fn gql_help(
         // A size limit (an operator chain, a pattern) brings its own fix as the alternative.
         GqlErrorKind::Limit if topic == GqlHelpTopic::Subquery => help.push_str(&format!(
             "The query is larger than gql() accepts: one query holds at most {} subqueries \
-             (EXISTS, pattern predicates and pattern comprehensions, nested ones included) \
-             and runs at most {} subquery bodies, where a LET or WITH variable holding a \
-             subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, \
-             as in g.gql(\"MATCH (p:person) WHERE EXISTS {{ MATCH (p)-[:knows]->(f) MATCH \
-             (f)-[:created]->(s) }} RETURN p.name\").",
+             (EXISTS, pattern predicates, pattern comprehensions, COUNT {{ }} and COLLECT {{ }}, \
+             nested ones included) and runs at most {} subquery bodies, where a LET or WITH \
+             variable holding a subquery counts once for every place that reads it; a CALL {{ }} \
+             body counts toward neither (CALL bodies nest at most {} levels). One EXISTS may \
+             hold several MATCH clauses and patterns, as in g.gql(\"MATCH (p:person) WHERE \
+             EXISTS {{ MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) }} RETURN p.name\"), \
+             and one CALL may compute what several COUNT {{ }} and COLLECT {{ }} over the same \
+             pattern do, as in g.gql(\"MATCH (p:person) CALL (p) {{ OPTIONAL MATCH \
+             (p)-[:created]->(s) RETURN count(s) AS n, collect_list(s.name) AS names }} RETURN \
+             p.name, n, names\").",
             crate::gql::bind::MAX_SUBQUERIES,
             crate::gql::lower::MAX_LOWERED_SUBQUERIES,
+            crate::gql::bind::MAX_BODY_DEPTH,
         )),
         GqlErrorKind::Limit if alternative.is_some() => {
             help.push_str("The query is larger than gql() accepts.")

@@ -11,7 +11,8 @@ syntax error whose help shows the query without it ([Aggregation](subset.md#aggr
 |---|---|---|
 | writes: `INSERT`, `CREATE`, `SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, `MERGE` | `gql()` is read-only in this version; writes are a later phase | the Gremlin mutation steps `add_v()`, `add_e()`, `property()`, `drop()`, `merge_v()` ([Changing the Graph](../dsl/changing_the_graph.md)) |
 | undirected edges `~[e]~`, `<~[e]~`, `~[e]~>`, `~`, `<~`, `~>` | Graphersal edges are always directed; there is no undirected edge to match | `-[e]-`, an edge in either direction |
-| vendor procedures: `CALL db.labels()`, `CALL apoc.*`, `YIELD` | vendor extensions, not GQL | the Gremlin steps that do the same, such as `g.v().label().dedup()` |
+| vendor procedures: `CALL db.labels()`, `CALL apoc.*`, `YIELD` | vendor extensions, not GQL (an inline `CALL { }` subquery is [supported](subset.md#call-subqueries)) | the Gremlin steps that do the same, such as `g.v().label().dedup()` |
+| `CALL { ... } IN TRANSACTIONS` | commits the writes of a subquery in batches; `gql()` is read-only, so there is nothing to batch | the same `CALL` without `IN TRANSACTIONS` |
 | `SHOW ...` | a vendor command, not GQL | the catalog steps (`indexes()`, `queries()`, `get_schema()`, `statistics()`) |
 | vendor path search `*BFS`, `*WSHORTEST`, `*ALLSHORTEST` | vendor extensions, not GQL | Gremlin `repeat()` |
 | `id(n)` | Cypher's `id()` is an integer; Graphersal ids are strings, and returning a different type under the same name would mislead | `element_id(n)`, the id as a string |
@@ -25,6 +26,8 @@ g.gql("CREATE (n:person {name: 'ann'}) RETURN n")   // refused: CREATE writes to
 g.gql("MATCH (n) DETACH DELETE n RETURN n")   // refused: DETACH DELETE writes to the graph
 g.gql("MATCH (a)~[e]~(b) RETURN a")   // refused: undirected edges (`~`) are not supported
 g.gql("CALL db.labels() YIELD label RETURN label")   // refused: procedure calls are vendor extensions
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw } IN TRANSACTIONS RETURN sw")   // refused: CALL { } IN TRANSACTIONS commits writes in batches
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw } RETURN sw ORDER BY sw").to_list()   // lop, lop, lop, ripple
 g.gql("SHOW INDEXES")   // refused: SHOW commands are vendor extensions
 g.gql("MATCH (n) RETURN id(n)")   // refused: use element_id(n)
 g.gql("MATCH (a)-[:knows*BFS]->(b) RETURN b")   // refused: *BFS is a vendor path search extension

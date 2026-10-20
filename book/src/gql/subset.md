@@ -15,17 +15,23 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
   FOR <name> IN <list> [WITH ORDINALITY <name> | WITH OFFSET <name>]
   UNWIND <list> AS <name>                     -- Cypher spelling of FOR
   WITH [DISTINCT] <item> [AS <name>], ...     -- or WITH *; Cypher
-       [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>] ]
+       [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>]
+  [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row ]
 RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *, mandatory; items may aggregate
 [ORDER BY <expr> [ASC | DESC], ...]
 [OFFSET <n>]                                  -- Cypher alias: SKIP
 [LIMIT <n>]
+[ UNION [ALL | DISTINCT] <clauses> RETURN ... [ORDER BY ...] [OFFSET ..] [LIMIT ..] ]   -- any number
+[ NEXT <the same again: clauses, RETURN, UNION ...> ]                                   -- any number
 [;]
 ```
 
 A pattern is a path of node and edge patterns, optionally named (`p = (a)-->(b)`); an edge may
 carry a quantifier (`-[:knows]->{1,3}`). A query usually starts with `MATCH`, but it may start
 with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-without-match)).
+Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
+([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
+query of that shape for each row ([CALL subqueries](#call-subqueries)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
 are case-sensitive. Line breaks are whitespace, so a query may span lines. Comments are `// ...`,
@@ -272,19 +278,60 @@ g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS creator, count(*
 g.gql("MATCH (p:person WHERE NOT (p)-[:created]->())-[:knows]-(f) RETURN p.name AS p, f.name AS f").to_list()   // #{"f": "marko", "p": "vadas"}
 ```
 
-The body holds `MATCH` clauses with their `WHERE` (and nested `EXISTS`); `OPTIONAL MATCH`,
-`WITH`, `LET`, `FILTER`, `FOR`, `RETURN`, `ORDER BY` and `LIMIT` inside a body are not supported
-yet, nor is `COUNT { }` ([Not supported yet](#not-supported-yet)). A query holds at most 64
-subqueries, [pattern comprehensions](#map-projections-and-comprehensions) included
-([Errors](errors.md#subqueries)).
+The body holds `MATCH` clauses with their `WHERE` (and nested subqueries), or a **whole
+query**: any clauses (`OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, `FOR`, `CALL`), `UNION` and
+`NEXT`, ending in `RETURN`. `EXISTS` is then TRUE when that query returns at least one row, and
+its `RETURN` items are still evaluated (a failing expression there fails the query). Whole-query
+bodies nest at most 16 levels, `CALL` bodies included. A query holds at most 64 subqueries,
+[pattern comprehensions](#map-projections-and-comprehensions), `COUNT { }` and `COLLECT { }`
+included ([Errors](errors.md#subqueries)).
 
 ```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH count(s) AS c WHERE c > 1 RETURN c } RETURN p.name AS name").to_list()   // #{"name": "josh"}
+g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN s UNION MATCH (p)-[:knows]->(s) RETURN s } RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
 g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->(q) AS k")   // error: the pattern predicate introduces the new variable `q`
 g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN s.name AS s")   // error: `s` is bound inside a subquery
-g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) RETURN x } RETURN p")   // error: RETURN inside EXISTS { } is not yet supported
-g.gql("MATCH (p:person) RETURN COUNT { (p)-->() } AS n")   // error: a COUNT { } subquery is not yet supported
-g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, count(s) AS n ORDER BY name").to_list()
-// josh 2, marko 1, peter 1, vadas 0: count the matches this way until COUNT { } is supported
+```
+
+### COUNT and COLLECT
+
+`COUNT { }` counts and `COLLECT { }` collects what a subquery finds for each row. They are not
+GQL: like the [list predicates](#list-predicates-and-reduce) they are openCypher compatibility
+forms, accepted with their Neo4j Cypher 25 meaning ([Cypher Aliases](aliases.md#count-and-collect)).
+Their bodies are those of `EXISTS`, and they stand anywhere an expression does:
+
+```text
+COUNT { <pattern> [WHERE <condition>] }       -- the number of matches
+COUNT { MATCH ... }                           -- the same
+COUNT { <query ending in RETURN> }            -- the number of rows the query returns
+COLLECT { <query ending in RETURN <one item>> }   -- the list of that item, one entry per row
+```
+
+`COUNT { }` is an integer, 0 when nothing matches, never `NULL`; `COUNT { .. } > 0` keeps the
+rows `EXISTS` keeps. `COLLECT { }` is a list in the order the body returns its rows (its own
+`ORDER BY` decides it), `[]` when there are none, with `NULL` items kept. Each row runs the body
+once, like the Gremlin twins `project(..).by(__.out("created").count())` and
+`by(__.out("created").values("name").fold())`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, COUNT { (p)-[:created]->() } AS n ORDER BY name").to_list()   // josh 2, marko 1, peter 1, vadas 0
+g.v().has_label("person").order().by("name").project("name", "n").by("name").by(__.out("created").count()).to_list()   // the same rows
+g.gql("MATCH (p:person) RETURN p.name AS name, COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY s.name } AS sw ORDER BY name").to_list()
+// josh [lop, ripple], marko [lop], peter [lop], vadas []
+g.gql("MATCH (p:person {name: 'marko'}) RETURN COLLECT { MATCH (p)-[:knows]->(f) RETURN f.lang } AS l").to_list()   // #{"l": [(), ()]}: NULLs kept
+g.gql("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 1 RETURN p.name AS name").to_list()   // #{"name": "josh"}
+g.gql("MATCH (p:person) RETURN p.name AS name, COUNT { MATCH (p)-[:created]->(s) RETURN s.lang AS l UNION MATCH (p)-[:knows]->(f) RETURN f.name AS l } AS n ORDER BY name").to_list()
+// josh 1 (java once), marko 3, peter 1, vadas 0
+```
+
+`COLLECT { }` needs a body ending in a `RETURN` of exactly one item. When a `COUNT { }` body
+is one query whose final `RETURN` only projects (no aggregate, `DISTINCT`, `ORDER BY` or
+`UNION`), its rows are counted without evaluating the `RETURN` items, so an expression there
+that would fail raises no error ([Semantics](semantics.md#count-and-collect)).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:knows]->(f) RETURN f.name, f.age } AS l")   // error: COLLECT { } needs a body that ends in a RETURN of exactly one column
+g.gql("MATCH (p:person) RETURN p.name AS name, COUNT { MATCH (p)-[:created]->(s) RETURN 1 / 0 AS x } AS n ORDER BY name").to_list()   // josh 2, marko 1, peter 1, vadas 0: 1 / 0 never runs
 ```
 
 ## OPTIONAL MATCH
@@ -501,6 +548,88 @@ g.v().has_label("person").values("name").order().range(1, 3).to_list()   // "mar
 
 Without `ORDER BY` the row order is unspecified; [Semantics](semantics.md#ordering) gives the
 order of `NULL` and of values of different types.
+
+## UNION and NEXT
+
+`UNION` combines the rows of queries that each end in `RETURN`. Every operand returns the same
+column names, in any order; the result has the column order of the first operand. `UNION` (also
+written `UNION DISTINCT`) removes duplicate rows with GQL's equality (`1` and `1.0` are one
+value), `UNION ALL` keeps them; one chain uses one kind. Each operand is a query of its own:
+its own variables, and its own `ORDER BY`, `OFFSET` and `LIMIT`, which apply to that operand
+only. Gremlin's twin is `union()`, followed by `dedup()` for `UNION`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name UNION MATCH (s:software) RETURN s.name AS name").to_list()   // josh, peter, lop, ripple (in any order)
+g.union(__.V().has("person", "age", P.gt(30)), __.V().has_label("software")).values("name").to_list()   // "josh", "peter", "lop", "ripple"
+g.gql("MATCH (p:person) RETURN p.name AS name UNION ALL MATCH (p:person)-[:created]->() RETURN p.name AS name").count().next()   // 8: duplicates kept
+g.gql("RETURN 1 AS a, 2 AS b UNION RETURN 2 AS b, 1 AS a").to_list()   // #{"a": 1, "b": 2}: one row, the first operand's order
+g.gql("MATCH (p:person) RETURN p.name AS name ORDER BY p.age DESC LIMIT 1 UNION ALL MATCH (s:software) RETURN s.name AS name ORDER BY name LIMIT 1").to_list()   // peter, lop: per operand
+g.gql("RETURN 1 AS x UNION RETURN 2 AS y")   // error: the operands of UNION must return the same column names
+g.gql("RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x")   // error: UNION ALL is mixed with UNION in one query
+```
+
+`NEXT` continues after a `RETURN`: the rows that `RETURN` builds are the input of the next
+statement, which sees only its columns, by name (`RETURN *` passes every variable on). It may
+start with any clause: `NEXT RETURN`, `NEXT FILTER`, `NEXT MATCH` continuing from an element
+column. `NEXT` binds looser than `UNION`, so a `NEXT` after a union sorts, filters, pages or
+aggregates the whole union, which no operand's `ORDER BY` can:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN s.name AS name NEXT RETURN name ORDER BY name LIMIT 3").to_list()   // josh, lop, marko
+g.gql("MATCH (p:person) RETURN p.name AS name, p.age AS age NEXT FILTER age > 30 RETURN name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
+g.gql("MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name AS who, s.name AS sw ORDER BY who, sw").to_list()   // josh lop, josh ripple, marko lop, peter lop
+g.gql("MATCH (p:person) RETURN p.name AS name, p.age AS age NEXT RETURN count(*) AS n, avg(age) AS mean").to_list()   // #{"mean": 30.75, "n": 4}
+g.gql("MATCH (p:person) RETURN p.name AS name NEXT RETURN p.age")   // error: the variable `p` is not in scope: the RETURN before NEXT does not return it
+```
+
+A `NEXT` after a plain query is the Cypher `WITH` of the same items: `q1 RETURN a, b NEXT q2`
+gives the rows of `q1 WITH a, b q2` ([Cypher Aliases](aliases.md#the-cypher-clause-with)).
+`NEXT YIELD` is not supported yet.
+
+## CALL subqueries
+
+`CALL { }` runs a whole query (any clauses, `UNION`, `NEXT`, ending in `RETURN`) **once for
+each incoming row**, and joins the row with each row the body returns: the columns of the body's
+`RETURN` become new variables of the query. Three things make it more than a `MATCH`:
+
+- the body's aggregates, `DISTINCT`, `ORDER BY` and `LIMIT` apply to **each row's** records:
+  a count per row, the top k per group;
+- a row whose body returns no row is dropped, `OPTIONAL CALL` keeps it with the new variables
+  `NULL` (an aggregating body returns one row anyway: `count` is 0 there);
+- a `UNION` or `NEXT` inside the body works per row too.
+
+```text
+CALL (a, b) { <query> }       -- imports a and b (GQL and Cypher 25)
+CALL (*) { <query> }          -- imports every variable in scope
+CALL () { <query> }           -- imports nothing
+CALL { <query> }              -- imports nothing, unless it starts with WITH a, b (Cypher's importing WITH)
+OPTIONAL CALL ...             -- keeps a row without results, with NULL columns
+```
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top ORDER BY who").to_list()
+// #{"top": "ripple", "who": "josh"}, #{"top": "lop", "who": "marko"}, #{"top": "lop", "who": "peter"}: vadas has no row
+g.v().has_label("person").as("p").flat_map(__.out_e("created").order().by("weight", Order.desc).limit(1).in_v()).project("who", "top").by(__.select("p").values("name")).by("name").to_list()   // the same three rows
+g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw ORDER BY sw LIMIT 1 } RETURN p.name AS who, sw ORDER BY who").to_list()
+// josh lop, marko lop, peter lop, vadas ()
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN count(f) AS friends } RETURN p.name AS who, friends ORDER BY who").to_list()   // josh 0, marko 2, peter 0, vadas 0
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS other UNION MATCH (p)-[:created]->(s) RETURN s.name AS other } RETURN p.name AS who, other ORDER BY who, other").to_list()
+// josh lop, josh ripple, marko josh, marko lop, marko vadas, peter lop
+g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:created]->(s) RETURN s.name AS sw } RETURN p.name AS who, sw ORDER BY who, sw").to_list()   // Cypher's importing WITH: josh lop, josh ripple, marko lop, peter lop
+```
+
+The body reads only the variables it imports: in `CALL { MATCH (p)-->(s) .. }` without a scope
+clause, `p` is a new variable of the body, not the outer one. A body that imports nothing still
+runs once per row ([Semantics](semantics.md#call-subqueries)). The returned names must be new,
+and a body without `RETURN` (a unit subquery, which only a write could use) is not supported;
+`IN TRANSACTIONS` is [refused](refused.md). A later clause continues from a returned element as
+from a `WITH` column:
+
+```rhai,graph=modern
+g.gql("CALL { MATCH (s:software) RETURN s } MATCH (s)<-[:created]-(p) RETURN s.name AS sw, count(p) AS n ORDER BY sw").to_list()   // lop 3, ripple 1
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN only makes sense for writes
+```
 
 ## Expressions
 
@@ -900,17 +1029,15 @@ construct and the alternative.
 
 | Construct | Until then |
 |---|---|
-| `NEXT` | `WITH`, or Gremlin steps after `gql()` |
+| `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | quantified path patterns `((a)-->(b)){1,3}` | quantify a single edge, `(a)-->{1,3}(b)`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
-| `UNION`, `EXCEPT`, `INTERSECT`, `CALL { }` subqueries | Gremlin `union()` |
-| `COUNT { }` subqueries | `OPTIONAL MATCH` and `count()`; `EXISTS` when only "at least one" matters |
-| `OPTIONAL MATCH`, `WITH`, `LET`, `FILTER`, `FOR`, `RETURN`, `ORDER BY`, `LIMIT` inside an `EXISTS` body | `MATCH` clauses with their `WHERE`, nested `EXISTS` |
+| `EXCEPT`, `INTERSECT`, `OTHERWISE` | `NOT EXISTS { }` / `EXISTS { }` on the rows of the first query, or `NEXT` |
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
-| a list-comprehension variable read inside an `EXISTS` or a pattern comprehension of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
+| a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
@@ -924,6 +1051,8 @@ g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path pat
 g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
 g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-[:created]->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
 g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN [x IN [p] | x.name] AS l ORDER BY l").to_list()   // #{"l": ["josh"]}, #{"l": ["marko"]}, #{"l": ["peter"]}
+g.gql("MATCH (p:person) RETURN p.name AS n EXCEPT MATCH (p:person)-[:created]->() RETURN p.name AS n")   // error: EXCEPT is not yet supported
+g.gql("MATCH (p:person) WHERE NOT EXISTS { (p)-[:created]->() } RETURN p.name AS n").to_list()   // #{"n": "vadas"}
 g.gql("MATCH (n:person) RETURN sin(n.age) AS s")   // error: sin() (a trigonometric function) is not yet supported
 g.gql("MATCH (n:person) RETURN n.name AS name, n.age AS a ORDER BY name").select("a").math("sin(_)").to_list()   // 0.5514266812416906, -0.6636338842129675, -0.428182669496151, 0.956375928404503
 ```

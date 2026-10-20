@@ -44,18 +44,21 @@ Cypher's `WITH`, `RETURN` with aggregation (`count`, `sum`, `avg`, `min`, `max`,
 id or index serves it, queries that start without `MATCH` (`RETURN 1 + 2 AS x`), `EXISTS`
 subqueries and Cypher pattern predicates (`WHERE NOT (p)-[:created]->()`), Cypher map projections
 and list and pattern comprehensions for nested, JSON-shaped answers
-(`p {.name, friends: [(p)-[:knows]->(f) | f.name]}`), node and edge
+(`p {.name, friends: [(p)-[:knows]->(f) | f.name]}`), Cypher's `COUNT { }` / `COLLECT { }` and
+list predicates (`all()`, `any()`, `reduce()`, ...), composite queries (`UNION`, `UNION ALL`,
+`NEXT`), `CALL { }` subqueries run per row (top k per group), node and edge
 patterns, quantified edges (`-[:knows]->{1,3}`), path variables, label expressions,
 expressions, parameters, the GQL scalar functions and the common openCypher ones (`toInteger`,
 `substring`, `split`, `round`, `keys`, `nodes(p)`, ...) ([The Supported Subset](subset.md)).
-Composite queries (`UNION`, `NEXT`), `COUNT { }` and `CALL { }` subqueries, shortest paths and
-quantified parenthesized paths come later; until then the error names the Gremlin step that does
-the same.
+`EXCEPT` / `INTERSECT`, shortest paths and quantified parenthesized paths come later; until
+then the error names the form or the Gremlin step that does the same.
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name, count(s) AS made ORDER BY made DESC, name").to_list()
 // josh 2, marko 1, peter 1, vadas 0
 g.gql("MATCH (a {name: 'marko'})-[:knows]->{1,2}(b)-[:created]->(s) RETURN DISTINCT s.name AS s ORDER BY s").to_list()   // #{"s": "lop"}, #{"s": "ripple"}
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top ORDER BY who").to_list()
+// josh ripple, marko lop, peter lop: each person's heaviest software
 ```
 
 ## Mixing GQL and Gremlin
@@ -118,7 +121,8 @@ graph.query('g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p
 - [The Supported Subset](subset.md): clauses, patterns, label expressions, expressions,
   functions, parameters, and what is not supported yet.
 - [Semantics](semantics.md): trail matching, quantified edges and their limits, `OPTIONAL MATCH`,
-  `NULL` and three-valued logic, aggregation, `DISTINCT` equality, comparisons, ordering, the
+  `NULL` and three-valued logic, subqueries (`EXISTS`, `COUNT`, `COLLECT`, `CALL`), `UNION` and
+  `NEXT`, aggregation, `DISTINCT` equality, comparisons, ordering, the
   rules of the functions (strict `CAST`, lenient `toInteger`, rounding, where they differ from
   Neo4j), ids.
 - [Result Shape](result_shape.md): row maps, column names and their order, path values.

@@ -35,10 +35,11 @@ The mandatory core of a GQL read query, by construct.
 | parameters `$name` | supported | values only, never text |
 | aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
 | `OPTIONAL MATCH` | supported | also as the first clause |
-| `EXISTS` predicate: `EXISTS { MATCH ... }`, `EXISTS { <pattern> }`, `EXISTS ( ... )` *(provisional: whether the standard makes it core or an optional feature, and its identifier, are still to be checked)* | partial | anywhere an expression stands, nested too; TRUE or FALSE, never `NULL`; the body holds `MATCH` clauses with their `WHERE`, other statements inside it not yet ([EXISTS](subset.md#exists-and-pattern-predicates)); Cypher pattern predicates as [aliases](aliases.md) |
+| `EXISTS` predicate: `EXISTS { MATCH ... }`, `EXISTS { <pattern> }`, `EXISTS ( ... )` *(provisional: whether the standard makes it core or an optional feature, and its identifier, are still to be checked)* | supported | anywhere an expression stands, nested too; TRUE or FALSE, never `NULL`; the body is a pattern, `MATCH` clauses, or a whole query ending in `RETURN` ([EXISTS](subset.md#exists-and-pattern-predicates)); Cypher pattern predicates as [aliases](aliases.md) |
 | Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |
 | record constructor `{k: expr, ...}` / `RECORD {k: expr, ...}` and list value constructor `[a, b]` | supported | `RECORD` is contextual: a variable named `record` stays usable, back-quoted before a projection that starts with `key:` or is empty ([Expressions](subset.md#expressions)) |
 | Cypher map projections `p {.k, .*, x, k: expr}`, list comprehensions `[x IN l WHERE c \| e]`, pattern comprehensions `[(a)-->(b) WHERE c \| e]` | supported | not GQL; accepted as compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#map-projections-and-comprehensions)); a pattern comprehension is a subquery; `all()` / `any()` / `none()` / `single()` / `reduce()` likewise, three-valued as the openCypher TCK ([Cypher Aliases](aliases.md#list-predicates-and-reduce)) |
+| Cypher `COUNT { }` and `COLLECT { }` subqueries | supported | not GQL; compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#count-and-collect)); bodies as for `EXISTS`, `COLLECT` returns one item; one deviation below |
 | a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
 | data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
@@ -95,7 +96,7 @@ The mandatory core of a GQL read query, by construct.
 | GL03 | binary literals | supported | `0b101` |
 | GQ01 | `USE` graph clause | no | `gql()` runs on the graph of its traversal source |
 | GQ02 | composite query: `OTHERWISE` *(provisional)* | not yet | |
-| GQ03 | composite query: `UNION` | not yet | Gremlin `union()` |
+| GQ03 | composite query: `UNION` | supported | `UNION`, `UNION DISTINCT`, `UNION ALL`; operands return the same column names in any order; one kind per chain; `ORDER BY` / `OFFSET` / `LIMIT` per operand ([UNION and NEXT](subset.md#union-and-next)) |
 | GQ04 | composite query: `EXCEPT DISTINCT` *(provisional)* | not yet | |
 | GQ06 | composite query: `INTERSECT DISTINCT` *(provisional)* | not yet | |
 | GQ08 | `FILTER` statement | supported | `FILTER [WHERE] <condition>` |
@@ -108,9 +109,11 @@ The mandatory core of a GQL read query, by construct.
 | GQ14 | complex expressions in sort keys *(provisional)* | supported | `ORDER BY element_id(e)`, `ORDER BY n.age * 2` |
 | GQ15 | `GROUP BY` clause *(provisional)* | supported | after the `RETURN` items, `GROUP BY ()` included; the keys must be the items without an aggregate (grouping is implicit, so it is optional); a key may also repeat an item's expression (`GROUP BY p.name`), beyond ISO's variable references |
 | GQ18 | scalar subqueries *(provisional)* | not yet | |
-| GQ20 | advanced linear composition with `NEXT` | not yet | chain Gremlin steps after `gql()` |
+| GQ20 | advanced linear composition with `NEXT` | partial | `RETURN .. NEXT ..`, also after a `UNION` and inside subquery bodies; `NEXT YIELD` not yet |
 | GQ21 | `OPTIONAL`: multiple `MATCH` statements *(provisional)* | not yet | one `OPTIONAL MATCH` per optional part is supported; the block form `OPTIONAL { MATCH ... MATCH ... }` is not |
-| GP01 | inline procedure *(provisional)* | not yet | `CALL { ... }` |
+| GP01 | inline procedure *(provisional)* | supported | `[OPTIONAL] CALL { <query> }`, run once per incoming row, the body ending in `RETURN` ([CALL subqueries](subset.md#call-subqueries)); a body without `RETURN` (a unit subquery) not yet, `IN TRANSACTIONS` refused |
+| GP02 | inline procedure with implicit nested variable scope *(provisional)* | partial | `CALL { }` without a scope clause is accepted but imports **nothing** (Neo4j Cypher 25's reading; the ISO scoping is still to be checked); import with `CALL (*)` or Cypher's importing `WITH` |
+| GP03 | inline procedure with explicit nested variable scope *(provisional)* | supported | `CALL (a, b) { }`, `CALL (*) { }`, `CALL () { }` |
 | GP04 | named procedure calls *(provisional)* | no | vendor procedures (`CALL db.*`, `apoc.*`) are refused |
 
 Every feature not listed here is not supported. Cypher spellings that GQL does not have, and the
@@ -128,6 +131,11 @@ where it has one):
 | order of values of different types | map, vertex, edge, list, date/time, UUID, string, boolean, number, vector, `NULL` |
 | row order without `ORDER BY` | unspecified |
 | item order of a pattern comprehension | unspecified: the order the matches are found, which depends on the plan |
+| item order of `COLLECT { }` | the order of the body's rows: its `ORDER BY` when it has one, unspecified otherwise |
+| `UNION` operands with the same column names in another order | accepted, matched by name; the result has the first operand's column order (provisional) |
+| order of the rows of a `UNION` | unspecified, also when the operands are sorted: sort after `NEXT` |
+| a `CALL` body that imports nothing | still run once per incoming row; its rows are not cached |
+| the `RETURN` items of a projecting `COUNT { }` body | not evaluated: the rows are counted, an expression that would fail raises no error (a deviation, [Semantics](semantics.md#count-and-collect)) |
 | a comprehension variable named like another variable of the query | an error (`42002`), also for a name no longer in scope (stricter than Neo4j) |
 | `DISTINCT`, grouping keys, `DISTINCT` in aggregates | GQL equality: `1` and `1.0` are one value, `NULL`s form one group |
 | aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; provisional) |

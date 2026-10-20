@@ -24,7 +24,7 @@ Error: GQL syntax error at line 1, column 33: unexpected end of input (step #1 '
                                              ^
   expected:  an expression
   GQLSTATUS: 42001
-Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name") or g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of a list, and a query may also start with FOR, LET, WITH, FILTER or RETURN, as in g.gql("FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age").
+Help: Expected an expression at the marked position. Fix the query at the marked position: a GQL read query is MATCH <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>, for example g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name") or g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n RETURN p.name, n"). CALL (p) { .. RETURN .. } runs a query for each row, UNION combines the records of two queries and NEXT continues after a RETURN, as in g.gql("MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of a list, and a query may also start with FOR, LET, WITH, FILTER or RETURN, as in g.gql("FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age").
 ```
 
 The plan of a query that failed this way is the marker step `gql:error("<GQLSTATUS>")`, which
@@ -61,10 +61,10 @@ Error: GQL syntax error at line 1, column 18: unexpected `RETRUN` (step #1 'gql:
              ^^^^^^^^^^^^^^^^^^
   query:        MATCH (n:person) RETRUN n
                                  ^^^^^^
-  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN
+  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN
   did you mean: RETURN
   GQLSTATUS:    42001
-Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN at the marked position. ...
+Help: Did you mean RETURN? Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, ... at the marked position. ...
 ```
 
 ## Errors while the query runs
@@ -222,14 +222,16 @@ Help: bind `s` in the MATCH clause of the query to use it here, or test it insid
 Help: move the condition to the WHERE of that later MATCH clause inside the subquery. A subquery, ...
 ```
 
-A query holds at most 64 subqueries (`EXISTS`, pattern predicates and pattern comprehensions,
-nested ones included) and runs at most 1024 subquery bodies, where a `LET` or `WITH` variable holding a subquery counts once
-for every place that reads it. Either limit is `54001` before the run, and its help names both
-bounds:
+A query holds at most 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions,
+`COUNT { }` and `COLLECT { }`, nested ones included) and runs at most 1024 subquery bodies, where
+a `LET` or `WITH` variable holding a subquery counts once for every place that reads it. A
+`CALL { }` body counts toward neither; `CALL` bodies and whole-query subquery bodies nest at most
+16 levels ([UNION, NEXT and CALL](#union-next-and-call)). Either limit is `54001` before the run,
+and its help names both bounds and the forms that need fewer subqueries:
 
 ```text
-Error: GQL limit exceeded at line 1, column 1553: the query holds more than 64 subqueries (EXISTS and pattern predicates), pattern comprehensions included ...
-Help: join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several MATCH clauses and patterns), or add the patterns to the MATCH clause of the query; a pattern comprehension is a subquery too: collect the matches of several patterns with OPTIONAL MATCH and collect_list() instead. The query is larger than gql() accepts: one query holds at most 64 subqueries (EXISTS, pattern predicates and pattern comprehensions, nested ones included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once for every place that reads it. One EXISTS may hold several MATCH clauses and patterns, as in g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN p.name").
+Error: GQL limit exceeded at line 1, column 785: the query holds more than 64 subqueries (EXISTS and pattern predicates), pattern comprehensions included, as are COUNT { } and COLLECT { } ...
+Help: join the patterns into fewer subqueries (one EXISTS { MATCH .. } may hold several MATCH clauses and patterns), or add the patterns to the MATCH clause of the query; a pattern comprehension is a subquery too: collect the matches of several patterns with OPTIONAL MATCH and collect_list() instead. The query is larger than gql() accepts: one query holds at most 64 subqueries (EXISTS, pattern predicates, pattern comprehensions, COUNT { } and COLLECT { }, nested ones included) and runs at most 1024 subquery bodies, where a LET or WITH variable holding a subquery counts once for every place that reads it; a CALL { } body counts toward neither (CALL bodies nest at most 16 levels). One EXISTS may hold several MATCH clauses and patterns, as in g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN p.name"), and one CALL may compute what several COUNT { } and COLLECT { } over the same pattern do, as in g.gql("MATCH (p:person) CALL (p) { OPTIONAL MATCH (p)-[:created]->(s) RETURN count(s) AS n, collect_list(s.name) AS names } RETURN p.name, n, names").
 ```
 
 A quantified edge inside a subquery that reaches `repeat.max_loops` or
@@ -244,16 +246,17 @@ g.with("repeat.max_loops", 1).gql("MATCH (p:person) WHERE EXISTS { (p)-[:knows|c
 Help: The loop of the quantified edge -[:knows|created]->{1,} inside an EXISTS subquery (or pattern predicate) of the gql() query ran 1 iterations, the limit of repeat.max_loops. ... A subquery stops at its first match, so its loop runs this long on a row that has no match, or only a late one. Give the quantifier an upper bound, as in -[:knows|created]->{1,5}, ...
 ```
 
-`COUNT { }` is not supported yet; its help shows the `OPTIONAL MATCH .. count()` form, and
-`EXISTS` for the test `COUNT { .. } > 0`. Cypher 4's `exists(n.p)` is [refused](refused.md):
+`COUNT { }` and `COLLECT { }` follow the same rules; a `COLLECT { }` body must end in a
+`RETURN` of exactly one column. Cypher 4's `exists(n.p)` is [refused](refused.md):
 
 ```rhai,graph=modern
-g.gql("MATCH (p:person) RETURN COUNT { (p)-->() } AS a")   // error: a COUNT { } subquery is not yet supported
+g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:knows]->(f) RETURN f.name, f.age } AS l")   // error: COLLECT { } needs a body that ends in a RETURN of exactly one column
+g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:knows]->(f) } AS n, f.name AS x")   // error: the variable `f` is not in scope: it is bound inside a subquery
 g.gql("MATCH (p:person) RETURN exists(p.age) AS a")   // refused: exists(value), the Cypher 4 property test, is not supported
 ```
 
 ```text
-Help: count the matches of the pattern with OPTIONAL MATCH and count(), as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s). To test only whether the pattern matches (COUNT { .. } > 0), use EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
+Help: return the one value to collect, as in MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS names. A subquery, ...
 Help: test a property with n.p IS NOT NULL, here p.age IS NOT NULL; EXISTS tests a graph pattern, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
 ```
 
@@ -317,15 +320,78 @@ Help: The loop of the quantified edge -[:knows|created]->{1,} inside a pattern c
 Help: ... A function whose result can be larger than its arguments (range(), split(), replace(), || and toString() of a list or map) and the list of collect_list() are checked before they are built, as is the list of a pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out of memory; the result is never cut short. ... count the values instead of collecting them, ... or, for the matches of a pattern, g.gql("MATCH (p:person) OPTIONAL MATCH (p)-->(f) RETURN p.name, count(f) AS n"), ...
 ```
 
+## UNION, NEXT and CALL
+
+The errors of a composite query share one help text that explains `UNION` and `NEXT`: the
+operands return the same column names in any order (the result keeps the first operand's order),
+`UNION` removes duplicates and `UNION ALL` keeps them, one chain uses one kind, each operand has
+its own variables, `ORDER BY` and `LIMIT`, and `NEXT` passes on only the `RETURN` columns. The
+column mismatch names both column sets:
+
+```rhai,graph=modern
+g.gql("RETURN 1 AS x UNION RETURN 2 AS y")   // error: the operands of UNION must return the same column names
+g.gql("RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x")   // error: UNION ALL is mixed with UNION in one query
+g.gql("MATCH (p:person) RETURN p.name AS name NEXT RETURN p.age")   // error: the variable `p` is not in scope: the RETURN before NEXT does not return it
+g.gql("MATCH (p:person) RETURN p MATCH (p)-[:created]->(s) RETURN s")   // error: MATCH after RETURN: RETURN ends the query
+```
+
+```text
+Error: GQL semantic error at line 1, column 21: the operands of UNION must return the same column names: the first returns `x`, this one returns `y` (`x` is missing) ...
+Help: name the columns alike with AS in every operand (their order may differ), as in MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN s.name AS name. UNION combines the records of queries that return the same column names, in any order (the result keeps the order of the first query): UNION (or UNION DISTINCT) removes duplicate records, UNION ALL keeps them, and one chain of UNIONs uses one kind. Each query of a UNION has its own variables, ORDER BY, OFFSET and LIMIT. NEXT passes the records of the statement before it on by their column names (only those), so it sorts, filters or aggregates a UNION as a whole, as in g.gql("MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN s.name AS name NEXT RETURN name ORDER BY name LIMIT 3").
+Help: write the same kind between every operand, or combine the parts with NEXT, as in RETURN 1 AS x UNION ALL RETURN 1 AS x NEXT RETURN x UNION RETURN 2 AS x. UNION combines ...
+Help: add `p` to the RETURN items before NEXT, as in RETURN ..., p NEXT ... UNION combines ...
+Help: put every MATCH before the RETURN, or continue with NEXT, which passes the columns of the RETURN on to the next statement, as in MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name, or chain Gremlin steps after gql(). ...
+```
+
+The errors of a `CALL` share a help text on its scope: the body reads only the variables its
+scope clause names (`CALL (*)` all, `CALL { }` none, Cypher's `CALL { WITH a .. }` those of its
+first `WITH`), returns new names, aggregates per row, and drops a row without records unless the
+`CALL` is `OPTIONAL`. A body without `RETURN` (a unit subquery, which only a write could use) is
+not supported, and `IN TRANSACTIONS` is [refused](refused.md):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
+g.gql("MATCH (p:person) CALL { WITH p AS q MATCH (q)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN (a unit subquery) only makes sense for writes
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(s) RETURN s.name AS sw } IN TRANSACTIONS RETURN sw")   // refused: CALL { } IN TRANSACTIONS commits writes in batches
+```
+
+```text
+Help: rename the column inside the body, as in RETURN ... AS p2. A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query once for each incoming row: the body reads only the variables its scope clause names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } those of its first WITH), and passes on only the columns of its RETURN, which must be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as in g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made"). A row whose body returns no record is dropped; OPTIONAL CALL keeps it with NULL columns.
+Help: name it in the variable scope clause, as in CALL (p) { ... }, or import every variable with CALL (*) { ... }. A CALL subquery, ...
+Help: end the body with RETURN and the columns the query reads after it, for example MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made. A CALL subquery, ...
+Help: remove IN TRANSACTIONS: a read-only subquery needs no batches. A CALL subquery, ...
+```
+
+`CALL` bodies and whole-query subquery bodies (`EXISTS`, `COUNT` or `COLLECT` with `WITH`,
+`RETURN`, ...) nest at most 16 levels (`54001`); the help shows how to un-nest them. A resource
+limit reached inside a `CALL` body names it: the body runs for each incoming row and keeps every
+record, so a quantified edge in it loops until the row's last match:
+
+```rhai,graph=modern
+g.with("repeat.max_loops", 1).gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows|created]->{1,}(x) RETURN count(x) AS n } RETURN p.name AS who, n")   // error: repeat() exceeded the loop limit of 1 iterations
+```
+
+```text
+Error: GQL limit exceeded at line 1, column 113: the query nests CALL { } and subquery bodies deeper than 16 levels ...
+Help: un-nest the bodies: a CALL body may follow another in the same query, as in CALL { .. RETURN a } CALL (a) { .. RETURN b }, and NEXT passes the result of one query to the next. The query is larger than gql() accepts.
+
+Help: The loop of the quantified edge -[:knows|created]->{1,} inside a CALL { } subquery of the gql() query ran 1 iterations, the limit of repeat.max_loops. ... A CALL { } subquery runs its body for each incoming row and keeps every record it returns, so its loop runs until the row's last match is found. Give the quantifier an upper bound, as in -[:knows|created]->{1,5}, ...
+```
+
+A limit inside an operand of a `UNION` or a block after `NEXT` at the top level keeps the plain
+text of a top-level clause; inside a subquery the place named is the innermost subquery
+(`CALL`, `COUNT`, `COLLECT`, `EXISTS` or a pattern comprehension).
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`; a list-comprehension variable read inside a subquery); also `gql()` after other steps |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import, importing one twice |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
-| `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates and pattern comprehensions, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader) |
+| `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
 | `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |

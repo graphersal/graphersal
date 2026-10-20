@@ -5,7 +5,9 @@ unambiguous and mean exactly the same: an alias is translated to its GQL form wh
 parsed, so both spellings give the same plan and the same rows. An alias never has a meaning of
 its own. This table lists every accepted alias; Cypher functions without any GQL counterpart are
 the [compatibility functions](#compatibility-functions) below, and Cypher's map projections and
-comprehensions the [compatibility forms](#map-projections-and-comprehensions); any other Cypher
+comprehensions, `COUNT { }` and `COLLECT { }` the compatibility forms
+([Map projections and comprehensions](#map-projections-and-comprehensions),
+[COUNT and COLLECT](#count-and-collect)); any other Cypher
 spelling is either not supported yet or [refused](refused.md).
 
 | Cypher spelling | GQL form | Notes |
@@ -33,6 +35,7 @@ spelling is either not supported yet or [refused](refused.md).
 | `-[e:T*m..]->` | `-[e:T]->{m,}` | |
 | `WHERE (a)-[:T]->(b)`, a pattern predicate | `WHERE EXISTS { (a)-[:T]->(b) }` | anywhere an expression stands; it may name only variables bound before it ([EXISTS](subset.md#exists-and-pattern-predicates)) |
 | `UNWIND list AS x` | `FOR x IN list` | one row per item; `WITH ORDINALITY` / `WITH OFFSET` only after `FOR` |
+| `CALL { WITH a, b ... }`, the importing `WITH` | `CALL (a, b) { ... }` | the first `WITH` of the body, when it lists plain variables only, is the variable scope clause ([CALL subqueries](subset.md#call-subqueries)) |
 
 Each pair below returns the same rows:
 
@@ -63,7 +66,14 @@ g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN p.name AS name ORDER BY 
 g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
 g.gql("MATCH (p:person {name: 'marko'}) UNWIND [p.age, p.age + 1] AS a RETURN a ORDER BY a").to_list()   // #{"a": 29}, #{"a": 30}
 g.gql("MATCH (p:person {name: 'marko'}) FOR a IN [p.age, p.age + 1] RETURN a ORDER BY a").to_list()   // #{"a": 29}, #{"a": 30}
+g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:knows]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 0, marko 2, peter 0, vadas 0
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 0, marko 2, peter 0, vadas 0
 ```
+
+The importing `WITH` passes the variables on unchanged; a first `WITH` that renames, computes or
+filters (`WITH p AS q`, `WITH p WHERE ..`) is an ordinary `WITH` of a body that imports
+nothing, so reading `p` there is an error (write `CALL (p) { .. }`). A `CALL { }`
+without a scope clause and without that `WITH` imports nothing, as in Neo4j Cypher 25.
 
 Mind the Cypher `*`: `-[*]->` starts at one edge, GQL's `-[]->*` at zero, so the GQL form
 also returns marko himself:
@@ -76,7 +86,7 @@ g.gql("MATCH (a {name: 'marko'})-[]->*(b) RETURN b.name AS b ORDER BY b").to_lis
 ## The Cypher clause `WITH`
 
 `WITH` is Cypher; GQL writes the same with its linear statements (`LET`, `FILTER`, and
-`RETURN ... NEXT`, which `gql()` does not support yet). `gql()` accepts `WITH` with Cypher's
+`RETURN ... NEXT`, [UNION and NEXT](subset.md#union-and-next)). `gql()` accepts `WITH` with Cypher's
 meaning: it passes on only its items, may take `DISTINCT`, aggregates, `ORDER BY`, `SKIP` /
 `OFFSET`, `LIMIT` and a `WHERE` (applied last), and a later clause continues from its columns
 ([The Supported Subset](subset.md#with)). A `WITH` that only passes values on is the same as
@@ -85,6 +95,7 @@ meaning: it passes on only its items, may take `DISTINCT`, aggregates, `ORDER BY
 ```rhai,graph=modern
 g.gql("MATCH (p:person) WITH p, p.age / 10 AS d WHERE d = 3 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
 g.gql("MATCH (p:person) LET d = p.age / 10 FILTER d = 3 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
+g.gql("MATCH (p:person) RETURN p, p.age / 10 AS d NEXT FILTER d = 3 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "josh"}, #{"name": "peter"}
 ```
 
 ## Spellings that are GQL as well
@@ -202,6 +213,30 @@ g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS name
 Cypher's list predicates `all()`, `any()`, `none()`, `single()` and `reduce()` bind a variable
 the same way; they are [compatibility functions](#list-predicates-and-reduce).
 
+## COUNT and COLLECT
+
+Cypher's `COUNT { }` and `COLLECT { }` subqueries have no GQL counterpart either; `gql()`
+accepts them as compatibility forms with their Neo4j Cypher 25 meaning
+([COUNT and COLLECT](subset.md#count-and-collect)). They take the bodies of `EXISTS`: a pattern,
+`MATCH` clauses, or a whole query ending in `RETURN` (one item for `COLLECT`).
+
+| Cypher form | GQL nearest form | Difference |
+|---|---|---|
+| `COUNT { <pattern or query> }` | `CALL (p) { OPTIONAL MATCH .. RETURN count(x) AS n }`, or `OPTIONAL MATCH` + `count()` | the subquery keeps the row and stands in any expression; `COUNT { } > 0` is `EXISTS { }` |
+| `COLLECT { <query> RETURN x }` | `CALL (p) { OPTIONAL MATCH .. RETURN collect_list(x) AS l }` | `COLLECT` keeps `NULL` items, `collect_list()` skips them |
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, COUNT { (p)-[:created]->() } AS n ORDER BY name").to_list()   // josh 2, marko 1, peter 1, vadas 0
+g.gql("MATCH (p:person) CALL (p) { OPTIONAL MATCH (p)-[:created]->(s) RETURN count(s) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 2, marko 1, peter 1, vadas 0
+g.gql("MATCH (p:person) RETURN p.name AS name, COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY s.name } AS sw ORDER BY name").to_list()
+// josh [lop, ripple], marko [lop], peter [lop], vadas []
+g.gql("MATCH (p:person) CALL (p) { OPTIONAL MATCH (p)-[:created]->(s) WITH s ORDER BY s.name RETURN collect_list(s.name) AS sw } RETURN p.name AS name, sw ORDER BY name").to_list()
+// josh [lop, ripple], marko [lop], peter [lop], vadas []
+```
+
+One difference from Neo4j: a `COUNT { }` body whose final `RETURN` only projects is counted
+without evaluating its items ([Semantics](semantics.md#count-and-collect)).
+
 ## Cypher spellings that are not aliases
 
 | Cypher | In `gql()` |
@@ -212,7 +247,8 @@ the same way; they are [compatibility functions](#list-predicates-and-reduce).
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
 | map projections, list and pattern comprehensions | supported as [compatibility forms](#map-projections-and-comprehensions), not aliases |
 | `any()` / `all()` / `none()` / `single()`, `reduce()` | supported as [compatibility functions](#list-predicates-and-reduce), not aliases: GQL has no such functions |
-| `COUNT { pattern }` | not supported yet; `OPTIONAL MATCH` and `count()` count the matches, `EXISTS` tests for one |
+| `COUNT { }`, `COLLECT { }` | supported as [compatibility forms](#count-and-collect), not aliases |
+| `CALL { } IN TRANSACTIONS` | [refused](refused.md): a write form; the `CALL` itself is supported |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
 | `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE` | refused: `gql()` is read-only |
