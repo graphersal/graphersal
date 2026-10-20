@@ -38,14 +38,14 @@ are not implemented yet in [TinkerPop Compliance](../for_developers/tinkerpop_co
   `g.with(key, value)` ([Execution Options Reference](execution_options_reference.md)).
 - **No `g.tx()`.** Every traversal is one unit of work; a host can run a whole script as one unit
   ([Transactions](transactions.md)).
-- **GQL is experimental.** [`g.gql()`](../gql/index.md) runs ISO GQL queries with `INSERT`
-  (Cypher `CREATE`) as its one write clause (Cypher spellings as aliases, Cypher's map projections, comprehensions, `COUNT { }` /
+- **GQL is experimental.** [`g.gql()`](../gql/index.md) runs ISO GQL queries with the write
+  clauses `INSERT` (Cypher `CREATE`), `SET` and `REMOVE` (Cypher spellings as aliases, Cypher's map projections, comprehensions, `COUNT { }` /
   `COLLECT { }` and list predicates, `UNION` / `NEXT` and `CALL { }` subqueries, quantified path
   patterns) as a start step; its subset and answers may still change between versions. `EXCEPT` /
   `INTERSECT`, shortest paths and a quantifier nested in a quantified path pattern are not
   supported yet, an
-  uncorrelated `CALL` body runs once per row (no caching), and `SET`, `REMOVE`, `DELETE` and
-  `MERGE` are not supported yet (use the Gremlin mutation steps).
+  uncorrelated `CALL` body runs once per row (no caching), and `DELETE` and `MERGE` are not
+  supported yet (use the Gremlin mutation steps).
 - **Saved queries only read** and are called at the start of a traversal (`g.query(..)`), not on
   incoming traversers ([Saved Queries](saved_queries.md)).
 

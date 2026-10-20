@@ -159,14 +159,17 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Cypher `[e:knows*1..3]`) with trail semantics (no edge twice in one match; the edge
     /// variable is the list of the edges), and path variables (`MATCH p = (a)-->(b) RETURN p`,
     /// `path_length(p)`, Cypher `length(p)`; a path is the Gremlin path value), and the write
-    /// clause `INSERT` (Cypher `CREATE`) of node and directed edge patterns, once per incoming
-    /// row; a query may end with its write clause or `FINISH` (no rows) or `RETURN` what it
-    /// wrote. Use [`Self::gql_with`] for a query with `$parameters`.
+    /// clauses `INSERT` (Cypher `CREATE`) of node and directed edge patterns, `SET` (a property
+    /// `n.k = expr`, all properties `n = {..}`, Cypher's merge `n += {..}`, labels `n:A`) and
+    /// `REMOVE` (`n.k`, `n:A`), each once per incoming row; a `NULL` value removes the
+    /// property; a query may end with its write clause or `FINISH` (no rows) or `RETURN` what
+    /// it wrote. Use [`Self::gql_with`] for a query with `$parameters`.
     ///
     /// A writing query runs on a writable source (`graph.traversal_mut()`), as one unit like
     /// any traversal: a failing row leaves nothing. On a read source (`graph.traversal()`) it
     /// fails exactly like a Gremlin write does there. It asks `Create` on the labels it inserts,
-    /// like `add_v()` / `add_e()`.
+    /// like `add_v()` / `add_e()`, and `Update` on the elements `SET` / `REMOVE` change, like
+    /// `property()` / `add_label()`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a

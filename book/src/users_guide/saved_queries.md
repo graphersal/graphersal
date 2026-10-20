@@ -194,6 +194,7 @@ check can hold every write against it:
 | `merge_v(..)` / `merge_e(..)` | `Create` and `Update` on the kind |
 | `g.query("other")` | the effects of `other`, when it writes |
 | `g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet)")` | the writes of the lowered GQL query: `Create` on `pet` vertices and `owns` edges |
+| `g.gql("MATCH (p:person) SET p.age = 1")` | `Update` on any vertex, as for `property()` |
 | `g.gql(text)` with a computed text (a variable, a concatenation) | `Create`, `Update` and `Delete` on any data: pass values as `$parameters` to keep a GQL read read-only |
 | a method of the same name on something else (`m.drop()` on a map) | counted as a write |
 
@@ -381,8 +382,9 @@ g.query("older", #{min: 26}).select("name").toList()
   query like `g.gql(body, args)` (no Rhai is evaluated) and returns its rows, one map per row, a
   traversal Gremlin steps may continue (`select("name")` above).
 - **Reads and writes**: the dialect comes from the query's plan, `graphersal-gql/1` when it
-  writes nothing and `graphersal-gql/2` when it writes (`INSERT` / `CREATE`); its effects are the
-  writes of the plan, exact per label. A call is authorized and limited exactly like a Rhai query
+  writes nothing and `graphersal-gql/2` when it writes (`INSERT` / `CREATE`, `SET`, `REMOVE`);
+  its effects are the writes of the plan, exact per label (a `SET` on a node is `Update
+  Data(vertex)`, as for `property()`). A call is authorized and limited exactly like a Rhai query
   of the same kind: a read-only query (and any query called from one) cannot write, also not
   through its result; a query that writes asks its whole effect set of the caller's authorizer
   first and runs as ONE transaction whose commit names the query and its arguments, then
@@ -399,6 +401,14 @@ g.get_query("hire")["effects"].map(|e| e.text)
 // ["Create Data(vertex \"person\")", "Create Data(edge \"created\")"]
 g.query("hire", #{name: "ann", company: "lop"}).toList()
 // [#{"name": "ann"}]
+g.define_query(#{
+    name: "birthday",
+    language: "gql",
+    params: #{name: "string"},
+    body: "MATCH (p:person {name: $name}) SET p.age = p.age + 1 RETURN p.age AS age"
+})
+g.get_query("birthday")["effects"].map(|e| e.text)
+// ["Update Data(vertex)"]
 ```
 
 - A Rhai query may call a GQL query (`g.query("hire", #{..})` in its body); its effects then

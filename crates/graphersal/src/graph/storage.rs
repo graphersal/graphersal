@@ -603,7 +603,7 @@ pub trait GraphStorage: Send + Sync {
     /// changed, `Ok(false)` if the vertex already carried this label (a no-op, not an error), and
     /// `Err` for an invalid vertex handle or when the vertex would violate the schema under the
     /// new label set. Behind the `add_label()` step (a Graphersal extension, TinkerPop has none)
-    /// and a future Cypher `SET n:Admin`.
+    /// and GQL's `SET n:Admin`.
     fn add_vertex_label(
         &mut self,
         node: Self::VertexId,
@@ -613,7 +613,8 @@ pub trait GraphStorage: Send + Sync {
     /// Removes a single label from an existing vertex. Returns `Ok(true)` if the label was present
     /// and is now removed, `Ok(false)` if the vertex never carried it, and `Err` for an invalid
     /// vertex handle or when the vertex would violate the schema under the remaining labels.
-    /// Behind the `drop_label()` step, mirroring [`Self::add_vertex_label`].
+    /// Behind the `drop_label()` step and GQL's `REMOVE n:Admin`, mirroring
+    /// [`Self::add_vertex_label`].
     fn remove_vertex_label(
         &mut self,
         node: Self::VertexId,

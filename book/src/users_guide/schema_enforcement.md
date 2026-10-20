@@ -637,6 +637,20 @@ let refused = g.gql("INSERT (:robot {name: 'r2'})").execute();   // fails: the c
 g.gql("MATCH (n) RETURN labels(n) AS labels, n.active AS active").to_list()   // #{"active": true, "labels": ["person"]}
 ```
 
+GQL's `SET` and `REMOVE` change an existing element property by property and label by label,
+as `property()`, `remove_property()`, `add_label()` and `drop_label()` do, and each change is
+checked like theirs: a value of the wrong type, an undeclared property or label in a closed
+schema, and removing a `required` property (with `REMOVE n.k`, `SET n.k = NULL`, or a
+`SET n = {..}` whose map lacks it) fail the query, which then changes nothing:
+
+```rhai,graph=empty,script
+g.set_schema(#{mode: "closed", vertices: #{person: #{schema: #{type: "object", properties: #{
+    name: #{type: "string"}, age: #{type: "integer"}}, required: ["name"]}}}});
+g.gql("INSERT (:person {name: 'alice'})").iterate();
+let refused = g.gql("MATCH (p:person) SET p.age = 3, p.name = NULL").execute();   // fails: 'name' is required
+g.gql("MATCH (p:person) RETURN properties(p) AS props").to_list()   // #{"props": #{"name": "alice"}}
+```
+
 ## A failing query changes nothing
 
 The schema is validated **per storage call** (one `add_v` with its folded properties, one single

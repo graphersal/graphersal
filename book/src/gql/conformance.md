@@ -45,7 +45,8 @@ The mandatory core of a GQL query, by construct.
 | Cypher `COUNT { }` and `COLLECT { }` subqueries | supported | not GQL; compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#count-and-collect)); bodies as for `EXISTS`, `COLLECT` returns one item; one deviation below |
 | a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
 | data-modifying statements: `INSERT` | supported | nodes with label conjunctions and properties, directed edges with one label, once per row; Cypher `CREATE` as an [alias](aliases.md) ([Writing with GQL](writes.md)) |
-| data-modifying statements: `SET`, `REMOVE`, `DELETE` | not yet | the Gremlin steps `property()`, `remove_property()`, `drop()` ([Writing with GQL](writes.md#not-yet)) |
+| data-modifying statements: `SET`, `REMOVE` | supported | property items `n.k = v`, all properties `n = {..}`, label items `n:A` / `n IS A`; once per row, items left to right, `NULL` removes; Cypher's `+=` and `SET n = <expression>` as [compatibility forms](aliases.md#set-and-remove) ([Writing with GQL](writes.md#set)) |
+| data-modifying statements: `DELETE` | not yet | the Gremlin step `drop()` ([Writing with GQL](writes.md#not-yet)) |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
 | value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); path values; no byte strings |
 
@@ -85,7 +86,8 @@ The mandatory core of a GQL query, by construct.
 | GA07 | ordering by discarded binding variables *(provisional)* | supported | `ORDER BY` may read variables that `RETURN` does not return (not after `RETURN DISTINCT`) |
 | GB02 | double minus sign comments | supported | `-- ...`, with the edge rule of [Writing GQL in Rhai Strings](rhai_strings.md#comments) |
 | GB03 | double solidus comments | supported | `// ...` |
-| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`); `SET`, `REMOVE`, `DELETE` and Cypher's `MERGE` not yet ([Writing with GQL](writes.md)) |
+| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`), `SET`, `REMOVE`; `DELETE` and Cypher's `MERGE` not yet ([Writing with GQL](writes.md)) |
+| GD02 | graph label set changes *(provisional)* | supported | `SET n:A` / `SET n IS A` and `REMOVE n:A` add and remove node labels; an edge's single label is not changed by them ([Writing with GQL](writes.md#set)) |
 | GE07 | Boolean `XOR` | supported | |
 | GF01 | enhanced numeric functions | supported | `ABS`, `FLOOR`, `CEIL` / `CEILING`, `SQRT`, `MOD`; an integer argument keeps its type |
 | GF02 | trigonometric functions *(provisional)* | not yet | Gremlin `math()` after `gql()` |

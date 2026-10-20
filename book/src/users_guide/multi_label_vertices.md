@@ -9,8 +9,9 @@ vertex's labels as an ordered, deduplicated set — zero, one, or many — so th
 
 **This page documents storage and Gremlin-facing behavior.** [`g.gql()`](../gql/index.md) reads
 label sets with GQL label expressions and creates multi-label nodes with `INSERT (n:A&B)`
-(Cypher `CREATE (n:A:B)`); `SET n:Admin` and `REMOVE n:Admin` are not supported yet, so the labels
-of an existing vertex are changed with the Gremlin steps below.
+(Cypher `CREATE (n:A:B)`) and changes the labels of an existing node with `SET n:Admin` and
+`REMOVE n:Admin` ([Writing with GQL](../gql/writes.md#set)); the Gremlin steps below do the
+same.
 
 ## Creating a multi-label vertex
 
@@ -67,8 +68,8 @@ g.V("1").add_label("Admin").labels().next()    // ["person", "Admin"]
 g.V("1").drop_label("person").label().next()   // "Admin"
 ```
 
-They call `GraphStorage::add_vertex_label`/`remove_vertex_label`, which a future Cypher
-`SET n:Admin`/`REMOVE n:Admin` will use as well.
+They call `GraphStorage::add_vertex_label`/`remove_vertex_label`, which GQL's
+`SET n:Admin`/`REMOVE n:Admin` use as well.
 
 Both methods go through the schema and commit only on success (`Ok(true)`/`Ok(false)` as before):
 the vertex must be valid under the new label set. Adding a label fails when it is undeclared in a

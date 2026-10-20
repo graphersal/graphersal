@@ -424,15 +424,21 @@ and a write step treats a traverser of bulk n as n rows: each row creates its ow
 `RETURN` column, an aggregate) is computed when the row is built; elements stay live, so
 `RETURN n.k` after a write reads the new state, as in Neo4j.
 
-**`NULL` is never stored.** `INSERT ({k: NULL})` stores no `k`; reading it gives `NULL` again.
-A `null` stored by Gremlin (`property("k", ())`) also reads as `NULL` in GQL.
+**`NULL` is never stored.** `INSERT ({k: NULL})` stores no `k`, and `SET n.k = NULL` removes
+`k`; reading it gives `NULL` again. A `null` stored by Gremlin (`property("k", ())`) also reads
+as `NULL` in GQL.
 
 **Permissions.** `INSERT` asks `Create` on the labels it creates, exactly like `add_v(labels)` /
 `add_e(label)`, and nothing for the properties of the new element. Gremlin's
 `add_v(..).property(..)` asks `Create` and `Update` (the check runs on the plan as written,
 before the optimizer folds the property into the creation), so a policy that denies only
 `Update` allows the `INSERT` and refuses its Gremlin twin
-([Writing with GQL](writes.md#permissions)).
+([Writing with GQL](writes.md#permissions)). `SET` and `REMOVE` ask exactly what their Gremlin
+twins `property()`, `remove_property()`, `add_label()` and `drop_label()` ask: `Update` on
+`Data(vertex)` for a node target, whatever labels its pattern names (a node's label set can
+hold more labels than the pattern tests, and a label item changes it), `Update` on
+`Data(edge "label")` for an edge whose pattern names its labels, and `Update` on any element
+when the kind is known only at run time (an item of a `FOR` list, a `WITH` column of a list).
 
 **Where writes differ from Neo4j:**
 
@@ -440,6 +446,54 @@ before the optimizer folds the property into the creation), so a policy that den
 |---|---|---|
 | a property value must be a scalar or a list of scalars of one kind; a map, a list of mixed kinds, a nested list or a `NULL` inside a list is a type error | stored as given: maps, mixed and nested lists (a `NULL` inside a list stays in the list) | Graphersal's data model stores JSON-like values ([jpath keys](../users_guide/jpath_keys.md)); a [schema](../users_guide/schema_enforcement.md) restricts a property's type where wanted |
 | `CREATE` requires `WITH` between a write and a following `MATCH` (Cypher 5) | `MATCH` may follow `INSERT` directly | GQL's linear statements allow it, as Neo4j's Cypher 25 does |
+| `SET n = NULL` / `SET n += NULL` | an error (`22004`) whose help names `SET n = {}` and `coalesce($map, {})` | a `NULL` map is more often a missing parameter than a wish to remove every property; an error can be relaxed later without changing a query that works, the opposite would silently start removing properties. GQL's own item takes a braced map only |
+| `SET` of a list of maps, a map, or a list of mixed kinds is a type error | stored as given, as for `INSERT` | as above |
+
+## SET and REMOVE
+
+**Items run left to right.** The items of one `SET` or `REMOVE` clause run in the order written,
+for each row in turn, and each item sees the changes of the items before it: `SET n.c = 1, n.c
+= n.c + 1` leaves `2`. The same item may be written twice; the last one wins. The value of an
+item is computed when the item runs, from the row and the current state of the graph.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.n = 1, p.n = p.n + 1 RETURN p.n AS n").to_list()   // #{"n": 2}
+```
+
+**`NULL` removes.** A property item whose value is `NULL` removes the property (it is never
+stored as `NULL`), and so does a `NULL` value in the map of `SET n = {..}` and `SET n += {..}`.
+
+**`=` replaces, `+=` merges.** `SET n = {..}` evaluates the whole map and checks every value
+before it writes: then it removes every property the map does not name and sets the others.
+`SET n += {..}` sets the keys of the map and keeps the rest. A node or an edge on the right
+stands for its properties, read before the first write (so `SET n = n` changes nothing); another
+value that is not a map is an error (`22G03`), and a `NULL` map is an error (`22004`).
+
+**The target.** A target that is `NULL` (a variable an `OPTIONAL MATCH` left `NULL`) makes the
+item a no-op for that row, whatever its right side: the right side is not evaluated. A target
+that holds a value which is not a node or an edge is an error (`22G03`); a target removed
+before the item runs fails the query, as the element no longer exists.
+
+```rhai,graph=modern
+g.gql("OPTIONAL MATCH (p:person {name: 'nobody'}) SET p.k = 1 / 0 RETURN p").to_list()   // #{"p": ()}
+g.gql("FOR x IN [1] SET x.k = 1")   // error: the target holds a value, not a node or an edge
+```
+
+**Labels.** A label item adds or removes each name in order. Adding a label the node has and
+removing one it lacks change nothing; the last label may be removed (the node then has none). An
+edge has exactly one label: a label item on it is an error before the run (`42002`) when the
+pattern declares the variable as an edge, and at run time (`22G03`) when only the row knows it,
+like `add_label()` on an edge.
+
+```rhai,graph=modern
+g.gql("MATCH (s:software {name: 'ripple'}) REMOVE s:software RETURN labels(s) AS labels").to_list()   // #{"labels": []}
+```
+
+**What a row sees** is as for `INSERT` ([Writes](#writes)): a value a row carried before the
+clause (`WITH n.age AS old`) keeps its value, while the element itself is live, so `RETURN n.k`
+reads the new state. A clause before the `SET` has found all its rows before the `SET` runs, so
+a `SET` never changes which rows an earlier `MATCH` matched; a `LIMIT 0` after the `SET` still
+lets it run for every row.
 
 ## Type errors surface at evaluation time
 

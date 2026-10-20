@@ -460,6 +460,27 @@
     "group": "GQL",
     "subgroup": "Writes",
     "graph": "modern",
+    "title": "SET a property: one year older",
+    "script": "// SET changes the elements of each row, its items left to right; RETURN reads the new values.\n// SET p.k = NULL (or REMOVE p.k) removes a property.\ng.gql(\"MATCH (p:person {name: 'vadas'}) SET p.age = p.age + 1, p.checked = true RETURN p.name AS name, p.age AS age, p.checked AS checked\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "REMOVE a label (and SET another)",
+    "script": "// SET n:L adds a label to a node, REMOVE n:L takes one away; an absent label changes nothing.\ng.gql(\"MATCH (s:software {name: 'ripple'}) SET s:product REMOVE s:software RETURN s.name AS name, labels(s) AS labels\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "SET p += {..}: merge a map into the properties",
+    "script": "// += (Cypher) merges the map in and a NULL value removes its key; SET p = {..} replaces every\n// property instead.\ng.gql(\"MATCH (p:person {name: 'marko'}) SET p += {city: 'Rome', age: NULL} RETURN properties(p) AS props\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
     "title": "A failing write changes nothing",
     "script": "// One query is one transaction: the second row fails (division by zero), so the first row's\n// node is not kept either.\ng.gql(\"FOR x IN [1, 0] INSERT (:n {v: 1 / x})\")",
     "expect": "error"
