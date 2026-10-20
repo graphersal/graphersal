@@ -309,11 +309,12 @@ use std::rc::Rc;
 
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
-    CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr,
-    LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral,
-    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern,
-    PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, ReduceAccumulator, ReturnItem,
-    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, InsertClause,
+    LabelExpr, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry,
+    MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath,
+    PathPattern, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
+    ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
+    UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -1127,6 +1128,17 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
              with OPTIONAL MATCH and collect_list() instead",
         )
         .topic(GqlHelpTopic::Subquery),
+    )
+}
+
+/// The refusal of a parsed `INSERT` / `CREATE` until the write clauses are bound (stage 3a.T2).
+fn insert_not_yet(clause: &InsertClause) -> Box<GqlErrorBuilder> {
+    let word = if clause.cypher { "CREATE" } else { "INSERT" };
+    not_yet(
+        clause.keyword,
+        word,
+        "create the elements with the Gremlin steps add_v() and add_e(), for example \
+         g.add_v(\"person\").property(\"name\", \"ann\")",
     )
 }
 
@@ -2056,6 +2068,23 @@ impl<'q> Binder<'q> {
         unit: bool,
         span: Span,
     ) -> BResult<Box<BoundLinear>> {
+        match last.end() {
+            QueryEnd::Return => {}
+            QueryEnd::Finish(word) => {
+                return Err(not_yet(
+                    word,
+                    "FINISH",
+                    "end the query with RETURN, for example MATCH (p:person) RETURN count(*)",
+                ));
+            }
+            QueryEnd::Write => {
+                return Err(not_yet(
+                    last.span,
+                    "a query without RETURN",
+                    "end the query with RETURN, for example MATCH (p:person) RETURN p.name",
+                ));
+            }
+        }
         let ret = &last.ret;
         let mut columns = self.projection(ret.star, &ret.items, "RETURN")?;
         if let Some(order) = align {
@@ -2139,6 +2168,7 @@ impl<'q> Binder<'q> {
             Stage::With(with) => self.with_clause(&WithParts::of(with)),
             Stage::For(clause) => self.for_clause(clause),
             Stage::Call(clause) => self.call_clause(clause),
+            Stage::Insert(clause) => Err(insert_not_yet(clause)),
         }
     }
 

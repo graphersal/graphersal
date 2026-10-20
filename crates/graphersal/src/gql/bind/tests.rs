@@ -3380,3 +3380,38 @@ fn binding_never_panics_on_parenthesized_path_patterns() {
     }
     assert!(bound_bodies > 300, "{bound_bodies}");
 }
+
+// ----- stage 3a.T1: write clauses parse, the binder refuses them until 3a.T2 -----
+
+#[test]
+fn insert_and_finish_are_not_yet_bound() {
+    for (query, text, what) in [
+        ("INSERT (n:person {name: 'ann'})", "INSERT", "INSERT"),
+        (
+            "MATCH (n) create (n)-[:T]->(m) RETURN m",
+            "create",
+            "CREATE",
+        ),
+        (
+            "MATCH (p) CALL (p) { INSERT (p)-[:T]->(:X) } RETURN p",
+            "INSERT",
+            "INSERT",
+        ),
+        ("MATCH (n) FINISH", "FINISH", "FINISH"),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            format!("{what} is not yet supported in this version")
+        );
+        assert!(f.alternative.is_some(), "{query}");
+    }
+    // A read clause before the INSERT is bound first: its errors come first.
+    let parsed = parse("MATCH (n) WHERE x > 1 INSERT (m)").unwrap();
+    let f = failure("MATCH (n) WHERE x > 1 INSERT (m)", bind(&parsed));
+    assert_eq!(f.kind, GqlErrorKind::Semantic, "{f:?}");
+}

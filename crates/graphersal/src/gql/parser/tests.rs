@@ -789,32 +789,29 @@ fn lexer_errors_are_gql_syntax_errors() {
 // ----- refused and not yet supported constructs -----
 
 #[test]
-fn writes_are_refused() {
-    for (query, text) in [
-        ("CREATE (n:person)", "CREATE"),
-        ("INSERT (n:person)", "INSERT"),
-        ("MATCH (n) SET n.x = 1", "SET"),
-        ("MATCH (n) REMOVE n.x", "REMOVE"),
-        ("MATCH (n) DELETE n", "DELETE"),
-        ("MATCH (n) DETACH DELETE n", "DETACH DELETE"),
-        ("MATCH (n) NODETACH DELETE n", "NODETACH DELETE"),
-        ("MERGE (n:person {name: 'x'})", "MERGE"),
-        ("MATCH (n) RETURN n CREATE (m)", "CREATE"),
-        ("match (n) delete n", "delete"),
+fn writes_not_yet_supported_are_refused() {
+    for (query, text, step) in [
+        ("MATCH (n) SET n.x = 1", "SET", "property("),
+        ("MATCH (n) REMOVE n.x", "REMOVE", "remove_property("),
+        ("MATCH (n) DELETE n", "DELETE", "drop()"),
+        ("MATCH (n) DETACH DELETE n", "DETACH DELETE", "drop()"),
+        ("MATCH (n) NODETACH DELETE n", "NODETACH DELETE", "drop()"),
+        ("MERGE (n:person {name: 'x'})", "MERGE", "merge_v("),
+        ("match (n) delete n", "delete", "drop()"),
     ] {
         let f = fail(query);
-        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
         assert_eq!(f.gqlstatus, "0A000");
         assert_eq!(f.text, text, "{query}");
-        assert!(f.message.contains("read-only"), "{}", f.message);
-        assert_eq!(
-            f.alternative.as_deref(),
-            Some(
-                "gql() is read-only; use the Gremlin mutation steps (add_v(), add_e(), \
-                 property(), drop(), merge_v())"
-            )
-        );
+        assert!(f.message.contains("is not yet supported"), "{}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(alternative.contains(step), "{query}: {alternative}");
     }
+    // A write clause after RETURN: RETURN ends the query.
+    let f = fail("MATCH (n) RETURN n CREATE (m)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "CREATE");
+    assert_eq!(f.message, "CREATE after RETURN: RETURN ends the query");
 }
 
 #[test]
@@ -1220,6 +1217,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::Filter(_) => "filter",
             Stage::For(_) => "for",
             Stage::Call(_) => "call",
+            Stage::Insert(_) => "insert",
         })
         .collect()
 }
@@ -3490,6 +3488,7 @@ fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
             Stage::Filter(_) => "filter",
             Stage::For(_) => "for",
             Stage::Call(_) => "call",
+            Stage::Insert(_) => "insert",
         })
         .collect()
 }
@@ -3798,7 +3797,7 @@ fn composite_and_call_errors() {
         assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
         assert_eq!(f.gqlstatus, "0A000");
         assert_eq!(f.text, text, "{query}");
-        assert!(f.message.contains("read-only"), "{}", f.message);
+        assert!(f.message.contains("IN TRANSACTIONS"), "{}", f.message);
     }
     // A body without RETURN: refused (a unit subquery writes); an empty body: syntax.
     let f = fail("MATCH (p) CALL (p) { MATCH (p)-->(x) } RETURN p");
@@ -4460,5 +4459,583 @@ fn parenthesized_path_patterns_in_expressions_are_bounded() {
         format!("MATCH (n) RETURN [{}", "((x)-->(y))+ ".repeat(2000)),
     ] {
         let _ = fail(&query);
+    }
+}
+
+// ----- stage 3a: INSERT / CREATE, FINISH, queries ending in a write -----
+
+/// The only stage of `q` as an INSERT clause.
+fn insert_of(linear: &LinearQuery, index: usize) -> &InsertClause {
+    match linear.stages.get(index) {
+        Some(Stage::Insert(clause)) => clause,
+        other => panic!("stage {index} is no INSERT: {other:?}"),
+    }
+}
+
+/// The label names of a conjunction, in written order.
+fn conjunction(labels: &LabelExpr) -> Vec<&str> {
+    match &labels.kind {
+        LabelExprKind::Label(name) => vec![name.name.as_str()],
+        LabelExprKind::And(left, right) => {
+            let mut names = conjunction(left);
+            names.extend(conjunction(right));
+            names
+        }
+        other => panic!("not a conjunction: {other:?}"),
+    }
+}
+
+#[test]
+fn insert_and_create_forms() {
+    let q = ok("INSERT (n:person {name: 'ann', age: 30})");
+    assert_eq!(stage_kinds(&q), ["insert"]);
+    assert_eq!(q.end(), QueryEnd::Write);
+    let insert = insert_of(&q, 0);
+    assert!(!insert.cypher);
+    assert_eq!(q.text(insert.keyword), "INSERT");
+    assert_eq!(
+        q.text(insert.span),
+        "INSERT (n:person {name: 'ann', age: 30})"
+    );
+    let node = &insert.patterns[0].start;
+    assert_eq!(node.variable.as_ref().map(|v| v.name.as_str()), Some("n"));
+    assert_eq!(conjunction(node.labels.as_ref().unwrap()), ["person"]);
+    let keys: Vec<&str> = node
+        .properties
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| e.key.name.as_str())
+        .collect();
+    assert_eq!(keys, ["name", "age"]);
+    // CREATE is the Cypher alias: the same tree, marked.
+    let q = ok("create (n:person {name: 'ann', age: 30})");
+    let create = insert_of(&q, 0);
+    assert!(create.cypher);
+    assert_eq!(q.text(create.keyword), "create");
+    // Label conjunctions: `&`, Cypher `:A:B`, the IS form, parentheses.
+    let q = ok("INSERT (a:A&B), (b IS C & D), (c:E:F), (d:(G&H)), ()");
+    let insert = insert_of(&q, 0);
+    assert_eq!(insert.patterns.len(), 5);
+    let names: Vec<Vec<&str>> = insert.patterns[..4]
+        .iter()
+        .map(|p| conjunction(p.start.labels.as_ref().unwrap()))
+        .collect();
+    assert_eq!(names, [["A", "B"], ["C", "D"], ["E", "F"], ["G", "H"]]);
+    assert_eq!(q.text(insert.patterns[4].span), "()");
+    assert!(insert.patterns[4].start.labels.is_none());
+    // Edges: both directions, a variable, one label, properties; a chain.
+    let q = ok("CREATE (a:person)-[:knows {since: 2001}]->(b)<-[e:likes]-(c), (c)-[:T]->(a)");
+    let insert = insert_of(&q, 0);
+    let steps = &insert.patterns[0].steps;
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].edge.direction, EdgeDirection::Right);
+    assert_eq!(steps[1].edge.direction, EdgeDirection::Left);
+    assert_eq!(
+        conjunction(steps[0].edge.labels.as_ref().unwrap()),
+        ["knows"]
+    );
+    assert_eq!(q.text(steps[0].edge.span), "-[:knows {since: 2001}]->");
+    assert_eq!(q.text(steps[1].edge.span), "<-[e:likes]-");
+    assert_eq!(steps[1].edge.variable.as_ref().unwrap().name, "e");
+    assert_eq!(q.text(insert.patterns[1].span), "(c)-[:T]->(a)");
+}
+
+#[test]
+fn insert_stands_wherever_a_clause_stands() {
+    // After reads, before RETURN, before MATCH (W4), twice, first after NEXT.
+    for (query, kinds) in [
+        (
+            "MATCH (n) INSERT (n)-[:T]->(:X) RETURN n",
+            &["match", "insert"][..],
+        ),
+        ("INSERT (a:A) MATCH (b:A) RETURN b", &["insert", "match"]),
+        ("INSERT (a) INSERT (b) RETURN a, b", &["insert", "insert"]),
+        ("FOR x IN [1, 2] INSERT (:N {v: x})", &["for", "insert"]),
+        (
+            "MATCH (n) WITH n LET k = 1 INSERT (:N {k: k})",
+            &["match", "with", "let", "insert"],
+        ),
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-->(m) INSERT (:N)",
+            &["match", "optional", "insert"],
+        ),
+    ] {
+        let q = ok(query);
+        assert_eq!(stage_kinds(&q), kinds, "{query}");
+    }
+    let q = ok("MATCH (n) RETURN n NEXT INSERT (:copy) RETURN 1 AS one");
+    assert_eq!(stage_kinds_of(&q.body.next[0].block.first), ["insert"]);
+    // With RETURN the query ends as before.
+    let q = ok("INSERT (n) RETURN n ORDER BY n LIMIT 1");
+    assert_eq!(q.end(), QueryEnd::Return);
+    assert!(q.limit.is_some());
+}
+
+#[test]
+fn a_query_may_end_in_a_write_clause() {
+    for query in [
+        "INSERT (n)",
+        "INSERT (n);",
+        "MATCH (n) INSERT (n)-[:T]->(m)",
+        "MATCH (p) CALL (p) { INSERT (p)-[:T]->(:X) }",
+        "MATCH (p) OPTIONAL CALL (p) { INSERT (:X) } ",
+    ] {
+        let q = ok(query);
+        assert_eq!(q.end(), QueryEnd::Write, "{query}");
+        assert!(q.ret.items.is_empty() && q.ret.star.is_none(), "{query}");
+        assert_eq!(q.ret.span.start, q.ret.span.end, "{query}");
+        assert!(q.order_by.is_none() && q.offset.is_none() && q.limit.is_none());
+    }
+    // The span of the linear query ends at its last clause.
+    let q = ok("MATCH (n) INSERT (m) ;");
+    assert_eq!(q.text(q.span), "MATCH (n) INSERT (m)");
+    // A CALL body may end in a write; the body of a CALL whose body writes may end the query.
+    let q = ok("MATCH (p) CALL (p) { MATCH (p)-->(x) INSERT (x)-[:seen]->(:log) } RETURN p");
+    let Some(Stage::Call(call)) = q.stages.get(1) else {
+        panic!("no CALL: {q:?}");
+    };
+    assert_eq!(call.body.first.first.end(), QueryEnd::Write);
+    assert_eq!(stage_kinds_of(&call.body.first.first), ["match", "insert"]);
+    // A clause that reads after the write needs RETURN again.
+    let f = fail("MATCH (n) INSERT (m) MATCH (k)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.message.starts_with("missing RETURN"), "{}", f.message);
+    // A read-only CALL body without RETURN stays refused.
+    let f = fail("MATCH (p) CALL (p) { MATCH (p)-->(x) } RETURN p");
+    assert_eq!(f.kind, GqlErrorKind::Refused);
+    assert_eq!(
+        f.message,
+        "a CALL { } body without RETURN (a unit subquery) only makes sense for writes, and this \
+         body writes nothing"
+    );
+    // UNION and NEXT need a RETURN before them.
+    for (query, text) in [
+        ("INSERT (a) NEXT MATCH (b) RETURN b", "NEXT"),
+        ("INSERT (a) UNION MATCH (b) RETURN b", "UNION"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("must follow a complete query"),
+            "{}",
+            f.message
+        );
+    }
+}
+
+#[test]
+fn finish_ends_a_query_without_a_result() {
+    for (query, finish) in [
+        ("MATCH (n) FINISH", "FINISH"),
+        ("finish", "finish"),
+        ("MATCH (n) INSERT (m) FINISH;", "FINISH"),
+    ] {
+        let q = ok(query);
+        let QueryEnd::Finish(span) = q.end() else {
+            panic!("{query}: {:?}", q.end());
+        };
+        assert_eq!(q.text(span), finish, "{query}");
+    }
+    let q = ok("MATCH (p) CALL (p) { MATCH (p)-->(x) Finish } RETURN p");
+    let Some(Stage::Call(call)) = q.stages.get(1) else {
+        panic!("no CALL: {q:?}");
+    };
+    assert!(matches!(call.body.first.first.end(), QueryEnd::Finish(_)));
+    // `finish` stays a name everywhere else.
+    let q = ok("MATCH (finish) RETURN finish.x AS finish");
+    assert_eq!(q.end(), QueryEnd::Return);
+    // Nothing follows FINISH.
+    for (query, text, expected) in [
+        ("MATCH (n) FINISH RETURN n", "RETURN", "end of input"),
+        ("MATCH (n) FINISH LIMIT 1", "LIMIT", "end of input"),
+        (
+            "MATCH (p) CALL (p) { FINISH MATCH (x) } RETURN p",
+            "MATCH",
+            "`}`",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, [expected], "{query}");
+        assert!(
+            f.message.ends_with("after FINISH: FINISH ends the query"),
+            "{}",
+            f.message
+        );
+    }
+}
+
+#[test]
+fn insert_expected_tokens() {
+    // After an INSERT pattern: another pattern or a clause (K9: no write clause is named).
+    let f = fail("MATCH (n) INSERT (m) foo");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "foo");
+    assert_eq!(
+        f.expected,
+        [
+            "`,`",
+            "MATCH",
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "FOR",
+            "UNWIND",
+            "CALL",
+            "RETURN"
+        ]
+    );
+    // A pattern starts with a node.
+    let f = fail("INSERT");
+    assert_eq!(f.expected, ["`(`"]);
+    let f = fail("INSERT x");
+    assert_eq!(f.text, "x");
+    assert_eq!(f.expected, ["`(`"]);
+    // An edge leads to a node.
+    let f = fail("INSERT (a)-[:T]->");
+    assert_eq!(f.expected, ["`{`", "`*`", "`+`", "`(`"]);
+    // Inside a node pattern.
+    let f = fail("INSERT (a:person name)");
+    assert_eq!(f.text, "name");
+    assert_eq!(f.expected, ["`{`", "WHERE", "`)`"]);
+    // After the whole query only its end may follow.
+    let f = fail("INSERT (a); MATCH (n)");
+    assert_eq!(f.text, "MATCH");
+    assert_eq!(f.expected, ["end of input"]);
+}
+
+#[test]
+fn insert_form_errors() {
+    // W6: edges need a direction.
+    for (query, text) in [
+        ("INSERT (a)-[:T]-(b)", "-[:T]-"),
+        ("INSERT (a)--(b)", "--"),
+        ("INSERT (a)-(b)", "-"),
+        ("INSERT (a)<-[:T]->(b)", "<-[:T]->"),
+        ("INSERT (a)<-->(b)", "<-->"),
+        ("CREATE (a)-[:T]-(b)", "-[:T]-"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.gqlstatus, "42001");
+        assert_eq!(f.text, text, "{query}");
+        let word = &query[..6];
+        assert_eq!(
+            f.message,
+            format!("{word} needs a direction; write -[e:T]-> or <-[e:T]-"),
+            "{query}"
+        );
+        assert!(
+            f.alternative
+                .as_deref()
+                .unwrap_or("")
+                .contains("-[:knows]->"),
+            "{query}: {f:?}"
+        );
+    }
+    // W6: exactly one edge label.
+    for (query, text, message) in [
+        ("INSERT (a)-[e]->(b)", "-[e]->", "needs exactly one label"),
+        ("INSERT (a)-->(b)", "-->", "needs exactly one label"),
+        ("INSERT (a)<-[]-(b)", "<-[]-", "needs exactly one label"),
+        ("INSERT (a)-[:A|B]->(b)", "A|B", "has exactly one label"),
+        ("INSERT (a)-[:A&B]->(b)", "A&B", "has exactly one label"),
+        ("INSERT (a)-[:A:B]->(b)", "A:B", "has exactly one label"),
+        ("INSERT (a)-[:!A]->(b)", "!A", "has exactly one label"),
+        ("INSERT (a)-[:%]->(b)", "%", "has exactly one label"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(message), "{query}: {}", f.message);
+    }
+    // W6: no quantifier; no WHERE in an edge.
+    for (query, text, message) in [
+        (
+            "INSERT (a)-[:T]->{2}(b)",
+            "{2}",
+            "a quantifier cannot stand in INSERT",
+        ),
+        (
+            "INSERT (a)-[:T*1..2]->(b)",
+            "*1..2",
+            "a quantifier cannot stand in INSERT",
+        ),
+        (
+            "INSERT (a)-[:T]->+(b)",
+            "+",
+            "a quantifier cannot stand in INSERT",
+        ),
+        (
+            "INSERT (a)-[e:T WHERE e.x = 1]->(b)",
+            "e.x = 1",
+            "a WHERE inside an edge pattern cannot stand in INSERT",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with(message), "{query}: {}", f.message);
+    }
+    // W7: node labels are a conjunction of names.
+    for (query, text, operator) in [
+        ("INSERT (a:A|B)", "A|B", "`|`"),
+        ("CREATE (a:!A)", "!A", "`!`"),
+        ("INSERT (a:%)", "%", "`%`"),
+        ("INSERT (a:A&(B|C))", "(B|C)", "`|`"),
+        ("INSERT (a IS A & !B)", "!B", "`!`"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with(operator), "{query}: {}", f.message);
+        assert!(
+            f.message.contains("a new node gets the labels written"),
+            "{}",
+            f.message
+        );
+    }
+    // No WHERE in a node, no parenthesized path pattern.
+    let f = fail("INSERT (a WHERE a.x = 1)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "a.x = 1");
+    assert!(
+        f.message.starts_with("a WHERE inside a node pattern"),
+        "{}",
+        f.message
+    );
+    let f = fail("INSERT (x) ((a)-[:T]->(b)){2}");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "((a)-[:T]->(b))");
+    assert!(
+        f.message.starts_with("a parenthesized path pattern"),
+        "{}",
+        f.message
+    );
+    // W5: a path variable is not yet supported.
+    let f = fail("INSERT p = (a)-[:T]->(b)");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "p");
+    assert_eq!(
+        f.message,
+        "a path variable in INSERT is not yet supported in this version"
+    );
+    // The second pattern is checked too.
+    let f = fail("INSERT (a), (b)--(c)");
+    assert_eq!(f.text, "--");
+}
+
+#[test]
+fn writes_inside_subqueries_and_comprehensions_are_refused() {
+    for (query, text, place) in [
+        (
+            "MATCH (n) WHERE EXISTS { CREATE (m) } RETURN n",
+            "CREATE",
+            "EXISTS { }",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) INSERT (m) } RETURN n",
+            "INSERT",
+            "EXISTS { }",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) INSERT (m) RETURN m } RETURN n",
+            "INSERT",
+            "EXISTS { }",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS ( MATCH (n) SET n.x = 1 ) RETURN n",
+            "SET",
+            "EXISTS ( )",
+        ),
+        (
+            "MATCH (n) RETURN COUNT { MATCH (n) INSERT (m) RETURN m }",
+            "INSERT",
+            "COUNT { }",
+        ),
+        (
+            "MATCH (n) RETURN COLLECT { MATCH (n) DELETE n RETURN n }",
+            "DELETE",
+            "COLLECT { }",
+        ),
+        (
+            "MATCH (n) RETURN COUNT { MATCH (n) DETACH DELETE n RETURN n }",
+            "DETACH DELETE",
+            "COUNT { }",
+        ),
+        (
+            "MATCH (n) RETURN EXISTS { CALL { INSERT (m) } RETURN 1 }",
+            "INSERT",
+            "EXISTS { }",
+        ),
+        (
+            "RETURN [x IN [1] | CREATE (m)]",
+            "CREATE",
+            "a list comprehension",
+        ),
+        (
+            "RETURN [x IN [1] WHERE MERGE (m) | x]",
+            "MERGE",
+            "a list comprehension",
+        ),
+        (
+            "MATCH (n) RETURN [(n)-->(m) | CREATE (k)]",
+            "CREATE",
+            "a pattern comprehension",
+        ),
+        (
+            "RETURN reduce(a = 0, x IN [1] | INSERT (m))",
+            "INSERT",
+            "reduce( )",
+        ),
+        ("RETURN all(x IN [1] WHERE CREATE (m))", "CREATE", "all( )"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            format!("{text} inside {place}: a subquery expression or a comprehension cannot write"),
+            "{query}"
+        );
+        assert!(f.alternative.unwrap_or_default().contains("INSERT (:maker"));
+    }
+    // A write clause where an expression stands, outside a subquery.
+    let f = fail("MATCH (n) WHERE CREATE (m) RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "CREATE");
+    assert_eq!(
+        f.message,
+        "CREATE is a clause and cannot stand inside an expression"
+    );
+}
+
+#[test]
+fn union_operands_that_write_are_not_yet_supported() {
+    for (query, text) in [
+        (
+            "MATCH (n) INSERT (m) RETURN m UNION MATCH (k) RETURN k",
+            "INSERT",
+        ),
+        ("MATCH (k) RETURN k UNION ALL CREATE (m) RETURN m", "CREATE"),
+        (
+            "MATCH (k) RETURN k UNION CALL { INSERT (m) } RETURN 1 AS k",
+            "INSERT",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            format!("{text} in an operand of UNION is not yet supported in this version")
+        );
+    }
+    // A writing CALL body may hold its own UNION of reads.
+    ok("CALL { MATCH (a) RETURN a UNION MATCH (a) RETURN a } INSERT (:copy)");
+}
+
+#[test]
+fn catalog_and_vendor_commands_are_refused() {
+    for (query, text, message, alternative) in [
+        (
+            "CREATE INDEX person_age FOR (n:person) ON (n.age)",
+            "CREATE INDEX",
+            "CREATE INDEX is a catalog command, not part of a gql() query",
+            Some("g.create_index("),
+        ),
+        (
+            "CREATE TEXT INDEX FOR (n:person) ON (n.name)",
+            "CREATE TEXT",
+            "CREATE TEXT is a catalog command, not part of a gql() query",
+            Some("g.create_index("),
+        ),
+        (
+            "CREATE CONSTRAINT FOR (n:person) REQUIRE n.name IS UNIQUE",
+            "CREATE CONSTRAINT",
+            "CREATE CONSTRAINT is a schema command, not part of a gql() query",
+            Some("g.set_schema("),
+        ),
+        (
+            "CREATE GRAPH social",
+            "CREATE GRAPH",
+            "CREATE GRAPH is a catalog command: gql() runs on the graph of its traversal source",
+            Some("host application"),
+        ),
+        (
+            "create or replace graph social",
+            "create or replace",
+            "CREATE OR REPLACE is a catalog command: gql() runs on the graph of its traversal \
+             source",
+            Some("host application"),
+        ),
+        (
+            "CREATE DATABASE social",
+            "CREATE DATABASE",
+            "CREATE DATABASE is a vendor administration command, not part of GQL",
+            None,
+        ),
+        (
+            "MATCH (n) CREATE INDEX FOR (m:x) ON (m.k)",
+            "CREATE INDEX",
+            "CREATE INDEX is a catalog command, not part of a gql() query",
+            Some("g.create_index("),
+        ),
+        (
+            "LOAD CSV FROM 'file:///people.csv' AS row RETURN row",
+            "LOAD CSV",
+            "LOAD CSV is a vendor extension, not part of GQL",
+            Some("FOR row IN $rows INSERT"),
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.gqlstatus, "0A000");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.message, message, "{query}");
+        match alternative {
+            Some(part) => assert!(
+                f.alternative.as_deref().unwrap_or("").contains(part),
+                "{query}: {f:?}"
+            ),
+            None => assert!(f.alternative.is_none(), "{query}: {f:?}"),
+        }
+    }
+    // A path variable after CREATE is a pattern, not a command.
+    let f = fail("CREATE p = (a)-[:T]->(b)");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "p");
+    // FOREACH: not yet, naming FOR with a write clause.
+    let f = fail("MATCH (n) FOREACH (x IN [1] | CREATE (m))");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "FOREACH");
+    assert!(f.alternative.unwrap_or_default().contains("FOR name IN"));
+}
+
+#[test]
+fn not_yet_write_clauses_build_the_gremlin_example_from_the_clause() {
+    for (query, example) in [
+        ("MATCH (p) SET p.old = true", ".property(\"old\", true)"),
+        (
+            "MATCH (p) SET p.name = 'bob'",
+            ".property(\"name\", \"bob\")",
+        ),
+        ("MATCH (p) SET p.age = 1.5", ".property(\"age\", 1.5)"),
+        ("MATCH (p) SET p.age = p.age + 1", ".property(\"age\", 30)"),
+        ("MATCH (p) SET p:admin", ".property(\"age\", 30)"),
+        ("MATCH (p) SET p.k = 'a\"b'", ".property(\"age\", 30)"),
+        ("MATCH (p) REMOVE p.age", ".remove_property(\"age\")"),
+        ("MATCH (p) REMOVE p:admin", ".remove_property(\"age\")"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(alternative.contains(example), "{query}: {alternative}");
     }
 }

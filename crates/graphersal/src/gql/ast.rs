@@ -1,4 +1,4 @@
-//! The abstract syntax tree of a GQL read query.
+//! The abstract syntax tree of a GQL query.
 //!
 //! Every node carries the [`Span`] of the text it was parsed from, and [`Query`] keeps the
 //! source text, so every later stage (binder, planner, lowering, errors) can point at the
@@ -31,6 +31,10 @@
 //! WHERE c){1,3} (b)`): [`PathPattern::groups`], each a [`ParenthesizedPath`] with its
 //! juxtaposed node and the plain steps after it ([`GroupStep`]). A path without one has exactly
 //! the tree of the stages before (`groups` empty).
+//! Stage 3a adds the first write clause: `INSERT` and its Cypher alias `CREATE`
+//! ([`Stage::Insert`], [`InsertClause`]), and linear queries without a result statement: one
+//! ending in a write clause or in `FINISH` ([`LinearQuery::end`]). A query without writes has
+//! exactly the tree of the stages before.
 
 use super::lexer::Span;
 
@@ -139,7 +143,10 @@ pub(crate) struct LinearQuery {
     /// [`Stage::For`], [`Stage::Let`], [`Stage::With`] or [`Stage::Filter`]. A 1a query
     /// holds one `Stage::Match(i)` per entry of `matches`, in order.
     pub(crate) stages: Vec<Stage>,
-    /// `RETURN` (mandatory).
+    /// `RETURN`. A linear query without a result statement (stage 3a: it ends in a write
+    /// clause or in `FINISH`, [`LinearQuery::end`]) holds an empty one: no items, no `*`, no
+    /// `GROUP BY`, spanning the word `FINISH` or nothing; `order_by`, `offset` and `limit` are
+    /// then `None`.
     pub(crate) ret: ReturnClause,
     /// `ORDER BY ...`.
     pub(crate) order_by: Option<OrderBy>,
@@ -155,6 +162,33 @@ pub(crate) struct LinearQuery {
     pub(crate) importing: Option<ImportingWith>,
     /// The whole linear query.
     pub(crate) span: Span,
+}
+
+impl LinearQuery {
+    /// How the linear query ends: `RETURN`, `FINISH`, or its last clause, which writes (W2).
+    /// Read from [`LinearQuery::ret`], which every `RETURN` fills with an item or a `*`.
+    pub(crate) fn end(&self) -> QueryEnd {
+        let ret = &self.ret;
+        if ret.star.is_some() || !ret.items.is_empty() {
+            QueryEnd::Return
+        } else if ret.span.start < ret.span.end {
+            QueryEnd::Finish(ret.span)
+        } else {
+            QueryEnd::Write
+        }
+    }
+}
+
+/// How a [`LinearQuery`] ends. Closed by definition: GQL's result statement is `RETURN` or
+/// `FINISH`, and a query whose last clause writes may leave it out (design W2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryEnd {
+    /// `RETURN ...` ([`LinearQuery::ret`]).
+    Return,
+    /// `FINISH` (ISO GQL): no result; the span of the word.
+    Finish(Span),
+    /// No result statement after a last clause that writes: zero result rows (design W2).
+    Write,
 }
 
 /// Cypher's importing `WITH a, b` / `WITH *` at the start of a `CALL { }` body (an alias of the
@@ -194,6 +228,28 @@ pub(crate) enum Stage {
     For(ForClause),
     /// `[OPTIONAL] CALL (vars | *) { query }` and Cypher `CALL { .. }` (stage 2d).
     Call(Box<CallClause>),
+    /// `INSERT pattern, ...` and its Cypher alias `CREATE pattern, ...` (stage 3a).
+    Insert(InsertClause),
+}
+
+/// `INSERT pattern, pattern, ...` or Cypher `CREATE pattern, ...` (stage 3a, design W-a): the
+/// nodes and edges of the patterns are created once per incoming row.
+///
+/// The parser guarantees the insert form of each [`PathPattern`] (design W5-W7): no path
+/// variable, no parenthesized path pattern; nodes without `WHERE`, their labels a conjunction
+/// of names only ([`LabelExprKind::Label`] / [`LabelExprKind::And`]: `:A&B`, `:A:B`, `IS A &
+/// B`); edges directed ([`EdgeDirection::Right`] / [`EdgeDirection::Left`]) with exactly one
+/// label name, no quantifier and no `WHERE`. Properties are inline maps of any expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertClause {
+    /// The comma-separated patterns in written order (at least one).
+    pub(crate) patterns: Vec<PathPattern>,
+    /// Written as Cypher `CREATE` (one meaning for both spellings).
+    pub(crate) cypher: bool,
+    /// The keyword (`INSERT` or `CREATE` as written).
+    pub(crate) keyword: Span,
+    /// From the keyword to the end of the last pattern.
+    pub(crate) span: Span,
 }
 
 /// `[OPTIONAL] CALL [(vars) | (*)] { query }`: an inline subquery run once per incoming row

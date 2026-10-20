@@ -1,4 +1,5 @@
-//! Recursive-descent parser of GQL read queries (stages 1a to 2e): tokens to the [`ast`](super::ast) tree.
+//! Recursive-descent parser of GQL queries (the read stages 1a to 2e, writes from stage 3a):
+//! tokens to the [`ast`](super::ast) tree.
 //!
 //! [`parse`] never panics on any input. Every failure, lexer errors included, is a
 //! [`TraverserError::Gql`] built through [`GqlErrorBuilder`]: the span of the offending token,
@@ -12,8 +13,12 @@
 //! query      := composite ';'?
 //! composite  := block (NEXT block)*                 -- NEXT binds looser than UNION
 //! block      := linear (UNION (ALL | DISTINCT)? linear)*   -- ALL: a contextual word
-//! linear     := stage* return order_by? (OFFSET|SKIP expr)? (LIMIT expr)?
-//! stage      := match | with | let | filter | for | call
+//! linear     := stage* result
+//! result     := return order_by? (OFFSET|SKIP expr)? (LIMIT expr)?
+//!             | FINISH                              -- FINISH: a contextual word (stage 3a)
+//!             |                                     -- nothing, after a stage that writes
+//! stage      := match | with | let | filter | for | call | insert
+//! insert     := (INSERT | CREATE) path (',' path)*   -- the insert form (stage 3a, below)
 //! call       := OPTIONAL? CALL ('(' (var (',' var)* | '*')? ')')? '{' composite '}'
 //! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
 //! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
@@ -69,8 +74,34 @@
 //!
 //! # Decisions
 //!
-//! - **`RETURN` is mandatory** (design D10); its absence is a syntax error whose alternative names
-//!   `RETURN *` and the query's own variables.
+//! - **`RETURN` is mandatory in a read query** (design D10); its absence is a syntax error whose
+//!   alternative names `RETURN *` and the query's own variables. Stage 3a (design W2, user
+//!   decision 3): a linear query whose last clause writes (an `INSERT`, a `CALL` whose body
+//!   writes) may end there, without a result statement, at the end of the query or of a `CALL`
+//!   body; ISO `FINISH` (a contextual word where `RETURN` may stand, not inside `EXISTS` /
+//!   `COUNT` / `COLLECT`) ends any linear query without a result. Both leave
+//!   [`LinearQuery::ret`] empty ([`LinearQuery::end`]); `UNION` and `NEXT` still need a
+//!   `RETURN` before them.
+//! - **Writes (stage 3a, design W-a, W3, W5-W7).** `INSERT` and its Cypher alias `CREATE` are
+//!   pipeline clauses ([`Stage::Insert`]), allowed wherever a clause stands: first, between
+//!   reads (GQL allows `MATCH` right after `INSERT`, W4), after `NEXT`, inside `[OPTIONAL] CALL
+//!   { }` bodies. Each pattern is parsed as a path pattern and then checked for the insert form
+//!   ([`InsertClause`]): edges directed (`-[e:T]->`, `<-[e:T]-`; an undirected form is a syntax
+//!   error naming the direction) with exactly one label name; node labels a conjunction of names
+//!   (`:A&B`, `:A:B`, `IS A & B`; `|`, `!`, `%` are syntax errors); no `WHERE` in a node or edge,
+//!   no quantifier, no parenthesized path pattern (syntax errors); a path variable `p =` is "not
+//!   yet supported". A write clause inside `EXISTS`, `COUNT { }`, `COLLECT { }`, a list or
+//!   pattern comprehension, a list predicate or `reduce()` is a syntax error naming it
+//!   ([`Parser::write_ban`]); a `UNION` operand that writes is "not yet supported". `CREATE`
+//!   followed by a word (`INDEX`, `CONSTRAINT`, `GRAPH`, `OR REPLACE`, Neo4j's `DATABASE`, ...)
+//!   is a refused catalog or administration command naming `g.create_index(..)` /
+//!   `g.set_schema(..)`; `LOAD CSV` is refused (vendor), Cypher `FOREACH` is "not yet"
+//!   naming `FOR x IN l INSERT ..`. The other write clauses (`SET`, `REMOVE`, `[DETACH |
+//!   NODETACH] DELETE`, `MERGE`) are "not yet supported", naming the Gremlin step that does
+//!   the work (`property()`, `remove_property()`, `drop()`, `merge_v()`); a write clause after
+//!   `RETURN` is the "RETURN ends the query" syntax error. The expected tokens after a clause
+//!   do not name the write clauses (coordinator default K9); after an `INSERT` they name `,`
+//!   and the clauses.
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
 //!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`LinearQuery::stages`] is then
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
@@ -222,13 +253,14 @@
 //! - **`CALL { }`** ([`CallClause`]): `[OPTIONAL] CALL (a, b) { .. }`, `CALL () { .. }`, `CALL (*)
 //!   { .. }` and `CALL { .. }` without a scope clause (imports nothing, Neo4j Cypher 25), a
 //!   pipeline stage anywhere, also first. The body is a whole composite query ending in
-//!   `RETURN`; a body without `RETURN` (a unit subquery, which only writes) is refused, an empty
-//!   one a syntax error. Cypher's importing `WITH` (a `CALL` without a scope clause whose
-//!   operand of the body's first block starts with `WITH` of plain variables, or `*` alone, and
-//!   nothing else) moves into [`LinearQuery::importing`]; any other first `WITH` stays a clause
-//!   (the binder finds its unknown names). `IN [n CONCURRENT] TRANSACTIONS` after the body is
-//!   refused (a batched write); `CALL name(..)` stays a refused vendor procedure. Each body is
-//!   one [`MAX_DEPTH`] level.
+//!   `RETURN`; a body without `RETURN` (a unit subquery) is accepted when its last clause
+//!   writes (stage 3a) and refused otherwise, an empty one is a syntax error. Cypher's
+//!   importing `WITH` (a `CALL` without a scope clause whose operand of the body's first block
+//!   starts with `WITH` of plain variables, or `*` alone, and nothing else) moves into
+//!   [`LinearQuery::importing`]; any other first `WITH` stays a clause (the binder finds its
+//!   unknown names). `IN [n CONCURRENT] TRANSACTIONS` after the body is refused (a batched
+//!   write; one gql() query is one unit); `CALL name(..)` stays a refused vendor procedure.
+//!   Each body is one [`MAX_DEPTH`] level.
 //! - **`COUNT { }`, `COLLECT { }` and whole-query bodies** (stage 2d, user decision D23; openCypher
 //!   compatibility forms): `COUNT` / `COLLECT` before `{` (contextual words, any case) start a
 //!   [`SubqueryExpr`] of kind [`SubqueryKind::Count`] / [`SubqueryKind::Collect`] with the
@@ -250,13 +282,13 @@ use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
     ComprehensionForm, CountClause, EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind,
-    FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, LabelExpr,
-    LabelExprKind, LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal,
-    MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy, Ordinal,
-    OrdinalKind, ParenthesizedPath, PathPattern, PatternComprehension, PatternStep, ProjectionItem,
-    Quantifier, Query, QueryBlock, ReduceAccumulator, ReturnClause, ReturnItem, SortDirection,
-    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind,
-    UnionOperand, WithClause,
+    FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
+    LabelExpr, LabelExprKind, LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate,
+    Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy,
+    Ordinal, OrdinalKind, ParenthesizedPath, PathPattern, PatternComprehension, PatternStep,
+    ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator, ReturnClause,
+    ReturnItem, SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide,
+    UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
@@ -269,11 +301,6 @@ pub(crate) const MAX_DEPTH: usize = 128;
 /// every later stage (and of `Drop`): a flat chain `a OR b OR ...` grows one level per operator.
 pub(crate) const MAX_HEIGHT: usize = 512;
 
-/// The alternative of every refused write clause.
-const WRITE_ALTERNATIVE: &str = "gql() is read-only; use the Gremlin mutation steps (add_v(), \
-                                 add_e(), property(), drop(), merge_v())";
-
-/// The alternative of the refused undirected edge forms.
 /// The clauses that may follow a clause of the pipeline, in the order the expected tokens
 /// name them; a query may start with any of them too (stage 2a, design E4).
 const NEXT_CLAUSES: [&str; 9] = [
@@ -288,6 +315,7 @@ const NEXT_CLAUSES: [&str; 9] = [
     "RETURN",
 ];
 
+/// The alternative of the refused undirected edge forms.
 const TILDE_ALTERNATIVE: &str = "edges in Graphersal are directed; use -[e]- for either direction";
 
 /// Whether a function computes a value per row or aggregates rows.
@@ -751,6 +779,12 @@ struct Parser<'a> {
     /// inside its `[`. A `|` at that level ends the part instead of continuing a label
     /// expression.
     bar_ends: Option<usize>,
+    /// The keyword of every write clause parsed so far, in text order (its length counts them:
+    /// whether a clause, a `CALL` body or a `UNION` operand writes).
+    writes: Vec<Span>,
+    /// While a subquery expression or a comprehension is parsed: what it is, for the refusal
+    /// of a write clause inside it (design W3).
+    write_ban: Option<&'static str>,
 }
 
 /// How an edge ahead of a node pattern in an expression reads (the pattern-predicate lookahead).
@@ -838,6 +872,8 @@ impl<'a> Parser<'a> {
             inner_height: 0,
             open: 0,
             bar_ends: None,
+            writes: Vec::new(),
+            write_ban: None,
         }
     }
 
@@ -987,6 +1023,11 @@ impl<'a> Parser<'a> {
             );
             return Some(Box::new(b));
         }
+        if token.kind == TokenKind::Ident
+            && let Some(e) = self.word_construct_error(&text)
+        {
+            return Some(e);
+        }
         let refused = |message: String, alternative: &str| {
             let mut b = err(GqlErrorKind::Refused, span, message);
             if !alternative.is_empty() {
@@ -1016,26 +1057,37 @@ impl<'a> Parser<'a> {
             _ => return None,
         }
         match token.keyword()? {
-            Keyword::Insert
-            | Keyword::Create
-            | Keyword::Set
-            | Keyword::Remove
-            | Keyword::Delete
-            | Keyword::Merge => refused(
-                format!("{text} writes to the graph; gql() is read-only"),
-                WRITE_ALTERNATIVE,
-            ),
+            keyword @ (Keyword::Insert | Keyword::Create) => {
+                if keyword == Keyword::Create
+                    && let Some(e) = self.catalog_create()
+                {
+                    return Some(e);
+                }
+                // Elsewhere a write clause where it cannot stand is a plain syntax error.
+                self.write_ban
+                    .map(|place| self.banned_write(span, &text, place))
+            }
+            keyword @ (Keyword::Set | Keyword::Remove | Keyword::Delete | Keyword::Merge) => {
+                if let Some(place) = self.write_ban {
+                    return Some(self.banned_write(span, &text, place));
+                }
+                not_yet(&text, &self.write_alternative(keyword))
+            }
             Keyword::Detach | Keyword::Nodetach => {
                 let mut whole = span;
                 if self.nth(1).keyword() == Some(Keyword::Delete) {
                     whole = span.to(self.nth(1).span);
                 }
-                let mut b = err(
-                    GqlErrorKind::Refused,
+                let what = format!("{text} DELETE");
+                if let Some(place) = self.write_ban {
+                    return Some(self.banned_write(whole, &what, place));
+                }
+                let b = err(
+                    GqlErrorKind::NotYet,
                     whole,
-                    format!("{text} DELETE writes to the graph; gql() is read-only"),
-                );
-                b = b.alternative(WRITE_ALTERNATIVE);
+                    format!("{what} is not yet supported in this version"),
+                )
+                .alternative(self.write_alternative(Keyword::Delete));
                 Some(Box::new(b))
             }
             // An inline `CALL { }` / `CALL (..) { }` where no clause stands: a plain syntax error.
@@ -1086,6 +1138,166 @@ impl<'a> Parser<'a> {
                 "NULLS FIRST / NULLS LAST",
                 "NULLs sort last ascending and first descending",
             ),
+            _ => None,
+        }
+    }
+
+    /// A targeted error at a contextual word that starts a construct outside the support:
+    /// Cypher's `FOREACH` (not yet: `FOR` and a write clause) and `LOAD CSV` (a vendor import).
+    fn word_construct_error(&self, text: &str) -> Option<Box<GqlErrorBuilder>> {
+        let span = self.peek().span;
+        if text == "FOREACH" && self.nth(1).kind == TokenKind::LParen {
+            return Some(self.not_yet(
+                span,
+                "FOREACH",
+                "write FOR x IN <list> followed by the write clause, for example \
+                 FOR name IN ['ann', 'bob'] INSERT (:person {name: name})",
+            ));
+        }
+        if text == "LOAD" && is_word(self.nth(1), "CSV") {
+            let b = err(
+                GqlErrorKind::Refused,
+                span.to(self.nth(1).span),
+                "LOAD CSV is a vendor extension, not part of GQL",
+            )
+            .alternative(
+                "import the file with the host's import (GraphSON, GraphML), or pass its rows \
+                 as a list parameter, for example FOR row IN $rows INSERT (:person {name: \
+                 row.name})",
+            );
+            return Some(Box::new(b));
+        }
+        None
+    }
+
+    /// The refusal of a catalog or administration command spelt with `CREATE` (`CREATE INDEX`,
+    /// `CREATE CONSTRAINT`, `CREATE GRAPH`, `CREATE OR REPLACE ..`, Neo4j's `CREATE DATABASE`
+    /// ..., P0 C4), at `CREATE`: a word follows it that starts no pattern (`(` or `p =`).
+    fn catalog_create(&self) -> Option<Box<GqlErrorBuilder>> {
+        let create = self.peek().span;
+        let next = self.nth(1);
+        let named = match next.kind {
+            TokenKind::Ident => self.nth(2).kind != TokenKind::Eq,
+            TokenKind::Keyword(Keyword::Or) => true,
+            _ => false,
+        };
+        if !named {
+            return None;
+        }
+        let word = next.text.to_ascii_uppercase();
+        let mut span = create.to(next.span);
+        if word == "OR" && is_word(self.nth(2), "REPLACE") {
+            span = create.to(self.nth(2).span);
+        }
+        const INDEX_WORDS: &[&str] = &[
+            "INDEX", "TEXT", "RANGE", "FULLTEXT", "VECTOR", "POINT", "LOOKUP", "BTREE",
+        ];
+        let (message, alternative) = if INDEX_WORDS.contains(&word.as_str()) {
+            (
+                format!("CREATE {word} is a catalog command, not part of a gql() query"),
+                "create a property index with g.create_index(#{label: \"person\", key: \
+                 \"age\"}); every query that can use it then does",
+            )
+        } else if word == "CONSTRAINT" {
+            (
+                "CREATE CONSTRAINT is a schema command, not part of a gql() query".to_string(),
+                "declare the rule in the graph schema with g.set_schema(..), for example a \
+                 required property or the type of a property",
+            )
+        } else if matches!(word.as_str(), "GRAPH" | "PROPERTY" | "SCHEMA" | "OR") {
+            (
+                format!(
+                    "{} is a catalog command: gql() runs on the graph of its traversal source",
+                    self.text(span).to_ascii_uppercase()
+                ),
+                "create the graph in the host application and run gql() on its traversal \
+                 source",
+            )
+        } else {
+            (
+                format!("CREATE {word} is a vendor administration command, not part of GQL"),
+                "",
+            )
+        };
+        let mut b = err(GqlErrorKind::Refused, span, message);
+        if !alternative.is_empty() {
+            b = b.alternative(alternative);
+        }
+        Some(Box::new(b))
+    }
+
+    /// The refusal of a write clause (`what`, as written in upper case) inside `place`, a
+    /// subquery expression or a comprehension, which only read (design W3).
+    fn banned_write(&self, span: Span, what: &str, place: &str) -> Box<GqlErrorBuilder> {
+        let b = err(
+            GqlErrorKind::Syntax,
+            span,
+            format!("{what} inside {place}: a subquery expression or a comprehension cannot write"),
+        )
+        .alternative(
+            "write the change as a clause of the query itself, after the clauses that find \
+             its rows, for example MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } \
+             INSERT (:maker {name: p.name})",
+        );
+        Box::new(b)
+    }
+
+    /// The Gremlin alternative of a write clause that is not yet supported (`SET`, `REMOVE`,
+    /// `DELETE` and its `DETACH` / `NODETACH` forms, `MERGE`), at its keyword: the step that does
+    /// it, with an example built from the clause when its first item is a plain
+    /// `v.key = literal` (`SET`) or `v.key` (`REMOVE`).
+    fn write_alternative(&self, keyword: Keyword) -> String {
+        match keyword {
+            Keyword::Set => {
+                let (key, value) = self
+                    .property_item()
+                    .and_then(|key| Some((key, self.literal_text(self.nth(5))?)))
+                    .unwrap_or_else(|| ("age".to_string(), "30".to_string()));
+                format!(
+                    "write the update as Gremlin steps: property() sets a property and \
+                     add_label() adds a label, for example \
+                     g.v().has_label(\"person\").property(\"{key}\", {value})"
+                )
+            }
+            Keyword::Remove => {
+                let key = self.property_item().unwrap_or_else(|| "age".to_string());
+                format!(
+                    "write the update as Gremlin steps: remove_property() removes a property \
+                     and drop_label() a label, for example \
+                     g.v().has_label(\"person\").remove_property(\"{key}\")"
+                )
+            }
+            Keyword::Merge => "find or create the element with the Gremlin steps merge_v() and \
+                 merge_e(), for example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})"
+                .to_string(),
+            _ => "remove the elements with the Gremlin step drop(), which removes a vertex with \
+                 its edges, for example g.v().has_label(\"person\").has(\"name\", \"marko\").drop()"
+                .to_string(),
+        }
+    }
+
+    /// After a `SET` / `REMOVE` keyword: the key of a first item `v.key`, when written so.
+    fn property_item(&self) -> Option<String> {
+        let plain =
+            |token: &Token<'_>| matches!(token.kind, TokenKind::Ident | TokenKind::QuotedIdent(_));
+        if !plain(self.nth(1)) || self.nth(2).kind != TokenKind::Dot {
+            return None;
+        }
+        let key = self.nth(3).name()?;
+        (!key.contains(['"', '\\'])).then(|| key.to_string())
+    }
+
+    /// The Rhai text of a literal token after `SET v.key =`: a number, a boolean or a plain
+    /// string (no quote or backslash in it); `None` otherwise.
+    fn literal_text(&self, token: &Token<'_>) -> Option<String> {
+        if self.nth(4).kind != TokenKind::Eq {
+            return None;
+        }
+        match &token.kind {
+            TokenKind::Integer(_) | TokenKind::Float(_) => Some(token.text.to_string()),
+            TokenKind::Keyword(Keyword::True) => Some("true".to_string()),
+            TokenKind::Keyword(Keyword::False) => Some("false".to_string()),
+            TokenKind::Str(text) if !text.contains(['"', '\\']) => Some(format!("\"{text}\"")),
             _ => None,
         }
     }
@@ -1202,16 +1414,29 @@ impl<'a> Parser<'a> {
 
     /// `linear (UNION [ALL | DISTINCT] linear)*`.
     fn block(&mut self, ctx: Body) -> PResult<Box<QueryBlock>> {
+        let writes = self.writes.len();
         let first = self.linear(ctx)?;
-        self.block_rest(first, ctx)
+        let wrote = (self.writes.len() > writes).then_some(writes);
+        self.block_rest(first, wrote, ctx)
     }
 
     /// The rest of a [`QueryBlock`] after its first operand: `(UNION [ALL | DISTINCT] linear)*`.
-    fn block_rest(&mut self, first: Box<LinearQuery>, ctx: Body) -> PResult<Box<QueryBlock>> {
+    /// `wrote`: the index in [`Parser::writes`] of the first write clause of the first operand.
+    fn block_rest(
+        &mut self,
+        first: Box<LinearQuery>,
+        wrote: Option<usize>,
+        ctx: Body,
+    ) -> PResult<Box<QueryBlock>> {
         let start = first.span;
         // The names of one operand are not in scope in the next (missing-RETURN advice).
         let base = self.variables.len();
         let mut unions = Vec::new();
+        if let Some(index) = wrote
+            && self.at_kw(Keyword::Union)
+        {
+            return Err(self.union_write(index));
+        }
         while let Some(union) = self.eat_kw(Keyword::Union) {
             let (kind, keyword) = if is_word(self.peek(), "ALL") {
                 (UnionKind::All, union.to(self.advance().span))
@@ -1221,7 +1446,11 @@ impl<'a> Parser<'a> {
                 (UnionKind::Distinct, union)
             };
             self.variables.truncate(base);
+            let writes = self.writes.len();
             let query = *self.linear(ctx)?;
+            if self.writes.len() > writes {
+                return Err(self.union_write(writes));
+            }
             unions.push(UnionOperand {
                 kind,
                 keyword,
@@ -1235,7 +1464,22 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// A linear query: the clause pipeline, `RETURN` and its tail.
+    /// The "not yet" error for a `UNION` operand that writes (design W3), at its first write
+    /// clause (`index` in [`Parser::writes`]).
+    fn union_write(&self, index: usize) -> Box<GqlErrorBuilder> {
+        let span = self.writes.get(index).copied().unwrap_or(self.peek().span);
+        self.not_yet(
+            span,
+            &format!(
+                "{} in an operand of UNION",
+                self.text(span).to_ascii_uppercase()
+            ),
+            "run the query that writes on its own, before or after the UNION query",
+        )
+    }
+
+    /// A linear query: the clause pipeline, then `RETURN` and its tail, `FINISH`, or nothing
+    /// after a last clause that writes (design W2).
     fn linear(&mut self, ctx: Body) -> PResult<Box<LinearQuery>> {
         // Thin on purpose (module rule "Bounded recursion"): every clause and every error is
         // parsed in a function of its own, so this frame stays small under nested bodies.
@@ -1244,11 +1488,94 @@ impl<'a> Parser<'a> {
         let mut stages = Vec::new();
         // The first clause that is not a plain MATCH, for a subquery body without RETURN.
         let mut other: Option<Span> = None;
-        while self.pipeline_clause(&mut matches, &mut stages, &mut other)? {}
-        if !self.at_kw(Keyword::Return) {
-            return Err(self.missing_clause(ctx, &stages, &matches, other));
+        // Whether the last clause writes (an INSERT, a CALL whose body writes).
+        let mut last_writes = false;
+        loop {
+            let writes = self.writes.len();
+            if !self.pipeline_clause(&mut matches, &mut stages, &mut other)? {
+                break;
+            }
+            last_writes = self.writes.len() > writes;
         }
-        self.result_statement(start, matches, stages)
+        if self.at_kw(Keyword::Return) {
+            return self.result_statement(start, matches, stages);
+        }
+        if !matches!(ctx, Body::Subquery(_)) && is_word(self.peek(), "FINISH") {
+            return self.finish_statement(start, matches, stages, ctx);
+        }
+        if last_writes && self.at_query_end(ctx) {
+            return Ok(self.without_result(start, matches, stages, None));
+        }
+        Err(self.missing_clause(ctx, &stages, &matches, other))
+    }
+
+    /// Whether the current token ends a query or body of `ctx`: the end of input or `;` at the
+    /// top, `}` in a body.
+    fn at_query_end(&self, ctx: Body) -> bool {
+        match ctx {
+            Body::Top => matches!(self.peek().kind, TokenKind::Eof | TokenKind::Semicolon),
+            Body::Call | Body::Subquery(_) => self.at(&TokenKind::RBrace),
+        }
+    }
+
+    /// `FINISH` (ISO GQL), at the word: the linear query ends without a result.
+    fn finish_statement(
+        &mut self,
+        start: Span,
+        matches: Vec<MatchClause>,
+        stages: Vec<Stage>,
+        ctx: Body,
+    ) -> PResult<Box<LinearQuery>> {
+        let word = self.advance().span;
+        if !self.at_query_end(ctx) {
+            let end = if ctx == Body::Top {
+                "end of input"
+            } else {
+                "`}`"
+            };
+            let b = err(
+                GqlErrorKind::Syntax,
+                self.peek().span,
+                format!(
+                    "unexpected {} after FINISH: FINISH ends the query",
+                    describe(self.peek())
+                ),
+            )
+            .expected([end]);
+            return Err(Box::new(b));
+        }
+        Ok(self.without_result(start, matches, stages, Some(word)))
+    }
+
+    /// A linear query without a result statement ([`LinearQuery::end`]): `finish` is the span
+    /// of `FINISH`, `None` after a last clause that writes.
+    fn without_result(
+        &self,
+        start: Span,
+        matches: Vec<MatchClause>,
+        stages: Vec<Stage>,
+        finish: Option<Span>,
+    ) -> Box<LinearQuery> {
+        let span = finish.unwrap_or(Span {
+            start: self.last.end,
+            ..self.last
+        });
+        Box::new(LinearQuery {
+            matches,
+            stages,
+            ret: ReturnClause {
+                distinct: false,
+                star: None,
+                items: Vec::new(),
+                group_by: None,
+                span,
+            },
+            order_by: None,
+            offset: None,
+            limit: None,
+            importing: None,
+            span: start.to(self.last),
+        })
     }
 
     /// One clause of the pipeline before `RETURN`, when the current token starts one (`false`
@@ -1280,6 +1607,7 @@ impl<'a> Parser<'a> {
                 self.pipeline_stage(keyword)?
             }
             Some(Keyword::For | Keyword::Unwind) => Stage::For(self.for_clause()?),
+            Some(Keyword::Insert | Keyword::Create) => Stage::Insert(self.insert_clause()?),
             _ => return Ok(false),
         };
         stages.push(stage);
@@ -1386,6 +1714,9 @@ impl<'a> Parser<'a> {
         } else {
             "`}`"
         };
+        if last.end() != QueryEnd::Return {
+            return self.unexpected(&[end]);
+        }
         self.after_return(
             &last.ret,
             last.order_by.is_some(),
@@ -1414,8 +1745,8 @@ impl<'a> Parser<'a> {
         let b = err(
             GqlErrorKind::Refused,
             span,
-            "a CALL { } body without RETURN (a unit subquery) only makes sense for writes; \
-             gql() is read-only",
+            "a CALL { } body without RETURN (a unit subquery) only makes sense for writes, \
+             and this body writes nothing",
         )
         .expected(["RETURN"])
         .alternative(
@@ -1515,9 +1846,12 @@ impl<'a> Parser<'a> {
         let b = err(
             GqlErrorKind::Refused,
             self.peek().span.to(end.span),
-            "CALL { } IN TRANSACTIONS commits writes in batches; gql() is read-only",
+            "CALL { } IN TRANSACTIONS commits writes in batches; a gql() query is one unit",
         )
-        .alternative("remove IN TRANSACTIONS: a read-only subquery needs no batches")
+        .alternative(
+            "remove IN TRANSACTIONS: the whole query commits at once, and a query that fails \
+             changes nothing",
+        )
         .topic(GqlHelpTopic::Call);
         Some(Box::new(b))
     }
@@ -1587,6 +1921,7 @@ impl<'a> Parser<'a> {
             Some(Stage::For(clause)) if !clause.unwind && clause.ordinal.is_none() => {
                 vec!["WITH ORDINALITY", "WITH OFFSET"]
             }
+            Some(Stage::Insert(_)) => vec!["`,`"],
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
@@ -1931,7 +2266,15 @@ impl<'a> Parser<'a> {
                 | Keyword::Let
                 | Keyword::Filter
                 | Keyword::For
-                | Keyword::Unwind,
+                | Keyword::Unwind
+                | Keyword::Insert
+                | Keyword::Create
+                | Keyword::Set
+                | Keyword::Remove
+                | Keyword::Delete
+                | Keyword::Detach
+                | Keyword::Nodetach
+                | Keyword::Merge,
             ) => {
                 return self.clause_after_return();
             }
@@ -2000,6 +2343,70 @@ impl<'a> Parser<'a> {
         .expected(["RETURN"])
         .alternative(alternative);
         Box::new(b)
+    }
+
+    /// `INSERT pattern, ...` or Cypher `CREATE pattern, ...`, at the keyword (stage 3a). Each
+    /// pattern is read as a path pattern and then checked for the insert form ([`InsertClause`],
+    /// design W5-W7), so a misplaced token gets the expected tokens of a pattern and a form
+    /// `INSERT` cannot create a targeted error.
+    fn insert_clause(&mut self) -> PResult<InsertClause> {
+        if self.at_kw(Keyword::Create)
+            && let Some(e) = self.catalog_create()
+        {
+            return Err(e);
+        }
+        if let Some(place) = self.write_ban {
+            let token = self.peek();
+            return Err(self.banned_write(token.span, &token.text.to_ascii_uppercase(), place));
+        }
+        let token = self.advance();
+        let cypher = token.keyword() == Some(Keyword::Create);
+        let word = if cypher { "CREATE" } else { "INSERT" };
+        let keyword = token.span;
+        self.writes.push(keyword);
+        let mut patterns = vec![self.insert_pattern(word)?];
+        while self.eat(&TokenKind::Comma).is_some() {
+            patterns.push(self.insert_pattern(word)?);
+        }
+        Ok(InsertClause {
+            patterns,
+            cypher,
+            keyword,
+            span: keyword.to(self.last),
+        })
+    }
+
+    /// One pattern of an `INSERT` (`word`: the clause as named in messages), checked for the
+    /// insert form.
+    fn insert_pattern(&mut self, word: &str) -> PResult<PathPattern> {
+        let pattern = self.path_pattern()?;
+        if let Some(variable) = &pattern.variable {
+            return Err(self.not_yet(
+                variable.span,
+                &format!("a path variable in {word}"),
+                &format!(
+                    "leave `{} =` out and name the nodes and edges instead, as in {word} \
+                     (a:person)-[e:knows]->(b:person)",
+                    variable.name
+                ),
+            ));
+        }
+        if let Some(group) = pattern.groups.first() {
+            return Err(insert_error(
+                group.group.span,
+                format!(
+                    "a parenthesized path pattern cannot stand in {word}: write each node and \
+                     edge it creates"
+                ),
+                word,
+            ));
+        }
+        check_insert_node(&pattern.start, word)?;
+        for step in &pattern.steps {
+            check_insert_edge(&step.edge, word)?;
+            check_insert_node(&step.node, word)?;
+        }
+        Ok(pattern)
     }
 
     fn match_clause(&mut self) -> PResult<MatchClause> {
@@ -3802,7 +4209,15 @@ impl<'a> Parser<'a> {
         self.enter()?;
         let saved_height = std::mem::replace(&mut self.inner_height, 0);
         let saved_variables = self.variables.len();
+        let place = match (kind, form) {
+            (SubqueryKind::Exists, SubqueryForm::Parens) => "EXISTS ( )",
+            (SubqueryKind::Exists, _) => "EXISTS { }",
+            (SubqueryKind::Count, _) => "COUNT { }",
+            (SubqueryKind::Collect, _) => "COLLECT { }",
+        };
+        let saved_ban = self.write_ban.replace(place);
         let result = self.subquery_body(kind, form, close, close_text);
+        self.write_ban = saved_ban;
         let inner = std::mem::replace(&mut self.inner_height, saved_height);
         self.variables.truncate(saved_variables);
         self.leave();
@@ -4157,7 +4572,9 @@ impl<'a> Parser<'a> {
         let open = self.advance().span;
         self.enter()?;
         let saved_bar = self.bar_ends;
+        let saved_ban = self.write_ban.replace("a list comprehension");
         let result = self.comprehension_parts();
+        self.write_ban = saved_ban;
         self.bar_ends = saved_bar;
         self.leave();
         let (comprehension, height) = result?;
@@ -4278,7 +4695,9 @@ impl<'a> Parser<'a> {
         let saved_height = std::mem::replace(&mut self.inner_height, 0);
         let saved_variables = self.variables.len();
         let saved_bar = self.bar_ends;
+        let saved_ban = self.write_ban.replace("a pattern comprehension");
         let result = self.pattern_comprehension_parts();
+        self.write_ban = saved_ban;
         self.bar_ends = saved_bar;
         let inner = std::mem::replace(&mut self.inner_height, saved_height);
         self.variables.truncate(saved_variables);
@@ -4503,7 +4922,16 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen, &["`(`"])?;
         self.enter()?;
         let saved_bar = self.bar_ends;
+        let place = match form {
+            Some(ListPredicate::All) => "all( )",
+            Some(ListPredicate::Any) => "any( )",
+            Some(ListPredicate::None) => "none( )",
+            Some(ListPredicate::Single) => "single( )",
+            None => "reduce( )",
+        };
+        let saved_ban = self.write_ban.replace(place);
         let result = self.list_function_parts(form);
+        self.write_ban = saved_ban;
         self.bar_ends = saved_bar;
         self.leave();
         let (comprehension, height) = result?;
@@ -4851,6 +5279,33 @@ impl<'a> Parser<'a> {
         let name = token.name().unwrap_or("");
         let span = token.span;
         let spec = lookup_function(name);
+        // A write clause before `(` (`CREATE (n)` where an expression stands): its own error.
+        if let TokenKind::Keyword(
+            Keyword::Insert
+            | Keyword::Create
+            | Keyword::Set
+            | Keyword::Remove
+            | Keyword::Delete
+            | Keyword::Merge,
+        ) = token.kind
+        {
+            if let Some(e) = self.construct_error() {
+                return Err(e);
+            }
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                format!(
+                    "{} is a clause and cannot stand inside an expression",
+                    name.to_ascii_uppercase()
+                ),
+            )
+            .alternative(format!(
+                "write {} as a clause of its own, after the clauses that find its rows",
+                name.to_ascii_uppercase()
+            ));
+            return Err(Box::new(b));
+        }
         if spec.is_none() && name.eq_ignore_ascii_case("id") {
             return Err(self.cypher_id(span));
         }
@@ -5105,6 +5560,104 @@ fn body_without_return(span: Span, word: &str, kind: SubqueryKind) -> Box<GqlErr
          (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name",
     );
     Box::new(b)
+}
+
+/// The example of a correct insert pattern in the errors of [`check_insert_node`] and
+/// [`check_insert_edge`].
+fn insert_error(span: Span, message: String, word: &str) -> Box<GqlErrorBuilder> {
+    let b = err(GqlErrorKind::Syntax, span, message).alternative(format!(
+        "write the nodes with their labels and properties and each edge with its direction \
+         and one label, as in {word} (a:person {{name: 'ann'}})-[:knows]->(b:person:admin)"
+    ));
+    Box::new(b)
+}
+
+/// A node pattern of an `INSERT` (design W7): no `WHERE`; labels a conjunction of names.
+fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
+    if let Some(condition) = &node.where_clause {
+        return Err(insert_error(
+            condition.span,
+            format!("a WHERE inside a node pattern cannot stand in {word}: it creates the node"),
+            word,
+        ));
+    }
+    let Some(labels) = &node.labels else {
+        return Ok(());
+    };
+    // A conjunction is a left-deep tree of `And`; walked without recursion.
+    let mut pending = vec![labels];
+    while let Some(label) = pending.pop() {
+        let operator = match &label.kind {
+            LabelExprKind::Label(_) => continue,
+            LabelExprKind::And(left, right) => {
+                pending.push(right);
+                pending.push(left);
+                continue;
+            }
+            LabelExprKind::Or(..) => "`|` (a label alternative)",
+            LabelExprKind::Not(_) => "`!` (a label negation)",
+            LabelExprKind::Wildcard => "`%` (any label)",
+        };
+        return Err(insert_error(
+            label.span,
+            format!(
+                "{operator} cannot stand in {word}: a new node gets the labels written, joined \
+                 by `&` or `:`"
+            ),
+            word,
+        ));
+    }
+    Ok(())
+}
+
+/// An edge pattern of an `INSERT` (design W6): directed, exactly one label name, no quantifier,
+/// no `WHERE`.
+fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
+    if edge.direction == EdgeDirection::Any {
+        return Err(insert_error(
+            edge.span,
+            format!("{word} needs a direction; write -[e:T]-> or <-[e:T]-"),
+            word,
+        ));
+    }
+    if let Some(quantifier) = &edge.quantifier {
+        return Err(insert_error(
+            quantifier.span,
+            format!("a quantifier cannot stand in {word}: each edge pattern creates one edge"),
+            word,
+        ));
+    }
+    match &edge.labels {
+        None => {
+            return Err(insert_error(
+                edge.span,
+                format!("an edge in {word} needs exactly one label, its type: write -[:T]->"),
+                word,
+            ));
+        }
+        Some(LabelExpr {
+            kind: LabelExprKind::Label(_),
+            ..
+        }) => {}
+        Some(labels) => {
+            return Err(insert_error(
+                labels.span,
+                format!(
+                    "an edge in {word} has exactly one label: a label expression cannot stand \
+                     here"
+                ),
+                word,
+            ));
+        }
+    }
+    if let Some(condition) = &edge.where_clause {
+        return Err(insert_error(
+            condition.span,
+            format!("a WHERE inside an edge pattern cannot stand in {word}: it creates the edge"),
+            word,
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `keyword` starts a pipeline clause other than `MATCH`, `RETURN` and `CALL`.

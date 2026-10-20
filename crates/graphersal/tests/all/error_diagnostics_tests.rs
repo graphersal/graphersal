@@ -7305,23 +7305,24 @@ mod gql {
     }
 
     #[test]
-    fn gql_write_clause_is_refused_with_the_gremlin_mutation_steps() {
+    fn gql_set_is_not_yet_supported_with_the_gremlin_step() {
         let (err, report) = gql_failure(|g| {
             g.gql("MATCH (p:person) SET p.old = true RETURN p")
                 .to_list()
         });
         assert_eq!(
             kind_and_status(&err),
-            (GqlErrorKind::Refused, "0A000".to_string())
+            (GqlErrorKind::NotYet, "0A000".to_string())
         );
         assert!(
-            report.contains("SET writes to the graph; gql() is read-only"),
+            report.contains("SET is not yet supported in this version"),
             "{report}"
         );
         assert!(
             report.contains(
-                "Help: gql() is read-only; use the Gremlin mutation steps (add_v(), add_e(), \
-                 property(), drop(), merge_v())."
+                "Help: write the update as Gremlin steps: property() sets a property and \
+                 add_label() adds a label, for example \
+                 g.v().has_label(\"person\").property(\"old\", true)."
             ),
             "{report}"
         );
@@ -7738,12 +7739,9 @@ mod gql {
             help.starts_with("use element_id(p), the element's id"),
             "{help}"
         );
-        let (err, _) = camel("CREATE (p:person)");
+        let (err, _) = camel("MERGE (p:person)");
         let help = err.help().expect("help");
-        assert!(
-            help.contains("(addV(), addE(), property(), drop(), mergeV())"),
-            "{help}"
-        );
+        assert!(help.contains("mergeV()"), "{help}");
     }
 
     /// The same through Rhai: `g.with("render.spelling", "camel").gql(..)`.
