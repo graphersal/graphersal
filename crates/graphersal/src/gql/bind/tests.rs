@@ -643,6 +643,8 @@ fn segment_shapes(q: &BoundQuery) -> Vec<String> {
                 BoundWrite::Insert(insert) => {
                     format!("insert{}+{}", insert.nodes.len(), insert.edges.len())
                 }
+                BoundWrite::Set(set) => format!("set{}", set.items.len()),
+                BoundWrite::Remove(remove) => format!("remove{}", remove.items.len()),
             },
         })
         .collect()
@@ -3392,6 +3394,7 @@ fn insert_of(q: &BoundQuery, segment: usize) -> &BoundInsert {
     match q.segments.get(segment) {
         Some(Segment::Write(write)) => match &**write {
             BoundWrite::Insert(insert) => insert,
+            other => panic!("segment {segment} is no INSERT: {other:?}"),
         },
         other => panic!("segment {segment} is no write: {other:?}"),
     }
@@ -3763,4 +3766,299 @@ fn insert_property_subqueries_bind_with_their_segment() {
         .unwrap();
     assert_eq!(q.binding(id(&q, "x")).unwrap().segment, write);
     assert_eq!(insert_of(&q, write).reads, [id(&q, "n")]);
+}
+
+// ----- stage 3c.T1: SET / REMOVE -----
+
+fn set_of(q: &BoundQuery, segment: usize) -> &BoundSet {
+    match q.segments.get(segment) {
+        Some(Segment::Write(write)) => match &**write {
+            BoundWrite::Set(set) => set,
+            other => panic!("segment {segment} is no SET: {other:?}"),
+        },
+        other => panic!("segment {segment} is no write: {other:?}"),
+    }
+}
+
+fn remove_of(q: &BoundQuery, segment: usize) -> &BoundRemove {
+    match q.segments.get(segment) {
+        Some(Segment::Write(write)) => match &**write {
+            BoundWrite::Remove(remove) => remove,
+            other => panic!("segment {segment} is no REMOVE: {other:?}"),
+        },
+        other => panic!("segment {segment} is no write: {other:?}"),
+    }
+}
+
+/// The edge labels of a target, `None` unless it is an edge restricted to names.
+fn edge_labels(target: &WriteTarget) -> Option<Vec<&str>> {
+    match &target.kind {
+        TargetKind::Edge {
+            labels: Some(labels),
+        } => Some(label_texts(labels)),
+        _ => None,
+    }
+}
+
+#[test]
+fn set_binds_targets_values_and_reads() {
+    let query = "MATCH (n:person)-[e:knows|likes]->(m) SET n.age = m.age + 1, (e).w = $w, \
+                 m = {a: 1}, m += n, n:A:B RETURN n";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["match[0]", "set5"]);
+    assert!(q.writes());
+    assert_eq!(q.end, QueryEnd::Return);
+    let (n, e, m) = (id(&q, "n"), id(&q, "e"), id(&q, "m"));
+    let set = set_of(&q, 1);
+    assert_eq!(&query[set.keyword.start..set.keyword.end], "SET");
+    assert!(query[set.span.start..set.span.end].ends_with("n:A:B"));
+    let targets: Vec<BindingId> = set.items.iter().map(|i| i.target.binding).collect();
+    assert_eq!(targets, [n, e, m, m, n]);
+    assert_eq!(set.items[0].target.kind, TargetKind::Node);
+    assert_eq!(
+        edge_labels(&set.items[1].target),
+        Some(vec!["knows", "likes"])
+    );
+    assert_eq!(
+        &query[set.items[1].target.span.start..set.items[1].target.span.end],
+        "e"
+    );
+    match &set.items[0].kind {
+        BoundSetKind::Property { key, value } => {
+            assert_eq!(key.name, "age");
+            assert_eq!(value.bindings, [m]);
+        }
+        other => panic!("{other:?}"),
+    }
+    match &set.items[1].kind {
+        BoundSetKind::Property { value, .. } => {
+            assert!(value.bindings.is_empty());
+            assert!(matches!(value.expr.kind, ExprKind::Parameter(_)));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(&set.items[2].kind, BoundSetKind::Replace(v) if v.bindings.is_empty()));
+    assert!(matches!(&set.items[3].kind, BoundSetKind::Merge(v) if v.bindings == [n]));
+    match &set.items[4].kind {
+        BoundSetKind::Labels(labels) => assert_eq!(label_texts(labels), ["A", "B"]),
+        other => panic!("{other:?}"),
+    }
+    let mut reads = vec![n, e, m];
+    reads.sort_unstable();
+    assert_eq!(set.reads, reads, "the targets and what the values read");
+    assert!(reads.iter().all(|id| q.binding(*id).unwrap().read));
+    assert_eq!(q.parameters.len(), 1);
+    // Edge targets: the label names of the pattern when they are names; else any label.
+    for (query, labels) in [
+        ("MATCH ()-[e]->() SET e.w = 1", None),
+        ("MATCH ()-[e:knows]->() SET e.w = 1", Some(vec!["knows"])),
+        ("MATCH ()-[e:!knows]->() SET e.w = 1", None),
+        ("MATCH ()-[e:%]->() SET e.w = 1", None),
+        ("MATCH ()-[e]->() WITH DISTINCT e SET e.w = 1", None),
+    ] {
+        let q = ok(query);
+        let write = q.segments.len() - 1;
+        let target = &set_of(&q, write).items[0].target;
+        assert!(
+            matches!(target.kind, TargetKind::Edge { .. }),
+            "{query}: {target:?}"
+        );
+        assert_eq!(edge_labels(target), labels, "{query}");
+    }
+    // Targets whose kind only the run knows: a FOR item, a column of a value, a CALL column.
+    for query in [
+        "FOR x IN [1, 2] SET x.k = 1",
+        "MATCH (n) WITH head(collect(n)) AS x SET x.k = 1",
+        "MATCH (n) CALL (n) { RETURN head([n]) AS x } SET x.k = 1",
+        "MATCH (n) WITH collect(n) AS l UNWIND l AS x REMOVE x:A",
+    ] {
+        let q = ok(query);
+        let write = q.segments.len() - 1;
+        let target = match q.segments.get(write) {
+            Some(Segment::Write(w)) => match &**w {
+                BoundWrite::Set(set) => &set.items[0].target,
+                BoundWrite::Remove(remove) => &remove.items[0].target,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{query}: {other:?}"),
+        };
+        assert_eq!(target.kind, TargetKind::Unknown, "{query}");
+    }
+    // A column holding a node variable is a node.
+    let q = ok("MATCH (n) CALL (n) { RETURN n AS x } SET x.k = 1");
+    assert_eq!(set_of(&q, 2).items[0].target.kind, TargetKind::Node);
+    // A LET / WITH alias of a variable is that variable.
+    let q = ok("MATCH (p) LET q = p WITH q AS r SET r.k = 1");
+    assert_eq!(set_of(&q, 1).items[0].target.binding, id(&q, "p"));
+    assert_eq!(set_of(&q, 1).items[0].target.kind, TargetKind::Node);
+}
+
+#[test]
+fn remove_binds_targets_and_reads() {
+    let query = "MATCH (n)-[e]->(m) REMOVE n.age, (e).w, m:L1:L3, n IS A";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["match[0]", "remove4"]);
+    assert_eq!(q.end, QueryEnd::Write);
+    assert!(q.columns.is_empty());
+    let (n, e, m) = (id(&q, "n"), id(&q, "e"), id(&q, "m"));
+    let remove = remove_of(&q, 1);
+    assert_eq!(&query[remove.keyword.start..remove.keyword.end], "REMOVE");
+    let items: Vec<String> = remove
+        .items
+        .iter()
+        .map(|i| match &i.kind {
+            BoundRemoveKind::Property(key) => format!("#{}.{}", i.target.binding.0, key.name),
+            BoundRemoveKind::Labels(labels) => {
+                format!("#{}:{}", i.target.binding.0, label_texts(labels).join(":"))
+            }
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            format!("#{}.age", n.0),
+            format!("#{}.w", e.0),
+            format!("#{}:L1:L3", m.0),
+            format!("#{}:A", n.0)
+        ]
+    );
+    let mut reads = vec![n, e, m];
+    reads.sort_unstable();
+    assert_eq!(remove.reads, reads);
+    assert!(reads.iter().all(|id| q.binding(*id).unwrap().read));
+}
+
+#[test]
+fn set_and_remove_materialize_substitutions_first() {
+    // Design W10: `old` stands for `n.age`; read after the SET, it is the value from before.
+    let q = ok("MATCH (n) WITH n, n.age AS old SET n.age = 1 RETURN old");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "set1"]);
+    let old = id(&q, "old");
+    assert_eq!(q.columns[0].bindings, [old]);
+    let n_column = set_of(&q, 2).items[0].target.binding;
+    assert_ne!(n_column, id(&q, "n"), "n continues as the WITH column");
+    assert_eq!(set_of(&q, 2).items[0].target.kind, TargetKind::Node);
+    let q = ok("MATCH (n) LET a = n.age REMOVE n.age RETURN a");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "remove1"]);
+    // The TCK List12 shape: a comprehension over the nodes, read after the SET.
+    let q = ok(
+        "MATCH (n) WITH collect(n) AS nodes WITH nodes, [x IN nodes | x.name] AS oldNames \
+                UNWIND nodes AS m SET m.name = 'x' RETURN m.name AS name, oldNames",
+    );
+    let shapes = segment_shapes(&q);
+    let set = shapes.iter().position(|s| s == "set1").unwrap();
+    assert!(
+        shapes[..set]
+            .iter()
+            .filter(|s| s.starts_with("with"))
+            .count()
+            >= 2,
+        "{shapes:?}"
+    );
+    // A constant stays a substitution.
+    let q = ok("MATCH (n) LET a = 1 SET n.k = a RETURN a");
+    assert_eq!(segment_shapes(&q), ["match[0]", "set1"]);
+    // A read-only query binds as before.
+    let q = ok("MATCH (n) WITH n, n.age AS old RETURN old");
+    assert_eq!(segment_shapes(&q), ["match[0]"]);
+}
+
+#[test]
+fn set_and_remove_inside_call_bodies() {
+    let q = ok("MATCH (p) CALL (p) { SET p.k = 1 } RETURN p");
+    assert_eq!(segment_shapes(&q), ["match[0]", "set1", "call0"]);
+    let Some(Segment::Call(call)) = q.segments.get(2) else {
+        panic!("{:?}", q.segments);
+    };
+    assert!(call.unit(), "a body ending in SET is a unit subquery");
+    assert_eq!(call.imports, [id(&q, "p")]);
+    assert_eq!(set_of(&q, 1).items[0].target.binding, id(&q, "p"));
+    let q = ok("MATCH (p) OPTIONAL CALL { WITH p REMOVE p:A } RETURN p");
+    assert!(q.writes());
+    // A CALL whose body sets is a write: values are materialized before it.
+    let q = ok("MATCH (n) LET a = n.age CALL (n) { SET n.age = 1 } RETURN a");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "set1", "call0"]);
+    // A body that sets and returns.
+    let q = ok("MATCH (p) CALL (p) { SET p.k = 1 RETURN p.k AS k } RETURN p, k");
+    assert_eq!(column_names(&q), ["p", "k"]);
+}
+
+#[test]
+fn set_and_remove_errors() {
+    // Unbound targets: 42002 with the message of any unknown name.
+    for (query, text) in [
+        ("MATCH (p) SET q.k = 1", "q"),
+        ("MATCH (p) REMOVE x:A", "x"),
+        ("MATCH (p) WITH p.age AS a SET p.k = 1", "p"),
+        ("SET n.k = 1", "n"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    let f = fail("MATCH (person) SET persn.k = 1");
+    assert_eq!(f.suggestion.as_deref(), Some("person"));
+    // An unbound name in a value.
+    let f = fail("MATCH (p) SET p.k = q.k");
+    assert_eq!(f.text, "q");
+    // Label items on an edge the binder knows (design W26, P0 C1).
+    for (query, text) in [
+        ("MATCH ()-[e:knows]->() SET e:x", ":x"),
+        ("MATCH ()-[e]->() REMOVE e IS knows", "IS knows"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with("`e` is an edge"), "{}", f.message);
+        assert!(
+            f.alternative.unwrap_or_default().contains(".set_label("),
+            "{query}"
+        );
+    }
+    // Targets that are no element.
+    for (query, text, message) in [
+        (
+            "LET m = 1 SET m.k = 2",
+            "m",
+            "is a value defined by LET or WITH",
+        ),
+        (
+            "MATCH (a) ((x)-->(y)){1,2} (b) SET x.k = 1",
+            "x",
+            "is a group variable",
+        ),
+        ("MATCH p = (a)-->(b) SET p.k = 1", "p", "is a path variable"),
+        (
+            "FOR x IN [1] WITH ORDINALITY i SET i.k = 1",
+            "i",
+            "is the position of a FOR item",
+        ),
+        (
+            "MATCH ()-[e]->{1,2}() REMOVE e.k",
+            "e",
+            "is a group variable",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(message), "{query}: {}", f.message);
+    }
+    // Aggregates and duplicate keys in a value (design W8).
+    let f = fail("MATCH (p)-->(f) SET p.n = count(f)");
+    assert_eq!(
+        f.message,
+        "the aggregate function count() cannot be used in SET"
+    );
+    assert!(
+        f.alternative
+            .unwrap_or_default()
+            .contains("AS n SET p.value = n"),
+        "the alternative names WITH"
+    );
+    let f = fail("MATCH (p) SET p += {a: 1, a: 2}");
+    assert_eq!(f.message, "the key `a` appears twice in this map");
+    // A read error before the SET comes first.
+    let f = fail("MATCH (n) WHERE x > 1 SET n.k = 1");
+    assert_eq!(f.text, "x");
 }

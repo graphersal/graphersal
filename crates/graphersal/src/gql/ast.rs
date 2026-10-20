@@ -34,7 +34,8 @@
 //! Stage 3a adds the first write clause: `INSERT` and its Cypher alias `CREATE`
 //! ([`Stage::Insert`], [`InsertClause`]), and linear queries without a result statement: one
 //! ending in a write clause or in `FINISH` ([`LinearQuery::end`]). A query without writes has
-//! exactly the tree of the stages before.
+//! exactly the tree of the stages before. Stage 3c adds `SET` ([`Stage::Set`], [`SetClause`])
+//! and `REMOVE` ([`Stage::Remove`], [`RemoveClause`]).
 
 use super::lexer::Span;
 
@@ -230,6 +231,102 @@ pub(crate) enum Stage {
     Call(Box<CallClause>),
     /// `INSERT pattern, ...` and its Cypher alias `CREATE pattern, ...` (stage 3a).
     Insert(InsertClause),
+    /// `SET item, ...` (stage 3c).
+    Set(SetClause),
+    /// `REMOVE item, ...` (stage 3c).
+    Remove(RemoveClause),
+}
+
+/// `SET item, item, ...` (stage 3c, design W20-W26): each item changes the element a variable
+/// holds, once per incoming row, the items left to right (W22).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SetClause {
+    /// The comma-separated items in written order (at least one).
+    pub(crate) items: Vec<SetItem>,
+    /// The `SET` keyword as written.
+    pub(crate) keyword: Span,
+    /// From the keyword to the end of the last item.
+    pub(crate) span: Span,
+}
+
+/// One item of a [`SetClause`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SetItem {
+    /// What it sets.
+    pub(crate) kind: SetItemKind,
+    /// The variable whose element it changes (the target, design D2: a plain variable).
+    pub(crate) target: Identifier,
+    /// The whole item.
+    pub(crate) span: Span,
+}
+
+/// The kinds of [`SetItem`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SetItemKind {
+    /// `v.key = expr` or `(v).key = expr`: sets one property (`NULL` removes it, W20).
+    Property {
+        /// The property key.
+        key: Identifier,
+        /// The new value.
+        value: Expr,
+    },
+    /// `v = expr`: replaces every property by the entries of a map or the properties of an
+    /// element (W23).
+    Replace {
+        /// The map or element.
+        value: Expr,
+    },
+    /// `v += expr`: merges the entries of a map or the properties of an element (W24).
+    Merge {
+        /// The map or element.
+        value: Expr,
+    },
+    /// `v:A:B`, `v:A&B`, `v IS A & B`: adds the labels (W26, design D1).
+    Labels(LabelItem),
+}
+
+/// The labels of a `SET` / `REMOVE` label item (design D1): a conjunction of names as `INSERT`
+/// writes a node's labels (`:A:B`, `:A&B`, `IS A & B`); the parser admits nothing else.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LabelItem {
+    /// The names in written order, each once.
+    pub(crate) labels: Vec<Identifier>,
+    /// From `:` / `IS` to the last name.
+    pub(crate) span: Span,
+}
+
+/// `REMOVE item, item, ...` (stage 3c, design W20, W26).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RemoveClause {
+    /// The comma-separated items in written order (at least one).
+    pub(crate) items: Vec<RemoveItem>,
+    /// The `REMOVE` keyword as written.
+    pub(crate) keyword: Span,
+    /// From the keyword to the end of the last item.
+    pub(crate) span: Span,
+}
+
+/// One item of a [`RemoveClause`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RemoveItem {
+    /// What it removes.
+    pub(crate) kind: RemoveItemKind,
+    /// The variable whose element it changes (a plain variable, design D2).
+    pub(crate) target: Identifier,
+    /// The whole item.
+    pub(crate) span: Span,
+}
+
+/// The kinds of [`RemoveItem`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RemoveItemKind {
+    /// `v.key` or `(v).key`: removes one property.
+    Property {
+        /// The property key.
+        key: Identifier,
+    },
+    /// `v:A:B`, `v IS A & B`: removes the labels.
+    Labels(LabelItem),
 }
 
 /// `INSERT pattern, pattern, ...` or Cypher `CREATE pattern, ...` (stage 3a, design W-a): the

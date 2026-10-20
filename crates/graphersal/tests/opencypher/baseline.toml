@@ -799,10 +799,6 @@ reason = "not yet: SET"
 class = "missing"
 reason = "not yet: SET"
 
-["clauses/set/Set1.feature::[9] Failing when using undefined variable in SET"]
-class = "missing"
-reason = "not yet: SET"
-
 ["clauses/set/Set2.feature::[1] Setting a node property to null removes the existing property"]
 class = "missing"
 reason = "not yet: SET"

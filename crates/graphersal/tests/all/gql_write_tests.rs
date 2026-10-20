@@ -802,3 +802,43 @@ mod script {
         assert_eq!(stamps, 7);
     }
 }
+
+// ----- stage 3c.T1: SET / REMOVE parse and bind, refused at the lowering until 3c.T3 -----
+
+#[test]
+fn bound_set_and_remove_are_refused_before_the_run() {
+    for (query, word) in [
+        ("MATCH (p:person) SET p.age = 1 RETURN p", "SET"),
+        (
+            "MATCH (p) SET p = {a: 1}, p += {b: 2}, (p).c = 3, p:A:B",
+            "SET",
+        ),
+        ("MATCH (p) REMOVE p.age, p:person", "REMOVE"),
+        ("MATCH (p) CALL (p) { SET p.k = 1 } RETURN p", "SET"),
+        (
+            "MATCH (p) WITH p, p.age AS old SET p.age = 1 RETURN old",
+            "SET",
+        ),
+    ] {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let before = dump(&graph);
+        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
+        match error.root_cause() {
+            TraverserError::Gql {
+                kind,
+                message,
+                gqlstatus,
+                ..
+            } => {
+                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
+                assert_eq!(gqlstatus, "0A000", "{query}");
+                assert_eq!(
+                    *message,
+                    format!("{word} is not yet supported in this version")
+                );
+            }
+            other => panic!("{query}: {other}"),
+        }
+        assert_eq!(dump(&graph), before, "{query} changed the graph");
+    }
+}

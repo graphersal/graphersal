@@ -17,8 +17,14 @@
 //! result     := return order_by? (OFFSET|SKIP expr)? (LIMIT expr)?
 //!             | FINISH                              -- FINISH: a contextual word (stage 3a)
 //!             |                                     -- nothing, after a stage that writes
-//! stage      := match | with | let | filter | for | call | insert
+//! stage      := match | with | let | filter | for | call | insert | set | remove
 //! insert     := (INSERT | CREATE) path (',' path)*   -- the insert form (stage 3a, below)
+//! set        := SET set_item (',' set_item)*         -- stage 3c
+//! set_item   := target '.' name '=' expr | var '=' expr | var '+=' expr | var label_item
+//! remove     := REMOVE remove_item (',' remove_item)*
+//! remove_item:= target '.' name | var label_item
+//! target     := var | '(' var ')'
+//! label_item := (':' | IS) labels                    -- a conjunction of names only
 //! call       := OPTIONAL? CALL ('(' (var (',' var)* | '*')? ')')? '{' composite '}'
 //! match      := OPTIONAL? MATCH path (',' path)* (WHERE expr)?
 //! with       := WITH projection order_by? (OFFSET|SKIP expr)? (LIMIT expr)? (WHERE expr)?
@@ -96,12 +102,19 @@
 //!   followed by a word (`INDEX`, `CONSTRAINT`, `GRAPH`, `OR REPLACE`, Neo4j's `DATABASE`, ...)
 //!   is a refused catalog or administration command naming `g.create_index(..)` /
 //!   `g.set_schema(..)`; `LOAD CSV` is refused (vendor), Cypher `FOREACH` is "not yet"
-//!   naming `FOR x IN l INSERT ..`. The other write clauses (`SET`, `REMOVE`, `[DETACH |
+//!   naming `FOR x IN l INSERT ..`. The other write clauses (`[DETACH |
 //!   NODETACH] DELETE`, `MERGE`) are "not yet supported", naming the Gremlin step that does
-//!   the work (`property()`, `remove_property()`, `drop()`, `merge_v()`); a write clause after
-//!   `RETURN` is the "RETURN ends the query" syntax error. The expected tokens after a clause
-//!   do not name the write clauses (coordinator default K9); after an `INSERT` they name `,`
-//!   and the clauses.
+//!   the work (`drop()`, `merge_v()`); a write clause after `RETURN` is the "RETURN ends the
+//!   query" syntax error. The expected tokens after a clause do not name the write clauses
+//!   (coordinator default K9); after an `INSERT`, `SET` or `REMOVE` they name `,` and the
+//!   clauses.
+//! - **`SET` / `REMOVE` (stage 3c, design W20-W26, D1, D2)** stand where `INSERT` stands
+//!   (same placement rules, [`Parser::writes`], [`Parser::write_ban`]). An item's target is a
+//!   variable: `v.key` or `(v).key` for a property item, `v` for `SET v = e` (replace every
+//!   property), `SET v += e` (merge; `+=` written without a space) and the label items `v:A:B`,
+//!   `v :A :B`, `v:A&B`, `v IS A & B` (a conjunction of names as in `INSERT`; `|`, `!`, `%` are
+//!   syntax errors). Any other target (`head(l).k`, `n.a.b`, `n[key]`) is read as an
+//!   expression and is "not yet supported" ([`SetClause`], [`RemoveClause`]).
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
 //!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`LinearQuery::stages`] is then
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
@@ -283,12 +296,13 @@ use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
     ComprehensionForm, CountClause, EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind,
     FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
-    LabelExpr, LabelExprKind, LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate,
-    Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy,
-    Ordinal, OrdinalKind, ParenthesizedPath, PathPattern, PatternComprehension, PatternStep,
-    ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator, ReturnClause,
-    ReturnItem, SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide,
-    UnaryOp, UnionKind, UnionOperand, WithClause,
+    LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery, ListComprehension,
+    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock,
+    NodePattern, OrderBy, Ordinal, OrdinalKind, ParenthesizedPath, PathPattern,
+    PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
+    ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind, ReturnClause, ReturnItem,
+    SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm,
+    SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
@@ -1067,7 +1081,11 @@ impl<'a> Parser<'a> {
                 self.write_ban
                     .map(|place| self.banned_write(span, &text, place))
             }
-            keyword @ (Keyword::Set | Keyword::Remove | Keyword::Delete | Keyword::Merge) => {
+            // `SET` / `REMOVE` (stage 3c): where no clause can stand, a plain syntax error.
+            Keyword::Set | Keyword::Remove => self
+                .write_ban
+                .map(|place| self.banned_write(span, &text, place)),
+            keyword @ (Keyword::Delete | Keyword::Merge) => {
                 if let Some(place) = self.write_ban {
                     return Some(self.banned_write(span, &text, place));
                 }
@@ -1243,63 +1261,16 @@ impl<'a> Parser<'a> {
         Box::new(b)
     }
 
-    /// The Gremlin alternative of a write clause that is not yet supported (`SET`, `REMOVE`,
-    /// `DELETE` and its `DETACH` / `NODETACH` forms, `MERGE`), at its keyword: the step that does
-    /// it, with an example built from the clause when its first item is a plain
-    /// `v.key = literal` (`SET`) or `v.key` (`REMOVE`).
+    /// The Gremlin alternative of a write clause that is not yet supported (`DELETE` and its
+    /// `DETACH` / `NODETACH` forms, `MERGE`), at its keyword: the step that does it.
     fn write_alternative(&self, keyword: Keyword) -> String {
         match keyword {
-            Keyword::Set => {
-                let (key, value) = self
-                    .property_item()
-                    .and_then(|key| Some((key, self.literal_text(self.nth(5))?)))
-                    .unwrap_or_else(|| ("age".to_string(), "30".to_string()));
-                format!(
-                    "write the update as Gremlin steps: property() sets a property and \
-                     add_label() adds a label, for example \
-                     g.v().has_label(\"person\").property(\"{key}\", {value})"
-                )
-            }
-            Keyword::Remove => {
-                let key = self.property_item().unwrap_or_else(|| "age".to_string());
-                format!(
-                    "write the update as Gremlin steps: remove_property() removes a property \
-                     and drop_label() a label, for example \
-                     g.v().has_label(\"person\").remove_property(\"{key}\")"
-                )
-            }
             Keyword::Merge => "find or create the element with the Gremlin steps merge_v() and \
                  merge_e(), for example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})"
                 .to_string(),
             _ => "remove the elements with the Gremlin step drop(), which removes a vertex with \
                  its edges, for example g.v().has_label(\"person\").has(\"name\", \"marko\").drop()"
                 .to_string(),
-        }
-    }
-
-    /// After a `SET` / `REMOVE` keyword: the key of a first item `v.key`, when written so.
-    fn property_item(&self) -> Option<String> {
-        let plain =
-            |token: &Token<'_>| matches!(token.kind, TokenKind::Ident | TokenKind::QuotedIdent(_));
-        if !plain(self.nth(1)) || self.nth(2).kind != TokenKind::Dot {
-            return None;
-        }
-        let key = self.nth(3).name()?;
-        (!key.contains(['"', '\\'])).then(|| key.to_string())
-    }
-
-    /// The Rhai text of a literal token after `SET v.key =`: a number, a boolean or a plain
-    /// string (no quote or backslash in it); `None` otherwise.
-    fn literal_text(&self, token: &Token<'_>) -> Option<String> {
-        if self.nth(4).kind != TokenKind::Eq {
-            return None;
-        }
-        match &token.kind {
-            TokenKind::Integer(_) | TokenKind::Float(_) => Some(token.text.to_string()),
-            TokenKind::Keyword(Keyword::True) => Some("true".to_string()),
-            TokenKind::Keyword(Keyword::False) => Some("false".to_string()),
-            TokenKind::Str(text) if !text.contains(['"', '\\']) => Some(format!("\"{text}\"")),
-            _ => None,
         }
     }
 
@@ -1609,6 +1580,8 @@ impl<'a> Parser<'a> {
             }
             Some(Keyword::For | Keyword::Unwind) => Stage::For(self.for_clause()?),
             Some(Keyword::Insert | Keyword::Create) => Stage::Insert(self.insert_clause()?),
+            Some(Keyword::Set) => Stage::Set(self.set_clause()?),
+            Some(Keyword::Remove) => Stage::Remove(self.remove_clause()?),
             _ => return Ok(false),
         };
         stages.push(stage);
@@ -1922,7 +1895,7 @@ impl<'a> Parser<'a> {
             Some(Stage::For(clause)) if !clause.unwind && clause.ordinal.is_none() => {
                 vec!["WITH ORDINALITY", "WITH OFFSET"]
             }
-            Some(Stage::Insert(_)) => vec!["`,`"],
+            Some(Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_)) => vec!["`,`"],
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
@@ -2411,6 +2384,204 @@ impl<'a> Parser<'a> {
             check_insert_node(&step.node, word)?;
         }
         Ok(pattern)
+    }
+
+    /// The keyword of a write clause that is no pattern (`SET`, `REMOVE`), consumed and
+    /// recorded in [`Parser::writes`]; inside a subquery expression or a comprehension the
+    /// refusal (design W3).
+    fn write_keyword(&mut self) -> PResult<Span> {
+        if let Some(place) = self.write_ban {
+            let token = self.peek();
+            return Err(self.banned_write(token.span, &token.text.to_ascii_uppercase(), place));
+        }
+        let keyword = self.advance().span;
+        self.writes.push(keyword);
+        Ok(keyword)
+    }
+
+    /// `SET item, ...`, at the keyword (stage 3c, [`SetClause`]).
+    fn set_clause(&mut self) -> PResult<SetClause> {
+        let keyword = self.write_keyword()?;
+        let mut items = vec![self.set_item()?];
+        while self.eat(&TokenKind::Comma).is_some() {
+            items.push(self.set_item()?);
+        }
+        Ok(SetClause {
+            items,
+            keyword,
+            span: keyword.to(self.last),
+        })
+    }
+
+    /// One `SET` item: `v.key = e`, `(v).key = e`, `v = e`, `v += e`, `v:A:B` / `v IS A & B`.
+    fn set_item(&mut self) -> PResult<SetItem> {
+        let start = self.peek().span;
+        let (target, key) = self.item_target("SET")?;
+        let kind = if let Some(key) = key {
+            self.expect(&TokenKind::Eq, &["`=`"])?;
+            let value = self.expr()?;
+            SetItemKind::Property { key, value }
+        } else if self.eat(&TokenKind::Eq).is_some() {
+            SetItemKind::Replace {
+                value: self.expr()?,
+            }
+        } else if self.at(&TokenKind::Plus)
+            && self.nth(1).kind == TokenKind::Eq
+            && self.peek().span.touches(self.nth(1).span)
+        {
+            self.advance();
+            self.advance();
+            SetItemKind::Merge {
+                value: self.expr()?,
+            }
+        } else if self.at(&TokenKind::Colon) || self.at_kw(Keyword::Is) {
+            SetItemKind::Labels(self.label_item("SET", &target)?)
+        } else {
+            return Err(self.unexpected(&["`.`", "`=`", "`+=`", "`:`", "IS"]));
+        };
+        Ok(SetItem {
+            kind,
+            target,
+            span: start.to(self.last),
+        })
+    }
+
+    /// `REMOVE item, ...`, at the keyword (stage 3c, [`RemoveClause`]).
+    fn remove_clause(&mut self) -> PResult<RemoveClause> {
+        let keyword = self.write_keyword()?;
+        let mut items = vec![self.remove_item()?];
+        while self.eat(&TokenKind::Comma).is_some() {
+            items.push(self.remove_item()?);
+        }
+        Ok(RemoveClause {
+            items,
+            keyword,
+            span: keyword.to(self.last),
+        })
+    }
+
+    /// One `REMOVE` item: `v.key`, `(v).key`, `v:A:B` / `v IS A & B`.
+    fn remove_item(&mut self) -> PResult<RemoveItem> {
+        let start = self.peek().span;
+        let (target, key) = self.item_target("REMOVE")?;
+        let kind = if let Some(key) = key {
+            RemoveItemKind::Property { key }
+        } else if self.at(&TokenKind::Colon) || self.at_kw(Keyword::Is) {
+            RemoveItemKind::Labels(self.label_item("REMOVE", &target)?)
+        } else {
+            return Err(self.unexpected(&["`.`", "`:`", "IS"]));
+        };
+        Ok(RemoveItem {
+            kind,
+            target,
+            span: start.to(self.last),
+        })
+    }
+
+    /// The target of a `SET` / `REMOVE` item (design D2): a variable, with the key of a
+    /// property item written `v.key` or `(v).key`. Any other target (`head(l).k`, `n.a.b`,
+    /// `n[key]`) is read as an expression and refused as not yet supported.
+    fn item_target(&mut self, word: &str) -> PResult<(Identifier, Option<Identifier>)> {
+        let is_name = |token: &Token<'_>| token.name().is_some();
+        let deeper = |token: &Token<'_>| {
+            matches!(
+                token.kind,
+                TokenKind::Dot | TokenKind::LBracket | TokenKind::LParen | TokenKind::LBrace
+            )
+        };
+        let paren = self.at(&TokenKind::LParen)
+            && is_name(self.nth(1))
+            && self.nth(2).kind == TokenKind::RParen
+            && self.nth(3).kind == TokenKind::Dot
+            && is_name(self.nth(4))
+            && !deeper(self.nth(5));
+        if paren {
+            self.advance();
+            let target = self.expect_name(&["a variable"])?;
+            self.expect(&TokenKind::RParen, &["`)`"])?;
+            self.expect(&TokenKind::Dot, &["`.`"])?;
+            let key = self.expect_name(&["a property key"])?;
+            return Ok((target, Some(key)));
+        }
+        if is_name(self.peek()) {
+            let property =
+                self.nth(1).kind == TokenKind::Dot && is_name(self.nth(2)) && !deeper(self.nth(3));
+            if property {
+                let target = self.expect_name(&["a variable"])?;
+                self.advance();
+                let key = self.expect_name(&["a property key"])?;
+                return Ok((target, Some(key)));
+            }
+            if !deeper(self.nth(1)) {
+                return Ok((self.expect_name(&["a variable"])?, None));
+            }
+        } else if !self.at(&TokenKind::LParen) {
+            return Err(self.unexpected(&["a variable"]));
+        }
+        let written = self.expr()?;
+        Err(self.complex_target(word, &written))
+    }
+
+    /// The "not yet" error of a `SET` / `REMOVE` target that is no variable (design D2),
+    /// `written` the item read as an expression (a `SET` item's `=` reads as a comparison).
+    fn complex_target(&self, word: &str, written: &Expr) -> Box<GqlErrorBuilder> {
+        let target = match &written.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Eq,
+                left,
+                ..
+            } if word == "SET" => &**left,
+            _ => written,
+        };
+        let (key, value) = match &target.kind {
+            ExprKind::Property { key, .. } => (gql_key(&key.name), " = <value>"),
+            _ => ("k".to_string(), " = <value>"),
+        };
+        let example = if word == "SET" {
+            format!("SET x.{key}{value}")
+        } else {
+            format!("REMOVE x.{key}")
+        };
+        self.not_yet(
+            target.span,
+            &format!("`{}` as a {word} target", self.text(target.span)),
+            &format!(
+                "{word} changes the element a variable holds: name it first and write the item \
+                 on the variable, as in WITH <element> AS x {example}"
+            ),
+        )
+    }
+
+    /// The labels of a `SET` / `REMOVE` label item after its target (design D1): `:` or `IS`,
+    /// then a conjunction of names (`A:B`, `A&B`); `|`, `!`, `%` are syntax errors.
+    fn label_item(&mut self, word: &str, target: &Identifier) -> PResult<LabelItem> {
+        let start = self.advance().span;
+        let (labels, _) = self.label_expr()?;
+        let names = conjunction_names(&labels).map_err(|(span, operator)| {
+            let names = written_label_names(&labels);
+            let names = if names.is_empty() {
+                "Label".to_string()
+            } else {
+                names.join(":")
+            };
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                format!(
+                    "{operator} cannot stand in {word}: a label item names the labels, joined \
+                     by `:` or `&`"
+                ),
+            )
+            .alternative(format!(
+                "write the labels, as in {word} {}:{names}",
+                gql_key(&target.name)
+            ));
+            Box::new(b)
+        })?;
+        Ok(LabelItem {
+            labels: names,
+            span: start.to(self.last),
+        })
     }
 
     fn match_clause(&mut self) -> PResult<MatchClause> {
@@ -5621,6 +5792,33 @@ fn insert_edge_text(edge: &EdgePattern, label: Option<&str>, extra: &str) -> Str
         EdgeDirection::Left => format!("<-[{inner}]-"),
         EdgeDirection::Right | EdgeDirection::Any => format!("-[{inner}]->"),
     }
+}
+
+/// The names of a conjunction of label names (`A & B`, `A:B`) in written order, each once
+/// (walked without recursion), or the span and description of the first other operator.
+fn conjunction_names(labels: &LabelExpr) -> Result<Vec<Identifier>, (Span, &'static str)> {
+    let mut names: Vec<Identifier> = Vec::new();
+    let mut pending = vec![labels];
+    while let Some(label) = pending.pop() {
+        let operator = match &label.kind {
+            LabelExprKind::Label(name) => {
+                if !names.iter().any(|n| n.name == name.name) {
+                    names.push(name.clone());
+                }
+                continue;
+            }
+            LabelExprKind::And(left, right) => {
+                pending.push(right);
+                pending.push(left);
+                continue;
+            }
+            LabelExprKind::Or(..) => "`|` (a label alternative)",
+            LabelExprKind::Not(_) => "`!` (a label negation)",
+            LabelExprKind::Wildcard => "`%` (any label)",
+        };
+        return Err((label.span, operator));
+    }
+    Ok(names)
 }
 
 /// A node pattern of an `INSERT` (design W7): no `WHERE`; labels a conjunction of names.

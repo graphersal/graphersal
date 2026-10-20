@@ -270,6 +270,19 @@
 //! - **Endings (design W2).** [`BoundLinear::end`]: a linear query ends in `RETURN`, in
 //!   `FINISH` or in a clause that writes; the last two have no columns and return no row.
 //!
+//! - **`SET` / `REMOVE` (stage 3c, design W20-W26)** are cuts like `INSERT` ([`BoundSet`],
+//!   [`BoundRemove`] in a [`Segment::Write`]), preceded by the W10 materialization. Every item
+//!   names a target variable bound before the clause (42002 otherwise, the message of any
+//!   unknown name); a node, an edge or a value whose kind only the run knows (a `FOR` item, a
+//!   `WITH` / `CALL` / `NEXT` column) may be one ([`WriteTarget`], [`TargetKind`]); a path, a
+//!   group variable, a `FOR` ordinal or a `LET` / `WITH` value name (an expression, not an
+//!   element) may not (42002). A label item on an edge the binder knows is an edge is refused
+//!   (42002, W26: an edge has exactly one label). The values are expressions over the scope
+//!   before the clause and parameters, without aggregates (42002); a map literal holds no key
+//!   twice (42002). Targets and what the values read are [`BoundSet::reads`] /
+//!   [`BoundRemove::reads`], all marked read. Until stage 3c.T3 lowers them, the lowering
+//!   refuses a bound `SET` / `REMOVE` as not yet supported.
+//!
 //! The planner plans a write clause as a `Stage::Write` of its pipeline; a `CALL` whose body
 //! ends in `FINISH` or a write is a unit subquery ([`BoundCall::unit`]): the outer row passes
 //! on unchanged once the body ran.
@@ -314,6 +327,9 @@
 //! variable that is bound already, an end that is no node, a lone reference creating nothing,
 //! an aggregate or a duplicate key in an `INSERT` property map; `NotYet`: a property value
 //! reading an element the same `INSERT` creates.
+//! Stage 3c 42002: a `SET` / `REMOVE` target that is not bound, is a path, a group variable, a
+//! `FOR` ordinal or a value name; a label item on an edge; an aggregate or a duplicate key in a
+//! `SET` value.
 //!
 //! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies; every one of them
 //! lowers (`UNION` and `NEXT` since 2d.T4, `[OPTIONAL] CALL { }` since 2d.T5, `COUNT { }`,
@@ -348,11 +364,12 @@ use std::rc::Rc;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
     CountClause, EdgeDirection, EdgePattern, Expr, ExprKind, ForClause, GroupBy, Identifier,
-    InsertClause, LabelExpr, LabelExprKind, LetClause, LinearQuery, ListComprehension,
+    InsertClause, LabelExpr, LabelExprKind, LabelItem, LetClause, LinearQuery, ListComprehension,
     ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy,
     OrdinalKind, ParenthesizedPath, PathPattern, PatternStep, ProjectionItem, Quantifier, Query,
-    QueryBlock, QueryEnd, ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnItem, SetClause,
+    SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind,
+    WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -680,21 +697,150 @@ pub(crate) struct BoundRows {
 }
 
 /// A bound write clause (stage 3a, [`Segment::Write`]; module docs, "Writes"). One variant per
-/// write clause; `SET`, `REMOVE`, `DELETE` and `MERGE` join in later stages.
+/// write clause; `DELETE` and `MERGE` join in later stages.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BoundWrite {
     /// `INSERT` / Cypher `CREATE`.
     Insert(BoundInsert),
+    /// `SET` (stage 3c).
+    Set(BoundSet),
+    /// `REMOVE` (stage 3c).
+    Remove(BoundRemove),
 }
 
 impl BoundWrite {
     /// The bindings declared before the clause that it reads (endpoints bound before it, the
-    /// bindings its property expressions read), sorted, without duplicates.
+    /// targets of `SET` / `REMOVE`, the bindings its expressions read), sorted, without
+    /// duplicates.
     pub(crate) fn reads(&self) -> &[BindingId] {
         match self {
             BoundWrite::Insert(insert) => &insert.reads,
+            BoundWrite::Set(set) => &set.reads,
+            BoundWrite::Remove(remove) => &remove.reads,
         }
     }
+}
+
+/// A bound `SET item, ..` (stage 3c, design W20-W26): the items run left to right on every
+/// incoming row (W22), each on the element its target holds (a `NULL` target: no-op, W25).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundSet {
+    /// The items in written order.
+    pub(crate) items: Vec<BoundSetItem>,
+    /// The targets and what the values read, sorted, without duplicates.
+    pub(crate) reads: Vec<BindingId>,
+    /// The `SET` keyword as written.
+    pub(crate) keyword: Span,
+    /// The clause.
+    pub(crate) span: Span,
+}
+
+/// One item of a [`BoundSet`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundSetItem {
+    /// The element it changes.
+    pub(crate) target: WriteTarget,
+    /// What it sets.
+    pub(crate) kind: BoundSetKind,
+    /// The item.
+    pub(crate) span: Span,
+}
+
+/// What a [`BoundSetItem`] sets.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BoundSetKind {
+    /// `v.key = value` / `(v).key = value`: one property; `NULL` removes it (W20).
+    Property {
+        /// The property key.
+        key: Identifier,
+        /// The value.
+        value: WriteValue,
+    },
+    /// `v = value`: every property replaced by the entries of a map or the properties of an
+    /// element (W23; `NULL` entries leave no key).
+    Replace(WriteValue),
+    /// `v += value`: the entries of a map or the properties of an element merged in (W24;
+    /// `NULL` entries remove the key).
+    Merge(WriteValue),
+    /// `v:A:B` / `v IS A & B`: the labels added, in written order, each once (W26, D1). The
+    /// target is never known to be an edge.
+    Labels(Vec<Identifier>),
+}
+
+/// The value expression of a `SET` item (design W8): any expression over the bindings before
+/// the clause and parameters, without aggregates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WriteValue {
+    /// The expression (`LET` / `WITH` names substituted).
+    pub(crate) expr: Expr,
+    /// The bindings it reads, sorted, without duplicates.
+    pub(crate) bindings: Vec<BindingId>,
+}
+
+/// A bound `REMOVE item, ..` (stage 3c, design W20, W26): the items run left to right on every
+/// incoming row, each on the element its target holds (a `NULL` target: no-op, W25).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundRemove {
+    /// The items in written order.
+    pub(crate) items: Vec<BoundRemoveItem>,
+    /// The targets, sorted, without duplicates.
+    pub(crate) reads: Vec<BindingId>,
+    /// The `REMOVE` keyword as written.
+    pub(crate) keyword: Span,
+    /// The clause.
+    pub(crate) span: Span,
+}
+
+/// One item of a [`BoundRemove`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundRemoveItem {
+    /// The element it changes.
+    pub(crate) target: WriteTarget,
+    /// What it removes.
+    pub(crate) kind: BoundRemoveKind,
+    /// The item.
+    pub(crate) span: Span,
+}
+
+/// What a [`BoundRemoveItem`] removes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BoundRemoveKind {
+    /// `v.key` / `(v).key`: one property (a missing key: no-op).
+    Property(Identifier),
+    /// `v:A:B` / `v IS A & B`: the labels, in written order, each once (a missing label:
+    /// no-op). The target is never known to be an edge.
+    Labels(Vec<Identifier>),
+}
+
+/// The target of a `SET` / `REMOVE` item: a binding declared before the clause, and what the
+/// binder knows of its kind (the static facts the access requests are built from, P0 C6).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WriteTarget {
+    /// The binding whose element the item changes.
+    pub(crate) binding: BindingId,
+    /// What the binding holds, as far as the binder knows.
+    pub(crate) kind: TargetKind,
+    /// The variable as written in the item.
+    pub(crate) span: Span,
+}
+
+/// What a [`WriteTarget`] holds, as far as the binder knows. Closed by definition: an element
+/// is a node or an edge, or its kind is known only at run time.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TargetKind {
+    /// A node (a node pattern variable, or a column holding one).
+    Node,
+    /// An edge (an edge pattern variable, or a column holding one).
+    Edge {
+        /// The label names its pattern allows when one of its label expressions is a name or
+        /// a disjunction of names (`:knows`, `:knows|likes`), in written order, each once;
+        /// `None` when the pattern does not restrict them so (any label).
+        labels: Option<Vec<Identifier>>,
+    },
+    /// A value whose kind only the run knows: a `FOR` / `UNWIND` item, a `WITH`, `CALL` or
+    /// `NEXT` column that is not a node or edge variable (a node or an edge then, `NULL`, or
+    /// a value the step refuses).
+    Unknown,
 }
 
 /// A bound `INSERT pattern, ..` / `CREATE pattern, ..` (stage 3a, design W5-W8): the elements
@@ -2336,6 +2482,8 @@ impl<'q> Binder<'q> {
                 self.call_clause(clause)
             }
             Stage::Insert(clause) => self.insert_clause(clause),
+            Stage::Set(clause) => self.set_clause(clause),
+            Stage::Remove(clause) => self.remove_clause(clause),
         }
     }
 
@@ -3512,6 +3660,170 @@ impl<'q> Binder<'q> {
             });
         }
         Ok(properties)
+    }
+
+    /// `SET item, ..` (stage 3c, module docs "Writes"): a cut ([`Segment::Write`]) after the
+    /// W10 materialization; every target bound before it, every value over the scope before
+    /// it.
+    #[inline(never)]
+    fn set_clause(&mut self, clause: &SetClause) -> BResult<()> {
+        self.write_prelude("SET", clause.keyword)?;
+        let mut reads: Vec<BindingId> = Vec::new();
+        let mut items = Vec::with_capacity(clause.items.len());
+        for item in &clause.items {
+            let target = self.write_target("SET", &item.target)?;
+            reads.push(target.binding);
+            let kind = match &item.kind {
+                SetItemKind::Property { key, value } => BoundSetKind::Property {
+                    key: key.clone(),
+                    value: self.write_value(value, &mut reads)?,
+                },
+                SetItemKind::Replace { value } => {
+                    BoundSetKind::Replace(self.write_value(value, &mut reads)?)
+                }
+                SetItemKind::Merge { value } => {
+                    BoundSetKind::Merge(self.write_value(value, &mut reads)?)
+                }
+                SetItemKind::Labels(labels) => {
+                    edge_label_item("SET", &item.target, &target, labels)?;
+                    BoundSetKind::Labels(labels.labels.clone())
+                }
+            };
+            items.push(BoundSetItem {
+                target,
+                kind,
+                span: item.span,
+            });
+        }
+        reads.sort_unstable();
+        reads.dedup();
+        self.mark_read(&reads);
+        let set = BoundSet {
+            items,
+            reads,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        self.push_write(BoundWrite::Set(set), clause.span)
+    }
+
+    /// `REMOVE item, ..` (stage 3c, module docs "Writes"): a cut like `SET`.
+    #[inline(never)]
+    fn remove_clause(&mut self, clause: &RemoveClause) -> BResult<()> {
+        self.write_prelude("REMOVE", clause.keyword)?;
+        let mut items = Vec::with_capacity(clause.items.len());
+        for item in &clause.items {
+            let target = self.write_target("REMOVE", &item.target)?;
+            let kind = match &item.kind {
+                RemoveItemKind::Property { key } => BoundRemoveKind::Property(key.clone()),
+                RemoveItemKind::Labels(labels) => {
+                    edge_label_item("REMOVE", &item.target, &target, labels)?;
+                    BoundRemoveKind::Labels(labels.labels.clone())
+                }
+            };
+            items.push(BoundRemoveItem {
+                target,
+                kind,
+                span: item.span,
+            });
+        }
+        let mut reads: Vec<BindingId> = items.iter().map(|i| i.target.binding).collect();
+        reads.sort_unstable();
+        reads.dedup();
+        self.mark_read(&reads);
+        let remove = BoundRemove {
+            items,
+            reads,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        self.push_write(BoundWrite::Remove(remove), clause.span)
+    }
+
+    /// Before a `SET` / `REMOVE`: refused inside a subquery expression (the parser refuses it
+    /// there already, design W3), then the W10 materialization.
+    fn write_prelude(&mut self, word: &str, keyword: Span) -> BResult<()> {
+        if self.subquery.is_some() {
+            return Err(Box::new(semantic(
+                keyword,
+                format!("{word} cannot stand inside a subquery expression"),
+            )));
+        }
+        self.materialize_for_write(keyword)
+    }
+
+    /// Appends a write clause that declares nothing as its own segment.
+    fn push_write(&mut self, write: BoundWrite, span: Span) -> BResult<()> {
+        let segment = self.segments.len();
+        self.push_numbered(Segment::Write(Box::new(write)), segment, span)?;
+        self.open = None;
+        Ok(())
+    }
+
+    /// The target variable of a `SET` / `REMOVE` item: bound before the clause (an unknown
+    /// name gets the error of any unknown name, 42002), a node, an edge or a value of unknown
+    /// kind; never a path, a group variable, a `FOR` ordinal or a value name (42002).
+    fn write_target(&mut self, word: &str, var: &Identifier) -> BResult<WriteTarget> {
+        let symbol = match self.scope.get(&var.name) {
+            Some(symbol) => symbol.clone(),
+            None => {
+                // The message of an unknown name (dropped, misspelt, a local, ...).
+                let written = Expr {
+                    kind: ExprKind::Variable(var.clone()),
+                    span: var.span,
+                };
+                self.expression(Ctx::refusing(IN_SET), &written)?;
+                return Err(Box::new(semantic(
+                    var.span,
+                    format!("the variable `{}` is not defined", var.name),
+                )));
+            }
+        };
+        let id = match symbol {
+            Symbol::Binding(id) => id,
+            Symbol::Value(_) => return Err(value_as_target(word, var)),
+        };
+        let binding = self.bindings.get(id.0).ok_or_else(|| {
+            semantic(
+                var.span,
+                "internal error: a binding id out of range in the binder",
+            )
+        })?;
+        if binding.group {
+            return Err(group_as_target(word, var));
+        }
+        let kind = match binding.kind {
+            BindingKind::Node => TargetKind::Node,
+            BindingKind::Edge => TargetKind::Edge {
+                labels: edge_label_names(&binding.labels),
+            },
+            BindingKind::Path => return Err(path_as_target(word, var)),
+            BindingKind::Value => {
+                if self.for_column(id) == Some(FOR_ORDINAL) {
+                    return Err(ordinal_as_target(word, var));
+                }
+                TargetKind::Unknown
+            }
+        };
+        Ok(WriteTarget {
+            binding: id,
+            kind,
+            span: var.span,
+        })
+    }
+
+    /// The value of a `SET` item (design W8): no aggregate, no key twice in a map literal;
+    /// what it reads is added to `reads`.
+    fn write_value(&mut self, value: &Expr, reads: &mut Vec<BindingId>) -> BResult<WriteValue> {
+        if let ExprKind::Map(map) = &value.kind {
+            check_map_keys(map)?;
+        }
+        let resolved = self.expression(Ctx::refusing(IN_SET), value)?;
+        reads.extend_from_slice(&resolved.refs.bindings);
+        Ok(WriteValue {
+            expr: resolved.expr,
+            bindings: resolved.refs.bindings,
+        })
     }
 
     // ----- LET and WITH -----
@@ -5818,6 +6130,157 @@ fn reference_with_parts(
     )
 }
 
+/// The error of a `LET` / projecting-`WITH` value name as a `SET` / `REMOVE` target (42002):
+/// it stands for an expression, not an element.
+fn value_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a value defined by LET or WITH, not a node or an edge; {word} \
+                 changes the element a variable holds"
+            ),
+        )
+        .alternative(format!(
+            "write the item on the node or edge variable itself, as in MATCH (p:person) {word} \
+             {}",
+            target_example(word, "p")
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a group variable (a list of elements) as a `SET` / `REMOVE` target (42002).
+fn group_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a group variable (the list of the elements of a quantified \
+                 pattern), not one element; {word} changes one node or edge"
+            ),
+        )
+        .alternative(format!(
+            "iterate the list and change each element, as in FOR x IN {name} {word} {}",
+            target_example(word, "x")
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a path variable as a `SET` / `REMOVE` target (42002).
+fn path_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a path variable, not a node or an edge; {word} changes one element"
+            ),
+        )
+        .alternative(format!(
+            "iterate its nodes and change each, as in FOR x IN nodes({name}) {word} {}",
+            target_example(word, "x")
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a `FOR` ordinal as a `SET` / `REMOVE` target (42002).
+fn ordinal_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "the variable `{name}` is the position of a FOR item (a number), not a node or \
+                 an edge; {word} changes an element"
+            ),
+        )
+        .alternative(format!(
+            "write the item on the FOR item itself, as in FOR x IN $nodes WITH ORDINALITY \
+             {name} {word} {}",
+            target_example(word, "x")
+        ))
+        .topic(GqlHelpTopic::For),
+    )
+}
+
+/// A `SET` / `REMOVE` item on `var`, for an alternative.
+fn target_example(word: &str, var: &str) -> String {
+    if word == "SET" {
+        format!("{var}.k = 1")
+    } else {
+        format!("{var}.k")
+    }
+}
+
+/// A label item on a target the binder knows is an edge (design W26, P0 C1, 42002): an edge
+/// has exactly one label, its type.
+fn edge_label_item(
+    word: &str,
+    var: &Identifier,
+    target: &WriteTarget,
+    labels: &LabelItem,
+) -> BResult<()> {
+    if !matches!(target.kind, TargetKind::Edge { .. }) {
+        return Ok(());
+    }
+    let name = &var.name;
+    let label = labels.labels.first().map_or("T", |l| l.name.as_str());
+    let rhai = crate::value::literal::rhai_string;
+    let text = crate::error::gql_key(name);
+    Err(Box::new(
+        semantic(
+            labels.span,
+            format!(
+                "`{name}` is an edge: an edge has exactly one label, its type, so {word} cannot \
+                 {} it",
+                if word == "SET" {
+                    "add labels to"
+                } else {
+                    "remove labels from"
+                }
+            ),
+        )
+        .alternative(format!(
+            "change the type of the edge with the Gremlin step set_label(), as in \
+             g.gql(\"MATCH ()-[{text}]->() RETURN {text}\").select({}).set_label({})",
+            rhai(name),
+            rhai(label)
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    ))
+}
+
+/// The label names an edge binding's patterns allow (see [`TargetKind::Edge`]): those of the
+/// first label expression that is a name or a disjunction of names (walked without recursion).
+fn edge_label_names(labels: &[LabelExpr]) -> Option<Vec<Identifier>> {
+    labels.iter().find_map(|expr| {
+        let mut names: Vec<Identifier> = Vec::new();
+        let mut pending = vec![expr];
+        while let Some(label) = pending.pop() {
+            match &label.kind {
+                LabelExprKind::Label(name) => {
+                    if !names.iter().any(|n| n.name == name.name) {
+                        names.push(name.clone());
+                    }
+                }
+                LabelExprKind::Or(left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                LabelExprKind::And(..) | LabelExprKind::Not(_) | LabelExprKind::Wildcard => {
+                    return None;
+                }
+            }
+        }
+        Some(names)
+    })
+}
+
 /// The error of a pattern of an `INSERT` that is a lone reference to a node it does not
 /// create (42002).
 fn creates_nothing(word: &str, node: &NodePattern, text: &str) -> Box<GqlErrorBuilder> {
@@ -5934,7 +6397,7 @@ fn composite_writes(composite: &CompositeQuery) -> bool {
         for linear in linears {
             for stage in &linear.stages {
                 match stage {
-                    Stage::Insert(_) => return true,
+                    Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) => return true,
                     Stage::Call(call) => pending.push(&call.body),
                     Stage::Match(_)
                     | Stage::Let(_)
@@ -5953,6 +6416,9 @@ const IN_INSERT: &str = "in INSERT";
 
 /// The place of an aggregate inside a Cypher `CREATE` property map (refused, design W8).
 const IN_CREATE: &str = "in CREATE";
+
+/// The place of an aggregate inside a `SET` value (refused, design W8).
+const IN_SET: &str = "in SET";
 
 /// `ORDINALITY` / `OFFSET` as written.
 fn ordinal_word(kind: OrdinalKind) -> &'static str {
@@ -6206,6 +6672,11 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
         format!(
             "aggregate in a WITH first and insert its column, as in \
              MATCH (p)-->(f) WITH p, {f}(f.age) AS n {word} (p)-[:stat]->(:summary {{value: n}})"
+        )
+    } else if place == IN_SET {
+        format!(
+            "aggregate in a WITH first and set its column, as in \
+             MATCH (p)-->(f) WITH p, {f}(f.age) AS n SET p.value = n"
         )
     } else if place == "in FOR" || place == "in UNWIND" {
         format!(

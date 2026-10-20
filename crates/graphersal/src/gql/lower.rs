@@ -114,9 +114,9 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundStep,
-    BoundWrite, Column, ColumnRef, Conjunct, Count, InsertProperty, Predicate, Segment, SortKey,
-    bind_with_parameters,
+    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemove,
+    BoundRemoveKind, BoundSet, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct,
+    Count, InsertProperty, Predicate, Segment, SortKey, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -1997,8 +1997,76 @@ impl<'q> Lowering<'q> {
                     site = Site::on(edge.binding);
                 }
             }
+            // Bound since stage 3c.T1, lowered from 3c.T3 on: refused before the run.
+            BoundWrite::Set(set) => return Err(self.set_not_yet(set)),
+            BoundWrite::Remove(remove) => return Err(self.remove_not_yet(remove)),
         }
         Ok(site)
+    }
+
+    /// The error of a bound `SET` the lowering does not emit yet (until stage 3c.T3), at its
+    /// keyword: the Gremlin steps that do it, with an example built from a first item
+    /// `v.key = literal` (a number, a boolean or a plain string).
+    fn set_not_yet(&self, set: &BoundSet) -> TraverserError {
+        let example = set.items.first().and_then(|item| match &item.kind {
+            BoundSetKind::Property { key, value } => {
+                let value = match &value.expr.kind {
+                    ExprKind::Literal(Literal::Integer(i)) => i.to_string(),
+                    ExprKind::Literal(Literal::Float(f)) => f.to_string(),
+                    ExprKind::Literal(Literal::Bool(b)) => b.to_string(),
+                    ExprKind::Literal(Literal::String(text)) if !text.contains(['"', '\\']) => {
+                        format!("\"{text}\"")
+                    }
+                    _ => return None,
+                };
+                (!key.name.contains(['"', '\\'])).then(|| (key.name.clone(), value))
+            }
+            _ => None,
+        });
+        let (key, value) = example.unwrap_or_else(|| ("age".to_string(), "30".to_string()));
+        self.write_not_yet(
+            "SET",
+            set.keyword,
+            format!(
+                "write the update as Gremlin steps: property() sets a property and add_label() \
+                 adds a label, for example g.v().has_label(\"person\").property(\"{key}\", \
+                 {value})"
+            ),
+        )
+    }
+
+    /// The error of a bound `REMOVE` the lowering does not emit yet (until stage 3c.T3).
+    fn remove_not_yet(&self, remove: &BoundRemove) -> TraverserError {
+        let key = remove
+            .items
+            .first()
+            .and_then(|item| match &item.kind {
+                BoundRemoveKind::Property(key) if !key.name.contains(['"', '\\']) => {
+                    Some(key.name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "age".to_string());
+        self.write_not_yet(
+            "REMOVE",
+            remove.keyword,
+            format!(
+                "write the update as Gremlin steps: remove_property() removes a property and \
+                 drop_label() a label, for example \
+                 g.v().has_label(\"person\").remove_property(\"{key}\")"
+            ),
+        )
+    }
+
+    /// The "not yet" error of a bound write clause at its keyword.
+    fn write_not_yet(&self, word: &str, keyword: Span, alternative: String) -> TraverserError {
+        GqlErrorBuilder::new(
+            GqlErrorKind::NotYet,
+            keyword.start..keyword.end,
+            format!("{word} is not yet supported in this version"),
+        )
+        .alternative(alternative)
+        .into_error(self.query)
     }
 
     /// The values of an inserted element, compiled for a step hosting the subqueries they

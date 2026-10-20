@@ -1651,6 +1651,8 @@ impl<'q> Planner<'q> {
                     *current = Some(edge.binding);
                 }
             }
+            // Planned from stage 3c.T3 on (the lowering refuses them until then).
+            BoundWrite::Set(_) | BoundWrite::Remove(_) => {}
         }
     }
 
@@ -2247,6 +2249,8 @@ fn write_created(write: &BoundWrite) -> Vec<BindingId> {
             .map(|n| n.binding)
             .chain(insert.edges.iter().map(|e| e.binding))
             .collect(),
+        // `SET` / `REMOVE` declare nothing.
+        BoundWrite::Set(_) | BoundWrite::Remove(_) => Vec::new(),
     }
 }
 

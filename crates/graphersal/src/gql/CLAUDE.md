@@ -73,8 +73,10 @@ Files appear as their stage lands; this table is the target layout.
   `{2}` vs two written edges, the nested forms (`EXISTS`, pattern predicate, `COUNT { }` /
   comprehension, `CALL`, `OPTIONAL MATCH`) vs the quantified edge, each with and without
   property indexes).
-- **Write clauses.** `INSERT` / `CREATE` since stage 3a; `SET`, `REMOVE`, `DELETE`, `MERGE` are
-  refused by the parser as not yet supported.
+- **Write clauses.** `INSERT` / `CREATE` since stage 3a; `SET` / `REMOVE` parsed and bound
+  since 3c.T1 (`Stage::Set` / `Stage::Remove`, `BoundWrite::Set` / `Remove`, targets with their
+  static kind `bind::TargetKind`), refused by the lowering (`Lowering::set_not_yet`) until 3c.T3;
+  `DELETE`, `MERGE` are refused by the parser as not yet supported.
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the

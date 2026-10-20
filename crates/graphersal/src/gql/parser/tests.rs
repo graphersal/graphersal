@@ -791,8 +791,6 @@ fn lexer_errors_are_gql_syntax_errors() {
 #[test]
 fn writes_not_yet_supported_are_refused() {
     for (query, text, step) in [
-        ("MATCH (n) SET n.x = 1", "SET", "property("),
-        ("MATCH (n) REMOVE n.x", "REMOVE", "remove_property("),
         ("MATCH (n) DELETE n", "DELETE", "drop()"),
         ("MATCH (n) DETACH DELETE n", "DETACH DELETE", "drop()"),
         ("MATCH (n) NODETACH DELETE n", "NODETACH DELETE", "drop()"),
@@ -1218,6 +1216,8 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::For(_) => "for",
             Stage::Call(_) => "call",
             Stage::Insert(_) => "insert",
+            Stage::Set(_) => "set",
+            Stage::Remove(_) => "remove",
         })
         .collect()
 }
@@ -3489,6 +3489,8 @@ fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
             Stage::For(_) => "for",
             Stage::Call(_) => "call",
             Stage::Insert(_) => "insert",
+            Stage::Set(_) => "set",
+            Stage::Remove(_) => "remove",
         })
         .collect()
 }
@@ -5021,21 +5023,325 @@ fn catalog_and_vendor_commands_are_refused() {
 #[test]
 fn not_yet_write_clauses_build_the_gremlin_example_from_the_clause() {
     for (query, example) in [
-        ("MATCH (p) SET p.old = true", ".property(\"old\", true)"),
-        (
-            "MATCH (p) SET p.name = 'bob'",
-            ".property(\"name\", \"bob\")",
-        ),
-        ("MATCH (p) SET p.age = 1.5", ".property(\"age\", 1.5)"),
-        ("MATCH (p) SET p.age = p.age + 1", ".property(\"age\", 30)"),
-        ("MATCH (p) SET p:admin", ".property(\"age\", 30)"),
-        ("MATCH (p) SET p.k = 'a\"b'", ".property(\"age\", 30)"),
-        ("MATCH (p) REMOVE p.age", ".remove_property(\"age\")"),
-        ("MATCH (p) REMOVE p:admin", ".remove_property(\"age\")"),
+        ("MATCH (p) DELETE p", ".drop()"),
+        ("MATCH (p) DETACH DELETE p", ".drop()"),
+        ("MERGE (p:person)", "merge_v("),
+        ("MATCH (p) FOREACH (x IN [1] | SET p.k = x)", "FOR name IN"),
     ] {
         let f = fail(query);
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
         let alternative = f.alternative.unwrap_or_default();
         assert!(alternative.contains(example), "{query}: {alternative}");
     }
+}
+
+// ----- stage 3c.T1: SET / REMOVE -----
+
+/// Stage `index` of `linear` as a SET clause.
+fn set_of(linear: &LinearQuery, index: usize) -> &SetClause {
+    match linear.stages.get(index) {
+        Some(Stage::Set(clause)) => clause,
+        other => panic!("stage {index} is no SET: {other:?}"),
+    }
+}
+
+/// Stage `index` of `linear` as a REMOVE clause.
+fn remove_of(linear: &LinearQuery, index: usize) -> &RemoveClause {
+    match linear.stages.get(index) {
+        Some(Stage::Remove(clause)) => clause,
+        other => panic!("stage {index} is no REMOVE: {other:?}"),
+    }
+}
+
+fn names_of(labels: &LabelItem) -> Vec<&str> {
+    labels.labels.iter().map(|l| l.name.as_str()).collect()
+}
+
+#[test]
+fn set_item_forms_and_spans() {
+    let query = "MATCH (n)-[r]->(m) SET n.k = 1 + 2, (r).w = n.k, n = {a: 1}, m += {b: NULL}, \
+                 n:Foo:Bar, m :A :B, n IS C & D, n:E&F&G RETURN n";
+    let q = ok(query);
+    assert_eq!(stage_kinds(&q), ["match", "set"]);
+    assert_eq!(q.end(), QueryEnd::Return);
+    let set = set_of(&q, 1);
+    assert_eq!(q.text(set.keyword), "SET");
+    assert!(q.text(set.span).starts_with("SET n.k = 1 + 2, "));
+    assert!(q.text(set.span).ends_with("n:E&F&G"));
+    let items: Vec<&str> = set.items.iter().map(|i| q.text(i.span)).collect();
+    assert_eq!(
+        items,
+        [
+            "n.k = 1 + 2",
+            "(r).w = n.k",
+            "n = {a: 1}",
+            "m += {b: NULL}",
+            "n:Foo:Bar",
+            "m :A :B",
+            "n IS C & D",
+            "n:E&F&G"
+        ]
+    );
+    let targets: Vec<&str> = set.items.iter().map(|i| i.target.name.as_str()).collect();
+    assert_eq!(targets, ["n", "r", "n", "m", "n", "m", "n", "n"]);
+    assert_eq!(q.text(set.items[1].target.span), "r");
+    match &set.items[0].kind {
+        SetItemKind::Property { key, value } => {
+            assert_eq!(key.name, "k");
+            assert_eq!(q.text(value.span), "1 + 2");
+        }
+        other => panic!("{other:?}"),
+    }
+    match &set.items[1].kind {
+        SetItemKind::Property { key, value } => {
+            assert_eq!(key.name, "w");
+            assert!(matches!(value.kind, ExprKind::Property { .. }), "{value:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        &set.items[2].kind,
+        SetItemKind::Replace { value } if matches!(value.kind, ExprKind::Map(_))
+    ));
+    assert!(matches!(
+        &set.items[3].kind,
+        SetItemKind::Merge { value } if q.text(value.span) == "{b: NULL}"
+    ));
+    let labels: Vec<(Vec<&str>, &str)> = set.items[4..]
+        .iter()
+        .map(|i| match &i.kind {
+            SetItemKind::Labels(labels) => (names_of(labels), q.text(labels.span)),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            (vec!["Foo", "Bar"], ":Foo:Bar"),
+            (vec!["A", "B"], ":A :B"),
+            (vec!["C", "D"], "IS C & D"),
+            (vec!["E", "F", "G"], ":E&F&G"),
+        ]
+    );
+    // A label written twice is added once; `SET n = $p` and `SET n = m` are expression forms.
+    let q = ok("MATCH (n), (m) SET n:A:A, n = $p, n += m");
+    let set = set_of(&q, 1);
+    match &set.items[0].kind {
+        SetItemKind::Labels(labels) => assert_eq!(names_of(labels), ["A"]),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(&set.items[1].kind, SetItemKind::Replace { value }
+        if matches!(value.kind, ExprKind::Parameter(_))));
+    assert!(matches!(&set.items[2].kind, SetItemKind::Merge { value }
+        if matches!(value.kind, ExprKind::Variable(_))));
+    // Case-insensitive keyword, back-quoted names.
+    let q = ok("match (`my n`) set `my n`.`the key` = 'x'");
+    let set = set_of(&q, 1);
+    assert_eq!(q.text(set.keyword), "set");
+    assert_eq!(set.items[0].target.name, "my n");
+    assert!(
+        matches!(&set.items[0].kind, SetItemKind::Property { key, .. } if key.name == "the key")
+    );
+}
+
+#[test]
+fn remove_item_forms_and_spans() {
+    let query = "MATCH (n)-[r]->() REMOVE n.k, (r).w, n:L1:L3, n IS A & B, n :X";
+    let q = ok(query);
+    assert_eq!(stage_kinds(&q), ["match", "remove"]);
+    assert_eq!(q.end(), QueryEnd::Write);
+    let remove = remove_of(&q, 1);
+    assert_eq!(q.text(remove.keyword), "REMOVE");
+    assert_eq!(q.text(remove.span), &query[18..]);
+    let items: Vec<&str> = remove.items.iter().map(|i| q.text(i.span)).collect();
+    assert_eq!(items, ["n.k", "(r).w", "n:L1:L3", "n IS A & B", "n :X"]);
+    let kinds: Vec<String> = remove
+        .items
+        .iter()
+        .map(|i| match &i.kind {
+            RemoveItemKind::Property { key } => format!("{}.{}", i.target.name, key.name),
+            RemoveItemKind::Labels(labels) => {
+                format!("{}:{}", i.target.name, names_of(labels).join(":"))
+            }
+        })
+        .collect();
+    assert_eq!(kinds, ["n.k", "r.w", "n:L1:L3", "n:A:B", "n:X"]);
+}
+
+#[test]
+fn set_and_remove_stand_where_insert_stands() {
+    // First clause, between reads, a write ending, `FINISH`, after `NEXT`, in CALL bodies.
+    for (query, kinds) in [
+        ("SET n.k = 1", vec!["set"]),
+        (
+            "MATCH (n) SET n.k = 1 MATCH (m) REMOVE m.k RETURN m",
+            vec!["match", "set", "match", "remove"],
+        ),
+        ("MATCH (n) SET n.k = 1;", vec!["match", "set"]),
+        ("MATCH (n) REMOVE n:A FINISH", vec!["match", "remove"]),
+        (
+            "FOR x IN [1] SET x.k = 1 SET x.j = 2",
+            vec!["for", "set", "set"],
+        ),
+        (
+            "MATCH (n) INSERT (m) SET m.k = n.k",
+            vec!["match", "insert", "set"],
+        ),
+    ] {
+        assert_eq!(stage_kinds(&ok(query)), kinds, "{query}");
+    }
+    assert!(matches!(
+        ok("MATCH (n) REMOVE n:A FINISH").end(),
+        QueryEnd::Finish(_)
+    ));
+    assert_eq!(ok("MATCH (n) SET n.k = 1;").end(), QueryEnd::Write);
+    let q = ok("MATCH (n) RETURN n NEXT MATCH (n) SET n.k = 1");
+    assert_eq!(q.body.next.len(), 1);
+    // A CALL body may end in SET / REMOVE (a unit subquery) or return after it.
+    for query in [
+        "MATCH (n) CALL (n) { SET n.k = 1 } RETURN n",
+        "MATCH (n) CALL (n) { REMOVE n:A } RETURN n",
+        "MATCH (n) CALL (n) { SET n.k = 1 RETURN n.k AS k } RETURN k",
+        "MATCH (n) OPTIONAL CALL { WITH n REMOVE n.k } RETURN n",
+    ] {
+        let q = ok(query);
+        let Some(Stage::Call(call)) = q.stages.get(1) else {
+            panic!("{query}: {:?}", q.stages);
+        };
+        let kinds = stage_kinds_of(&call.body.first.first);
+        assert!(
+            kinds.contains(&"set") || kinds.contains(&"remove"),
+            "{query}: {kinds:?}"
+        );
+    }
+    // A UNION operand that writes: not yet, at its keyword.
+    let f = fail("MATCH (n) SET n.k = 1 RETURN n UNION MATCH (n) RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "SET");
+    let f = fail("MATCH (n) RETURN n UNION MATCH (n) REMOVE n.k RETURN n");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "REMOVE");
+    // A write clause after RETURN: RETURN ends the query.
+    for (query, text) in [
+        ("MATCH (n) RETURN n SET n.k = 1", "SET"),
+        ("MATCH (n) RETURN n REMOVE n.k", "REMOVE"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}");
+        assert_eq!(f.text, text);
+        assert_eq!(
+            f.message,
+            format!("{text} after RETURN: RETURN ends the query")
+        );
+    }
+    // Inside subquery expressions and comprehensions: the write ban (design W3).
+    for (query, text, place) in [
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) SET n.k = 1 RETURN n } RETURN n",
+            "SET",
+            "EXISTS",
+        ),
+        (
+            "MATCH (n) RETURN COUNT { MATCH (n) REMOVE n.k RETURN n } AS c",
+            "REMOVE",
+            "COUNT",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [n] | SET x.k = 1] AS l",
+            "SET",
+            "list comprehension",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.contains(place), "{query}: {}", f.message);
+        assert!(f.message.contains("cannot write"), "{}", f.message);
+    }
+    // Inside an expression: a clause, not a function.
+    let f = fail("MATCH (n) RETURN SET(n)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "SET");
+    assert!(f.message.contains("is a clause"), "{}", f.message);
+}
+
+#[test]
+fn set_and_remove_errors() {
+    // Label items take a conjunction of names only (design D1).
+    for (query, text, operator) in [
+        ("MATCH (n) SET n:A|B", "A|B", "`|`"),
+        ("MATCH (n) SET n IS !A", "!A", "`!`"),
+        ("MATCH (n) REMOVE n:%", "%", "`%`"),
+        ("MATCH (n) REMOVE n IS A&(B|C)", "(B|C)", "`|`"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with(operator), "{query}: {}", f.message);
+        assert!(
+            f.alternative.as_deref().unwrap_or("").contains("as in "),
+            "{query}: {f:?}"
+        );
+    }
+    // A target that is no variable (design D2): not yet, the target underlined.
+    for (query, text) in [
+        ("MATCH (n) SET head([n]).k = 1", "head([n]).k"),
+        ("MATCH (n) SET n.a.b = 1", "n.a.b"),
+        ("MATCH (n) SET (n.a).k = 1", "(n.a).k"),
+        ("MATCH (n) REMOVE n.a.b", "n.a.b"),
+        ("MATCH (n) REMOVE head([n]).k", "head([n]).k"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            format!(
+                "`{text}` as a {} target is not yet supported in this version",
+                if query.contains("SET") {
+                    "SET"
+                } else {
+                    "REMOVE"
+                }
+            )
+        );
+        assert!(f.alternative.unwrap_or_default().contains("AS x"));
+    }
+    // A dynamic key `n[k]`: not yet, as indexing anywhere.
+    let f = fail("MATCH (n) SET n['k'] = 1");
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert_eq!(f.text, "[");
+    // Missing or wrong operators: the expected tokens.
+    for (query, text, expected) in [
+        (
+            "MATCH (n) SET n",
+            "",
+            vec!["`.`", "`=`", "`+=`", "`:`", "IS"],
+        ),
+        (
+            "MATCH (n) SET n + = {}",
+            "+",
+            vec!["`.`", "`=`", "`+=`", "`:`", "IS"],
+        ),
+        ("MATCH (n) SET n.k", "", vec!["`=`"]),
+        ("MATCH (n) SET n.k += 1", "+", vec!["`=`"]),
+        ("MATCH (n) REMOVE n", "", vec!["`.`", "`:`", "IS"]),
+        ("MATCH (n) REMOVE n = 1", "=", vec!["`.`", "`:`", "IS"]),
+        ("MATCH (n) SET 1 = 2", "1", vec!["a variable"]),
+        ("MATCH (n) SET", "", vec!["a variable"]),
+        ("MATCH (n) SET n.k = 1,", "", vec!["a variable"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, expected, "{query}");
+    }
+    // After an item: `,` and the clauses (K9).
+    let f = fail("MATCH (n) SET n.k = 1 n.j = 2");
+    assert_eq!(f.text, "n");
+    assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
+    let f = fail("MATCH (n) REMOVE n:A )");
+    assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
 }
