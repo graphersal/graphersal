@@ -1,5 +1,5 @@
 //! Executes one TCK case through the Rust GQL API and records what happened (no comparison:
-//! that is `classify.rs` with the result seam of `stand_in.rs`).
+//! that is `classify.rs` with `compare.rs`).
 //!
 //! Copied from the TinkerPop harness's `execute.rs` approach and adapted (W42: copy, never
 //! share).
@@ -14,10 +14,12 @@
 //!    `Given an empty graph` and `Given any graph` both start from it; `Given the <name> graph`
 //!    runs `graphs/<name>/<name>.cypher` through `gql()` (design T7, its trailing `;` dropped).
 //! 3. The steps in order: every `having executed` query through `gql()`; parameters through
-//!    the notation seam ([`super::stand_in::parameter_value`]); a failure of any setup step is
+//!    the value notation (`values::parse_value`, `values::to_element_property`); a failure of any setup step is
 //!    [`RawOutcome::Setup`] with its reason. Then the state is snapshotted, the query runs with
 //!    the parameters (`gql_with`), the state is snapshotted again and the side effects are
 //!    their diff (`state.rs`, design T8); every control query runs after it on the same graph.
+//!    The rows of every query are materialized (`compare::materialize`) right after it ran, so
+//!    returned elements are read in the state the query left.
 //!
 //! Every query is one traversal on `GraphTraversalSource::new(&mut storage)`: its own unit, so a
 //! failing query leaves nothing behind.
@@ -51,6 +53,7 @@ use graphersal::exec::CancelToken;
 use graphersal::storage::GraphStorage;
 use graphersal::{ElementProperty, GraphTraversalSource, TraversalGraph, TraverserError};
 
+use super::compare::{self, ActualResult};
 use super::gherkin::{Case, Step};
 use super::state::{self, SideEffects};
 use super::storage::TestStorage;
@@ -145,8 +148,8 @@ impl QueryError {
 /// What one query did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryOutcome {
-    /// It ran; its rows (each a map column -> value).
-    Rows(Vec<ElementProperty>),
+    /// It ran; its rows, materialized for the comparison (or why they could not be).
+    Rows(Result<ActualResult, String>),
     /// It failed.
     Error(QueryError),
 }
@@ -369,7 +372,9 @@ fn execute_on<S: GraphStorage>(mut graph: S, case: &Case) -> RawOutcome {
             }
             Step::Parameters(table) => {
                 for (name, raw) in table {
-                    match super::stand_in::parameter_value(raw) {
+                    match super::values::parse_value(raw)
+                        .and_then(|v| super::values::to_element_property(&v))
+                    {
                         Ok(value) => params.push((name.clone(), value)),
                         Err(e) => return RawOutcome::Setup(format!("parameter {name}: {e}")),
                     }
@@ -421,7 +426,7 @@ fn run_query<S: GraphStorage>(
         .gql_with(query, params.iter().cloned())
         .to_list();
     match rows {
-        Ok(rows) => QueryOutcome::Rows(rows),
+        Ok(rows) => QueryOutcome::Rows(compare::materialize(&*graph, &rows)),
         Err(e) => QueryOutcome::Error(describe(&e)),
     }
 }

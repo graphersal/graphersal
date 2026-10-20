@@ -33,9 +33,9 @@
 //! Errors imply no side effects (G8): a case that expects an error and gets a matching one is
 //! `wrong_side_effects` when the state changed.
 
+use super::compare::{self, ActualResult};
 use super::execute::{ErrorRoot, MainRun, Phase, QueryError, QueryOutcome, RawOutcome};
 use super::gherkin::{Case, ErrorPhase, ErrorType, Step};
-use super::stand_in::{self, ResultCheck};
 use super::state::SideEffects;
 
 /// The class of a case.
@@ -120,8 +120,6 @@ pub struct Outcome {
     pub class: Class,
     /// One-line reason: the refused construct, the setup failure, the first difference, ...
     pub detail: String,
-    /// TEMPORARY (until 3b.T3's comparison): a pass whose rows were not compared.
-    pub result_unchecked: bool,
 }
 
 impl Outcome {
@@ -129,7 +127,6 @@ impl Outcome {
         Self {
             class,
             detail: detail.into(),
-            result_unchecked: false,
         }
     }
 }
@@ -204,7 +201,7 @@ fn classify_run(case: &Case, run: &MainRun) -> Outcome {
     let Some(expectation) = expectation else {
         return Outcome::new(Class::Panic, "harness: the case states no outcome");
     };
-    let mut outcome = match (&expectation, &run.outcome) {
+    let outcome = match (&expectation, &run.outcome) {
         (_, QueryOutcome::Error(e)) if e.is_unsupported() => {
             return Outcome::new(Class::Missing, e.message.clone());
         }
@@ -257,21 +254,15 @@ fn classify_run(case: &Case, run: &MainRun) -> Outcome {
                     "expected {} at {}, the query succeeded with {} row(s)",
                     kind.as_str(),
                     phase_name(*phase),
-                    rows.len()
+                    rows.as_ref().map_or(0, |r| r.rows.len())
                 ),
             );
         }
-        (Expectation::Result(step), QueryOutcome::Rows(rows)) => {
-            match stand_in::check_result(step, rows) {
-                ResultCheck::Match => Outcome::new(Class::Pass, ""),
-                ResultCheck::Unchecked => Outcome {
-                    result_unchecked: true,
-                    ..Outcome::new(Class::Pass, "")
-                },
-                ResultCheck::WrongColumns(d) => return Outcome::new(Class::WrongColumns, d),
-                ResultCheck::WrongResult(d) => return Outcome::new(Class::WrongResult, d),
-            }
-        }
+        (Expectation::Result(step), QueryOutcome::Rows(rows)) => match check_result(step, rows) {
+            ResultCheck::Match => Outcome::new(Class::Pass, ""),
+            ResultCheck::WrongColumns(d) => return Outcome::new(Class::WrongColumns, d),
+            ResultCheck::WrongResult(d) => return Outcome::new(Class::WrongResult, d),
+        },
     };
 
     if let Some(expected) = &side_effects {
@@ -298,9 +289,8 @@ fn classify_run(case: &Case, run: &MainRun) -> Outcome {
                     format!("control query: {}", e.message),
                 );
             }
-            QueryOutcome::Rows(rows) => match stand_in::check_result(step, rows) {
+            QueryOutcome::Rows(rows) => match check_result(step, rows) {
                 ResultCheck::Match => {}
-                ResultCheck::Unchecked => outcome.result_unchecked = true,
                 ResultCheck::WrongColumns(d) => {
                     return Outcome::new(Class::WrongColumns, format!("control query: {d}"));
                 }
@@ -311,6 +301,59 @@ fn classify_run(case: &Case, run: &MainRun) -> Outcome {
         }
     }
     outcome
+}
+
+/// What the comparison of a result step found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResultCheck {
+    /// The rows match the expected table.
+    Match,
+    /// The column names differ.
+    WrongColumns(String),
+    /// The rows differ (or could not be materialized).
+    WrongResult(String),
+}
+
+/// Compares the materialized rows of a query with a [`Step::Result`] / [`Step::ResultEmpty`].
+/// The column names are checked here first (when there is a row: an empty result carries
+/// none), so a column difference is `wrong_columns`, then `compare::compare_result`.
+fn check_result(expected: &Step, actual: &Result<ActualResult, String>) -> ResultCheck {
+    let actual = match actual {
+        Ok(actual) => actual,
+        Err(e) => return ResultCheck::WrongResult(format!("rows not comparable: {e}")),
+    };
+    match expected {
+        Step::ResultEmpty if actual.rows.is_empty() => ResultCheck::Match,
+        Step::ResultEmpty => ResultCheck::WrongResult(format!(
+            "expected no rows, got {} row(s)",
+            actual.rows.len()
+        )),
+        Step::Result { rows, lists, table } => {
+            if !actual.rows.is_empty() && actual.columns != table.header {
+                return ResultCheck::WrongColumns(format!(
+                    "columns differ: expected {:?}, actual {:?}",
+                    table.header, actual.columns
+                ));
+            }
+            match compare::compare_result(table, *rows, *lists, actual) {
+                Ok(()) => ResultCheck::Match,
+                Err(e) => ResultCheck::WrongResult(one_line(&e)),
+            }
+        }
+        _ => ResultCheck::WrongResult("harness: not a result step".to_string()),
+    }
+}
+
+/// `text` on one line (newlines as ` | `), cut to 300 characters.
+fn one_line(text: &str) -> String {
+    let joined = text.lines().map(str::trim).collect::<Vec<_>>().join(" | ");
+    if joined.chars().count() > 300 {
+        let mut cut: String = joined.chars().take(300).collect();
+        cut.push('…');
+        cut
+    } else {
+        joined
+    }
 }
 
 fn phase_name(phase: ErrorPhase) -> &'static str {

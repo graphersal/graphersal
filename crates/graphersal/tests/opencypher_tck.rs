@@ -4,8 +4,8 @@
 //! A separate test target (an exception to the one-binary rule, like `tinkerpop_features.rs`):
 //! own process for parallel lanes, the panic hook and per-case timeouts. The harness lives under
 //! `tests/opencypher/harness/`; its unit tests run as part of this target. The target parses
-//! the whole tree and runs every case (`harness::execute`, `harness::classify`); the result
-//! comparison, the baseline and the report come with the later harness steps.
+//! the whole tree and runs and classifies every case (`harness::execute`, `harness::classify`
+//! with `harness::compare`); the baseline and the report come with the next harness step.
 #![cfg(feature = "gql")]
 
 #[path = "opencypher/harness/mod.rs"]
@@ -438,7 +438,6 @@ fn opencypher_tck_runs_every_case() {
     if env_flag("OPENCYPHER_SUMMARY") {
         let mut total: BTreeMap<Class, usize> = BTreeMap::new();
         let mut per_dir: BTreeMap<String, BTreeMap<Class, usize>> = BTreeMap::new();
-        let mut unchecked = 0usize;
         for (path, _, outcome) in &outcomes {
             *total.entry(outcome.class).or_default() += 1;
             let dir = path.split('/').take(2).collect::<Vec<_>>().join("/");
@@ -447,7 +446,6 @@ fn opencypher_tck_runs_every_case() {
                 .or_default()
                 .entry(outcome.class)
                 .or_default() += 1;
-            unchecked += usize::from(outcome.result_unchecked);
         }
         let render = |counts: &BTreeMap<Class, usize>| {
             Class::ALL
@@ -457,7 +455,7 @@ fn opencypher_tck_runs_every_case() {
                 .join(", ")
         };
         let mut text = format!(
-            "opencypher tck ({}): {} cases in {:.1} s ({} lanes): {}\n  of the passes, result not yet compared: {unchecked}\n",
+            "opencypher tck ({}): {} cases in {:.1} s ({} lanes): {}\n",
             storage.name(),
             outcomes.len(),
             elapsed.as_secs_f64(),
