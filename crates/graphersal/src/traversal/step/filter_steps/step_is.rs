@@ -75,12 +75,8 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + 'static>
     GraphStepFilter<'g, S> for StepIs<B>
 {
-    fn value_index_ranges(&self) -> Option<(Vec<crate::graph::PropertyIndexRange>, bool)> {
-        let ranges = super::step_has_p::index_ranges(&self.predicate)?;
-        Some((
-            ranges,
-            super::step_has_p::reads_path_labels(&self.predicate),
-        ))
+    fn value_index_ranges(&self) -> Option<Vec<crate::graph::PropertyIndexRange>> {
+        super::step_has_p::index_ranges(&self.predicate)
     }
 
     #[inline]
@@ -89,11 +85,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
         context: &mut TraverserContext<'_, S>,
         source: &Traverser<S>,
     ) -> TraverserResult<bool> {
-        self.predicate.test(context, &source.value, source.path)
-    }
-
-    fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
-        self.predicate.path_requirement()
+        self.predicate.test(context, &source.value)
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {
@@ -195,10 +187,12 @@ mod tests {
                 r#"g.V("1").as("A").out("created").in("created").is(P::Neq("A")).id()"#,
                 r#"g.v("1").as("A").out("created").in("created").is(P::Neq("A")).id()"#,
             ],
+            // `is()` compares with the literal "A" (TinkerPop), never the label `A`: no vertex
+            // equals it, so all three pass.
             assert: |res| {
-                assert_eq!(res.len(), 2);
-                assert_eq!(res[0].as_string(), Some("6"));
-                assert_eq!(res[1].as_string(), Some("4"));
+                let mut ids: Vec<_> = res.iter().filter_map(|id| id.as_string()).collect();
+                ids.sort();
+                assert_eq!(ids, ["1", "4", "6"]);
             },
         );
     }

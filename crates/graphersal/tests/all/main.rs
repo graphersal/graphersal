@@ -126,6 +126,7 @@ mod pop_notation_tests;
 mod pop_tests;
 mod predicate_comparability_tests;
 mod predicate_composition_tests;
+mod predicate_label_resolution_tests;
 mod property_cardinality_tests;
 mod property_element_by_token_tests;
 mod property_element_label_tests;

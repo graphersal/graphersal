@@ -25,8 +25,8 @@ const PURE_FILTERS: [&str; 7] = [
 ///
 /// - the `has(key, value)` conditions folded into the source (scalar values only), and
 /// - the `has(key, P)` steps in the run of pure filters right after it (`eq`, `within`, the
-///   ranges; see `step_has_p::index_ranges`). A `P.eq` with a string operand only at the root,
-///   where no traverser carries a path label it could name.
+///   ranges; see `step_has_p::index_ranges`), at the root and in a child level alike (a
+///   string operand is a value, never a path label).
 /// - the `has(key, __.to_lower().is(P))` steps in that run (TinkerPop's `has(key, traversal)`
 ///   with exactly that child, `P` as above), served by an index with the transform `to_lower`
 ///   on the key, read with `P`'s constants as given (the child compares the lowered value with
@@ -165,9 +165,7 @@ impl<'g, S: GraphStorage + 'g> OptimizationRule<'g, S> for PropertyIndexRule {
                     if PURE_FILTERS.contains(name)
                         || (*name == "has_traversal" && filter.index_condition().is_some()) =>
                 {
-                    if let Some(condition) = filter.index_condition()
-                        && (context.root || !condition.reads_path_labels)
-                    {
+                    if let Some(condition) = filter.index_condition() {
                         consider(condition.key, condition.transform, condition.ranges);
                     }
                 }

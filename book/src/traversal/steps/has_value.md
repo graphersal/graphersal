@@ -3,7 +3,7 @@
 
 `has_value` · `hasValue` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Keeps properties whose value is one of the given values (or matches a predicate).
+Keeps properties whose value is one of the given values (or matches a predicate, whose string operand is a value, never a path label).
 
 ## Forms
 
@@ -19,3 +19,7 @@ has_value(arg1, …, arg10)
 ```rhai,graph=modern
 g.v(1).properties().has_value("marko").key().to_list()   // ["name"]
 ```
+
+## See also
+
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

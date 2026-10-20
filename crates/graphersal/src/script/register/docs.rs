@@ -430,7 +430,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Counts the stream per key (the first by(), default the element) into a map; with a key it is a side effect.",
         "g.v().group_count().by(T.label).next()" => "#{\"person\": 4, \"software\": 2}";
     "traversal" "has":
-        "Keeps elements that have the property (and, with a value or predicate, whose value matches; with a traversal, for whose value the traversal yields a result, like filter(__.values(key)...)); with T.id or T.label first it tests the id or label; the 3-argument form also tests the label.",
+        "Keeps elements that have the property (and, with a value or predicate, whose value matches, a string operand being a value, never a path label; with a traversal, for whose value the traversal yields a result, like filter(__.values(key)...)); with T.id or T.label first it tests the id or label; the 3-argument form also tests the label.",
         "{ [g.v().has(\"person\", \"age\", P.gt(30)).count().next(), g.v().has(\"name\", __.to_lower().is(\"josh\")).count().next(), g.v().has(T.label, __.is(\"software\")).count().next()] }" => "[2, 1, 2]";
     "traversal" "has_id":
         "Keeps elements whose id is one of the given ids (ids are strings, see the book page Id Arguments).",
@@ -445,17 +445,17 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Keeps elements that do not have the given property.",
         "g.v().has_not(\"age\").values(\"name\").to_list()" => "[\"lop\", \"ripple\"]";
     "traversal" "has_p":
-        "Graphersal form of has(key, predicate) (a bare value means P.eq).",
-        "g.v().has_p(\"age\", P.gt(30)).values(\"name\").to_list()" => "[\"josh\", \"peter\"]";
+        "Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "g.v(1).as(\"vadas\").out(\"knows\").has_p(\"name\", P.eq(\"vadas\")).values(\"name\").to_list()" => "[\"vadas\"]";
     "traversal" "has_value":
-        "Keeps properties whose value is one of the given values (or matches a predicate).",
+        "Keeps properties whose value is one of the given values (or matches a predicate, whose string operand is a value, never a path label).",
         "g.v(1).properties().has_value(\"marko\").key().to_list()" => "[\"name\"]";
     "traversal" "has_value_any":
         "Graphersal alias of has_value(v1, v2, ...).",
         "g.v().properties(\"name\").has_value_any(\"marko\", \"josh\").value().to_list()" => "[\"marko\", \"josh\"]";
     "traversal" "has_value_p":
-        "Graphersal form of has_value(predicate).",
-        "g.v().properties(\"age\").has_value_p(P.gt(30)).value().to_list()" => "[32, 35]";
+        "Graphersal form of has_value(predicate); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "g.v(1).as(\"vadas\").out(\"knows\").properties(\"name\").has_value_p(P.eq(\"vadas\")).value().to_list()" => "[\"vadas\"]";
     "traversal" "id":
         "Yields the id of each vertex or edge (a string), never a property named id.",
         "g.v().has(\"name\", \"josh\").id().to_list()" => "[\"4\"]";
@@ -493,8 +493,8 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Keeps the elements of the incoming list that are also in the given list.",
         "g.inject([1, 2, 3]).intersect([2, 3, 4]).next()" => "[2, 3]";
     "traversal" "is":
-        "Keeps values equal to the given value or matching the predicate.",
-        "g.v().values(\"age\").is(P.lt(30)).to_list()" => "[29, 27]";
+        "Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).",
+        "g.v(1).as(\"vadas\").out(\"knows\").values(\"name\").is(P.eq(\"vadas\")).to_list()" => "[\"vadas\"]";
     "traversal" "iterate":
         "Runs the traversal for its side effects and returns unit; the results are discarded, never materialized.",
         "{ g.add_v(\"x\").property(\"n\", 1).iterate(); g.v().has_label(\"x\").count().next() }" => "1";
@@ -778,11 +778,11 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Runs the traversal and renders its results in the given V format (default: the session's).",
         "g.v(1).values(\"name\").visualize(V.Json)" => "";
     "traversal" "where":
-        "Keeps the traverser when the child traversal yields a result, or when a labelled object matches a predicate on another label (see the book page where() Start and End Labels).",
+        "Keeps the traverser when the child traversal yields a result, or when a labelled object matches a predicate on another label; where(P.eq(\"a\")) is the step whose string operand names a path label (see the book page where() Start and End Labels).",
         "g.v(1).as(\"a\").out().where(__.in(\"created\").as(\"a\")).values(\"name\").to_list()" => "[\"lop\"]";
     "traversal" "where_p":
-        "Graphersal form of where(predicate), modulated by by().",
-        "g.v(1).as(\"a\").out(\"knows\").where_p(P.gt(\"a\")).by(\"age\").values(\"name\").to_list()" => "[\"josh\"]";
+        "Graphersal form of where(predicate), modulated by by(); a string operand names a path label first (has() and is() never read labels).",
+        "g.v(1).as(\"a\").out(\"created\").in(\"created\").where_p(P.neq(\"a\")).values(\"name\").to_list()" => "[\"peter\", \"josh\"]";
     "traversal" "where_t":
         "Graphersal form of where(traversal).",
         "g.v().where_t(__.out(\"created\")).values(\"name\").to_list()" => "[\"marko\", \"josh\", \"peter\"]";

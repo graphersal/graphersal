@@ -804,8 +804,8 @@ fn edge_indexes_serve_e_with_ranges() {
 }
 
 #[test]
-fn a_string_eq_predicate_in_a_child_traversal_is_not_served() {
-    // `P.eq("a")` first names a path label: inside a child the traversers carry one.
+fn a_string_eq_predicate_in_a_child_traversal_returns_the_same_with_and_without_the_index() {
+    // `P.eq("josh")` is a value even after `as("josh")`: the results equal the scan's.
     let graph = Arc::new(GraphSource::tinkerpop_modern());
     ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
     let script = r#"g.v("1").as("josh").map(__.v().has_label("person").has("name", P.eq("josh")).count()).to_list()"#;
@@ -826,6 +826,52 @@ fn a_string_eq_predicate_in_a_child_traversal_is_not_served() {
         &graph,
         r#"v().has_label("person").has("name", P.eq("josh"))"#
     ));
+}
+
+/// A string `P.eq` is a value, never a path label (only `where(P)` reads labels), so a child
+/// level starting with `v()` is served too, even after an `as()` of the same spelling; the
+/// results equal the scan's.
+#[test]
+fn a_string_eq_predicate_in_a_child_traversal_is_served() {
+    let graph = Arc::new(GraphSource::tinkerpop_modern());
+    ok(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
+    let query = r#"v("1").as("josh").map(__.v().has_label("person").has("name", P.eq("josh")).values("age"))"#;
+    let profile = run(&graph, &format!("g.{query}.profile()"))
+        .unwrap()
+        .try_cast::<graphersal::profile::TraversalMetrics>()
+        .expect("metrics")
+        .to_string();
+    assert!(profile.contains("[index: vertex person.name]"), "{profile}");
+    let with = run(&graph, &format!("g.{query}.to_list()"))
+        .unwrap()
+        .to_string();
+    let without = run(
+        &graph,
+        &format!(r#"g.with("optimizer.disabled", ["property_index"]).{query}.to_list()"#),
+    )
+    .unwrap()
+    .to_string();
+    assert_eq!(with, "[32]");
+    assert_eq!(with, without);
+    // Inside a `union()` operand as well.
+    let profile = run(
+        &graph,
+        r#"g.union(__.v().has_label("person").has("name", P.eq("josh")), __.v().has_label("person").has("name", P.eq("vadas"))).profile()"#,
+    )
+    .unwrap()
+    .try_cast::<graphersal::profile::TraversalMetrics>()
+    .expect("metrics")
+    .to_string();
+    assert_eq!(
+        profile
+            .lines()
+            .filter(|line| line
+                .trim_start()
+                .starts_with(r#"\> v(labels: ["person"]) [index: vertex person.name]"#))
+            .count(),
+        2,
+        "{profile}"
+    );
 }
 
 #[test]

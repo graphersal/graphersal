@@ -81,15 +81,11 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
             return Ok(false);
         };
         for item in &items {
-            if self.predicate.test(context, item, source.path)? {
+            if self.predicate.test(context, item)? {
                 return Ok(true);
             }
         }
         Ok(false)
-    }
-
-    fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
-        self.predicate.path_requirement()
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {

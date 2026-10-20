@@ -100,17 +100,12 @@ pub(crate) struct TraversalOptimizer<'g, S: GraphStorage + 'g> {
     /// The property indexes the storage serves (read once per run, see
     /// [`Self::for_run`]); empty: no index is used.
     indexes: Vec<crate::graph::PropertyIndexInfo>,
-    /// How deep the level being optimized is nested (0: the root traversal).
-    depth: std::cell::Cell<u32>,
 }
 
 /// What a rule may know about the run beyond the plan ([`OptimizationRule::apply_in`]).
 pub(crate) struct OptimizerContext<'a> {
     /// The property indexes the storage serves, with their stats.
     pub(crate) indexes: &'a [crate::graph::PropertyIndexInfo],
-    /// Whether the level is the root traversal (its source receives no traverser, so no path
-    /// label exists).
-    pub(crate) root: bool,
 }
 
 impl<'g, S: GraphStorage + 'g> Default for TraversalOptimizer<'g, S> {
@@ -120,7 +115,6 @@ impl<'g, S: GraphStorage + 'g> Default for TraversalOptimizer<'g, S> {
             diagnostics: true,
             fired: RefCell::new(Vec::new()),
             indexes: Vec::new(),
-            depth: std::cell::Cell::new(0),
         }
     }
 }
@@ -235,15 +229,11 @@ impl<'g, S: GraphStorage + 'g> TraversalOptimizer<'g, S> {
     /// wrote it. `None` when no rule changed anything and the executed plan still is that query.
     pub fn apply(&self, steps: &mut Vec<GraphStep<'g, S>>) -> Option<LevelPlan<'g, S>> {
         let mut plan = Plan::from_steps(std::mem::take(steps), self.diagnostics);
-        let depth = self.depth.get();
-        self.depth.set(depth.saturating_add(1));
         for step in plan.steps_mut() {
             step.optimize_nested(self);
         }
-        self.depth.set(depth);
         let context = OptimizerContext {
             indexes: &self.indexes,
-            root: depth == 0,
         };
         for rule in &self.rules {
             if rule.apply_in(&mut plan, &context) {

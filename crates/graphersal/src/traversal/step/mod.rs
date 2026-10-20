@@ -1171,9 +1171,6 @@ pub(crate) struct IndexCondition<'a> {
     pub(crate) transform: Option<crate::graph::PropertyIndexTransform>,
     /// The slices holding every value the predicate accepts.
     pub(crate) ranges: Vec<crate::graph::PropertyIndexRange>,
-    /// The predicate reads a string operand as a path label first (`P.eq("a")`): only a source
-    /// whose traversers carry no path label may serve it from an index.
-    pub(crate) reads_path_labels: bool,
 }
 
 pub(crate) trait GraphStepInit<'g, S: GraphStorage + 'g>:
@@ -1844,10 +1841,9 @@ pub(crate) trait GraphStepFilter<'g, S: GraphStorage + 'g>:
         None
     }
     /// The predicate of an `is(P)` on the incoming value as the slices of an ordered property
-    /// index that hold every value it can accept, with whether it reads a string operand as a
-    /// path label first (see [`IndexCondition::reads_path_labels`]): read by the
-    /// `property_index` rule for the child of `has(key, __.to_lower().is(P))`. Default `None`.
-    fn value_index_ranges(&self) -> Option<(Vec<crate::graph::PropertyIndexRange>, bool)> {
+    /// index that hold every value it can accept: read by the `property_index` rule for the
+    /// child of `has(key, __.to_lower().is(P))`. Default `None`.
+    fn value_index_ranges(&self) -> Option<Vec<crate::graph::PropertyIndexRange>> {
         None
     }
     fn as_where_traversal(&self) -> Option<&AnonymousTraversal<'g, S>> {

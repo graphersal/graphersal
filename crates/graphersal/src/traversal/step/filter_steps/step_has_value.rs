@@ -269,9 +269,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasValue {
 /// added here — inventing one would duplicate `P::WithIn` for no gain.
 ///
 /// Kept as its own step type (rather than folding into [`StepHasValue`] behind an internal enum)
-/// because a literal comparison never needs `TraverserContext`/`PathRef`, while a predicate
-/// comparison always does (`P::test` resolves path-label references and coerces the candidate
-/// value); splitting the two keeps the literal path exactly as cheap as it already was and
+/// because a literal comparison never needs `TraverserContext`, while a predicate
+/// comparison always does (`P::test` coerces the candidate value; like `has(key, P)` it never
+/// reads a path label); splitting the two keeps the literal path exactly as cheap as it already was and
 /// mirrors this codebase's own `has()`/`has_p()` split.
 struct StepHasValueP<B: Into<PValue> + Debug + Clone + Send + Sync> {
     predicate: P<B>,
@@ -353,7 +353,6 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
         &self,
         context: &mut TraverserContext<'_, S>,
         value: &ElementProperty,
-        path: PathRef,
     ) -> TraverserResult<bool> {
         match value {
             ElementProperty::Null => Ok(false),
@@ -367,7 +366,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
             | ElementProperty::Temporal(_)
             | ElementProperty::Vector(_) => {
                 let candidate = TraverserValue::Computed(value.to_logical(), None);
-                self.predicate.test(context, &candidate, path)
+                self.predicate.test(context, &candidate)
             }
             ElementProperty::Object(_) | ElementProperty::Vertex(_) | ElementProperty::Edge(_) => {
                 let values: Vec<ElementProperty> = value
@@ -375,7 +374,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                     .map(|nested| nested.values().map(ElementProperty::to_logical).collect())
                     .unwrap_or_default();
                 for v in &values {
-                    if self.matches_value(context, v, path)? {
+                    if self.matches_value(context, v)? {
                         return Ok(true);
                     }
                 }
@@ -385,7 +384,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 let values: Vec<ElementProperty> =
                     nested.values().map(ElementProperty::to_logical).collect();
                 for v in &values {
-                    if self.matches_value(context, v, path)? {
+                    if self.matches_value(context, v)? {
                         return Ok(true);
                     }
                 }
@@ -398,7 +397,6 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
         &self,
         context: &mut TraverserContext<'_, S>,
         source: &TraverserValue<S>,
-        path: PathRef,
     ) -> TraverserResult<bool> {
         match source {
             TraverserValue::Vertex(v) => {
@@ -409,7 +407,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 match values {
                     Some(values) => {
                         for value in &values {
-                            if self.matches_value(context, value, path)? {
+                            if self.matches_value(context, value)? {
                                 return Ok(true);
                             }
                         }
@@ -419,8 +417,8 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 }
             }
 
-            TraverserValue::Computed(vertex, _) => self.matches_value(context, vertex, path),
-            TraverserValue::PathProperty(prop) => self.matches_value(context, &prop.1, path),
+            TraverserValue::Computed(vertex, _) => self.matches_value(context, vertex),
+            TraverserValue::PathProperty(prop) => self.matches_value(context, &prop.1),
 
             TraverserValue::VertexProperty(prop_name, node_index, _) => {
                 let prop_name = prop_name.clone();
@@ -430,7 +428,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                     .and_then(|vertex| vertex.get(prop_name.as_str()))
                     .cloned();
                 match value {
-                    Some(value) => self.matches_value(context, &value, path),
+                    Some(value) => self.matches_value(context, &value),
                     None => Err(Box::new(TraverserError::property_not_found_on_element(
                         prop_name.to_string(),
                         "vertex",
@@ -446,7 +444,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                     .and_then(|edge| edge.get(prop_name.as_str()))
                     .cloned();
                 match value {
-                    Some(value) => self.matches_value(context, &value, path),
+                    Some(value) => self.matches_value(context, &value),
                     None => Err(Box::new(TraverserError::property_not_found_on_element(
                         prop_name.to_string(),
                         "edge",
@@ -462,7 +460,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
                 match values {
                     Some(values) => {
                         for value in &values {
-                            if self.matches_value(context, value, path)? {
+                            if self.matches_value(context, value)? {
                                 return Ok(true);
                             }
                         }
@@ -477,7 +475,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
 
             TraverserValue::Object(obj) => {
                 for r in obj.values() {
-                    if self.test_value(context, r, path)? {
+                    if self.test_value(context, r)? {
                         return Ok(true);
                     }
                 }
@@ -486,7 +484,7 @@ impl<B: Into<PValue> + Debug + Clone + Send + Sync> StepHasValueP<B> {
 
             TraverserValue::Record { values, .. } => {
                 for r in values {
-                    if self.test_value(context, r, path)? {
+                    if self.test_value(context, r)? {
                         return Ok(true);
                     }
                 }
@@ -556,11 +554,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
         context: &mut TraverserContext<'_, S>,
         source: &Traverser<S>,
     ) -> TraverserResult<bool> {
-        self.test_value(context, &source.value, source.path)
-    }
-
-    fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
-        self.predicate.path_requirement()
+        self.test_value(context, &source.value)
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {

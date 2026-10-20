@@ -539,6 +539,54 @@ fn each_operand_keeps_its_index_and_pushdown() {
     assert_eq!(indexed(&all), 2, "{all}");
 }
 
+/// A string equality is a value, never a path label: a variable named like the compared string
+/// (`vadas`) does not change it, and inside every `UNION` operand the property index serves it
+/// (before, `has(k, P.eq("s"))` read a same-named path label and the index served it only at
+/// the root).
+#[test]
+fn a_string_equality_is_a_value_and_index_served_in_every_operand() {
+    let graph = modern();
+    assert_eq!(
+        column(
+            &rows(
+                &graph,
+                "MATCH (vadas:person)-[:knows]->(f {name: 'vadas'}) RETURN f.name AS n"
+            ),
+            "n"
+        ),
+        texts(&["vadas"])
+    );
+    assert_eq!(
+        column(
+            &rows(
+                &graph,
+                "MATCH (vadas:person)-[:knows]->(f) WHERE f.name = 'vadas' RETURN vadas.name AS n"
+            ),
+            "n"
+        ),
+        texts(&["marko"])
+    );
+
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    graph
+        .traversal_mut()
+        .create_index(
+            "person_name",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "name"),
+        )
+        .unwrap();
+    let graph = Arc::new(Graph::new(graph));
+    let query = "MATCH (p:person {name: 'marko'}) RETURN p.age AS n \
+                 UNION MATCH (q:person) WHERE q.name = 'josh' RETURN q.age AS n";
+    let text = profile(&graph, query);
+    let indexed = steps(&text)
+        .iter()
+        .filter(|s| *s == "\\> v(labels: [\"person\"]) [index: vertex person.name]")
+        .count();
+    assert_eq!(indexed, 2, "{text}");
+    assert_eq!(multiset(&graph, query, "n"), ints(&[29, 32]));
+}
+
 /// The first block starts with the start step `union()`, a unit operand with `inject(0)` in
 /// its branch; no label is set that nothing reads.
 #[test]

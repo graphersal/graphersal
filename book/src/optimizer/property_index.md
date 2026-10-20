@@ -55,8 +55,7 @@ equals the scan's (only the order of the elements may differ).
 - The start step has no folded label (`v().has("title", "CEO")`), has ids folded
   (`v("1").has_label(..)`: the ids are cheaper), or a fused `count()`/`group_count()`.
 - The condition is not served: `P.neq`, `P.without`, text predicates, composites, a list or map
-  value, a jpath key, `NaN`; a `P.eq` with a string operand inside a child traversal (a string first
-  names a path label there); a `has(key, traversal)` whose child is not exactly
+  value, a jpath key, `NaN`; a `has(key, traversal)` whose child is not exactly
   `to_lower().is(P)`; the lowered form while its index skipped a non-string value.
 
 `g.with("optimizer.disabled", ["property_index"])` turns it off for one query, for example to

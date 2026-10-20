@@ -3,7 +3,7 @@
 
 `where` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Keeps the traverser when the child traversal yields a result, or when a labelled object matches a predicate on another label (see the book page where() Start and End Labels).
+Keeps the traverser when the child traversal yields a result, or when a labelled object matches a predicate on another label; where(P.eq("a")) is the step whose string operand names a path label (see the book page where() Start and End Labels).
 
 ## Forms
 
@@ -21,3 +21,4 @@ g.v(1).as("a").out().where(__.in("created").as("a")).values("name").to_list()   
 ## See also
 
 - [where() Start and End Labels](../../users_guide/where_scope.md)
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

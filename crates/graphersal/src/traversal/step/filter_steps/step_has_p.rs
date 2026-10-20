@@ -43,9 +43,8 @@ fn index_operand(value: PValue) -> Option<ElementProperty> {
 /// The slices of an ordered property index that hold every value `predicate` accepts (book
 /// page "Property Indexes"): `eq`, `within`, `gt`, `gte`, `lt`, `lte`, `inside`, `between` and
 /// `outside`; `None` for every other predicate (negations, text predicates, composites,
-/// `typeOf`), which the index does not serve. A string operand of `eq` can name a path label
-/// (`where(P.eq("a"))`), so `eq` with a string is left to the rule to allow (only where no path
-/// label can exist).
+/// `typeOf`), which the index does not serve. Every operand is a value (`has(key, P)` and
+/// `is(P)` never read a path label, `P::test`).
 pub(crate) fn index_ranges<B: Into<PValue> + Clone>(
     predicate: &P<B>,
 ) -> Option<Vec<crate::graph::PropertyIndexRange>> {
@@ -83,12 +82,6 @@ pub(crate) fn index_ranges<B: Into<PValue> + Clone>(
         | P::Or(_, _)
         | P::Not(_) => return None,
     })
-}
-
-/// Whether `predicate` resolves a string operand as a path label first (`eq` does, see
-/// `P::test`): an index can serve it only where the traversers carry no path label.
-pub(crate) fn reads_path_labels<B: Into<PValue> + Clone>(predicate: &P<B>) -> bool {
-    matches!(predicate, P::Eq(value) if matches!(value.clone().into(), PValue::String(_)))
 }
 
 /// The step for `has(key, P)`: the literal-name step for a name, the path step for a path.
@@ -161,7 +154,6 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
             key: self.key.as_str(),
             transform: None,
             ranges,
-            reads_path_labels: reads_path_labels(&self.predicate),
         })
     }
 
@@ -182,9 +174,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                             *node_index,
                             PropertyHandleKind::Value,
                         );
-                        Ok(self
-                            .predicate
-                            .test(context, &traverser_value, source.path)?)
+                        Ok(self.predicate.test(context, &traverser_value)?)
                     } else {
                         Ok(false)
                     }
@@ -198,9 +188,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                     let value = vertex.get(self.key.as_str());
                     if let Some(value) = value {
                         let traverser_value = TraverserValue::Computed(value.to_logical(), None);
-                        Ok(self
-                            .predicate
-                            .test(context, &traverser_value, source.path)?)
+                        Ok(self.predicate.test(context, &traverser_value)?)
                     } else {
                         Ok(false)
                     }
@@ -227,11 +215,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                         Some(nested) => {
                                             let traverser_value =
                                                 TraverserValue::Computed(nested.to_logical(), None);
-                                            self.predicate.test(
-                                                context,
-                                                &traverser_value,
-                                                source.path,
-                                            )
+                                            self.predicate.test(context, &traverser_value)
                                         }
                                         None => Ok(false),
                                     }
@@ -270,11 +254,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                         Some(nested) => {
                                             let traverser_value =
                                                 TraverserValue::Computed(nested.to_logical(), None);
-                                            self.predicate.test(
-                                                context,
-                                                &traverser_value,
-                                                source.path,
-                                            )
+                                            self.predicate.test(context, &traverser_value)
                                         }
                                         None => Ok(false),
                                     }
@@ -308,9 +288,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                                 *edge_index,
                                 PropertyHandleKind::Value,
                             );
-                            Ok(self
-                                .predicate
-                                .test(context, &traverser_value, source.path)?)
+                            Ok(self.predicate.test(context, &traverser_value)?)
                         } else {
                             Ok(false)
                         }
@@ -328,7 +306,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                     None,
                 );
                 if let Some(val) = obj.get(&key_tv) {
-                    self.predicate.test(context, val, source.path)
+                    self.predicate.test(context, val)
                 } else {
                     Ok(false)
                 }
@@ -336,7 +314,7 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
 
             TraverserValue::Record { keys, values } => {
                 if let Some(idx) = keys.iter().position(|k| k.as_str() == self.key.as_str()) {
-                    self.predicate.test(context, &values[idx], source.path)
+                    self.predicate.test(context, &values[idx])
                 } else {
                     Ok(false)
                 }
@@ -395,10 +373,6 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
                 "graph".to_string(),
             ))),
         }
-    }
-
-    fn path_requirement(&self) -> crate::traversal::optimizer::path_analysis::PathRequirement {
-        self.predicate.path_requirement()
     }
 
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g> {
@@ -471,10 +445,8 @@ mod tests {
                 r#"g.V("1").as("A").out("created").in("created").is(P::Eq("A")).id()"#,
                 r#"g.v("1").as("A").out("created").in("created").is(P::Eq("A")).id()"#,
             ],
-            assert: |res| {
-                assert_eq!(res.len(), 1);
-                assert_eq!(res[0].as_string(), Some("1"));
-            },
+            // `is()` compares with the literal "A" (TinkerPop), never the label `A`.
+            assert: |res| assert!(res.is_empty()),
         );
     }
 

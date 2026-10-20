@@ -565,6 +565,41 @@ const SEE_ALSO: &[(&str, &str, &str)] = &[
     ("is", "Predicates", "traversal/functions/predicates.md"),
     ("has", "Predicates", "traversal/functions/predicates.md"),
     (
+        "is",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_value",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_value_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "where",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "where_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
         "properties",
         "Property Elements",
         "users_guide/property_elements.md",

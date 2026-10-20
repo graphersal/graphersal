@@ -368,11 +368,23 @@ pub(crate) fn render_predicate<T: Into<PValue> + Clone>(predicate: &P<T>) -> Str
     }
 }
 
+/// How [`P::test_resolving`] reads a bare-string operand of `eq`/`neq`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operands {
+    /// `where(P)`: a step label on the path, then a vertex id, then a value.
+    PathLabels,
+    /// `has(key, P)`, `is(P)` and the other value filters: a vertex id, then a value; never a
+    /// step label.
+    Values,
+    /// `hasId(P)`/`hasLabel(P)`/`hasKey(P)` and resolved side effects: always a value.
+    Literal,
+}
+
 impl<T: Into<PValue> + Debug + Clone> P<T> {
-    /// What testing this predicate reads from the traverser path: a string argument of a
-    /// comparison (`eq`/`neq`/`lt`/`lte`/`gt`/`gte`) names a step label when one is set
-    /// (`where(P.gt("a"))`), so it is a label requirement. (`has`/`is` share this method and only
-    /// record a label that an `as()` of the same spelling declares; they still compare literally.)
+    /// What testing this predicate under `where(P)` reads from the traverser path: a string
+    /// argument of a comparison (`eq`/`neq`/`lt`/`lte`/`gt`/`gte`) names a step label when one is
+    /// set (`where(P.gt("a"))`), so it is a label requirement. The value filters (`has`, `is`,
+    /// ...) never read the path ([`test`](Self::test)) and do not call this.
     pub(crate) fn path_requirement(
         &self,
     ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
@@ -422,7 +434,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 if let Some(matched) = self.resolve_side_effect(context, arg_value, arg_path)? {
                     return Ok(matched);
                 }
-                self.test(context, arg_value, arg_path)
+                self.test_with_labels(context, arg_value, arg_path)
             }
         }
     }
@@ -581,7 +593,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 if let Some(matched) = self.resolve_side_effect(context, &start, arg_path)? {
                     return Ok(Some(matched));
                 }
-                Ok(Some(self.test(context, &start, arg_path)?))
+                Ok(Some(self.test_with_labels(context, &start, arg_path)?))
             }
         }
     }
@@ -589,15 +601,15 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
     /// `where(within(key))`/`where(without(key))` (and, through
     /// `resolve_comparison_side_effect`, `eq`/`neq`/`lt`/`gt`/`lte`/`gte` with a bare string): resolves a single bare-string `within`/
     /// `without` argument against a side-effect bucket populated by `aggregate()`/`store()`,
-    /// mirroring how `P::Eq`/`P::Neq` (in [`test`](Self::test)) already resolve a bare string
+    /// mirroring how `P::Eq`/`P::Neq` (in `test_with_labels`) already resolve a bare string
     /// against a step label via `context.paths.by_label` first. `Ok(None)` when this predicate
     /// isn't a single-key `within`/`without`, or the key names no known side effect — the caller
-    /// falls back to [`test`](Self::test)'s ordinary literal-value comparison.
+    /// falls back to `test_with_labels`'s ordinary literal-value comparison.
     ///
     /// Deliberately **not** called from [`test`](Self::test) itself: `test()` is also the
     /// evaluation path for `has(key, P)`/`is(P)`/`hasValue(P)`/`all(P)`/`any(P)`, whose string
     /// arguments are always literal property values, never side-effect-bucket names. Only
-    /// `where(P)` (`StepWhereP`) calls this, before falling back to `test()`, so a name that
+    /// `where(P)` (`StepWhereP`) calls this, before falling back to `test_with_labels()`, so a name that
     /// happens to match both a literal value and a side-effect key can't change `has()`'s
     /// behavior.
     ///
@@ -727,13 +739,29 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         Ok(Some(matched))
     }
 
+    /// Tests the predicate against a value: what `has(key, P)`, `is(P)`, `hasValue(P)`,
+    /// `all(P)`/`any(P)`/`none(P)` and a `has(jpath, P)` need. Every operand is a value, as in
+    /// TinkerPop's `HasContainer`/`IsStep`: a bare string never names a step label, so
+    /// `as("vadas")..has("name", P.eq("vadas"))` compares the property with the string `"vadas"`
+    /// (only `where(P)` resolves labels, [`test_where`](Self::test_where)). A vertex compared
+    /// with a string by `eq`/`neq` compares its id.
     pub(crate) fn test<S: crate::graph::GraphStorage>(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        arg_value: &TraverserValue<S>,
+    ) -> TraverserResult<bool> {
+        self.test_resolving(context, arg_value, PathRef::default(), Operands::Values)
+    }
+
+    /// The literal fallback of `where(P)`: like [`test`](Self::test), but a bare-string operand
+    /// of `eq`/`neq` first names a step label on `arg_path` (`where(P.eq("a"))`).
+    fn test_with_labels<S: crate::graph::GraphStorage>(
         &self,
         context: &mut TraverserContext<'_, S>,
         arg_value: &TraverserValue<S>,
         arg_path: PathRef,
     ) -> TraverserResult<bool> {
-        self.test_resolving(context, arg_value, arg_path, true)
+        self.test_resolving(context, arg_value, arg_path, Operands::PathLabels)
     }
 
     /// Tests the predicate with every string operand a plain literal: a bare string never names a
@@ -745,7 +773,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         context: &mut TraverserContext<'_, S>,
         arg_value: &TraverserValue<S>,
     ) -> TraverserResult<bool> {
-        self.test_resolving(context, arg_value, PathRef::default(), false)
+        self.test_resolving(context, arg_value, PathRef::default(), Operands::Literal)
     }
 
     /// `true` for a predicate that holds when its operand does *not* match (`neq`, `without`,
@@ -828,7 +856,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         context: &mut TraverserContext<'_, S>,
         arg_value: &TraverserValue<S>,
         arg_path: PathRef,
-        resolve_labels: bool,
+        operands: Operands,
     ) -> TraverserResult<bool> {
         match self {
             // `compare_value.clone()` is a `PValue` clone: cheap (a stack copy, no allocator
@@ -837,10 +865,15 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
             // the comparand fixed at construction time (see `PValue::String`'s doc comment).
             P::Eq(compare_value) => {
                 let expected: PValue = compare_value.clone().into();
-                if let (true, PValue::String(label)) = (resolve_labels, &expected) {
-                    // A bare string first names a step label (`where(P.eq("a"))`), then a
-                    // vertex id, then a plain string value.
-                    if let Some(labelled) = context.paths.by_label(arg_path, label.as_str()) {
+                if let PValue::String(label) = &expected
+                    && operands != Operands::Literal
+                {
+                    // Under `where(P)` a bare string first names a step label
+                    // (`where(P.eq("a"))`); then (also for `is(P)`) a vertex id; then it is a
+                    // plain string value.
+                    if operands == Operands::PathLabels
+                        && let Some(labelled) = context.paths.by_label(arg_path, label.as_str())
+                    {
                         return Ok(arg_value.eq(&labelled));
                     }
                     if let TraverserValue::Vertex(node_index) = arg_value {
@@ -854,12 +887,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 Ok(Self::compare(context, arg_value, &expected)? == Some(Ordering::Equal))
             }
 
-            P::Neq(compare_value) => Ok(!P::Eq(compare_value.clone().into()).test_resolving(
-                context,
-                arg_value,
-                arg_path,
-                resolve_labels,
-            )?),
+            P::Neq(compare_value) => Ok(!P::Eq(compare_value.clone().into())
+                .test_resolving(context, arg_value, arg_path, operands)?),
 
             P::Lt(expected) => Ok(Self::compare(context, arg_value, &expected.clone().into())?
                 == Some(Ordering::Less)),
@@ -888,9 +917,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 Ok(false)
             }
 
-            P::WithOut(compare_value) => {
-                Ok(!P::WithIn(compare_value.clone()).test(context, arg_value, arg_path)?)
-            }
+            P::WithOut(compare_value) => Ok(!P::WithIn(compare_value.clone())
+                .test_resolving(context, arg_value, arg_path, operands)?),
 
             P::Inside(low, high) => Ok(Self::compare(context, arg_value, &low.clone().into())?
                 == Some(Ordering::Greater)
@@ -921,9 +949,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 | PValue::Null => Ok(false),
             },
 
-            P::NotStartingWith(value) => {
-                Ok(!P::StartingWith(value.clone().into()).test(context, arg_value, arg_path)?)
-            }
+            P::NotStartingWith(value) => Ok(!P::StartingWith(value.clone().into())
+                .test_resolving(context, arg_value, arg_path, operands)?),
 
             P::EndingWith(value) => match value.clone().into() {
                 PValue::String(value) => Ok(Self::text_operand(context, arg_value)?
@@ -936,9 +963,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 | PValue::Null => Ok(false),
             },
 
-            P::NotEndingWith(value) => {
-                Ok(!P::EndingWith(value.clone().into()).test(context, arg_value, arg_path)?)
-            }
+            P::NotEndingWith(value) => Ok(!P::EndingWith(value.clone().into())
+                .test_resolving(context, arg_value, arg_path, operands)?),
 
             P::Containing(value) => match value.clone().into() {
                 PValue::String(value) => Ok(Self::text_operand(context, arg_value)?
@@ -951,9 +977,8 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 | PValue::Null => Ok(false),
             },
 
-            P::NotContaining(value) => {
-                Ok(!P::Containing(value.clone().into()).test(context, arg_value, arg_path)?)
-            }
+            P::NotContaining(value) => Ok(!P::Containing(value.clone().into())
+                .test_resolving(context, arg_value, arg_path, operands)?),
 
             P::Regex(regex) => {
                 Ok(Self::text_operand(context, arg_value)?
@@ -967,19 +992,13 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
 
             P::TypeOf(target) => Self::test_type_of(context, arg_value, target),
 
-            P::And(a, b) => Ok(
-                a.test_resolving(context, arg_value, arg_path, resolve_labels)?
-                    && b.test_resolving(context, arg_value, arg_path, resolve_labels)?,
-            ),
+            P::And(a, b) => Ok(a.test_resolving(context, arg_value, arg_path, operands)?
+                && b.test_resolving(context, arg_value, arg_path, operands)?),
 
-            P::Or(a, b) => Ok(
-                a.test_resolving(context, arg_value, arg_path, resolve_labels)?
-                    || b.test_resolving(context, arg_value, arg_path, resolve_labels)?,
-            ),
+            P::Or(a, b) => Ok(a.test_resolving(context, arg_value, arg_path, operands)?
+                || b.test_resolving(context, arg_value, arg_path, operands)?),
 
-            P::Not(inner) => {
-                Ok(!inner.test_resolving(context, arg_value, arg_path, resolve_labels)?)
-            }
+            P::Not(inner) => Ok(!inner.test_resolving(context, arg_value, arg_path, operands)?),
         }
     }
 
