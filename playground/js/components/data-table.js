@@ -1,8 +1,12 @@
-// A plain table for {columns, rows}: sticky header, row numbers, typed cell styling.
+// A plain table for {columns, rows}: sticky header, row numbers, typed cell styling. A long text or
+// a long list of numbers is collapsed with an expand button (components/value-text.js); the
+// engine's vector marker keeps its own disclosure (the JSON view has every value).
 
 import { formatValue, isVectorCell, vectorPreview, vectorSummary } from '../util.js';
+import { ValueText } from './value-text.js';
 
 export const DataTable = {
+  components: { ValueText },
   props: {
     table: { type: Object, required: true },
     rowNumbers: { type: Boolean, default: true },
@@ -42,7 +46,7 @@ export const DataTable = {
               class="row-action" :title="rowAction.title" :aria-label="rowAction.title" @click="rowAction.run(row, table.columns)">{{ rowAction.label }}</button></td>
           <td v-for="(v, j) in row" :key="j" :class="cellClass(v)" :title="cellText(v)">
             <details v-if="isVectorCell(v)"><summary>{{ vectorSummary(v) }}</summary><span class="mono">{{ vectorPreview(v) }}</span></details>
-            <template v-else>{{ cellText(v) }}</template>
+            <value-text v-else-if="v !== undefined" :value="v" :name="table.columns[j] || 'value'"></value-text>
           </td>
         </tr>
       </tbody>

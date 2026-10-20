@@ -17,6 +17,7 @@ import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
 import { taskStartText, taskEndText } from './store-model.js';
+import { VALUE_MAX_CHARS } from './value-view.js';
 import { PUBLIC_PLAYGROUND, MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
 
 const HISTORY_MAX = 100;
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   graphMaxEdges: 20000,
   graphResultMax: 50000, // the result subgraph: vertices + edges (subgraph_max_elements; at most 200 000)
   graphTier: 'auto', // the Graph panel's tier switch: 'auto' | 'detailed' | 'fast' (js/graph/tiers.js)
+  valueMaxChars: VALUE_MAX_CHARS.default, // element views collapse longer values (js/value-view.js); 0 = off
 });
 
 const media = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;

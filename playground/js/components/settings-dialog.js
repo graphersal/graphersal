@@ -1,9 +1,11 @@
-// Settings dialog: display limits (like the CLI's --max-rows/--max-items/--no-limit), the step-name
-// spelling (--spelling) and the graph drawing limits. Saved in localStorage.
+// Settings dialog: display limits (like the CLI's --max-rows/--max-items/--no-limit), when element
+// views collapse long values (js/value-view.js), the step-name spelling (--spelling) and the graph
+// drawing limits. Saved in localStorage.
 
 import { ref, reactive } from 'vue';
 import { state, saveSettings, DEFAULT_SETTINGS } from '../store.js';
 import { TIER_CHOICES, TIER_TUNING } from '../graph/tiers.js';
+import { VALUE_MAX_CHARS, VALUE_VIEW_TUNING, maxCharsError } from '../value-view.js';
 
 export const SettingsDialog = {
   setup(props, { expose }) {
@@ -29,6 +31,12 @@ export const SettingsDialog = {
         }
         form[k] = n;
       }
+      const charsError = maxCharsError(form.valueMaxChars);
+      if (charsError) {
+        error.value = charsError;
+        return;
+      }
+      form.valueMaxChars = Number(form.valueMaxChars);
       if (form.graphResultMax > TIER_TUNING.fastMax) {
         error.value = `The result graph takes at most ${fmt(TIER_TUNING.fastMax)} vertices + edges (the end of the Fast tier's range).`;
         return;
@@ -41,7 +49,7 @@ export const SettingsDialog = {
     }
     expose({ open, close });
     const fmt = (n) => n.toLocaleString('en-US');
-    return { dlg, form, error, close, apply, reset, TIER_CHOICES, TIER_TUNING, DEFAULT_SETTINGS, fmt };
+    return { dlg, form, error, close, apply, reset, TIER_CHOICES, TIER_TUNING, DEFAULT_SETTINGS, VALUE_MAX_CHARS, VALUE_VIEW_TUNING, fmt };
   },
   template: `
   <dialog ref="dlg" aria-labelledby="settings-title" @click.self="close">
@@ -61,6 +69,11 @@ export const SettingsDialog = {
           <span class="hint">Items shown of every nested collection (a fold() list, a group() row).</span>
           <label for="s-nolimit">No limit</label>
           <input id="s-nolimit" type="checkbox" v-model="form.noLimit" style="justify-self:start">
+          <label for="s-valuechars">Collapse values above</label>
+          <input id="s-valuechars" type="number" min="0" :max="VALUE_MAX_CHARS.max" v-model="form.valueMaxChars" aria-describedby="s-valuechars-hint">
+          <span class="hint" id="s-valuechars-hint">Characters (default {{ VALUE_MAX_CHARS.default }}; 0 shows every value in full). A longer text, or one with more than
+            {{ VALUE_VIEW_TUNING.maxLines }} lines, and a vector (a list of {{ VALUE_VIEW_TUNING.vectorMin }} or more numbers) are collapsed
+            in the graph's element details and the result table, with an expand button. Copy copies the full value.</span>
         </div>
         <h3>Step names</h3>
         <div class="form-grid">

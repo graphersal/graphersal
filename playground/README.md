@@ -98,6 +98,8 @@ playground/
   tests/ai-chat.test.mjs       Node tests of the AI Chat tab model and controller (fake server), the wasm stub, the HTTP calls
   tests/link.test.mjs          Node tests of playground links: parse/build, graph data encoding, damage, share size
   tests/markdown.test.mjs      Node tests of the chat's Markdown renderer and the table -> Markdown copy
+  tests/value-view.test.mjs    Node tests of collapsed long values (vectors, long texts, the setting valueMaxChars)
+  tests/highlight.test.mjs     Node tests of the Graph panel's result highlight and its dismissal
   tests/examples-panel.test.mjs  Node tests of the Examples panel model and the shape of examples.json
   js/
     main.js                Vue app root, global shortcuts, dialogs, toasts
@@ -117,6 +119,7 @@ playground/
     examples-panel.js      the Examples panel's model: group tree, plain search + snippets, keyboard order,
                            remembered state (pure, Node-tested)
     util.js                storage (try/catch-wrapped localStorage), formatting
+    value-view.js          long values in element views: collapsed summary and full text (pure, Node-tested)
     export.js              file names and downloads (drawings, Save menu)
     profile-text.js        TraversalMetrics as the CLI-style text table (Profile panel, Text tab)
     statistics.js          the Statistics tab's rows: counts, memory, limits (pure, Node-tested)
@@ -131,6 +134,7 @@ playground/
       layout-jobs.js       the running engine layouts the toolbar's Stop cancels (pure, Node-tested)
       layout-client.js     drives the engine's force layout slice by slice (pure, Node-tested)
       palette.js           the label colours: collision-free slots, light/dark (pure, Node-tested)
+      highlight.js         the result highlight: when it shows, its Clear/Esc dismissal per result (pure, Node-tested)
       edit-mode.js         the edit mode: switch state, connect drag, in-place patch, positions (pure, Node-tested)
     saved-queries.js       saved queries: folder tree, editor draft <-> spec, run form (pure, Node-tested)
     element-editor.js      the property editor: typed values <-> form tree, raw JSON, schema fields, diff (pure, Node-tested)
@@ -160,6 +164,7 @@ playground/
       results-panel.js  statistics-view.js  data-table.js  error-view.js  graph-panel.js  graph-canvas.js
       schema-panel.js  schema-editor.js  profile-panel.js  help-dialog.js  settings-dialog.js  drop-menu.js
       build-missing.js  saved-queries.js (the saved-query dialog: edit and run)
+      value-text.js (one property value: collapsed long text or vector with expand/collapse and copy)
       store-menu.js (the Store menu: newest 5 marks, then snapshots)  store-dialog.js  store-calendar.js (the history calendar dialog)
       store-task-label.js (a store action's button text: idle, or spinner + running text + elapsed time)
       element-editor.js (the Graph panel's property editor dialog)
@@ -519,9 +524,25 @@ renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
   reason, for the label overview and read-only graphs (`labelChoices().readOnly`).
 - **Gestures (both tiers).** Click = inspector. Double click on a vertex selects it and its
   neighbours (again: one hop more, at most 1000 vertices; `neighbourhood` in `graph-data.js`);
-  double click on empty space fits. **Drill down:** in Fast a picked vertex (click) or the double-click
+  double click on empty space fits; `Esc` on the focused drawing (a click focuses it) clears the
+  double-click selection and the result highlight. **Drill down:** in Fast a picked vertex (click) or the double-click
   selection offers "Open ... in Detailed": its neighbourhood within the drawing (`subView`) is drawn
   in the Detailed tier, with "Back to the whole drawing". Sigma has no lasso, so there is none.
+- **Result highlight** (`js/graph/highlight.js`, Node tests `tests/highlight.test.mjs`). The
+  Whole graph tab highlights what the active tab's result refers to (`renderer.select(ids)`, the
+  rest faded, both tiers). **✕ Clear highlight** (toolbar end, only while a highlight is shown)
+  and `Esc` dismiss it for that result: a dismissal is keyed by the result's subgraph object in a
+  module-level `WeakSet` (the panel is re-mounted on a tab switch), so a new result, or another
+  tab's, highlights again and a cleared tab stays cleared; the "highlight result" checkbox is the
+  lasting switch. The canvas reports `Esc` as `clear-highlight`; it focuses itself on press and on
+  release (Cytoscape blurs the active element on mousedown).
+- **Long values** (`js/value-view.js`, Node tests `tests/value-view.test.mjs`; view
+  `components/value-text.js`). The inspector and the Results table collapse a text above the
+  setting `valueMaxChars` (default 200, 0 = off, else 20..100 000) or above 3 lines, and a list of
+  at least 16 numbers (how the inspector receives a vector: plain JSON numbers) to
+  `vector[N] [first 4, …]`; expand/collapse buttons carry `aria-expanded`, the inspector's copy
+  button copies the full value. The table's vector marker (`graphersal:Vector`) keeps its
+  `<details>`.
 - **Stop.** A running engine layout is registered with the store (`js/graph/layout-jobs.js`), so the
   toolbar's Stop is enabled while only a layout runs and then cancels it (`layoutCancel`): the
   drawing keeps the positions reached so far, nothing restarts. With a query running, Stop works as

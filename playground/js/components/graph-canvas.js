@@ -18,7 +18,9 @@
 // the inspector is read again, and a redrawn drawing re-inspects the element it showed.
 //
 // Gestures (every tier): click = inspector (and picks the vertex, `pick`), double click on a
-// vertex = select it with its neighbours (again: one more hop), double click on empty space = fit.
+// vertex = select it with its neighbours (again: one more hop), double click on empty space = fit,
+// Esc on the focused drawing = clear the double-click selection and the panel's result highlight
+// (`clear-highlight`; a click on the drawing gives it the focus).
 //
 // Edit mode (`editMode`, js/graph/edit-mode.js): double click on empty space = a new vertex there
 // (the creation dialog of components/element-editor.js), a drag from a vertex to another = a new
@@ -45,7 +47,11 @@ import { GraphController } from '../graph/controller.js';
 import { TIER_TUNING } from '../graph/tiers.js';
 import { labelPalette, vertexLabelsInTableOrder, OTHER_SLOT, PALETTE_SIZE } from '../graph/palette.js';
 import { ElementEditor } from './element-editor.js';
+import { ValueText } from './value-text.js';
 import { EDIT_TUNING, carryEditPositions, deleteConfirmText } from '../graph/edit-mode.js';
+import { isClearKey } from '../graph/highlight.js';
+
+const pick4 = (e) => ({ key: e.key, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey });
 
 /** The layout menu: the renderer's built-in layouts and the engine's force layout. */
 export const LAYOUTS = [
@@ -75,7 +81,7 @@ function paletteLabels(els, kind) {
 const message = (err) => (err && err.message ? err.message : String(err));
 
 export const GraphCanvas = {
-  components: { ElementEditor },
+  components: { ElementEditor, ValueText },
   props: {
     /**
      * `kind: 'data'`: the engine's compact graph view (graph-data.js); `kind: 'schema'`:
@@ -104,7 +110,7 @@ export const GraphCanvas = {
     /** Edit mode (the panel decides whether it is allowed: js/graph/edit-mode.js `editModeState`). */
     editMode: { type: Boolean, default: false },
   },
-  emits: ['layout-note', 'layout-state', 'renderer', 'tier-failed', 'pick', 'activate', 'expand', 'edited'],
+  emits: ['layout-note', 'layout-state', 'renderer', 'tier-failed', 'pick', 'activate', 'expand', 'edited', 'clear-highlight'],
   setup(props, { expose, emit }) {
     const host = ref(null);
     const editor = ref(null);
@@ -322,10 +328,20 @@ export const GraphCanvas = {
      * a dialog.
      */
     function onKey(event) {
-      if (!editing() || !host.value) return;
+      if (!host.value) return;
       const t = event.target;
-      if (t && t.closest && t.closest('input, textarea, select, dialog, [contenteditable]')) return;
+      const inField = !!(t && t.closest && t.closest('input, textarea, select, dialog, [contenteditable]'));
       const box = host.value.parentElement;
+      // Esc on the drawing (it has the focus) clears the double-click selection and asks the
+      // panel to clear its result highlight (js/graph/highlight.js); a delete confirmation is
+      // closed first.
+      if (isClearKey({ ...pick4(event), inField }) && t === host.value && !confirmDel.value && (focus || props.highlight)) {
+        event.preventDefault();
+        if (focus) setFocus(null);
+        emit('clear-highlight');
+        return;
+      }
+      if (!editing() || inField) return;
       if (t && t !== document.body && !(box && box.contains(t))) return;
       if ((event.key === 'Delete' || event.key === 'Backspace') && selected.value && selected.value.id !== undefined) {
         event.preventDefault();
@@ -335,9 +351,12 @@ export const GraphCanvas = {
         confirmDel.value = null;
       }
     }
-    /** The canvas takes the keyboard focus on a press, so Delete reaches it. */
+    /**
+     * The canvas takes the keyboard focus on a press, so Delete and Esc reach it (again on the
+     * release: Cytoscape blurs the active element on its mousedown).
+     */
     function focusCanvas() {
-      if (editing() && host.value && document.activeElement !== host.value) host.value.focus({ preventScroll: true });
+      if (host.value && !isSchema() && document.activeElement !== host.value) host.value.focus({ preventScroll: true });
     }
 
     const deleteState = computed(() => {
@@ -412,7 +431,7 @@ export const GraphCanvas = {
         const element = await state.engine.element(kind, id);
         if (seq !== inspectSeq || !selected.value) return;
         selected.value = element
-          ? { ...selected.value, title: element.label || id, rows: inspectorRows(element, formatValue), loading: false, error: null }
+          ? { ...selected.value, title: element.label || id, rows: inspectorRows(element, (v) => v), loading: false, error: null }
           : { ...selected.value, title: id, rows: [['id', id]], loading: false, error: `This ${kind} no longer exists (reload the drawing).` };
       } catch (err) {
         if (seq !== inspectSeq || !selected.value) return;
@@ -632,6 +651,8 @@ export const GraphCanvas = {
       positions: () => (renderer ? renderer.getPositions() : null),
       /** The vertex indices of the double-click selection (null: none). */
       focusIndices: () => (focus ? focus.indices.slice() : null),
+      /** Clears the double-click selection (the drawing shows the panel's highlight, or none). */
+      clearFocus: () => { if (focus) setFocus(null); },
     });
 
     const isEmpty = computed(() => counts()[0] === 0);
@@ -639,13 +660,13 @@ export const GraphCanvas = {
     return {
       host, editor, selected, legend, failed, isEmpty, close: () => { selected.value = null; confirmDel.value = null; inspectSeq++; }, isDark,
       edit, editState, onSaved, onCreated, onCommitting, deleteState, askDelete, confirmDelete, confirmDel, editNote, onKey, focusCanvas,
-      editing: computed(() => props.editMode && props.kind !== 'schema'),
+      editing: computed(() => props.editMode && props.kind !== 'schema'), isSchemaKind: computed(() => props.kind === 'schema'),
     };
   },
   template: `
   <div class="cy-host">
-    <div class="cy-canvas" ref="host" role="img" :tabindex="editing ? 0 : -1" @pointerdown.capture="focusCanvas"
-         :aria-label="editing ? 'Graph drawing, edit mode' : 'Graph drawing'"></div>
+    <div class="cy-canvas" ref="host" role="img" :tabindex="isSchemaKind ? -1 : 0" @pointerdown.capture="focusCanvas" @pointerup.capture="focusCanvas"
+         :aria-label="(editing ? 'Graph drawing, edit mode' : 'Graph drawing') + (highlight ? ' (result highlighted: Esc shows the graph normally)' : '')"></div>
     <div v-if="failed" class="graph-empty">{{ failed }}</div>
     <div v-else-if="isEmpty" class="graph-empty">{{ emptyText }}</div>
     <div class="graph-legend" v-if="legend.length && !isEmpty">
@@ -680,7 +701,7 @@ export const GraphCanvas = {
         </div>
       </div>
       <dl>
-        <template v-for="r in selected.rows" :key="r[0]"><dt>{{ r[0] }}</dt><dd>{{ r[1] }}</dd></template>
+        <template v-for="r in selected.rows" :key="selected.kind + ':' + selected.id + ':' + r[0]"><dt>{{ r[0] }}</dt><dd><value-text :value="r[1]" :name="r[0]" copy></value-text></dd></template>
       </dl>
       <div v-if="selected.loading" class="faint inspector-note">Loading properties…</div>
       <div v-if="selected.error" class="inspector-note" role="alert">{{ selected.error }}</div>
