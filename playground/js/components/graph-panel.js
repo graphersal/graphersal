@@ -16,7 +16,7 @@
 // neighbourhood are then read again from the engine (the neighbourhood keeps the new vertex), the
 // query result's drawing and a drill-down stay patched.
 
-import { ref, computed, watch, onMounted, markRaw } from 'vue';
+import { ref, computed, watch, onMounted, markRaw, toRaw } from 'vue';
 import { state, saveSettings } from '../store.js';
 import { PanelFrame, PanelTabs, FitButton, ExportMenu } from './panel-frame.js';
 import { exportFileName, downloadBlob } from '../export.js';
@@ -34,10 +34,14 @@ import {
   neighbourhoodRequest, expandRequest, carryPositions, selectionNotice, resultNotice,
 } from '../graph/selection.js';
 import { editModeState, applyEdit } from '../graph/edit-mode.js';
+import { resultHighlight, createDismissals } from '../graph/highlight.js';
 
 const LAYOUT_IDS = LAYOUTS.map((l) => l.id);
 const HOP_CHOICES = Array.from({ length: SELECTION_TUNING.maxHops }, (_, i) => i + 1);
 const fmt = (n) => n.toLocaleString('en-US');
+// The dismissed result highlights, kept outside the component: they outlive a re-mounted panel.
+const dismissals = createDismissals();
+const dismissVersion = ref(0);
 const message = (err) => (err && err.message ? err.message : String(err));
 
 export const GraphPanel = {
@@ -388,10 +392,20 @@ export const GraphPanel = {
     const initialPositions = computed(() => (source.value === 'neighbourhood' && !drill.value ? nbPositions.value : null));
     const expandFromEngine = computed(() => (source.value === 'neighbourhood' || source.value === 'result') && !drill.value);
 
+    // The result highlight (js/graph/highlight.js): "Clear highlight" / Esc dismiss it for this
+    // result only; a later result, or another tab's, highlights again.
     const highlight = computed(() => {
-      if (drill.value || source.value !== 'graph' || overview.value || !highlightResult.value || !subgraph.value) return null;
-      return idsOf(subgraph.value);
+      void dismissVersion.value; // re-read after a dismissal
+      return resultHighlight({
+        source: source.value, overview: overview.value, drill: !!drill.value, enabled: highlightResult.value,
+        subgraph: subgraph.value, dismissed: (s) => dismissals.isDismissed(toRaw(s)), idsOf,
+      });
     });
+    /** Leaves the highlight: the drawing is shown normally again (and the double-click selection cleared). */
+    function clearHighlight() {
+      if (cyRef.value) cyRef.value.clearFocus();
+      if (subgraph.value && dismissals.dismiss(toRaw(subgraph.value))) dismissVersion.value = dismissals.version;
+    }
 
     // ------------------------------------------------------------------ notices
     /** `{text, links: [{id, label}]}` of what is drawn and how to see more. */
@@ -570,7 +584,7 @@ export const GraphPanel = {
 
     return {
       state, SOURCES: VIEW_SOURCES, LAYOUTS, TIER_CHOICES, HOP_CHOICES, source, layout, edgeLabels, showIds, edgeIds, highlightResult,
-      elements, kind, highlight, notice, metaDetail, onNoticeLink, emptyText, isMeta,
+      elements, kind, highlight, clearHighlight, notice, metaDetail, onNoticeLink, emptyText, isMeta,
       error, cyRef, subgraph, held, drawAnyway, layoutNote, layoutState, fmt,
       tier, tierChoice, setTier, tierNotes, controls, webgl, fastError, onTierFailed,
       pick, drill, drillOffer, openInDetailed, closeDrill,
@@ -611,6 +625,8 @@ export const GraphPanel = {
         </label>
         </div>
         <div class="toolbar-end">
+          <button v-if="highlight" type="button" class="btn small clear-highlight" @click="clearHighlight"
+                  title="Show the graph normally again (also Esc on the drawing). The next query result highlights again.">✕ Clear highlight</button>
           <span class="info-tip" tabindex="0" role="note" aria-label="Click an element for its properties. Double-click a vertex to select its neighbours (again: one hop more); in the Neighbourhood view it fetches them from the engine; in the Labels view double-click a label or an edge to draw a sample. Pinch or wheel to zoom, drag to pan, double-click empty space to fit."
                 title="Click an element for its properties. Double-click a vertex to select its neighbours (again: one hop more); in the Neighbourhood view it fetches them from the engine; in the Labels view double-click a label or an edge to draw a sample. Pinch or wheel to zoom, drag to pan, double-click empty space to fit.">ⓘ</span>
           <fit-button @fit="fit"></fit-button>
@@ -670,7 +686,7 @@ export const GraphPanel = {
       <graph-canvas ref="cyRef" :elements="elements" :kind="kind" :tier="tier" :layout="layout" :edge-labels="edgeLabels" :show-ids="showIds" :edge-ids="edgeIds" :highlight="highlight" :empty-text="emptyText"
                     :expand-from-engine="expandFromEngine" :initial-positions="initialPositions" :edit-mode="edit.active" @edited="onEdited"
                     @layout-note="layoutNote = $event" @layout-state="layoutState = $event" @tier-failed="onTierFailed" @pick="pick = $event"
-                    @activate="openSample" @expand="expand">
+                    @activate="openSample" @expand="expand" @clear-highlight="clearHighlight">
         <template #inspector-actions="{ element }">
           <div v-if="element && element.kind === 'vertex' && element.id !== undefined" class="inspector-actions">
             <a href="#" @click.prevent="showNeighbourhood(element.id)" title="Draw this vertex and its neighbours, fetched from the engine (the Neighbourhood view)">Neighbourhood</a>

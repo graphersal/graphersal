@@ -67,7 +67,8 @@ answers questions by querying the served graph. In the WebAssembly playground th
   path recording and memory. The Graph panel draws the whole graph when it has at most 10 000
   vertices and 20 000 edges (Settings), else its labels; it also draws the neighbourhood of a
   vertex and the last query result. Clicking a vertex or an edge shows its properties, fetched from
-  the engine at that moment (the drawing itself carries only ids, labels and names);
+  the engine at that moment (the drawing itself carries only ids, labels and names; long texts and
+  vectors are collapsed with an expand button, see [Long values](#what-the-panel-shows));
   double-clicking a vertex in the neighbourhood or the query result expands it by one hop from
   the engine (in the whole graph: selects it with its neighbours, again for one hop more),
   double-clicking empty space fits the drawing. Above 200 vertices the engine lays the drawing out (with progress
@@ -201,6 +202,22 @@ panel's tabs choose a meaningful part instead:
   result's vertices stay in place, and further double clicks keep expanding. A result with more
   vertices than the drawing limit is not expanded (the note says so; open a vertex's
   neighbourhood instead).
+
+**Result highlight.** In the **Whole graph** tab the elements the active tab's last query result
+refers to are highlighted and everything else is faded (the **highlight result** checkbox turns
+this off for good). **✕ Clear highlight** in the toolbar, shown while a highlight is active, or
+`Esc` on the drawing (click it first) shows the graph normally again; `Esc` also clears a
+double-click selection. Clearing applies to that result only: the next query result highlights
+again, and switching to another query tab shows that tab's result highlighted, while the tab you
+cleared stays cleared. Both tiers behave the same.
+
+**Long values.** In an element's details (click a vertex or an edge) and in the Results table, a
+text longer than 200 characters or with more than 3 lines is cut to its start and "…", and a
+vector (a list of 16 or more numbers) shows as `vector[384] [0.12, -0.03, 0.5, 1, …]`. **expand**
+shows the full value, **collapse** the short form again; the copy button next to it in the
+element's details copies the full value. **Collapse values above** in the Settings sets the
+number of characters (20 to 100 000), 0 shows every value in full. A vector in the Results table
+keeps its own disclosure (`vector[768 f32]`, the JSON tab has every value).
 
 ### Editing properties
 
