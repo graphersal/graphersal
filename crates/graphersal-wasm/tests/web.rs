@@ -663,3 +663,29 @@ fn tall_expressions_in_union_operands_stay_within_the_wasm_stack() {
         assert!(r["ok"] == true, "{}: {r}", &query[..60]);
     }
 }
+
+/// Stage 2d.T6: the list functions `reduce`, `any` and `all` at the deepest nesting the parser
+/// accepts (in `reduce`'s `|` part, in its initial value, in the list of `any`, inside a list
+/// comprehension's `WHERE`) run within the 1 MB wasm32 stack; one level more is 54001.
+#[wasm_bindgen_test]
+fn deeply_nested_list_functions_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let nest = |form: &str, depth: usize| {
+        let mut expr = "1".to_string();
+        for i in 0..depth {
+            expr = match form {
+                "reduce" => format!("reduce(s{i} = 0, x{i} IN [1] | s{i} + {expr})"),
+                "init" => format!("reduce(s{i} = {expr}, x{i} IN [1] | s{i})"),
+                "any" => format!("any(x{i} IN [{expr}] WHERE true)"),
+                _ => {
+                    format!("head([x{i} IN [1] WHERE all(y{i} IN [x{i}] WHERE y{i} > 0) | {expr}])")
+                }
+            };
+        }
+        format!("RETURN {expr} AS c")
+    };
+    for (form, deepest) in [("reduce", 42), ("init", 63), ("any", 42), ("all", 41)] {
+        gql_within_limits(&mut p, &nest(form, deepest), Some(1));
+        gql_within_limits(&mut p, &nest(form, deepest + 1), None);
+    }
+}

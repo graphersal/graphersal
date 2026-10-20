@@ -2593,6 +2593,53 @@ mod gql {
         );
     }
 
+    /// Stage 2d.T6: a read only a later `UNION` operand or a block after `NEXT` makes is asked
+    /// like the Gremlin `union()` twin: the authorization walk visits every operand child of the
+    /// start `union()` (and of a mid-traversal one after `NEXT`), also when the first operand
+    /// reads nothing denied.
+    #[test]
+    fn a_denied_read_reached_only_in_a_union_operand_refuses_gql_like_union() {
+        let graph = modern();
+        for script in [
+            r#"g.union(__.inject(1), __.V().hasLabel("person").out("created")).toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n UNION MATCH (p:person)-[:created]->(s) RETURN s.name AS n").toList()"#,
+            r#"g.gql("RETURN 1 AS x NEXT RETURN x UNION MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:nobody) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:nobody)-[:created]->(s) RETURN 2 AS x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // A vertex read only in a later operand.
+        for script in [
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person) RETURN 2 AS x").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION RETURN 3 AS x NEXT MATCH (p:person) RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the denied operand the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person) RETURN 2 AS x").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.union(__.inject(1), __.V().hasLabel("person").out("created")).toList()"#
+            )
+        );
+    }
+
     /// Stage 2d.T5c: a read only a `COUNT { }` or `COLLECT { }` body (or a whole-query
     /// `EXISTS` body) makes is asked like the Gremlin `local(__..count())` / `fold()` twin:
     /// the authorization walk visits the children of the hosting `gql:*` step (MATCH-only and

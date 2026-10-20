@@ -74,7 +74,9 @@
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
 //!   it is a plain filter of the unit row, so it is accepted like the others. A first token that
 //!   starts no clause expects every clause a query may start with (`MATCH`, `OPTIONAL MATCH`,
-//!   `WITH`, `LET`, `FILTER`, `FOR`, `UNWIND`, `RETURN`), the same list as after a clause.
+//!   `WITH`, `LET`, `FILTER`, `FOR`, `UNWIND`, `CALL`, `RETURN`), the same list as after a
+//!   clause. After a complete result statement the expected tokens name `UNION` and `NEXT`
+//!   before the end of the query (or the `}` of a body).
 //! - **Result tail in GQL order:** `ORDER BY`, then `OFFSET` / `SKIP`, then `LIMIT`, each at most
 //!   once, as GQL and Neo4j write them. Another order is a syntax error naming the right one; the
 //!   standalone Cypher 25 forms before `RETURN` are "not yet supported".
@@ -226,7 +228,7 @@ use super::ast::{
     SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
-use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
+use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 
 /// The deepest nesting accepted: recursion levels of the parser (parentheses, `NOT`, unary
 /// minus, lists, maps, `CASE`, function arguments, label expressions).
@@ -243,7 +245,7 @@ const WRITE_ALTERNATIVE: &str = "gql() is read-only; use the Gremlin mutation st
 /// The alternative of the refused undirected edge forms.
 /// The clauses that may follow a clause of the pipeline, in the order the expected tokens
 /// name them; a query may start with any of them too (stage 2a, design E4).
-const NEXT_CLAUSES: [&str; 8] = [
+const NEXT_CLAUSES: [&str; 9] = [
     "MATCH",
     "OPTIONAL MATCH",
     "WITH",
@@ -251,6 +253,7 @@ const NEXT_CLAUSES: [&str; 8] = [
     "FILTER",
     "FOR",
     "UNWIND",
+    "CALL",
     "RETURN",
 ];
 
@@ -1349,7 +1352,8 @@ impl<'a> Parser<'a> {
             "end the body with RETURN and the columns the query reads after it, for example \
              MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } \
              RETURN p.name, made",
-        );
+        )
+        .topic(GqlHelpTopic::Call);
         Box::new(b)
     }
 
@@ -1443,7 +1447,8 @@ impl<'a> Parser<'a> {
             self.peek().span.to(end.span),
             "CALL { } IN TRANSACTIONS commits writes in batches; gql() is read-only",
         )
-        .alternative("remove IN TRANSACTIONS: a read-only subquery needs no batches");
+        .alternative("remove IN TRANSACTIONS: a read-only subquery needs no batches")
+        .topic(GqlHelpTopic::Call);
         Some(Box::new(b))
     }
 
@@ -1881,7 +1886,7 @@ impl<'a> Parser<'a> {
         if !has_limit {
             expected.push("LIMIT");
         }
-        expected.push(end);
+        expected.extend(["UNION", "NEXT", end]);
         self.unexpected(&expected)
     }
 
@@ -1896,7 +1901,11 @@ impl<'a> Parser<'a> {
                 token.text.to_ascii_uppercase()
             ),
         )
-        .alternative("put every MATCH before the one RETURN, or chain Gremlin steps after gql()");
+        .alternative(
+            "put every MATCH before the RETURN, or continue with NEXT, which passes the columns \
+             of the RETURN on to the next statement, as in MATCH (p:person) RETURN p NEXT \
+             MATCH (p)-[:created]->(s) RETURN p.name, s.name, or chain Gremlin steps after gql()",
+        );
         Box::new(b)
     }
 

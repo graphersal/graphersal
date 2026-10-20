@@ -520,6 +520,65 @@ const GQL_CURATED_2C: &[&str] = &[
     r#"g.with("traversal.max_materialized_bytes", 64).gql("MATCH (p:person {name: 'marko'}) RETURN [(p)-->(x) | x.name] AS l").toList()"#,
 ];
 
+/// Stage 2d scripts (feature `gql`): `UNION` / `UNION ALL` with reordered columns, `NEXT` after
+/// a linear query and after a `UNION`, `[OPTIONAL] CALL { }` with every scope form (Cypher's
+/// importing `WITH` included), nested and with a `UNION` body, top-k per row, `COUNT { }`,
+/// `COLLECT { }`, whole-query `EXISTS`, a body served by `gql:lookup` through a property index,
+/// the list functions; then the plan of a `CALL` (`flat_map`) and two refused queries.
+#[cfg(feature = "gql")]
+const GQL_CURATED_2D: &[&str] = &[
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, 'p' AS k UNION MATCH (s:software) RETURN 's' AS k, s.name AS n NEXT RETURN k, n ORDER BY k, n").toList()"#,
+    r#"g.gql("MATCH (p:person)-->(x) RETURN x.name AS n UNION ALL MATCH (s:software)<--(y) RETURN y.name AS n NEXT RETURN n, count(*) AS c ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY n DESC LIMIT 2 UNION MATCH (s:software) RETURN s.name AS n ORDER BY n LIMIT 1 NEXT RETURN n ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name AS a, s.name AS b ORDER BY a, b").toList()"#,
+    r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name AS n, made ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (s:software) CALL (s) { MATCH (s)<-[:created]-(p) RETURN p.name AS who ORDER BY p.age DESC LIMIT 2 } RETURN s.name AS s, who ORDER BY s, who").toList()"#,
+    r#"g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s {lang: 'none'}) RETURN s } RETURN p.name AS n, s ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:knows]->(f) RETURN f.name AS f } RETURN p.name AS n, f ORDER BY n, f").toList()"#,
+    r#"g.gql("MATCH (p:person) CALL (*) { CALL (p) { MATCH (p)-->(x) RETURN x UNION MATCH (p)<--(x) RETURN x } RETURN count(x) AS c } RETURN p.name AS n, c ORDER BY n").toList()"#,
+    r#"g.gql("FOR i IN [1, 2] CALL { MATCH (s:software) RETURN s.name AS n } RETURN i, n ORDER BY i, n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (p)-->(x) RETURN x UNION MATCH (p)<--(x) RETURN x } AS c, COUNT { (p)-[:created]->() } AS m ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(x) RETURN x.name ORDER BY x.name } AS l ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH s WHERE s.lang = 'java' RETURN s } RETURN p.name AS n ORDER BY n").toList()"#,
+    r#"g.create_index(#{label: "person", key: "age"}); g.gql("FOR a IN [29, 32, 40] CALL (a) { MATCH (p:person) WHERE p.age = a RETURN p.name AS n } RETURN a, n ORDER BY a").toList()"#,
+    r#"g.create_index(#{label: "person", key: "age"}); g.gql("FOR a IN [29, 32, 40] RETURN a, COUNT { MATCH (p:person) WHERE p.age = a } AS c ORDER BY a").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS n, all(x IN [p.age, 30] WHERE x > 25) AS a, any(x IN [(p)-->(y) | y.age] WHERE x > 30) AS b, reduce(s = 0, x IN [(p)-->(y) | y] | s + 1) AS r ORDER BY n").toList()"#,
+    r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f } RETURN p, f").profile().to_string().contains("flat_map(")"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name AS a UNION MATCH (s:software) RETURN s.name AS b").toList()"#,
+    r#"g.gql("RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_2d_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_2D {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 2d, not fail on the way: only the two error cases fail.
+    assert_eq!(failing, 2, "only the two error cases fail");
+    let at = GQL_CURATED_2D.len() - 3;
+    let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2D[at]).result;
+    assert!(
+        result.as_deref().is_ok_and(|text| text.ends_with("true")),
+        "{result:?}"
+    );
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2c_scripts_give_the_same_result_on_both_storages() {

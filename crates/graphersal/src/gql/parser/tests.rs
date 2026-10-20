@@ -641,7 +641,7 @@ fn order_offset_limit_follow_gql_order() {
         "ORDER BY must come before OFFSET / SKIP and LIMIT"
     );
     let f = fail("MATCH (n) RETURN n LIMIT 1 LIMIT 2");
-    assert_eq!(f.expected, ["end of input"]);
+    assert_eq!(f.expected, ["UNION", "NEXT", "end of input"]);
     let f = fail("MATCH (n) RETURN n ORDER n.x");
     assert_eq!(f.expected, ["BY"]);
     let f = fail("MATCH (n) ORDER BY n.x RETURN n");
@@ -689,6 +689,7 @@ fn expected_tokens_and_did_you_mean() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -707,6 +708,7 @@ fn expected_tokens_and_did_you_mean() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -749,6 +751,7 @@ fn expected_tokens_and_did_you_mean() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -1373,6 +1376,7 @@ fn pipeline_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -1387,6 +1391,7 @@ fn pipeline_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -1402,6 +1407,7 @@ fn pipeline_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -1416,6 +1422,7 @@ fn pipeline_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -2299,6 +2306,7 @@ fn queries_may_start_without_match() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -2378,6 +2386,7 @@ fn for_and_unwind_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );
@@ -2392,6 +2401,7 @@ fn for_and_unwind_errors() {
             "FILTER",
             "FOR",
             "UNWIND",
+            "CALL",
             "RETURN"
         ]
     );

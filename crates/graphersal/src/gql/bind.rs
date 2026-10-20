@@ -267,10 +267,10 @@ use std::rc::Rc;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
     CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, LabelExpr,
-    LetClause, LinearQuery, ListComprehension, Literal, MapEntry, MapLiteral, MapProjection,
-    MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier, Query, QueryBlock,
-    ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
-    UnionKind, WithClause,
+    LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral,
+    MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ProjectionItem, Quantifier,
+    Query, QueryBlock, ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -952,7 +952,8 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
             span.start..span.end,
             format!(
                 "the query holds more than {MAX_SUBQUERIES} subqueries (EXISTS and pattern \
-                 predicates), pattern comprehensions included"
+                 predicates), pattern comprehensions included, as are COUNT {{ }} and COLLECT \
+                 {{ }}"
             ),
         )
         .alternative(
@@ -1320,10 +1321,10 @@ struct Binder<'q> {
     later_in_body: Vec<String>,
     /// The variables of the list comprehensions whose `WHERE` / `|` part is being resolved,
     /// innermost last (design M4: locals of one expression, never bindings).
-    locals: Vec<Identifier>,
+    locals: Vec<Local>,
     /// The comprehension variables around a subquery body being bound: not readable inside it
     /// (not yet), named by the error.
-    shelved_locals: Vec<Identifier>,
+    shelved_locals: Vec<Local>,
     /// The scope around each `CALL` body being bound, innermost last (for the message of an
     /// outer name the body does not import).
     calls: Vec<Rc<Names>>,
@@ -1635,7 +1636,7 @@ impl<'q> Binder<'q> {
                 "write the same kind between every operand, or combine the parts with NEXT, \
                  as in RETURN 1 AS x UNION ALL RETURN 1 AS x NEXT RETURN x UNION RETURN 2 AS x",
             )
-            .topic(GqlHelpTopic::Names)
+            .topic(GqlHelpTopic::Composite)
             .into());
         }
         Ok(())
@@ -1742,7 +1743,7 @@ impl<'q> Binder<'q> {
                     ),
                 )
                 .alternative(format!("name `{}` once", var.name))
-                .topic(GqlHelpTopic::Scope)
+                .topic(GqlHelpTopic::Call)
                 .into());
             }
         }
@@ -1867,9 +1868,14 @@ impl<'q> Binder<'q> {
             .matches
             .iter()
             .flat_map(declared_names)
-            .find(|var| self.shelved_locals.iter().any(|l| l.name == var.name))
+            .find_map(|var| {
+                self.shelved_locals
+                    .iter()
+                    .find(|l| l.var.name == var.name)
+                    .map(|l| (var, l.owner))
+            })
         {
-            return Err(local_in_subquery(var));
+            return Err(local_in_subquery(var.0, var.1));
         }
         self.bound_clauses = 0;
         self.later_clauses = linear
@@ -2025,7 +2031,7 @@ impl<'q> Binder<'q> {
                  in MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN \
                  s.name AS name",
             )
-            .topic(GqlHelpTopic::Names)
+            .topic(GqlHelpTopic::Composite)
             .into());
         }
         let mut slots: Vec<Option<Column>> = columns.into_iter().map(Some).collect();
@@ -2099,7 +2105,7 @@ impl<'q> Binder<'q> {
                     "rename the column inside the body, as in RETURN ... AS {}2",
                     name.name
                 ))
-                .topic(GqlHelpTopic::Scope)
+                .topic(GqlHelpTopic::Call)
                 .into());
             }
             let site = Site {
@@ -3078,14 +3084,25 @@ impl<'q> Binder<'q> {
         if let ComprehensionForm::Reduce(accumulator) = &comprehension.form {
             result = self.check_local(ctx, &accumulator.variable, comprehension);
             if result.is_ok() {
-                self.locals.push(accumulator.variable.clone());
+                self.locals.push(Local {
+                    var: accumulator.variable.clone(),
+                    owner: LocalOwner::Accumulator,
+                });
             }
         }
         if result.is_ok() {
             result = self.check_local(ctx, &comprehension.variable, comprehension);
         }
         if result.is_ok() {
-            self.locals.push(comprehension.variable.clone());
+            let owner = match &comprehension.form {
+                ComprehensionForm::List => LocalOwner::List,
+                ComprehensionForm::Predicate(predicate) => LocalOwner::Predicate(*predicate),
+                ComprehensionForm::Reduce(_) => LocalOwner::ReduceItem,
+            };
+            self.locals.push(Local {
+                var: comprehension.variable.clone(),
+                owner,
+            });
             for part in [&comprehension.filter, &comprehension.map]
                 .into_iter()
                 .flatten()
@@ -3114,8 +3131,11 @@ impl<'q> Binder<'q> {
         let name = &var.name;
         let in_scope = self.scope.get(name).is_some()
             || ctx.aliases.iter().any(|(alias, _)| alias == name)
-            || self.locals.iter().any(|local| local.name == *name)
-            || self.shelved_locals.iter().any(|local| local.name == *name);
+            || self.locals.iter().any(|local| local.var.name == *name)
+            || self
+                .shelved_locals
+                .iter()
+                .any(|local| local.var.name == *name);
         let used = self.taken.contains(name.as_str())
             || self.dropped.contains_key(name)
             || self.hidden.contains_key(name)
@@ -3208,7 +3228,7 @@ impl<'q> Binder<'q> {
 
     fn variable(&self, ctx: Ctx<'_>, var: &Identifier, refs: &mut Refs) -> BResult<()> {
         // A comprehension variable reads no binding (it shadows nothing: `check_local`).
-        if self.locals.iter().any(|local| local.name == var.name) {
+        if self.locals.iter().any(|local| local.var.name == var.name) {
             return Ok(());
         }
         if let Some((_, column)) = ctx.aliases.iter().find(|(name, _)| *name == var.name) {
@@ -3256,8 +3276,12 @@ impl<'q> Binder<'q> {
     /// The error of a name not in scope.
     fn undefined(&self, ctx: Ctx<'_>, var: &Identifier) -> Box<GqlErrorBuilder> {
         let name = &var.name;
-        if self.shelved_locals.iter().any(|local| local.name == *name) {
-            return local_in_subquery(var);
+        if let Some(local) = self
+            .shelved_locals
+            .iter()
+            .find(|local| local.var.name == *name)
+        {
+            return local_in_subquery(var, local.owner);
         }
         if self.pending_let.iter().any(|n| n == name) {
             return semantic(
@@ -3299,7 +3323,7 @@ impl<'q> Binder<'q> {
                     "add `{name}` to the RETURN items before NEXT, as in RETURN ..., {name} \
                      NEXT ..."
                 ))
-                .topic(GqlHelpTopic::Scope)
+                .topic(GqlHelpTopic::Composite)
                 .into();
             }
             None => {}
@@ -3329,7 +3353,7 @@ impl<'q> Binder<'q> {
             .alternative(format!(
                 "return it from the body, as in CALL {{ MATCH ({name}) RETURN {name} }}"
             ))
-            .topic(GqlHelpTopic::Scope)
+            .topic(GqlHelpTopic::Call)
             .into();
         }
         if let Some(&hidden) = self.hidden.get(name) {
@@ -3390,7 +3414,7 @@ impl<'q> Binder<'q> {
                 "name it in the variable scope clause, as in CALL ({name}) {{ ... }}, or import \
                  every variable with CALL (*) {{ ... }}"
             ))
-            .topic(GqlHelpTopic::Scope)
+            .topic(GqlHelpTopic::Call)
             .into();
         }
         let in_scope = self
@@ -3905,9 +3929,14 @@ impl<'q> Binder<'q> {
             .matches
             .iter()
             .flat_map(declared_names)
-            .find(|var| self.locals.iter().any(|local| local.name == var.name))
+            .find_map(|var| {
+                self.locals
+                    .iter()
+                    .find(|l| l.var.name == var.name)
+                    .map(|l| (var, l.owner))
+            })
         {
-            return Err(local_in_subquery(var));
+            return Err(local_in_subquery(var.0, var.1));
         }
         if subquery.form == SubqueryForm::PatternPredicate {
             self.check_pattern_predicate(ctx, subquery)?;
@@ -4823,17 +4852,69 @@ const IN_REDUCE: &str = "inside the | part of reduce()";
 
 const IN_PATTERN_COMPREHENSION: &str = "inside the | part of a pattern comprehension";
 
-/// A comprehension variable named inside a subquery body (not yet: the body is a child
-/// traversal planned apart from the item being iterated).
-fn local_in_subquery(var: &Identifier) -> Box<GqlErrorBuilder> {
+/// A local of one expression (design M4): the variable of a list comprehension, of a list
+/// predicate or of `reduce`, or the accumulator of `reduce`.
+#[derive(Debug, Clone)]
+struct Local {
+    var: Identifier,
+    owner: LocalOwner,
+}
+
+/// What binds a [`Local`], for messages.
+#[derive(Debug, Clone, Copy)]
+enum LocalOwner {
+    /// `[x IN list | ..]`.
+    List,
+    /// `all` / `any` / `none` / `single(x IN list WHERE ..)`.
+    Predicate(ListPredicate),
+    /// The accumulator `s` of `reduce(s = init, x IN list | ..)`.
+    Accumulator,
+    /// The variable `x` of `reduce(s = init, x IN list | ..)`.
+    ReduceItem,
+}
+
+/// A variable of a list comprehension, a list predicate or `reduce` named inside a subquery
+/// body (not yet: the body is a child traversal planned apart from the item being iterated);
+/// the message names the construct that binds it.
+fn local_in_subquery(var: &Identifier, owner: LocalOwner) -> Box<GqlErrorBuilder> {
     let name = &var.name;
+    let (what, alternative) = match owner {
+        LocalOwner::List => (
+            format!("the comprehension variable `{name}`"),
+            format!(
+                "test `{name}` outside the subquery, as in [{name} IN list WHERE {name} > 0 AND \
+                 EXISTS {{ MATCH (n)-->() }}]"
+            ),
+        ),
+        LocalOwner::Predicate(predicate) => {
+            let f = predicate.name();
+            (
+                format!("the variable `{name}` of {f}()"),
+                format!(
+                    "test `{name}` outside the subquery, as in {f}({name} IN list WHERE {name} > \
+                     0 AND EXISTS {{ MATCH (n)-->() }})"
+                ),
+            )
+        }
+        LocalOwner::Accumulator => (
+            format!("the accumulator `{name}` of reduce()"),
+            format!(
+                "read `{name}` outside the subquery, as in reduce({name} = 0, x IN list | {name} \
+                 + COUNT {{ MATCH (n)-->() }})"
+            ),
+        ),
+        LocalOwner::ReduceItem => (
+            format!("the variable `{name}` of reduce()"),
+            format!(
+                "read `{name}` outside the subquery, as in reduce(s = 0, {name} IN list | s + \
+                 {name} * COUNT {{ MATCH (n)-->() }})"
+            ),
+        ),
+    };
     not_yet(
         var.span,
-        &format!("reading the comprehension variable `{name}` inside a subquery"),
-        &format!(
-            "test `{name}` outside the subquery, as in [{name} IN list WHERE {name} > 0 AND \
-             EXISTS {{ MATCH (n)-->() }}]"
-        ),
+        &format!("reading {what} inside a subquery"),
+        &alternative,
     )
 }
 

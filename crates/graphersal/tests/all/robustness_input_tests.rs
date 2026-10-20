@@ -3322,3 +3322,309 @@ fn random_gql_2d_list_functions_never_panic_and_equal_their_rewrites() {
     }
     fatal.assert_empty("GQL 2d list functions");
 }
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2d.T6: composite queries (UNION, NEXT, CALL { }, COUNT { }, COLLECT { })
+// ---------------------------------------------------------------------------------------------
+
+/// Valid composite queries: the base documents of their mutations.
+#[cfg(feature = "gql")]
+const GQL_2D_CORPUS: &[&str] = &[
+    "MATCH (p:person) RETURN p.name AS n UNION MATCH (s:software) RETURN s.name AS n",
+    "RETURN 1 AS x UNION ALL RETURN 1 AS x NEXT RETURN x, count(*) AS c",
+    "MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name",
+    "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.name LIMIT 1 } RETURN p, f",
+    "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN p, s",
+    "MATCH (p) CALL { WITH p MATCH (p)-->(f) RETURN count(f) AS c } RETURN p, c",
+    "CALL { MATCH (s:software) RETURN s } RETURN s.name AS n",
+    "MATCH (p) CALL (*) { CALL (p) { RETURN p.name AS a UNION RETURN 'x' AS a } RETURN a } RETURN a",
+    "MATCH (p:person) RETURN COUNT { MATCH (p)-->(f) RETURN f UNION MATCH (p)<--(f) RETURN f } AS c",
+    "MATCH (p:person) RETURN COLLECT { MATCH (p)-->(f) RETURN f.name ORDER BY f.name } AS l",
+    "MATCH (p) WHERE EXISTS { MATCH (p)-->(f) WITH f WHERE f.age > 30 RETURN f } RETURN p",
+    "MATCH (p:person) RETURN p.name AS n ORDER BY n LIMIT 2 UNION RETURN 'z' AS n NEXT RETURN n ORDER BY n DESC",
+];
+
+/// Tokens of stage 2d for the composite token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2D_TOKENS: &[&str] = &[
+    "UNION",
+    "UNION ALL",
+    "UNION DISTINCT",
+    "NEXT",
+    "CALL",
+    "CALL (p) {",
+    "CALL (*) {",
+    "CALL {",
+    "OPTIONAL CALL",
+    "COUNT {",
+    "COLLECT {",
+    "EXISTS {",
+    "IN TRANSACTIONS",
+    "{",
+    "}",
+    "(",
+    ")",
+    "(p)",
+    "(p)-->(f)",
+    "MATCH",
+    "WITH p",
+    "RETURN",
+    "RETURN p",
+    "RETURN 1 AS x",
+    "AS x",
+    "ORDER BY",
+    "LIMIT 1",
+    "count(*)",
+    "p",
+    "f",
+    "x",
+    ",",
+    "1",
+];
+
+/// A random stage 2d query as pairs (or triples) of forms with the same rows; `kind` picks the
+/// construct:
+/// 0. a `CALL` body (nested 0 to 2 times in further `CALL`s) vs a later `MATCH`;
+/// 1. a counting `CALL` body vs `COUNT { }` vs `size()` of a pattern comprehension;
+/// 2. `COLLECT { }` vs the pattern comprehension;
+/// 3. `UNION` vs `OR` with `DISTINCT`;
+/// 4. `UNION ALL` vs a `FOR` over two filters;
+/// 5. `NEXT` vs `FILTER`, and an aggregate after `NEXT` over a `UNION` vs `WITH DISTINCT`;
+/// 6. a `UNION` body of a `CALL` vs a `DISTINCT` body over either direction;
+/// 7. a whole-query `EXISTS` body vs the `MATCH`-only one.
+#[cfg(feature = "gql")]
+fn random_gql_2d_forms(rng: &mut Rng, kind: usize) -> Vec<Vec<String>> {
+    let (head, vars, imports): (&str, &[&str], &[&str]) = match rng.below(7) {
+        0 => ("MATCH (a:person)", &["a"], &["a"]),
+        1 => ("MATCH (a)-[e]->(b)", &["a", "e", "b"], &["a", "b"]),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            &["a", "b"],
+            &["b", "a"],
+        ),
+        3 => (
+            "MATCH (a:person) WITH a, count(*) AS c",
+            &["a", "c"],
+            &["a"],
+        ),
+        4 => (
+            "FOR n IN ['marko', 'lop', 'nobody'] MATCH (a {name: n})",
+            &["n", "a"],
+            &["a"],
+        ),
+        5 => ("MATCH p = (a)-[:knows]->(b)", &["a", "b"], &["b", "a"]),
+        _ => ("MATCH (a:software), (b:person)", &["a", "b"], &["a", "b"]),
+    };
+    let x = *rng.pick(imports);
+    let keys = vars.join(", ");
+    let (pattern, condition, map) = random_gql_2c_body(rng, x);
+    let conditions = [
+        format!("{x}.age > 30"),
+        format!("{x}.name STARTS WITH 'j'"),
+        format!("EXISTS {{ ({x})-[:created]->() }}"),
+        format!("{x}.age IS NULL"),
+        format!("COUNT {{ ({x})--() }} > 2"),
+        format!("{x}.name IN ['lop', 'marko', 'vadas']"),
+        format!("size(COLLECT {{ MATCH ({x})-->(z) RETURN z }}) = 1"),
+    ];
+    let c1 = rng.pick(&conditions).clone();
+    let c2 = rng.pick(&conditions).clone();
+    match kind {
+        0 => {
+            let mut body = format!("MATCH {pattern}{condition} RETURN {map} AS v");
+            for _ in 0..rng.below(3) {
+                body = format!("CALL ({x}) {{ {body} }} RETURN v");
+            }
+            vec![vec![
+                format!("{head} CALL ({x}) {{ {body} }} RETURN {keys}, v"),
+                format!("{head} MATCH {pattern}{condition} RETURN {keys}, {map} AS v"),
+            ]]
+        }
+        1 => vec![vec![
+            format!(
+                "{head} CALL ({x}) {{ MATCH {pattern}{condition} RETURN count(*) AS s }} RETURN \
+                 {keys}, s"
+            ),
+            format!("{head} RETURN {keys}, COUNT {{ MATCH {pattern}{condition} }} AS s"),
+            format!("{head} RETURN {keys}, size([{pattern}{condition} | 1]) AS s"),
+        ]],
+        2 => vec![vec![
+            format!(
+                "{head} RETURN {keys}, COLLECT {{ MATCH {pattern}{condition} RETURN {map} AS v \
+                 }} AS l"
+            ),
+            format!("{head} RETURN {keys}, [{pattern}{condition} | {map}] AS l"),
+        ]],
+        3 => vec![vec![
+            format!("{head} FILTER {c1} RETURN {keys} UNION {head} FILTER {c2} RETURN {keys}"),
+            format!("{head} FILTER {c1} OR {c2} RETURN DISTINCT {keys}"),
+        ]],
+        4 => vec![vec![
+            format!("{head} FILTER {c1} RETURN {keys} UNION ALL {head} FILTER {c2} RETURN {keys}"),
+            format!(
+                "{head} FOR t IN [1, 2] FILTER CASE WHEN t = 1 THEN {c1} ELSE {c2} END RETURN \
+                 {keys}"
+            ),
+        ]],
+        5 => vec![
+            vec![
+                format!("{head} RETURN {keys} NEXT FILTER {c1} RETURN {keys}"),
+                format!("{head} FILTER {c1} RETURN {keys}"),
+            ],
+            vec![
+                format!(
+                    "{head} FILTER {c1} RETURN {keys} UNION {head} FILTER {c2} RETURN {keys} \
+                     NEXT RETURN count(*) AS k"
+                ),
+                format!("{head} FILTER {c1} OR {c2} WITH DISTINCT {keys} RETURN count(*) AS k"),
+            ],
+        ],
+        6 => vec![vec![
+            format!(
+                "{head} CALL ({x}) {{ MATCH ({x})-->(y) RETURN y UNION MATCH ({x})<--(y) RETURN \
+                 y }} RETURN {keys}, y"
+            ),
+            format!("{head} CALL ({x}) {{ MATCH ({x})--(y) RETURN DISTINCT y }} RETURN {keys}, y"),
+        ]],
+        _ => vec![vec![
+            format!(
+                "{head} FILTER EXISTS {{ MATCH {pattern}{condition} RETURN {map} AS v }} RETURN \
+                 {keys}"
+            ),
+            format!("{head} FILTER EXISTS {{ MATCH {pattern}{condition} }} RETURN {keys}"),
+        ]],
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2d_composite_queries_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_D7E6);
+    let mut generated: Vec<Vec<String>> = Vec::new();
+    for _ in 0..budget(100) {
+        for _ in 0..3 {
+            let kind = rng.below(8);
+            generated.extend(random_gql_2d_forms(&mut rng, kind));
+        }
+    }
+    // Every generated query parses; enough of them run; the forms of a group give the same
+    // rows (or the same error), with and without property indexes.
+    let mut ran = 0;
+    let mut total = 0;
+    for forms in &generated {
+        total += forms.len();
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (form, result) in forms.iter().zip(&results).skip(1) {
+                    if result.0 != results[0].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{form}\n  {:?}",
+                            forms[0], results[0].0, result.0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 4 >= total * 3,
+        "only {ran} of {total} generated 2d queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2d queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2d queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2D_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting, long chains and unbounded bodies: a result or a bounded error.
+    let mut calls = "RETURN 1 AS x".to_string();
+    let mut counts = "MATCH (n) RETURN n".to_string();
+    for _ in 0..20 {
+        calls = format!("CALL {{ {calls} UNION ALL RETURN 2 AS x }} RETURN x");
+        counts = format!("MATCH (n) WHERE COUNT {{ {counts} }} > 0 RETURN n");
+    }
+    texts.push(calls);
+    texts.push(counts);
+    texts.push(
+        (0..300)
+            .map(|i| format!("RETURN {i} AS x"))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL "),
+    );
+    texts.push(format!(
+        "RETURN 1 AS x {}RETURN x",
+        "NEXT RETURN x + 1 AS x ".repeat(300)
+    ));
+    texts.push(format!(
+        "MATCH (p) {} RETURN p",
+        (0..60)
+            .map(|i| format!("CALL (p) {{ MATCH (p)--(q{i}) RETURN count(q{i}) AS c{i} }}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    texts.push(
+        "MATCH (a), (b), (c) CALL (a, b, c) { MATCH (a)--(d)--(e) RETURN [d, e, b, c] AS l } \
+         RETURN l"
+            .to_string(),
+    );
+    texts.push(
+        "MATCH (p) CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q UNION ALL MATCH (p)-[]-{1,}(q) \
+         RETURN q } RETURN count(*) AS c"
+            .to_string(),
+    );
+    texts.push(
+        "MATCH (p) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN COLLECT { MATCH (q)-[]-{1,}(r) \
+         RETURN r } AS l } AS l"
+            .to_string(),
+    );
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2D_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2D_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) RETURN p");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2d composite");
+}

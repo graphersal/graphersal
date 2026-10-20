@@ -7266,15 +7266,15 @@ mod gql {
         );
         assert!(
             report.contains(
-                "  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN"
+                "  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN"
             ),
             "{report}"
         );
         assert!(report.contains("  GQLSTATUS: 42001"), "{report}");
         assert!(
             report.contains(
-                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN at \
-                 the marked position. Fix the query at the marked position: a GQL read query is \
+                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, \
+                 RETURN at the marked position. Fix the query at the marked position: a GQL read query is \
                  MATCH \
                  <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, \
                  LET or FILTER clauses, then RETURN <items>, for example \
@@ -7750,7 +7750,7 @@ mod gql {
         assert!(
             report.contains(
                 "  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, \
-                 UNWIND, RETURN"
+                 UNWIND, CALL, RETURN"
             ),
             "{report}"
         );
@@ -7770,7 +7770,7 @@ mod gql {
         assert!(
             help.contains(
                 "Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, \
-                 RETURN at the marked position."
+                 CALL, ... at the marked position."
             ),
             "{help}"
         );
@@ -8724,7 +8724,7 @@ mod gql {
 
     #[test]
     fn gql_syntax_advice_names_for_and_the_clauses_a_query_may_start_with() {
-        let all = "MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, RETURN";
+        let all = "MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN";
         for query in ["FOO 1", "", "(a) RETURN a"] {
             let (err, report) = gql_failure(|g| g.gql(query).to_list());
             assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
@@ -9439,5 +9439,350 @@ mod gql {
             "{help}"
         );
         assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T6: `UNION` and `NEXT` errors carry the composite-query advice (same column
+    /// names in any order, one kind of `UNION` per chain, `NEXT` passes on only the columns
+    /// of the `RETURN` before it); the column mismatch names both column sets.
+    #[test]
+    fn gql_union_and_next_errors_explain_composite_queries() {
+        let advice = "UNION combines the records of queries that return the same column names, \
+             in any order (the result keeps the order of the first query): UNION (or UNION \
+             DISTINCT) removes duplicate records, UNION ALL keeps them, and one chain of UNIONs \
+             uses one kind. Each query of a UNION has its own variables, ORDER BY, OFFSET and \
+             LIMIT. NEXT passes the records of the statement before it on by their column names \
+             (only those), so it sorts, filters or aggregates a UNION as a whole, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN \
+             s.name AS name NEXT RETURN name ORDER BY name LIMIT 3\").";
+        for (query, message, alternative) in [
+            (
+                "MATCH (p:person) RETURN p.name AS name, p.age AS age UNION MATCH (s:software) \
+                 RETURN s.name AS n",
+                "the operands of UNION must return the same column names: the first returns \
+                 `name`, `age`, this one returns `n` (`name` is missing)",
+                "name the columns alike with AS in every operand",
+            ),
+            (
+                "RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x",
+                "UNION ALL is mixed with UNION in one query",
+                "write the same kind between every operand, or combine the parts with NEXT",
+            ),
+            (
+                "MATCH (p:person) RETURN p.name AS n NEXT RETURN p",
+                "the variable `p` is not in scope: the RETURN before NEXT does not return it",
+                "add `p` to the RETURN items before NEXT",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(alternative), "{query}: {help}");
+            assert!(help.ends_with(advice), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// Stage 2d.T6: `CALL { }` errors carry the CALL advice (imports by the scope clause, new
+    /// returned names, per-row semantics, OPTIONAL CALL), the refused body without `RETURN` and
+    /// `IN TRANSACTIONS` included.
+    #[test]
+    fn gql_call_errors_explain_imports_and_returned_columns() {
+        let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query \
+             once for each incoming row: the body reads only the variables its scope clause \
+             names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
+             those of its first WITH), and passes on only the columns of its RETURN, which must \
+             be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
+             in g.gql(\"MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) \
+             AS made } RETURN p.name, made\"). A row whose body returns no record is dropped; \
+             OPTIONAL CALL keeps it with NULL columns.";
+        for (query, kind, message) in [
+            (
+                "MATCH (p:person) CALL (p) { RETURN 1 AS p } RETURN p",
+                GqlErrorKind::Semantic,
+                "the CALL body returns `p`, which is already defined outside it",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f } RETURN f, x",
+                GqlErrorKind::Semantic,
+                "the variable `x` is not defined",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (f) WHERE f.age > p.age RETURN f.name AS n } \
+                 RETURN f",
+                GqlErrorKind::Semantic,
+                "the variable `f` is not in scope: it is bound inside a CALL body",
+            ),
+            (
+                "MATCH (p:person), (q:person) CALL (p) { RETURN q.name AS n } RETURN n",
+                GqlErrorKind::Semantic,
+                "the variable `q` is not imported into the CALL body",
+            ),
+            (
+                "MATCH (p:person) CALL (p, p) { RETURN p.name AS n } RETURN n",
+                GqlErrorKind::Semantic,
+                "the variable `p` is imported twice by this CALL",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-->(f) } RETURN p",
+                GqlErrorKind::Refused,
+                "a CALL { } body without RETURN (a unit subquery) only makes sense for writes",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { RETURN 1 AS x } IN TRANSACTIONS RETURN x",
+                GqlErrorKind::Refused,
+                "CALL { } IN TRANSACTIONS commits writes in batches",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, kind, "{query}: {report}");
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            if !message.ends_with("is not defined") {
+                assert!(help.ends_with(advice), "{query}: {help}");
+            }
+            assert_examples_run(&help);
+        }
+    }
+
+    /// Stage 2d.T6: the expected tokens name `CALL` among the clauses and `UNION` / `NEXT`
+    /// after a complete result statement; a clause after `RETURN` names `NEXT` with a runnable
+    /// fix, and the syntax advice shows CALL, UNION and NEXT.
+    #[test]
+    fn gql_expected_tokens_name_call_union_and_next() {
+        let report = gql_report("MATCH (p:person) RETURN p.name AS n x");
+        assert!(
+            report.contains(
+                "  expected:  `,`, ORDER BY, OFFSET, SKIP, LIMIT, UNION, NEXT, end of input"
+            ),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) RETURN p LIMIT 1 x");
+        assert!(
+            report.contains("  expected:  UNION, NEXT, end of input"),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) CALL (p) { RETURN p.name AS n x } RETURN n");
+        assert!(report.contains("UNION, NEXT, `}`"), "{report}");
+        let report = gql_report("FOO");
+        assert!(
+            report.contains("MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN"),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) RETURN p NEX MATCH (p)-->(f) RETURN f");
+        assert!(report.contains("  did you mean: NEXT"), "{report}");
+        let help = gql_help("MATCH (p:person) RETURN p MATCH (p)-[:created]->(s) RETURN s.name");
+        assert!(
+            help.starts_with(
+                "put every MATCH before the RETURN, or continue with NEXT, which passes the \
+                 columns of the RETURN on to the next statement, as in MATCH (p:person) RETURN \
+                 p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name, or chain Gremlin steps \
+                 after gql()."
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains(
+                "CALL (p) { .. RETURN .. } runs a query for each row, UNION combines the records \
+                 of two queries and NEXT continues after a RETURN, as in g.gql(\"MATCH (p:person) \
+                 RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name\")."
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        assert!(
+            run_ok(
+                "MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name"
+            ) > 0
+        );
+    }
+
+    fn run_ok(query: &str) -> usize {
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph.read().traversal().gql(query).to_list();
+        rows.unwrap_or_else(|e| panic!("{query}: {e}")).len()
+    }
+
+    /// Stage 2d.T6: a resource limit inside a `CALL { }` body names the CALL (also inside a
+    /// `COUNT { }` / `EXISTS` body); one inside a `union()` operand of a `COLLECT { }` /
+    /// `COUNT { }` body names that subquery; a top-level `UNION` operand is the query itself.
+    #[test]
+    fn gql_limits_inside_call_and_union_name_the_construct() {
+        let call = "inside a CALL { } subquery of the gql() query";
+        let why_call = "A CALL { } subquery runs its body for each incoming row and keeps every \
+             record it returns, so its loop runs until the row's last match is found.";
+        for (query, place, why) in [
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } RETURN q.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } RETURN \
+                 q.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } \
+                 RETURN q } AS c",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } \
+                 RETURN q } RETURN p.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN q.name AS n \
+                 UNION RETURN p.name AS n } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { RETURN p AS q UNION MATCH (p)-[]-{1,}(q) \
+                 RETURN q } AS c",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "The loop of the quantified edge -[]-{{1,}} {place} ran 2 iterations"
+                )),
+                "{query}: {help}"
+            );
+            assert!(help.contains(why), "{query}: {help}");
+            assert!(!help.contains("EXISTS subquery"), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // A top-level UNION operand and a NEXT block are the query itself.
+        for query in [
+            "RETURN 1 AS q UNION MATCH (p:person)-[]-{1,}(q) RETURN q",
+            "MATCH (p:person) RETURN p NEXT MATCH (p)-[]-{1,}(q) RETURN q",
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "The loop of the quantified edge -[]-{1,} of the gql() query ran 2 iterations"
+                ),
+                "{query}: {help}"
+            );
+        }
+        // A traverser limit inside a CALL body.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 5)
+                .gql("MATCH (p:person) CALL (p) { MATCH (s)-[]-{1,}(q) RETURN q } RETURN q")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(help.contains("inside a CALL { } subquery"), "{help}");
+        assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T6: a variable of `all()` / `any()` / `none()` / `single()` or `reduce()`
+    /// named inside a subquery body is "not yet" with a message naming the function.
+    #[test]
+    fn gql_list_function_variables_inside_a_subquery_name_the_function() {
+        for (query, message) in [
+            (
+                "MATCH (p) WHERE all(x IN [1] WHERE EXISTS { MATCH (x)-->() }) RETURN p",
+                "reading the variable `x` of all() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE any(x IN [1] WHERE EXISTS { MATCH (p)-->(x) }) RETURN p",
+                "reading the variable `x` of any() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE none(x IN [1] WHERE COUNT { MATCH (x)-->() } > 0) RETURN p",
+                "reading the variable `x` of none() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE single(x IN [1] WHERE EXISTS { MATCH (x) }) RETURN p",
+                "reading the variable `x` of single() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN reduce(s = 0, x IN [1] | s + COUNT { MATCH (x)-->() }) AS r",
+                "reading the variable `x` of reduce() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN reduce(s = 0, x IN [1] | s + COUNT { MATCH (s)-->() }) AS r",
+                "reading the accumulator `s` of reduce() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN [x IN [1] WHERE EXISTS { MATCH (x)-->() }] AS l",
+                "reading the comprehension variable `x` inside a subquery",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{query}: {report}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+        }
+    }
+
+    /// Stage 2d.T6: COUNT { } and COLLECT { } count against both subquery limits, and the
+    /// messages say so; the bodies-run advice names CALL as the form that is not copied.
+    #[test]
+    fn gql_subquery_limits_name_count_and_collect() {
+        let many = vec!["COUNT { (p)-->(q) }"; 65].join(" + ");
+        let (err, report) =
+            gql_failure(|g| g.gql(&format!("MATCH (p) RETURN {many} AS n")).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains(
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates), \
+                 pattern comprehensions included, as are COUNT { } and COLLECT { }"
+            ),
+            "{report}"
+        );
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = COUNT {{ (p)-->(x) }} > 0 LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        let (err, report) = gql_failure(|g| g.gql(&substituted).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains("runs its own copy), COUNT { } and COLLECT { } included"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "(the same holds for COUNT { } and COLLECT { }), or join the patterns into fewer \
+                 subqueries; a CALL (a) { .. } body is not copied: it runs once per row, and \
+                 later clauses read its columns, as in MATCH (p) CALL (p) { OPTIONAL MATCH \
+                 (p)-->(f) RETURN count(f) AS n } FILTER n > 0 RETURN p, n"
+            ),
+            "{help}"
+        );
+        assert_eq!(
+            run_ok(
+                "MATCH (p) CALL (p) { OPTIONAL MATCH (p)-->(f) RETURN count(f) AS n } FILTER n > \
+                 0 RETURN p, n"
+            ),
+            3
+        );
     }
 }

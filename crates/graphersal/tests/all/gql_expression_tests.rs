@@ -1341,3 +1341,47 @@ fn the_deepest_accepted_list_function_nesting_runs() {
         assert!(ran > 15, "{form}: nothing ran below the nesting bound");
     }
 }
+
+/// Stage 2d.T6: each list function form at the deepest nesting the parser accepts runs on the
+/// default 2 MiB test thread (debug builds included; measured 1.27 MB with `RUST_MIN_STACK`),
+/// and one level more is the bounded 54001: `reduce` in the `|` part (42 levels), `reduce` in
+/// the accumulator's initial value (63), `any` in the list (42), `all` inside a list
+/// comprehension's `WHERE` (41).
+#[test]
+fn the_deepest_list_function_forms_run_within_the_stack() {
+    let graph = modern();
+    let nest = |form: &str, depth: usize| {
+        let mut expr = "1".to_string();
+        for i in 0..depth {
+            expr = match form {
+                "reduce" => format!("reduce(s{i} = 0, x{i} IN [1] | s{i} + {expr})"),
+                "init" => format!("reduce(s{i} = {expr}, x{i} IN [1] | s{i})"),
+                "any" => format!("any(x{i} IN [{expr}] WHERE true)"),
+                _ => {
+                    format!("head([x{i} IN [1] WHERE all(y{i} IN [x{i}] WHERE y{i} > 0) | {expr}])")
+                }
+            };
+        }
+        format!("RETURN {expr} AS c")
+    };
+    for (form, deepest, value) in [
+        ("reduce", 42, "i:1"),
+        ("init", 63, "i:1"),
+        ("any", 42, "true"),
+        ("all", 41, "i:1"),
+    ] {
+        let rows = rows(&graph, &nest(form, deepest));
+        assert_eq!(rows.len(), 1, "{form}");
+        assert_eq!(norm(column(&rows[0], "c")), value, "{form}");
+        let error = graph
+            .read()
+            .traversal()
+            .gql(&nest(form, deepest + 1))
+            .to_list()
+            .expect_err("one level past the bound");
+        assert!(
+            matches!(error.root_cause(), TraverserError::Gql { gqlstatus, .. } if gqlstatus == "54001"),
+            "{form}: {error}"
+        );
+    }
+}

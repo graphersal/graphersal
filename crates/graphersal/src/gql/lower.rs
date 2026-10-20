@@ -2250,12 +2250,16 @@ impl<'q> Lowering<'q> {
             format!(
                 "the query runs more than {MAX_LOWERED_SUBQUERIES} subquery bodies once its LET \
                  variables are substituted (each place that reads a LET holding EXISTS or a \
-                 pattern comprehension runs its own copy)"
+                 pattern comprehension runs its own copy), COUNT {{ }} and COLLECT {{ }} \
+                 included"
             ),
         )
         .alternative(
             "write the EXISTS or the pattern comprehension where it is used instead of in a LET \
-             that is read many times, or join the patterns into fewer subqueries",
+             that is read many times (the same holds for COUNT { } and COLLECT { }), or join \
+             the patterns into fewer subqueries; a CALL (a) { .. } body is not copied: it runs \
+             once per row, and later clauses read its columns, as in MATCH (p) CALL (p) { \
+             OPTIONAL MATCH (p)-->(f) RETURN count(f) AS n } FILTER n > 0 RETURN p, n",
         )
         .topic(GqlHelpTopic::Subquery)
         .into_error(self.query)

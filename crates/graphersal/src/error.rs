@@ -4332,6 +4332,11 @@ pub(crate) enum GqlHelpTopic {
     PatternComprehension,
     /// The variable of a list comprehension `[x IN list | expr]` reusing a name (stage 2c).
     ComprehensionVariable,
+    /// `UNION` and `NEXT`: the column names of the operands, one kind of `UNION` per chain,
+    /// what the statement after `NEXT` reads (stage 2d).
+    Composite,
+    /// A `CALL { }` subquery: its imports, its returned columns, its `RETURN` (stage 2d).
+    Call,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
@@ -4363,10 +4368,11 @@ pub enum GqlErrorKind {
     /// parameter, a variable used as the wrong kind of element.
     Semantic,
     /// A construct `gql()` refuses for good: every write clause (`gql()` is read-only), the
-    /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL`), Cypher `id()`.
+    /// undirected edge forms `~[e]~`, `<~`, `~>`, vendor procedures (`CALL db.labels()`),
+    /// `CALL { } IN TRANSACTIONS`, Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern `((a)-->(b)){1,3}`, `sin(x)` or `UNION`.
+    /// pattern `((a)-->(b)){1,3}`, `sin(x)` or `EXCEPT`.
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
@@ -6750,7 +6756,10 @@ fn gql_help(
                  FILTER clauses, then RETURN <items>, for example \
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
                  g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
-                 AS n RETURN p.name, n\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
+                 AS n RETURN p.name, n\"). CALL (p) { .. RETURN .. } runs a query for each \
+                 row, UNION combines the records of two queries and NEXT continues after a \
+                 RETURN, as in g.gql(\"MATCH (p:person) RETURN p NEXT MATCH \
+                 (p)-[:created]->(s) RETURN p.name, s.name\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
                  one row per item of a list, and a query may also start with FOR, LET, WITH, \
                  FILTER or RETURN, as in \
                  g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age\").",
@@ -6763,6 +6772,9 @@ fn gql_help(
              g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2}).",
         ),
         GqlErrorKind::Semantic => help.push_str(gql_semantic_advice(topic)),
+        GqlErrorKind::Refused if topic == GqlHelpTopic::Call => {
+            help.push_str(gql_semantic_advice(topic))
+        }
         GqlErrorKind::Refused if alternative.is_some() => help.push_str(
             "gql() runs read queries (MATCH ... RETURN ...); write the rest of the query as \
              Gremlin steps.",
@@ -6953,6 +6965,26 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              all(), any(), none() and single() and for both variables of reduce(), as in \
              g.gql(\"MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS old, \
              reduce(s = 0, a IN [p.age, 1] | s + a) AS total\")."
+        }
+        GqlHelpTopic::Composite => {
+            "UNION combines the records of queries that return the same column names, in any \
+             order (the result keeps the order of the first query): UNION (or UNION DISTINCT) \
+             removes duplicate records, UNION ALL keeps them, and one chain of UNIONs uses one \
+             kind. Each query of a UNION has its own variables, ORDER BY, OFFSET and LIMIT. \
+             NEXT passes the records of the statement before it on by their column names \
+             (only those), so it sorts, filters or aggregates a UNION as a whole, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN \
+             s.name AS name NEXT RETURN name ORDER BY name LIMIT 3\")."
+        }
+        GqlHelpTopic::Call => {
+            "A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query once \
+             for each incoming row: the body reads only the variables its scope clause names \
+             (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
+             those of its first WITH), and passes on only the columns of its RETURN, which \
+             must be new names; its aggregates, ORDER BY and LIMIT apply to each row's \
+             records, as in g.gql(\"MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) \
+             RETURN count(s) AS made } RETURN p.name, made\"). A row whose body returns no \
+             record is dropped; OPTIONAL CALL keeps it with NULL columns."
         }
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
@@ -7177,8 +7209,9 @@ fn gql_edge_pattern(body: &str) -> String {
 
 /// Where a resource limit inside a lowered GQL query was reached: outside any subquery, inside
 /// an `EXISTS` subquery / pattern predicate (a `filter()` / `not()` child or a hosted child that
-/// stops at its first match), or inside a pattern comprehension (a hosted child ending in
-/// `gql:value`, run to its end).
+/// stops at its first match), inside a pattern comprehension (a hosted child ending in
+/// `gql:value`, run to its end), a `COUNT { }` / `COLLECT { }` subquery or a `CALL { }` body
+/// (the child of `flat_map()`). The innermost of them decides.
 #[cfg(feature = "gql")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GqlSubqueryPlace {
@@ -7189,6 +7222,8 @@ enum GqlSubqueryPlace {
     Count,
     /// A `COLLECT { }` subquery (a hosted child ending in `gql:value` after its `RETURN`).
     Collect,
+    /// A `CALL { }` body (the child of `flat_map()`, run to its end for each row).
+    Call,
 }
 
 #[cfg(feature = "gql")]
@@ -7201,6 +7236,7 @@ impl GqlSubqueryPlace {
             GqlSubqueryPlace::Comprehension => " inside a pattern comprehension [(a)-->(b) | ..]",
             GqlSubqueryPlace::Count => " inside a COUNT { } subquery",
             GqlSubqueryPlace::Collect => " inside a COLLECT { } subquery",
+            GqlSubqueryPlace::Call => " inside a CALL { } subquery",
         }
     }
 
@@ -7223,6 +7259,10 @@ impl GqlSubqueryPlace {
             GqlSubqueryPlace::Collect => {
                 " A COLLECT { } subquery collects every row of its body for each row, so its \
                  loop runs until the row's last match is found."
+            }
+            GqlSubqueryPlace::Call => {
+                " A CALL { } subquery runs its body for each incoming row and keeps every \
+                 record it returns, so its loop runs until the row's last match is found."
             }
         }
     }
@@ -7653,42 +7693,53 @@ impl TraverserError {
         name
     }
 
-    /// Whether the innermost failure ran inside the child of a GQL subquery: a level above the
-    /// failing one is a `filter()` / `not()` step (the `[NOT] EXISTS` fast path) or a `gql:*`
-    /// step (a hosted subquery, the only children those steps hold).
-    #[cfg(feature = "gql")]
-    fn gql_in_subquery(&self) -> bool {
-        let mut hosted = false;
-        let mut current = self;
-        while let TraverserError::StepFailed {
-            step_name, source, ..
-        } = current
-        {
-            if matches!(**source, TraverserError::StepFailed { .. }) {
-                let name = step_name.as_str();
-                hosted |= name.starts_with("filter(")
-                    || name.starts_with("not(")
-                    || name.starts_with("gql:");
-            }
-            current = source;
-        }
-        hosted
-    }
-
-    /// Where the innermost failure ran: inside a GQL subquery child (see
-    /// [`Self::gql_in_subquery`]) whose failing level ends in `gql:value` is a pattern
-    /// comprehension (only its lowering and that of `COLLECT { }` emit that step, always last;
-    /// a `COLLECT { }` body has its `RETURN`, `gql:project` / `gql:aggregate`, or a `union()` of
-    /// operands on that level), one ending in `count()` a `COUNT { }` subquery (only its
-    /// lowering closes a child with it, possibly fused into the step before); any other subquery child is an `EXISTS` body or a
-    /// pattern predicate.
+    /// Where the innermost failure ran (feature `gql`): walking the failing levels from the
+    /// innermost outwards, the first level that is the child of a GQL construct decides. The
+    /// child of a `filter()` / `not()` step (the `[NOT] EXISTS` fast path) or of a `gql:*` step
+    /// (a hosted subquery, the only children those steps hold) is a subquery, classified by
+    /// its own steps: ending in `gql:value` a pattern comprehension (only its lowering and that
+    /// of `COLLECT { }` emit that step, always last; a `COLLECT { }` body has its `RETURN`,
+    /// `gql:project` / `gql:aggregate`, or a `union()` of operands on that level), ending in
+    /// `count()` a `COUNT { }` subquery (only its lowering closes a child with it, possibly
+    /// fused into the step before), else an `EXISTS` body or a pattern predicate. The child of
+    /// `flat_map()` is a `CALL { }` body (the only GQL construct lowered to it). Other levels
+    /// (`union()` operands, `optional()`, `repeat()` bodies, edge forms) are transparent.
     #[cfg(feature = "gql")]
     fn gql_subquery_place(&self) -> GqlSubqueryPlace {
-        if !self.gql_in_subquery() {
-            return GqlSubqueryPlace::Outside;
+        let mut levels: Vec<(&str, &[String])> = Vec::new();
+        let mut current = self;
+        while let TraverserError::StepFailed {
+            step_name,
+            frame,
+            source,
+            ..
+        } = current
+        {
+            let steps = frame.as_deref().map_or(&[][..], |f| f.steps.as_slice());
+            levels.push((step_name.as_str(), steps));
+            current = source;
         }
-        let trace = self.step_trace();
-        let level = trace.last().map_or(&[][..], |frame| frame.steps.as_slice());
+        for pair in levels.windows(2).rev() {
+            let [(parent, _), (_, level)] = pair else {
+                continue;
+            };
+            if parent.starts_with("flat_map(") {
+                return GqlSubqueryPlace::Call;
+            }
+            if parent.starts_with("filter(")
+                || parent.starts_with("not(")
+                || parent.starts_with("gql:")
+            {
+                return Self::gql_subquery_kind(level);
+            }
+        }
+        GqlSubqueryPlace::Outside
+    }
+
+    /// The kind of the subquery whose child runs the steps `level` (see
+    /// [`Self::gql_subquery_place`]).
+    #[cfg(feature = "gql")]
+    fn gql_subquery_kind(level: &[String]) -> GqlSubqueryPlace {
         match level.last() {
             Some(step) if step.starts_with("gql:value(") => {
                 let returns = level.iter().any(|step| {
@@ -7711,11 +7762,11 @@ impl TraverserError {
         }
     }
 
-    /// The steps of the failing level when it runs inside the child of a GQL subquery (see
-    /// [`Self::gql_in_subquery`]).
+    /// The steps of the failing level when it runs inside a GQL subquery or `CALL` body (see
+    /// [`Self::gql_subquery_place`]).
     #[cfg(feature = "gql")]
     fn gql_subquery_steps(&self) -> Option<&[String]> {
-        if !self.gql_in_subquery() {
+        if self.gql_subquery_place() == GqlSubqueryPlace::Outside {
             return None;
         }
         self.step_trace().last().map(|frame| frame.steps.as_slice())
@@ -9546,7 +9597,10 @@ mod tests {
                  FILTER clauses, then RETURN <items>, for example \
                  g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
                  g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
-                 AS n RETURN p.name, n\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
+                 AS n RETURN p.name, n\"). CALL (p) { .. RETURN .. } runs a query for each \
+                 row, UNION combines the records of two queries and NEXT continues after a \
+                 RETURN, as in g.gql(\"MATCH (p:person) RETURN p NEXT MATCH \
+                 (p)-[:created]->(s) RETURN p.name, s.name\"). FOR x IN <list> (Cypher UNWIND <list> AS x) gives \
                  one row per item of a list, and a query may also start with FOR, LET, WITH, \
                  FILTER or RETURN, as in \
                  g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN n, p.age\")."
