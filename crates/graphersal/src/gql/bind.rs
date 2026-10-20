@@ -3453,7 +3453,8 @@ impl<'q> Binder<'q> {
         let mut nodes: Vec<(InsertNode, Option<&MapLiteral>)> = Vec::new();
         let mut edges: Vec<(InsertEdge, Option<&MapLiteral>)> = Vec::new();
         for path in &clause.patterns {
-            let (start, created) = self.insert_node(word, first, &path.start, &mut nodes)?;
+            let (start, created) =
+                self.insert_node(word, clause.keyword, first, &path.start, &mut nodes)?;
             if path.steps.is_empty() && !created {
                 return Err(creates_nothing(
                     word,
@@ -3464,7 +3465,8 @@ impl<'q> Binder<'q> {
             let mut before = start;
             for step in &path.steps {
                 let edge = self.insert_edge(word, &step.edge)?;
-                let (node, _) = self.insert_node(word, first, &step.node, &mut nodes)?;
+                let (node, _) =
+                    self.insert_node(word, clause.keyword, first, &step.node, &mut nodes)?;
                 let e = &step.edge;
                 let (source, target) = match e.direction {
                     EdgeDirection::Right => (before, node),
@@ -3532,6 +3534,7 @@ impl<'q> Binder<'q> {
     fn insert_node<'n>(
         &mut self,
         word: &str,
+        keyword: Span,
         first: usize,
         node: &'n NodePattern,
         nodes: &mut Vec<(InsertNode, Option<&'n MapLiteral>)>,
@@ -3563,7 +3566,13 @@ impl<'q> Binder<'q> {
             Symbol::Value(_) => return Err(value_as_element(var, BindingKind::Node)),
         };
         if node.labels.is_some() || node.properties.is_some() {
-            return Err(reference_with_parts(word, var, node, id.0 >= first));
+            let created = id.0 >= first;
+            let set = if created {
+                String::new()
+            } else {
+                self.set_of_reference(keyword, var, node)
+            };
+            return Err(reference_with_parts(word, var, node, created, &set));
         }
         let binding = self.bindings.get(id.0).ok_or_else(|| {
             semantic(
@@ -3697,7 +3706,7 @@ impl<'q> Binder<'q> {
                     BoundSetKind::Merge(self.write_value(value, &mut reads)?)
                 }
                 SetItemKind::Labels(labels) => {
-                    edge_label_item("SET", &item.target, &target, labels)?;
+                    self.edge_label_item("SET", clause.keyword, &item.target, &target, labels)?;
                     BoundSetKind::Labels(labels.labels.clone())
                 }
             };
@@ -3729,7 +3738,7 @@ impl<'q> Binder<'q> {
             let kind = match &item.kind {
                 RemoveItemKind::Property { key } => BoundRemoveKind::Property(key.clone()),
                 RemoveItemKind::Labels(labels) => {
-                    edge_label_item("REMOVE", &item.target, &target, labels)?;
+                    self.edge_label_item("REMOVE", clause.keyword, &item.target, &target, labels)?;
                     BoundRemoveKind::Labels(labels.labels.clone())
                 }
             };
@@ -3750,6 +3759,99 @@ impl<'q> Binder<'q> {
             span: clause.span,
         };
         self.push_write(BoundWrite::Remove(remove), clause.span)
+    }
+
+    /// A label item on a target the binder knows is an edge (design W26, P0 C1, 42002): an edge
+    /// has exactly one label, its type.
+    fn edge_label_item(
+        &self,
+        word: &str,
+        keyword: Span,
+        var: &Identifier,
+        target: &WriteTarget,
+        labels: &LabelItem,
+    ) -> BResult<()> {
+        if !matches!(target.kind, TargetKind::Edge { .. }) {
+            return Ok(());
+        }
+        let name = &var.name;
+        let label = labels.labels.first().map_or("T", |l| l.name.as_str());
+        let rhai = crate::value::literal::rhai_string;
+        let text = crate::error::gql_key(name);
+        Err(Box::new(
+            semantic(
+                labels.span,
+                format!(
+                    "`{name}` is an edge: an edge has exactly one label, its type, so {word} cannot \
+                     {} it",
+                    if word == "SET" {
+                        "add labels to"
+                    } else {
+                        "remove labels from"
+                    }
+                ),
+            )
+            .alternative(format!(
+                "change the type of the edge with the Gremlin step set_label(), as in \
+                 {}.select({}).set_label({})",
+                self.write_example(
+                    keyword,
+                    &format!("RETURN {text}"),
+                    &format!("MATCH ()-[{text}]->()")
+                ),
+                rhai(name),
+                rhai(label)
+            ))
+            .topic(GqlHelpTopic::PatternVariable),
+        ))
+    }
+
+    /// A runnable `g.gql(..)` of the failing query's clauses before `keyword` followed by
+    /// `write` (rule 6, stage 3c), when they are the top-level pipeline of a linear query (the
+    /// variables `write` names are bound there); otherwise `fallback` followed by `write`.
+    fn write_example(&self, keyword: Span, write: &str, fallback: &str) -> String {
+        let prefix = self
+            .query
+            .source
+            .get(..keyword.start)
+            .unwrap_or("")
+            .trim_end();
+        let own = self.body_depth == 0
+            && self.subquery.is_none()
+            && self.query.is_linear()
+            && !prefix.is_empty();
+        let quote = crate::value::literal::rhai_query;
+        let quoted = own
+            .then(|| quote(&format!("{prefix} {write}")))
+            .flatten()
+            .or_else(|| quote(&format!("{fallback} {write}")));
+        match quoted {
+            Some(quoted) => format!("g.gql({quoted})"),
+            None => "g.gql(..)".to_string(),
+        }
+    }
+
+    /// The `SET` that changes the bound node `var` of an `INSERT` the way its labels and
+    /// properties ask (P0 row 9): `SET p:A:B, p += {map}`, as a runnable query.
+    fn set_of_reference(&self, keyword: Span, var: &Identifier, node: &NodePattern) -> String {
+        let text = crate::error::gql_key(&var.name);
+        let mut items: Vec<String> = Vec::new();
+        let labels = node.labels.as_ref().map(label_names).unwrap_or_default();
+        if !labels.is_empty() {
+            let names: Vec<String> = labels
+                .iter()
+                .map(|l| crate::error::gql_key(&l.name))
+                .collect();
+            items.push(format!("{text}:{}", names.join(":")));
+        }
+        if let Some(map) = &node.properties {
+            items.push(format!("{text} += {}", self.query.text(map.span)));
+        }
+        self.write_example(
+            keyword,
+            &format!("SET {}", items.join(", ")),
+            &format!("MATCH ({text})"),
+        )
     }
 
     /// Before a `SET` / `REMOVE`: refused inside a subquery expression (the parser refuses it
@@ -6090,6 +6192,7 @@ fn reference_with_parts(
     var: &Identifier,
     node: &NodePattern,
     created: bool,
+    set: &str,
 ) -> Box<GqlErrorBuilder> {
     let name = &var.name;
     let message = if created {
@@ -6108,8 +6211,8 @@ fn reference_with_parts(
          ({name})-[:T]->({name}2:Label {{k: 1}})"
     );
     if !created {
-        // Changing the bound node itself is SET (stage 3c): name the Gremlin steps that do it,
-        // reading the node from the query's row.
+        // Changing the bound node itself is SET (stage 3c, `set` built from the failing
+        // query), or the Gremlin steps reading the node from the query's row.
         let rhai = crate::value::literal::rhai_string;
         let change = match node
             .labels
@@ -6130,8 +6233,9 @@ fn reference_with_parts(
         };
         let text = crate::error::gql_key(name);
         alternative.push_str(&format!(
-            "; to change the bound node itself use the Gremlin steps add_label() and \
-             property() on it, as in g.gql(\"MATCH ({text}) RETURN {text}\").select({}).{change}",
+            "; to change the bound node itself use SET on it, as in {set}, or the Gremlin steps \
+             add_label() and property() on it, as in g.gql(\"MATCH ({text}) RETURN \
+             {text}\").select({}).{change}",
             rhai(name)
         ));
     }
@@ -6227,44 +6331,6 @@ fn target_example(word: &str, var: &str) -> String {
     } else {
         format!("{var}.k")
     }
-}
-
-/// A label item on a target the binder knows is an edge (design W26, P0 C1, 42002): an edge
-/// has exactly one label, its type.
-fn edge_label_item(
-    word: &str,
-    var: &Identifier,
-    target: &WriteTarget,
-    labels: &LabelItem,
-) -> BResult<()> {
-    if !matches!(target.kind, TargetKind::Edge { .. }) {
-        return Ok(());
-    }
-    let name = &var.name;
-    let label = labels.labels.first().map_or("T", |l| l.name.as_str());
-    let rhai = crate::value::literal::rhai_string;
-    let text = crate::error::gql_key(name);
-    Err(Box::new(
-        semantic(
-            labels.span,
-            format!(
-                "`{name}` is an edge: an edge has exactly one label, its type, so {word} cannot \
-                 {} it",
-                if word == "SET" {
-                    "add labels to"
-                } else {
-                    "remove labels from"
-                }
-            ),
-        )
-        .alternative(format!(
-            "change the type of the edge with the Gremlin step set_label(), as in \
-             g.gql(\"MATCH ()-[{text}]->() RETURN {text}\").select({}).set_label({})",
-            rhai(name),
-            rhai(label)
-        ))
-        .topic(GqlHelpTopic::PatternVariable),
-    ))
 }
 
 /// The label names an edge binding's patterns allow (see [`TargetKind::Edge`]): those of the

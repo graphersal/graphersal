@@ -131,8 +131,9 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlRemove {
                             context.storage.remove_vertex_label(v, label)?;
                         }
                     }
-                    (GqlRemoveItem::Labels { .. }, Resolved::Edge(_)) => {
-                        return Err(Box::new(self.write.edge_label_item(index)));
+                    (GqlRemoveItem::Labels { labels, .. }, Resolved::Edge(_)) => {
+                        let label = labels.first().map_or("T", |l| l.as_str());
+                        return Err(Box::new(self.write.edge_label_item(index, label)));
                     }
                 }
             }

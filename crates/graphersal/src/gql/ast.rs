@@ -57,7 +57,6 @@ impl Query {
     }
 
     /// Whether the query is one linear query (no `UNION`, no `NEXT`).
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by the tests"))]
     pub(crate) fn is_linear(&self) -> bool {
         self.body.is_linear()
     }

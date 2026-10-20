@@ -4395,6 +4395,9 @@ pub(crate) enum GqlHelpTopic {
     /// reference may carry (designs W5-W7), a write inside a subquery expression (W3), an edge
     /// endpoint that is no node at run time.
     Insert,
+    /// A `SET` / `REMOVE` clause (stage 3c): the item forms, a write inside a subquery
+    /// expression, a value an item cannot write at run time.
+    Set,
     /// `UNION` and `NEXT`: the column names of the operands, one kind of `UNION` per chain,
     /// what the statement after `NEXT` reads (stage 2d).
     Composite,
@@ -4437,7 +4440,7 @@ pub enum GqlErrorKind {
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
     /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, or the write
-    /// clauses after `INSERT` / `CREATE` (`SET`, `REMOVE`, `DELETE`, `MERGE`).
+    /// clauses after `INSERT` / `CREATE`, `SET` and `REMOVE` (`DELETE`, `MERGE`).
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
@@ -4755,6 +4758,16 @@ impl TraverserError {
                         .is_some_and(|step| step.starts_with("gql:insert_")) =>
                 {
                     gql_schema_help(schema).or_else(|| schema.help())
+                }
+                // A schema violation of a GQL SET / REMOVE (stage 3c): the fix is GQL text too.
+                #[cfg(feature = "gql")]
+                TraverserError::Schema(schema)
+                | TraverserError::Graph(GraphError::Schema(schema))
+                    if self.innermost_failed_step().is_some_and(|step| {
+                        step.starts_with("gql:set(") || step.starts_with("gql:remove(")
+                    }) =>
+                {
+                    gql_set_schema_help(schema).or_else(|| schema.help())
                 }
                 TraverserError::RepeatWithoutBody { modulator } => {
                     Some(repeat_without_body_help(modulator, self.failing_level_prefix()))
@@ -6841,6 +6854,10 @@ fn gql_help(
                 help.push_str(GQL_INSERT_ADVICE);
                 return help;
             }
+            if topic == GqlHelpTopic::Set {
+                help.push_str(GQL_SET_ADVICE);
+                return help;
+            }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
                  [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
@@ -6920,6 +6937,14 @@ fn gql_help(
              one by a MATCH, as in g.gql(\"FOR n IN ['lop'] MATCH (s:software {name: n}) \
              INSERT (:review {stars: 5})-[:about]->(s)\").",
         ),
+        GqlErrorKind::Data if topic == GqlHelpTopic::Set => {
+            help.push_str(
+                "A row of the data gave the marked SET or REMOVE item a value it cannot write; \
+                 keep such rows away from it with FILTER or WHERE, as in \
+                 g.gql(\"MATCH (p:person) FILTER p.age IS NOT NULL SET p.next = p.age + 1\"). ",
+            );
+            help.push_str(GQL_SET_ADVICE);
+        }
         GqlErrorKind::Data => {
             if topic == GqlHelpTopic::TextAndNumber {
                 help.push_str(
@@ -6950,6 +6975,111 @@ const GQL_INSERT_ADVICE: &str = "INSERT (Cypher CREATE) creates its pattern once
      with the INSERT (it then returns no rows), and FOR gives it one row per item, as \
      in g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\").";
 
+/// The general advice of an error about a `SET` / `REMOVE` clause ([`GqlHelpTopic::Set`],
+/// stage 3c): the item forms.
+#[cfg(feature = "gql")]
+const GQL_SET_ADVICE: &str = "SET changes the nodes and edges of each row, item by item from \
+     left to right: n.k = <value> sets a property (a NULL value removes it), n = {map} \
+     replaces every property, n += {map} merges the map into them, and n:A:B adds labels to a \
+     node (an edge has exactly one label); REMOVE n.k removes a property and REMOVE n:A a \
+     label, as in g.gql(\"MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:employee \
+     REMOVE p.nick RETURN p.age\"). A variable that OPTIONAL MATCH leaves NULL is skipped, \
+     and a query may end with the SET or REMOVE (it then returns no rows), as in \
+     g.gql(\"MATCH (s:software) SET s += {open: true}\").";
+
+/// The advice of a schema violation a GQL `SET` / `REMOVE` raised (stage 3c), with a runnable
+/// `SET` of the failing label and key: the conversion of a value of the wrong type, keeping a
+/// required property, setting it before the label that requires it. `None` for the violations
+/// whose own help fits (labels, connections, undeclared keys).
+#[cfg(feature = "gql")]
+fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
+    match error {
+        SchemaError::TypeMismatch {
+            element_type,
+            label,
+            property_name,
+            expected_type,
+            actual_type,
+        } if !is_nested_schema_path(property_name) && actual_type != "null" => {
+            let (function, sample) = gql_conversion(expected_type)?;
+            let example = gql_set_example(
+                element_type,
+                label,
+                &format!("{{v}}.{} = {function}($v)", gql_key(property_name)),
+            );
+            Some(format!(
+                "Convert the value to the type '{expected_type}' where the SET writes it, with \
+                 {function}(), as in g.gql(\"{example}\", #{{v: {sample}}}). {function}() gives \
+                 NULL for a value it cannot convert, and SET of a NULL value removes the \
+                 property; CAST(x AS ..) fails the query for it instead."
+            ))
+        }
+        SchemaError::RequiredPropertyRemoval {
+            element_type,
+            label,
+            property_name,
+        } if !is_nested_schema_path(property_name) => {
+            let key = gql_key(property_name);
+            let keep = gql_set_example(
+                element_type,
+                label,
+                &format!("{{v}} = {{{key}: {{v}}.{key}}}"),
+            );
+            let merge =
+                gql_set_example(element_type, label, &format!("{{v}} += {{{key}: 'value'}}"));
+            Some(format!(
+                "'{property_name}' is in \"required\" of {element_type} label '{label}': SET \
+                 n.{key} = NULL and REMOVE n.{key} remove it, and SET n = {{map}} removes every \
+                 key the map lacks. Keep it in the map, as in g.gql(\"{keep}\"), or merge with \
+                 +=, which keeps the keys the map lacks, as in g.gql(\"{merge}\"), and give a \
+                 value that may be NULL a fallback, as in SET n.{key} = coalesce($v, n.{key}). \
+                 Or remove it from \"required\" in the schema (g.patch_schema(..)), or set the \
+                 schema mode to \"none\"."
+            ))
+        }
+        SchemaError::MissingRequiredProperty {
+            element_type,
+            label,
+            property_name,
+        } if *element_type == "vertex" && !is_nested_schema_path(property_name) => {
+            let key = gql_key(property_name);
+            let text = gql_key(label);
+            Some(format!(
+                "The label '{label}' requires '{property_name}': set it before the label in \
+                 the same SET (the items apply from left to right), as in \
+                 g.gql(\"MATCH (n) SET n.{key} = 'value', n:{text}\"). Or remove it from the \
+                 label's \"required\" in the schema (a \"default\" fills only elements \
+                 created without the property, not a label added later)."
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// A runnable `MATCH .. SET` on the modern graph changing the elements of `label`, `item`
+/// with `{v}` for the variable.
+#[cfg(feature = "gql")]
+fn gql_set_example(element_type: &str, label: &str, item: &str) -> String {
+    let text = gql_key(label);
+    if element_type == "edge" {
+        format!("MATCH ()-[e:{text}]->() SET {}", item.replace("{v}", "e"))
+    } else {
+        format!("MATCH (n:{text}) SET {}", item.replace("{v}", "n"))
+    }
+}
+
+/// The lenient conversion function to a schema type, with a sample text value for `$v`.
+#[cfg(feature = "gql")]
+fn gql_conversion(expected_type: &str) -> Option<(&'static str, &'static str)> {
+    Some(match expected_type.to_lowercase().as_str() {
+        "int64" | "number" => ("toInteger", "\"29\""),
+        "float64" => ("toFloat", "\"1.5\""),
+        "string" => ("toString", "29"),
+        "boolean" => ("toBoolean", "\"true\""),
+        _ => return None,
+    })
+}
+
 /// The advice of a schema violation a GQL `INSERT` raised (stage 3a), with a runnable
 /// `INSERT` of the failing label and key: the conversion of a value of the wrong type, the
 /// value of a missing required property. `None` for the violations whose advice names no
@@ -6964,13 +7094,7 @@ fn gql_schema_help(error: &SchemaError) -> Option<String> {
             expected_type,
             actual_type,
         } if !is_nested_schema_path(property_name) && actual_type != "null" => {
-            let (function, sample) = match expected_type.to_lowercase().as_str() {
-                "int64" | "number" => ("toInteger", "\"29\""),
-                "float64" => ("toFloat", "\"1.5\""),
-                "string" => ("toString", "29"),
-                "boolean" => ("toBoolean", "\"true\""),
-                _ => return None,
-            };
+            let (function, sample) = gql_conversion(expected_type)?;
             let example = gql_insert_example(
                 element_type,
                 label,
@@ -7188,8 +7312,8 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              s.name AS name NEXT RETURN name ORDER BY name LIMIT 3\")."
         }
         GqlHelpTopic::Call => {
-            "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT / \
-             FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
+            "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT, SET, \
+             REMOVE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
              (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which \
              must be new names; its aggregates, ORDER BY and LIMIT apply to each row's \
@@ -7198,6 +7322,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              record is dropped; OPTIONAL CALL keeps it with NULL columns."
         }
         GqlHelpTopic::Insert => GQL_INSERT_ADVICE,
+        GqlHelpTopic::Set => GQL_SET_ADVICE,
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
@@ -7792,6 +7917,13 @@ impl GqlErrorBuilder {
     pub(crate) fn topic(mut self, topic: GqlHelpTopic) -> Self {
         self.topic = topic;
         self
+    }
+
+    /// [`topic`](Self::topic) unless an earlier stage chose one already.
+    pub(crate) fn or_topic(&mut self, topic: GqlHelpTopic) {
+        if self.topic == GqlHelpTopic::Kind {
+            self.topic = topic;
+        }
     }
 
     /// The [`TraverserError::Gql`] for `query`. An offset past the end or inside a character

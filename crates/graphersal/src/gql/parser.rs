@@ -1247,17 +1247,29 @@ impl<'a> Parser<'a> {
     /// The refusal of a write clause (`what`, as written in upper case) inside `place`, a
     /// subquery expression or a comprehension, which only read (design W3).
     fn banned_write(&self, span: Span, what: &str, place: &str) -> Box<GqlErrorBuilder> {
+        let (change, topic) = match what {
+            // The INSERT form stays in the example: every write clause stands there.
+            "SET" => (
+                "SET p.maker = true INSERT (:maker {name: p.name})",
+                GqlHelpTopic::Set,
+            ),
+            "REMOVE" => (
+                "REMOVE p.age INSERT (:maker {name: p.name})",
+                GqlHelpTopic::Set,
+            ),
+            _ => ("INSERT (:maker {name: p.name})", GqlHelpTopic::Insert),
+        };
         let b = err(
             GqlErrorKind::Syntax,
             span,
             format!("{what} inside {place}: a subquery expression or a comprehension cannot write"),
         )
-        .alternative(
+        .alternative(format!(
             "write the change as a clause of the query itself, after the clauses that find \
-             its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } \
-             INSERT (:maker {name: p.name})\")",
-        )
-        .topic(GqlHelpTopic::Insert);
+             its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS {{ (p)-[:created]->() }} \
+             {change}\")"
+        ))
+        .topic(topic);
         Box::new(b)
     }
 
@@ -1899,7 +1911,11 @@ impl<'a> Parser<'a> {
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
-        self.unexpected(&expected)
+        let error = self.unexpected(&expected);
+        if matches!(last, Some(Stage::Set(_) | Stage::Remove(_))) {
+            return set_topic(error);
+        }
+        error
     }
 
     /// `WITH`, `LET` or `FILTER`, first or after another clause.
@@ -2414,11 +2430,12 @@ impl<'a> Parser<'a> {
     }
 
     /// One `SET` item: `v.key = e`, `(v).key = e`, `v = e`, `v += e`, `v:A:B` / `v IS A & B`.
+    /// An error of the item's form (not of its value) gets the SET advice.
     fn set_item(&mut self) -> PResult<SetItem> {
         let start = self.peek().span;
-        let (target, key) = self.item_target("SET")?;
+        let (target, key) = self.item_target("SET").map_err(set_topic)?;
         let kind = if let Some(key) = key {
-            self.expect(&TokenKind::Eq, &["`=`"])?;
+            self.expect(&TokenKind::Eq, &["`=`"]).map_err(set_topic)?;
             let value = self.expr()?;
             SetItemKind::Property { key, value }
         } else if self.eat(&TokenKind::Eq).is_some() {
@@ -2435,9 +2452,11 @@ impl<'a> Parser<'a> {
                 value: self.expr()?,
             }
         } else if self.at(&TokenKind::Colon) || self.at_kw(Keyword::Is) {
-            SetItemKind::Labels(self.label_item("SET", &target)?)
+            SetItemKind::Labels(self.label_item("SET", &target).map_err(set_topic)?)
         } else {
-            return Err(self.unexpected(&["`.`", "`=`", "`+=`", "`:`", "IS"]));
+            return Err(set_topic(
+                self.unexpected(&["`.`", "`=`", "`+=`", "`:`", "IS"]),
+            ));
         };
         Ok(SetItem {
             kind,
@@ -2460,16 +2479,17 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// One `REMOVE` item: `v.key`, `(v).key`, `v:A:B` / `v IS A & B`.
+    /// One `REMOVE` item: `v.key`, `(v).key`, `v:A:B` / `v IS A & B`; its errors get the SET
+    /// advice.
     fn remove_item(&mut self) -> PResult<RemoveItem> {
         let start = self.peek().span;
-        let (target, key) = self.item_target("REMOVE")?;
+        let (target, key) = self.item_target("REMOVE").map_err(set_topic)?;
         let kind = if let Some(key) = key {
             RemoveItemKind::Property { key }
         } else if self.at(&TokenKind::Colon) || self.at_kw(Keyword::Is) {
-            RemoveItemKind::Labels(self.label_item("REMOVE", &target)?)
+            RemoveItemKind::Labels(self.label_item("REMOVE", &target).map_err(set_topic)?)
         } else {
-            return Err(self.unexpected(&["`.`", "`:`", "IS"]));
+            return Err(set_topic(self.unexpected(&["`.`", "`:`", "IS"])));
         };
         Ok(RemoveItem {
             kind,
@@ -5735,6 +5755,13 @@ fn body_without_return(span: Span, word: &str, kind: SubqueryKind) -> Box<GqlErr
          (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name",
     );
     Box::new(b)
+}
+
+/// An error of the form of a `SET` / `REMOVE` item (stage 3c): the SET advice, unless the
+/// error chose its own.
+fn set_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
+    error.or_topic(GqlHelpTopic::Set);
+    error
 }
 
 /// An error of an insert pattern (designs W6 / W7): `fix` built from the failing pattern, then

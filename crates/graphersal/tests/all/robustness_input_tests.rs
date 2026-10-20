@@ -4368,3 +4368,423 @@ fn random_gql_3a_writes_never_panic_equal_their_twins_and_fail_without_trace() {
 fn graphersal_rhai_string(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
+
+// ----- stage 3c: GQL SET / REMOVE -----
+
+/// One source of [`GQL_3C_SOURCES`]: the GQL `MATCH`, its Gremlin twin, its targets (name,
+/// whether a node).
+#[cfg(feature = "gql")]
+type Gql3cSource = (&'static str, &'static str, &'static [(&'static str, bool)]);
+
+/// The rows of [`random_gql_3c_set`]: the GQL `MATCH`, its Gremlin twin, and the targets it
+/// binds (name, whether a node).
+#[cfg(feature = "gql")]
+const GQL_3C_SOURCES: &[Gql3cSource] = &[
+    (
+        "MATCH (p:person)",
+        "g.v().has_label(\"person\").as(\"p\")",
+        &[("p", true)],
+    ),
+    (
+        "MATCH (p:person)-[e:knows]->(q)",
+        "g.v().has_label(\"person\").as(\"p\").out_e(\"knows\").as(\"e\").in_v().as(\"q\")",
+        &[("p", true), ("e", false), ("q", true)],
+    ),
+    (
+        "MATCH (s:software)<-[c:created]-(p)",
+        "g.v().has_label(\"software\").as(\"s\").in_e(\"created\").as(\"c\").out_v().as(\"p\")",
+        &[("s", true), ("c", false), ("p", true)],
+    ),
+];
+
+/// One `SET` / `REMOVE` item of [`random_gql_3c_set`] on `target`: its GQL text, its Gremlin
+/// step on the selected target (`None` when the item reads the target's own name, which stays
+/// valid only without a replacing item), whether it is a REMOVE item, whether it replaces
+/// every property, whether it reads.
+#[cfg(feature = "gql")]
+fn random_gql_3c_item(
+    rng: &mut Rng,
+    target: &str,
+    node: bool,
+) -> (String, String, bool, bool, bool) {
+    // `(v).k` is a property item form only (design D2).
+    let t = if rng.chance(15) {
+        format!("({target})")
+    } else {
+        target.to_string()
+    };
+    let v = target;
+    let kinds = if node { 12 } else { 8 };
+    match rng.below(kinds) {
+        0 => (
+            format!("{t}.k = 1"),
+            "property(\"k\", 1)".into(),
+            false,
+            false,
+            false,
+        ),
+        1 => (
+            format!("{t}.s = 'a'"),
+            "property(\"s\", \"a\")".into(),
+            false,
+            false,
+            false,
+        ),
+        2 => (
+            format!("{t}.k = 2.5"),
+            "property(\"k\", 2.5)".into(),
+            false,
+            false,
+            false,
+        ),
+        3 => (
+            format!("{t}.k = NULL"),
+            "remove_property(\"k\")".into(),
+            false,
+            false,
+            false,
+        ),
+        4 => (
+            format!("{v} += {{a: 1, b: 'x'}}"),
+            "property(#{a: 1, b: \"x\"})".into(),
+            false,
+            false,
+            false,
+        ),
+        5 => (
+            format!("{v} += {{a: NULL, k: 3}}"),
+            "remove_property(\"a\").property(\"k\", 3)".into(),
+            false,
+            false,
+            false,
+        ),
+        6 => (
+            format!("{v} = {{x: 1}}"),
+            "side_effect(__.properties().drop()).property(\"x\", 1)".into(),
+            false,
+            true,
+            false,
+        ),
+        7 => (
+            format!("{t}.k"),
+            "remove_property(\"k\")".into(),
+            true,
+            false,
+            false,
+        ),
+        8 => {
+            let (written, steps) = *rng.pick(&[
+                (":A", "add_label(\"A\")"),
+                (":A:B", "add_label(\"A\").add_label(\"B\")"),
+                (":A&B", "add_label(\"A\").add_label(\"B\")"),
+                (" IS B", "add_label(\"B\")"),
+                (" :B :A", "add_label(\"B\").add_label(\"A\")"),
+            ]);
+            (format!("{v}{written}"), steps.into(), false, false, false)
+        }
+        9 => {
+            let (written, steps) = *rng.pick(&[
+                (":A", "drop_label(\"A\")"),
+                (":A:B", "drop_label(\"A\").drop_label(\"B\")"),
+                (":nope", "drop_label(\"nope\")"),
+            ]);
+            (format!("{v}{written}"), steps.into(), true, false, false)
+        }
+        10 => (
+            format!("{t}.c = {target}.name"),
+            "property(\"c\", __.values(\"name\"))".into(),
+            false,
+            false,
+            true,
+        ),
+        _ => (format!("{t}.name"), String::new(), true, false, false),
+    }
+}
+
+/// A random `SET` / `REMOVE` query and its Gremlin twin (Rhai), which leave the same graph:
+/// the rows of one of [`GQL_3C_SOURCES`] (perhaps with an `OPTIONAL MATCH` binding `z` to
+/// NULL, whose items are no-ops), then one to five items on the bound elements, in one or
+/// several `SET` / `REMOVE` clauses, then nothing, `FINISH` or a `RETURN`. The twin applies the
+/// items in text order with `select()` and the Gremlin write steps; it runs step at a time,
+/// GQL row at a time, which leaves the same graph because every item writes a constant (or
+/// the target's own name, never written): the last item touching a key decides it either way.
+/// With `fail`, the rows come from `FOR x IN [1, .., 0]` and the first item stores `1 / x`, so
+/// the last row fails.
+#[cfg(feature = "gql")]
+fn random_gql_3c_set(rng: &mut Rng, fail: bool) -> (String, String) {
+    let (matched, twin, targets) = *rng.pick(GQL_3C_SOURCES);
+    let mut gql = String::new();
+    if fail {
+        gql.push_str(rng.pick(&["FOR x IN [1, 0] ", "FOR x IN [2, 1, 0] "]));
+    }
+    gql.push_str(matched);
+    let mut targets: Vec<(&str, bool)> = targets.to_vec();
+    let null = rng.chance(30);
+    if null {
+        gql.push_str(" OPTIONAL MATCH (p)-[:nope]->(z)");
+        targets.push(("z", true));
+    }
+    let mut twin = twin.to_string();
+    let count = 1 + rng.below(5);
+    let mut items: Vec<(String, &str, String, bool, bool, bool)> = Vec::new();
+    if fail {
+        let (target, _) = targets[0];
+        items.push((
+            format!("{target}.v = 1 / x"),
+            target,
+            String::new(),
+            false,
+            false,
+            false,
+        ));
+    }
+    while items.len() < count + usize::from(fail) {
+        let (target, node) = *rng.pick(&targets);
+        let (text, step, remove, replace, reads) = random_gql_3c_item(rng, target, node);
+        // REMOVE of `name` only as a REMOVE item (its SET twin form is the empty step).
+        if step.is_empty() && !remove {
+            continue;
+        }
+        items.push((text, target, step, remove, replace, reads));
+    }
+    // A replacing item and a read of `name` do not mix (GQL reads row at a time).
+    let replaces = items.iter().any(|item| item.4);
+    let removes_name = items
+        .iter()
+        .any(|item| item.2.is_empty() && item.0.ends_with(".name"));
+    if replaces || removes_name {
+        items.retain(|item| !item.5);
+    }
+    let mut clause: Option<bool> = None;
+    for (text, target, step, remove, _, _) in &items {
+        let continues = clause == Some(*remove) && rng.chance(60);
+        if continues {
+            gql.push_str(", ");
+        } else {
+            gql.push_str(if *remove { " REMOVE " } else { " SET " });
+        }
+        clause = Some(*remove);
+        gql.push_str(text);
+        if *target == "z" || fail {
+            continue;
+        }
+        let step = if step.is_empty() {
+            "remove_property(\"name\")"
+        } else {
+            step.as_str()
+        };
+        twin.push_str(&format!(".select(\"{target}\").{step}"));
+    }
+    gql.push_str(rng.pick(&[
+        "",
+        " FINISH",
+        " RETURN count(*) AS c",
+        " RETURN p.name AS n",
+    ]));
+    twin.push_str(".iterate()");
+    (gql, twin)
+}
+
+/// Adversarial and refused `SET` / `REMOVE` queries of stage 3c: every item form on nodes,
+/// edges, NULL and non-element targets, D4 (`SET n = NULL`), label items on edges, complex
+/// targets (not yet), writes in subqueries, aggregates, schema-free type mixes, huge row
+/// counts.
+#[cfg(feature = "gql")]
+const GQL_3C_CORPUS: &[&str] = &[
+    "MATCH (p:person) SET p.k = 1, (p).j = p.k, p:A:B, p IS C & D REMOVE p:A, p.age",
+    "MATCH (p) SET p = NULL",
+    "MATCH (p) SET p += NULL",
+    "MATCH (p) SET p = $missing",
+    "MATCH (p) SET p = 1",
+    "MATCH (p) SET p += [1, 2]",
+    "MATCH (p) SET p = p",
+    "MATCH (a), (b) SET a = b",
+    "MATCH (a)-[e]->(b) SET a += e, e = a",
+    "MATCH (p) SET p.k = p",
+    "MATCH (p) SET p.k = [p]",
+    "MATCH (p) SET p += {k: p}",
+    "MATCH p = (a)-->(b) SET a.k = p",
+    "MATCH ()-[e]->() SET e:x",
+    "MATCH ()-[e]->() REMOVE e:knows",
+    "MATCH ()-[e]->() WITH collect(e) AS es FOR x IN es SET x:foo",
+    "FOR x IN [1, 'a', null] SET x.k = 1",
+    "FOR x IN [1] REMOVE x:A",
+    "LET x = 1 SET x.k = 2",
+    "MATCH p = (a)-->(b) SET p.k = 1",
+    "MATCH (a) ((x)-->(y)){1,2} (b) SET x.k = 1",
+    "FOR x IN [1] WITH ORDINALITY i SET i.k = 1",
+    "MATCH (p) SET q.k = 1",
+    "MATCH (p) SET p.a.b = 1",
+    "MATCH (p) SET head([p]).k = 1",
+    "MATCH (p) SET p[\"k\"] = 1",
+    "MATCH (p) SET p:A|B",
+    "MATCH (p) SET p:!A",
+    "MATCH (p) SET p:%",
+    "MATCH (p) SET p:A&B:C",
+    "MATCH (p) SET p.k",
+    "MATCH (p) SET",
+    "MATCH (p) REMOVE p.k = 1",
+    "MATCH (p) REMOVE p",
+    "MATCH (p) SET p.k = count(*)",
+    "MATCH (p) SET p += {k: 1, k: 2}",
+    "MATCH (p) WHERE EXISTS { MATCH (p) SET p.x = 1 } RETURN p",
+    "MATCH (p) RETURN COUNT { MATCH (p) REMOVE p.x RETURN p } AS c",
+    "MATCH (p) RETURN [(p)-->(m) | 1] AS l SET p.k = 1",
+    "MATCH (p) SET p.k = 1 UNION MATCH (p) RETURN p",
+    "MATCH (p) CALL (p) { SET p.k = 1 } RETURN p.k",
+    "MATCH (p) OPTIONAL CALL (p) { REMOVE p:person } RETURN count(*) AS c",
+    "MATCH (p) SET p.k = 1 RETURN p NEXT MATCH (p) REMOVE p.k RETURN p",
+    "MATCH (n) WITH n, n.age AS old SET n.age = 1 RETURN old",
+    "MATCH (a), (b) SET a.n = coalesce(a.n, 0) + 1",
+    "FOR i IN range(1, 300) MATCH (p) SET p.k = i",
+    "MATCH (a), (b), (c) SET a.k = b.name, c:Triple",
+    "FOR x IN [1, 0] MATCH (p) SET p.v = 1 / x",
+    "MATCH (p) SET p.m = {a: [1, 'b', {c: null}]}, p.l = [1, [2, [3]]]",
+    "MATCH (p) SET p.k = 1 LIMIT 0",
+    "MATCH (p) SET p.k = 1 WITH p WHERE p.k > 0 RETURN count(*) AS c",
+    "MATCH (p) SET p.k = 1 SET p.k = p.k + 1 REMOVE p.k SET p.k = 3",
+    "INSERT (n:X) SET n.k = 1, n:Y REMOVE n:X RETURN n",
+    "MATCH (p) OPTIONAL MATCH (p)-[:nope]->(z) SET z.k = 1, z:A, z = {}, z += {a: 1} REMOVE z.k, z:A",
+    "MATCH (p) FOREACH (x IN [1] | SET p.k = x)",
+    "MATCH (p) SET p.`we ird` = 1, p:`la bel` REMOVE p.`we ird`",
+    "MATCH (p) SET p.k = $n, p += $name",
+];
+
+/// Tokens of stage 3c for the token soup (a new list: the existing ones stay as they are).
+#[cfg(feature = "gql")]
+const GQL_3C_TOKENS: &[&str] = &[
+    "SET",
+    "REMOVE",
+    "MATCH",
+    "(p)",
+    "(p:person)",
+    "-[e]->",
+    "(q)",
+    "p",
+    "e",
+    "(p)",
+    ".",
+    "k",
+    "=",
+    "+=",
+    ":",
+    "A",
+    "IS",
+    "&",
+    "|",
+    "{a: 1}",
+    "{}",
+    "NULL",
+    "1",
+    "p.name",
+    ",",
+    "RETURN",
+    "FINISH",
+    "OPTIONAL",
+    "WITH",
+    "FOR x IN [1, 0]",
+    "1 / x",
+    "CALL",
+    "{",
+    "}",
+    "LIMIT 0",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_3c_set_never_panics_equals_its_twins_and_fails_without_trace() {
+    let mut fatal = Fatal::default();
+    let mut differences = Vec::new();
+    let mut traces = Vec::new();
+    let mut rng = Rng::new(0x3C5E_7AE0);
+    let modern = gql_3a_dump(&TraversalGraph::tinkerpop_modern());
+    let mut texts: Vec<String> = GQL_3C_CORPUS.iter().map(|s| s.to_string()).collect();
+    let mut generated = Vec::new();
+    for _ in 0..budget(40) {
+        generated.push((random_gql_3c_set(&mut rng, false), false));
+        generated.push((random_gql_3c_set(&mut rng, true), true));
+    }
+    let mut twins = 0;
+    let mut changed = 0;
+    for ((query, twin), fail) in generated {
+        texts.push(query.clone());
+        let label = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            let rows = graph
+                .traversal_mut()
+                .gql(&query)
+                .to_list()
+                .map_err(|e| format_diagnostic(&e));
+            let gql = rows.map(|_| gql_3a_dump(&graph));
+            let rhai = gql_3a_script_state(&format!(
+                "g.gql({}).iterate()",
+                graphersal_rhai_string(&query)
+            ));
+            let gremlin = if fail {
+                Err(String::new())
+            } else {
+                gql_3a_script_state(&twin)
+            };
+            (query, twin, gql, rhai, gremlin, gql_3a_dump(&graph))
+        });
+        let Ok((query, twin, gql, rhai, gremlin, after)) = outcome else {
+            fatal.check(&label, outcome.map(|_| ()));
+            continue;
+        };
+        if fail {
+            // The last row fails: an error, and nothing of the earlier rows stays.
+            if gql.is_ok() || rhai.is_ok() || after != modern {
+                traces.push(format!("{query}\n  {gql:?}\n  rhai: {rhai:?}"));
+            }
+            continue;
+        }
+        twins += 1;
+        if gql.as_ref().is_ok_and(|state| *state != modern) {
+            changed += 1;
+        }
+        match (&gql, &gremlin) {
+            (Ok(gql_state), Ok(gremlin_state)) if gql_state == gremlin_state && gql == rhai => {}
+            _ => differences.push(format!(
+                "{query}\n  GQL:     {gql:?}\n  Rhai:    {rhai:?}\n  {twin}\n  Gremlin: {gremlin:?}"
+            )),
+        }
+    }
+    assert!(twins >= budget(40) as usize, "only {twins} twins ran");
+    // The twins compare changed graphs, not the modern graph again and again.
+    assert!(
+        changed * 2 > twins,
+        "only {changed} of {twins} twins changed the graph"
+    );
+    assert!(
+        differences.is_empty(),
+        "{} SET / REMOVE queries whose final graph differs from their Gremlin twin:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    assert!(
+        traces.is_empty(),
+        "{} failing SET / REMOVE queries left a trace:\n{}",
+        traces.len(),
+        traces.join("\n")
+    );
+    for _ in 0..budget(40) {
+        let base = rng.pick(GQL_3C_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(40) {
+        let len = 1 + rng.below(16);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_3C_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) SET");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql_write(text.clone()));
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 3c SET / REMOVE");
+}

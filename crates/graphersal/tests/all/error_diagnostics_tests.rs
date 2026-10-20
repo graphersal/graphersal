@@ -9695,7 +9695,7 @@ mod gql {
     #[test]
     fn gql_call_errors_explain_imports_and_returned_columns() {
         let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write \
-             (INSERT / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
+             (INSERT, SET, REMOVE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
              names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which must \
              be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
@@ -10210,15 +10210,17 @@ mod gql {
             (
                 "MATCH (p:person) INSERT (p:x)",
                 "write (p) to connect the node, or give a new node its own name, as in INSERT \
-                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use the Gremlin \
-                 steps add_label() and property() on it, as in g.gql(\"MATCH (p) RETURN \
+                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use SET on it, as \
+                 in g.gql(\"MATCH (p:person) SET p:x\"), or the Gremlin steps add_label() and \
+                 property() on it, as in g.gql(\"MATCH (p) RETURN \
                  p\").select(\"p\").add_label(\"x\"). ",
             ),
             (
                 "MATCH (p:person) CREATE (p {age: 1})",
                 "write (p) to connect the node, or give a new node its own name, as in CREATE \
-                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use the Gremlin \
-                 steps add_label() and property() on it, as in g.gql(\"MATCH (p) RETURN \
+                 (p)-[:T]->(p2:Label {k: 1}); to change the bound node itself use SET on it, as \
+                 in g.gql(\"MATCH (p:person) SET p += {age: 1}\"), or the Gremlin steps \
+                 add_label() and property() on it, as in g.gql(\"MATCH (p) RETURN \
                  p\").select(\"p\").property(\"age\", 1). ",
             ),
             (
@@ -10448,5 +10450,394 @@ mod gql {
         let (err, _) = gql_write_failure("MATCH (n) RETURN n.name ORDER BY id(n)");
         let help = err.help().expect("help");
         assert!(!help.contains("read queries"), "{help}");
+    }
+
+    // ----- stage 3c: help sweep for SET / REMOVE (rule 6) -----
+
+    /// The general advice of every error about a SET / REMOVE item.
+    const SET_ADVICE: &str = "SET changes the nodes and edges of each row, item by item from \
+         left to right: n.k = <value> sets a property (a NULL value removes it), n = {map} \
+         replaces every property, n += {map} merges the map into them, and n:A:B adds labels to \
+         a node (an edge has exactly one label); REMOVE n.k removes a property and REMOVE n:A a \
+         label, as in g.gql(\"MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, \
+         p:employee REMOVE p.nick RETURN p.age\"). A variable that OPTIONAL MATCH leaves NULL \
+         is skipped, and a query may end with the SET or REMOVE (it then returns no rows), as in \
+         g.gql(\"MATCH (s:software) SET s += {open: true}\").";
+
+    /// The advice a data error of a SET / REMOVE item adds before [`SET_ADVICE`].
+    const SET_DATA_ADVICE: &str = "A row of the data gave the marked SET or REMOVE item a value \
+         it cannot write; keep such rows away from it with FILTER or WHERE, as in \
+         g.gql(\"MATCH (p:person) FILTER p.age IS NOT NULL SET p.next = p.age + 1\"). ";
+
+    /// The canonical state of a graph: every vertex and edge with its labels and properties,
+    /// sorted (a failed write must leave it as it was).
+    fn state(graph: &TraversalGraph) -> Vec<String> {
+        let props = |map: Option<&graphersal::storage::PropertyMap>| {
+            let mut entries: Vec<String> = map
+                .map(|m| m.iter().map(|(k, v)| format!("{k}={v:?}")).collect())
+                .unwrap_or_default();
+            entries.sort();
+            entries.join(",")
+        };
+        let mut lines: Vec<String> = graph
+            .vertices()
+            .map(|v| {
+                format!(
+                    "V {:?} {}",
+                    graph.vertex_labels(v),
+                    props(graph.vertex_properties(v))
+                )
+            })
+            .collect();
+        lines.extend(graph.edges().map(|e| {
+            format!(
+                "E {:?} {}",
+                graph.edge_label(e),
+                props(graph.edge_properties(e))
+            )
+        }));
+        lines.sort();
+        lines
+    }
+
+    /// D4: `SET n = NULL` / `SET n += NULL` is 22004; the help names `SET n = {}` and a
+    /// `coalesce()` default built into the failing query, and the rewritten queries run (the
+    /// `=` one keeps every property).
+    #[test]
+    fn gql_set_of_a_null_map_names_the_empty_map_and_a_coalesce_default() {
+        let before = state(&TraversalGraph::tinkerpop_modern());
+        for (query, fix) in [
+            (
+                "MATCH (p:person) SET p = NULL",
+                "SET p = {} removes every property; to keep them when the map is NULL, give it \
+                 the element's own properties as a default with coalesce($p, properties(p)), \
+                 as in g.gql(\"MATCH (p:person) SET p = coalesce(NULL, properties(p))\"). ",
+            ),
+            (
+                "MATCH (p:person) SET p += NULL",
+                "SET p += {} changes nothing: give a NULL map that default with coalesce($p, \
+                 {}), as in g.gql(\"MATCH (p:person) SET p += coalesce(NULL, {})\"). ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22004".to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!("{fix}{SET_DATA_ADVICE}{SET_ADVICE}"),
+                "{query}"
+            );
+            assert_write_examples_run(&help);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+        // The fixes change nothing on the modern graph.
+        for query in [
+            "MATCH (p:person) SET p = coalesce(NULL, properties(p))",
+            "MATCH (p:person) SET p += coalesce(NULL, {})",
+        ] {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            graph.traversal_mut().gql(query).to_list().expect(query);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+    }
+
+    /// The other run-time errors of SET / REMOVE items: the fix rewrites the failing query
+    /// where it can (`p.k = 1` for a map item given a single value, `element_id()` for an
+    /// element stored as a property), names the label of an edge's label item, and finds the
+    /// node with a MATCH for a value target. Each failure leaves the graph as it was.
+    #[test]
+    fn gql_set_and_remove_data_errors_build_the_fix_from_the_failing_query() {
+        let before = state(&TraversalGraph::tinkerpop_modern());
+        for (query, status, fix) in [
+            (
+                "MATCH (p:person) SET p = 1",
+                "22G03",
+                "set one property with SET p.k = <value>, as in g.gql(\"MATCH (p:person) SET \
+                 p.k = 1\"), or give a map, as in SET p = {k: 1}. ",
+            ),
+            (
+                "MATCH (p) SET p.k = p",
+                "22G03",
+                "store a value of it instead, such as its id, as in g.gql(\"MATCH (p) SET p.k = \
+                 element_id(p)\"), or its properties with properties(..). ",
+            ),
+            (
+                "FOR x IN [1] REMOVE x.k",
+                "22G03",
+                "keep only the rows where `x` holds an element, or find the node first with a \
+                 MATCH and remove it, as in g.gql(\"FOR n IN ['marko'] MATCH (x {name: n}) \
+                 REMOVE x.age RETURN x.name\"). ",
+            ),
+            (
+                "FOR x IN ['a'] SET x.k = 1",
+                "22G03",
+                "keep only the rows where `x` holds an element, or find the node first with a \
+                 MATCH and set it, as in g.gql(\"FOR n IN ['marko'] MATCH (x {name: n}) SET \
+                 x.k = 1 RETURN x.name\"). ",
+            ),
+            (
+                "MATCH ()-[e]->() WITH collect(e) AS es FOR x IN es SET x:met",
+                "22G03",
+                "an edge has exactly one label, changed with the Gremlin step set_label(), for \
+                 example g.e().has_label(\"knows\").set_label(\"met\"). ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!("{fix}{SET_DATA_ADVICE}{SET_ADVICE}"),
+                "{query}"
+            );
+            assert_write_examples_run(&help);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+        // A query too long to quote keeps the general form of the fix.
+        let long = format!(
+            "MATCH (p:person) WHERE p.name <> '{}' SET p = 1",
+            "x".repeat(1200)
+        );
+        let (err, _) = gql_write_failure(&long);
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with(
+                "set one property with SET p.k = <value>, or give a map, as in SET p = {k: 1}. "
+            ),
+            "{help}"
+        );
+    }
+
+    /// A label item on a variable the binder knows is an edge (42002): the Gremlin fix reads
+    /// the edge from the failing query's own clauses (or a plain MATCH inside a CALL body), and
+    /// runs.
+    #[test]
+    fn gql_edge_label_item_names_set_label_on_the_failing_query() {
+        for (query, fix) in [
+            (
+                "MATCH (a:person)-[e:knows]->(b) WHERE b.age > 30 SET e:met",
+                "change the type of the edge with the Gremlin step set_label(), as in \
+                 g.gql(\"MATCH (a:person)-[e:knows]->(b) WHERE b.age > 30 RETURN \
+                 e\").select(\"e\").set_label(\"met\"). ",
+            ),
+            (
+                "MATCH (a)-[e:created]->(b) REMOVE e:created",
+                "change the type of the edge with the Gremlin step set_label(), as in \
+                 g.gql(\"MATCH (a)-[e:created]->(b) RETURN e\").select(\"e\").set_label(\"created\"). ",
+            ),
+            (
+                "MATCH (a)-[e]->(b) CALL (e) { SET e:x }",
+                "change the type of the edge with the Gremlin step set_label(), as in \
+                 g.gql(\"MATCH ()-[e]->() RETURN e\").select(\"e\").set_label(\"x\"). ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert!(help.starts_with(fix), "{query}: {help}");
+            assert_eq!(counts(&graph), (6, 6), "{query}");
+            // The Gremlin form runs.
+            let script = fix
+                .trim_start_matches(
+                    "change the type of the edge with the Gremlin step set_label(), as in ",
+                )
+                .trim_end_matches(". ");
+            let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+            crate::script_host::eval(graph, &format!("{script}.iterate(); 1"))
+                .unwrap_or_else(|e| panic!("{script}: {e}"));
+        }
+    }
+
+    /// Syntax errors of the form of a SET / REMOVE item, and a token after the clause, carry
+    /// the SET advice; an error inside an item's value keeps the general advice.
+    #[test]
+    fn gql_set_and_remove_syntax_errors_carry_the_set_advice() {
+        for (query, start) in [
+            ("MATCH (p) SET p.k", "Expected `=` at the marked position. "),
+            (
+                "MATCH (p) SET",
+                "Expected a variable at the marked position. ",
+            ),
+            (
+                "MATCH (p) SET p 1",
+                "Expected `.`, `=`, `+=`, `:`, IS at the marked position. ",
+            ),
+            ("MATCH (p) SET p:A|B", "write the labels, as in SET p:A:B. "),
+            (
+                "MATCH (p) REMOVE p.k = 1",
+                "Expected `,`, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, \
+                 RETURN at the marked position. ",
+            ),
+            (
+                "MATCH (p) REMOVE p",
+                "Expected `.`, `:`, IS at the marked position. ",
+            ),
+        ] {
+            let (err, _) = gql_write_failure(query);
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            let help = err.help().expect("help");
+            assert_eq!(help, format!("{start}{SET_ADVICE}"), "{query}");
+            assert_write_examples_run(&help);
+        }
+        let (err, _) = gql_write_failure("MATCH (p) SET p.k = (1 +");
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("a GQL read query is MATCH <pattern>"),
+            "{help}"
+        );
+        assert!(!help.contains(SET_ADVICE), "{help}");
+    }
+
+    /// SET / REMOVE inside a subquery expression: the fix is the clause of the query itself,
+    /// with a SET or REMOVE example.
+    #[test]
+    fn gql_set_inside_a_subquery_expression_names_the_clause_form() {
+        for (query, change) in [
+            (
+                "MATCH (p) WHERE EXISTS { MATCH (p) SET p.x = 1 } RETURN p",
+                "SET p.maker = true INSERT (:maker {name: p.name})",
+            ),
+            (
+                "MATCH (p) RETURN COUNT { MATCH (p) REMOVE p.x RETURN p } AS c",
+                "REMOVE p.age INSERT (:maker {name: p.name})",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!(
+                    "write the change as a clause of the query itself, after the clauses that \
+                     find its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS {{ \
+                     (p)-[:created]->() }} {change}\"). {SET_ADVICE}"
+                ),
+                "{query}"
+            );
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6));
+        }
+    }
+
+    /// Schema violations raised by `gql:set` / `gql:remove`: GQL fixes naming the label and
+    /// key (a conversion, keeping a required key, setting it before the label that requires
+    /// it); the suggested forms run on the same graph; a violation without a GQL fix keeps its
+    /// own help. Each failure leaves the graph as it was.
+    #[test]
+    fn gql_schema_violation_of_a_set_names_the_gql_fix() {
+        let schema = |mode: &str| {
+            GraphSchema::from_json(&format!(
+                r#"{{"mode": "{mode}",
+                  "vertices": {{"person": {{"schema": {{"type": "object", "properties": {{
+                      "name": {{"type": "string"}}, "age": {{"type": "integer"}}}},
+                    "required": ["name"]}}}}}},
+                  "edges": {{"knows": {{"schema": {{"type": "object", "properties": {{
+                      "weight": {{"type": "number"}}}}}},
+                    "connections": [{{"from": "person", "to": "person"}}]}}}}}}"#
+            ))
+            .expect("schema")
+        };
+        let graph_with = |mode: &str| {
+            let mut graph = TraversalGraph::new();
+            graph.set_schema(schema(mode)).expect("set");
+            graph
+                .traversal_mut()
+                .gql("INSERT (:person {name: 'marko'})-[:knows]->(:person {name: 'josh'})")
+                .to_list()
+                .expect("people");
+            if mode == "open" {
+                graph
+                    .traversal_mut()
+                    .gql("INSERT (:thing {k: 1})")
+                    .to_list()
+                    .expect("thing");
+            }
+            graph
+        };
+        let failure = |mode: &str, query: &str| {
+            let mut graph = graph_with(mode);
+            let before = state(&graph);
+            let err = graph
+                .traversal_mut()
+                .gql(query)
+                .to_list()
+                .expect_err("a schema violation");
+            assert_eq!(state(&graph), before, "{query}");
+            err.help().expect("help")
+        };
+        assert_eq!(
+            failure("closed", "MATCH (p:person) SET p.age = 'x'"),
+            "Convert the value to the type 'int64' where the SET writes it, with toInteger(), \
+             as in g.gql(\"MATCH (n:person) SET n.age = toInteger($v)\", #{v: \"29\"}). \
+             toInteger() gives NULL for a value it cannot convert, and SET of a NULL value \
+             removes the property; CAST(x AS ..) fails the query for it instead."
+        );
+        assert!(
+            failure("closed", "MATCH ()-[e:knows]->() SET e += {weight: 'h'}").starts_with(
+                "Convert the value to the type 'float64' where the SET writes it, with \
+                 toFloat(), as in g.gql(\"MATCH ()-[e:knows]->() SET e.weight = toFloat($v)\", \
+                 #{v: \"1.5\"})."
+            )
+        );
+        let required = "'name' is in \"required\" of vertex label 'person': SET n.name = NULL \
+             and REMOVE n.name remove it, and SET n = {map} removes every key the map lacks. Keep \
+             it in the map, as in g.gql(\"MATCH (n:person) SET n = {name: n.name}\"), or merge \
+             with +=, which keeps the keys the map lacks, as in g.gql(\"MATCH (n:person) SET n \
+             += {name: 'value'}\"), and give a value that may be NULL a fallback, as in SET \
+             n.name = coalesce($v, n.name). Or remove it from \"required\" in the schema \
+             (g.patch_schema(..)), or set the schema mode to \"none\".";
+        for query in [
+            "MATCH (p:person) REMOVE p.name",
+            "MATCH (p:person) SET p.name = NULL",
+            "MATCH (p:person) SET p = {age: 3}",
+        ] {
+            assert_eq!(failure("closed", query), required, "{query}");
+        }
+        assert_eq!(
+            failure("open", "MATCH (p:thing) SET p:person"),
+            "The label 'person' requires 'name': set it before the label in the same SET (the \
+             items apply from left to right), as in g.gql(\"MATCH (n) SET n.name = 'value', \
+             n:person\"). Or remove it from the label's \"required\" in the schema (a \
+             \"default\" fills only elements created without the property, not a label added \
+             later)."
+        );
+        // The suggested forms run on the same graphs.
+        let mut graph = graph_with("closed");
+        for (query, value) in [
+            ("MATCH (n:person) SET n.age = toInteger($v)", "29"),
+            ("MATCH ()-[e:knows]->() SET e.weight = toFloat($v)", "1.5"),
+            ("MATCH (n:person) SET n = {name: n.name}", ""),
+            ("MATCH (n:person) SET n += {name: 'value'}", ""),
+        ] {
+            graph
+                .traversal_mut()
+                .gql_with(query, [("v", ElementProperty::from(value))])
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {}", format_diagnostic(&e)));
+        }
+        let mut graph = graph_with("open");
+        graph
+            .traversal_mut()
+            .gql("MATCH (n:thing) SET n.name = 'value', n:person")
+            .to_list()
+            .unwrap_or_else(|e| panic!("{}", format_diagnostic(&e)));
+        // Without a GQL fix the violation keeps its own help.
+        assert!(
+            failure("closed", "MATCH (p:person) SET p:robot")
+                .starts_with("A closed schema admits only declared vertex labels")
+        );
+        assert!(failure("closed", "MATCH (p:person) SET p.zzz = 1").starts_with("Declare 'zzz'"));
     }
 }

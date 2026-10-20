@@ -27,11 +27,35 @@ fn cut_note(out: &mut String, total: usize, unit: &str) {
 /// so the literal parses back to the same string. A string longer than [`MAX_LITERAL_CHARS`]
 /// is cut: `"aaaa…" (100000 chars)`.
 pub(crate) fn rhai_string(text: &str) -> String {
+    rhai_string_up_to(text, MAX_LITERAL_CHARS)
+}
+
+/// The most characters of a query a `help()` rewrite quotes whole as a runnable
+/// `g.gql("..")` ([`rhai_query`]); a longer query gets a generic example instead.
+#[cfg_attr(
+    not(feature = "gql"),
+    allow(dead_code, reason = "used by the gql() errors")
+)]
+pub(crate) const MAX_QUERY_EXAMPLE_CHARS: usize = 1000;
+
+/// The Rhai string literal of a whole query (never cut, so the example runs), or `None` when
+/// it is longer than [`MAX_QUERY_EXAMPLE_CHARS`].
+#[cfg_attr(
+    not(feature = "gql"),
+    allow(dead_code, reason = "used by the gql() errors")
+)]
+pub(crate) fn rhai_query(text: &str) -> Option<String> {
+    (text.chars().count() <= MAX_QUERY_EXAMPLE_CHARS)
+        .then(|| rhai_string_up_to(text, MAX_QUERY_EXAMPLE_CHARS))
+}
+
+/// [`rhai_string`] cut after `max` characters.
+fn rhai_string_up_to(text: &str, max: usize) -> String {
     let total = text.chars().count();
-    let cut = total > MAX_LITERAL_CHARS;
-    let mut out = String::with_capacity(text.len().min(4 * MAX_LITERAL_CHARS) + 2);
+    let cut = total > max;
+    let mut out = String::with_capacity(text.len().min(4 * max) + 2);
     out.push('"');
-    for c in text.chars().take(MAX_LITERAL_CHARS) {
+    for c in text.chars().take(max) {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),

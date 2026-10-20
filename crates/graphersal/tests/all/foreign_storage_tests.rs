@@ -705,6 +705,151 @@ fn curated_gql_3a_scripts_give_the_same_result_on_both_storages() {
     assert_eq!(outcome.state, modern);
 }
 
+/// Stage 3c: GQL `SET` / `REMOVE` (every item form on nodes and edges, NULL targets and
+/// values, label lists, values read across the write, `CALL` bodies, an index read after the
+/// write, saved queries), each script ending in [`DUMP_3A`] on a fresh modern graph. Errors
+/// (nothing of the query stays): the last row fails, `SET n = NULL` (D4), a label item on an
+/// edge at run time, a closed schema, a required key removed, an atomic script that throws.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3C: &[(Mode, &str)] = &[
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, (p).nick = 'mk', p:Old:Tall RETURN p.age AS a").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) SET p.age = NULL REMOVE p:person SET p IS Human & Being").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (s:software) SET s = {title: s.name, kind: 'app'}").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (s:software) SET s += {lang: NULL, stars: 5, tags: ['a', 'b']}").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a)-[e:knows]->(b) SET e.weight = e.weight * 2, e.since = 2020 REMOVE e.nope").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a)-[e:created]->(s) SET e = {by: a.name} RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) SET b = a").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) SET s.by = p.name, s:Made").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) WITH n, n.name AS old SET n.name = 'x' RETURN old ORDER BY old").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a)-->(b) SET b.seen = coalesce(b.seen, 0) + 1").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) CALL (p) { SET p.k = 1 REMOVE p.age } RETURN p.name AS n ORDER BY n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("FOR n IN ['marko', 'lop'] MATCH (x {name: n}) SET x.hit = true RETURN x LIMIT 0").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.create_index(#{label: "person", key: "age"}); g.gql("MATCH (p:person) SET p.age = 50").toList(); g.V().has_label("person").has("age", 50).count().next()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("INSERT (n:X {k: 1}) SET n.k = 2, n:Y REMOVE n:X RETURN labels(n) AS l, n.k AS k").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.define_query(#{name: "bump", language: "gql", params: #{n: "string"}, body: "MATCH (p:person {name: $n}) SET p.age = p.age + 1"}); g.query("bump", #{n: "josh"}).iterate(); g.query("bump", #{n: "josh"}).iterate()"#,
+    ),
+    // Errors: nothing of the query stays.
+    (
+        Mode::Plain,
+        r#"g.gql("FOR x IN [1, 0] MATCH (p:person) SET p.v = 1 / x").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) SET p.k = 1, p = NULL").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH ()-[e]->() WITH collect(e) AS es FOR x IN es SET x.k = 1, x:met").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.set_schema(g.infer_schema(), SchemaMode.closed); g.gql("MATCH (p:person) SET p.zzz = 1").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", required: ["name"]}}}}); g.gql("MATCH (p:person) SET p.k = 1 REMOVE p.name").toList()"#,
+    ),
+    (
+        Mode::Atomic,
+        r#"g.gql("MATCH (p:person) SET p.k = 1").toList(); g.gql("MATCH (s:software) REMOVE s.lang").toList(); throw "boom""#,
+    ),
+    // Whole-script units and dry runs.
+    (
+        Mode::Atomic,
+        r#"g.gql("MATCH (p:person) SET p.k = 1").toList(); g.gql("MATCH (p {k: 1}) REMOVE p.k SET p:Done").toList(); g.V().has_label("Done").count().next()"#,
+    ),
+    (
+        Mode::DryRun,
+        r#"g.gql("MATCH (p:person {name: 'josh'}) SET p.age = 33, p:Dry REMOVE p.name").toList(); g.V().has_label("Dry").count().next()"#,
+    ),
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3c_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = Vec::new();
+    for (mode, script) in GQL_CURATED_3C {
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), *mode, &script);
+        let actual = run_curated(forwarded(), *mode, &script);
+        if expected.result.is_err() {
+            failing.push(script.clone());
+        }
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 3c, not fail on the way: only the six error cases fail.
+    assert_eq!(failing.len(), 6, "{failing:#?}");
+    // A failed write leaves the modern graph as it was.
+    let modern = run_curated(reference(), Mode::Plain, &format!("1; {DUMP_3A}")).state;
+    for (mode, script) in &GQL_CURATED_3C[15..21] {
+        let outcome = run_curated(reference(), *mode, &format!("{script}; {DUMP_3A}"));
+        assert!(outcome.result.is_err(), "{script}");
+        if !script.contains("set_schema") {
+            assert_eq!(outcome.state, modern, "{script}");
+        }
+    }
+    // A dry run reports the change set and keeps nothing.
+    let (mode, script) = GQL_CURATED_3C[GQL_CURATED_3C.len() - 1];
+    let outcome = run_curated(reference(), mode, script);
+    assert!(outcome.changes.is_some_and(|changes| !changes.is_empty()));
+    assert_eq!(outcome.state, modern);
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2e_scripts_give_the_same_result_on_both_storages() {

@@ -282,21 +282,24 @@ impl WriteItems {
         )
         .gqlstatus(status::INVALID_VALUE_TYPE)
         .alternative(format!(
-            "keep only the rows where `{name}` holds an element, or {} the property of a \
-             bound node or edge, as in MATCH (n) {} n.k",
+            "keep only the rows where `{name}` holds an element, or find the node first with \
+             a MATCH and {} it, as in g.gql(\"FOR n IN ['marko'] MATCH (x {{name: n}}) {} \
+             RETURN x.name\")",
             self.clause.to_ascii_lowercase(),
             if self.clause == "SET" {
-                "SET n.k = 1 RETURN"
+                "SET x.k = 1"
             } else {
-                "REMOVE n.k RETURN"
+                "REMOVE x.age"
             }
         ))
+        .topic(GqlHelpTopic::Set)
         .into_error(&self.query)
     }
 
-    /// The error of a label item on an edge (W26: an edge has exactly one label).
+    /// The error of a label item on an edge (W26: an edge has exactly one label); `label` the
+    /// first label of the item.
     #[inline(never)]
-    pub(crate) fn edge_label_item(&self, item: usize) -> TraverserError {
+    pub(crate) fn edge_label_item(&self, item: usize, label: &str) -> TraverserError {
         let (name, span) = match self.targets.get(item) {
             Some(target) => (target.name.as_str(), target.span),
             None => ("?", NO_SPAN),
@@ -310,12 +313,23 @@ impl WriteItems {
             ),
         )
         .gqlstatus(status::INVALID_VALUE_TYPE)
-        .alternative(
+        .alternative(format!(
             "an edge has exactly one label, changed with the Gremlin step set_label(), for \
-             example g.e().has_label(\"knows\").set_label(\"met\")",
-        )
+             example g.e().has_label(\"knows\").set_label({})",
+            crate::value::literal::rhai_string(label)
+        ))
+        .topic(GqlHelpTopic::Set)
         .into_error(&self.query)
     }
+}
+
+/// `query` with the bytes of `span` replaced by `with`, as a runnable `g.gql(..)` (rule 6: the
+/// fix built from the failing query); `None` when the span does not fit the query.
+fn rewritten(query: &str, span: Span, with: &str) -> Option<String> {
+    let before = query.get(..span.start)?;
+    let after = query.get(span.end..)?;
+    let quoted = crate::value::literal::rhai_query(&format!("{before}{with}{after}"))?;
+    Some(format!("g.gql({quoted})"))
 }
 
 /// Sets `key` on `target` (a stored value).
@@ -470,7 +484,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
                     match stored_value(value) {
                         Ok(property) => out.push((key, Some(property))),
                         Err(kind) => {
-                            return Err(Box::new(self.not_a_value(value_expr, &key, kind)));
+                            return Err(Box::new(self.not_a_value(value_expr, &key, kind, false)));
                         }
                     }
                 }
@@ -504,9 +518,24 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
         }
     }
 
+    /// `element`: the value itself is the node or edge (not a list or map holding one), so
+    /// the advice stores its `element_id()` in the failing query.
     #[inline(never)]
-    fn not_a_value(&self, value: &RowExpr<S>, key: &str, kind: &str) -> TraverserError {
+    fn not_a_value(
+        &self,
+        value: &RowExpr<S>,
+        key: &str,
+        kind: &str,
+        element: bool,
+    ) -> TraverserError {
         let span = value.span();
+        let query = &self.write.query;
+        let fixed = element
+            .then(|| {
+                let text = query.get(span.start..span.end)?;
+                rewritten(query, span, &format!("element_id({text})"))
+            })
+            .flatten();
         GqlErrorBuilder::new(
             GqlErrorKind::Data,
             span.start..span.end,
@@ -516,10 +545,17 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
             ),
         )
         .gqlstatus(status::INVALID_VALUE_TYPE)
-        .alternative(format!(
-            "store a value of it instead, such as SET n.{key} = element_id(..) or SET n.{key} = \
-             properties(..)"
-        ))
+        .alternative(match fixed {
+            Some(fixed) => format!(
+                "store a value of it instead, such as its id, as in {fixed}, or its properties \
+                 with properties(..)"
+            ),
+            None => format!(
+                "store a value of it instead, such as SET n.{key} = element_id(..) or SET \
+                 n.{key} = properties(..)"
+            ),
+        })
+        .topic(GqlHelpTopic::Set)
         .into_error(&self.write.query)
     }
 
@@ -547,10 +583,33 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
             format!("the right side of SET {name} {op} .. is NULL, not a map"),
         )
         .gqlstatus(status::NULL_VALUE)
-        .alternative(format!(
-            "write SET {name} {op} {{}} to change nothing, or give a NULL map a default with \
-             coalesce(), as in SET {name} {op} coalesce($p, {{}})"
-        ))
+        .alternative({
+            let query = &self.write.query;
+            let text = query.get(span.start..span.end).unwrap_or("$p");
+            if op == "+=" {
+                let fixed = rewritten(query, span, &format!("coalesce({text}, {{}})"));
+                format!(
+                    "SET {name} += {{}} changes nothing: give a NULL map that default with \
+                     coalesce($p, {{}}), as in {}",
+                    fixed.unwrap_or_else(|| format!("SET {name} += coalesce($p, {{}})"))
+                )
+            } else {
+                let fixed = rewritten(
+                    query,
+                    span,
+                    &format!("coalesce({text}, properties({name}))"),
+                );
+                format!(
+                    "SET {name} = {{}} removes every property; to keep them when the map is \
+                     NULL, give it the element's own properties as a default with \
+                     coalesce($p, properties({name})), as in {}",
+                    fixed.unwrap_or_else(|| {
+                        format!("SET {name} = coalesce($p, properties({name}))")
+                    })
+                )
+            }
+        })
+        .topic(GqlHelpTopic::Set)
         .into_error(&self.write.query)
     }
 
@@ -567,10 +626,28 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
             ),
         )
         .gqlstatus(status::INVALID_VALUE_TYPE)
-        .alternative(format!(
-            "set one property with SET {name}.k = <value>, or give a map, as in SET {name} \
-             {op} {{k: 1}}"
-        ))
+        .alternative({
+            let query = &self.write.query;
+            let item_span = self.items.get(item).map(GqlSetItem::span);
+            let fixed = (kind != "a path")
+                .then(|| {
+                    let item_span = item_span?;
+                    let text = query.get(span.start..span.end)?;
+                    rewritten(query, item_span, &format!("{name}.k = {text}"))
+                })
+                .flatten();
+            match fixed {
+                Some(fixed) => format!(
+                    "set one property with SET {name}.k = <value>, as in {fixed}, or give a \
+                     map, as in SET {name} {op} {{k: 1}}"
+                ),
+                None => format!(
+                    "set one property with SET {name}.k = <value>, or give a map, as in SET \
+                     {name} {op} {{k: 1}}"
+                ),
+            }
+        })
+        .topic(GqlHelpTopic::Set)
         .into_error(&self.write.query)
     }
 
@@ -593,9 +670,10 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
                 if matches!(evaluated, Value::Null) {
                     return remove_property(context.storage, &target, key);
                 }
+                let element = matches!(evaluated, Value::Element(_));
                 match stored_value(evaluated) {
                     Ok(property) => set_property(context.storage, &target, key, property),
-                    Err(kind) => Err(Box::new(self.not_a_value(value, key, kind))),
+                    Err(kind) => Err(Box::new(self.not_a_value(value, key, kind, element))),
                 }
             }
             GqlSetItem::Replace { value, .. } | GqlSetItem::Merge { value, .. } => {
@@ -626,7 +704,10 @@ impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
                     }
                     Ok(())
                 }
-                Resolved::Edge(_) => Err(Box::new(self.write.edge_label_item(index))),
+                Resolved::Edge(_) => Err(Box::new(
+                    self.write
+                        .edge_label_item(index, labels.first().map_or("T", |l| l.as_str())),
+                )),
                 Resolved::Null => Ok(()),
             },
         }
