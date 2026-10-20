@@ -24,6 +24,10 @@ use crate::error::{TraverserError, TraverserResult, ValueError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
 
+/// Above this many (required label, produced label) pairs the undeclared-label check builds a
+/// hash set instead of scanning `produced` once per required label.
+const SCAN_LIMIT: usize = 64;
+
 /// Step "kind names" (the `&'static str` every `GraphStep` variant carries) that can turn any
 /// incoming value into a map/object shape a later `select()` might legitimately read a key from
 /// (a `valueMap()`/`elementMap()`/`project()`/`group()`/... result, an `inject()`-ed map, a
@@ -38,6 +42,10 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "value_map",
     "element_map",
     "project",
+    "gql:project",
+    "gql:value",
+    "gql:aggregate",
+    "gql:for",
     "constant",
     "unfold",
     "group",
@@ -82,7 +90,31 @@ impl SmallLabelSet {
         if other.0.iter().all(|l| self.contains(l)) {
             return self.clone();
         }
-        SmallLabelSet::new(self.0.iter().chain(other.0.iter()).cloned())
+        // Both sides are sorted and deduplicated: one merge, linear (re-sorting the chain made a
+        // walk that adds one label per step quadratic in the labels).
+        let (a, b) = (&self.0[..], &other.0[..]);
+        let mut merged = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while let (Some(x), Some(y)) = (a.get(i), b.get(j)) {
+            match x.cmp(y) {
+                std::cmp::Ordering::Less => {
+                    merged.push(x.clone());
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(y.clone());
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(x.clone());
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        merged.extend(a.get(i..).unwrap_or_default().iter().cloned());
+        merged.extend(b.get(j..).unwrap_or_default().iter().cloned());
+        SmallLabelSet(Arc::from(merged))
     }
 
     fn without(&self, labels: &[CompactString]) -> SmallLabelSet {
@@ -242,6 +274,11 @@ pub(crate) struct PathAnalysis {
     /// so a rejected modulator inside a branch that never executes (`where(__.out().by("x"))` on
     /// a traverser that never reaches `where()`) is still reported before execution.
     rejected_modulator: std::cell::RefCell<Option<crate::error::BoxedTraverserError>>,
+    /// Labels some step reads in every occurrence (`history_labels()`: a GQL trail check, a
+    /// GQL group variable), anywhere in the query. An `as()` setting such a label does not
+    /// retract it, so the earlier occurrences stay on the path (labels only, never `Full`).
+    /// Collected by the first walk, which seeds the second.
+    history: std::cell::RefCell<Vec<CompactString>>,
 }
 
 impl PathAnalysis {
@@ -256,6 +293,7 @@ impl PathAnalysis {
             required: std::cell::RefCell::new(Vec::new()),
             map_producing_seen: std::cell::Cell::new(false),
             rejected_modulator: std::cell::RefCell::new(None),
+            history: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -302,6 +340,7 @@ impl PathAnalysis {
         }
         let effects = collect.effects.get();
         let known = SmallLabelSet::new(collect.produced.into_inner());
+        let history = collect.history.into_inner();
         let analysis = PathAnalysis {
             force_full: false,
             effects: std::cell::Cell::new(PlanEffects::default()),
@@ -311,6 +350,7 @@ impl PathAnalysis {
             required: std::cell::RefCell::new(Vec::new()),
             map_producing_seen: std::cell::Cell::new(false),
             rejected_modulator: std::cell::RefCell::new(None),
+            history: std::cell::RefCell::new(history),
         };
         Ok((
             analysis.analyze_level(steps, PathRequirement::None).0,
@@ -337,10 +377,23 @@ impl PathAnalysis {
             // cannot rule out; never report a plausible case as a static error.
             return Ok(());
         }
-        let produced = self.produced.borrow();
         let required = self.required.borrow();
+        if required.is_empty() {
+            // The common case (no `select()` at all): nothing to check, no set to build.
+            return Ok(());
+        }
+        let produced = self.produced.borrow();
+        // A set only when the lists are large: a scan of `produced` per required label is
+        // quadratic in the labels, while building a hash set costs more than a short scan.
+        let set: Option<std::collections::HashSet<&str>> = (required.len() * produced.len()
+            > SCAN_LIMIT)
+            .then(|| produced.iter().map(CompactString::as_str).collect());
+        let is_produced = |label: &str| match &set {
+            Some(set) => set.contains(label),
+            None => produced.iter().any(|p| p.as_str() == label),
+        };
         for (label, _step_name) in required.iter() {
-            if !produced.iter().any(|p| p == label) {
+            if !is_produced(label.as_str()) {
                 return Err(Box::new(TraverserError::Value(
                     ValueError::UndeclaredLabel {
                         label: label.to_string(),
@@ -349,6 +402,40 @@ impl PathAnalysis {
             }
         }
         Ok(())
+    }
+
+    /// Records the history labels `step` declares (`history_labels()`); see `history`.
+    #[cfg(feature = "gql")]
+    fn note_history<'g, S: GraphStorage + 'g>(&self, step: &GraphStep<'g, S>) {
+        let history = step.history_labels();
+        if history.is_empty() {
+            return;
+        }
+        let mut known = self.history.borrow_mut();
+        for label in history {
+            if !known.contains(label) {
+                known.push(label.clone());
+            }
+        }
+    }
+
+    /// `need` upstream of an `as()` producing `labels`: without them, except the history labels
+    /// (read in every occurrence, so an earlier occurrence is still needed).
+    fn retract_produced(&self, need: PathRequirement, labels: &[CompactString]) -> PathRequirement {
+        // No history label can exist without the `gql` feature: a plain retraction.
+        if !cfg!(feature = "gql") {
+            return need.retract(labels);
+        }
+        let history = self.history.borrow();
+        if history.is_empty() || !labels.iter().any(|label| history.contains(label)) {
+            return need.retract(labels);
+        }
+        let retracted: Vec<CompactString> = labels
+            .iter()
+            .filter(|label| !history.contains(label))
+            .cloned()
+            .collect();
+        need.retract(&retracted)
     }
 
     /// Drops the labels of `requirement` that no `as()` in the query produces.
@@ -461,6 +548,10 @@ impl PathAnalysis {
             if MAP_PRODUCING_KINDS.contains(&step.kind_name()) {
                 self.map_producing_seen.set(true);
             }
+            // Only internal GQL steps declare history labels: without the feature this is
+            // compiled out, so a Gremlin plan pays nothing for it.
+            #[cfg(feature = "gql")]
+            self.note_history(step);
 
             if self.force_full {
                 modes[index] = PathMode::Full;
@@ -470,7 +561,7 @@ impl PathAnalysis {
                 // (the labels themselves were already recorded above, unconditionally).
                 let labels: &[CompactString] = as_step.step_labels().map_or(&[], |l| &l[..]);
                 modes[index] = need.clone();
-                need = need.retract(labels).union(children);
+                need = self.retract_produced(need, labels).union(children);
             } else {
                 modes[index] = need.clone();
                 let skipped = next_is_count && step.skipped_before_count();

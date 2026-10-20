@@ -123,6 +123,17 @@ pub(crate) fn camel_name(snake: &str) -> Cow<'_, str> {
 /// [`Spelling::Camel`], every identifier directly followed by `(` outside a string literal is
 /// renamed through [`camel_name`]. Idempotent; [`Spelling::Snake`] returns `text` unchanged.
 pub(crate) fn respell(text: &str, spelling: Spelling) -> Cow<'_, str> {
+    respell_keeping(text, spelling, |_| false)
+}
+
+/// [`respell`], except that a called identifier for which `keep` holds stays as written: the
+/// help of a GQL error keeps the GQL function names (`element_id(p)`) and respells the Gremlin
+/// steps.
+pub(crate) fn respell_keeping(
+    text: &str,
+    spelling: Spelling,
+    keep: impl Fn(&str) -> bool,
+) -> Cow<'_, str> {
     if spelling == Spelling::Snake || !text.contains('_') {
         return Cow::Borrowed(text);
     }
@@ -168,7 +179,7 @@ pub(crate) fn respell(text: &str, spelling: Spelling) -> Cow<'_, str> {
         }
         let identifier = &text[start..end];
         let called = chars.peek().is_some_and(|&(_, next)| next == '(');
-        if called {
+        if called && !keep(identifier) {
             out.push_str(&camel_name(identifier));
         } else {
             out.push_str(identifier);
@@ -202,6 +213,22 @@ mod tests {
                 Spelling::Camel
             ),
             r#"globPath("a", #{max_depth: 2}).math("_ + 1")"#
+        );
+    }
+
+    #[test]
+    fn respell_keeping_leaves_the_kept_calls_alone() {
+        assert_eq!(
+            respell_keeping(
+                "use element_id(p) or add_v(), char_length(x)",
+                Spelling::Camel,
+                |name| name == "element_id" || name == "char_length"
+            ),
+            "use element_id(p) or addV(), char_length(x)"
+        );
+        assert_eq!(
+            respell_keeping("add_v()", Spelling::Snake, |_| false),
+            "add_v()"
         );
     }
 

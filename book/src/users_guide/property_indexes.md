@@ -232,8 +232,9 @@ keys) and ranged by its length, a month as 30 days, ties broken by the fields: e
 `P.within` and every range on durations are served. Only the **order** of the elements may differ (the index
 reads them by value): use `order()` when the order matters.
 
-A `P.eq("a")` with a string inside a child traversal is not served: there a string first names a
-path label (`where(P.eq("a"))`), which an index cannot know.
+A string operand of `has(key, P)` is always a value, also inside a child traversal and after an
+`as()` of the same spelling (only `where(P.eq("a"))` names a path label), so `P.eq("a")` is served
+wherever the start step is.
 
 ## See it in `.profile()`
 

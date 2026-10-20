@@ -139,11 +139,11 @@ The report's "Deliberate incompatibilities" section has the same table, with the
 ## Running and regenerating
 
 ```bash
-# Run the suite (also part of the plain `cargo test --package graphersal --features script,io,display,serde,persist`)
-cargo test --package graphersal --features script,io,display,serde,persist --test tinkerpop_features
+# Run the suite (also part of the plain `cargo test --package graphersal --features script,io,display,serde,persist,gql`)
+cargo test --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features
 
 # Rewrite the baseline AND the generated blocks of this page after intended changes; review the diff like code
-TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist --test tinkerpop_features
+TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features
 ```
 
 Every run prints the summary to stderr and writes the full report to `target/tinkerpop-report.md`:

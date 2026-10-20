@@ -109,7 +109,7 @@ unless a page says otherwise; the differences are collected in
 <!-- steps:begin -->
 ### Start
 
-[`v`](steps/v.md) · [`e`](steps/e.md) · [`inject`](steps/inject.md)
+[`v`](steps/v.md) · [`e`](steps/e.md) · [`inject`](steps/inject.md) · [`gql`](steps/gql.md)
 
 ### Walking the graph
 

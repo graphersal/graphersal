@@ -1935,3 +1935,893 @@ mod compression_estimate {
         assert!(err.contains("Permission denied"), "{err}");
     }
 }
+
+/// `g.gql()` (feature `gql`) asks exactly what its Gremlin twin asks: the lowered plan is an
+/// ordinary plan, checked once before it runs. A read names the element kind (never a label,
+/// like every Gremlin read), so denying the reads of edges refuses an edge pattern and lets a
+/// node pattern through; `gql()` never asks for a write.
+#[cfg(feature = "gql")]
+mod gql {
+    use super::*;
+
+    /// Denies every read of edges (and of data of an unknown kind).
+    struct NoEdges;
+
+    impl Authorizer for NoEdges {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (Action::Read, Resource::Data { element, .. })
+                    if element != Some(ElementKind::Vertex) =>
+                {
+                    Err(Denied::new("edges are private"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// The requests `script` asks, allowed.
+    fn requests(graph: &Arc<Graph>, script: &str) -> Vec<String> {
+        let recorder = Arc::new(Recorder::default());
+        let _ =
+            run(graph, script, recorder.clone()).unwrap_or_else(|err| panic!("{script}: {err}"));
+        recorder.seen()
+    }
+
+    #[test]
+    fn a_denied_read_refuses_gql_like_its_gremlin_twin() {
+        let graph = modern();
+        // The Gremlin twin and the GQL query are refused with the same step and request.
+        for script in [
+            r#"g.V().hasLabel("person").out("knows").values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows]->(f) RETURN f.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        for script in [
+            r#"g.V().hasLabel("person").outE("knows").inV().values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN e.weight").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out_e", "Read Data(edge)");
+        }
+        // Refused before it runs, also when no row would reach the edge step.
+        let err = run(
+            &graph,
+            r#"g.gql("MATCH (p:nobody)-[:knows]->(f) RETURN f").toList()"#,
+            NoEdges,
+        )
+        .unwrap_err();
+        assert!(err.contains("edges are private"), "{err}");
+        // A node pattern reads vertices only: allowed, like its twin.
+        let names = run(
+            &graph,
+            r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS n ORDER BY n").select("n").toList()"#,
+            NoEdges,
+        )
+        .unwrap();
+        assert_eq!(names.into_array().unwrap().len(), 2);
+        // The Rust API asks the same.
+        let lock = graph.read();
+        let g = GraphTraversalSource::new(&*lock).with_authorizer(Arc::new(NoEdges));
+        let err = format_diagnostic(
+            &g.gql("MATCH (a)-[:created]->(s) RETURN s.name")
+                .to_list()
+                .unwrap_err(),
+        );
+        assert!(
+            err.contains("Permission denied for 'out' (Read Data(edge)): edges are private"),
+            "{err}"
+        );
+        let g = GraphTraversalSource::new(&*lock).with_authorizer(Arc::new(NoEdges));
+        assert_eq!(
+            g.gql("MATCH (s:software) RETURN s")
+                .to_list()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn gql_asks_the_same_requests_as_its_gremlin_twin() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person)-[e:knows]->(f) RETURN f.name").toList()"#,
+                r#"g.V().hasLabel("person").outE("knows").inV().values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (a)-[:created]-(b) RETURN b").toList()"#,
+                r#"g.V().both("created").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
+    #[test]
+    fn gql_never_asks_for_a_write() {
+        let graph = modern();
+        for query in [
+            "MATCH (p:person) WHERE p.age > 30 RETURN p.name ORDER BY p.name LIMIT 1",
+            "MATCH (a)-[e:knows]->(b), (b)-[:created]->(c) RETURN a, e, b, c",
+            "MATCH (a)-[:created]->(s)<-[:created]-(b) WHERE a <> b RETURN DISTINCT s.name",
+            "MATCH (a)-[e]-(b) RETURN element_id(e), labels(a), type(e)",
+            // Refused write clauses fail before anything is asked of the data.
+            "CREATE (p:person {name: 'x'})",
+            "MATCH (p) SET p.age = 1 RETURN p",
+            "MATCH (p) DETACH DELETE p",
+        ] {
+            let recorder = Arc::new(Recorder::default());
+            let script = format!("g.gql({query:?}).toList()");
+            let _ = run(&graph, &script, recorder.clone());
+            let seen = recorder.seen();
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+        // So a read-only host runs every GQL query, and the graph stays unchanged.
+        let rows = run(
+            &graph,
+            r#"g.gql("MATCH (a)-[:knows]->(b) RETURN a.name, b.name").toList()"#,
+            AccessPolicy::read_only(),
+        )
+        .unwrap();
+        assert_eq!(rows.into_array().unwrap().len(), 2);
+        assert_eq!(count(&graph), 6);
+        assert_eq!(graph.read().edge_count(), 6);
+    }
+
+    /// Stage 1b: an edge read only inside a quantified edge (a `repeat()` body), an optional
+    /// part (an `optional()` child) or a pattern after a `WITH` is refused before the run, by
+    /// the same step and request as the Gremlin twin. Reads never name a label, so the denial
+    /// is by element kind, as for every Gremlin read.
+    #[test]
+    fn a_denied_read_in_a_1b_construct_refuses_gql_like_its_gremlin_twin() {
+        let graph = modern();
+        // A quantified edge: the edge step of the repeat() body.
+        for script in [
+            r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows]->{1,2}(f) RETURN f.name").toList()"#,
+            r#"g.gql("MATCH (p:person)-[:knows*]->(f) RETURN count(*) AS c").toList()"#,
+            r#"g.gql("MATCH x = (p:person)-[:knows]->{0,1}(f) RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out_e", "Read Data(edge)");
+        }
+        // An optional part: the edge step inside optional().
+        for script in [
+            r#"g.V().hasLabel("person").optional(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, s.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // After a WITH, projecting or materializing (an aggregate, ORDER BY with LIMIT).
+        for script in [
+            r#"g.V().hasLabel("person").limit(2).out("created").values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p, count(*) AS c MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 2 MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Refused before it runs, also when no row would reach the optional part or the
+        // quantified edge.
+        for script in [
+            r#"g.gql("MATCH (p:nobody) OPTIONAL MATCH (p)-[:created]->(s) RETURN s").toList()"#,
+            r#"g.gql("MATCH (p:nobody)-[:knows]->{0,3}(f) RETURN f").toList()"#,
+            r#"g.gql("MATCH (p:nobody) WITH p LIMIT 0 MATCH (p)-[:created]->(s) RETURN s").toList()"#,
+        ] {
+            let err = run(&graph, script, NoEdges).unwrap_err();
+            assert!(err.contains("edges are private"), "{script}: {err}");
+        }
+        // Node-only 1b queries read vertices only: allowed.
+        let rows = run(
+            &graph,
+            r#"g.gql("MATCH (p:person) WITH p.age AS a LET b = a + 1 FILTER b > 30 RETURN count(*) AS c, collect_list(b) AS bs").toList()"#,
+            NoEdges,
+        )
+        .unwrap();
+        assert_eq!(rows.into_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn gql_1b_asks_the_same_requests_as_its_gremlin_twin() {
+        let graph = modern();
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person)-[:knows]->{1,2}(f) RETURN f.name").toList()"#,
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+                r#"g.V().hasLabel("person").optional(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WITH p, count(*) AS c MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+                r#"g.V().hasLabel("person").out("created").values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN count(*) AS c").toList()"#,
+                r#"g.V().hasLabel("person").count().toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+        // And a 1b query never asks for a write.
+        for query in [
+            "MATCH (p:person) OPTIONAL MATCH (p)-[e:knows]->{1,2}(f) RETURN p.name, count(f) AS c",
+            "MATCH x = (a)-[:created]-{1,2}(b) WITH x, length(x) AS l RETURN l, count(*) AS c",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            let seen = requests(&graph, &script);
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+    }
+
+    /// Denies every read of `person` vertices: a read whose label is not stated (every read)
+    /// is possibly one, so all vertex reads are denied, edge reads are not.
+    struct NoPersons;
+
+    impl Authorizer for NoPersons {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (Action::Read, Resource::Data { element, label })
+                    if element != Some(ElementKind::Edge)
+                        && label.is_none_or(|label| label == "person") =>
+                {
+                    Err(Denied::new("persons are private"))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Design F8 (stage 1c): `startNode(e)` / `endNode(e)`, `nodes(p)`, `keys` and
+    /// `properties` ask no permission of their own. They read vertices the pattern already
+    /// read: every edge pattern stands between two node patterns, whose lowering reads the
+    /// endpoint vertices, so a denied vertex read refuses the query before it runs, like the
+    /// Gremlin twin `e().out_v()`. (The GQL plan starts at `v()`, the twin at `e()`, so the
+    /// denied step differs; the request is the same.)
+    #[test]
+    fn a_denied_vertex_read_refuses_start_node_like_out_v() {
+        let graph = modern();
+        // The edges alone are readable in Gremlin.
+        let weights = run(&graph, r#"g.E().values("weight").toList()"#, NoPersons).unwrap();
+        assert_eq!(weights.into_array().unwrap().len(), 6);
+        assert_denied(
+            run(&graph, r#"g.E().outV().values("name").toList()"#, NoPersons),
+            "out_v",
+            "Read Data(vertex)",
+        );
+        assert_denied(
+            run(&graph, r#"g.E().inV().values("name").toList()"#, NoPersons),
+            "in_v",
+            "Read Data(vertex)",
+        );
+        for query in [
+            "MATCH ()-[e]->() RETURN startNode(e).name AS s",
+            "MATCH ()-[e:knows]->() RETURN element_id(endNode(e)) AS t",
+            "MATCH (a)-[e]-(b) RETURN a IS SOURCE OF e AS s",
+            "MATCH p = ()-[:knows]->() RETURN nodes(p) AS n",
+            "MATCH ()-[e]->() RETURN keys(e) AS k, properties(e) AS p",
+            "MATCH (x:nobody)-[e]->() RETURN startNode(e) AS s",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            assert_denied(run(&graph, &script, NoPersons), "v", "Read Data(vertex)");
+        }
+    }
+
+    /// The functions of stage 1c add no request: a query with them asks exactly what the same
+    /// pattern without them asks, and the same set as the Gremlin twin of the endpoints.
+    #[test]
+    fn gql_1c_functions_add_no_request() {
+        let graph = modern();
+        let set = |script: &str| {
+            let mut seen = requests(&graph, script);
+            seen.sort();
+            seen.dedup();
+            seen
+        };
+        for (with_functions, without) in [
+            (
+                r#"g.gql("MATCH ()-[e]->() RETURN startNode(e), endNode(e), keys(e), properties(e)").toList()"#,
+                r#"g.gql("MATCH ()-[e]->() RETURN e").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH p = (a)-[:knows]->{1,2}(b) RETURN nodes(p), relationships(p), a IS SOURCE OF head(relationships(p))").toList()"#,
+                r#"g.gql("MATCH p = (a)-[:knows]->{1,2}(b) RETURN p").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (n) RETURN toString(n.age), upper(left(n.name, 2)), round(sqrt(n.age), 1), range(1, 3), CAST(n.age AS STRING)").toList()"#,
+                r#"g.gql("MATCH (n) RETURN n").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, with_functions), requests(&graph, without));
+        }
+        assert_eq!(
+            set(r#"g.gql("MATCH ()-[e]->() RETURN startNode(e), endNode(e)").toList()"#),
+            set(r#"g.E().project("s", "t").by(__.outV()).by(__.inV()).toList()"#)
+        );
+    }
+
+    /// Stage 2a: `gql:lookup` (a component found by id or index, design M3) reads vertices
+    /// like the `v()` it replaces: a denied vertex read refuses it before it runs, at that step,
+    /// with the request `g.V().hasLabel(..)` is refused with, also when it is the only vertex
+    /// read of the query and no row would reach it.
+    #[test]
+    fn a_denied_read_refuses_gql_lookup_like_v_has_label() {
+        let graph = modern();
+        assert_denied(
+            run(
+                &graph,
+                r#"g.V().hasLabel("person").values("name").toList()"#,
+                NoPersons,
+            ),
+            "v",
+            "Read Data(vertex)",
+        );
+        let by_id = r#"g.gql("FOR id IN ['1', '4'] MATCH (n:person) WHERE element_id(n) = id RETURN n.name").toList()"#;
+        let by_index =
+            r#"g.gql("FOR x IN ['marko'] MATCH (n:person {name: x}) RETURN n.age").toList()"#;
+        let no_row =
+            r#"g.gql("FOR id IN [] MATCH (n:person) WHERE element_id(n) = id RETURN n").toList()"#;
+        assert!(requests(&graph, by_index).contains(&"Read Data(vertex)".to_string()));
+        // The index: created allowed, before the denied runs.
+        let _ = requests(&graph, r#"g.create_index(#{label: "person", key: "name"})"#);
+        for script in [by_id, by_index, no_row] {
+            let profile = run(
+                &graph,
+                &script.replace(".toList()", ".profile().to_string()"),
+                Recorder::default(),
+            )
+            .unwrap_or_else(|err| panic!("{script}: {err}"))
+            .to_string();
+            assert!(profile.contains("gql:lookup("), "{script}: {profile}");
+            assert!(!profile.contains("\nv()"), "{script}: {profile}");
+            assert_denied(
+                run(&graph, script, NoPersons),
+                "gql:lookup",
+                "Read Data(vertex)",
+            );
+        }
+        // It asks exactly what the Gremlin twin asks.
+        assert_eq!(
+            requests(&graph, by_id),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("person").values("name").toList()"#
+            )
+        );
+    }
+
+    /// Stage 2a: a query without `MATCH` (`FOR`, `RETURN`, a leading `FILTER`) starts from the
+    /// unit row `inject(0)` and reads no vertex, so it runs where vertex reads are denied, asking
+    /// what `g.inject(0)` asks; a `MATCH` after a `FOR` (a per-row scan or a lookup of another
+    /// label) asks what its Gremlin twin asks and is refused or allowed like it.
+    #[test]
+    fn for_and_unit_row_queries_ask_what_their_gremlin_twins_ask() {
+        let graph = modern();
+        for script in [
+            r#"g.gql("FOR x IN [1, 2] WITH ORDINALITY i RETURN x, i").toList()"#,
+            r#"g.gql("RETURN 1 AS x").toList()"#,
+            r#"g.gql("FILTER true UNWIND [1] AS x RETURN x").toList()"#,
+        ] {
+            assert!(run(&graph, script, NoPersons).is_ok(), "{script}");
+            assert_eq!(
+                requests(&graph, script),
+                requests(&graph, r#"g.inject(0).toList()"#),
+                "{script}"
+            );
+        }
+        // A per-row scan of persons after FOR: refused at v(), as g.inject(0).V().hasLabel(..).
+        let scan = r#"g.gql("FOR n IN ['marko'] MATCH (p:person) WHERE p.name = n RETURN p.age").toList()"#;
+        assert_denied(run(&graph, scan, NoPersons), "v", "Read Data(vertex");
+        assert_eq!(
+            requests(&graph, scan),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("person").values("age").toList()"#
+            )
+        );
+        // A lookup of software by id after FOR: allowed like g.inject(0).V().hasLabel("software").
+        let software = r#"g.gql("FOR id IN ['3'] MATCH (s:software) WHERE element_id(s) = id RETURN s.lang").toList()"#;
+        assert_eq!(
+            run(&graph, software, NoPersons).is_ok(),
+            run(
+                &graph,
+                r#"g.inject(0).V().hasLabel("software").values("lang").toList()"#,
+                NoPersons
+            )
+            .is_ok(),
+            "{software}"
+        );
+        assert_eq!(
+            requests(&graph, software),
+            requests(
+                &graph,
+                r#"g.inject(0).V().hasLabel("software").values("lang").toList()"#
+            )
+        );
+    }
+
+    /// Stage 2b: a top-level `[NOT] EXISTS` (or a pattern predicate) is a `filter(__..)` /
+    /// `not(__..)` child, and the authorization walk visits it: an edge read reached only inside
+    /// the subquery (the query's own pattern reads vertices only) is refused before the run, at
+    /// the child's step, like the Gremlin twin `where(__.out(..))` / `not(__.out(..))`; allowed,
+    /// it asks what the twin asks.
+    #[test]
+    fn a_denied_read_inside_exists_refuses_gql_like_where() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN p.name").toList()"#,
+            r#"g.V().hasLabel("person").not(__.out("created")).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) FILTER NOT EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Nested: the edge read sits in the inner child only.
+        for script in [
+            r#"g.V().hasLabel("person").as("p").where(__.V().hasLabel("software").where(__.in("created").where(P.eq("p")))).values("name").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { MATCH (q:software) WHERE EXISTS { (q)<-[:created]-(p) } } RETURN p.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "in", "Read Data(edge)");
+        }
+        // The node pattern alone is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN p.name").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        // Refused before it runs, also when no row would reach the child.
+        let err = run(
+            &graph,
+            r#"g.gql("MATCH (p:nobody) WHERE NOT (p)-->() RETURN p").toList()"#,
+            NoEdges,
+        )
+        .unwrap_err();
+        assert!(err.contains("edges are private"), "{err}");
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").not(__.out("created")).values("name").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
+    /// Stage 2b.T5: a subquery anywhere in an expression runs as a child of the `gql:*` step
+    /// evaluating it (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`); the
+    /// authorization walk visits those children, so an edge read reached only there is refused
+    /// before the run, also when no row would reach it, like the Gremlin `where(__.out(..))`.
+    #[test]
+    fn a_denied_read_inside_a_hosted_exists_refuses_gql() {
+        let graph = modern();
+        for script in [
+            // gql:filter: under OR
+            r#"g.gql("MATCH (p:person) WHERE p.age > 30 OR EXISTS { (p)-[:created]->() } RETURN p.name").toList()"#,
+            // gql:filter: under CASE
+            r#"g.gql("MATCH (p:person) WHERE CASE WHEN (p)-[:created]->() THEN true ELSE false END RETURN p.name").toList()"#,
+            // gql:project: a RETURN column
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-[:created]->() } AS c").toList()"#,
+            // gql:order: an ORDER BY key
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY EXISTS { (p)-[:created]->() }").toList()"#,
+            // gql:aggregate: an aggregate's argument and a grouping key
+            r#"g.gql("MATCH (p:person) RETURN count(CASE WHEN (p)-[:created]->() THEN 1 END) AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS e, count(*) AS c").toList()"#,
+            // gql:for: the list
+            r#"g.gql("MATCH (p:person) FOR x IN [EXISTS { (p)-[:created]->() }] RETURN x").toList()"#,
+            // no row reaches the host
+            r#"g.gql("MATCH (p:nobody) RETURN EXISTS { (p)-[:created]->() } AS c").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Without the subquery every query above is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) WHERE p.age > 30 RETURN p.name AS n ORDER BY n").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        // Allowed, a hosted child asks what the Gremlin twin's child asks.
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN EXISTS { (p)-[:created]->() } AS c").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE p.age > 30 OR (p)-[:created]->() RETURN p.name").toList()"#,
+                r#"g.V().hasLabel("person").where(__.out("created")).values("name").toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
+    /// Stage 2c.T3: a pattern comprehension runs as a child of the `gql:*` step evaluating it
+    /// (ending in `gql:value`); the authorization walk visits it in every host and nested in
+    /// another comprehension's `|` part, so an edge read reached only there is refused before
+    /// the run, also when no row reaches it, like the Gremlin `project().by(__.out(..).fold())`.
+    #[test]
+    fn a_denied_read_inside_a_pattern_comprehension_refuses_gql() {
+        let graph = modern();
+        for script in [
+            // gql:project: a RETURN column, inside a map projection
+            r#"g.gql("MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p {.name, made: [(p)-[:created]->(s) | s.name]} AS m").toList()"#,
+            // gql:filter: WHERE
+            r#"g.gql("MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) > 1 RETURN p.name").toList()"#,
+            // gql:order: an ORDER BY key
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)-[:created]->(s) | s])").toList()"#,
+            // gql:aggregate: an aggregate's argument
+            r#"g.gql("MATCH (p:person) RETURN collect_list([(p)-[:created]->(s) | s.name]) AS c").toList()"#,
+            // gql:for: the list
+            r#"g.gql("MATCH (p:person) FOR x IN [(p)-[:created]->(s) | s.name] RETURN x").toList()"#,
+            // nested in another comprehension's `|` part (gql:value hosts it)
+            r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS l").toList()"#,
+            // no row reaches the host
+            r#"g.gql("MATCH (p:nobody) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // Allowed, the hosted children (the nested one under `gql:value` included) ask what
+        // the Gremlin twin's children ask, request for request.
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:created]->(s) | s.name] AS l").toList()"#,
+                r#"g.V().hasLabel("person").project("l").by(__.out("created").values("name").fold()).toList()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | [(f)-[:created]->(s) | s.name]] AS l").toList()"#,
+                r#"g.V().hasLabel("person").project("l").by(__.out("knows").map(__.out("created").values("name").fold()).fold()).toList()"#,
+            ),
+        ] {
+            assert_eq!(requests(&graph, query), requests(&graph, twin), "{query}");
+        }
+    }
+
+    /// Stage 2b.T6: a vertex read reached only inside a subquery (the unit row and `FOR`
+    /// read none outside it; a read request states no label, so a denied label is a denied
+    /// vertex read) is refused before the run like the Gremlin twin, on the fast path and
+    /// through every hook, also when no row reaches the subquery; allowed, the query asks what
+    /// the twin asks.
+    #[test]
+    fn a_denied_read_reached_only_inside_exists_refuses_gql_like_its_twin() {
+        let graph = modern();
+        // Outside the subqueries these queries read no vertex and are allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("FOR x IN [1, 2] FILTER x > 1 RETURN x ORDER BY x").toList()"#,
+                NoPersons
+            )
+            .is_ok()
+        );
+        for script in [
+            r#"g.inject(0).where(__.V().hasLabel("person").has("age", P.gt(30))).toList()"#,
+            // fast path: filter() / not() on the unit row and after FOR
+            r#"g.gql("FILTER EXISTS { MATCH (p:person) WHERE p.age > 30 } RETURN 1 AS x").toList()"#,
+            r#"g.gql("FOR n IN ['marko'] FILTER NOT EXISTS { MATCH (p:person {name: n}) } RETURN n").toList()"#,
+            // hooks: gql:filter, gql:project, gql:order, gql:aggregate, gql:for
+            r#"g.gql("FOR x IN [1] FILTER x = 2 OR EXISTS { MATCH (p:person) } RETURN x").toList()"#,
+            r#"g.gql("RETURN EXISTS { MATCH (p:person) } AS e").toList()"#,
+            r#"g.gql("FOR x IN [1, 2] RETURN x ORDER BY EXISTS { MATCH (p:person) WHERE p.age = x }").toList()"#,
+            r#"g.gql("FOR x IN [1, 2] RETURN count(CASE WHEN EXISTS { MATCH (p:person) } THEN x END) AS c").toList()"#,
+            r#"g.gql("FOR x IN [EXISTS { MATCH (p:person) }] RETURN x").toList()"#,
+            // no row reaches the subquery
+            r#"g.gql("FOR x IN [] FILTER EXISTS { MATCH (p:person) } RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Allowed, the fast path asks what the Gremlin twin asks.
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("FILTER EXISTS { MATCH (p:person) WHERE p.age > 30 } RETURN 1 AS x").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.inject(0).where(__.V().hasLabel("person").has("age", P.gt(30))).toList()"#
+            )
+        );
+    }
+    /// Stage 2d.T5: a `CALL { }` body is the child of `flat_map(__..)` (`OPTIONAL CALL` inside
+    /// `optional(__..)`), and the authorization walk visits it: an edge read reached only in the
+    /// body (the query's own pattern reads vertices only) is refused before the run, at the
+    /// body's step, also when no row reaches the `CALL`, nested, in a `UNION` operand of the
+    /// body, like the Gremlin `flatMap(__.out(..))`; a vertex read only in an uncorrelated body
+    /// likewise; allowed, it asks what the twin asks.
+    #[test]
+    fn a_denied_read_inside_a_call_body_refuses_gql_like_flat_map() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").flatMap(__.out("created")).toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS c } RETURN c").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { RETURN 1 AS x UNION ALL MATCH (p)-[:created]->(s) RETURN 2 AS x } RETURN x").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:nobody) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s").toList()"#,
+            r#"g.gql("CALL { MATCH (p:person)-[:created]->(s) RETURN s } RETURN s").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        for script in [
+            r#"g.gql("FOR x IN [1] CALL { MATCH (p:person) RETURN p.name AS n } RETURN n").toList()"#,
+            r#"g.gql("FOR x IN [1] OPTIONAL CALL (x) { MATCH (p:person) WHERE p.age = x RETURN p } RETURN p").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the body the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) CALL (p) { RETURN p.name AS n } RETURN n").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").flatMap(__.out("created")).values("name").toList()"#
+            )
+        );
+    }
+
+    /// Stage 2d.T6: a read only a later `UNION` operand or a block after `NEXT` makes is asked
+    /// like the Gremlin `union()` twin: the authorization walk visits every operand child of the
+    /// start `union()` (and of a mid-traversal one after `NEXT`), also when the first operand
+    /// reads nothing denied.
+    #[test]
+    fn a_denied_read_reached_only_in_a_union_operand_refuses_gql_like_union() {
+        let graph = modern();
+        for script in [
+            r#"g.union(__.inject(1), __.V().hasLabel("person").out("created")).toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n UNION MATCH (p:person)-[:created]->(s) RETURN s.name AS n").toList()"#,
+            r#"g.gql("RETURN 1 AS x NEXT RETURN x UNION MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:nobody) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN s.name").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:nobody)-[:created]->(s) RETURN 2 AS x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // A vertex read only in a later operand.
+        for script in [
+            r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person) RETURN 2 AS x").toList()"#,
+            r#"g.gql("RETURN 1 AS x UNION RETURN 3 AS x NEXT MATCH (p:person) RETURN x").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the denied operand the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person) RETURN 2 AS x").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("RETURN 1 AS x UNION ALL MATCH (p:person)-[:created]->(s) RETURN 2 AS x").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.union(__.inject(1), __.V().hasLabel("person").out("created")).toList()"#
+            )
+        );
+    }
+
+    /// Stage 2d.T5c: a read only a `COUNT { }` or `COLLECT { }` body (or a whole-query
+    /// `EXISTS` body) makes is asked like the Gremlin `local(__..count())` / `fold()` twin:
+    /// the authorization walk visits the children of the hosting `gql:*` step (MATCH-only and
+    /// whole-query bodies, under every host, nested, uncorrelated).
+    #[test]
+    fn a_denied_read_inside_count_or_collect_refuses_gql_like_local() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").local(__.out("created").count()).toList()"#,
+            r#"g.V().hasLabel("person").local(__.out("created").values("name").fold()).toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COUNT { (p)-[:created]->() } AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 0 RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY COUNT { (p)-[:created]->() }").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN sum(COUNT { (p)-[:created]->() }) AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) FOR x IN [COUNT { (p)-[:created]->() }] RETURN x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:created]->(s) RETURN s.name AS x UNION RETURN 1 AS x } AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) WITH s ORDER BY s.name RETURN s.name } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { RETURN COUNT { (p)-[:created]->() } AS c } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN count(s) AS c } RETURN p.name").toList()"#,
+            r#"g.gql("RETURN COUNT { MATCH (p:person)-[:created]->(s) } AS c").toList()"#,
+            r#"g.gql("RETURN COLLECT { MATCH (p:person)-[:created]->(s) RETURN s } AS l").toList()"#,
+            r#"g.gql("MATCH (p:nobody) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s } AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // A vertex read only a body's child-leading scan makes (uncorrelated, or correlated by
+        // a condition no index serves).
+        for script in [
+            r#"g.gql("FOR x IN [1] RETURN COUNT { MATCH (p:person) } AS c").toList()"#,
+            r#"g.gql("FOR x IN [1] RETURN COLLECT { MATCH (p:person) RETURN p.name } AS l").toList()"#,
+            r#"g.gql("FOR x IN [29] RETURN COUNT { MATCH (p:person) WHERE p.age = x } AS c").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the body the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COLLECT { RETURN p.name AS n } AS l").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COUNT { (p)-[:created]->() } AS c").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").local(__.out("created").count()).toList()"#
+            )
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS l").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").local(__.out("created").values("name").fold()).toList()"#
+            )
+        );
+    }
+
+    /// Stage 2e.T5: a parenthesized path pattern is `repeat(__.<body>)` (or its body inline),
+    /// and the authorization walk visits the body: an edge read only a body hop makes (the
+    /// outer pattern reads vertices only) is refused before the run at the body's edge step,
+    /// like the Gremlin `repeat(__.outE(..).inV())` twin, for every quantifier, walked from
+    /// either end, in a two-hop body, inside `OPTIONAL MATCH`, `EXISTS`, a pattern predicate, a
+    /// pattern comprehension, `COUNT { }` and `CALL`, also when no row reaches it. A vertex read
+    /// only a body's node label asks (a read states no label) is refused likewise when it is
+    /// the only vertex read, in an uncorrelated subquery body. Allowed, it asks what the twin
+    /// asks.
+    #[test]
+    fn a_denied_read_inside_a_parenthesized_path_pattern_refuses_gql_like_repeat() {
+        let graph = modern();
+        // Without a quantifier (and with `?`, one iteration at most) an unread edge is the 1a
+        // `out()` hop; a repeating body labels its edges, so its hop is `out_e()`.
+        for (script, step) in [
+            (
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[e:knows]->(y)) (f) RETURN f.name").toList()"#,
+                "out",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y))? (f) RETURN f.name").toList()"#,
+                "out",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y))* (f) RETURN count(*) AS c").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(m)-[:created]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:nobody) ((x)-[:knows]->(y)){1,2} (f) RETURN f").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE EXISTS { (p) ((x)-[:knows]->(y)){1,2} } RETURN p.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE (p) (()-[:knows]->()){1,2} RETURN p.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p) ((x)-[:knows]->(y)){1,2} (f) | f.name] AS l").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN COUNT { (p) ((x)-[:knows]->(y))+ } AS c").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p) ((x)-[:knows]->(y)){1,2} (f) RETURN f } RETURN f.name").toList()"#,
+                "out_e",
+            ),
+        ] {
+            assert_denied(run(&graph, script, NoEdges), step, "Read Data(edge)");
+        }
+        // Walked from the far end the hop is reversed: the edge step is in_e.
+        for script in [
+            r#"g.V().has("name", "lop").repeat(__.inE("created").outV()).times(1).values("name").toList()"#,
+            r#"g.gql("MATCH (a) ((x)-[:created]->(y)){1} (s:software {name: 'lop'}) RETURN a.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "in_e", "Read Data(edge)");
+        }
+        // Either direction: the first hop of the `union()` of both.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]-(y)){1,2} (f) RETURN f.name").toList()"#,
+                NoEdges,
+            ),
+            "out_e",
+            "Read Data(edge)",
+        );
+        // A vertex read that only a body's node pattern (with its label) makes.
+        for script in [
+            r#"g.gql("FOR i IN [1] RETURN COUNT { MATCH ((x:person)-[:knows]->(y)){1,2} } AS c").toList()"#,
+            r#"g.gql("FOR i IN [] RETURN COLLECT { MATCH ((x:person)-[:knows]->(y:person))+ RETURN y } AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Allowed, a parenthesized path pattern asks what its Gremlin twin asks.
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#
+            )
+        );
+        for query in [
+            "MATCH (p:person) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20)? (b) RETURN p, b",
+            "MATCH p = (a) ((x)-->(y)){1,2} (b) RETURN p",
+            "MATCH (a) WHERE (a) (()-->()){2} RETURN [(a) ((x)-->(y))+ | y] AS l",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            let seen = requests(&graph, &script);
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+    }
+}

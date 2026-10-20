@@ -70,14 +70,14 @@ The long fuzz budgets (release builds with overflow checks and debug assertions 
 ```bash
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
 ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=7 \
-  cargo test --release -p graphersal --features script,io,display,serde,persist \
+  cargo test --release -p graphersal --features script,io,display,serde,persist,gql \
   --test all robustness_fuzz_tests::fuzz_long -- --ignored
 ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist --test all robustness_input_tests::
+  --features script,io,display,serde,persist,gql --test all robustness_input_tests::
 MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist,persist-zip --test all merge_checkpoint_fuzz_tests::
+  --features script,io,display,serde,persist,gql,persist-zip --test all merge_checkpoint_fuzz_tests::
 BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist,persist-zip --test all backup_fuzz_tests::
+  --features script,io,display,serde,persist,gql,persist-zip --test all backup_fuzz_tests::
 ```
 
 Robustness findings go to `target/robustness-findings.txt` (`ROBUSTNESS_REPLAY=<seed>` replays one case); a failing

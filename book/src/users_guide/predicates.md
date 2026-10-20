@@ -65,11 +65,20 @@ Rust the predicate is `P::regex("^mar")?` / `P::not_regex(..)?`.
   `withSideEffect`), then the **literal** string. A side effect holding a collection compares as
   a whole value for `eq`/`neq` and is false for the ordering predicates. An unknown name stays a
   literal.
-- **`has(key, P)`, `is(P)`, `hasValue(P)`, `all(P)`, `any(P)`:** operands are always literal
-  values; they never resolve to a label or side effect, so a name that exists as a side-effect key
-  cannot change the meaning of a property filter.
-- **`eq` with a string** resolves a step label or a vertex id first (kept from the original
-  implementation), then compares literally.
+- **`has(key, P)`, `is(P)`, `hasValue(P)`, `all(P)`, `any(P)`, `none(P)`:** operands are always
+  literal values, as in TinkerPop; they never resolve to a label or side effect, so a name that
+  exists as a step label or side-effect key cannot change the meaning of a property filter:
+  `g.V().as("vadas").out("knows").has("name", P.eq("vadas"))` finds vadas.
+- **`eq`/`neq` with a string on a vertex** compares the vertex's id (`is(P.eq("1"))`, kept from
+  the original implementation); under `where(P)` a step label of that name comes first.
+- **Changed in 0.2:** before, a value filter compared a string naming a step label with the
+  labelled element (so the first query below returned nothing). TinkerPop compares the literal;
+  only `where(P)` resolves labels.
+
+```rhai,graph=modern
+g.v(1).as("vadas").out("knows").has("name", P.eq("vadas")).values("name").to_list()   // ["vadas"]: a value filter compares the string
+g.v(1).as("a").out("created").in("created").where(P.eq("a")).values("name").to_list()   // ["marko"]: where() reads the label a
+```
 
 ## hasId(P), hasLabel(P), hasKey(P)
 

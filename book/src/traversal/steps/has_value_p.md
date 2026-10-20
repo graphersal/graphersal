@@ -3,7 +3,7 @@
 
 `has_value_p` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Graphersal form of has_value(predicate).
+Graphersal form of has_value(predicate); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).
 
 ## Forms
 
@@ -14,5 +14,9 @@ has_value_p(arg1: any)
 ## Example
 
 ```rhai,graph=modern
-g.v().properties("age").has_value_p(P.gt(30)).value().to_list()   // [32, 35]
+g.v(1).as("vadas").out("knows").properties("name").has_value_p(P.eq("vadas")).value().to_list()   // ["vadas"]
 ```
+
+## See also
+
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

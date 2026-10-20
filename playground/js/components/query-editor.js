@@ -4,6 +4,8 @@
 // selection, undo history), swapped in when the tab becomes active. Mod-Shift-Enter runs all tabs.
 // Run (button, Mod-Enter) executes the main selection when it holds more than whitespace, else the
 // whole tab (js/editor/run-selection.js).
+// The Examples menu's GQL group starts with "Wrap as GQL": the selection (or the whole tab) holding
+// a GQL query becomes the script g.gql(`...`) that runs it (js/editor/gql-wrap.js).
 // An AI Chat tab (tab kind 'ai') shows the chat (ai-chat.js) in place of the editor; the editor
 // view stays mounted (hidden) so the query tabs keep their editor states.
 
@@ -27,6 +29,7 @@ import { loadCompletionData } from '../editor/completion-data.js';
 import { floatingTooltips } from '../editor/tooltips.js';
 import { runStatusText, cursorTexts } from '../editor/editor-status.js';
 import { runText } from '../editor/run-selection.js';
+import { wrapGql } from '../editor/gql-wrap.js';
 import { PanelFrame } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
 import { QueryTabs } from './query-tabs.js';
@@ -160,7 +163,7 @@ export const QueryEditor = {
             closeBrackets(),
             highlightActiveLine(),
             highlightSelectionMatches(),
-            placeholder('g.v().has_label("person").values("name")'),
+            placeholder('g.v().has_label("person").values("name")   or GQL:   g.gql("MATCH (p:person) RETURN p.name AS name")'),
             floatingTooltips(host.value),
             autocompletion({
               override: [dslCompletionSource(() => completionData.value, () => state.savedQueries)],
@@ -256,6 +259,20 @@ export const QueryEditor = {
       openScript({ title: ex.title, script: ex.script });
       if (view) view.focus();
     }
+    /**
+     * Wraps the selection (when it holds more than whitespace) or the whole tab into
+     * g.gql(`...`): one undoable change; an empty tab gets a template query.
+     */
+    function wrapAsGql() {
+      if (!view) return;
+      const doc = view.state.doc.toString();
+      const { from, to } = view.state.selection.main;
+      const picked = to > from && doc.slice(from, to).trim() !== '';
+      const [lo, hi] = picked ? [from, to] : [0, doc.length];
+      const insert = wrapGql(doc.slice(lo, hi));
+      view.dispatch({ changes: { from: lo, to: hi, insert }, selection: { anchor: lo + insert.length } });
+      view.focus();
+    }
     /** A history entry follows the same rule as an example (the reused tab keeps its name). */
     function useHistory(h) {
       historyIndex = -1;
@@ -274,7 +291,7 @@ export const QueryEditor = {
 
     return {
       state, host, cursorText, status, runningHere, isChat, runningText, exampleGroups, modKey, setRunOption, stopRun,
-      useExample, useHistory, oneLine, clearHistory, runNow, hasSelection, runTitle,
+      useExample, useHistory, wrapAsGql, oneLine, clearHistory, runNow, hasSelection, runTitle,
     };
   },
   template: `
@@ -306,6 +323,10 @@ export const QueryEditor = {
         <template #trigger>Examples ▾</template>
           <template v-for="grp in exampleGroups" :key="grp.group">
             <div class="menu-title">{{ grp.group }}</div>
+            <button v-if="grp.group === 'GQL'" class="menu-item" @click="wrapAsGql()"
+                    title="Turn the GQL query in the editor (the selection, or the whole tab) into the script g.gql(\`...\`) that runs it; an empty tab gets a template">
+              <span style="flex:none;min-width:0">Wrap as GQL: g.gql(\`…\`)</span>
+            </button>
             <button v-for="ex in grp.items" :key="ex.title" class="menu-item" @click="useExample(ex)" :title="ex.script">
               <span style="flex:none;min-width:0">{{ ex.title }}</span>
             </button>

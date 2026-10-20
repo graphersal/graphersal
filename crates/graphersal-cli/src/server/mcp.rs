@@ -444,7 +444,8 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
 const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
-traversals (Gremlin in Rhai syntax, see its description), `get_schema`/`statistics`/`graph_info` \
+traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL read queries (experimental; MATCH \
+... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects; see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
 stored in the graph; run one with `run_saved_query` {name, params} instead of writing it again. \
@@ -589,6 +590,87 @@ fn no_args() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
+const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like) read query \
+against the shared graph and return its rows as JSON: one JSON object per row, its keys the \
+RETURN columns in the order written (bounded like query's: at most max_rows rows, default 100; \
+a note says when something was cut). It runs the script g.gql(query, params) and never changes \
+the graph. No Rhai escaping is needed: pass the GQL text as it is. GQL support is \
+experimental (its subset and answers may still change between versions); the query tool with \
+Gremlin stays the complete interface.
+
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d and 2e): MATCH with comma-separated patterns of node patterns \
+(v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
+expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
+WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
+pipeline: project, aggregate, DISTINCT, ORDER BY, SKIP, LIMIT, WHERE, then more MATCH clauses); \
+LET x = expr and FILTER expr; FOR x IN list [WITH ORDINALITY i | WITH OFFSET i] (Cypher \
+UNWIND list AS x): one row per item, e.g. FOR id IN $ids MATCH (n) WHERE element_id(n) = id \
+(a NULL list gives no row, a non-list value one row; an equality on element_id or on an \
+indexed property after FOR is a direct lookup, not a scan); a query may start with MATCH, \
+OPTIONAL MATCH, FOR, UNWIND, LET, WITH, FILTER or RETURN (RETURN 1 + 2 AS x runs on one empty \
+row); EXISTS subqueries EXISTS { MATCH <pattern> [WHERE <condition>] } and EXISTS { <pattern> } \
+and Cypher pattern predicates (a pattern where a condition stands, naming only variables bound \
+before it), TRUE or FALSE (never NULL), anywhere an expression stands, each row kept once (a \
+semi-join, unlike a MATCH of the same pattern), e.g. who has no project: MATCH (p:person) WHERE \
+NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name, or MATCH (p:person) \
+WHERE NOT (p)-[:created]->() ...; map projections p {.name, .age, .*, f, total: expr} \
+(Cypher; NULL for a NULL p, while the GQL record {name: p.name} gives {name: NULL}), list \
+comprehensions [x IN list WHERE x > 1 | x * 2] (WHERE and | each optional) and pattern \
+comprehensions [(p)-[:knows]->(f) WHERE f.age > 30 | f.name] (per row the list of the \
+pattern's matches, [] when none, in no defined order), anywhere an expression stands and \
+nested: use them for JSON-shaped answers, one row per entity with its related data inside, e.g. \
+MATCH (p:person) RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]} AS person ORDER BY \
+person.name; list predicates all(x IN list WHERE cond), any, none, single (NULL when a NULL \
+item could decide) and reduce(acc = 0, x IN list | acc + x); COUNT { <pattern> } (the number \
+of matches per row, never NULL) and COLLECT { MATCH ... RETURN x } (the list of its one RETURN \
+column per row); the body of EXISTS { }, COUNT { } and COLLECT { } may be a whole query with \
+WITH, ORDER BY, LIMIT and RETURN; composite queries q1 UNION q2 (duplicate rows removed; UNION \
+ALL keeps them; every operand returns the same column names, in any order; ORDER BY and LIMIT \
+belong to their operand) and q1 NEXT q2 (the RETURN columns of q1 are the rows of q2, e.g. \
+... UNION ... NEXT RETURN name ORDER BY name LIMIT 3); CALL (p) { MATCH ... RETURN ... } runs \
+its body once per incoming row and joins the row with each of the body's rows (a row with none \
+is dropped; OPTIONAL CALL keeps it with NULL columns; Cypher CALL { WITH p ... } imports p \
+too); the body's aggregates, ORDER BY and LIMIT apply per row, so CALL gives top k per group, \
+e.g. each person's heaviest software: MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->(s) \
+RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 } RETURN p.name AS who, top ORDER BY who; \
+aggregates count(x), count(*), sum, avg, min, max, collect_list \
+(Cypher alias collect), each with DISTINCT, grouped implicitly by the other columns (an \
+optional GROUP BY after the RETURN items must list exactly those columns); quantified edges -[:knows]->{1,3}, {n}, {m,}, * (0 or more), + (1 or more) and \
+Cypher -[e*1..3]-> (a group variable e is the list of edges); quantified path patterns \
+(a) ((x)-[:knows]->(y) WHERE x.age < y.age){1,3} (b) repeat a whole chain with the same \
+quantifiers (? = 0 or 1): the outer node before the group is its first node, the one after it \
+its last, a variable inside is the list of its nodes or edges, one per iteration (with ? or no \
+quantifier a single value, NULL when ? matched nothing), the body WHERE reads only body \
+variables, every edge at most once per match, e.g. people one or two co-author hops apart \
+(sharing software): MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b) RETURN DISTINCT a.name, \
+b.name; path variables p = (a)-->(b) \
+returned as a path value, path_length(p) (Cypher alias length), nodes(p) and \
+relationships(p) (lists of the path's vertices and edges); CASE, coalesce, nullif; scalar \
+functions: conversions CAST(x AS INTEGER|FLOAT|STRING|BOOLEAN) (strict: bad text fails the query \
+with GQLSTATUS 22018) vs Cypher toInteger, toFloat, toBoolean, toString (bad text gives NULL) \
+and their OrNull forms (NULL for any other kind too); strings upper/toUpper, lower/toLower, \
+substring (0-based), left, right, split, replace, reverse, trim, btrim, ltrim, rtrim, \
+char_length, size, || concatenation; numbers abs, ceil, floor, round(x[, precision[, mode]]), \
+sign, sqrt, exp, ln, log, log10, power, mod; lists head, last, tail, range, size, isEmpty; \
+elements keys, properties, labels, type, element_id, startNode(e) and endNode(e) (the edge's \
+stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; RETURN (mandatory; expressions \
+with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
+SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text). \
+String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
+(trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
+label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
+the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
+a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
+rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
+with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
+
+Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
+f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
+OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS who, count(s) AS projects ORDER BY \
+projects DESC, who; more in the group \
+\"GQL\" of the resource graphersal://examples (scripts g.gql(\"...\")).";
+
 fn all_tools() -> Vec<Tool> {
     let tool = |name, title, kind, description: &str, input| Tool {
         name,
@@ -611,6 +693,22 @@ fn all_tools() -> Vec<Tool> {
                     "max_rows": {"type": "integer", "minimum": 1, "description": "Most top-level results returned (default 100)."},
                 },
                 "required": ["script"],
+            }),
+        ),
+        tool(
+            "gql",
+            "Run a GQL query",
+            Kind::Read,
+            GQL_DESCRIPTION,
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The GQL read query (MATCH ... RETURN ...), as plain text."},
+                    "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
+                    "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Most rows returned (default 100)."},
+                },
+                "required": ["query"],
             }),
         ),
         tool(
@@ -1114,6 +1212,7 @@ fn run_tool(
 ) -> Result<String, String> {
     match name {
         "query" => query(context, caller, args),
+        "gql" => gql(context, caller, args),
         "get_schema" => {
             let text = context.call(|s| s.get_schema_text()).map_err(http_failed)?;
             Ok(if text == "null" {
@@ -1483,6 +1582,29 @@ fn query_tool_listings(context: &Context, read_only: bool) -> Result<Vec<Value>,
             }))
         })
         .collect())
+}
+
+/// The `gql` tool: the call text `g.gql(query, #{params})` (the query one Rhai string literal,
+/// the parameters Rhai literals) run like the `query` tool; read-only by construction, and under
+/// the read-only authorizer for a read-only caller like every script.
+fn gql(context: &Context, caller: &ToolCaller, args: &Value) -> Result<String, String> {
+    let text = str_arg(args, "query").ok_or("missing argument \"query\" (the GQL query to run)")?;
+    let params = match args.get("params") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => serde_json::from_str(text)
+            .map_err(|err| format!("argument \"params\" is not a JSON object: {err}"))?,
+        Some(other) => other.clone(),
+    };
+    let script = graphersal_session::queries::gql_call_text(text, &params)?;
+    let profile = args
+        .get("profile")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_rows = args
+        .get("max_rows")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_MAX_ROWS, |n| n.max(1) as usize);
+    run_result(run_script(context, caller, script, profile, max_rows)?)
 }
 
 /// The `query` tool: one run of the session (like the browser's Run), the answer as text.
@@ -2056,6 +2178,132 @@ fn examples_text(examples: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gql_is_a_reading_tool_offered_read_only() {
+        for read_only in [false, true] {
+            let tool = tools(read_only)
+                .into_iter()
+                .find(|t| t.name == "gql")
+                .expect("gql listed");
+            let listing = tool.listing(read_only);
+            assert_eq!(listing["annotations"]["readOnlyHint"], true, "{listing}");
+            assert_eq!(
+                listing["annotations"]["destructiveHint"], false,
+                "{listing}"
+            );
+            assert_eq!(listing["inputSchema"]["required"], json!(["query"]));
+            for key in ["query", "params", "profile", "max_rows"] {
+                assert!(
+                    listing["inputSchema"]["properties"][key].is_object(),
+                    "{key}"
+                );
+            }
+        }
+        for named in [
+            "OPTIONAL MATCH",
+            "RETURN *",
+            "graphersal://examples",
+            "\"GQL\"",
+        ] {
+            assert!(GQL_DESCRIPTION.contains(named), "{named}");
+        }
+        assert!(INSTRUCTIONS.contains("`gql`"));
+    }
+
+    /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
+    /// calls GQL experimental and still names what is refused; it stays a read-only tool.
+    #[test]
+    fn gql_description_lists_stage_1b_and_what_is_still_refused() {
+        let (supported, refused) = GQL_DESCRIPTION
+            .split_once("Not yet supported")
+            .expect("a not-yet list");
+        for named in [
+            "OPTIONAL MATCH",
+            "WITH",
+            "LET",
+            "FILTER",
+            "collect_list",
+            "count(*)",
+            "DISTINCT",
+            "->{1,3}",
+            "-[e*1..3]->",
+            "p = (a)-->(b)",
+            "path_length(p)",
+            "ORDER BY",
+            "GROUP BY",
+            "nodes(p)",
+            "relationships(p)",
+            "CAST(",
+            "toInteger",
+            "OrNull",
+            "substring",
+            "round(",
+            "keys",
+            "properties",
+            "startNode(e)",
+            "FOR x IN list",
+            "UNWIND",
+            "WITH ORDINALITY",
+            "$ids",
+            "may start with",
+            "EXISTS { MATCH",
+            "EXISTS { <pattern> }",
+            "pattern predicates",
+            "never NULL",
+            "NOT EXISTS { (p)-[:created]->() }",
+            "map projections p {.name",
+            "list comprehensions [x IN list WHERE",
+            "pattern comprehensions [(p)-[:knows]->(f)",
+            "JSON-shaped answers",
+            "RETURN p {.name, friends: [(p)-[:knows]->(f) | f.name]}",
+            "all(x IN list WHERE cond)",
+            "reduce(acc = 0, x IN list | acc + x)",
+            "COUNT { <pattern> }",
+            "COLLECT { MATCH ... RETURN x }",
+            "q1 UNION q2",
+            "UNION ALL",
+            "q1 NEXT q2",
+            "CALL (p) { MATCH ... RETURN ... }",
+            "OPTIONAL CALL",
+            "top k per group",
+            "CALL (p) { MATCH (p)-[e:created]->(s) RETURN s.name AS top ORDER BY e.weight DESC LIMIT 1 }",
+            "quantified path patterns",
+            "((x)-[:knows]->(y) WHERE x.age < y.age){1,3}",
+            "one per iteration",
+            "NULL when ? matched nothing",
+            "MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)",
+        ] {
+            assert!(supported.contains(named), "{named}");
+        }
+        for named in [
+            "nested inside a quantified path pattern",
+            "EXCEPT and INTERSECT",
+            "IN TRANSACTIONS",
+            "randomUUID",
+            "INSERT",
+            "use the query tool",
+        ] {
+            assert!(refused.contains(named), "{named}");
+        }
+        for gone in [
+            "without MATCH",
+            "UNWIND",
+            "EXISTS",
+            "comprehension",
+            "projection",
+            "COUNT { }",
+            "COLLECT",
+            "UNION",
+            "NEXT",
+            "reduce()",
+            "((a)-->(b)){1,3}",
+        ] {
+            assert!(!refused.contains(gone), "{gone}");
+        }
+        assert!(GQL_DESCRIPTION.contains("never changes"));
+        assert!(GQL_DESCRIPTION.contains("experimental"));
+    }
 
     #[test]
     fn secrets_targets_and_sentences() {

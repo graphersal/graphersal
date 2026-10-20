@@ -34,7 +34,7 @@ the texts of crates/graphersal/src/script/register/docs.rs: change those and reg
 /// The steps and source methods of a traversal (receiver `traversal`), by category, in the order
 /// of the index. Every function of the catalogue must be in exactly one.
 const CATEGORIES: &[(&str, &[&str])] = &[
-    ("Start", &["v", "e", "inject"]),
+    ("Start", &["v", "e", "inject", "gql"]),
     (
         "Walking the graph",
         &[
@@ -386,6 +386,7 @@ const SEE_ALSO: &[(&str, &str, &str)] = &[
     ("merge_v", "Upserts", "users_guide/upserts.md"),
     ("merge_e", "Upserts", "users_guide/upserts.md"),
     ("math", "Math Expressions", "users_guide/math.md"),
+    ("gql", "GQL Queries", "gql/index.md"),
     (
         "sack",
         "Sack and Operators",
@@ -563,6 +564,41 @@ const SEE_ALSO: &[(&str, &str, &str)] = &[
     ),
     ("is", "Predicates", "traversal/functions/predicates.md"),
     ("has", "Predicates", "traversal/functions/predicates.md"),
+    (
+        "is",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_value",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "has_value_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "where",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
+    (
+        "where_p",
+        "Predicates: Comparison and Resolution",
+        "users_guide/predicates.md",
+    ),
     (
         "properties",
         "Property Elements",

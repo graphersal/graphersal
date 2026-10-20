@@ -62,6 +62,19 @@
 - [Custom Storages](for_developers/custom_storage.md)
   - [Storage Conformance](for_developers/storage_conformance.md)
 
+# GQL
+
+- [GQL Queries](gql/index.md)
+  - [The Supported Subset](gql/subset.md)
+  - [Semantics](gql/semantics.md)
+  - [Result Shape](gql/result_shape.md)
+  - [Writing GQL in Rhai Strings](gql/rhai_strings.md)
+  - [Cypher Aliases](gql/aliases.md)
+  - [Refused Constructs](gql/refused.md)
+  - [Errors](gql/errors.md)
+  - [Plans and Performance](gql/plans.md)
+  - [GQL Conformance](gql/conformance.md)
+
 # The Gremlin DSL
 
 - [Writing Queries](dsl/writing_queries.md)
@@ -200,6 +213,7 @@
   - [get_query](traversal/steps/get_query.md)
   - [get_schema](traversal/steps/get_schema.md)
   - [glob_path](traversal/steps/glob_path.md)
+  - [gql](traversal/steps/gql.md)
   - [group](traversal/steps/group.md)
   - [group_count](traversal/steps/group_count.md)
   - [has](traversal/steps/has.md)

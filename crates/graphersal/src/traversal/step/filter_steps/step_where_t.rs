@@ -165,7 +165,8 @@ mod tests {
                 r#"g.V("1").as("A").out("created").in("created").where(__.is("A")).id()"#,
                 r#"g.v("1").as("A").out("created").in("created").where(__.is("A")).id()"#,
             ],
-            assert: |res| assert_eq!(res[0], ElementProperty::String("1".into())),
+            // `is()` compares with the literal "A" (TinkerPop), never the label `A`.
+            assert: |res| assert!(res.is_empty()),
         );
     }
 

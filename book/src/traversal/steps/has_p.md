@@ -3,7 +3,7 @@
 
 `has_p` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Graphersal form of has(key, predicate) (a bare value means P.eq).
+Graphersal form of has(key, predicate) (a bare value means P.eq); a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).
 
 ## Forms
 
@@ -14,5 +14,9 @@ has_p(arg1: any, arg2: any)
 ## Example
 
 ```rhai,graph=modern
-g.v().has_p("age", P.gt(30)).values("name").to_list()   // ["josh", "peter"]
+g.v(1).as("vadas").out("knows").has_p("name", P.eq("vadas")).values("name").to_list()   // ["vadas"]
 ```
+
+## See also
+
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

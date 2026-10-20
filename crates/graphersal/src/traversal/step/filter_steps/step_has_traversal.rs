@@ -185,12 +185,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasTraversal<'g, S
             return None;
         };
         let transform = transform.index_transform()?;
-        let (ranges, reads_path_labels) = predicate.value_index_ranges()?;
+        let ranges = predicate.value_index_ranges()?;
         Some(crate::traversal::step::IndexCondition {
             key,
             transform: Some(transform),
             ranges,
-            reads_path_labels,
         })
     }
 

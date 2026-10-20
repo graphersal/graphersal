@@ -232,6 +232,41 @@ fn failing_query_reports_diagnostic_on_stderr() {
     assert!(res.stderr.contains("Help:"), "stderr: {}", res.stderr);
 }
 
+/// `g.gql(..)` runs in the CLI: JSON keeps the written column order (`who` before `what`), the
+/// table sorts its columns like `project()`, and a GQL syntax error exits 1 with its GQLSTATUS.
+#[test]
+fn gql_queries_run_in_the_cli() {
+    let query = r#"g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS who, s.name AS what ORDER BY who, what")"#;
+    let json = run(&["--format", "json", "-e", query], "");
+    assert_eq!(json.code, 0, "stderr: {}", json.stderr);
+    let rows: serde_json::Value = serde_json::from_str(&json.stdout).expect("JSON rows");
+    assert_eq!(
+        rows,
+        serde_json::json!([
+            {"who": "josh", "what": "lop"},
+            {"who": "josh", "what": "ripple"},
+            {"who": "marko", "what": "lop"},
+            {"who": "peter", "what": "lop"}
+        ])
+    );
+    assert!(
+        json.stdout.find("\"who\"") < json.stdout.find("\"what\""),
+        "{}",
+        json.stdout
+    );
+    let table = run(&["-e", query], "");
+    assert_eq!(table.code, 0, "stderr: {}", table.stderr);
+    assert!(
+        table.stdout.contains("│ ripple │ josh  │"),
+        "{}",
+        table.stdout
+    );
+    let refused = run(&["-e", r#"g.gql("MATCH (p:person) RETURN")"#], "");
+    assert_eq!(refused.code, 1, "stdout: {}", refused.stdout);
+    assert!(refused.stdout.is_empty(), "stdout: {}", refused.stdout);
+    assert!(refused.stderr.contains("GQLSTATUS"), "{}", refused.stderr);
+}
+
 /// The Gremlin console idiom for a map's keys: `unfold()` of a `group()` result into entries,
 /// then `select(Column.keys)`, one name per traverser.
 #[test]

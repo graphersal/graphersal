@@ -513,6 +513,39 @@ struct ColumnWidths {
     bulk_len: usize,
 }
 
+/// Indentation of a nested row's step text (`\\> ` after spaces), empty at the top level.
+fn step_prefix(depth: usize) -> String {
+    if depth == 0 {
+        String::new()
+    } else {
+        format!("{}\\> ", " ".repeat(6 * depth - 4))
+    }
+}
+
+/// Step column text of one row: the step name plus its `[path: ..]` recording.
+fn step_text(node: &Metrics) -> String {
+    match &node.path_recording {
+        Some(recording) => format!("{} [path: {recording}]", node.name),
+        None => node.name.clone(),
+    }
+}
+
+/// Width (in bytes) the step column needs to show `node` and its descendants uncut.
+fn step_width(node: &Metrics, depth: usize) -> usize {
+    let own = step_prefix(depth).len() + step_text(node).len();
+    node.nested
+        .iter()
+        .map(|child| step_width(child, depth + 1))
+        .fold(own, usize::max)
+}
+
+/// Narrowest step column of a table without nested rows.
+const STEP_MIN_WIDTH: usize = 60;
+/// Narrowest step column of a table with nested rows.
+const STEP_MIN_NESTED_WIDTH: usize = 70;
+/// Widest step column: a longer step text is cut with `...`.
+const STEP_MAX_WIDTH: usize = 160;
+
 fn format_row(buf: &mut String, node: &Metrics, depth: usize, widths: ColumnWidths) {
     let ColumnWidths {
         step_len,
@@ -533,16 +566,9 @@ fn format_row(buf: &mut String, node: &Metrics, depth: usize, widths: ColumnWidt
     } else {
         String::new()
     };
-    let prefix = if depth == 0 {
-        String::new()
-    } else {
-        format!("{}\\> ", " ".repeat(6 * depth - 4))
-    };
+    let prefix = step_prefix(depth);
     let available_len = step_len.saturating_sub(prefix.len());
-    let shown = match &node.path_recording {
-        Some(recording) => format!("{} [path: {recording}]", node.name),
-        None => node.name.clone(),
-    };
+    let shown = step_text(node);
     let name_part = truncate_str(&shown, available_len);
     let full_step = format!("{prefix}{name_part:<available_len$}");
     let time = TimeFormat(node.duration).to_string();
@@ -591,7 +617,20 @@ impl std::fmt::Display for TraversalMetrics {
     /// `ProfileType::Memory`, the `TOTAL:` rows, and the optimizer rules that fired.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let has_nested = self.metrics.iter().any(|m| !m.nested.is_empty());
-        let step_len = if has_nested { 70 } else { 60 };
+        // The step column is as wide as the longest step text (indentation included), so
+        // annotations such as `[index: ..]` or `[path: ..]` show in full, between a floor that
+        // keeps short plans compact and a cap beyond which the text is cut with `...`.
+        let min_len = if has_nested {
+            STEP_MIN_NESTED_WIDTH
+        } else {
+            STEP_MIN_WIDTH
+        };
+        let step_len = self
+            .metrics
+            .iter()
+            .map(|m| step_width(m, 0))
+            .fold(min_len, usize::max)
+            .min(STEP_MAX_WIDTH);
         let has_rows = !self.metrics.is_empty();
         let show_mem = has_rows && self.metrics.iter().any(has_memory);
         let show_bulk = has_rows && self.metrics.iter().any(has_bulk);

@@ -64,7 +64,7 @@ ai = ["dev-server", "dep:ureq"]
 model2vec = ["graphersal/model2vec", "dep:ureq", "dep:ring", "dep:serde_json"]
 
 [dependencies]
-graphersal = { workspace = true, features = ["io", "script", "display", "serde", "persist", "persist-zip", "alloc-tracking"] }
+graphersal = { workspace = true, features = ["io", "script", "gql", "display", "serde", "persist", "persist-zip", "alloc-tracking"] }
 rustyline = { workspace = true }
 rustyline-derive = { workspace = true }
 rhai = { workspace = true }

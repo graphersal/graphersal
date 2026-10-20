@@ -1,5 +1,6 @@
 //! Malformed-input robustness (CLAUDE.md rule 1): GraphML and GraphSON documents, schema JSON, serialized
-//! `ChangeSet` journals, `jpath(...)` strings, `UUID.fromString(...)` and script parameters.
+//! `ChangeSet` journals, `jpath(...)` strings, `UUID.fromString(...)`, script parameters and GQL
+//! query strings (feature `gql`, through the Rust entry and through Rhai).
 //!
 //! Each input family has a handwritten corpus of adversarial cases plus seeded byte/structure
 //! mutations of a valid document. Every case runs through [`guarded`] (own thread,
@@ -1030,4 +1031,2909 @@ fn adversarial_parameters_never_panic() {
         }
     }
     fatal.assert_empty("parameters");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL query strings (feature `gql`), through the Rust entry and through Rhai
+// ---------------------------------------------------------------------------------------------
+
+/// Valid GQL queries of every construct of the supported subset, then refused and not yet
+/// supported ones: the base documents of the GQL mutations.
+#[cfg(feature = "gql")]
+const GQL_CORPUS: &[&str] = &[
+    "MATCH (p:person) RETURN p",
+    "MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name ORDER BY name DESC",
+    "MATCH (p:person|software) RETURN p.name, labels(p), element_id(p)",
+    "MATCH (p:!person) RETURN p",
+    "MATCH (p:%) RETURN p",
+    "MATCH (p:(person&!software)|software) RETURN *",
+    "MATCH (p {name: 'marko'}) RETURN p.age",
+    "MATCH (p:person {name: $name}) RETURN p.age",
+    "MATCH (a:person)-[:knows]->(b) RETURN a.name AS a, b.name AS b",
+    "MATCH (a)<-[e:created]-(b) RETURN a, e, b, type(e)",
+    "MATCH (a)-[e]-(b) RETURN element_id(e), a.name",
+    "MATCH (a)-->(b)<--(c) RETURN a, b, c",
+    "MATCH (a)--(b) RETURN DISTINCT a",
+    "MATCH (a)-[e:knows|created WHERE e.weight > 0.4]->(b) RETURN e.weight",
+    "MATCH (a)-[e {weight: 1.0}]->(b) RETURN a, b",
+    "MATCH (a)-[:knows]->(b), (b)-[:created]->(c) RETURN a.name, c.name",
+    "MATCH (a)-[:created]->(s) MATCH (b)-[:created]->(s) WHERE a <> b RETURN a, b, s",
+    "MATCH (a)-[e1]->(b)-[e2]->(c) RETURN a, c",
+    "MATCH (a)-[:knows]->(a) RETURN a",
+    "MATCH (a), (b) RETURN a, b LIMIT 3",
+    "MATCH (p) RETURN p.name ORDER BY p.age, p.name DESC OFFSET 1 LIMIT 2",
+    "MATCH (p) RETURN p.name SKIP $o LIMIT $n",
+    "MATCH (p) WHERE p.age IS NULL OR p.age IS NOT NULL RETURN p",
+    "MATCH (p) WHERE NOT (p.age < 30) XOR p.name STARTS WITH 'm' RETURN p",
+    "MATCH (p) WHERE p.name ENDS WITH 'o' AND p.name CONTAINS 'ar' RETURN p",
+    "MATCH (p) WHERE p.age IN [27, 29, NULL] RETURN p",
+    "MATCH (p) WHERE p IS LABELED person RETURN p",
+    "MATCH (p) RETURN CASE WHEN p.age > 30 THEN 'old' ELSE 'young' END AS c",
+    "MATCH (p) RETURN CASE p.name WHEN 'marko' THEN 1 END",
+    "MATCH (p) RETURN p.age + 1, p.age - 1, p.age * 2, p.age / 2, p.age % 7, -p.age",
+    "MATCH (p) RETURN p.name || '!', upper(p.name), lower(p.name), char_length(p.name)",
+    "MATCH (p) RETURN coalesce(p.age, 0), size(labels(p)), cardinality([1, 2])",
+    "MATCH (p) RETURN [1, 2.5, 'x', TRUE, FALSE, NULL], {a: 1, b: [p.age]}",
+    "MATCH (p) RETURN 9223372036854775807 + 1",
+    "MATCH (p) RETURN 1 / 0, 1.0 / 0.0",
+    "MATCH (p) RETURN p.name + 1",
+    "MATCH (`weird name`) RETURN `weird name`",
+    "MATCH (p) // a comment\n/* a block */ -- another\nRETURN p",
+    "match (p:person) where p.age >= 29 return p.name as n order by n asc limit 1",
+    // Refused and not yet supported.
+    "CREATE (p:person {name: 'x'})",
+    "MATCH (p) SET p.age = 1 RETURN p",
+    "MATCH (p) DETACH DELETE p",
+    "MERGE (p:person)",
+    "MATCH (a)~[e]~(b) RETURN a",
+    "MATCH (a)<~(b) RETURN a",
+    "MATCH (p)",
+    "MATCH (p) RETURN id(p)",
+    "MATCH (p) RETURN count(p), sum(p.age), avg(p.age), collect(p.name)",
+    "OPTIONAL MATCH (p) RETURN p",
+    "MATCH (p) WITH p RETURN p",
+    "MATCH p = (a)-->(b) RETURN p",
+    "MATCH (a)-[*1..3]->(b) RETURN b",
+    "MATCH ((a)-->(b)){1,3} RETURN a",
+    "CALL db.labels()",
+    "MATCH (p) RETURN p UNION MATCH (q) RETURN q",
+    "MATCH (p) WHERE EXISTS { (p)-->() } RETURN p",
+    "UNWIND [1, 2] AS x RETURN x",
+    "MATCH (p) RETURN p.name ORDER BY p.nope LIMIT -1",
+    "MATCH (p) RETURN q",
+    "MATCH (p) RETURN p, p",
+    "",
+    "MATCH",
+    "RETURN 1",
+];
+
+/// Snippets the GQL mutations insert: keywords, brackets, operators, comments, quotes.
+#[cfg(feature = "gql")]
+const GQL_SNIPPETS: &[&[u8]] = &[
+    b"MATCH ",
+    b" RETURN ",
+    b" WHERE ",
+    b"(",
+    b")",
+    b"[",
+    b"]",
+    b"{",
+    b"}",
+    b"-[e]->",
+    b"<-",
+    b"~",
+    b"|",
+    b"&",
+    b"!",
+    b"%",
+    b" AND NOT ",
+    b"$n",
+    b"$",
+    b"'",
+    b"\"",
+    b"`",
+    b"/*",
+    b"--",
+    b"//",
+    b"\n",
+    b"\0",
+    b"\xff",
+    b" ORDER BY ",
+    b" LIMIT ",
+    b" CASE WHEN ",
+    b"element_id(",
+    b"9999999999999999999999",
+    b"1e309",
+    b"\xc3\xbc",
+];
+
+/// The tokens the GQL token soup is drawn from.
+#[cfg(feature = "gql")]
+const GQL_TOKENS: &[&str] = &[
+    "MATCH",
+    "RETURN",
+    "WHERE",
+    "ORDER",
+    "BY",
+    "LIMIT",
+    "OFFSET",
+    "SKIP",
+    "DISTINCT",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "XOR",
+    "IS",
+    "NULL",
+    "IN",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    ":",
+    ",",
+    ".",
+    "-",
+    "->",
+    "<-",
+    "--",
+    "-->",
+    "<--",
+    "~",
+    "*",
+    "/",
+    "+",
+    "=",
+    "<>",
+    "<",
+    ">=",
+    "|",
+    "&",
+    "!",
+    "%",
+    "p",
+    "q",
+    "e",
+    "person",
+    "knows",
+    "name",
+    "age",
+    "$n",
+    "$name",
+    "'x'",
+    "1",
+    "2.5",
+    "TRUE",
+    "element_id",
+    "labels",
+    "count",
+    "`",
+    "/*",
+    "//",
+    "\n",
+    "ü",
+];
+
+/// Runs `query` through `g.gql()` from Rust (rows, a count, the profile, the diagnostic in both
+/// spellings) and from Rhai, on the modern graph plus a self-loop and a `null` age.
+#[cfg(feature = "gql")]
+fn exercise_gql(query: String) -> Result<(), Outcome> {
+    guarded(WATCHDOG, move || {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let _ = graph
+            .traversal_mut()
+            .add_v("person")
+            .property("name", "nullage")
+            .property("age", ElementProperty::Null)
+            .iterate();
+        let _ = graph
+            .traversal_mut()
+            .v(None)
+            .has("name", "marko")
+            .as_("m")
+            .add_e("knows")
+            .from("m")
+            .iterate();
+        let params = [
+            ("n", ElementProperty::from(2)),
+            ("o", ElementProperty::from(1)),
+            ("name", ElementProperty::from("marko")),
+        ];
+        let results = [
+            graph.traversal().gql_with(&query, params.clone()).to_list(),
+            graph
+                .traversal()
+                .with("render.spelling", "camel")
+                .gql_with(&query, params.clone())
+                .to_list(),
+            graph
+                .traversal()
+                .gql_with(&query, params.clone())
+                .count()
+                .to_list(),
+        ];
+        for result in results {
+            if let Err(err) = result {
+                let _ = format_diagnostic(&err);
+                let _ = err.help();
+            }
+        }
+        match graph.traversal().gql_with(&query, params).profile() {
+            Ok(metrics) => {
+                let _ = metrics.to_string();
+            }
+            Err(err) => {
+                let _ = format_diagnostic(&err);
+            }
+        }
+        let graph = Arc::new(Graph::new(graph));
+        let script_params: HashMap<String, ElementProperty> =
+            [("q".to_string(), ElementProperty::from(query.as_str()))].into();
+        let _ = eval_value_with_limits(
+            graph,
+            r#"g.gql(q).toList();
+               g.gql(q, #{n: 2, o: 1, name: "marko"}).select("p").out().toList();
+               g.with("render.spelling", "camel").gql(q, #{n: -1}).toList();
+               g.gql(q, ()).count().next();
+               g.v().gql(q).toList();"#,
+            script_params,
+            &ScriptLimits::default(),
+        );
+    })
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_strings_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut texts: Vec<String> = GQL_CORPUS.iter().map(|s| s.to_string()).collect();
+    // Deep nesting and long chains: a bounded error, never a stack overflow.
+    texts.push(format!(
+        "MATCH (p) RETURN {}1{}",
+        "(".repeat(50_000),
+        ")".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (p) WHERE {}TRUE RETURN p",
+        "NOT ".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (p) WHERE {}TRUE RETURN p",
+        "p.age = 1 AND ".repeat(5_000)
+    ));
+    texts.push(format!("MATCH (p) RETURN {}1", "-".repeat(50_000)));
+    texts.push(format!(
+        "MATCH (p:{}person{}) RETURN p",
+        "(".repeat(20_000),
+        ")".repeat(20_000)
+    ));
+    texts.push(format!("MATCH (p:{}person) RETURN p", "!".repeat(50_000)));
+    texts.push(format!(
+        "MATCH (p) RETURN {}1{}",
+        "[".repeat(50_000),
+        "]".repeat(50_000)
+    ));
+    texts.push(format!("MATCH (p) RETURN {}", "{a: ".repeat(20_000)));
+    // A long path: the trail checks grow with the square of the edge count (every pair of edges
+    // whose labels may overlap gets one), so 300 hops stay well inside the watchdog.
+    texts.push(format!("MATCH {} RETURN *", "(a)-->".repeat(300) + "(b)"));
+    texts.push(format!("MATCH (p) RETURN 1{}", " + 1".repeat(20_000)));
+    texts.push(format!("MATCH (p) RETURN p /* {}", "x".repeat(100_000)));
+    let mut rng = Rng::new(0x6A1_0001);
+    for _ in 0..budget(150) {
+        let base = rng.pick(GQL_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(24);
+        let soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_TOKENS)).collect();
+        let joiner = if rng.chance(50) { " " } else { "" };
+        texts.push(soup.join(joiner));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 1b: grammar-generated queries (OPTIONAL MATCH, WITH, LET, FILTER, quantified edges,
+// path and group variables, aggregates)
+// ---------------------------------------------------------------------------------------------
+
+/// Builds random queries of the stage 1b grammar (`parser.rs` module docs): every one is
+/// syntactically valid, and it reads mostly variables in scope (it tracks what each clause
+/// declares, what `WITH` keeps and `LET` adds), so most reach the binder, the planner, the
+/// lowering and the run; the rest end in a semantic or a data error.
+#[cfg(feature = "gql")]
+struct Gql1bGenerator<'r> {
+    rng: &'r mut Rng,
+    /// The variables in scope with their kind.
+    scope: Vec<(String, GenKind)>,
+    /// The counter for fresh names.
+    fresh: usize,
+}
+
+/// What a generated variable names.
+#[cfg(feature = "gql")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenKind {
+    Node,
+    Edge,
+    Group,
+    Path,
+    Value,
+}
+
+#[cfg(feature = "gql")]
+impl<'r> Gql1bGenerator<'r> {
+    const LABELS: &'static [&'static str] = &["person", "software", "knows", "created", "nope"];
+    const KEYS: &'static [&'static str] = &["name", "age", "weight", "lang", "missing"];
+
+    fn new(rng: &'r mut Rng) -> Self {
+        Self {
+            rng,
+            scope: Vec::new(),
+            fresh: 0,
+        }
+    }
+
+    fn fresh(&mut self, prefix: &str) -> String {
+        self.fresh += 1;
+        format!("{prefix}{}", self.fresh)
+    }
+
+    /// A variable in scope of one of `kinds`, if any.
+    fn pick_var(&mut self, kinds: &[GenKind]) -> Option<String> {
+        let names: Vec<&String> = self
+            .scope
+            .iter()
+            .filter(|(_, kind)| kinds.contains(kind))
+            .map(|(name, _)| name)
+            .collect();
+        (!names.is_empty()).then(|| (*self.rng.pick(&names)).clone())
+    }
+
+    fn declare(&mut self, name: &str, kind: GenKind) {
+        if !self.scope.iter().any(|(n, _)| n == name) {
+            self.scope.push((name.to_string(), kind));
+        }
+    }
+
+    fn labels(&mut self) -> String {
+        let first = *self.rng.pick(Self::LABELS);
+        match self.rng.below(5) {
+            0 => format!(":{first}|{}", self.rng.pick(Self::LABELS)),
+            1 => format!(":!{first}"),
+            _ => format!(":{first}"),
+        }
+    }
+
+    fn literal(&mut self) -> String {
+        match self.rng.below(6) {
+            0 => "'marko'".to_string(),
+            1 => "NULL".to_string(),
+            2 => "$n".to_string(),
+            3 => "2.5".to_string(),
+            _ => self.rng.below(40).to_string(),
+        }
+    }
+
+    /// A property of an element in scope, or a literal.
+    fn property(&mut self) -> String {
+        match self.pick_var(&[GenKind::Node, GenKind::Edge]) {
+            Some(var) => format!("{var}.{}", self.rng.pick(Self::KEYS)),
+            None => self.literal(),
+        }
+    }
+
+    fn condition(&mut self) -> String {
+        let left = self.property();
+        match self.rng.below(6) {
+            0 => format!("{left} IS NULL"),
+            1 => format!("{left} IN [27, 29, NULL]"),
+            2 => format!("{left} STARTS WITH 'm'"),
+            3 => format!("{left} > {} AND NOT {left} = 1", self.literal()),
+            4 => match self.pick_var(&[GenKind::Path]) {
+                Some(path) => format!("path_length({path}) > 1"),
+                None => format!("{left} <> 0"),
+            },
+            _ => format!("{left} >= {}", self.literal()),
+        }
+    }
+
+    fn expression(&mut self) -> String {
+        match self.rng.below(8) {
+            0 => self
+                .pick_var(&[GenKind::Node, GenKind::Edge, GenKind::Value])
+                .unwrap_or_else(|| self.literal()),
+            1 => format!("coalesce({}, 0)", self.property()),
+            2 => match self.pick_var(&[GenKind::Node]) {
+                Some(node) => format!("labels({node})"),
+                None => self.literal(),
+            },
+            3 => match self.pick_var(&[GenKind::Path]) {
+                Some(path) => format!("path_length({path})"),
+                None => self.property(),
+            },
+            4 => match self.pick_var(&[GenKind::Group]) {
+                Some(group) => format!("size({group})"),
+                None => self.property(),
+            },
+            5 => format!("CASE WHEN {} THEN 1 ELSE 0 END", self.condition()),
+            _ => self.property(),
+        }
+    }
+
+    fn aggregate(&mut self) -> String {
+        let distinct = if self.rng.chance(20) { "DISTINCT " } else { "" };
+        let element = self.pick_var(&[GenKind::Node, GenKind::Edge]);
+        match (self.rng.below(7), element) {
+            (1, Some(var)) => format!("count({distinct}{var})"),
+            (2, _) => format!("sum({distinct}{})", self.property()),
+            (3, _) => format!("avg({})", self.property()),
+            (4, _) => format!("min({})", self.property()),
+            (5, _) => format!("max({})", self.expression()),
+            (6, _) => format!("collect_list({distinct}{})", self.expression()),
+            _ => "count(*)".to_string(),
+        }
+    }
+
+    fn node(&mut self) -> String {
+        let mut node = String::from("(");
+        let joined = if self.rng.chance(35) {
+            self.pick_var(&[GenKind::Node])
+        } else {
+            None
+        };
+        let var = match joined {
+            Some(var) => Some(var),
+            None if self.rng.chance(80) => Some(self.fresh("n")),
+            None => None,
+        };
+        if let Some(var) = &var {
+            node.push_str(var);
+        }
+        if self.rng.chance(40) {
+            node.push_str(&self.labels());
+        }
+        match (self.rng.below(6), &var) {
+            (0, _) => node.push_str(" {name: 'marko'}"),
+            (1, Some(var)) => {
+                let key = *self.rng.pick(Self::KEYS);
+                node.push_str(&format!(" WHERE {var}.{key} IS NOT NULL"));
+            }
+            _ => {}
+        }
+        node.push(')');
+        if let Some(var) = var {
+            self.declare(&var, GenKind::Node);
+        }
+        node
+    }
+
+    fn quantifier(&mut self) -> String {
+        (*self.rng.pick(&[
+            "{1,3}", "{2}", "{0,2}", "{1,}", "{,2}", "*", "+", "{0}", "{2,4}",
+        ]))
+        .to_string()
+    }
+
+    fn edge(&mut self) -> String {
+        let cypher = self.rng.chance(15);
+        let quantified = cypher || self.rng.chance(40);
+        let var = self.rng.chance(60).then(|| self.fresh("e"));
+        let mut filler = var.clone().unwrap_or_default();
+        if self.rng.chance(50) {
+            filler.push_str(&self.labels());
+        }
+        if cypher {
+            filler.push_str(self.rng.pick(&["*", "*2", "*1..2", "*..3", "*0.."]));
+        } else if let Some(var) = &var
+            && self.rng.chance(20)
+        {
+            filler.push_str(&format!(" WHERE {var}.weight > 0.1"));
+        }
+        let edge = match self.rng.below(7) {
+            0 => format!("<-[{filler}]-"),
+            1 => format!("-[{filler}]-"),
+            2 if var.is_none() && !cypher => "-->".to_string(),
+            3 if var.is_none() && !cypher => "<--".to_string(),
+            _ => format!("-[{filler}]->"),
+        };
+        if let Some(var) = var {
+            let kind = if quantified {
+                GenKind::Group
+            } else {
+                GenKind::Edge
+            };
+            self.declare(&var, kind);
+        }
+        if quantified && !cypher {
+            format!("{edge}{}", self.quantifier())
+        } else {
+            edge
+        }
+    }
+
+    fn path(&mut self) -> String {
+        let mut path = String::new();
+        let variable = self.rng.chance(20).then(|| self.fresh("p"));
+        if let Some(var) = &variable {
+            path.push_str(&format!("{var} = "));
+        }
+        path.push_str(&self.node());
+        for _ in 0..self.rng.below(3) {
+            path.push_str(&self.edge());
+            path.push_str(&self.node());
+        }
+        if let Some(var) = variable {
+            self.declare(&var, GenKind::Path);
+        }
+        path
+    }
+
+    fn match_clause(&mut self, first: bool) -> String {
+        let optional = if first {
+            self.rng.chance(5)
+        } else {
+            self.rng.chance(40)
+        };
+        let keyword = if optional { "OPTIONAL MATCH" } else { "MATCH" };
+        let mut clause = format!("{keyword} {}", self.path());
+        if self.rng.chance(15) {
+            let path = self.path();
+            clause.push_str(&format!(", {path}"));
+        }
+        if self.rng.chance(30) {
+            let condition = self.condition();
+            clause.push_str(&format!(" WHERE {condition}"));
+        }
+        clause
+    }
+
+    /// The items of a `RETURN` / `WITH` and the names of its columns (the sort keys a tail may
+    /// use after an aggregate or `DISTINCT`).
+    fn items(&mut self, with: bool) -> (String, Vec<(String, GenKind)>) {
+        if !with && self.rng.chance(10) {
+            return ("*".to_string(), Vec::new());
+        }
+        let mut items = Vec::new();
+        let mut columns = Vec::new();
+        for _ in 0..1 + self.rng.below(3) {
+            let carried = if self.rng.chance(40) {
+                self.pick_var(&[
+                    GenKind::Node,
+                    GenKind::Edge,
+                    GenKind::Group,
+                    GenKind::Path,
+                    GenKind::Value,
+                ])
+            } else {
+                None
+            };
+            if let Some(name) = carried
+                && !columns.iter().any(|(n, _)| *n == name)
+            {
+                let kind = self
+                    .scope
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(GenKind::Value, |(_, kind)| *kind);
+                items.push(name.clone());
+                columns.push((name, kind));
+                continue;
+            }
+            let item = if self.rng.chance(35) {
+                self.aggregate()
+            } else {
+                self.expression()
+            };
+            let alias = self.fresh("v");
+            items.push(format!("{item} AS {alias}"));
+            columns.push((alias, GenKind::Value));
+        }
+        (items.join(", "), columns)
+    }
+
+    /// `ORDER BY` (a column), `OFFSET` / `SKIP` and `LIMIT` in this order, each maybe.
+    fn tail(&mut self, columns: &[(String, GenKind)]) -> String {
+        let mut tail = String::new();
+        if !columns.is_empty() && self.rng.chance(30) {
+            let (key, _) = self.rng.pick(columns).clone();
+            let direction = *self.rng.pick(&["", " DESC", " ASC"]);
+            tail.push_str(&format!(" ORDER BY {key}{direction}"));
+        }
+        if self.rng.chance(15) {
+            tail.push_str(self.rng.pick(&[" OFFSET 1", " SKIP $o"]));
+        }
+        if self.rng.chance(20) {
+            tail.push_str(self.rng.pick(&[" LIMIT 2", " LIMIT $n"]));
+        }
+        tail
+    }
+
+    fn query(&mut self) -> String {
+        let mut clauses = vec![self.match_clause(true)];
+        for _ in 0..self.rng.below(4) {
+            let clause = match self.rng.below(5) {
+                0 | 1 => self.match_clause(false),
+                2 => {
+                    let distinct = if self.rng.chance(15) { "DISTINCT " } else { "" };
+                    let (items, columns) = self.items(true);
+                    let mut with = format!("WITH {distinct}{items}");
+                    with.push_str(&self.tail(&columns));
+                    self.scope = columns;
+                    if self.rng.chance(25) {
+                        let condition = self.condition();
+                        with.push_str(&format!(" WHERE {condition}"));
+                    }
+                    with
+                }
+                3 => {
+                    let value = self.expression();
+                    let name = self.fresh("v");
+                    self.declare(&name, GenKind::Value);
+                    format!("LET {name} = {value}")
+                }
+                _ => format!("FILTER {}", self.condition()),
+            };
+            clauses.push(clause);
+        }
+        let distinct = if self.rng.chance(15) { "DISTINCT " } else { "" };
+        let (items, columns) = self.items(false);
+        let tail = self.tail(&columns);
+        clauses.push(format!("RETURN {distinct}{items}{tail}"));
+        clauses.join(if self.rng.chance(20) { "\n" } else { " " })
+    }
+}
+
+/// Valid stage 1b queries of every new construct: the base documents of the 1b mutations.
+#[cfg(feature = "gql")]
+const GQL_1B_CORPUS: &[&str] = &[
+    "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)",
+    "MATCH (p:person) WITH p, count(*) AS c ORDER BY c DESC LIMIT 2 WHERE c > 0 RETURN p, c",
+    "MATCH (p:person) LET n = upper(p.name), a = p.age + 1 FILTER a > 28 RETURN n, a",
+    "MATCH (a)-[e:knows]->{1,3}(b) RETURN a, e, b",
+    "MATCH (a)-[:knows]->*(b) RETURN DISTINCT b",
+    "MATCH (a)<-[e*1..2]-(b) RETURN size(e), path_length(p) AS l",
+    "MATCH p = (a)-[:knows|created]-+(b) RETURN p, path_length(p)",
+    "MATCH (a) RETURN a.lang, collect_list(a.name), collect(DISTINCT a.age), sum(a.age), \
+     avg(a.age), min(a.age), max(a.name), count(DISTINCT a)",
+    "OPTIONAL MATCH (x:nope) RETURN x",
+    "MATCH (a)-[e]-{0,2}(b) WITH DISTINCT b WHERE b.age IS NOT NULL RETURN b.name ORDER BY \
+     b.name SKIP $o LIMIT $n",
+    "MATCH (a:person) WITH a MATCH (a)-[:created]->(s) OPTIONAL MATCH (s)<-[:created]-(o) \
+     RETURN a, s, count(o)",
+    "MATCH (a)-[e]->{1,}(b)-[f]->{,2}(c) RETURN count(*)",
+    "MATCH p = (a)-[e:knows WHERE e.weight > 0.1]->{1,2}(b) RETURN nodes(p)",
+    "MATCH (a) RETURN a.name GROUP BY a.name",
+];
+
+/// Tokens of stage 1b for the 1b token soup (a list of its own; `GQL_TOKENS` stays as it is).
+#[cfg(feature = "gql")]
+const GQL_1B_TOKENS: &[&str] = &[
+    "MATCH",
+    "OPTIONAL",
+    "WITH",
+    "LET",
+    "FILTER",
+    "RETURN",
+    "DISTINCT",
+    "ORDER BY",
+    "LIMIT",
+    "WHERE",
+    "AS",
+    "=",
+    "(a)",
+    "(b:person)",
+    "-[e]->",
+    "<-[e:knows]-",
+    "-[e*1..2]->",
+    "-[*]-",
+    "-->",
+    "{1,3}",
+    "{0}",
+    "{2,}",
+    "{,2}",
+    "{",
+    "}",
+    ",",
+    "*",
+    "+",
+    "p =",
+    "p",
+    "e",
+    "a",
+    "count(*)",
+    "count(",
+    "sum(a.age)",
+    "collect_list(",
+    "collect(DISTINCT a)",
+    "avg(",
+    "path_length(p)",
+    "nodes(p)",
+    ")",
+    "a.age",
+    "GROUP BY",
+    "1",
+    "$n",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_1b_queries_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut rng = Rng::new(0x6A1_B001);
+    let mut generated = Vec::new();
+    for _ in 0..budget(150) {
+        generated.push(Gql1bGenerator::new(&mut rng).query());
+    }
+    // Every generated query parses: an error is a semantic one or a run-time one; and enough
+    // of them run to the end that the generator exercises the planner and the lowering.
+    let mut ran = 0;
+    for query in &generated {
+        let text = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            let graph = TraversalGraph::tinkerpop_modern();
+            match graph
+                .traversal()
+                .gql_with(&text, [("n", 2), ("o", 1)])
+                .to_list()
+            {
+                Ok(_) => Ok(()),
+                Err(err) => match err.root_cause() {
+                    TraverserError::Gql { kind, message, .. } => {
+                        Err(Some((*kind, message.clone())))
+                    }
+                    _ => Err(None),
+                },
+            }
+        });
+        match outcome {
+            Ok(Ok(())) => ran += 1,
+            Ok(Err(Some((graphersal::error::GqlErrorKind::Syntax, message)))) => {
+                syntax.push(format!("{query}: {message}"));
+            }
+            Ok(Err(_)) => {}
+            Err(outcome) => fatal.check(query, Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 2 >= generated.len(),
+        "only {ran} of {} generated 1b queries ran",
+        generated.len()
+    );
+    let mut texts = generated;
+    texts.extend(GQL_1B_CORPUS.iter().map(|s| s.to_string()));
+    // Long 1b chains: bounded errors or results, never a stack overflow.
+    texts.push(format!(
+        "MATCH (a) {}RETURN a",
+        "OPTIONAL MATCH (a)-->(b) ".repeat(200)
+    ));
+    texts.push(format!("MATCH (a) {}RETURN a", "WITH a ".repeat(500)));
+    texts.push(format!(
+        "MATCH (a) LET x0 = 1 {}RETURN x199",
+        (1..200)
+            .map(|i| format!("LET x{i} = x{} + x{} ", i - 1, i - 1))
+            .collect::<String>()
+    ));
+    texts.push(format!(
+        "MATCH (a){}(b) RETURN count(*)",
+        "-[]->{1,}()".repeat(30)
+    ));
+    texts.push(format!(
+        "MATCH (a) RETURN {}a.age{}",
+        "max(".repeat(50),
+        ")".repeat(50)
+    ));
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_1B_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(24);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_1B_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (a)");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 1b");
+    assert!(
+        syntax.is_empty(),
+        "generated 1b queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 1c: random function calls (every scalar function, its Cypher spellings, the special
+// forms CAST / TRIM / IS SOURCE OF, the not-yet names, misspellings) with random arguments
+// ---------------------------------------------------------------------------------------------
+
+/// Function names for the 1c call generator and token soup (a list of its own; `GQL_TOKENS`
+/// and `GQL_1B_TOKENS` stay as they are): every name of the function table, Cypher spellings,
+/// names `gql()` refuses or does not support yet, and near misses.
+#[cfg(feature = "gql")]
+const GQL_FUNCTION_TOKENS: &[&str] = &[
+    "element_id",
+    "elementId",
+    "labels",
+    "type",
+    "coalesce",
+    "upper",
+    "toUpper",
+    "lower",
+    "toLower",
+    "char_length",
+    "character_length",
+    "size",
+    "cardinality",
+    "path_length",
+    "length",
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "collect_list",
+    "collect",
+    "toInteger",
+    "toIntegerOrNull",
+    "toFloat",
+    "toFloatOrNull",
+    "toBoolean",
+    "toBooleanOrNull",
+    "toString",
+    "toStringOrNull",
+    "left",
+    "right",
+    "substring",
+    "trim",
+    "btrim",
+    "ltrim",
+    "rtrim",
+    "replace",
+    "split",
+    "reverse",
+    "byte_length",
+    "octet_length",
+    "isEmpty",
+    "nullif",
+    "abs",
+    "floor",
+    "ceil",
+    "ceiling",
+    "round",
+    "sign",
+    "sqrt",
+    "exp",
+    "ln",
+    "log",
+    "log10",
+    "power",
+    "mod",
+    "head",
+    "last",
+    "tail",
+    "range",
+    "keys",
+    "properties",
+    "startNode",
+    "endNode",
+    "nodes",
+    "relationships",
+    "TOINTEGER",
+    "Substring",
+    "rand",
+    "randomUUID",
+    "sin",
+    "atan2",
+    "pi",
+    "date",
+    "duration",
+    "toIntegerList",
+    "normalize",
+    "all",
+    "reduce",
+    "elements",
+    "percentileCont",
+    "stDev",
+    "exists",
+    "id",
+    "toInt",
+    "substr",
+    "lenght",
+    "uper",
+    "",
+];
+
+/// Arguments of the 1c call generator: NULL, numbers at the `i64` and float edges, texts with
+/// spaces, UTF-8, number and boolean texts, lists, maps, the pattern's variables and their
+/// properties, parameters.
+#[cfg(feature = "gql")]
+const GQL_FUNCTION_ARGS: &[&str] = &[
+    "NULL",
+    "0",
+    "1",
+    "-1",
+    "2",
+    "2.5",
+    "-0.5",
+    "1e308",
+    "9223372036854775807",
+    "-9223372036854775807 - 1",
+    "''",
+    "' '",
+    "'a'",
+    "'héllo'",
+    "'日本語 🎉'",
+    "' 42 '",
+    "'0x1F'",
+    "'1e3'",
+    "'NaN'",
+    "'-Infinity'",
+    "'true'",
+    "'HALF_EVEN'",
+    "'half_up'",
+    "TRUE",
+    "[]",
+    "[1, 'a', NULL]",
+    "['-', '']",
+    "[[1], {a: 1}]",
+    "{a: 1, b: NULL}",
+    "n",
+    "m",
+    "e",
+    "p",
+    "n.name",
+    "n.age",
+    "m.lang",
+    "e.weight",
+    "$n",
+    "$name",
+    "$missing",
+];
+
+/// Builds a random expression of nested function calls (depth-bounded).
+#[cfg(feature = "gql")]
+fn random_gql_call(rng: &mut Rng, depth: usize) -> String {
+    if depth == 0 || rng.chance(30) {
+        return rng.pick(GQL_FUNCTION_ARGS).to_string();
+    }
+    let arg = |rng: &mut Rng| random_gql_call(rng, depth - 1);
+    match rng.below(12) {
+        0 => {
+            let target = *rng.pick(&[
+                "INTEGER", "INT", "BIGINT", "FLOAT", "DOUBLE", "STRING", "BOOLEAN", "BOOL", "DATE",
+                "LIST", "INTEGR",
+            ]);
+            format!("CAST({} AS {target})", arg(rng))
+        }
+        1 => {
+            let side = *rng.pick(&["", "LEADING ", "TRAILING ", "BOTH "]);
+            let character = if rng.chance(50) {
+                format!("{} ", arg(rng))
+            } else {
+                String::new()
+            };
+            let from = if side.is_empty() && character.is_empty() && rng.chance(50) {
+                String::new()
+            } else {
+                "FROM ".to_string()
+            };
+            format!("TRIM({side}{character}{from}{})", arg(rng))
+        }
+        2 => {
+            let test = *rng.pick(&[
+                "IS SOURCE OF",
+                "IS NOT SOURCE OF",
+                "IS DESTINATION OF",
+                "IS NOT DESTINATION OF",
+            ]);
+            format!("{} {test} {}", arg(rng), arg(rng))
+        }
+        3 => format!("SUBSTRING({} FROM 1 FOR 2)", arg(rng)),
+        4 => format!("{} || {}", arg(rng), arg(rng)),
+        5 => format!("{} + {}", arg(rng), arg(rng)),
+        _ => {
+            let name = rng.pick(GQL_FUNCTION_TOKENS);
+            let count = rng.below(5);
+            let args: Vec<String> = (0..count).map(|_| arg(rng)).collect();
+            format!("{name}({})", args.join(", "))
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_function_calls_never_panic() {
+    let mut fatal = Fatal::default();
+    let mut rng = Rng::new(0x6A1_C001);
+    let mut texts: Vec<String> = Vec::new();
+    // Every function with two random argument counts, on a row with a node, an edge and a
+    // path (the unit test `stage_1c_calls_never_panic` covers every count on a test row).
+    for name in GQL_FUNCTION_TOKENS {
+        for count in [rng.below(5), rng.below(5)] {
+            let args: Vec<String> = (0..count)
+                .map(|_| rng.pick(GQL_FUNCTION_ARGS).to_string())
+                .collect();
+            texts.push(format!(
+                "MATCH p = (n)-[e]->(m) RETURN {name}({}) AS x",
+                args.join(", ")
+            ));
+        }
+    }
+    // Blow-ups: refused by the materialization limit before anything is built.
+    texts.push("MATCH (n) RETURN range(0, 9223372036854775807) AS x".to_string());
+    texts.push(
+        "MATCH (n) RETURN range(-9223372036854775807 - 1, 9223372036854775807, 1) AS x".to_string(),
+    );
+    texts.push(format!(
+        "MATCH (n) LET s = '{}' RETURN size(split(replace(s, '', s), '')) AS x",
+        "x".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN toString(split('{}', '')) AS x",
+        "é".repeat(50_000)
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN {}n.name{} AS x",
+        "reverse(".repeat(5_000),
+        ")".repeat(5_000)
+    ));
+    // Random nested calls in every clause that evaluates expressions.
+    for _ in 0..budget(150) {
+        let expr = random_gql_call(&mut rng, 3);
+        let query = match rng.below(7) {
+            0 => format!("MATCH (n) WHERE {expr} RETURN n.name AS x"),
+            1 => format!("MATCH (n) LET x = {expr} RETURN x"),
+            2 => format!("MATCH (n)-[e]-(m) WITH n, e, {expr} AS x RETURN x, count(*) AS c"),
+            3 => format!("MATCH (n) RETURN n.name AS x ORDER BY {expr}"),
+            4 => format!("MATCH (n) OPTIONAL MATCH p = (n)-[e]->(m) RETURN {expr} AS x"),
+            5 => format!("MATCH (n) RETURN collect_list({expr}) AS x, max({expr}) AS y"),
+            _ => format!("MATCH p = (n)-[e]->{{1,2}}(m) RETURN DISTINCT {expr} AS x"),
+        };
+        texts.push(query);
+    }
+    // Mutations of valid 1c queries and a token soup of function names and arguments.
+    const BASES: &[&str] = &[
+        "MATCH (n) RETURN toInteger(' 42 '), CAST(n.age AS STRING), round(n.age / 7.0, 2, 'UP')",
+        "MATCH (n) RETURN TRIM(LEADING 'm' FROM n.name), btrim(n.name, 'mo'), split(n.name, ['a', 'o'])",
+        "MATCH p = (n)-[e]->(m) RETURN startNode(e), nodes(p), keys(n), properties(e), n IS SOURCE OF e",
+        "MATCH (n) RETURN range(1, 10, 3), head(tail(range(1, 3))), trim([1, 2, 3], 1), log(2, 8)",
+    ];
+    for _ in 0..budget(100) {
+        let base = rng.pick(BASES).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(16);
+        let soup: Vec<&str> = (0..len)
+            .map(|_| {
+                if rng.chance(50) {
+                    *rng.pick(GQL_FUNCTION_TOKENS)
+                } else {
+                    *rng.pick(&[
+                        "(", ")", ",", "AS", "FROM", "IS", "SOURCE", "OF", "'x'", "1",
+                    ])
+                }
+            })
+            .collect();
+        texts.push(format!("MATCH (n) RETURN {}", soup.join(" ")));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 1c functions");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2a: FOR / UNWIND (WITH ORDINALITY / OFFSET), queries without MATCH and the
+// correlated lookup gql:lookup, with and without property indexes
+// ---------------------------------------------------------------------------------------------
+
+/// Valid stage 2a queries: the base documents of the 2a mutations.
+#[cfg(feature = "gql")]
+const GQL_2A_CORPUS: &[&str] = &[
+    "FOR x IN [1, 2, 2, null] WITH ORDINALITY i RETURN x, i",
+    "UNWIND $ids AS id MATCH (n) WHERE element_id(n) = id RETURN n.name",
+    "FOR n IN $names MATCH (p:person {name: n})-[:created]->(s) RETURN n, s.name",
+    "MATCH p = (a)-[:knows]->(b) FOR v IN nodes(p) WITH OFFSET o MATCH (v)-->(m) RETURN o, m",
+    "RETURN 1 AS one, $n + 1 AS two",
+    "LET k = 2 FOR x IN range(1, k) RETURN collect_list(x) AS l",
+    "FILTER $n > 0 MATCH (a:person) FOR x IN [a.age, a.name] RETURN a, x",
+    "MATCH (p:person) WITH p, collect_list(p.name) AS ns FOR n IN ns OPTIONAL MATCH \
+     (q:person {name: n}) RETURN p, q",
+    "WITH 3 AS three LIMIT 1 FOR x IN [three] RETURN x",
+];
+
+/// Tokens of stage 2a for the 2a token soup (a list of its own; the earlier lists stay as they
+/// are).
+#[cfg(feature = "gql")]
+const GQL_2A_TOKENS: &[&str] = &[
+    "FOR",
+    "UNWIND",
+    "IN",
+    "AS",
+    "WITH",
+    "ORDINALITY",
+    "OFFSET",
+    "x",
+    "i",
+    "n",
+    "[1, 2]",
+    "[]",
+    "null",
+    "$ids",
+    "$names",
+    "nodes(p)",
+    "MATCH",
+    "OPTIONAL",
+    "(n)",
+    "(n:person {name: x})",
+    "WHERE",
+    "element_id(n) = x",
+    "n.name = x",
+    "LET",
+    "FILTER",
+    "RETURN",
+    "*",
+    "count(*)",
+    "collect_list(",
+    ")",
+    ",",
+    "=",
+    "1",
+];
+
+/// A random stage 2a query that parses: a start (nothing, a pattern, a path, an `OPTIONAL
+/// MATCH`, `LET`, `FILTER`), one to three `FOR` / `UNWIND` clauses over constant, parameter,
+/// per-row and element lists, each optionally followed by a `MATCH` that looks a node up by the
+/// item (by id, an inline property, a `WHERE` equality, an E3 continuation), then a `RETURN`.
+#[cfg(feature = "gql")]
+fn random_gql_2a_query(rng: &mut Rng) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+    let mut nodes: Vec<String> = Vec::new();
+    let mut path = false;
+    match rng.below(7) {
+        0 => {}
+        1 => {
+            parts.push("MATCH (a:person)".into());
+            nodes.push("a".into());
+        }
+        2 => {
+            parts.push("MATCH p = (a)-[e]->(b)".into());
+            nodes.extend(["a".to_string(), "b".to_string()]);
+            path = true;
+        }
+        3 => {
+            parts.push("OPTIONAL MATCH (a:nope)".into());
+            nodes.push("a".into());
+        }
+        4 => {
+            parts.push("LET k = 2".into());
+            values.push("k".into());
+        }
+        5 => parts.push("FILTER $n > 0".into()),
+        _ => {
+            parts.push("MATCH (a:person) WITH a, count(*) AS c".into());
+            nodes.push("a".into());
+            values.push("c".into());
+        }
+    }
+    let mut items = Vec::new();
+    for f in 0..1 + rng.below(3) {
+        let mut lists = vec![
+            "[1, 2, 2, null]".to_string(),
+            "$ids".into(),
+            "$names".into(),
+            "null".into(),
+            "42".into(),
+            "'marko'".into(),
+            "range(1, $n)".into(),
+            "[]".into(),
+            "[[1, 2], [3]]".into(),
+            "['1', 1, 1.0, true]".into(),
+        ];
+        if let Some(v) = values.last() {
+            lists.push(format!("[{v}, {v} + 1]"));
+        }
+        if let Some(a) = nodes.last() {
+            lists.push(format!("[{a}]"));
+            lists.push(format!("[{a}.name, {a}.age, element_id({a})]"));
+        }
+        if path {
+            lists.push("nodes(p)".into());
+            lists.push("relationships(p)".into());
+        }
+        let list = rng.pick(&lists).clone();
+        let x = format!("x{f}");
+        let ordinal = format!("i{f}");
+        match rng.below(4) {
+            0 => parts.push(format!("UNWIND {list} AS {x}")),
+            1 => {
+                parts.push(format!("FOR {x} IN {list} WITH ORDINALITY {ordinal}"));
+                values.push(ordinal);
+            }
+            2 => {
+                parts.push(format!("FOR {x} IN {list} WITH OFFSET {ordinal}"));
+                values.push(ordinal);
+            }
+            _ => parts.push(format!("FOR {x} IN {list}")),
+        }
+        let n = format!("n{f}");
+        let lookup = match rng.below(8) {
+            0 => format!("MATCH ({n}) WHERE element_id({n}) = {x}"),
+            1 => format!("MATCH ({n}:person {{name: {x}}})"),
+            2 => format!("MATCH ({n}:person|software) WHERE {n}.name = {x}"),
+            3 => format!("OPTIONAL MATCH ({n}:person {{age: {x}}})"),
+            4 => format!("MATCH ({x})-->({n})"),
+            5 => format!("MATCH ({n}:person)-[:knows]->(:person {{name: {x}}})"),
+            _ => String::new(),
+        };
+        if lookup.is_empty() {
+            values.push(x.clone());
+        } else {
+            parts.push(lookup);
+            nodes.push(n);
+        }
+        items.push(x);
+        if rng.chance(20) {
+            parts.push(format!("FILTER {} IS NOT NULL", rng.pick(&items)));
+        }
+    }
+    let x = rng.pick(&items).clone();
+    let ret = match rng.below(6) {
+        0 => "RETURN count(*) AS c".to_string(),
+        1 => format!("RETURN {x} AS v, count(*) AS c"),
+        2 => "RETURN *".to_string(),
+        3 => format!("RETURN DISTINCT {x} AS v"),
+        4 => format!("RETURN collect_list({x}) AS l"),
+        _ => match nodes.last() {
+            Some(node) => format!("RETURN {node}.name AS name, {x} AS v ORDER BY name LIMIT 5"),
+            None => format!("RETURN {x} AS v"),
+        },
+    };
+    parts.push(ret);
+    parts.join(" ")
+}
+
+/// The modern graph, with property indexes on `person.name`, `person.age` and `software.name`
+/// when `indexed` (the lookups of the 2a family then read them).
+#[cfg(feature = "gql")]
+fn gql_2a_graph(indexed: bool) -> TraversalGraph {
+    use graphersal::catalog::PropertyIndexDefinition;
+    use graphersal::storage::ElementKind;
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    if indexed {
+        for (label, key) in [("person", "name"), ("person", "age"), ("software", "name")] {
+            let _ = graph.traversal_mut().create_index(
+                &format!("{label}_{key}"),
+                PropertyIndexDefinition::new(ElementKind::Vertex, label, key),
+            );
+        }
+    }
+    graph
+}
+
+/// The parameters of the 2a family.
+#[cfg(feature = "gql")]
+fn gql_2a_params() -> Vec<(&'static str, ElementProperty)> {
+    vec![
+        ("n", ElementProperty::from(2)),
+        (
+            "ids",
+            ElementProperty::Array(vec![
+                ElementProperty::from("1"),
+                ElementProperty::from("4"),
+                ElementProperty::from("99"),
+                ElementProperty::from(4),
+                ElementProperty::Null,
+            ]),
+        ),
+        (
+            "names",
+            ElementProperty::Array(vec![
+                ElementProperty::from("marko"),
+                ElementProperty::from("lop"),
+                ElementProperty::from("nobody"),
+                ElementProperty::from("marko"),
+            ]),
+        ),
+    ]
+}
+
+/// The sorted rows of `query` on the modern graph (indexed or not), or the error kind.
+#[cfg(feature = "gql")]
+fn gql_2a_rows(query: &str, indexed: bool) -> Result<Vec<String>, String> {
+    let graph = gql_2a_graph(indexed);
+    match graph.traversal().gql_with(query, gql_2a_params()).to_list() {
+        Ok(rows) => {
+            let mut rows: Vec<String> = rows.iter().map(|row| format!("{row:?}")).collect();
+            rows.sort();
+            Ok(rows)
+        }
+        Err(err) => Err(match err.root_cause() {
+            TraverserError::Gql { kind, message, .. } => format!("{kind:?}: {message}"),
+            other => other.to_string(),
+        }),
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2a_queries_never_panic_and_indexes_never_change_rows() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_A001);
+    let mut generated = Vec::new();
+    for _ in 0..budget(150) {
+        generated.push(random_gql_2a_query(&mut rng));
+    }
+    // Every generated query parses; enough of them run; a property index changes the plan
+    // (gql:lookup instead of a scan), never the rows or the error.
+    let mut ran = 0;
+    let mut checked = generated.clone();
+    checked.extend(GQL_2A_CORPUS.iter().map(|s| s.to_string()));
+    for query in &checked {
+        let text = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            (gql_2a_rows(&text, false), gql_2a_rows(&text, true))
+        });
+        match outcome {
+            Ok((plain, indexed)) => {
+                match &plain {
+                    Ok(_) => ran += 1,
+                    Err(message) if message.starts_with("Syntax") => {
+                        syntax.push(format!("{query}: {message}"));
+                    }
+                    Err(_) => {}
+                }
+                if plain != indexed {
+                    differences.push(format!(
+                        "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                    ));
+                }
+            }
+            Err(outcome) => fatal.check(query, Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 2 >= checked.len(),
+        "only {ran} of {} generated 2a queries ran",
+        checked.len()
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2a queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} queries whose rows depend on an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts = generated;
+    texts.extend(GQL_2A_CORPUS.iter().map(|s| s.to_string()));
+    // Long FOR chains and big lists: bounded errors or results, never a stack overflow.
+    texts.push(format!(
+        "{}RETURN count(*) AS c",
+        (0..200)
+            .map(|i| format!("FOR x{i} IN [1] "))
+            .collect::<String>()
+    ));
+    texts.push(format!(
+        "FOR x IN [{}] RETURN count(*) AS c",
+        vec!["1"; 5_000].join(", ")
+    ));
+    texts.push("FOR x IN range(1, 9223372036854775807) RETURN x LIMIT 1".to_string());
+    texts.push(format!(
+        "FOR x IN {}1{} RETURN x",
+        "[".repeat(300),
+        "]".repeat(300)
+    ));
+    texts.push(format!(
+        "FOR id IN [{}] MATCH (n) WHERE element_id(n) = id RETURN count(*) AS c",
+        (0..2_000)
+            .map(|i| format!("'{i}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2A_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2A_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "FOR x IN [1, 2]");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2a");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2b: EXISTS subqueries and pattern predicates (fast path and expression hook)
+// ---------------------------------------------------------------------------------------------
+
+/// Valid stage 2b queries: the base documents of the 2b mutations.
+#[cfg(feature = "gql")]
+const GQL_2B_CORPUS: &[&str] = &[
+    "MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name AS n",
+    "MATCH (a:person), (b:person) WHERE (a)-[:knows]->(b) RETURN a.name, b.name",
+    "MATCH (p) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } RETURN p",
+    "MATCH (p) WHERE EXISTS ((p)<-[:knows]-()) OR p.age > 30 RETURN p.name AS n",
+    "MATCH (p:person) RETURN p.name AS n, EXISTS { (p)-->() } AS e ORDER BY EXISTS { (p)-[:knows]->() }, n",
+    "MATCH (p:person) RETURN count(CASE WHEN (p)-->() THEN 1 END) AS c, (p)<--() AS i",
+    "MATCH (p) OPTIONAL MATCH (p)-[:created]->(s) RETURN p, EXISTS { (s)<-[:created]-(:person {name: 'peter'}) } AS x",
+    "MATCH (p) WHERE EXISTS { MATCH (p)-->(q) WHERE EXISTS { MATCH (q)-->(r) WHERE NOT (r)-->(p) } } RETURN p",
+    "FOR b IN [EXISTS { MATCH (s:software) }, (a)-->()] RETURN b",
+    "MATCH (p:person) LET k = (p)-[:knows]->() FILTER k OR NOT k RETURN p.name AS n, k",
+    "MATCH (p:person) WITH p, count(*) AS c ORDER BY EXISTS { (p)-[:created]->() } RETURN p.name AS n",
+    "MATCH (a)-[e]->(b) WHERE EXISTS { MATCH (a)-[e]->(b) MATCH (b)-[f]->() WHERE f <> e } RETURN e",
+];
+
+/// Tokens of stage 2b for the 2b token soup (a list of its own; the earlier lists stay as they
+/// are).
+#[cfg(feature = "gql")]
+const GQL_2B_TOKENS: &[&str] = &[
+    "EXISTS",
+    "EXISTS {",
+    "EXISTS (",
+    "exists(",
+    "COUNT {",
+    "{",
+    "}",
+    "(",
+    ")",
+    "(p)",
+    "(q)",
+    "()",
+    "(p)-->()",
+    "(p)-[:knows]->(q)",
+    "-->",
+    "<--",
+    "--",
+    "-",
+    "-[:created]->",
+    "<-[e]-",
+    "{1,}",
+    "MATCH",
+    "OPTIONAL",
+    "WHERE",
+    "NOT",
+    "OR",
+    "AND",
+    "CASE WHEN",
+    "THEN",
+    "END",
+    "RETURN",
+    "ORDER BY",
+    "LET k =",
+    "FOR x IN [",
+    "]",
+    "count(",
+    "p.age > 30",
+    ",",
+    "1",
+];
+
+/// A random subquery over the node variables `nodes` (the first is the main import): one of
+/// the four forms, sometimes negated, sometimes nested, sometimes joined with a plain
+/// condition.
+#[cfg(feature = "gql")]
+fn random_gql_2b_predicate(
+    rng: &mut Rng,
+    nodes: &[String],
+    edge: Option<&str>,
+    depth: usize,
+) -> String {
+    let x = nodes.first().cloned().unwrap_or_else(|| "x".into());
+    let y = nodes.get(1).cloned();
+    // Pattern-predicate bodies: no new named variable.
+    let mut plain = vec![
+        format!("({x})-->()"),
+        format!("({x})<-[:knows]-()"),
+        format!("({x})-[:created]->(:software)"),
+        format!("({x})-[:knows]->{{1,2}}()"),
+        format!("({x})--(:person {{name: 'josh'}})"),
+    ];
+    if let Some(y) = &y {
+        plain.push(format!("({x})--({y})"));
+        plain.push(format!("({y})<-[:created]-({x})"));
+    }
+    if let Some(e) = edge {
+        plain.push(format!("({x})-[{e}]-()"));
+    }
+    let mut bodies = plain.clone();
+    bodies.extend([
+        format!("({x})-[r]->(o) WHERE r.weight > 0.4"),
+        format!("({x})-[:created]->(s) WHERE s.lang = 'java'"),
+        "(s:software {name: 'lop'})".to_string(),
+        format!("({x})-[:knows*1..2]->(m) WHERE m.age > 30"),
+        format!("q = ({x})-->() WHERE length(q) = 1"),
+    ]);
+    if depth < 2 && rng.chance(25) {
+        let inner = random_gql_2b_predicate(rng, &["o".to_string(), x.clone()], None, depth + 1);
+        bodies.push(format!("({x})-->(o) WHERE {inner}"));
+    }
+    let form = rng.below(4);
+    let core = if form == 0 {
+        rng.pick(&plain).clone()
+    } else {
+        let body = rng.pick(&bodies).clone();
+        match form {
+            1 => format!("EXISTS {{ MATCH {body} }}"),
+            2 if rng.chance(50) => format!("EXISTS {{ MATCH {body} MATCH ({x})--() }}"),
+            2 => format!("EXISTS {{ {body} }}"),
+            _ => format!("EXISTS ({body})"),
+        }
+    };
+    let core = if rng.chance(40) {
+        format!("NOT {core}")
+    } else {
+        core
+    };
+    match rng.below(6) {
+        0 => format!("{core} AND {x}.age > 30"),
+        1 => format!("({core} OR {x}.name = 'josh')"),
+        _ => core,
+    }
+}
+
+/// A random stage 2b query in four forms with the same rows: the subquery as a `WHERE`
+/// condition (the `filter()` / `not()` fast path when it stands alone), the same under `CASE`
+/// (the `gql:filter` hook), as a `FILTER` (fast path) and through a `FOR` list (the `gql:for`
+/// hook). Returns `[where, where_case, filter, for_filter]`; pairs (0, 1) and (2, 3) must agree.
+#[cfg(feature = "gql")]
+fn random_gql_2b_queries(rng: &mut Rng) -> [String; 4] {
+    let (head, nodes, edge): (&str, &[&str], Option<&str>) = match rng.below(7) {
+        0 => ("MATCH (a:person)", &["a"], None),
+        1 => ("MATCH (a)-[e]->(b)", &["a", "b"], Some("e")),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            &["b", "a"],
+            None,
+        ),
+        3 => ("MATCH (a:person) WITH a, count(*) AS c", &["a"], None),
+        4 => ("FOR n IN $names MATCH (a {name: n})", &["a"], None),
+        5 => ("MATCH p = (a)-[:knows]->(b)", &["b", "a"], None),
+        _ => ("MATCH (a:software), (b:person)", &["a", "b"], None),
+    };
+    let nodes: Vec<String> = nodes.iter().map(|n| n.to_string()).collect();
+    let pred = random_gql_2b_predicate(rng, &nodes, edge, 0);
+    let x = &nodes[0];
+    let other = random_gql_2b_predicate(rng, &nodes, None, 1);
+    let ret = match rng.below(6) {
+        0 => "RETURN count(*) AS c".to_string(),
+        1 => format!("RETURN {x}.name AS n"),
+        2 => format!("RETURN DISTINCT {x} AS v"),
+        3 => format!("RETURN {x}.name AS n, {other} AS e"),
+        4 => format!("RETURN {x}.name AS n ORDER BY {other}, n LIMIT 3"),
+        _ => {
+            format!("RETURN count(CASE WHEN {other} THEN 1 END) AS c, collect_list({x}.name) AS l")
+        }
+    };
+    [
+        format!("{head} WHERE {pred} {ret}"),
+        format!("{head} WHERE CASE WHEN {pred} THEN true ELSE false END {ret}"),
+        format!("{head} FILTER {pred} {ret}"),
+        format!("{head} FOR t IN [{pred}] FILTER t {ret}"),
+    ]
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2b_queries_never_panic_and_fast_path_equals_hook() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_B001);
+    let mut generated = Vec::new();
+    for _ in 0..budget(120) {
+        generated.push(random_gql_2b_queries(&mut rng));
+    }
+    // Every generated query parses; enough of them run; the fast path and the hook give the
+    // same rows (or the same error), with and without property indexes.
+    let mut ran = 0;
+    for forms in &generated {
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (a, b) in [(0, 1), (2, 3)] {
+                    if results[a].0 != results[b].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{}\n  {:?}",
+                            forms[a], results[a].0, forms[b], results[b].0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    let total = generated.len() * 4;
+    assert!(
+        ran * 2 >= total,
+        "only {ran} of {total} generated 2b queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2b queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2b queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2B_CORPUS.iter().map(|s| s.to_string()));
+    // Every host position, nested EXISTS and the bounds: a result or a bounded error.
+    let pred = "EXISTS { MATCH (p)-[:knows]->{1,}(q) WHERE (q)-->() }";
+    for host in [
+        format!("MATCH (p) WHERE {pred} OR p.age > 1 RETURN p"),
+        format!("MATCH (p WHERE {pred}) RETURN p"),
+        format!("MATCH (p)-[e WHERE {pred}]->() RETURN e"),
+        format!("MATCH (p) RETURN {pred} AS x ORDER BY {pred}"),
+        format!("MATCH (p) RETURN {pred} AS k, count(CASE WHEN {pred} THEN 1 END) AS c"),
+        format!("MATCH (p) FOR x IN [{pred}, NOT {pred}] RETURN x"),
+        format!("MATCH (p) LET k = {pred} WITH p, k WHERE k RETURN p"),
+        format!("MATCH (p) WITH p, count(*) AS c WHERE {pred} RETURN p"),
+        format!("MATCH (p) OPTIONAL MATCH (p)-->(q) WHERE {pred} RETURN p, q"),
+        format!("MATCH (p) RETURN CASE WHEN {pred} THEN 1 WHEN NOT {pred} THEN 2 END AS c"),
+    ] {
+        texts.push(host);
+    }
+    let mut nested = "(n)-->()".to_string();
+    for _ in 0..300 {
+        nested = format!("EXISTS {{ MATCH (n) WHERE {nested} }}");
+    }
+    texts.push(format!("MATCH (n) WHERE {nested} RETURN n"));
+    texts.push(format!(
+        "MATCH (n) WHERE {} RETURN n",
+        vec!["(n)-->()"; 70].join(" OR ")
+    ));
+    texts.push(format!(
+        "MATCH (n) LET a = EXISTS {{ (n)-->() }} LET b = EXISTS {{ MATCH (n)-->(q) WHERE {} }} \
+         FILTER {} RETURN n",
+        vec!["a"; 50].join(" AND "),
+        vec!["b"; 50].join(" AND ")
+    ));
+    texts.push(format!(
+        "MATCH (n) WHERE EXISTS {{ MATCH {} }} RETURN n",
+        "(a)-->".repeat(80) + "(b)"
+    ));
+    texts.push(format!(
+        "MATCH (n) WHERE {}(n)-->() RETURN n",
+        "NOT ".repeat(5_000)
+    ));
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2B_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2B_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) WHERE");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2b");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2c: map projections, list comprehensions and pattern comprehensions
+// ---------------------------------------------------------------------------------------------
+
+/// Valid stage 2c queries: the base documents of the 2c mutations.
+#[cfg(feature = "gql")]
+const GQL_2C_CORPUS: &[&str] = &[
+    "MATCH (p:person) RETURN p {.name, .age} AS m",
+    "MATCH (p:person) RETURN p {.*, friends: [(p)-[:knows]->(f) | f {.name}]} AS m",
+    "MATCH (n) RETURN n {.name, k: n.age + 1, n} AS m",
+    "RETURN [x IN [1, 2, 3, 4] WHERE x > 2 | x * 10] AS l",
+    "MATCH (p:person) RETURN [x IN [p.age, 1, NULL] WHERE x > 1] AS l",
+    "MATCH (p:person) RETURN [(p)-->(b) WHERE b.age > 30 | b.name] AS l",
+    "MATCH (p) RETURN [q = (p)-[:knows]->{1,2}(f) | length(q)] AS l",
+    "MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) > 0 RETURN p.name AS n",
+    "MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)<--(x) | x]) DESC, n",
+    "MATCH (p) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, [(s)<-[:created]-(c) | c.name] AS l",
+    "MATCH (p:person) FOR f IN [(p)-[:knows]->(f2) | f2 {.name}] RETURN p.name, f",
+    "MATCH (p:person) RETURN [(p)-->(b) | [(b)-->(c) | [y IN [c.name] | y]]] AS l",
+    "MATCH (p:person) WITH p, [(p)-->(b) | b.name] AS l RETURN l, count(*) AS c",
+    "MATCH (p:person) RETURN collect_list(p {.name, n: size([(p)--(o) | o])}) AS l",
+];
+
+/// Tokens of stage 2c for the 2c token soup (a list of its own; the earlier lists stay as they
+/// are).
+#[cfg(feature = "gql")]
+const GQL_2C_TOKENS: &[&str] = &[
+    "[",
+    "]",
+    "{",
+    "}",
+    "(",
+    ")",
+    "|",
+    "x IN",
+    "IN",
+    "[x IN [1, 2] |",
+    "[(p)-->(b) |",
+    "p {",
+    ".name",
+    ".*",
+    ":",
+    "k:",
+    "p",
+    "b",
+    "x",
+    "(p)",
+    "(b)",
+    "-->",
+    "<--",
+    "-[:knows]->",
+    "q =",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "EXISTS {",
+    "MATCH",
+    "RETURN",
+    "FOR f IN",
+    "ORDER BY",
+    "size(",
+    ",",
+    "1",
+    "NULL",
+];
+
+/// A random pattern comprehension body for the 2c family over the import `x`: the pattern
+/// (binding `y`, never a name of the heads), an optional condition and the `|` expression.
+#[cfg(feature = "gql")]
+fn random_gql_2c_body(rng: &mut Rng, x: &str) -> (String, String, String) {
+    let (pattern, own): (String, &[&str]) = match rng.below(8) {
+        0 => (format!("({x})-->(y)"), &[]),
+        1 => (format!("({x})<-[:knows]-(y)"), &[]),
+        2 => (format!("({x})-[:created]->(y:software)"), &[]),
+        3 => (format!("({x})-[:knows]->{{1,2}}(y)"), &[]),
+        4 => (format!("({x})--(y:person)"), &[]),
+        5 => (
+            format!("({x})-[r]->(y)"),
+            &["r.weight > 0.4", "r.weight < 0.9"],
+        ),
+        6 => (format!("q = ({x})-->(y)"), &["length(q) = 1"]),
+        _ => ("(y:software)<-[:created]-(:person)".to_string(), &[]),
+    };
+    let mut conditions = vec![
+        "y.age > 30".to_string(),
+        "y.name <> 'lop'".to_string(),
+        "y.name STARTS WITH 'j'".to_string(),
+        format!("{x}.age > 30"),
+        "EXISTS { (y)-->() }".to_string(),
+        "size([(y)-->(z) | z]) > 0".to_string(),
+        "size([w IN [1, 2, 3] WHERE w > 1]) = 2".to_string(),
+    ];
+    conditions.extend(own.iter().map(|c| c.to_string()));
+    let condition = match rng.below(3) {
+        0 => String::new(),
+        1 => format!(" WHERE {}", rng.pick(&conditions)),
+        _ => format!(
+            " WHERE {} OR {}",
+            rng.pick(&conditions),
+            rng.pick(&conditions)
+        ),
+    };
+    let map = rng
+        .pick(&[
+            "y.name",
+            "y",
+            "y {.name}",
+            "y {.*, k: 1}",
+            "[(y)-->(z) | z.name]",
+            "[w IN [y.age, y.name] WHERE w IS NOT NULL]",
+            "size([(y)--(z) | z])",
+        ])
+        .to_string();
+    (pattern, condition, map)
+}
+
+/// A random stage 2c query in six forms, three pairs with the same rows:
+/// - `size()` of a pattern comprehension vs `OPTIONAL MATCH` + `count()` grouped by the head's
+///   variables;
+/// - `FOR` over a pattern comprehension vs a later `MATCH` of its pattern;
+/// - a map projection vs the record constructor (`NULL` for a `NULL` target).
+#[cfg(feature = "gql")]
+fn random_gql_2c_queries(rng: &mut Rng) -> [String; 6] {
+    let (head, vars, imports): (&str, &[&str], &[&str]) = match rng.below(7) {
+        0 => ("MATCH (a:person)", &["a"], &["a"]),
+        1 => ("MATCH (a)-[e]->(b)", &["a", "e", "b"], &["a", "b"]),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            &["a", "b"],
+            &["b", "a"],
+        ),
+        3 => (
+            "MATCH (a:person) WITH a, count(*) AS c",
+            &["a", "c"],
+            &["a"],
+        ),
+        4 => (
+            "FOR n IN ['marko', 'lop', 'nobody'] MATCH (a {name: n})",
+            &["n", "a"],
+            &["a"],
+        ),
+        5 => ("MATCH p = (a)-[:knows]->(b)", &["a", "b"], &["b", "a"]),
+        _ => ("MATCH (a:software), (b:person)", &["a", "b"], &["a", "b"]),
+    };
+    let x = *rng.pick(imports);
+    let keys = vars.join(", ");
+    let (pattern, condition, map) = random_gql_2c_body(rng, x);
+    let comprehension = format!("[{pattern}{condition} | {map}]");
+    [
+        format!("{head} RETURN {keys}, size({comprehension}) AS s"),
+        format!("{head} OPTIONAL MATCH {pattern}{condition} RETURN {keys}, count(y) AS s"),
+        format!("{head} FOR v IN {comprehension} RETURN {keys}, v"),
+        format!("{head} MATCH {pattern}{condition} RETURN {keys}, {map} AS v"),
+        format!("{head} RETURN {keys}, {x} {{.name, l: {comprehension}}} AS m"),
+        format!(
+            "{head} RETURN {keys}, CASE WHEN {x} IS NULL THEN NULL ELSE {{name: {x}.name, l: \
+             {comprehension}}} END AS m"
+        ),
+    ]
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2c_queries_never_panic_and_comprehensions_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_C001);
+    let mut generated = Vec::new();
+    for _ in 0..budget(100) {
+        generated.push(random_gql_2c_queries(&mut rng));
+    }
+    // Every generated query parses; enough of them run; each pair gives the same rows (or the
+    // same error), with and without property indexes.
+    let mut ran = 0;
+    for forms in &generated {
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (a, b) in [(0, 1), (2, 3), (4, 5)] {
+                    if results[a].0 != results[b].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{}\n  {:?}",
+                            forms[a], results[a].0, forms[b], results[b].0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    let total = generated.len() * 6;
+    assert!(
+        ran * 4 >= total * 3,
+        "only {ran} of {total} generated 2c queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2c queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2c queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2C_CORPUS.iter().map(|s| s.to_string()));
+    // Every host position, unbounded quantifiers, nesting and the bounds: a result or a
+    // bounded error.
+    let pc = "[(p)-[:knows]->{1,}(q) WHERE (q)-->() | q {.name, l: [(q)-->(r) | r.name]}]";
+    for host in [
+        format!("MATCH (p) WHERE size({pc}) > 0 OR p.age > 1 RETURN p"),
+        format!("MATCH (p WHERE size({pc}) > 0) RETURN p"),
+        format!("MATCH (p)-[e WHERE size({pc}) > 0]->() RETURN e"),
+        format!("MATCH (p) RETURN {pc} AS x ORDER BY size({pc})"),
+        format!("MATCH (p) RETURN {pc} AS k, collect_list({pc}) AS c"),
+        format!("MATCH (p) FOR x IN {pc} RETURN x"),
+        format!("MATCH (p) LET k = {pc} WITH p, k WHERE size(k) > 0 RETURN p, k"),
+        format!("MATCH (p) WITH p, count(*) AS c WHERE size({pc}) > 0 RETURN p"),
+        format!("MATCH (p) OPTIONAL MATCH (p)-->(o) WHERE size({pc}) > 0 RETURN p, o"),
+        format!("MATCH (p) RETURN p {{.*, l: {pc}, m: [x IN {pc} WHERE x IS NOT NULL]}} AS m"),
+        format!("MATCH (p) RETURN [x IN [1, 2] | {pc}] AS l"),
+        format!("MATCH (p) RETURN [(p)-->(o) | [x IN {pc} | x]] AS l"),
+        format!("MATCH (p) WHERE EXISTS {{ MATCH (p)-->(o) WHERE size({pc}) > 0 }} RETURN p"),
+    ] {
+        texts.push(host);
+    }
+    for (open, close) in [
+        ("[(n)-->(m) | ", "]"),
+        ("[x IN [1] WHERE ", " | x]"),
+        ("n {k: ", "}"),
+        ("[(n)-->(m) WHERE size(", ") > 0 | m]"),
+    ] {
+        texts.push(format!(
+            "MATCH (n) RETURN {}1{} AS x",
+            open.repeat(300),
+            close.repeat(300)
+        ));
+    }
+    // A chain of 40 comprehensions, each from the previous one's element.
+    let mut nested = "m40.name".to_string();
+    for i in (0..40).rev() {
+        nested = format!("[(m{i})-->(m{}) | {nested}]", i + 1);
+    }
+    texts.push(format!("MATCH (m0) RETURN {nested} AS x"));
+    texts.push(format!(
+        "MATCH (n) RETURN {} AS x",
+        vec!["size([(n)-->(m) | m])"; 70].join(" + ")
+    ));
+    texts.push(format!(
+        "MATCH (n) LET a = size([(n)-->(m) | m]) > 0 LET b = EXISTS {{ MATCH (n)-->(q) WHERE {} \
+         }} FILTER {} RETURN n",
+        vec!["a"; 50].join(" AND "),
+        vec!["b"; 50].join(" AND ")
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN [{} | b] AS x",
+        "(a)-->".repeat(80) + "(b)"
+    ));
+    texts.push(format!(
+        "MATCH (n) RETURN n {{{}}} AS m",
+        (0..2_000)
+            .map(|i| format!("k{i}: {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    texts.push(format!(
+        "RETURN [x IN [{}] WHERE x > 1 | [y IN [x, x] | y * x]] AS l",
+        vec!["1"; 5_000].join(", ")
+    ));
+    texts.push("RETURN [x IN range(1, 9223372036854775807) | x] AS l".to_string());
+    texts.push("MATCH (a), (b), (c) RETURN [(a)--(d)--(e) | [d, e, b, c]] AS l".to_string());
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2C_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2C_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) RETURN");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2c");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2d.T5d: the list predicates all / any / none / single and reduce (D23)
+// ---------------------------------------------------------------------------------------------
+
+/// Valid queries with the list predicates and `reduce`: the base documents of their mutations.
+#[cfg(feature = "gql")]
+const GQL_2D_LIST_FUNCTION_CORPUS: &[&str] = &[
+    "RETURN all(x IN [1, 2, NULL] WHERE x > 0) AS a, any(x IN [] WHERE x) AS b",
+    "MATCH (p:person) WHERE none(x IN [(p)-->(y) | y.age] WHERE x > 30) RETURN p.name AS n",
+    "MATCH (p:person) RETURN single(x IN [p.age, 29] WHERE x = 29) AS s",
+    "MATCH (p:person) RETURN reduce(s = 0, x IN [(p)-->(y) | y] | s + 1) AS n",
+    "MATCH (p:person) RETURN reduce(s = p.age, x IN [1, 2] | s * x) AS n ORDER BY n",
+    "MATCH (p:person) RETURN reduce(s = [], x IN collect_list(p.name) | [x] + s) AS l",
+    "MATCH (p:person) RETURN [x IN [1, 2] WHERE all(y IN [x, p.age] WHERE y > 0) | x] AS l",
+    "MATCH (p:person) FOR v IN reduce(s = [], x IN [1, 2] | s + [x * p.age]) RETURN v",
+    "MATCH (p:person) LET k = any(x IN [p.age] WHERE x > 30) FILTER k RETURN p",
+];
+
+/// Tokens of the list functions for their token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2D_LIST_FUNCTION_TOKENS: &[&str] = &[
+    "all(",
+    "any(",
+    "none(",
+    "single(",
+    "reduce(",
+    "reduce(s = 0,",
+    "s =",
+    "=",
+    "x IN",
+    "IN",
+    "WHERE",
+    "|",
+    "(",
+    ")",
+    "[",
+    "]",
+    ",",
+    "x",
+    "s",
+    "s + x",
+    "p.age",
+    "[1, NULL]",
+    "[(p)-->(y) | y]",
+    "NULL",
+    "1",
+    "AND",
+    "NOT",
+    "IS NULL",
+    "RETURN",
+];
+
+/// A random list function and its rewrite into list comprehensions, `CASE` and `size()`, with
+/// the same value on every row (`NULL` lists, `NULL` items and `NULL` conditions included; the
+/// conditions never fail, so the early return of a decided predicate is not observable).
+#[cfg(feature = "gql")]
+fn random_gql_2d_list_function_queries(rng: &mut Rng) -> [String; 2] {
+    let (head, keys): (&str, &str) = match rng.below(4) {
+        0 => ("MATCH (a:person)", "a"),
+        1 => ("MATCH (a)-[e]->(b)", "a, e, b"),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            "a, b",
+        ),
+        _ => ("MATCH (a) WITH a, a.age AS c", "a, c"),
+    };
+    let list = *rng.pick(&[
+        "[a.age, 30, NULL]",
+        "[(a)-->(y) | y.age]",
+        "a.missing",
+        "[]",
+        "[a.age, a.age + 1]",
+        "[(a)--(y) | y.name]",
+    ]);
+    let condition = *rng.pick(&[
+        "x > 30",
+        "x = 29",
+        "x IS NULL",
+        "x <> 27",
+        "x > a.age",
+        "x IN [27, 32, 'lop']",
+        "x STARTS WITH 'j'",
+    ]);
+    let kept = format!("size([x IN {list} WHERE {condition}])");
+    let unknown = format!("size([x IN {list} WHERE ({condition}) IS NULL])");
+    let any = format!(
+        "CASE WHEN {list} IS NULL THEN NULL WHEN {kept} > 0 THEN true WHEN {unknown} > 0 THEN \
+         NULL ELSE false END"
+    );
+    let (form, rewrite) = match rng.below(6) {
+        0 => (
+            format!("all(x IN {list} WHERE {condition})"),
+            format!(
+                "CASE WHEN {list} IS NULL THEN NULL WHEN size([x IN {list} WHERE NOT \
+                 ({condition})]) > 0 THEN false WHEN {unknown} > 0 THEN NULL ELSE true END"
+            ),
+        ),
+        1 => (format!("any(x IN {list} WHERE {condition})"), any),
+        2 => (
+            format!("none(x IN {list} WHERE {condition})"),
+            format!("NOT ({any})"),
+        ),
+        3 => (
+            format!("single(x IN {list} WHERE {condition})"),
+            format!(
+                "CASE WHEN {list} IS NULL THEN NULL WHEN {kept} > 1 THEN false WHEN {unknown} > \
+                 0 THEN NULL ELSE {kept} = 1 END"
+            ),
+        ),
+        4 => (
+            format!("reduce(s = [], x IN {list} | s + [x])"),
+            format!("[x IN {list} | x]"),
+        ),
+        _ => (
+            format!("reduce(s = 0, x IN {list} | s + 1)"),
+            format!("size({list})"),
+        ),
+    };
+    [
+        format!("{head} RETURN {keys}, {form} AS v"),
+        format!("{head} RETURN {keys}, {rewrite} AS v"),
+    ]
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2d_list_functions_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_D5D1);
+    let mut generated = Vec::new();
+    for _ in 0..budget(100) {
+        generated.push(random_gql_2d_list_function_queries(&mut rng));
+    }
+    let mut ran = 0;
+    for forms in &generated {
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| gql_2a_rows(q, false))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, result) in forms.iter().zip(&results) {
+                    match result {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                if results[0] != results[1] {
+                    differences.push(format!(
+                        "{}\n  {:?}\n{}\n  {:?}",
+                        forms[0], results[0], forms[1], results[1]
+                    ));
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    let total = generated.len() * 2;
+    assert!(
+        ran * 4 >= total * 3,
+        "only {ran} of {total} generated list function queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated list function queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} list function queries that differ from their rewrites:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2D_LIST_FUNCTION_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting bounds, long lists and a quadratic fold: a result or a bounded error.
+    for (open, close) in [
+        ("reduce(s = 0, x IN ", " | s)"),
+        ("reduce(s = ", ", x IN [1] | s)"),
+        ("all(x IN [1] WHERE ", ")"),
+        ("any(x IN ", " WHERE true)"),
+    ] {
+        texts.push(format!(
+            "MATCH (n) RETURN {}1{} AS x",
+            open.repeat(300),
+            close.repeat(300)
+        ));
+    }
+    texts.push(format!(
+        "RETURN reduce(s = [], x IN [{}] | s + [x, x]) AS l",
+        vec!["1"; 1_000].join(", ")
+    ));
+    texts.push("RETURN all(x IN range(1, 9223372036854775807) WHERE x > 0) AS a".to_string());
+    texts.push("RETURN reduce(s = 0, x IN range(1, 100000) | s + x) AS a".to_string());
+    texts.push("RETURN reduce(s = 9223372036854775807, x IN [1] | s + x) AS a".to_string());
+    texts.push(
+        "MATCH (a), (b), (c) RETURN reduce(s = [], x IN [(a)--(d) | d] | s + [x, b, c]) AS l"
+            .to_string(),
+    );
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2D_LIST_FUNCTION_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len)
+            .map(|_| *rng.pick(GQL_2D_LIST_FUNCTION_TOKENS))
+            .collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) RETURN");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2d list functions");
+}
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 2d.T6: composite queries (UNION, NEXT, CALL { }, COUNT { }, COLLECT { })
+// ---------------------------------------------------------------------------------------------
+
+/// Valid composite queries: the base documents of their mutations.
+#[cfg(feature = "gql")]
+const GQL_2D_CORPUS: &[&str] = &[
+    "MATCH (p:person) RETURN p.name AS n UNION MATCH (s:software) RETURN s.name AS n",
+    "RETURN 1 AS x UNION ALL RETURN 1 AS x NEXT RETURN x, count(*) AS c",
+    "MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name",
+    "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.name LIMIT 1 } RETURN p, f",
+    "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN p, s",
+    "MATCH (p) CALL { WITH p MATCH (p)-->(f) RETURN count(f) AS c } RETURN p, c",
+    "CALL { MATCH (s:software) RETURN s } RETURN s.name AS n",
+    "MATCH (p) CALL (*) { CALL (p) { RETURN p.name AS a UNION RETURN 'x' AS a } RETURN a } RETURN a",
+    "MATCH (p:person) RETURN COUNT { MATCH (p)-->(f) RETURN f UNION MATCH (p)<--(f) RETURN f } AS c",
+    "MATCH (p:person) RETURN COLLECT { MATCH (p)-->(f) RETURN f.name ORDER BY f.name } AS l",
+    "MATCH (p) WHERE EXISTS { MATCH (p)-->(f) WITH f WHERE f.age > 30 RETURN f } RETURN p",
+    "MATCH (p:person) RETURN p.name AS n ORDER BY n LIMIT 2 UNION RETURN 'z' AS n NEXT RETURN n ORDER BY n DESC",
+];
+
+/// Tokens of stage 2d for the composite token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2D_TOKENS: &[&str] = &[
+    "UNION",
+    "UNION ALL",
+    "UNION DISTINCT",
+    "NEXT",
+    "CALL",
+    "CALL (p) {",
+    "CALL (*) {",
+    "CALL {",
+    "OPTIONAL CALL",
+    "COUNT {",
+    "COLLECT {",
+    "EXISTS {",
+    "IN TRANSACTIONS",
+    "{",
+    "}",
+    "(",
+    ")",
+    "(p)",
+    "(p)-->(f)",
+    "MATCH",
+    "WITH p",
+    "RETURN",
+    "RETURN p",
+    "RETURN 1 AS x",
+    "AS x",
+    "ORDER BY",
+    "LIMIT 1",
+    "count(*)",
+    "p",
+    "f",
+    "x",
+    ",",
+    "1",
+];
+
+/// A random stage 2d query as pairs (or triples) of forms with the same rows; `kind` picks the
+/// construct:
+/// 0. a `CALL` body (nested 0 to 2 times in further `CALL`s) vs a later `MATCH`;
+/// 1. a counting `CALL` body vs `COUNT { }` vs `size()` of a pattern comprehension;
+/// 2. `COLLECT { }` vs the pattern comprehension;
+/// 3. `UNION` vs `OR` with `DISTINCT`;
+/// 4. `UNION ALL` vs a `FOR` over two filters;
+/// 5. `NEXT` vs `FILTER`, and an aggregate after `NEXT` over a `UNION` vs `WITH DISTINCT`;
+/// 6. a `UNION` body of a `CALL` vs a `DISTINCT` body over either direction;
+/// 7. a whole-query `EXISTS` body vs the `MATCH`-only one.
+#[cfg(feature = "gql")]
+fn random_gql_2d_forms(rng: &mut Rng, kind: usize) -> Vec<Vec<String>> {
+    let (head, vars, imports): (&str, &[&str], &[&str]) = match rng.below(7) {
+        0 => ("MATCH (a:person)", &["a"], &["a"]),
+        1 => ("MATCH (a)-[e]->(b)", &["a", "e", "b"], &["a", "b"]),
+        2 => (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[:created]->(b)",
+            &["a", "b"],
+            &["b", "a"],
+        ),
+        3 => (
+            "MATCH (a:person) WITH a, count(*) AS c",
+            &["a", "c"],
+            &["a"],
+        ),
+        4 => (
+            "FOR n IN ['marko', 'lop', 'nobody'] MATCH (a {name: n})",
+            &["n", "a"],
+            &["a"],
+        ),
+        5 => ("MATCH p = (a)-[:knows]->(b)", &["a", "b"], &["b", "a"]),
+        _ => ("MATCH (a:software), (b:person)", &["a", "b"], &["a", "b"]),
+    };
+    let x = *rng.pick(imports);
+    let keys = vars.join(", ");
+    let (pattern, condition, map) = random_gql_2c_body(rng, x);
+    let conditions = [
+        format!("{x}.age > 30"),
+        format!("{x}.name STARTS WITH 'j'"),
+        format!("EXISTS {{ ({x})-[:created]->() }}"),
+        format!("{x}.age IS NULL"),
+        format!("COUNT {{ ({x})--() }} > 2"),
+        format!("{x}.name IN ['lop', 'marko', 'vadas']"),
+        format!("size(COLLECT {{ MATCH ({x})-->(z) RETURN z }}) = 1"),
+    ];
+    let c1 = rng.pick(&conditions).clone();
+    let c2 = rng.pick(&conditions).clone();
+    match kind {
+        0 => {
+            let mut body = format!("MATCH {pattern}{condition} RETURN {map} AS v");
+            for _ in 0..rng.below(3) {
+                body = format!("CALL ({x}) {{ {body} }} RETURN v");
+            }
+            vec![vec![
+                format!("{head} CALL ({x}) {{ {body} }} RETURN {keys}, v"),
+                format!("{head} MATCH {pattern}{condition} RETURN {keys}, {map} AS v"),
+            ]]
+        }
+        1 => vec![vec![
+            format!(
+                "{head} CALL ({x}) {{ MATCH {pattern}{condition} RETURN count(*) AS s }} RETURN \
+                 {keys}, s"
+            ),
+            format!("{head} RETURN {keys}, COUNT {{ MATCH {pattern}{condition} }} AS s"),
+            format!("{head} RETURN {keys}, size([{pattern}{condition} | 1]) AS s"),
+        ]],
+        2 => vec![vec![
+            format!(
+                "{head} RETURN {keys}, COLLECT {{ MATCH {pattern}{condition} RETURN {map} AS v \
+                 }} AS l"
+            ),
+            format!("{head} RETURN {keys}, [{pattern}{condition} | {map}] AS l"),
+        ]],
+        3 => vec![vec![
+            format!("{head} FILTER {c1} RETURN {keys} UNION {head} FILTER {c2} RETURN {keys}"),
+            format!("{head} FILTER {c1} OR {c2} RETURN DISTINCT {keys}"),
+        ]],
+        4 => vec![vec![
+            format!("{head} FILTER {c1} RETURN {keys} UNION ALL {head} FILTER {c2} RETURN {keys}"),
+            format!(
+                "{head} FOR t IN [1, 2] FILTER CASE WHEN t = 1 THEN {c1} ELSE {c2} END RETURN \
+                 {keys}"
+            ),
+        ]],
+        5 => vec![
+            vec![
+                format!("{head} RETURN {keys} NEXT FILTER {c1} RETURN {keys}"),
+                format!("{head} FILTER {c1} RETURN {keys}"),
+            ],
+            vec![
+                format!(
+                    "{head} FILTER {c1} RETURN {keys} UNION {head} FILTER {c2} RETURN {keys} \
+                     NEXT RETURN count(*) AS k"
+                ),
+                format!("{head} FILTER {c1} OR {c2} WITH DISTINCT {keys} RETURN count(*) AS k"),
+            ],
+        ],
+        6 => vec![vec![
+            format!(
+                "{head} CALL ({x}) {{ MATCH ({x})-->(y) RETURN y UNION MATCH ({x})<--(y) RETURN \
+                 y }} RETURN {keys}, y"
+            ),
+            format!("{head} CALL ({x}) {{ MATCH ({x})--(y) RETURN DISTINCT y }} RETURN {keys}, y"),
+        ]],
+        _ => vec![vec![
+            format!(
+                "{head} FILTER EXISTS {{ MATCH {pattern}{condition} RETURN {map} AS v }} RETURN \
+                 {keys}"
+            ),
+            format!("{head} FILTER EXISTS {{ MATCH {pattern}{condition} }} RETURN {keys}"),
+        ]],
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2d_composite_queries_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_D7E6);
+    let mut generated: Vec<Vec<String>> = Vec::new();
+    for _ in 0..budget(100) {
+        for _ in 0..3 {
+            let kind = rng.below(8);
+            generated.extend(random_gql_2d_forms(&mut rng, kind));
+        }
+    }
+    // Every generated query parses; enough of them run; the forms of a group give the same
+    // rows (or the same error), with and without property indexes.
+    let mut ran = 0;
+    let mut total = 0;
+    for forms in &generated {
+        total += forms.len();
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (form, result) in forms.iter().zip(&results).skip(1) {
+                    if result.0 != results[0].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{form}\n  {:?}",
+                            forms[0], results[0].0, result.0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 4 >= total * 3,
+        "only {ran} of {total} generated 2d queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2d queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2d queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2D_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting, long chains and unbounded bodies: a result or a bounded error.
+    let mut calls = "RETURN 1 AS x".to_string();
+    let mut counts = "MATCH (n) RETURN n".to_string();
+    for _ in 0..20 {
+        calls = format!("CALL {{ {calls} UNION ALL RETURN 2 AS x }} RETURN x");
+        counts = format!("MATCH (n) WHERE COUNT {{ {counts} }} > 0 RETURN n");
+    }
+    texts.push(calls);
+    texts.push(counts);
+    texts.push(
+        (0..300)
+            .map(|i| format!("RETURN {i} AS x"))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL "),
+    );
+    texts.push(format!(
+        "RETURN 1 AS x {}RETURN x",
+        "NEXT RETURN x + 1 AS x ".repeat(300)
+    ));
+    texts.push(format!(
+        "MATCH (p) {} RETURN p",
+        (0..60)
+            .map(|i| format!("CALL (p) {{ MATCH (p)--(q{i}) RETURN count(q{i}) AS c{i} }}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    texts.push(
+        "MATCH (a), (b), (c) CALL (a, b, c) { MATCH (a)--(d)--(e) RETURN [d, e, b, c] AS l } \
+         RETURN l"
+            .to_string(),
+    );
+    texts.push(
+        "MATCH (p) CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q UNION ALL MATCH (p)-[]-{1,}(q) \
+         RETURN q } RETURN count(*) AS c"
+            .to_string(),
+    );
+    texts.push(
+        "MATCH (p) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN COLLECT { MATCH (q)-[]-{1,}(r) \
+         RETURN r } AS l } AS l"
+            .to_string(),
+    );
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2D_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2D_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p) RETURN p");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2d composite");
+}
+
+/// Stage 2e (parenthesized and quantified path patterns) corpus for the mutations.
+#[cfg(feature = "gql")]
+const GQL_2E_CORPUS: &[&str] = &[
+    "MATCH (a) ((x)-[e]->(y)){1,3} (b) RETURN a, b, x, e",
+    "MATCH (a {name: 'marko'}) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20){1,2} (b) RETURN b, m",
+    "MATCH p = (a) ((x)-->(y))? (b) RETURN p, y",
+    "MATCH (a:person) WHERE (a) (()-[:created]->()){1} RETURN a",
+    "MATCH (a) WHERE ((x)-->(y))+ (a) RETURN a",
+    "MATCH (a) RETURN [(a) ((x)-->(y)){1,2} (b) | b.name] AS l",
+    "MATCH (a) RETURN [((x)-->(y))? (a) | x] AS l",
+    "MATCH (a) WHERE EXISTS { (a) ((x)-->(y))+ (:software) } RETURN a",
+    "MATCH (a) CALL (a) { MATCH (a) ((x)--(y)){2} (b) RETURN b } RETURN a, b",
+    "MATCH (a) OPTIONAL MATCH (a) ((x)-[e]->(y)){0,2} (b) RETURN a, b, e",
+    "MATCH (a) ((x)-[e]-(y)){0} (b) RETURN a, b",
+    "MATCH (a) ((x)-->(y)) ((u)<--(v)){1,2} (b) RETURN a, b, v",
+    "MATCH (a) ((x)-->(y) WHERE x.age < y.age)* (b) RETURN a, b",
+    "MATCH (a) RETURN COUNT { (a) ((x)-[:knows]->(y)){1,} } AS c",
+];
+
+/// Tokens of stage 2e for the token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2E_TOKENS: &[&str] = &[
+    "(",
+    ")",
+    "((",
+    "))",
+    "(x)",
+    "(y)",
+    "(a)",
+    "(b)",
+    "()",
+    "-->",
+    "<--",
+    "--",
+    "-[e]->",
+    "-[e:knows]-",
+    "<-[f]-",
+    "{1,3}",
+    "{0}",
+    "{2,}",
+    "{,2}",
+    "{1}",
+    "?",
+    "*",
+    "+",
+    "WHERE",
+    "x.age > 20",
+    "e.weight < 0.5",
+    "MATCH",
+    "RETURN",
+    "RETURN a",
+    "a",
+    "b",
+    "x",
+    "e",
+    ",",
+    "p =",
+    "EXISTS {",
+    "COUNT {",
+    "}",
+    "[",
+    "|",
+    "]",
+    "OPTIONAL MATCH",
+    "TRAIL",
+    "AND",
+    "NOT",
+    "CALL (a) {",
+    "MATCH (a)",
+];
+
+/// A random stage 2e query as groups of forms with the same rows; `kind` picks the rewrite:
+/// 0. no quantifier vs the plain edge (body variables singletons);
+/// 1. a one-edge quantified path pattern vs the quantified edge (`e` a list in both);
+/// 2. `?` (conditional singletons) vs `{0,1}` (lists, read with `head`);
+/// 3. the body written reversed from the other end (lists read with `reverse`);
+/// 4. `{2}` of one edge vs two written edges, and `{1}` of two edges vs the plain chain;
+/// 5. nested: `EXISTS { }`, a pattern predicate, `COUNT { }` / a pattern comprehension, `CALL`
+///    and `OPTIONAL MATCH` vs the same with the quantified edge.
+#[cfg(feature = "gql")]
+fn random_gql_2e_forms(rng: &mut Rng, kind: usize) -> Vec<Vec<String>> {
+    let a = *rng.pick(&[
+        "(a)",
+        "(a:person)",
+        "(a {name: 'marko'})",
+        "(a:software)",
+        "(a WHERE a.age > 30)",
+    ]);
+    let (b, blank_b) = *rng.pick(&[
+        ("(b)", "()"),
+        ("(b:software)", "(:software)"),
+        ("(b {name: 'lop'})", "({name: 'lop'})"),
+        ("(b:person)", "(:person)"),
+    ]);
+    let label = *rng.pick(&["", ":knows", ":created", ":knows|created"]);
+    // The edge written forward, the same edge written from its other end.
+    let ((l, r), (rl, rr)) = *rng.pick(&[
+        (("-[", "]->"), ("<-[", "]-")),
+        (("<-[", "]-"), ("-[", "]->")),
+        (("-[", "]-"), ("-[", "]-")),
+    ]);
+    let q = *rng.pick(&[
+        "{1,2}", "{0,2}", "{1}", "{2}", "{0}", "{2,3}", "+", "*", "{,2}",
+    ]);
+    let cond = *rng.pick(&["", " WHERE e.weight > 0.3", " WHERE e.weight <= 0.5"]);
+    let edge = format!("{l}e{label}{r}");
+    let back = format!("{rl}e{label}{rr}");
+    let inline = format!("{l}e{label}{cond}{r}");
+    let blank = format!("{l}{label}{r}");
+    let outer = cond;
+    match kind {
+        0 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}) {b} RETURN a, b, e, x, y"),
+            format!("MATCH {a}{edge}{b}{outer} RETURN a, b, e, a AS x, b AS y"),
+        ]],
+        1 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}){q} {b} RETURN a, b, e, size(x) AS n"),
+            format!("MATCH {a}{inline}{q}{b} RETURN a, b, e, size(e) AS n"),
+        ]],
+        2 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond})? {b} RETURN a, b, e, y"),
+            format!(
+                "MATCH {a} ((x){edge}(y){cond}){{0,1}} {b} RETURN a, b, head(e) AS e, head(y) AS y"
+            ),
+        ]],
+        3 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}){q} {b} RETURN a, b, e, x, y"),
+            format!(
+                "MATCH {b} ((y){back}(x){cond}){q} {a} RETURN a, b, reverse(e) AS e, reverse(x) \
+                 AS x, reverse(y) AS y"
+            ),
+        ]],
+        4 => {
+            let f = format!("{l}f{label}{r}");
+            let second = cond.replace("e.", "f.");
+            vec![
+                vec![
+                    format!("MATCH {a} ((x){edge}(y){cond}){{2}} {b} RETURN a, b, e"),
+                    format!(
+                        "MATCH {a}{edge}(){f}{b} WHERE true{} RETURN a, b, [e, f] AS e",
+                        if cond.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" AND {} AND {}", &cond[7..], &second[7..])
+                        }
+                    ),
+                ],
+                vec![
+                    format!(
+                        "MATCH {a} ((x){edge}(m){f}(y)){{1}} {b} RETURN a, b, head(m) AS m, \
+                         head(e) AS e, head(f) AS f"
+                    ),
+                    format!("MATCH {a}{edge}(m){f}{b} RETURN a, b, m, e, f"),
+                ],
+            ]
+        }
+        _ => vec![
+            {
+                let mut exists = vec![
+                    format!(
+                        "MATCH {a} WHERE EXISTS {{ (a) ((x){edge}(y){cond}){q} {b} }} RETURN a"
+                    ),
+                    format!("MATCH {a} WHERE EXISTS {{ (a){inline}{q}{b} }} RETURN a"),
+                ];
+                // A pattern predicate introduces no variable, so it has no edge condition.
+                if cond.is_empty() {
+                    exists.push(format!(
+                        "MATCH {a} WHERE (a) ((){blank}()){q} {blank_b} RETURN a"
+                    ));
+                    exists.push(format!("MATCH {a} WHERE (a){blank}{q}{blank_b} RETURN a"));
+                }
+                exists
+            },
+            vec![
+                format!("MATCH {a} RETURN a, COUNT {{ (a) ((x){edge}(y){cond}){q} {b} }} AS c"),
+                format!("MATCH {a} RETURN a, size([(a) ((x){edge}(y){cond}){q} {b} | 1]) AS c"),
+                format!("MATCH {a} RETURN a, COUNT {{ (a){inline}{q}{b} }} AS c"),
+            ],
+            vec![
+                format!(
+                    "MATCH {a} CALL (a) {{ MATCH (a) ((x){edge}(y){cond}){q} {b} RETURN b, e }} \
+                     RETURN a, b, e"
+                ),
+                format!("MATCH {a} MATCH (a){inline}{q}{b} RETURN a, b, e"),
+            ],
+            vec![
+                format!("MATCH {a} OPTIONAL MATCH (a) ((x){edge}(y){cond}){q} {b} RETURN a, b, e"),
+                format!("MATCH {a} OPTIONAL MATCH (a){inline}{q}{b} RETURN a, b, e"),
+            ],
+        ],
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2e_queries_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_E5E5);
+    let mut generated: Vec<Vec<String>> = Vec::new();
+    for _ in 0..budget(100) {
+        for _ in 0..2 {
+            let kind = rng.below(6);
+            generated.extend(random_gql_2e_forms(&mut rng, kind));
+        }
+    }
+    // Every generated query parses; enough of them run; the forms of a group give the same
+    // rows (or the same error), with and without property indexes.
+    let mut ran = 0;
+    let mut total = 0;
+    for forms in &generated {
+        total += forms.len();
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (form, result) in forms.iter().zip(&results).skip(1) {
+                    if result.0 != results[0].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{form}\n  {:?}",
+                            forms[0], results[0].0, result.0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 10 >= total * 9,
+        "only {ran} of {total} generated 2e queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2e queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2e queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2E_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting, long bodies and unbounded loops: a result or a bounded error. (Every level of
+    // nested comprehensions runs per item of the one around it: deep nesting is a parser
+    // limit, shallow nesting runs.)
+    for depth in [3, 300] {
+        let mut exists = "(n)-->()".to_string();
+        let mut comprehension = "1".to_string();
+        for _ in 0..depth {
+            exists = format!("(n) ((x WHERE EXISTS {{ {exists} }})-->(y)){{1,2}}");
+            comprehension = format!("[(n) (()-->()){{1,2}} (m) | {comprehension}]");
+        }
+        texts.push(format!("MATCH (n) WHERE {exists} RETURN n"));
+        texts.push(format!("MATCH (n) RETURN {comprehension} AS l"));
+    }
+    texts.push(format!(
+        "MATCH (a) ({}){{1,3}} (b) RETURN count(*) AS c",
+        (0..64)
+            .map(|i| format!("(x{i})-[e{i}]-"))
+            .collect::<String>()
+            + "(x64)"
+    ));
+    texts.push("MATCH (a) ((x)-[e]-(y))* (b) ((u)-[f]-(v))* (c) RETURN count(*) AS c".into());
+    texts.push("MATCH (a) WHERE (a) ((x)-->(y)){2} RETURN a".into());
+    texts.push("MATCH (a) WHERE ((a)-->(b)) * 2 RETURN a".into());
+    texts.push("MATCH (a) RETURN [((x)-->(y)){2} (a), ((a)-->(b))] AS l".into());
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2E_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2E_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (a) WHERE");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2e quantified path patterns");
 }

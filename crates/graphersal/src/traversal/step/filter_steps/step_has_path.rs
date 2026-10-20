@@ -86,10 +86,9 @@ impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + '
         match peek_path(context, &source.value, self.path.segments(), |leaf| {
             leaf.to_logical()
         })? {
-            Some(leaf) => {
-                self.predicate
-                    .test(context, &TraverserValue::Computed(leaf, None), source.path)
-            }
+            Some(leaf) => self
+                .predicate
+                .test(context, &TraverserValue::Computed(leaf, None)),
             None => Ok(false),
         }
     }

@@ -16,7 +16,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-graphersal = { workspace = true, features = ["io", "script", "serde", "display", "alloc-tracking"] }
+graphersal = { workspace = true, features = ["io", "script", "gql", "serde", "display", "alloc-tracking"] }
 graphersal-session = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }

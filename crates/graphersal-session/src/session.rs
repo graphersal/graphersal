@@ -2784,4 +2784,62 @@ mod tests {
         );
         assert!(r["display"]["notice"].as_str().is_some(), "{r}");
     }
+
+    /// GQL runs through the session's JSON API: rows keep the written column order in
+    /// `results`, `$params` come from a Rhai map, and a parse error is an ordinary failed run.
+    #[test]
+    fn gql_runs_through_the_session() {
+        let mut s = modern();
+        let text = s.execute(
+            r#"g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS who, s.name AS what ORDER BY who, what")"#,
+            &RunOptions::default(),
+        );
+        assert!(
+            text.contains(r#""results":[{"who":"josh","what":"lop"},{"who":"josh","what":"ripple"},{"who":"marko","what":"lop"},{"who":"peter","what":"lop"}]"#),
+            "{text}"
+        );
+        let r = run(
+            &mut s,
+            r#"g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name", #{min: 30})"#,
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(
+            r["execution"]["results"],
+            json!([{"name": "josh"}, {"name": "peter"}])
+        );
+        let r = run(&mut s, r#"g.gql("MATCH (p:person) RETURN")"#);
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r["execution"]["error"]["help"].is_string(), "{r}");
+        assert_eq!(r["mutated"], false, "{r}");
+    }
+
+    /// The deepest GQL nesting the parser accepts runs on an ordinary (2 MiB) thread, and one
+    /// level more is refused with GQLSTATUS 54001, never a stack overflow.
+    #[test]
+    fn deeply_nested_gql_runs_on_an_ordinary_thread() {
+        let mut s = modern();
+        let nested = |n: usize| {
+            format!(
+                r#"g.gql("MATCH (p:person) WHERE {}p.age > 1{} RETURN p.name AS n")"#,
+                "(".repeat(n),
+                ")".repeat(n)
+            )
+        };
+        let r = run(&mut s, &nested(126));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["execution"]["results"].as_array().unwrap().len(), 4);
+        let r = run(&mut s, &nested(127));
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r.to_string().contains("54001"), "{r}");
+        let ors = (0..510)
+            .map(|i| format!("p.age = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let r = run(
+            &mut s,
+            &format!(r#"g.gql("MATCH (p:person) WHERE {ors} RETURN p.name AS n")"#),
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["execution"]["results"].as_array().unwrap().len(), 4);
+    }
 }

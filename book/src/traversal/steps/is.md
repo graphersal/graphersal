@@ -3,7 +3,7 @@
 
 `is` · `is_` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Keeps values equal to the given value or matching the predicate.
+Keeps values equal to the given value or matching the predicate; a string operand is always a value, never a path label (only where() reads labels; before 0.2 a string naming a label compared with the labelled element).
 
 ## Forms
 
@@ -14,9 +14,10 @@ is(arg1: any)
 ## Example
 
 ```rhai,graph=modern
-g.v().values("age").is(P.lt(30)).to_list()   // [29, 27]
+g.v(1).as("vadas").out("knows").values("name").is(P.eq("vadas")).to_list()   // ["vadas"]
 ```
 
 ## See also
 
 - [Predicates](../../traversal/functions/predicates.md)
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

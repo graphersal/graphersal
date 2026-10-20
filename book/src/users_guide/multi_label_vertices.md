@@ -3,12 +3,13 @@
 Gremlin/TinkerPop vertices carry exactly one label. Cypher and GQL vertices (nodes) carry a
 **set** of labels: `MATCH (n:A:B)` matches a node tagged with both `A` and `B`, and `SET n:Admin`
 adds a label to an existing node without touching the others. Graphersal's storage carries a
-vertex's labels as an ordered, deduplicated set — zero, one, or many — so that a future Cypher/GQL
-front end can sit on top of the same storage without another migration.
+vertex's labels as an ordered, deduplicated set — zero, one, or many — so that the
+[GQL front end](../gql/index.md) sits on top of the same storage: `MATCH (n:A&B)` (Cypher
+`(n:A:B)`) tests a vertex's label set.
 
-**This page documents storage and Gremlin-facing behavior only.** Graphersal does not implement
-Cypher or GQL today; multi-label storage is foundational work for that future front end, not a
-Cypher feature itself.
+**This page documents storage and Gremlin-facing behavior.** [`g.gql()`](../gql/index.md) reads
+label sets with GQL label expressions; it is read-only, so labels are changed with the Gremlin
+steps below (there is no `SET n:Admin`).
 
 ## Creating a multi-label vertex
 

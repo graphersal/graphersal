@@ -221,7 +221,20 @@ fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Result<(), Str
 /// written as Rhai literals (strings escaped, nothing cut), so the text runs exactly that call;
 /// the engine checks them against the parameter schemas when it runs.
 pub fn query_call_text(name: &str, args: &Value) -> Result<String, String> {
-    let mut out = format!("g.query({}", rhai_string(name));
+    call_text("g.query", name, args, "the arguments of a saved query")
+}
+
+/// The call text of the GQL query `query` with the parameters `params` (a JSON object, `$name`
+/// in the query reads the entry `name`; `null` or `{}`: none): `g.gql("MATCH ..", #{min: 30})`.
+/// The query is written as one Rhai string literal and the parameters as Rhai literals, so
+/// parameter values are never spliced into the query text.
+pub fn gql_call_text(query: &str, params: &Value) -> Result<String, String> {
+    call_text("g.gql", query, params, "the parameters of a GQL query")
+}
+
+/// `<head>("<first>"[, #{args}])`; `what` names the arguments in the error of a non-object.
+fn call_text(head: &str, first: &str, args: &Value, what: &str) -> Result<String, String> {
+    let mut out = format!("{head}({}", rhai_string(first));
     match args {
         Value::Null => {}
         Value::Object(map) if map.is_empty() => {}
@@ -231,8 +244,7 @@ pub fn query_call_text(name: &str, args: &Value) -> Result<String, String> {
         }
         other => {
             return Err(format!(
-                "the arguments of a saved query are a JSON object (parameter name -> value), \
-                 not {}",
+                "{what} are a JSON object (parameter name -> value), not {}",
                 match other {
                     Value::Array(_) => "an array",
                     Value::String(_) => "a string",
@@ -805,6 +817,24 @@ mod tests {
             deep = json!([deep]);
         }
         assert!(query_call_text("top", &json!({"x": deep})).is_err());
+    }
+
+    #[test]
+    fn gql_call_texts_keep_parameters_out_of_the_query() {
+        assert_eq!(
+            gql_call_text("MATCH (p) RETURN p", &Value::Null).unwrap(),
+            "g.gql(\"MATCH (p) RETURN p\")"
+        );
+        assert_eq!(
+            gql_call_text(
+                "MATCH (p {name: \"x\"})\nWHERE p.age > $min RETURN p",
+                &json!({"min": 30, "name": "a\"b"})
+            )
+            .unwrap(),
+            "g.gql(\"MATCH (p {name: \\\"x\\\"})\\nWHERE p.age > $min RETURN p\", #{min: 30, name: \"a\\\"b\"})"
+        );
+        let err = gql_call_text("MATCH (p) RETURN p", &json!([1])).unwrap_err();
+        assert!(err.starts_with("the parameters of a GQL query"), "{err}");
     }
 
     fn modern() -> Session {

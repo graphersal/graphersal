@@ -25,7 +25,7 @@ Rust 1.88 or newer. The workspace also contains the PyO3 binding, which needs a 
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test  --package graphersal --features script,io,display,serde,persist   # includes the TinkerPop suite
+cargo test  --package graphersal --features script,io,display,serde,persist,gql   # includes the TinkerPop suite
 cargo test  --package graphersal --doc --features script,io
 cargo test  --package graphersal-cli
 cargo test  --package graphersal-storage-tests
@@ -47,9 +47,9 @@ Some files are generated and checked by tests; regenerate them instead of editin
 
 | What | Regenerate with |
 |---|---|
-| the DSL surface snapshot (`tests/snapshots/script_surface.txt`) | `GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,display,serde,persist --lib surface` |
+| the DSL surface snapshot (`tests/snapshots/script_surface.txt`) | `GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,display,serde,persist,gql --lib surface` |
 | the step reference pages of the book | `GRAPHERSAL_UPDATE_BOOK=1 cargo test -p graphersal-session --test book_step_reference` |
-| the TinkerPop baseline and compliance page | `TINKERPOP_UPDATE_BASELINE=1 cargo test -p graphersal --features script,io,display,serde,persist --test tinkerpop_features` |
+| the TinkerPop baseline and compliance page | `TINKERPOP_UPDATE_BASELINE=1 cargo test -p graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features` |
 
 Feature hygiene (after touching `cfg(feature)` code or dependencies): `cargo check --package graphersal` for each of
 `--no-default-features`, `--features script`, `--features display`, `--features serde`, `--features io`,
@@ -72,10 +72,10 @@ unbounded memory. A seeded fuzzer checks this:
 ```bash
 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
 ROBUSTNESS_CASES=500000 ROBUSTNESS_SEED=23 ROBUSTNESS_THREADS=4 \
-  cargo test --release -p graphersal --features script,io,display,serde,persist \
+  cargo test --release -p graphersal --features script,io,display,serde,persist,gql \
   --test all robustness_fuzz_tests::fuzz_long -- --ignored
 ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist --test all robustness_input_tests::
+  --features script,io,display,serde,persist,gql --test all robustness_input_tests::
 ```
 
   Findings are written to `target/robustness-findings.txt`; `ROBUSTNESS_REPLAY=<seed>` replays one case. A new
@@ -88,16 +88,16 @@ ROBUSTNESS_INPUT_CASES=20000 cargo test --release -p graphersal \
 
 ```bash
 MERGE_FUZZ_CASES=60000 MERGE_FUZZ_SEED=1 MERGE_FUZZ_THREADS=8 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist,persist-zip --test all merge_checkpoint_fuzz_tests::
+  --features script,io,display,serde,persist,gql,persist-zip --test all merge_checkpoint_fuzz_tests::
 BACKUP_FUZZ_CASES=60000 BACKUP_FUZZ_SEED=1 BACKUP_FUZZ_THREADS=8 cargo test --release -p graphersal \
-  --features script,io,display,serde,persist,persist-zip --test all backup_fuzz_tests::
+  --features script,io,display,serde,persist,gql,persist-zip --test all backup_fuzz_tests::
 ```
 
   A failing case prints `MERGE_FUZZ_REPLAY=<seed>` or `BACKUP_FUZZ_REPLAY=<seed>` to replay it.
 
 ## The TinkerPop suite
 
-`cargo test --package graphersal --features script,io,display,serde,persist --test tinkerpop_features` runs the vendored
+`cargo test --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features` runs the vendored
 Apache TinkerPop 3.8.2 scenarios through the Rhai DSL against a ratchet baseline
 (`crates/graphersal/tests/tinkerpop/baseline.toml`) and writes `target/tinkerpop-report.md`. When a step is added or
 fixed, remove the scenarios that now pass from the baseline (or regenerate it with `TINKERPOP_UPDATE_BASELINE=1` and

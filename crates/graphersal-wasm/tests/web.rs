@@ -475,3 +475,217 @@ fn compression_rules_in_the_browser() {
     assert_eq!(json(&p.drop_compression("names").unwrap())["dropped"], true);
     assert_eq!(json(&p.info())["compressionRules"], 0);
 }
+
+/// Runs one GQL query through the browser session: it either answers (with `rows` rows) or is
+/// refused by the parser's nesting limits (GQLSTATUS 54001), never a stack overflow of the
+/// 1 MB wasm32 stack (debug build, the deepest frames).
+fn gql_within_limits(p: &mut Playground, query: &str, rows: Option<usize>) {
+    let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+    match rows {
+        Some(rows) => {
+            assert_eq!(r["ok"], true, "{query}: {r}");
+            assert_eq!(
+                r["execution"]["results"].as_array().unwrap().len(),
+                rows,
+                "{query}: {r}"
+            );
+        }
+        None => {
+            assert_eq!(r["ok"], false, "{query}: {r}");
+            assert!(r.to_string().contains("54001"), "{query}: {r}");
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+fn deeply_nested_gql_stays_within_the_wasm_stack() {
+    let mut p = modern();
+    let nest = |n: usize, inner: &str| format!("{}{inner}{}", "(".repeat(n), ")".repeat(n));
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("p.age = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let q = |predicate: &str| format!("MATCH (p:person) WHERE {predicate} RETURN p.name AS n");
+    // Parentheses: the deepest accepted nesting, and one past it.
+    gql_within_limits(&mut p, &q(&nest(120, "p.age > 1")), Some(4));
+    gql_within_limits(&mut p, &q(&nest(126, "p.age > 1")), Some(4));
+    gql_within_limits(&mut p, &q(&nest(127, "p.age > 1")), None);
+    // Flat OR chains: the tallest accepted operator tree, and one past it.
+    gql_within_limits(&mut p, &q(&ors(500)), Some(4));
+    gql_within_limits(&mut p, &q(&ors(510)), Some(4));
+    gql_within_limits(&mut p, &q(&ors(511)), None);
+    // Both at once: a tall tree under deep parentheses.
+    gql_within_limits(&mut p, &q(&nest(120, &ors(500))), Some(4));
+    // Other recursive forms at their deepest.
+    let nots = format!("{}p.age > 1", "NOT NOT ".repeat(60));
+    gql_within_limits(&mut p, &q(&nots), Some(4));
+    let minus = format!("p.age > {}1", "- ".repeat(126));
+    gql_within_limits(&mut p, &q(&minus), Some(4));
+    let lists = format!("size({}1{}) = 1", "[".repeat(125), "]".repeat(125));
+    gql_within_limits(&mut p, &q(&lists), Some(4));
+    let calls = format!(
+        "{}p.name{} IS NOT NULL",
+        "upper(".repeat(125),
+        ")".repeat(125)
+    );
+    gql_within_limits(&mut p, &q(&calls), Some(4));
+    let cases = format!(
+        "{}true{} = true",
+        "CASE WHEN true THEN ".repeat(120),
+        " END".repeat(120)
+    );
+    gql_within_limits(&mut p, &q(&cases), Some(4));
+    let labels = format!("MATCH (p:{}) RETURN p.name AS n", nest(126, "person"));
+    gql_within_limits(&mut p, &labels, Some(4));
+}
+
+/// Stage 2d: the deepest accepted nesting of `CALL { }` and whole-query subquery bodies
+/// (`bind::MAX_BODY_DEPTH`, 16), each with the tallest expression inside, stays within the 1 MB
+/// wasm32 stack; one level more is refused (54001). Before their lowering landed (2d.T5 for
+/// `CALL`, 2d.T5c for whole-query bodies) the accepted ones answered "not yet supported"
+/// (0A000) after binding; both forms now run.
+#[wasm_bindgen_test]
+fn deeply_nested_gql_bodies_stay_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let calls = |levels: usize| {
+        let mut q = format!("WITH 1 AS x RETURN {} AS y", ors(500));
+        for _ in 0..levels {
+            q = format!("CALL {{ {q} UNION ALL RETURN 2 AS y }} RETURN y");
+        }
+        q
+    };
+    let bodies = |levels: usize| {
+        let mut q = format!("EXISTS {{ LET x = 1 FILTER {} RETURN x }}", ors(440));
+        for _ in 1..levels {
+            q = format!("EXISTS {{ MATCH (n) WITH n WHERE {q} RETURN n }}");
+        }
+        format!("MATCH (n) WHERE {q} RETURN n")
+    };
+    for (query, refused) in [
+        (calls(16), false),
+        (calls(17), true),
+        (bodies(16), false),
+        (bodies(17), true),
+    ] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        let text = r.to_string();
+        if refused {
+            assert!(text.contains("54001"), "{}: {text}", &query[..60]);
+        } else {
+            assert!(
+                r["ok"] == true || text.contains("0A000"),
+                "{}: {text}",
+                &query[..60]
+            );
+        }
+    }
+}
+
+/// Stage 2d.T5: the deepest accepted `CALL { }` nesting (`bind::MAX_BODY_DEPTH`, 16) lowers and
+/// runs within the 1 MB wasm32 stack, each level a `UNION ALL` body or a correlated body
+/// importing the row, the tallest expression innermost.
+#[wasm_bindgen_test]
+fn deeply_nested_calls_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = (0..500)
+        .map(|i| format!("x = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut unions = format!("WITH 1 AS x RETURN {ors} AS y");
+    let mut imports = format!("MATCH (p:person) WITH p, 1 AS x RETURN {ors} AS y");
+    for _ in 0..16 {
+        unions = format!("CALL {{ {unions} UNION ALL RETURN 2 AS y }} RETURN y");
+        imports = format!("MATCH (p:person) CALL (p) {{ {imports} }} RETURN y");
+    }
+    for query in [unions, imports] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}
+
+/// Stage 2d.T5c: the deepest accepted whole-query subquery nesting (`bind::MAX_BODY_DEPTH`, 16
+/// levels of `EXISTS` bodies, or of `COLLECT` bodies around a `COUNT`), the tallest expression
+/// innermost, lowers and runs within the 1 MB wasm32 stack.
+#[wasm_bindgen_test]
+fn deeply_nested_whole_query_bodies_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = (0..440)
+        .map(|i| format!("x = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut exists = format!("EXISTS {{ LET x = 1 FILTER {ors} RETURN x }}");
+    let mut collects = format!("COUNT {{ LET x = 1 FILTER {ors} RETURN x }}");
+    for _ in 1..16 {
+        exists = format!("EXISTS {{ MATCH (n) WITH n WHERE {exists} RETURN n }}");
+        collects =
+            format!("size(COLLECT {{ MATCH (n) WITH n WHERE {collects} > 0 RETURN n.name }})");
+    }
+    for query in [
+        format!("MATCH (n) WHERE {exists} RETURN n"),
+        format!("MATCH (n) RETURN {collects} AS c"),
+    ] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}
+
+/// Stage 2d.T4: `UNION` operands and `NEXT` blocks lower and run the tallest expression (a
+/// substituted `LET` and a column read from the rows before) within the 1 MB wasm32 stack.
+#[wasm_bindgen_test]
+fn tall_expressions_in_union_operands_stay_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    for query in [
+        format!("RETURN 0 AS y UNION ALL LET x = 1 RETURN {} AS y", ors(500)),
+        format!(
+            "RETURN 0 AS y UNION ALL WITH 1 AS x RETURN {} AS y",
+            ors(500)
+        ),
+        format!(
+            "RETURN 0 AS x UNION ALL RETURN 1 AS x NEXT RETURN {} AS y UNION RETURN x = 0 AS y",
+            ors(500)
+        ),
+    ] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}
+
+/// Stage 2d.T6: the list functions `reduce`, `any` and `all` at the deepest nesting the parser
+/// accepts (in `reduce`'s `|` part, in its initial value, in the list of `any`, inside a list
+/// comprehension's `WHERE`) run within the 1 MB wasm32 stack; one level more is 54001.
+#[wasm_bindgen_test]
+fn deeply_nested_list_functions_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let nest = |form: &str, depth: usize| {
+        let mut expr = "1".to_string();
+        for i in 0..depth {
+            expr = match form {
+                "reduce" => format!("reduce(s{i} = 0, x{i} IN [1] | s{i} + {expr})"),
+                "init" => format!("reduce(s{i} = {expr}, x{i} IN [1] | s{i})"),
+                "any" => format!("any(x{i} IN [{expr}] WHERE true)"),
+                _ => {
+                    format!("head([x{i} IN [1] WHERE all(y{i} IN [x{i}] WHERE y{i} > 0) | {expr}])")
+                }
+            };
+        }
+        format!("RETURN {expr} AS c")
+    };
+    for (form, deepest) in [("reduce", 42), ("init", 63), ("any", 42), ("all", 41)] {
+        gql_within_limits(&mut p, &nest(form, deepest), Some(1));
+        gql_within_limits(&mut p, &nest(form, deepest + 1), None);
+    }
+}

@@ -3,7 +3,7 @@
 
 `where_p` · category: [Filters](../../traversal/step_reference.md#filters)
 
-Graphersal form of where(predicate), modulated by by().
+Graphersal form of where(predicate), modulated by by(); a string operand names a path label first (has() and is() never read labels).
 
 ## Forms
 
@@ -14,9 +14,10 @@ where_p(arg1: any)
 ## Example
 
 ```rhai,graph=modern
-g.v(1).as("a").out("knows").where_p(P.gt("a")).by("age").values("name").to_list()   // ["josh"]
+g.v(1).as("a").out("created").in("created").where_p(P.neq("a")).values("name").to_list()   // ["peter", "josh"]
 ```
 
 ## See also
 
 - [where() Start and End Labels](../../users_guide/where_scope.md)
+- [Predicates: Comparison and Resolution](../../users_guide/predicates.md)

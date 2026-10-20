@@ -2850,6 +2850,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
         mcp.tool_names(),
         [
             "query",
+            "gql",
             "list_saved_queries",
             "run_saved_query",
             "list_compressions",
@@ -4789,4 +4790,152 @@ fn a_compression_estimate_over_http_and_mcp_changes_nothing() {
     assert!(!error && text.contains('4'), "{text}");
     assert_eq!(changes(port)["version"], 0, "nothing was committed");
     assert_eq!(get(port, "/api/compression").json(), serde_json::json!([]));
+}
+
+/// GQL over HTTP runs on the dev server's session thread: the deepest nesting the parser accepts
+/// answers, one level more is refused with GQLSTATUS 54001 (never a stack overflow), and the
+/// rows keep the written column order.
+#[test]
+fn gql_runs_on_the_dev_server_session_thread() {
+    let ui = ui_dir("basic");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    let nested = |n: usize| {
+        format!(
+            r#"g.gql("MATCH (p:person) WHERE {}p.age > 1{} RETURN p.name AS n, p.age AS a")"#,
+            "(".repeat(n),
+            ")".repeat(n)
+        )
+    };
+    let body = serde_json::json!({ "script": nested(126), "options": {} });
+    let answer = post(port, "/api/execute", &body.to_string());
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert!(
+        answer.body.contains(r#"{"n":"marko","a":29}"#),
+        "{}",
+        answer.body
+    );
+    let r = answer.json();
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        r["execution"]["results"].as_array().unwrap().len(),
+        4,
+        "{r}"
+    );
+    let r = execute(port, &nested(127));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(diagnostic(&r).contains("54001"), "{r}");
+    let ors = (0..510)
+        .map(|i| format!("p.age = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let r = execute(
+        port,
+        &format!(r#"g.gql("MATCH (p:person) WHERE {ors} RETURN p.name AS n")"#),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+}
+
+/// The MCP tool `gql`: rows as JSON objects in the written column order, parameters passed as
+/// values (never spliced into the query), a GQL error with its GQLSTATUS and Help line, the
+/// profile, offered and allowed in read-only mode; the examples resource has the GQL group.
+#[test]
+fn mcp_gql_tool_rows_params_errors_and_read_only() {
+    let server = start(&["--graph", "modern", "--mcp", "--mcp-read-only"]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let tools = mcp.rpc("tools/list", serde_json::json!({}));
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "gql")
+        .cloned()
+        .expect("listed in read-only mode");
+    assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+
+    // Rows in the written column order (not sorted: `who` before `friend` before `age`).
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p:person)-[:knows]->(f:person) RETURN p.name AS who, f.name AS friend, f.age AS age ORDER BY age DESC"}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.starts_with("ok: 2 results"), "{text}");
+    let at = |key: &str| text.find(key).unwrap_or_else(|| panic!("{key}: {text}"));
+    assert!(
+        at("\"who\"") < at("\"friend\"") && at("\"friend\"") < at("\"age\""),
+        "{text}"
+    );
+    assert!(at("\"josh\"") < at("\"vadas\""), "{text}");
+
+    // Parameters are values: a quote in one never reaches the query text.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({
+            "query": "MATCH (p:person) WHERE p.age > $min AND p.name <> $odd\nRETURN p.name AS name ORDER BY name",
+            "params": {"min": 30, "odd": "x' OR 'a' = 'a"},
+        }),
+    );
+    assert!(!error, "{text}");
+    assert!(text.starts_with("ok: 2 results"), "{text}");
+    assert!(
+        text.contains("josh") && text.contains("peter") && !text.contains("marko"),
+        "{text}"
+    );
+    // As a JSON string too, like run_saved_query.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p {name: $n}) RETURN p.age AS age", "params": "{\"n\": \"vadas\"}"}),
+    );
+    assert!(!error && text.contains("27"), "{text}");
+
+    // max_rows bounds the rows.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (v) RETURN v.name AS name", "max_rows": 2}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("note:"), "{text}");
+
+    // A GQL error: GQLSTATUS and a Help line.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p:person) RETRUN p.name"}),
+    );
+    assert!(error, "{text}");
+    assert!(
+        text.contains("42001") && text.contains("Help: Did you mean RETURN?"),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p) RETURN p EXCEPT MATCH (q) RETURN q"}),
+    );
+    assert!(error && text.contains("not yet supported"), "{text}");
+    let (error, text) = mcp.call("gql", serde_json::json!({"params": {}}));
+    assert!(
+        error && text.contains("missing argument \"query\""),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p) RETURN p", "params": [1]}),
+    );
+    assert!(error && text.contains("JSON object"), "{text}");
+
+    // The profile: the Gremlin plan the query runs as.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name", "profile": true}),
+    );
+    assert!(!error && text.contains("gql:project"), "{text}");
+    assert_eq!(changes(port)["version"], 0, "nothing was committed");
+
+    // The embedded playground's examples carry the GQL group.
+    let answer = mcp.rpc(
+        "resources/read",
+        serde_json::json!({"uri": "graphersal://examples"}),
+    );
+    let examples = answer["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(examples.contains("g.gql("), "{examples}");
 }

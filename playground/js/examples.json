@@ -78,6 +78,319 @@
     "script": "// Data terminals (to_list(), next()) return plain Rhai values you can compute with.\nlet people = g.v().has_label(\"person\").value_map(\"name\", \"age\").to_list();\nlet total = 0;\nlet oldest = \"\";\nlet max_age = 0;\nfor p in people {\n    let age = p.age[0];\n    total += age;\n    if age > max_age { max_age = age; oldest = p.name[0]; }\n}\n#{ people: people.len(), average_age: total / people.len(), oldest: oldest }"
   },
   {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Whom does each person know? (GQL)",
+    "script": "g.gql(\"MATCH (p:person)-[:knows]->(f:person) RETURN p.name AS who, f.name AS friend, f.age AS age ORDER BY age DESC\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Inline properties and an edge variable",
+    "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[e:knows]->(b) RETURN b.name AS friend, e.weight AS weight ORDER BY weight DESC\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "A $parameter: creators of software in one language",
+    "script": "g.gql(\"MATCH (p:person)-[:created]->(s:software) WHERE s.lang = $lang RETURN p.name AS person, s.name AS project ORDER BY person\", #{lang: \"java\"})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Multi-line query in a backtick string: co-creators",
+    "script": "// Backtick strings span lines; GQL strings use single quotes inside them.\ng.gql(`\n  MATCH (a:person)-[:created]->(s:software)<-[:created]-(b:person)\n  WHERE a.name < b.name\n  RETURN a.name AS one, b.name AS other, s.name AS project\n  ORDER BY project, one, other\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Label expression and string predicates",
+    "script": "g.gql(\"MATCH (v:person|software) WHERE v.name STARTS WITH 'j' OR v.name ENDS WITH 'p' RETURN v.name AS name, labels(v) AS labels ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "RETURN * with ORDER BY and LIMIT",
+    "script": "g.gql(\"MATCH (p:person)-[:created]->(s:software) RETURN * ORDER BY p.name, s.name LIMIT 3\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Paging with OFFSET (SKIP) and LIMIT",
+    "script": "g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age ORDER BY age OFFSET 1 LIMIT 2\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "NULL for a missing property (NULLs sort last)",
+    "script": "g.gql(\"MATCH (v) RETURN v.name AS name, v.age AS age ORDER BY age, name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Either direction, with the edge label",
+    "script": "g.gql(\"MATCH (x {name: 'josh'})-[e]-(y) RETURN type(e) AS rel, y.name AS other ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Aggregates: count and collect_list per person (implicit grouping)",
+    "script": "// The columns without an aggregate (person) are the grouping key; GROUP BY is optional.\ng.gql(`\n  MATCH (p:person)-[:created]->(s:software)\n  RETURN p.name AS person, count(s) AS projects, collect_list(s.name) AS names\n  ORDER BY projects DESC, person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Aggregates over all rows: count, sum, avg, min, max",
+    "script": "g.gql(\"MATCH (p:person) RETURN count(*) AS people, sum(p.age) AS total, avg(p.age) AS mean, min(p.age) AS youngest, max(p.age) AS oldest\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "count(DISTINCT ...): creators per language",
+    "script": "g.gql(\"MATCH (s:software)<-[:created]-(p:person) RETURN s.lang AS lang, count(s) AS rows, count(DISTINCT p) AS creators ORDER BY lang\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL MATCH: NULL when nothing matches",
+    "script": "g.gql(`\n  MATCH (p:person)\n  OPTIONAL MATCH (p)-[:created]->(s:software)\n  RETURN p.name AS person, s.name AS project\n  ORDER BY person, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL MATCH with count: zero for the unmatched",
+    "script": "g.gql(`\n  MATCH (p:person)\n  OPTIONAL MATCH (p)-[:created]->(s)\n  RETURN p.name AS person, count(s) AS projects\n  ORDER BY projects DESC, person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "WITH: aggregate, then filter on the aggregate",
+    "script": "g.gql(`\n  MATCH (p:person)-[:knows]->(f:person)\n  WITH p, count(f) AS friends, avg(f.age) AS mean_age\n  WHERE friends >= 2\n  RETURN p.name AS person, friends, mean_age\n  ORDER BY person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "WITH ... ORDER BY ... LIMIT, then MATCH again: the two oldest and their projects",
+    "script": "g.gql(`\n  MATCH (p:person)\n  WITH p ORDER BY p.age DESC LIMIT 2\n  MATCH (p)-[:created]->(s:software)\n  RETURN p.name AS person, s.name AS project\n  ORDER BY person, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "LET and FILTER with a $parameter",
+    "script": "g.gql(`\n  MATCH (p:person)\n  LET decade = p.age / 10 * 10\n  FILTER decade >= $from\n  RETURN p.name AS name, decade\n  ORDER BY decade, name\n`, #{from: 30})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "FOR over a $parameter list: one row per item",
+    "script": "// FOR x IN list (Cypher UNWIND list AS x) gives one row per item; a name with no person gives no row.\ng.gql(`\n  FOR n IN $names\n  MATCH (p:person {name: n})\n  RETURN n AS name, p.age AS age\n  ORDER BY name\n`, #{names: [\"vadas\", \"marko\", \"nobody\"]})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "FOR id IN $ids: vertices by element id",
+    "script": "// The element_id equality after FOR is a direct lookup by id (see .profile()), not a scan.\ng.gql(\"FOR id IN $ids MATCH (n) WHERE element_id(n) = id RETURN id, n.name AS name ORDER BY name\", #{ids: [\"1\", \"3\", \"42\"]})"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "UNWIND a collected list (Cypher spelling)",
+    "script": "g.gql(`\n  MATCH (p:person)\n  WITH collect_list(p.name) AS names\n  UNWIND names AS name\n  RETURN name\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "empty",
+    "title": "FOR ... WITH ORDINALITY: the item's position from 1",
+    "script": "// WITH ORDINALITY counts from 1, WITH OFFSET from 0.\ng.gql(\"FOR x IN [10, 20, 30] WITH ORDINALITY i RETURN i, x, x * i AS weighted ORDER BY i\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "empty",
+    "title": "RETURN without MATCH: one row of expressions",
+    "script": "// A query may start with FOR, UNWIND, LET, WITH, FILTER or RETURN: it runs on one empty row.\ng.gql(\"RETURN 1 + 2 AS three, upper('gql') AS name, range(1, 3) AS list ORDER BY three\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Who has no ...? NOT EXISTS: people who created nothing",
+    "script": "// NOT EXISTS { pattern } keeps the rows the pattern does not match; the plan is v(labels: [\"person\"]).not(__.out(\"created\")) (see .profile()).\ng.gql(\"MATCH (p:person) WHERE NOT EXISTS { (p)-[:created]->() } RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "EXISTS { MATCH ... WHERE ... }: each java creator once",
+    "script": "// EXISTS tests a match and keeps the row once; MATCH (p)-[:created]->(s) would give one row per project.\ng.gql(`\n  MATCH (p:person)\n  WHERE EXISTS { MATCH (p)-[:created]->(s:software) WHERE s.lang = 'java' }\n  RETURN p.name AS name\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Cypher pattern predicate: people known by someone",
+    "script": "// A pattern where a condition stands is EXISTS { pattern }; it may name only variables bound before it.\ng.gql(\"MATCH (p:person) WHERE ()-[:knows]->(p) RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "EXISTS in RETURN: a TRUE / FALSE column per row",
+    "script": "// EXISTS is TRUE or FALSE, never NULL, and stands anywhere an expression does.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS name,\n         EXISTS { (p)-[:knows]->() } AS knows_someone,\n         (p)-[:created]->(:software {lang: 'java'}) AS creates_java\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Map projection p {.name, .age, key: expr}: one map per person",
+    "script": "// A map projection builds a map from an element: .key reads a property, key: expr computes one, .* takes all.\ng.gql(\"MATCH (p:person) RETURN p {.name, .age, decade: p.age / 10} AS person ORDER BY person.name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Pattern comprehension: a JSON-shaped answer with nested lists",
+    "script": "// [(p)-[:knows]->(f) | f.name] is the list of the pattern's matches per row ([] when none, items in no defined order).\ng.gql(`\n  MATCH (p:person)\n  RETURN p {.name,\n            friends: [(p)-[:knows]->(f) | f.name],\n            projects: [(p)-[:created]->(s) | s {.name, .lang}]} AS person\n  ORDER BY person.name\n`).to_json()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "List comprehension [x IN list WHERE .. | ..]: the names along a path",
+    "script": "// WHERE keeps the items it is TRUE for, | maps each kept item; both parts are optional.\ng.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows|created]->{1,2}(b)\n  RETURN b.name AS reached,\n         [x IN nodes(p) | x.name] AS names,\n         [x IN nodes(p) WHERE x:software | x.name] AS programs\n  ORDER BY size(names), reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "size() of a pattern comprehension: people with two or more projects",
+    "script": "// size([pattern | x]) counts the matches per row; EXISTS is enough when only one match matters.\ng.gql(\"MATCH (p:person) WHERE size([(p)-[:created]->(s) | s]) >= 2 RETURN p.name AS name ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "CALL { } per row: each person's heaviest software (top k per group)",
+    "script": "// The body runs once per person; its ORDER BY and LIMIT apply per row. A person without a match\n// is dropped (vadas); OPTIONAL CALL would keep him with NULL columns.\ng.gql(`\n  MATCH (p:person)\n  CALL (p) {\n    MATCH (p)-[e:created]->(s)\n    RETURN s.name AS top, e.weight AS weight ORDER BY weight DESC LIMIT 1\n  }\n  RETURN p.name AS who, top, weight\n  ORDER BY who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "OPTIONAL CALL with an aggregate: a count per row, 0 included",
+    "script": "// OPTIONAL CALL keeps a row whose body returns nothing; an aggregating body returns one row\n// anyway, so every person gets a count, 0 included.\ng.gql(`\n  MATCH (p:person)\n  OPTIONAL CALL (p) {\n    MATCH (p)-[:knows]->(f)\n    RETURN count(f) AS friends, collect_list(f.name) AS names\n  }\n  RETURN p.name AS who, friends, names\n  ORDER BY friends DESC, who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "COUNT { } and COLLECT { }: related data per row",
+    "script": "// COUNT { } is the number of matches (never NULL); COLLECT { } the list of its one RETURN column.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS who,\n         COUNT { (p)-[:created]->() } AS projects,\n         COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY s.name } AS names\n  ORDER BY projects DESC, who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "UNION and NEXT: one name list from two labels, sorted",
+    "script": "// UNION removes duplicate rows (UNION ALL keeps them); NEXT sorts and cuts the whole union.\ng.gql(`\n  MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name\n  UNION\n  MATCH (s:software) RETURN s.name AS name\n  NEXT RETURN name ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "all() / any() and reduce(): list predicates and a fold per row",
+    "script": "// openCypher compatibility forms; all/any/none/single are three-valued (NULL items count).\ng.gql(`\n  MATCH (p:person)\n  LET weights = [(p)-[e:created]->() | e.weight]\n  RETURN p.name AS who,\n         all(w IN weights WHERE w >= 0.4) AS all_heavy,\n         any(w IN weights WHERE w = 1.0) AS one_full,\n         reduce(total = 0, w IN weights | total + w) AS total\n  ORDER BY who\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Quantified edges {1,2}: reachable in one or two hops",
+    "script": "g.gql(\"MATCH (a:person {name: 'marko'})-[:knows|created]->{1,2}(b) RETURN DISTINCT b.name AS reached ORDER BY reached\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Cypher variable length [e*1..2]: the edge list e",
+    "script": "// [e*1..2] is GQL ->{1,2}; e is the list of the edges walked (Cypher's lower bound defaults to 1).\ng.gql(\"MATCH (a:person {name: 'marko'})-[e*1..2]->(b) RETURN b.name AS reached, size(e) AS hops ORDER BY hops, reached\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Quantified path pattern ((x)-[e]->(y)){1,2}: group lists",
+    "script": "// A variable inside the group is the list of its nodes or edges, one per iteration; (a) is the\n// first x and (b) the last y.\ng.gql(`\n  MATCH (a:person {name: 'marko'}) ((x)-[e:knows|created]->(y)){1,2} (b)\n  RETURN b.name AS reached, [n IN y | n.name] AS via, size(e) AS hops\n  ORDER BY hops, reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Quantified path pattern with a two-hop body: co-creators",
+    "script": "// The body repeats a whole chain: person -created-> software <-created- person, once or twice.\n// Every edge is used at most once per match, so x and y of one iteration differ.\ng.gql(`\n  MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)\n  RETURN DISTINCT a.name AS person, b.name AS co_creator\n  ORDER BY person, co_creator\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Body WHERE in a quantified path pattern: always to someone older",
+    "script": "// The body's WHERE is checked in every iteration and reads only the body's variables.\ng.gql(`\n  MATCH (a:person) ((x)-[:knows|created]-(y) WHERE y.age > x.age){1,3} (b)\n  RETURN a.name AS younger, b.name AS older, size(y) AS steps\n  ORDER BY younger, older\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Optional path pattern ((..))?: NULL when it matched nothing",
+    "script": "// With ? the body's variables are single values (ISO), NULL for the row where the part is\n// skipped; then (q) is (p) itself.\ng.gql(`\n  MATCH (p:person) ((x)-[:created]->(s:software) WHERE s.lang = 'java')? (q)\n  RETURN p.name AS who, s.name AS project, q.name AS last\n  ORDER BY who, project\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Path variable p = ...: the path and its length",
+    "script": "g.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows]->{0,1}(b)-[:created]->(s:software)\n  RETURN s.name AS project, path_length(p) AS len, p\n  ORDER BY len, project, b.name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Conversions: CAST (strict) and toInteger / toIntegerOrNull (lenient)",
+    "script": "// CAST fails the query on text that is not a value of the type; the Cypher conversions give NULL.\ng.gql(`\n  MATCH (p:person)\n  RETURN p.name AS name, CAST(p.age AS STRING) AS age_text, toInteger('4' || '2') AS answer,\n         toFloat(p.age) / 10 AS decades, toIntegerOrNull(p.name) AS not_a_number\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "String functions: substring, upper, split, replace",
+    "script": "g.gql(`\n  MATCH (s:software)\n  RETURN s.name AS name, upper(substring(s.name, 0, 1)) || substring(s.name, 1) AS title,\n         split(s.name, 'p') AS pieces, replace(s.lang, 'java', 'JVM') AS platform\n  ORDER BY name\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "round(avg(...), 1) with GROUP BY",
+    "script": "// GROUP BY lists the non-aggregated RETURN items; without it the grouping is the same.\ng.gql(`\n  MATCH (p:person)-[e:created]->(s:software)\n  RETURN p.name AS person, round(avg(e.weight), 1) AS mean_weight, count(s) AS projects\n  GROUP BY person\n  ORDER BY person\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "keys and properties of vertices and edges",
+    "script": "g.gql(\"MATCH (a {name: 'marko'})-[e]->(b) RETURN b.name AS other, keys(e) AS edge_keys, properties(b) AS props ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "nodes(p) and relationships(p) of a path",
+    "script": "g.gql(`\n  MATCH p = (a:person {name: 'marko'})-[:knows|created]->{1,2}(b)\n  RETURN b.name AS reached, size(relationships(p)) AS hops,\n         head(nodes(p)).name AS first, last(nodes(p)).name AS last\n  ORDER BY hops, reached\n`)"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "startNode and endNode: the stored direction of an edge",
+    "script": "// -[e]- matches either direction; startNode(e) / endNode(e) give the edge's own source and target.\ng.gql(\"MATCH (x {name: 'josh'})-[e]-(y) RETURN y.name AS other, startNode(e).name AS source, endNode(e).name AS target ORDER BY other\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Gremlin after GQL: continue from a row variable",
+    "script": "g.gql(\"MATCH (p:person {name: 'marko'}) RETURN p\")\n  .select(\"p\").out(\"created\").values(\"name\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Gremlin after GQL: count the rows",
+    "script": "g.gql(\"MATCH (a:person)-[:knows]->(b:person) RETURN a, b\").count()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "Profile a GQL query (the Gremlin plan it runs)",
+    "script": "g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name AS name ORDER BY name\").profile()"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "A GQL syntax error (see the help text)",
+    "script": "g.gql(\"MATCH (p:person) RETRUN p.name\")",
+    "expect": "error"
+  },
+  {
     "group": "Generated test data (Fake)",
     "graph": "any",
     "title": "Fake(seed): a table of reproducible test people",

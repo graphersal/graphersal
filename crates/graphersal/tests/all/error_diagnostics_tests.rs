@@ -7204,3 +7204,2823 @@ fn a_dictionary_on_a_dedup_rule_help_names_the_fix() {
     assert!(help.contains(r#"25 for codec "dedup""#), "{help}");
     assert!(help.contains(r#"codec: "dedup""#), "{help}");
 }
+
+/// GQL diagnostics (feature `gql`): every error kind with its caret excerpt, GQLSTATUS and the
+/// `help()` that names the fix, and the camelCase rendering that leaves the GQL text alone.
+#[cfg(feature = "gql")]
+mod gql {
+    use graphersal::error::GqlErrorKind;
+    use graphersal::exec::Spelling;
+    use graphersal::prelude::*;
+
+    /// The failed GQL traversal of `build` on the modern graph: the error and its diagnostic.
+    fn gql_failure(
+        build: impl FnOnce(
+            GraphTraversalSource<'_, &TraversalGraph>,
+        ) -> Result<Vec<ElementProperty>, Box<TraverserError>>,
+    ) -> (Box<TraverserError>, String) {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        let err = build(locked.traversal()).expect_err("the GQL query must fail");
+        let report = format_diagnostic(&err);
+        (err, report)
+    }
+
+    /// The diagnostic of `g.gql(query)` on the modern graph.
+    fn gql_report(query: &str) -> String {
+        gql_failure(|g| g.gql(query).to_list()).1
+    }
+
+    /// The kind and GQLSTATUS of the GQL error at the root of `err`.
+    fn kind_and_status(err: &TraverserError) -> (GqlErrorKind, String) {
+        match err.root_cause() {
+            TraverserError::Gql {
+                kind, gqlstatus, ..
+            } => (*kind, gqlstatus.clone()),
+            other => panic!("expected a GQL error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn gql_syntax_error_on_line_two_lists_the_expected_tokens_under_a_caret() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person)\nWHERE p.age 30\nRETURN p.name")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Syntax, "42001".to_string())
+        );
+        // The diagnostic leads with the GQL error, not with the internal marker step.
+        assert!(
+            report.starts_with(
+                "Error: GQL syntax error at line 2, column 13: unexpected `30` (step #1 \
+                 'gql:error(\"42001\")' refused the query before the traversal ran)"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("Caused by: GQL"), "{report}");
+        assert!(
+            report.contains("  line 2:    WHERE p.age 30\n                         ^^"),
+            "the caret must sit under `30` on line 2: {report}"
+        );
+        assert!(
+            report.contains(
+                "  expected:  MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  GQLSTATUS: 42001"), "{report}");
+        assert!(
+            report.contains(
+                "Help: Expected MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, \
+                 RETURN at the marked position. Fix the query at the marked position: a GQL read query is \
+                 MATCH \
+                 <pattern> [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, \
+                 LET or FILTER clauses, then RETURN <items>, for example \
+                 g.gql(\"MATCH (p:person) WHERE p.age > 30 RETURN p.name\") or \
+                 g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) \
+                 AS n RETURN p.name, n\")."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_misspelt_keyword_and_function_get_did_you_mean() {
+        let report = gql_report("MATCH (p:person) RETRUN p.name");
+        assert!(
+            report.contains(
+                "  query:        MATCH (p:person) RETRUN p.name\n                                 ^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: RETURN"), "{report}");
+        assert!(report.contains("Help: Did you mean RETURN? "), "{report}");
+
+        let report = gql_report("MATCH (p:person) RETURN lowr(p.name)");
+        assert!(report.contains("unknown function lowr()"), "{report}");
+        assert!(report.contains("  did you mean: lower()"), "{report}");
+        assert!(report.contains("Help: Did you mean lower()? "), "{report}");
+    }
+
+    #[test]
+    fn gql_write_clause_is_refused_with_the_gremlin_mutation_steps() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) SET p.old = true RETURN p")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Refused, "0A000".to_string())
+        );
+        assert!(
+            report.contains("SET writes to the graph; gql() is read-only"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: gql() is read-only; use the Gremlin mutation steps (add_v(), add_e(), \
+                 property(), drop(), merge_v())."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_undirected_edge_is_refused_with_the_either_direction_form() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a)~[e]~(b) RETURN a").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Refused);
+        assert!(
+            report.contains("  query:     MATCH (a)~[e]~(b) RETURN a\n                      ^"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: edges in Graphersal are directed; use -[e]- for either direction."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_missing_return_suggests_return_star() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person)").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax);
+        assert!(
+            report.contains("missing RETURN: a GQL query ends with a RETURN statement"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: end the query with a RETURN statement, such as RETURN * (every \
+                 variable) or RETURN p."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_cypher_id_names_element_id() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p:person) RETURN id(p)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Refused, "0A000".to_string())
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN id(p)\n                                     ^^"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("Help: use element_id(p), the element's id as a string."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_quantified_path_pattern_past_the_loop_limit_names_the_pattern() {
+        // Stage 2e.T4: parenthesized path patterns run (the "not yet" this test asserted
+        // before is gone); a loop limit of one names the pattern, read back from its body.
+        let (err, report) = gql_failure(|g| {
+            g.with("repeat.max_loops", 1)
+                .gql("MATCH (a) ((x)-[e:knows]-(m)-[f]-(y)){1,} (b) RETURN b")
+                .to_list()
+        });
+        assert!(
+            matches!(
+                err.root_cause(),
+                TraverserError::RepeatLimitExceeded { max_loops: 1, .. }
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: The loop of the quantified path pattern (()-[e:knows]-()-[f]-()){1,} of \
+                 the gql() query ran 1 iterations, the limit of repeat.max_loops. A quantifier \
+                 without an upper bound ({m,}, *, + or Cypher [*]) repeats the pattern until \
+                 every path has used all the edges it can reach (trail)"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("as in (()-[e:knows]-()-[f]-()){1,5}, for example"),
+            "{report}"
+        );
+    }
+
+    /// The MATCH examples (`MATCH .. RETURN <var>`) written in an alternative, in order.
+    fn match_examples(help: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut rest = help;
+        while let Some(at) = rest.find("MATCH (") {
+            let tail = &rest[at..];
+            let Some(ret) = tail.find(" RETURN ") else {
+                break;
+            };
+            let after = &tail[ret + " RETURN ".len()..];
+            let end = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .unwrap_or(after.len());
+            let example = tail[..ret + " RETURN ".len() + end].trim_end_matches('.');
+            examples.push(example.to_string());
+            rest = &tail[ret..];
+        }
+        examples
+    }
+
+    #[test]
+    fn gql_help_names_quantified_path_patterns_where_they_fix_the_error() {
+        // Stage 2e.T5, rule 6: a quantified path pattern reads an edge together with its nodes
+        // in every iteration, and repeats a pattern a quantifier after a node cannot.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, names) in [
+            (
+                "MATCH (a)-[e WHERE e.weight > a.age]->{1,3}(b) RETURN b",
+                "or read the edge and its nodes together in every iteration of a quantified \
+                 path pattern, as in MATCH (a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} \
+                 (b) RETURN b, or test the list of edges in the WHERE of the MATCH clause",
+            ),
+            (
+                "MATCH (a){2}-->(b) RETURN b",
+                "quantify the edge, for example MATCH (a)-[:knows]->{1,3}(b) RETURN b, or repeat \
+                 a pattern with its nodes as a quantified path pattern, for example MATCH (a) \
+                 ((x:person)-[:knows]->(y)){1,3} (b) RETURN b",
+            ),
+        ] {
+            let help = gql_help(query);
+            assert!(help.contains(names), "{query}: {help}");
+            let examples = match_examples(names);
+            assert!(!examples.is_empty(), "{names}");
+            for example in examples {
+                let rows = locked.traversal().gql(&example).to_list();
+                assert!(rows.is_ok(), "{example}: {rows:?}");
+            }
+        }
+        // The refusals inside a parenthesized path pattern (E17) stay, each with an alternative
+        // that runs as written.
+        for (query, what) in [
+            (
+                "MATCH (a) (((x)-->(y)){2}){1,3} (b) RETURN b",
+                "a parenthesized path pattern nested in another one",
+            ),
+            (
+                "MATCH (a) ((x)-[:knows]->{2}(y)){1,3} (b) RETURN b",
+                "a quantified edge inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) (p = (x)-->(y)){1,3} (b) RETURN b",
+                "a path variable inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) ((x)-->(y), (y)-->(z)){1,3} (b) RETURN b",
+                "several path patterns inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) ((x)){1,3} (b) RETURN b",
+                "a parenthesized path pattern without an edge",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{report}"
+            );
+            assert!(
+                report.contains(&format!("{what} is not yet supported")),
+                "{report}"
+            );
+            let help = err.help().expect("a GQL error has help");
+            assert!(!help.contains("not yet supported"), "{help}");
+            for example in match_examples(&help) {
+                let rows = locked.traversal().gql(&example).to_list();
+                assert!(rows.is_ok(), "{query}: {example}: {rows:?}");
+            }
+        }
+        // A parenthesized path pattern itself is no longer refused anywhere a pattern stands.
+        for query in [
+            "MATCH (a) ((x)-->(y)){1,3} (b) RETURN b",
+            "MATCH (a) WHERE (a) (()-->()){1,2} RETURN a",
+            "MATCH (a) RETURN [(a) ((x)-->(y)){1,2} | y] AS l",
+            "MATCH (a) RETURN [((x)-->(y))? (a) | x] AS l",
+            "MATCH (a) WHERE EXISTS { (a) ((x)-->(y))+ } RETURN a",
+            "MATCH (a) OPTIONAL MATCH (a) ((x)-->(y)){2} (b) RETURN a, b",
+            "MATCH (a) CALL (a) { MATCH (a) ((x)-->(y)) (b) RETURN b } RETURN b",
+        ] {
+            let rows = locked.traversal().gql(query).to_list();
+            assert!(rows.is_ok(), "{query}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn gql_nesting_past_the_bound_is_a_limit_error() {
+        let query = format!("MATCH (p) RETURN {}1{}", "(".repeat(2000), ")".repeat(2000));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(report.contains("the query nests deeper than"), "{report}");
+        assert!(
+            report.contains("Help: The query nests deeper than gql() accepts."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_match_past_the_edge_limit_suggests_clauses_or_repeat() {
+        // 65 edge patterns in one MATCH, one past the limit.
+        let query = format!("MATCH (a){}-[e]->(z) RETURN z", "-->()".repeat(64));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains("the MATCH clause has more than 64 edge patterns"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: split the pattern into several MATCH clauses that share a variable, for \
+                 example MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness \
+                 then holds within each clause only), repeat a chain as a quantified path \
+                 pattern, whose body edges count once however often it repeats, for example \
+                 MATCH (a) (()-->()){65} (z) RETURN z, or walk a long path with Gremlin \
+                 repeat(), for example g.v().repeat(__.out()).times(100). The query is larger \
+                 than gql() accepts."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_long_operator_chain_help_leads_with_the_in_advice() {
+        let terms: Vec<String> = (0..600).map(|i| format!("p.a{i} = 1")).collect();
+        let query = format!("MATCH (p) WHERE {} RETURN p", terms.join(" OR "));
+        let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains("Help: split long AND / OR chains, and test many alternatives with IN"),
+            "{report}"
+        );
+        assert!(
+            report.contains("The query is larger than gql() accepts."),
+            "{report}"
+        );
+        assert!(!report.contains("nests deeper"), "{report}");
+    }
+
+    #[test]
+    fn gql_undefined_variable_suggests_the_declared_one() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person)-[:knows]->(f) RETURN p.name, g.name")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the variable `g` is not defined"),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: p"), "{report}");
+        assert!(
+            report.contains(
+                "Help: Did you mean p? Declare every variable in a MATCH pattern before WHERE, \
+                 RETURN or ORDER BY uses it"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_missing_parameter_help_repeats_the_query() {
+        let report = gql_report("MATCH (p:person) RETURN p.name LIMIT $n");
+        assert!(
+            report.contains("the parameter `$n` has no value"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: pass it in the parameters of gql(), as in \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT $n\", #{n: value})."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_division_by_zero_fails_at_run_time_with_22012() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) RETURN 100 / (p.age - 29)")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22012".to_string())
+        );
+        // Raised by the row it failed on: located at the projecting step, not before the run.
+        assert!(
+            report.starts_with(
+                "Error: Step #1 'gql:project(\"100 / (p.age - 29)\")' execution failed"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("Caused by: GQL data exception at line 1, column 25: division by zero"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN 100 / (p.age - 29)\n                                     ^^^^^^^^^^^^^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  GQLSTATUS: 22012"), "{report}");
+        assert!(
+            report.contains("Help: A row of the data made the marked expression fail."),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_bad_limit_parameter_names_a_runnable_value() {
+        let (err, report) = gql_failure(|g| {
+            g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "22G02".to_string())
+        );
+        assert!(
+            report.contains("LIMIT must be a non-negative integer, but $n is negative"),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: give $n a value such as 10, as in \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT $n\", #{n: 10}). OFFSET and \
+                 LIMIT take a non-negative integer: a literal, or a $parameter given such a \
+                 value in the parameters of gql(), for example \
+                 g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2})."
+            ),
+            "{report}"
+        );
+        // The advice does not talk about undeclared variables.
+        assert!(!report.contains("Declare every variable"), "{report}");
+        // A literal of the wrong kind gets the same advice.
+        let report = gql_report("MATCH (p:person) RETURN p.name LIMIT 1.5");
+        assert!(
+            report.contains("OFFSET and LIMIT take a non-negative integer"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn gql_after_other_steps_names_the_query_as_a_start() {
+        let (err, report) = gql_failure(|g| g.v(None).gql("MATCH (p) RETURN p").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet);
+        assert!(
+            report.contains(
+                "Help: start the traversal with it, as in g.gql(\"MATCH (p) RETURN p\"), and \
+                 write what the steps before it selected as the MATCH pattern and its WHERE \
+                 condition; Gremlin steps may follow it, as in \
+                 g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\")."
+            ),
+            "{report}"
+        );
+    }
+
+    /// Under `render.spelling = camel` the GQL excerpt, the GQL message and the GQL functions
+    /// in the advice stay as written (`element_id(p)`, never `elementId(p)`), so the caret stays
+    /// under its span; the Gremlin steps of the advice and the plan are respelled.
+    #[test]
+    fn gql_text_is_not_respelled_under_camel_case() {
+        let camel = |query: &'static str| {
+            gql_failure(move |g| g.with("render.spelling", "camel").gql(query).to_list())
+        };
+        // Before the run (the marker).
+        let (err, report) = camel("MATCH (p:person) WHERE element_id(p) = '1' RETRUN p");
+        assert_eq!(err.spelling(), Spelling::Camel);
+        assert!(
+            report.contains(
+                "  query:        MATCH (p:person) WHERE element_id(p) = '1' RETRUN p\n                                                           ^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        // At run time (a row fails): the plan is respelled, the GQL text is not.
+        let (_, report) = camel("MATCH (p:person) RETURN element_id(p), 1 / (p.age - 29)");
+        assert!(
+            report.contains("v().hasLabel(\"person\").gql:project("),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "  query:     MATCH (p:person) RETURN element_id(p), 1 / (p.age - 29)\n                                                    ^^^^^^^^^^^^^^^^"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        // The advice: GQL functions as written, Gremlin steps respelled.
+        let (err, _) = camel("MATCH (p:person) RETURN id(p)");
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with("use element_id(p), the element's id"),
+            "{help}"
+        );
+        let (err, _) = camel("CREATE (p:person)");
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("(addV(), addE(), property(), drop(), mergeV())"),
+            "{help}"
+        );
+    }
+
+    /// The same through Rhai: `g.with("render.spelling", "camel").gql(..)`.
+    #[test]
+    #[cfg(feature = "script")]
+    fn gql_text_is_not_respelled_under_camel_case_in_rhai() {
+        let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+        let report = crate::script_host::eval(
+            graph,
+            r#"g.with("render.spelling", "camel").gql("MATCH (p:person) RETURN element_id(p), char_length(p.name) / 0").toList()"#,
+        )
+        .expect_err("division by zero")
+        .to_string();
+        assert!(
+            report.contains("RETURN element_id(p), char_length(p.name) / 0\n"),
+            "{report}"
+        );
+        assert!(!report.contains("elementId"), "{report}");
+        assert!(!report.contains("charLength"), "{report}");
+    }
+
+    /// A parameter map of the wrong type names both forms of `gql()`.
+    #[test]
+    #[cfg(feature = "script")]
+    fn gql_argument_mismatch_help_names_the_parameter_map() {
+        for script in [
+            r#"g.gql("MATCH (p) RETURN p", 5)"#,
+            r#"g.gql("MATCH (p) RETURN p", #{x: g.v()})"#,
+        ] {
+            let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+            let report = crate::script_host::eval(graph, script)
+                .expect_err(script)
+                .to_string();
+            assert!(
+                report.contains("Argument mismatch for step 'gql'"),
+                "{report}"
+            );
+            assert!(
+                report.contains(
+                    "Help: gql() takes the query as a string and, optionally, the values of \
+                     its $parameters as a map from name to value, for example \
+                     g.gql(\"MATCH (p:person {name: $name}) RETURN p.age\", #{name: \
+                     \"marko\"})"
+                ),
+                "{report}"
+            );
+        }
+        // Both examples of the advice run.
+        let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+        let ages = crate::script_host::eval_value(
+            graph.clone(),
+            r#"g.gql("MATCH (p:person {name: $name}) RETURN p.age", #{name: "marko"}).to_list()"#,
+        )
+        .unwrap();
+        assert_eq!(ages.into_array().unwrap().len(), 1);
+        let names = crate::script_host::eval_value(
+            graph,
+            r#"let n = g.v().count().next(); g.gql("MATCH (p:person) RETURN p.name LIMIT $n", #{n: n}).to_list()"#,
+        )
+        .unwrap();
+        assert_eq!(names.into_array().unwrap().len(), 4);
+    }
+
+    // ----- stage 1b: help sweep (rule 6) -----
+
+    /// The help of the GQL error `g.gql(query)` raises on the modern graph.
+    fn gql_help(query: &str) -> String {
+        let (err, _) = gql_failure(|g| g.gql(query).to_list());
+        err.help().expect("a GQL error has help")
+    }
+
+    /// Every `g.gql("..")` example in `help`, with the `g.with(key, n)` options before it.
+    fn gql_examples(help: &str) -> Vec<(Vec<(String, i64)>, String)> {
+        let mut examples = Vec::new();
+        let mut rest = help;
+        while let Some(at) = rest.find("g.") {
+            let mut tail = &rest[at + 2..];
+            rest = tail;
+            let mut options = Vec::new();
+            while let Some(after) = tail.strip_prefix("with(\"") {
+                let key_end = after.find('"').expect("a closed option key");
+                let key = after[..key_end].to_string();
+                let after = after[key_end + 1..].trim_start_matches(", ");
+                let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+                let after = after[digits.len()..]
+                    .strip_prefix(").")
+                    .expect("an option value");
+                options.push((key, digits.parse().expect("a number")));
+                tail = after;
+            }
+            let Some(query) = tail.strip_prefix("gql(\"") else {
+                continue;
+            };
+            let end = query.find("\")").expect("a closed example");
+            examples.push((options, query[..end].replace("\\\"", "\"")));
+        }
+        examples
+    }
+
+    /// Runs every `g.gql(..)` example of `help` on the modern graph: each must succeed.
+    fn assert_examples_run(help: &str) {
+        let examples = gql_examples(help);
+        assert!(!examples.is_empty(), "no g.gql(..) example in: {help}");
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (options, query) in examples {
+            let mut g = locked.traversal();
+            for (key, value) in &options {
+                g = g.with(key.as_str(), *value);
+            }
+            let rows = g.gql(&query).to_list();
+            assert!(rows.is_ok(), "{options:?} {query}: {rows:?}");
+        }
+    }
+
+    #[test]
+    fn gql_expected_tokens_name_every_clause_and_the_quantifiers() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a)-[e]->(b) RETRN a").to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax);
+        assert!(
+            report.contains(
+                "  expected:     `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, \
+                 UNWIND, CALL, RETURN"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("  did you mean: RETURN"), "{report}");
+        // The syntax advice describes the whole clause pipeline, and its examples run.
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "a GQL read query is MATCH <pattern> [WHERE <condition>], then any further \
+                 MATCH, OPTIONAL MATCH, WITH, LET or FILTER clauses, then RETURN <items>"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // After a node pattern too.
+        let help = gql_help("MATCH (p:person) RETRUN p");
+        assert!(
+            help.contains(
+                "Expected `,`, WHERE, MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, \
+                 CALL, ... at the marked position."
+            ),
+            "{help}"
+        );
+        // A misspelt 1b clause gets its suggestion from the same list.
+        let report = gql_report("MATCH (a) OPTINAL MATCH (a)-->(b) RETURN b");
+        assert!(
+            report.contains("  did you mean: OPTIONAL MATCH"),
+            "{report}"
+        );
+        // WITH lists its own tail, then the clauses.
+        let help = gql_help("MATCH (a) WITH a b RETURN a");
+        assert!(
+            help.starts_with(
+                "Expected `,`, AS, ORDER BY, OFFSET, SKIP, LIMIT, WHERE, MATCH, OPTIONAL MATCH, \
+                 WITH, ... at the marked position."
+            ),
+            "{help}"
+        );
+        // Cypher `*` inside the brackets, a GQL quantifier after the edge.
+        let help = gql_help("MATCH (a)-[e:knows RETURN a");
+        assert!(
+            help.starts_with("Expected `*`, `{`, WHERE, `]` at the marked position."),
+            "{help}"
+        );
+        let help = gql_help("MATCH (a)-[e]->x RETURN a");
+        assert!(
+            help.starts_with("Expected `{`, `*`, `+`, `(` at the marked position."),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_group_by_explains_implicit_grouping() {
+        for (query, text) in [
+            // Stage 1c accepts ISO GQL `GROUP BY` on RETURN; on WITH it stays explained.
+            (
+                "MATCH (p:person)-[:created]->(s) WITH p.name AS n, count(s) AS c GROUP BY n \
+                 RETURN n, c",
+                "GROUP BY",
+            ),
+            (
+                "MATCH (p:person) WITH p.name AS n, count(*) AS c group by n RETURN n, c",
+                "group by",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Syntax, "42001".to_string())
+            );
+            assert!(
+                report.contains(
+                    "GROUP BY is not needed: grouping is implicit, the RETURN or WITH items \
+                     without an aggregate are the grouping keys"
+                ),
+                "{report}"
+            );
+            assert!(
+                report.contains(&format!("{text} ")) && report.contains(" ^^^^^^^^\n  GQLSTATUS"),
+                "the caret must underline {text}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "remove GROUP BY and list the keys as items next to the aggregates, as in \
+                     MATCH (p:person)-[:created]->(s) RETURN p.name, count(s). "
+                ),
+                "{help}"
+            );
+            assert_examples_run(&help);
+        }
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql("MATCH (p:person)-[:created]->(s) RETURN p.name, count(s)")
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    /// ISO GQL `GROUP BY` on RETURN (stage 1c): a key that is no plain item names the fix.
+    #[test]
+    fn gql_group_by_keys_name_the_fix() {
+        let query = "MATCH (p:person)-[:created]->(s) RETURN p.name AS n, p.age AS a, count(s) \
+                     GROUP BY n";
+        let (err, report) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the RETURN item `a` has no aggregate"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "add it to GROUP BY (GROUP BY ..., a), or remove GROUP BY: grouping is implicit, \
+                 the items without an aggregate are the keys. "
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+    }
+
+    #[test]
+    fn gql_with_and_let_scope_errors_explain_the_scope() {
+        let scope = "WITH passes on only its columns: a variable it does not list is out of \
+                     scope after it, so list every variable a later clause reads, as in \
+                     g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
+                     p.name, n\"); a WITH item other than a variable needs a name (AS). LET \
+                     adds variables and keeps all others in scope, each with a new name, as in \
+                     g.gql(\"MATCH (p:person) LET name = upper(p.name) RETURN p.age, name\").";
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a) WITH a.name AS n RETURN a").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains("the variable `a` is not in scope: the WITH before does not carry it"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            format!("add `a` to the WITH items, as in WITH ..., a. {scope}")
+        );
+        // The generic advice about MATCH declarations is not given.
+        assert!(!help.contains("Declare every variable"), "{help}");
+        assert_examples_run(&help);
+
+        let help = gql_help("MATCH (a) WITH a.age + 1 RETURN a");
+        assert_eq!(
+            help,
+            format!("name it with AS, as in WITH a.age + 1 AS value. {scope}")
+        );
+        let help = gql_help("MATCH (a) LET x = 1 LET x = 2 RETURN x");
+        assert_eq!(
+            help,
+            format!("choose another name, as in LET x2 = <value>. {scope}")
+        );
+        let help = gql_help("MATCH (a) LET x = 1, y = x + 1 RETURN y");
+        assert!(help.ends_with(scope), "{help}");
+    }
+
+    /// E14 (a list-comprehension variable reusing a name) has its own advice, with a runnable
+    /// example, not the WITH / LET scope advice.
+    #[test]
+    fn gql_comprehension_variable_errors_explain_new_names() {
+        let advice = "A list comprehension, [x IN <list> WHERE <condition> | <expression>], \
+                      binds its variable x to each item of the list, inside the comprehension \
+                      only; x must be a new name, used nowhere else in the query: not a \
+                      variable or column in scope, not the variable of a comprehension around \
+                      it, and not a name that an earlier clause bound and dropped, as in \
+                      g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, p.age + 1] WHERE a \
+                      > 30 | a * 2] AS l\"). The same holds for the variable of all(), any(), \
+                      none() and single() and for both variables of reduce(), as in \
+                      g.gql(\"MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS \
+                      old, reduce(s = 0, a IN [p.age, 1] | s + a) AS total\").";
+        for (query, name) in [
+            ("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l", "p"),
+            (
+                "MATCH (p:person) WITH p.name AS n RETURN [p IN [1] | p] AS l",
+                "p",
+            ),
+            ("RETURN [x IN [1] | [x IN [2] | x]] AS l", "x"),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string())
+            );
+            let help = err.help().unwrap();
+            assert_eq!(
+                help,
+                format!(
+                    "give the comprehension a variable of its own, as in [{name}2 IN list WHERE \
+                     {name}2 > 0 | {name}2]. {advice}"
+                ),
+                "{query}"
+            );
+            assert!(!help.contains("WITH passes on only"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    #[test]
+    fn gql_grouping_errors_explain_grouping_keys() {
+        let grouping = "A RETURN or WITH with an aggregate groups the rows by its other items \
+                        (the grouping keys): read a variable outside an aggregate only in such a \
+                        key, and after it (as after DISTINCT) only its columns remain, so ORDER \
+                        BY names a column, as in g.gql(\"MATCH (p:person)-[:created]->(s) \
+                        RETURN p.name, count(s) AS n ORDER BY n\"). An aggregate takes no \
+                        aggregate as its argument; aggregate in two steps with WITH, as in \
+                        g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
+                        max(n)\").";
+        let help = gql_help("MATCH (a) RETURN count(*), a.name ORDER BY a.age");
+        assert_eq!(
+            help,
+            format!(
+                "return the sort key too (RETURN ..., a.age) and order by it, or group by it \
+                 too. {grouping}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a)-->(b) RETURN a.name, count(b) + b.age",
+            "MATCH (a) RETURN a.age, max(count(a))",
+            "MATCH (a) WHERE count(a) > 1 RETURN a",
+            "MATCH (a) RETURN a.name ORDER BY count(a)",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(grouping), "{query}: {help}");
+            assert!(!help.contains("Declare every variable"), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_pattern_variable_errors_explain_what_a_variable_names() {
+        let pattern = "In a MATCH clause a node variable names one node (written twice, it joins \
+                       on the same node), an edge variable one edge, a path variable the path \
+                       after its `=`, the variable of a quantified edge the list of its \
+                       edges, and a variable inside a quantified path pattern the list of its \
+                       nodes or edges, one per iteration, as in g.gql(\"MATCH p = \
+                       (a:person)-[e:knows]->(b) RETURN p, e, b.name\") and g.gql(\"MATCH \
+                       (a:person) ((x)-[e:knows]->(y)){1,2} (b) RETURN a.name, y\"); a name \
+                       defined by LET or WITH is a value, not a pattern variable.";
+        let help = gql_help("MATCH (a)-[e]->(b), (c)-[e]->(d) RETURN a");
+        assert_eq!(
+            help,
+            format!(
+                "give the second edge its own variable, or put the second pattern in a MATCH \
+                 clause of its own to join on the same edge `e`. {pattern}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a)-[e]->(e) RETURN a",
+            "MATCH p = (a)-->(b) MATCH p = (c)-->(d) RETURN p",
+            "MATCH (a)-[e]->{1,2}(b) RETURN e.weight",
+            "MATCH (a) WITH a.name AS n MATCH (n) RETURN n",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(pattern), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_duplicate_names_ask_for_a_name_of_its_own() {
+        let names = "Give every column of a RETURN or WITH, every variable of a LET and every \
+                     key of a map a name of its own, as in \
+                     g.gql(\"MATCH (p:person) RETURN p.name AS name, p.age AS age\").";
+        let help = gql_help("MATCH (a) RETURN a.name AS n, a.age AS n");
+        assert_eq!(
+            help,
+            format!(
+                "give one of the columns another name with AS, as in RETURN ... AS n2. {names}"
+            )
+        );
+        assert_examples_run(&help);
+        for query in [
+            "MATCH (a) LET x = 1, x = 2 RETURN x",
+            "MATCH (a) RETURN {k: 1, k: 2}",
+        ] {
+            let help = gql_help(query);
+            assert!(help.ends_with(names), "{query}: {help}");
+        }
+    }
+
+    #[test]
+    fn gql_aggregate_of_the_wrong_kind_names_numeric_aggregates() {
+        let (err, report) = gql_failure(|g| g.gql("MATCH (a) RETURN sum(a.name)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report.contains("sum() takes numbers, not a string"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            "A row of the data gave the marked aggregate a value it cannot add: sum() and avg() \
+             take numbers only (count() and collect_list() take values of any kind). Aggregate \
+             a numeric property, as in g.gql(\"MATCH (p:person) RETURN sum(p.age)\"), and keep \
+             values of another kind out with a comparison to a number, which is NULL for text \
+             and so drops the row, as in g.gql(\"MATCH (p) WHERE p.age >= 0 RETURN \
+             avg(p.age)\"), or inside the aggregate, as in g.gql(\"MATCH (p) RETURN sum(CASE \
+             WHEN p.age >= 0 THEN p.age END)\") (an aggregate skips NULL)."
+        );
+        assert_examples_run(&help);
+        // avg() too; a failing argument keeps the general data advice.
+        let help = gql_help("MATCH (a) RETURN avg(a.lang)");
+        assert!(
+            help.starts_with("A row of the data gave the marked aggregate"),
+            "{help}"
+        );
+        let help = gql_help("MATCH (a:person) RETURN sum(1 / (a.age - 29))");
+        assert!(
+            help.starts_with("A row of the data made the marked expression fail."),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_repeat_limit_of_a_quantifier_names_the_quantifier() {
+        let (err, report) = gql_failure(|g| {
+            g.with("repeat.max_loops", 1)
+                .gql("MATCH (a:person)-[e:knows]->{2,}(b) RETURN b")
+                .to_list()
+        });
+        assert!(
+            report.contains("Caused by: repeat() exceeded the loop limit of 1 iterations"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            "The loop of the quantified edge -[e:knows]->{2,} of the gql() query ran 1 \
+             iterations, the limit of repeat.max_loops. A quantifier without an upper bound \
+             ({m,}, *, + or Cypher [*]) repeats the edge until every path has used all the \
+             edges it can reach (trail), which takes more iterations than the limit on a large \
+             or densely connected graph; the result is never cut short. Give the quantifier an \
+             upper bound, as in -[e:knows]->{2,10}, for example \
+             g.gql(\"MATCH (a:person)-[:knows]->{1,3}(b) RETURN b.name\"). Or raise the limit \
+             for the query, g.with(\"repeat.max_loops\", 2).gql(..), for example \
+             g.with(\"repeat.max_loops\", 2).gql(\"MATCH (a)-[:knows]->{1,}(b) RETURN \
+             b.name\"). It is an administrative option: a script whose host restricts it needs \
+             Update on that Option to set it."
+        );
+        // The internal loop body is not offered as advice.
+        assert!(!help.contains("gql:trail"), "{help}");
+        assert!(!help.contains("glob_path"), "{help}");
+        assert_examples_run(&help);
+        // Other forms: `*` (lower bound 0), either direction, `<-`, Cypher `[*]`, a filter.
+        for (query, edge) in [
+            ("MATCH (a)-[:knows]->*(b) RETURN b", "-[:knows]->{0,}"),
+            ("MATCH (a)-[e]-+(b) RETURN b", "-[e]-{1,}"),
+            (
+                "MATCH (a)<-[:knows|created]-{1,}(b) RETURN b",
+                "<-[:knows|created]-{1,}",
+            ),
+            ("MATCH (a)-[e:knows*]->(b) RETURN b", "-[e:knows]->{1,}"),
+            (
+                "MATCH (a)-[e WHERE e.weight > 0.1]->{1,}(b) RETURN b",
+                "-[e WHERE ..]->{1,}",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 1).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!("The loop of the quantified edge {edge} of")),
+                "{query}: {help}"
+            );
+        }
+        // Under camel spelling the advice reads the same.
+        let (err, _) = gql_failure(|g| {
+            g.with("render.spelling", "camel")
+                .with("repeat.max_loops", 1)
+                .gql("MATCH (a:person)-[e:knows]->{2,}(b) RETURN b")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with("The loop of the quantified edge -[e:knows]->{2,} of"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_traverser_limit_gives_gql_advice() {
+        let tail = "Narrow the pattern with labels and conditions, for example \
+                    g.gql(\"MATCH (p:person)-[:knows]->(f) WHERE f.age > 30 RETURN f.name\"), \
+                    or raise the limit for the query, g.with(\"traversal.max_traversers\", \
+                    40).gql(..), for example g.with(\"traversal.max_traversers\", \
+                    40).gql(\"MATCH (a)-->(b) RETURN count(*)\"). A host can lock this option \
+                    with ExecutionPolicy::with_locked(\"traversal.max_traversers\"); \
+                    9223372036854775807 is as good as unlimited. Setting it is an \
+                    administrative option: a script whose host restricts it needs Update on \
+                    that Option.";
+        let (err, report) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 20)
+                .gql("MATCH (a)-[e]-{1,}(b) RETURN count(*)")
+                .to_list()
+        });
+        assert!(
+            report.contains("Resource limit 'traversal.max_traversers' exceeded (limit 20"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert_eq!(
+            help,
+            format!(
+                "The gql() query kept more traversers (rows in the making) alive between two \
+                 steps than 'traversal.max_traversers' allows (20). Each path a quantified edge \
+                 (-[e]-{{1,}}) matches is a traverser of its own (trail keeps them apart, so \
+                 they do not merge), and their number grows with every iteration: give it a \
+                 lower upper bound, as in -[e]-{{1,5}}. {tail}"
+            )
+        );
+        assert!(!help.contains("v().out().out()"), "{help}");
+        assert_examples_run(&help);
+        // A query without a quantifier gets the GQL advice without the quantifier sentence.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 3)
+                .gql("MATCH (a)-->(b) RETURN b")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "The gql() query kept more traversers (rows in the making) alive between two \
+                 steps than 'traversal.max_traversers' allows (3). Narrow the pattern"
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains("g.with(\"traversal.max_traversers\", 6).gql(..)"),
+            "{help}"
+        );
+    }
+
+    /// D21 reverses C12 (stage 1c): `nodes(p)` / `relationships(p)` no longer carry the
+    /// "over a path" refusal; their own diagnostics come with their implementation.
+    #[test]
+    fn gql_nodes_and_relationships_are_no_longer_refused() {
+        for function in ["nodes", "relationships"] {
+            let query = format!("MATCH p = (a)-->(b) RETURN {function}(p)");
+            let graph = GraphSource::tinkerpop_modern();
+            if let Err(error) = graph.read().traversal().gql(&query).to_list() {
+                let text = error.to_string();
+                assert!(!text.contains("over a path"), "{query}: {text}");
+                assert!(!text.contains("gql:error"), "{query}: {text}");
+            }
+        }
+    }
+
+    /// Stage 2d.T5c: `COUNT { }` and `COLLECT { }` run (they were refused "not yet" with the
+    /// `OPTIONAL MATCH` + `count()` / `collect_list()` forms as advice); each gives the rows of
+    /// that form.
+    #[test]
+    fn gql_count_and_collect_subqueries_run_like_their_optional_match_forms() {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (subquery, form) in [
+            (
+                "MATCH (p:person) RETURN p.name AS n, COUNT { (p)-[:created]->() } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
+                 count(s) AS c",
+            ),
+            (
+                "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-[:created]->(s) \
+                 RETURN s.name } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
+                 collect_list(s.name) AS c",
+            ),
+        ] {
+            let mut left: Vec<String> = locked
+                .traversal()
+                .gql(subquery)
+                .to_list()
+                .unwrap()
+                .iter()
+                .map(|row| format!("{row:?}"))
+                .collect();
+            let mut right: Vec<String> = locked
+                .traversal()
+                .gql(form)
+                .to_list()
+                .unwrap()
+                .iter()
+                .map(|row| format!("{row:?}"))
+                .collect();
+            left.sort();
+            right.sort();
+            assert_eq!(left.len(), 4, "{subquery}");
+            assert_eq!(left, right, "{subquery}");
+        }
+    }
+
+    // ----- stage 1c: help sweep (rule 6) -----
+
+    /// One test per new GQLSTATUS of stage 1c: a data exception (raised by the row it failed
+    /// on), the caret under the offending argument, and a help that leads with the function
+    /// that fixes it, keeps the general data advice, and whose examples run.
+    #[test]
+    fn gql_1c_data_statuses_name_the_fix() {
+        for (expr, status, caret, advice) in [
+            (
+                "CAST(p.name AS INTEGER)",
+                "22018",
+                "p.name",
+                "CAST is strict: text that is not a value of the target type fails the query. \
+                 The Cypher conversions are lenient: toInteger(x), toFloat(x) and toBoolean(x) \
+                 give NULL for such text, and toIntegerOrNull(x), toFloatOrNull(x) and \
+                 toBooleanOrNull(x) give NULL for a value of any other kind too",
+            ),
+            (
+                "substring(p.name, -1)",
+                "22011",
+                "-1",
+                "substring(s, start, length), left(s, n) and right(s, n) take non-negative \
+                 integers",
+            ),
+            (
+                "left(p.name, p.age - 30)",
+                "22011",
+                "p.age - 30",
+                "substring(s, start, length), left(s, n) and right(s, n)",
+            ),
+            (
+                "TRIM('ab' FROM p.name)",
+                "22027",
+                "'ab'",
+                "TRIM(c FROM s) removes one character c; to remove any of several characters \
+                 use btrim(s, chars), ltrim(s, chars) or rtrim(s, chars)",
+            ),
+            (
+                "ln(p.age - 29)",
+                "2201E",
+                "p.age - 29",
+                "ln(x), log(x) and log10(x) take a positive number, and log(base, x) also a \
+                 positive base other than 1",
+            ),
+            (
+                "log(1, p.age)",
+                "2201E",
+                "1",
+                "ln(x), log(x) and log10(x) take a positive number",
+            ),
+            (
+                "sqrt(p.age - 30)",
+                "2201F",
+                "p.age - 30",
+                "sqrt(x) takes a number >= 0, and power(x, y) cannot raise 0 to a negative power",
+            ),
+            (
+                "power(p.age - 29, -1)",
+                "2201F",
+                "power(p.age - 29, -1)",
+                "sqrt(x) takes a number >= 0",
+            ),
+            (
+                "range(1, p.age, 0)",
+                "22023",
+                "0",
+                "An argument is outside the values the function accepts: range() takes a step \
+                 other than 0, round() a precision >= 0 and one of the modes UP, DOWN, CEILING, \
+                 FLOOR, HALF_UP, HALF_DOWN or HALF_EVEN (upper case), replace() a limit >= 0 \
+                 and the list trim(list, n) an n >= 0",
+            ),
+            (
+                "round(p.age, 1, 'half_up')",
+                "22023",
+                "'half_up'",
+                "An argument is outside",
+            ),
+            (
+                "replace(p.name, 'a', 'b', -1)",
+                "22023",
+                "-1",
+                "An argument is outside",
+            ),
+            ("trim([1, 2], -1)", "22023", "-1", "An argument is outside"),
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}: {report}"
+            );
+            // The caret sits under the offending argument (or the call).
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.starts_with("  query:"))
+                .take(2)
+                .collect::<Vec<_>>();
+            let [source, carets] = caret_line[..] else {
+                panic!("no excerpt in {report}");
+            };
+            // Columns count characters (the excerpt may start with `…`).
+            let start = carets.find('^').expect("a caret");
+            let marked: String = source
+                .chars()
+                .skip(start)
+                .take(caret.chars().count())
+                .collect();
+            assert_eq!(marked, caret, "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+            // The general data advice stays.
+            assert!(
+                help.ends_with(
+                    "and compare values of one kind only (no implicit conversion between text \
+                     and numbers)."
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+    }
+
+    /// `+` / `||` of text and a number or a boolean names the conversions to text (rule 6:
+    /// stage 1c functions fix it); other kinds keep the general advice.
+    #[test]
+    fn gql_text_and_number_name_to_string_and_cast() {
+        for expr in [
+            "p.name + p.age",
+            "p.age + p.name",
+            "p.name || p.age",
+            "p.name || true",
+            "1.5 || p.name",
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string()),
+                "{report}"
+            );
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "Convert the number or boolean to text first, with toString(x) or CAST(x AS \
+                     STRING), and join text with ||, as in g.gql(\"MATCH (p:person) RETURN \
+                     p.name || ' is ' || toString(p.age) AS s\"); or compute with numbers only, \
+                     converting text with toInteger(x) or toFloat(x). A row of the data made"
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+        // A list and a number: no text involved, the general advice only.
+        for expr in ["[1] + p.age", "[1] || p.name", "p.age || 1"] {
+            let help = gql_help(&format!("MATCH (p:person) RETURN {expr} AS x"));
+            assert!(
+                help.starts_with("A row of the data made the marked expression fail."),
+                "{expr}: {help}"
+            );
+        }
+        // The message itself is unchanged.
+        let (_, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person {name: 'marko'}) RETURN p.name + 1")
+                .to_list()
+        });
+        assert!(
+            report.contains(
+                "+ joins two strings or adds two numbers, not a string and a number; a number is \
+                 never turned into text implicitly"
+            ),
+            "{report}"
+        );
+    }
+
+    /// A value a GQL function or `collect_list()` would build over
+    /// `traversal.max_materialized_bytes` is the resource-limit error (not a GQL root cause:
+    /// the limit and its option are the engine's), with advice on the GQL query instead of
+    /// the Gremlin materializing steps; the GQL function names survive camelCase.
+    #[test]
+    fn gql_materialization_limit_gives_gql_advice() {
+        let tail = |raised: u64| {
+            format!(
+                "or raise the limit for the query, \
+                 g.with(\"traversal.max_materialized_bytes\", {raised}).gql(..), for example \
+                 g.with(\"traversal.max_materialized_bytes\", {raised}).gql(\"MATCH (p:person) \
+                 RETURN collect_list(p.name) AS names\"). A host can lock this option with \
+                 ExecutionPolicy::with_locked(\"traversal.max_materialized_bytes\"). Setting it \
+                 is an administrative option: a script whose host restricts it needs Update on \
+                 that Option."
+            )
+        };
+        for query in [
+            "MATCH (p:person {name: 'marko'}) RETURN range(1, 100000) AS r",
+            "MATCH (p:person {name: 'marko'}) RETURN size(split(replace(p.name, '', p.name || \
+             p.name, 9223372036854775807), '')) AS n",
+            "MATCH (p), (q) RETURN collect_list(p.name) AS r",
+            "MATCH (p) WHERE size(range(1, 100000)) > 0 RETURN p",
+            "MATCH (p) WITH p ORDER BY toString(range(1, 100000)) RETURN p",
+            // gql:aggregate: a grouping key, an aggregate's argument, an item over aggregates.
+            "MATCH (p) RETURN size(range(1, 100000)) AS k, count(*) AS c",
+            "MATCH (p) RETURN count(range(1, 100000)) AS c",
+            "MATCH (p) RETURN size(range(1, count(*) * 100000)) AS c",
+        ] {
+            let (err, report) = gql_failure(|g| {
+                g.with("traversal.max_materialized_bytes", 1_000)
+                    .gql(query)
+                    .to_list()
+            });
+            match err.root_cause() {
+                TraverserError::ResourceLimitExceeded { limit, max, .. } => {
+                    assert_eq!(limit, "traversal.max_materialized_bytes", "{query}");
+                    assert_eq!(*max, Some(1_000), "{query}");
+                }
+                other => panic!("{query}: expected the limit error, got {other}"),
+            }
+            assert!(report.contains("Step #"), "{report}");
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "The gql() query built a value larger than \
+                     'traversal.max_materialized_bytes' allows (1000 bytes); this one needed at \
+                     least "
+                ),
+                "{query}: {help}"
+            );
+            assert!(
+                help.contains(
+                    "A function whose result can be larger than its arguments (range(), \
+                     split(), replace(), || and toString() of a list or map) and the list of \
+                     collect_list() are checked before they are built"
+                ),
+                "{help}"
+            );
+            assert!(help.ends_with(&tail(2_000)), "{query}: {help}");
+            assert!(!help.contains("fold()"), "{help}");
+            assert_examples_run(&help);
+        }
+        // Under camel spelling: the GQL function names as written, the Gremlin API respelled.
+        let (err, _) = gql_failure(|g| {
+            g.with("render.spelling", "camel")
+                .with("traversal.max_materialized_bytes", 1_000)
+                .gql("MATCH (p) RETURN collect_list(p.name) AS n, range(1, 1000) AS r")
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        assert!(
+            help.contains("the list of collect_list() are checked"),
+            "{help}"
+        );
+        assert!(help.contains("ExecutionPolicy::withLocked("), "{help}");
+        assert!(!help.contains("collectList"), "{help}");
+        // A Gremlin step after gql() that materializes keeps the Gremlin advice.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 100_000)
+                .gql("MATCH (p:person {name: 'marko'}) RETURN p.name AS n")
+                .select("n")
+                .repeat(__::path())
+                .times(60)
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with("A step had to materialize a value or buffer larger"),
+            "{help}"
+        );
+    }
+
+    /// The targeted not-yet / refused functions of stage 1c lead their help with the
+    /// alternative (an LLM reads the Help line and retries), and a misspelt conversion is
+    /// corrected.
+    #[test]
+    fn gql_1c_not_yet_functions_name_the_alternative() {
+        for (expr, kind, message, advice) in [
+            (
+                "rand()",
+                GqlErrorKind::Refused,
+                "rand() is not supported: a non-deterministic function",
+                "gql() functions are deterministic; sample rows with Gremlin after gql(), for \
+                 example g.gql(\"MATCH (n) RETURN n\").sample(1), or coin(0.5).",
+            ),
+            (
+                "sin(p.age)",
+                GqlErrorKind::NotYet,
+                "sin() (a trigonometric function) is not yet supported",
+                "Gremlin math() after gql(), for example g.gql(\"MATCH (n:person) RETURN n.age \
+                 AS a\").select(\"a\").math(\"sin(_)\").",
+            ),
+            (
+                "date('2020-01-01')",
+                GqlErrorKind::NotYet,
+                "date() (a date or time function) is not yet supported",
+                "dates and times are planned for version 0.2.0",
+            ),
+            (
+                "toIntegerList(p.tags)",
+                GqlErrorKind::NotYet,
+                "toIntegerList() (a list conversion function) is not yet supported",
+                "convert the items one by one in Gremlin after gql()",
+            ),
+            (
+                "normalize(p.name)",
+                GqlErrorKind::NotYet,
+                "normalize() (Unicode normalization) is not yet supported",
+                "store normalized text, or compare with lower() / upper().",
+            ),
+            (
+                "elements(p)",
+                GqlErrorKind::NotYet,
+                "elements() (a GQL path function pending verification) is not yet supported",
+                "nodes(p) and relationships(p) return the vertices and the edges of a path.",
+            ),
+            (
+                "percentileCont(p.age, 0.5)",
+                GqlErrorKind::NotYet,
+                "percentileCont() (a statistical aggregate function) is not yet supported",
+                "collect the values with collect_list(x) and compute it after gql().",
+            ),
+            (
+                "p.age ^ 2",
+                GqlErrorKind::NotYet,
+                "the exponentiation operator `^` is not yet supported",
+                "use power(x, y), as in power(2, 10).",
+            ),
+            (
+                "exists(p.age)",
+                GqlErrorKind::Refused,
+                "exists(value), the Cypher 4 property test, is not supported",
+                "test a property with n.p IS NOT NULL",
+            ),
+            (
+                "SUBSTRING(p.name FROM 1 FOR 2)",
+                GqlErrorKind::Syntax,
+                "SUBSTRING(s FROM a FOR b) is SQL, not GQL",
+                "use substring(s, start, length) with a 0-based start, as in \
+                 substring('graph', 1, 3) = 'rap', or left(s, n) / right(s, n).",
+            ),
+        ] {
+            let query = format!("MATCH (p:person) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            let (actual, _) = kind_and_status(&err);
+            assert_eq!(actual, kind, "{query}: {report}");
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+        }
+        // The forms the advice names run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for query in [
+            "MATCH (p:person) RETURN power(2, 10) AS x",
+            "MATCH (p:person) WHERE p.age IS NOT NULL RETURN p.name",
+            "MATCH (p:person) RETURN substring('graph', 1, 3) = 'rap' AS x, left(p.name, 2) AS l",
+            "MATCH x = (a)-->(b) RETURN nodes(x), relationships(x)",
+        ] {
+            assert!(locked.traversal().gql(query).to_list().is_ok(), "{query}");
+        }
+        // A misspelt conversion: "did you mean" names the Cypher spelling.
+        let (err, report) = gql_failure(|g| g.gql("MATCH (p) RETURN toInt(p.age)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Syntax, "42001".to_string())
+        );
+        assert!(report.contains("  did you mean: toInteger()"), "{report}");
+        let help = err.help().expect("help");
+        assert!(help.starts_with("Did you mean toInteger()? "), "{help}");
+    }
+
+    /// One camelCase rendering of the stage 1c advice: the GQL function names (also those that
+    /// are Gremlin steps, `replace`, `split`, `range`, and the Cypher ones such as
+    /// `toIntegerOrNull`) stay as written, the Gremlin steps of an alternative are respelled.
+    #[test]
+    fn gql_1c_advice_under_camel_case() {
+        let camel = |query: &'static str| {
+            let (err, _) =
+                gql_failure(move |g| g.with("render.spelling", "camel").gql(query).to_list());
+            err.help().expect("help")
+        };
+        let snake = |query: &'static str| gql_help(query);
+        for query in [
+            "MATCH (p:person {name: 'marko'}) RETURN CAST(p.name AS INTEGER)",
+            "MATCH (p:person {name: 'marko'}) RETURN TRIM('ab' FROM p.name)",
+            "MATCH (p:person {name: 'marko'}) RETURN range(1, 2, 0)",
+            "MATCH (p:person {name: 'marko'}) RETURN p.name + 1",
+        ] {
+            assert_eq!(camel(query), snake(query), "{query}");
+        }
+        let help = camel("MATCH (p:person {name: 'marko'}) RETURN CAST(p.name AS INTEGER)");
+        assert!(help.contains("toIntegerOrNull(x)"), "{help}");
+        assert!(help.contains("toInteger(p.name)"), "{help}");
+        // An alternative with Gremlin steps: respelled outside the GQL text.
+        let help = camel("MATCH (p) RETURN toIntegerList(p.tags)");
+        assert!(
+            help.contains(".select(\"t\").unfold().asNumber()"),
+            "{help}"
+        );
+        let help = camel("MATCH (p) RETURN percentileCont(p.age, 0.5)");
+        assert!(help.contains("collect_list(x)"), "{help}");
+    }
+
+    /// Stage 2a: the errors of `FOR` / `UNWIND` explain what `FOR` defines (rule 6), the syntax
+    /// advice and the expected tokens name `FOR` / `UNWIND` and the clauses a query may start
+    /// with, and every `g.gql(..)` example of that advice runs.
+    #[test]
+    fn gql_for_errors_explain_what_for_defines() {
+        let advice = "FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of the \
+                      list, which it reads on the row before the FOR; the item x and, with WITH \
+                      ORDINALITY i (from 1) or WITH OFFSET i (from 0), its position i are two \
+                      new variables with names of their own; a node item continues a pattern by \
+                      its name, as in FOR n IN nodes(p) MATCH (n)-->(m), and any other item is \
+                      compared in a property map or WHERE, as in g.gql(\"FOR n IN ['marko', \
+                      'josh'] WITH ORDINALITY i MATCH (p:person {name: n}) RETURN i, p.age\").";
+        for (query, message, alternative) in [
+            (
+                "MATCH (a) FOR a IN [1] RETURN a",
+                "the variable `a` is already defined; FOR defines a new variable",
+                "choose another name, as in FOR a2 IN <list>",
+            ),
+            (
+                "MATCH (a) UNWIND [1] AS a RETURN a",
+                "the variable `a` is already defined; UNWIND defines a new variable",
+                "choose another name, as in UNWIND <list> AS a2",
+            ),
+            (
+                "LET i = 1 FOR x IN [1] WITH ORDINALITY i RETURN x",
+                "the variable `i` is already defined; FOR defines a new variable",
+                "choose another name, as in FOR i2 IN <list>",
+            ),
+            (
+                "FOR x IN [1] WITH ORDINALITY x RETURN x",
+                "`x` names both the item and its position; WITH ORDINALITY defines a second \
+                 variable",
+                "give the position its own name, as in FOR x IN ... WITH ORDINALITY x_index",
+            ),
+            (
+                "FOR x IN [1] WITH OFFSET i MATCH (i)-->(b) RETURN b",
+                "the variable `i` is the position of a FOR item (a number), not a node",
+                "give the pattern element its own name, as in (i2), and compare the position \
+                 in WHERE",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert_eq!(help, format!("{alternative}. {advice}"), "{query}");
+        }
+        let help = gql_help("MATCH (a) FOR a IN [1] RETURN a");
+        assert_examples_run(&help);
+        // An aggregate in the list keeps the grouping advice: aggregate in a WITH first.
+        let help = gql_help("MATCH (p)-->(f) FOR x IN collect_list(f) RETURN x");
+        assert!(
+            help.starts_with(
+                "aggregate in a WITH first and iterate over its column, as in MATCH (p)-->(f) \
+                 WITH p, collect_list(f) AS fs FOR x IN fs RETURN p, x. A RETURN or WITH with \
+                 an aggregate"
+            ),
+            "{help}"
+        );
+        // An undefined variable: FOR defines variables too.
+        let help = gql_help("FOR x IN [1] RETURN y");
+        assert!(
+            help.contains("(LET, WITH and FOR define variables too)"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn gql_syntax_advice_names_for_and_the_clauses_a_query_may_start_with() {
+        let all = "MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN";
+        for query in ["FOO 1", "", "(a) RETURN a"] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            assert!(
+                report.contains(&format!("  expected:     {all}"))
+                    || report.contains(&format!("  expected:  {all}")),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.contains(&format!("Expected {all} at the marked position.")),
+                "{query}: {help}"
+            );
+            assert!(
+                help.ends_with(
+                    "FOR x IN <list> (Cypher UNWIND <list> AS x) gives one row per item of a \
+                     list, and a query may also start with FOR, LET, WITH, FILTER or RETURN, as \
+                     in g.gql(\"FOR n IN ['marko', 'josh'] MATCH (p:person {name: n}) RETURN \
+                     n, p.age\")."
+                ),
+                "{query}: {help}"
+            );
+            assert_examples_run(&help);
+        }
+        // A misspelt FOR / UNWIND gets its suggestion from the same list.
+        let report = gql_report("UNWIDN [1] AS x RETURN x");
+        assert!(report.contains("  did you mean: UNWIND"), "{report}");
+        let report = gql_report("MATCH (a) UNWIDN [1] AS x RETURN x");
+        assert!(report.contains("  did you mean: UNWIND"), "{report}");
+        // FOR / UNWIND after RETURN: RETURN ends the query.
+        let report = gql_report("MATCH (a) RETURN a UNWIND [1] AS x");
+        assert!(report.contains("RETURN ends the query"), "{report}");
+    }
+
+    /// Every clause a query may start with runs, a leading `FILTER` included (the 2a "not yet"
+    /// texts of a query without `MATCH` are gone).
+    #[test]
+    fn gql_queries_without_match_and_for_are_no_longer_refused() {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for query in [
+            "RETURN 1 AS x",
+            "FOR x IN [1, 2] RETURN x",
+            "UNWIND [1, 2] AS x RETURN x",
+            "LET x = 1 RETURN x",
+            "WITH 1 AS x RETURN x",
+            "FILTER true RETURN 1 AS x",
+            "FILTER WHERE 1 = 1 MATCH (p:person) RETURN p.name",
+            "MATCH (p:person) FOR x IN [p.age] RETURN x",
+        ] {
+            let rows = locked.traversal().gql(query).to_list();
+            assert!(rows.is_ok(), "{query}: {rows:?}");
+        }
+        let count = |query: &str| {
+            locked
+                .traversal()
+                .gql(query)
+                .to_list()
+                .map(|rows| rows.len())
+                .unwrap_or(usize::MAX)
+        };
+        assert_eq!(count("FILTER 1 > 2 RETURN 1 AS x"), 0);
+        assert_eq!(count("FILTER 1 < 2 MATCH (p:person) RETURN p"), 4);
+        assert_eq!(count("FILTER 1 > 2 MATCH (p:person) RETURN p"), 0);
+    }
+
+    /// The not-yet list constructs name FOR in gql() beside the Gremlin form (rule 6), and the
+    /// FOR examples run.
+    #[test]
+    fn gql_not_yet_list_constructs_name_for() {
+        let query = "MATCH (p) RETURN toIntegerList(p.tags)";
+        let keeps = "convert the items one by one in Gremlin after gql()";
+        let names = "or with FOR in gql(), as in g.gql(\"FOR t IN ['1', '2'] RETURN \
+                     collect_list(toInteger(t)) AS l\")";
+        let (err, _) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(kind_and_status(&err).0, GqlErrorKind::NotYet, "{query}");
+        let help = err.help().unwrap();
+        assert!(help.starts_with(keeps), "{query}: {help}");
+        assert!(help.contains(names), "{query}: {help}");
+        assert_examples_run(&help);
+    }
+
+    // ----- stage 2b: help sweep (rule 6) -----
+
+    /// The general advice of the subquery errors (`GqlHelpTopic::Subquery`).
+    const SUBQUERY_ADVICE: &str = "A subquery, EXISTS { MATCH <pattern> [WHERE <condition>] }, \
+         EXISTS { <pattern> } or a Cypher pattern predicate such as (p)-[:created]->(), is TRUE \
+         when its body has a match and FALSE otherwise, never NULL; its body reads the variables \
+         bound before it, and the variables it binds itself stay inside it. A pattern predicate \
+         binds no new variable: name new elements in an EXISTS { MATCH .. }, as in \
+         g.gql(\"MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = \
+         'java' } RETURN p.name\"), and bind an element in the MATCH clause of the query to read \
+         it after the subquery, as in g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, \
+         s.name\").";
+
+    /// The scope errors of a subquery (a pattern predicate naming a new variable, a local read
+    /// after the subquery, a body variable bound by a later clause of the body) explain what a
+    /// subquery imports and keeps, and their examples run.
+    #[test]
+    fn gql_subquery_scope_errors_explain_imports_and_locals() {
+        for (query, text, message, alternative) in [
+            (
+                "MATCH (p:person) WHERE (p)-[:created]->(s) RETURN p.name",
+                "s",
+                "the pattern predicate introduces the new variable `s`; a pattern used as a \
+                 condition may only name variables bound before it",
+                "write it as EXISTS { MATCH (p)-[:created]->(s) }, whose MATCH may bind new \
+                 variables, or leave `s` out of the pattern",
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(x) } RETURN x",
+                "x",
+                "the variable `x` is not in scope: it is bound inside a subquery (EXISTS or a \
+                 pattern predicate), whose variables are visible only inside it",
+                "bind `x` in the MATCH clause of the query to use it here, or test it inside the \
+                 subquery",
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(a) WHERE b.age > 1 MATCH \
+                 (a)-->(b) } RETURN p",
+                "b",
+                "the variable `b` is not defined here: it is bound by a later MATCH clause of \
+                 the subquery",
+                "move the condition to the WHERE of that later MATCH clause inside the subquery",
+            ),
+            (
+                // Nested: the later clause of the enclosing body.
+                "MATCH (p) WHERE EXISTS { MATCH (p)-->(a) WHERE EXISTS { (a)-->(c) WHERE c = \
+                 b } MATCH (a)-->(b) } RETURN p",
+                "b",
+                "it is bound by a later MATCH clause of the subquery",
+                "move the condition to the WHERE of that later MATCH clause inside the subquery",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            assert!(report.contains(&format!("`{text}`")), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert_eq!(help, format!("{alternative}. {SUBQUERY_ADVICE}"), "{query}");
+            assert_examples_run(&help);
+        }
+        // The fixes the alternatives name run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, rows) in [
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN p.name",
+                3,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(a) MATCH (a)-->(b) WHERE b.age > \
+                 1 } RETURN p",
+                0,
+            ),
+            ("MATCH (p:person)-->(x) RETURN x", 6),
+        ] {
+            assert_eq!(
+                locked.traversal().gql(query).to_list().unwrap().len(),
+                rows,
+                "{query}"
+            );
+        }
+        // An undefined name in a body without a later clause keeps the plain message.
+        let report =
+            gql_report("MATCH (p) WHERE EXISTS { MATCH (p)-->(a) WHERE zz.x = 1 } RETURN p");
+        assert!(
+            report.contains("the variable `zz` is not defined"),
+            "{report}"
+        );
+        assert!(!report.contains("later MATCH"), "{report}");
+    }
+
+    /// Both subquery limits (subqueries written, bodies run once LET values are substituted)
+    /// are 54001 with the advice naming both bounds and a runnable EXISTS that holds several
+    /// MATCH clauses.
+    #[test]
+    fn gql_subquery_limits_name_both_bounds() {
+        let advice = "The query is larger than gql() accepts: one query holds at most 64 \
+             subqueries (EXISTS, pattern predicates, pattern comprehensions, COUNT { } and \
+             COLLECT { }, nested ones included) and runs at most 1024 subquery bodies, where a \
+             LET or WITH variable holding a subquery counts once for every place that reads it; \
+             a CALL { } body counts toward neither (CALL bodies nest at most 16 levels). One \
+             EXISTS may hold several MATCH clauses and patterns, as in g.gql(\"MATCH (p:person) \
+             WHERE EXISTS { MATCH (p)-[:knows]->(f) MATCH (f)-[:created]->(s) } RETURN \
+             p.name\"), and one CALL may compute what several COUNT { } and COLLECT { } over the \
+             same pattern do, as in g.gql(\"MATCH (p:person) CALL (p) { OPTIONAL MATCH \
+             (p)-[:created]->(s) RETURN count(s) AS n, collect_list(s.name) AS names } RETURN \
+             p.name, n, names\").";
+        let many = vec!["(p)-->()"; 65].join(" OR ");
+        let written = format!("MATCH (p) WHERE {many} RETURN p");
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = EXISTS {{ (p)-->() }} LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        for (query, message) in [
+            (
+                written.as_str(),
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates)",
+            ),
+            (
+                substituted.as_str(),
+                "the query runs more than 1024 subquery bodies once its LET variables are \
+                 substituted",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Limit, "54001".to_string())
+            );
+            assert!(report.contains(message), "{report}");
+            let help = err.help().unwrap();
+            assert!(help.ends_with(advice), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// Stage 2d.T5c: `COUNT { } > 0` runs (it was refused "not yet" with EXISTS as advice) and
+    /// keeps the rows of `EXISTS`.
+    #[test]
+    fn gql_count_subquery_above_zero_keeps_the_exists_rows() {
+        let graph = GraphSource::tinkerpop_modern();
+        let run = |query: &str| {
+            graph
+                .read()
+                .traversal()
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"))
+        };
+        let exists = run("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name");
+        assert_eq!(exists.len(), 3);
+        assert_eq!(
+            run("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 0 RETURN p.name"),
+            exists
+        );
+    }
+
+    /// A loop limit or a traverser limit reached by a quantified edge inside a subquery names
+    /// the quantifier and says it is inside EXISTS, on the fast path (`filter()` / `not()`) and
+    /// in a hosted child (`gql:project`, `gql:filter`, `gql:order`); a quantifier outside a
+    /// subquery, also in an OPTIONAL MATCH child, keeps the plain text.
+    #[test]
+    fn gql_limits_inside_exists_name_the_quantifier() {
+        let body = "EXISTS { MATCH (p)-[]-{1,}(q) WHERE q.name = 'zzz' }";
+        let inside = [
+            format!("MATCH (p:person) WHERE {body} RETURN p.name"),
+            format!("MATCH (p:person) WHERE NOT {body} RETURN p.name"),
+            format!("MATCH (p:person) WHERE p.age > 100 OR {body} RETURN p.name"),
+            format!("MATCH (p:person) RETURN p.name, {body} AS e"),
+            format!("MATCH (p:person) RETURN p.name AS n ORDER BY {body}"),
+            format!(
+                "MATCH (p:person) WHERE EXISTS {{ MATCH (p)-->(x) WHERE {} }} RETURN p",
+                body.replace("(p)", "(x)")
+            ),
+        ];
+        let outside = [
+            "MATCH (p:person)-[]-{1,}(q) RETURN p.name".to_string(),
+            "MATCH (p:person) OPTIONAL MATCH (p)-[]-{1,}(q) WHERE q.name = 'zzz' RETURN p.name, q"
+                .to_string(),
+        ];
+        let loops = "The loop of the quantified edge -[]-{1,} inside an EXISTS subquery (or \
+                     pattern predicate) of the gql() query ran 2 iterations, the limit of \
+                     repeat.max_loops.";
+        let early = "A subquery stops at its first match, so its loop runs this long on a row \
+                     that has no match, or only a late one. Give the quantifier an upper bound, \
+                     as in -[]-{1,5}, for example";
+        let traversers = "Each path a quantified edge (-[]-{1,}), inside an EXISTS subquery (or \
+                          pattern predicate), matches is a traverser of its own";
+        for query in &inside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.starts_with(loops), "{query}: {help}");
+            assert!(help.contains(early), "{query}: {help}");
+            assert_examples_run(&help);
+            let (err, _) =
+                gql_failure(|g| g.with("traversal.max_traversers", 5).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.contains(traversers), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        for query in &outside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "The loop of the quantified edge -[]-{1,} of the gql() query ran 2 \
+                     iterations"
+                ),
+                "{query}: {help}"
+            );
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+        }
+    }
+
+    /// EXISTS and pattern predicates run in every position: no help recommends the Gremlin
+    /// `where()` instead of them any more.
+    #[test]
+    fn gql_exists_is_no_longer_refused() {
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, rows) in [
+            (
+                "MATCH (p:person) WHERE NOT (p)-[:created]->() RETURN p.name",
+                1,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } OR p.age > 30 RETURN p",
+                3,
+            ),
+            ("MATCH (p:person) RETURN p.name, (p)-[:knows]->() AS k", 4),
+            (
+                "MATCH (p:person) RETURN p.name ORDER BY EXISTS ((p)-->()) DESC",
+                4,
+            ),
+            ("FOR b IN [EXISTS { MATCH (s:software) }] RETURN b", 1),
+            (
+                "MATCH (p:person) RETURN count(CASE WHEN (p)-->() THEN 1 END) AS c",
+                1,
+            ),
+        ] {
+            assert_eq!(
+                locked.traversal().gql(query).to_list().unwrap().len(),
+                rows,
+                "{query}"
+            );
+        }
+    }
+
+    // ----- stage 2c: help sweep (rule 6) -----
+
+    // ----- stage 2d.T5d: list predicates and reduce (D23) -----
+
+    /// A variable of `all()` / `any()` / `none()` / `single()` / `reduce()` that reuses a name
+    /// is E14 like a comprehension variable: the message names the form, the advice gives it a
+    /// variable of its own and its examples run.
+    #[test]
+    fn gql_list_function_variables_must_be_new_names() {
+        for (query, message, alternative) in [
+            (
+                "MATCH (p:person) RETURN all(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of all() shadows the variable `p` in scope; it must be a new \
+                 name",
+                "give all() a variable of its own, as in all(p2 IN list WHERE p2 > 0).",
+            ),
+            (
+                "MATCH (p:person) RETURN single(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of single() shadows the variable `p` in scope",
+                "give single() a variable of its own, as in single(p2 IN list WHERE p2 > 0).",
+            ),
+            (
+                "MATCH (p:person) RETURN reduce(p = 0, x IN [1] | x) AS a",
+                "the accumulator `p` of reduce() shadows the variable `p` in scope",
+                "give reduce() an accumulator of its own, as in reduce(p2 = 0, item IN list | \
+                 p2 + item).",
+            ),
+            (
+                "RETURN reduce(s = 0, s IN [1] | s) AS a",
+                "the variable `s` of reduce() shadows the variable `s` in scope",
+                "give reduce() a variable of its own, as in reduce(total = 0, s2 IN list | \
+                 total + s2).",
+            ),
+            (
+                "MATCH (p:person) WITH p.name AS n RETURN any(p IN [1] WHERE p > 0) AS a",
+                "the variable `p` of any() is a name this query already uses",
+                "give any() a variable of its own, as in any(p2 IN list WHERE p2 > 0).",
+            ),
+        ] {
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(text.contains(message), "{query}: {text}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(alternative), "{query}: {help}");
+            assert!(help.contains("both variables of reduce()"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// An aggregate inside the condition of a list predicate or the `|` part of `reduce()` is
+    /// refused with a WITH example of that form; its initial value and its list lie outside.
+    #[test]
+    fn gql_list_function_aggregates_name_the_form() {
+        for (query, place, example) in [
+            (
+                "MATCH (p:person) RETURN any(x IN [1] WHERE x > count(*)) AS a",
+                "inside the WHERE part of all(), any(), none() or single()",
+                "aggregate in a WITH first and use its column in the condition, as in MATCH \
+                 (p)-->(f) WITH p, count(f.age) AS n RETURN all(x IN [1, 2, 3] WHERE x < n)",
+            ),
+            (
+                "MATCH (p:person) RETURN reduce(s = 0, x IN [1] | s + max(p.age)) AS a",
+                "inside the | part of reduce()",
+                "aggregate in a WITH first and use its column in the | part, as in MATCH \
+                 (p)-->(f) WITH p, max(f.age) AS n RETURN reduce(s = 0, x IN [1, 2, 3] | s + x \
+                 * n)",
+            ),
+        ] {
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Semantic, "{query}");
+            assert!(text.contains(place), "{query}: {text}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(example), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        let rows = locked
+            .traversal()
+            .gql(
+                "MATCH (p:person) RETURN reduce(s = count(*), x IN collect_list(p.age) | s + x) \
+                 AS a",
+            )
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// A list function over a value that is not a list is a data error naming the function;
+    /// a missing `WHERE` or `|` is a syntax error naming the expected token.
+    #[test]
+    fn gql_list_function_errors_name_the_function() {
+        for (query, message) in [
+            (
+                "RETURN any(x IN 5 WHERE x > 1) AS a",
+                "any() iterates over a list, not a number",
+            ),
+            (
+                "RETURN all(x IN 'ab' WHERE x > 1) AS a",
+                "all() iterates over a list, not a string",
+            ),
+            (
+                "RETURN reduce(s = 0, x IN 5 | s + x) AS a",
+                "reduce() iterates over a list, not a number",
+            ),
+        ] {
+            let (err, text) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).1, "22G03", "{query}");
+            assert!(text.contains(message), "{query}: {text}");
+        }
+        for (query, expected) in [
+            ("RETURN all(x IN [1]) AS a", "Expected WHERE"),
+            ("RETURN reduce(s = 0, x IN [1]) AS a", "Expected `|`"),
+            ("RETURN reduce(s, x IN [1] | s) AS a", "Expected `=`"),
+            (
+                "RETURN none(1 IN [1] WHERE true) AS a",
+                "Expected a variable",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, GqlErrorKind::Syntax, "{query}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(expected), "{query}: {help}");
+        }
+    }
+
+    /// A loop or traverser limit reached by a quantified edge inside a pattern comprehension
+    /// names the pattern comprehension (it runs to its last match, it does not stop at the
+    /// first); an EXISTS inside a comprehension's `|` part keeps the EXISTS text, a
+    /// comprehension inside an EXISTS body names the comprehension.
+    #[test]
+    fn gql_limits_inside_a_pattern_comprehension_name_it() {
+        let comprehension = "[(p)-[]-{1,}(q) WHERE q.name = 'zzz' | q.name]";
+        let inside = [
+            format!("MATCH (p:person) RETURN p.name, {comprehension} AS e"),
+            format!("MATCH (p:person) WHERE size({comprehension}) > 0 RETURN p.name"),
+            format!("MATCH (p:person) RETURN p.name AS n ORDER BY size({comprehension})"),
+            format!("MATCH (p:person) RETURN collect_list({comprehension}) AS c"),
+            format!("MATCH (p:person) FOR x IN {comprehension} RETURN x"),
+            format!(
+                "MATCH (p:person) RETURN [(p)-->(x) | {}] AS e",
+                comprehension.replace("(p)", "(x)")
+            ),
+            format!(
+                "MATCH (p:person) WHERE EXISTS {{ MATCH (p)-->(x) WHERE size({}) > 0 }} RETURN p",
+                comprehension.replace("(p)", "(x)")
+            ),
+        ];
+        let loops = "The loop of the quantified edge -[]-{1,} inside a pattern comprehension \
+                     [(a)-->(b) | ..] of the gql() query ran 2 iterations, the limit of \
+                     repeat.max_loops.";
+        let collects = "A pattern comprehension collects every match of its pattern for each \
+                        row, so its loop runs until the row's last match is found. Give the \
+                        quantifier an upper bound, as in -[]-{1,5}, for example";
+        let traversers = "Each path a quantified edge (-[]-{1,}), inside a pattern \
+                          comprehension [(a)-->(b) | ..], matches is a traverser of its own";
+        for query in &inside {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.starts_with(loops), "{query}: {help}");
+            assert!(help.contains(collects), "{query}: {help}");
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+            assert_examples_run(&help);
+            let (err, _) =
+                gql_failure(|g| g.with("traversal.max_traversers", 5).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(help.contains(traversers), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // An EXISTS in the `|` part: the loop is the EXISTS body's.
+        let query = "MATCH (p:person) RETURN [(p)-->(x) | EXISTS { MATCH (x)-[]-{1,}(q) WHERE \
+                     q.name = 'zzz' }] AS e";
+        let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "The loop of the quantified edge -[]-{1,} inside an EXISTS subquery (or pattern \
+                 predicate) of the gql() query"
+            ),
+            "{help}"
+        );
+        assert!(!help.contains("pattern comprehension"), "{help}");
+    }
+
+    /// A pattern comprehension's list over `traversal.max_materialized_bytes` gets the GQL
+    /// advice naming the comprehension and counting its matches instead.
+    #[test]
+    fn gql_pattern_comprehension_list_limit_names_it() {
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 300)
+                .gql("MATCH (p:person) RETURN [(p)-[]-{1,3}(f) | f.name] AS l")
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        for part in [
+            "as is the list of a pattern comprehension [(a)-->(b) | b.name], so the query stops",
+            "or, for the matches of a pattern, g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-->(f) \
+             RETURN p.name, count(f) AS n\")",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        assert_examples_run(&help);
+    }
+
+    /// A variable bound inside a pattern comprehension and read after it names the
+    /// comprehension (not EXISTS), with the comprehension advice; EXISTS keeps its text.
+    /// Stage 2d.T5c: a loop or traverser limit reached inside a `COUNT { }` or `COLLECT { }`
+    /// subquery names the construct (each runs its body to the end for every row, also when
+    /// the optimizer fuses the closing `count()`); the examples run.
+    #[test]
+    fn gql_limits_inside_count_and_collect_name_them() {
+        for (query, place, why) in [
+            (
+                "MATCH (p:person) RETURN p.name, COUNT { MATCH (p)-[]-{1,}(q) WHERE q.name = \
+                 'zzz' } AS c",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+            (
+                "MATCH (p:person) WHERE COUNT { (p)-[]-{1,}(q) } > 2 RETURN p.name",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN q.name } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) WITH q WHERE q.age > 1 \
+                 RETURN q.name ORDER BY q.name } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "The loop of the quantified edge -[]-{{1,}} {place} ran 2 iterations"
+                )),
+                "{query}: {help}"
+            );
+            assert!(help.contains(why), "{query}: {help}");
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+            assert!(!help.contains("pattern comprehension"), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // A traverser limit in an uncorrelated body (a child-leading scan).
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 5)
+                .gql("MATCH (p:person) RETURN COUNT { MATCH (s)-[]-{1,}(q) } AS c")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(help.contains("inside a COUNT { } subquery"), "{help}");
+        assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T5c: a `COLLECT { }` list over `traversal.max_materialized_bytes` is refused
+    /// before it is built; the advice names `COLLECT { }` and shows the `COUNT { }` form of
+    /// counting the matches instead.
+    #[test]
+    fn gql_collect_subquery_list_limit_names_it() {
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 300)
+                .gql(
+                    "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,3}(f) RETURN f.name } \
+                     AS l",
+                )
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        for part in [
+            "The list of a COLLECT { .. RETURN x } subquery is checked the same way.",
+            "or its openCypher form g.gql(\"MATCH (p:person) RETURN p.name, COUNT { (p)-->() } \
+             AS n\")",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        assert_examples_run(&help);
+    }
+
+    #[test]
+    fn gql_pattern_comprehension_scope_errors_name_it() {
+        for query in [
+            "MATCH (a) RETURN [(a)-->(c) | c] AS l, c",
+            "MATCH (a) WHERE size([(a)-->(c) | c]) > 0 RETURN c",
+            "MATCH (a) WITH a, [(a)-->(c) | c.name] AS l RETURN c",
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(
+                report.contains(
+                    "the variable `c` is not in scope: it is bound inside a pattern \
+                     comprehension, whose variables are visible only inside it"
+                ),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "bind `c` in the MATCH clause of the query to use it here, or read it in \
+                     the | part of the comprehension, as in [(a)-->(c) | c.name]. A pattern \
+                     comprehension, [(a)-[:knows]->(f) WHERE <condition> | <expression>], is \
+                     the list of its | part evaluated for every match of its pattern"
+                ),
+                "{query}: {help}"
+            );
+            assert!(!help.contains("EXISTS"), "{help}");
+            assert_examples_run(&help);
+        }
+        let report = gql_report("MATCH (a) WHERE EXISTS { (a)-->(c) } RETURN c");
+        assert!(
+            report.contains("it is bound inside a subquery (EXISTS or a pattern predicate)"),
+            "{report}"
+        );
+    }
+
+    /// Pattern comprehensions count against both subquery limits, and the messages say so.
+    #[test]
+    fn gql_subquery_limits_count_pattern_comprehensions() {
+        let many = vec!["size([(p)-->(q) | q])"; 65].join(" + ");
+        let written = format!("MATCH (p) RETURN {many} AS n");
+        let (err, report) = gql_failure(|g| g.gql(&written).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains(
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates), \
+                 pattern comprehensions included"
+            ),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "a pattern comprehension is a subquery too: collect the matches of several \
+                 patterns with OPTIONAL MATCH and collect_list() instead"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // A LET holding a pattern comprehension, read in 40 conditions of an EXISTS body that
+        // a LET holds and 40 conditions read: 1600 bodies.
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = size([(p)-->(x) | x]) > 0 LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        let (err, report) = gql_failure(|g| g.gql(&substituted).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "(each place that reads a LET holding EXISTS or a pattern comprehension runs its \
+                 own copy)"
+            ),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "write the EXISTS or the pattern comprehension where it is used instead of in a \
+                 LET that is read many times"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T6: `UNION` and `NEXT` errors carry the composite-query advice (same column
+    /// names in any order, one kind of `UNION` per chain, `NEXT` passes on only the columns
+    /// of the `RETURN` before it); the column mismatch names both column sets.
+    #[test]
+    fn gql_union_and_next_errors_explain_composite_queries() {
+        let advice = "UNION combines the records of queries that return the same column names, \
+             in any order (the result keeps the order of the first query): UNION (or UNION \
+             DISTINCT) removes duplicate records, UNION ALL keeps them, and one chain of UNIONs \
+             uses one kind. Each query of a UNION has its own variables, ORDER BY, OFFSET and \
+             LIMIT. NEXT passes the records of the statement before it on by their column names \
+             (only those), so it sorts, filters or aggregates a UNION as a whole, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name AS name UNION MATCH (s:software) RETURN \
+             s.name AS name NEXT RETURN name ORDER BY name LIMIT 3\").";
+        for (query, message, alternative) in [
+            (
+                "MATCH (p:person) RETURN p.name AS name, p.age AS age UNION MATCH (s:software) \
+                 RETURN s.name AS n",
+                "the operands of UNION must return the same column names: the first returns \
+                 `name`, `age`, this one returns `n` (`name` is missing)",
+                "name the columns alike with AS in every operand",
+            ),
+            (
+                "RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x",
+                "UNION ALL is mixed with UNION in one query",
+                "write the same kind between every operand, or combine the parts with NEXT",
+            ),
+            (
+                "MATCH (p:person) RETURN p.name AS n NEXT RETURN p",
+                "the variable `p` is not in scope: the RETURN before NEXT does not return it",
+                "add `p` to the RETURN items before NEXT",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            assert!(help.starts_with(alternative), "{query}: {help}");
+            assert!(help.ends_with(advice), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// Stage 2d.T6: `CALL { }` errors carry the CALL advice (imports by the scope clause, new
+    /// returned names, per-row semantics, OPTIONAL CALL), the refused body without `RETURN` and
+    /// `IN TRANSACTIONS` included.
+    #[test]
+    fn gql_call_errors_explain_imports_and_returned_columns() {
+        let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query \
+             once for each incoming row: the body reads only the variables its scope clause \
+             names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
+             those of its first WITH), and passes on only the columns of its RETURN, which must \
+             be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
+             in g.gql(\"MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) \
+             AS made } RETURN p.name, made\"). A row whose body returns no record is dropped; \
+             OPTIONAL CALL keeps it with NULL columns.";
+        for (query, kind, message) in [
+            (
+                "MATCH (p:person) CALL (p) { RETURN 1 AS p } RETURN p",
+                GqlErrorKind::Semantic,
+                "the CALL body returns `p`, which is already defined outside it",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f } RETURN f, x",
+                GqlErrorKind::Semantic,
+                "the variable `x` is not defined",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (f) WHERE f.age > p.age RETURN f.name AS n } \
+                 RETURN f",
+                GqlErrorKind::Semantic,
+                "the variable `f` is not in scope: it is bound inside a CALL body",
+            ),
+            (
+                "MATCH (p:person), (q:person) CALL (p) { RETURN q.name AS n } RETURN n",
+                GqlErrorKind::Semantic,
+                "the variable `q` is not imported into the CALL body",
+            ),
+            (
+                "MATCH (p:person) CALL (p, p) { RETURN p.name AS n } RETURN n",
+                GqlErrorKind::Semantic,
+                "the variable `p` is imported twice by this CALL",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-->(f) } RETURN p",
+                GqlErrorKind::Refused,
+                "a CALL { } body without RETURN (a unit subquery) only makes sense for writes",
+            ),
+            (
+                "MATCH (p:person) CALL (p) { RETURN 1 AS x } IN TRANSACTIONS RETURN x",
+                GqlErrorKind::Refused,
+                "CALL { } IN TRANSACTIONS commits writes in batches",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(kind_and_status(&err).0, kind, "{query}: {report}");
+            assert!(report.contains(message), "{query}: {report}");
+            let help = err.help().unwrap();
+            if !message.ends_with("is not defined") {
+                assert!(help.ends_with(advice), "{query}: {help}");
+            }
+            assert_examples_run(&help);
+        }
+    }
+
+    /// Stage 2d.T6: the expected tokens name `CALL` among the clauses and `UNION` / `NEXT`
+    /// after a complete result statement; a clause after `RETURN` names `NEXT` with a runnable
+    /// fix, and the syntax advice shows CALL, UNION and NEXT.
+    #[test]
+    fn gql_expected_tokens_name_call_union_and_next() {
+        let report = gql_report("MATCH (p:person) RETURN p.name AS n x");
+        assert!(
+            report.contains(
+                "  expected:  `,`, ORDER BY, OFFSET, SKIP, LIMIT, UNION, NEXT, end of input"
+            ),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) RETURN p LIMIT 1 x");
+        assert!(
+            report.contains("  expected:  UNION, NEXT, end of input"),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) CALL (p) { RETURN p.name AS n x } RETURN n");
+        assert!(report.contains("UNION, NEXT, `}`"), "{report}");
+        let report = gql_report("FOO");
+        assert!(
+            report.contains("MATCH, OPTIONAL MATCH, WITH, LET, FILTER, FOR, UNWIND, CALL, RETURN"),
+            "{report}"
+        );
+        let report = gql_report("MATCH (p:person) RETURN p NEX MATCH (p)-->(f) RETURN f");
+        assert!(report.contains("  did you mean: NEXT"), "{report}");
+        let help = gql_help("MATCH (p:person) RETURN p MATCH (p)-[:created]->(s) RETURN s.name");
+        assert!(
+            help.starts_with(
+                "put every MATCH before the RETURN, or continue with NEXT, which passes the \
+                 columns of the RETURN on to the next statement, as in MATCH (p:person) RETURN \
+                 p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name, or chain Gremlin steps \
+                 after gql()."
+            ),
+            "{help}"
+        );
+        assert!(
+            help.contains(
+                "CALL (p) { .. RETURN .. } runs a query for each row, UNION combines the records \
+                 of two queries and NEXT continues after a RETURN, as in g.gql(\"MATCH (p:person) \
+                 RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name\")."
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        assert!(
+            run_ok(
+                "MATCH (p:person) RETURN p NEXT MATCH (p)-[:created]->(s) RETURN p.name, s.name"
+            ) > 0
+        );
+    }
+
+    fn run_ok(query: &str) -> usize {
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph.read().traversal().gql(query).to_list();
+        rows.unwrap_or_else(|e| panic!("{query}: {e}")).len()
+    }
+
+    /// Stage 2d.T6: a resource limit inside a `CALL { }` body names the CALL (also inside a
+    /// `COUNT { }` / `EXISTS` body); one inside a `union()` operand of a `COLLECT { }` /
+    /// `COUNT { }` body names that subquery; a top-level `UNION` operand is the query itself.
+    #[test]
+    fn gql_limits_inside_call_and_union_name_the_construct() {
+        let call = "inside a CALL { } subquery of the gql() query";
+        let why_call = "A CALL { } subquery runs its body for each incoming row and keeps every \
+             record it returns, so its loop runs until the row's last match is found.";
+        for (query, place, why) in [
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } RETURN q.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } RETURN \
+                 q.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } \
+                 RETURN q } AS c",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) WHERE EXISTS { CALL (p) { MATCH (p)-[]-{1,}(q) RETURN q } \
+                 RETURN q } RETURN p.name",
+                call,
+                why_call,
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN q.name AS n \
+                 UNION RETURN p.name AS n } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { RETURN p AS q UNION MATCH (p)-[]-{1,}(q) \
+                 RETURN q } AS c",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "The loop of the quantified edge -[]-{{1,}} {place} ran 2 iterations"
+                )),
+                "{query}: {help}"
+            );
+            assert!(help.contains(why), "{query}: {help}");
+            assert!(!help.contains("EXISTS subquery"), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // A top-level UNION operand and a NEXT block are the query itself.
+        for query in [
+            "RETURN 1 AS q UNION MATCH (p:person)-[]-{1,}(q) RETURN q",
+            "MATCH (p:person) RETURN p NEXT MATCH (p)-[]-{1,}(q) RETURN q",
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "The loop of the quantified edge -[]-{1,} of the gql() query ran 2 iterations"
+                ),
+                "{query}: {help}"
+            );
+        }
+        // A traverser limit inside a CALL body.
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 5)
+                .gql("MATCH (p:person) CALL (p) { MATCH (s)-[]-{1,}(q) RETURN q } RETURN q")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(help.contains("inside a CALL { } subquery"), "{help}");
+        assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T6: a variable of `all()` / `any()` / `none()` / `single()` or `reduce()`
+    /// named inside a subquery body is "not yet" with a message naming the function.
+    #[test]
+    fn gql_list_function_variables_inside_a_subquery_name_the_function() {
+        for (query, message) in [
+            (
+                "MATCH (p) WHERE all(x IN [1] WHERE EXISTS { MATCH (x)-->() }) RETURN p",
+                "reading the variable `x` of all() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE any(x IN [1] WHERE EXISTS { MATCH (p)-->(x) }) RETURN p",
+                "reading the variable `x` of any() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE none(x IN [1] WHERE COUNT { MATCH (x)-->() } > 0) RETURN p",
+                "reading the variable `x` of none() inside a subquery",
+            ),
+            (
+                "MATCH (p) WHERE single(x IN [1] WHERE EXISTS { MATCH (x) }) RETURN p",
+                "reading the variable `x` of single() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN reduce(s = 0, x IN [1] | s + COUNT { MATCH (x)-->() }) AS r",
+                "reading the variable `x` of reduce() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN reduce(s = 0, x IN [1] | s + COUNT { MATCH (s)-->() }) AS r",
+                "reading the accumulator `s` of reduce() inside a subquery",
+            ),
+            (
+                "MATCH (p) RETURN [x IN [1] WHERE EXISTS { MATCH (x)-->() }] AS l",
+                "reading the comprehension variable `x` inside a subquery",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{query}: {report}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+        }
+    }
+
+    /// Stage 2d.T6: COUNT { } and COLLECT { } count against both subquery limits, and the
+    /// messages say so; the bodies-run advice names CALL as the form that is not copied.
+    #[test]
+    fn gql_subquery_limits_name_count_and_collect() {
+        let many = vec!["COUNT { (p)-->(q) }"; 65].join(" + ");
+        let (err, report) =
+            gql_failure(|g| g.gql(&format!("MATCH (p) RETURN {many} AS n")).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string())
+        );
+        assert!(
+            report.contains(
+                "the query holds more than 64 subqueries (EXISTS and pattern predicates), \
+                 pattern comprehensions included, as are COUNT { } and COLLECT { }"
+            ),
+            "{report}"
+        );
+        let a = vec!["a"; 40].join(" AND ");
+        let b = vec!["b"; 40].join(" AND ");
+        let substituted = format!(
+            "MATCH (p) LET a = COUNT {{ (p)-->(x) }} > 0 LET b = EXISTS {{ MATCH (p)-->(q) WHERE \
+             {a} }} FILTER {b} RETURN p.name AS n"
+        );
+        let (err, report) = gql_failure(|g| g.gql(&substituted).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Limit, "54001".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains("runs its own copy), COUNT { } and COLLECT { } included"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.contains(
+                "(the same holds for COUNT { } and COLLECT { }), or join the patterns into fewer \
+                 subqueries; a CALL (a) { .. } body is not copied: it runs once per row, and \
+                 later clauses read its columns, as in MATCH (p) CALL (p) { OPTIONAL MATCH \
+                 (p)-->(f) RETURN count(f) AS n } FILTER n > 0 RETURN p, n"
+            ),
+            "{help}"
+        );
+        assert_eq!(
+            run_ok(
+                "MATCH (p) CALL (p) { OPTIONAL MATCH (p)-->(f) RETURN count(f) AS n } FILTER n > \
+                 0 RETURN p, n"
+            ),
+            3
+        );
+    }
+
+    /// A name bound inside `COUNT { }` / `COLLECT { }` and read outside: the message and the
+    /// help name the construct, and the help's examples run (stage 2d.T7b).
+    #[test]
+    fn gql_count_and_collect_scope_errors_name_them() {
+        for (query, construct, fix) in [
+            (
+                "MATCH (a:person) WHERE COUNT { MATCH (a)-->(b) } > 0 RETURN b",
+                "COUNT { }",
+                "bind `b` in the MATCH clause of the query to use it here, or test it inside \
+                 the COUNT { } body. ",
+            ),
+            (
+                "MATCH (a:person) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS l, b",
+                "COLLECT { }",
+                "bind `b` in the MATCH clause of the query to use it here, or return what you \
+                 need of it from the body, as in COLLECT { MATCH (a)-->(b) RETURN b.name }. ",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(
+                report.contains(&format!(
+                    "the variable `b` is not in scope: it is bound inside a {construct} \
+                     subquery, whose variables are visible only inside it"
+                )),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(help.starts_with(fix), "{query}: {help}");
+            assert!(
+                help.contains(
+                    "COUNT { <body> } is the number of matches of its body (or of the records \
+                     its RETURN gives), and COLLECT { <body> RETURN <expression> } the list of \
+                     the values it returns"
+                ),
+                "{help}"
+            );
+            assert!(!help.contains("EXISTS"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// A first `WITH` of a `CALL { }` body that is no importing `WITH` (here with a `WHERE`)
+    /// gets the targeted message, not "bound by a later MATCH clause" (stage 2d.T7b).
+    #[test]
+    fn gql_call_with_where_is_no_importing_with() {
+        let query = "MATCH (p:person) CALL { WITH p WHERE p.age > 30 MATCH (p)-->(x) RETURN x } \
+                     RETURN x.name";
+        let (err, report) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains(
+                "the variable `p` is not imported into the CALL body: its first WITH is not an \
+                 importing WITH, which lists plain variables only (no WHERE, alias, expression, \
+                 DISTINCT, ORDER BY, OFFSET or LIMIT), so the body imports nothing"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("later MATCH"), "{report}");
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "import `p` with a variable scope clause, as in CALL (p) { MATCH ... WHERE ... }, \
+                 or in Cypher with a WITH of plain variables first and the rest of the body \
+                 after it, as in CALL { WITH p MATCH ... WHERE ... }. A CALL subquery"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // Both suggested forms run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for fixed in [
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(x) WHERE p.age > 30 RETURN x } RETURN x.name",
+            "MATCH (p:person) CALL { WITH p MATCH (p)-->(x) WHERE p.age > 30 RETURN x } \
+             RETURN x.name",
+        ] {
+            let rows = locked.traversal().gql(fixed).to_list();
+            assert_eq!(rows.map(|r| r.len()).ok(), Some(3), "{fixed}");
+        }
+    }
+
+    /// `OTHERWISE` is "not yet" (0A000) like `EXCEPT` / `INTERSECT` (stage 2d.T7b).
+    #[test]
+    fn gql_otherwise_is_not_yet_supported() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (n) RETURN n OTHERWISE MATCH (m) RETURN m")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::NotYet, "0A000".to_string())
+        );
+        assert!(
+            report.contains("OTHERWISE (a conditional query) is not yet supported in this version"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "take the first non-empty result in Gremlin with coalesce(), for example \
+                 g.inject(1).coalesce(__.v().has_label(\"robot\"), \
+                 __.v().has_label(\"person\")).values(\"name\")."
+            ),
+            "{help}"
+        );
+    }
+}
