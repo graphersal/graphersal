@@ -138,7 +138,9 @@ impl<'g, S: GraphStorage + 'g> InsertProperties<'g, S> {
 
 /// `value` as a stored property value; `Err` names the kind of graph element it holds (at any
 /// depth): elements are handles of this graph, not values.
-fn stored_value<S: GraphStorage>(value: RowValue<S>) -> Result<ElementProperty, &'static str> {
+pub(crate) fn stored_value<S: GraphStorage>(
+    value: RowValue<S>,
+) -> Result<ElementProperty, &'static str> {
     match value {
         Value::Null => Ok(ElementProperty::Null),
         Value::Scalar(property) => Ok(property),

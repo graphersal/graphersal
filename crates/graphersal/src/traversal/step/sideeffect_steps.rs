@@ -9,6 +9,10 @@ mod step_fail;
 pub(crate) mod step_gql_insert_edge;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_insert_node;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_remove;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_set;
 mod step_group_side_effect;
 mod step_merge_e;
 mod step_merge_v;
