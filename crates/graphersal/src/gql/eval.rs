@@ -146,6 +146,8 @@ pub(crate) mod status {
     /// Program limit exceeded: [`Env::reserve`](super::Env::reserve) refused a result's size
     /// (the step reports the row's own limit error instead, see `runtime::Row`).
     pub(crate) const LIMIT: &str = "54001";
+    /// Data exception: null value not allowed (an endpoint of an inserted edge that is `NULL`).
+    pub(crate) const NULL_VALUE: &str = "22004";
 }
 
 /// A failure of [`compile`] or of an evaluation.

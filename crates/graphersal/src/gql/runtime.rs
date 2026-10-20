@@ -67,6 +67,8 @@ use crate::{CompactString, ElementKind, ElementProperty};
 #[cfg(test)]
 mod for_step_tests;
 #[cfg(test)]
+mod insert_step_tests;
+#[cfg(test)]
 mod step_tests;
 #[cfg(test)]
 mod tests;
