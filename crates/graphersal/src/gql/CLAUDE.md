@@ -55,7 +55,9 @@ Files appear as their stage lands; this table is the target layout.
   evaluator error, so a refused `Env::reserve` surfaces as the real limit error, not 54001.
   Data errors carry targeted advice by GQLSTATUS (`gql_data_status_advice`) or by
   `GqlHelpTopic` (stage 2d: `Composite` for `UNION` / `NEXT`, `Call` for `CALL { }`, also on
-  the refused body without `RETURN` and `IN TRANSACTIONS`). The expected tokens name `CALL`
+  the refused body without `RETURN` and `IN TRANSACTIONS`, and on an outer name read by a first
+  `WITH` of a scope-less `CALL` body that is no importing `WITH`, `bind::not_importing_with`;
+  `CountCollect` for a name bound inside `COUNT { }` / `COLLECT { }` read outside it). The expected tokens name `CALL`
   among the clauses and `UNION` / `NEXT` after a result statement. Tests:
   `error_diagnostics_tests.rs` (`mod gql`), robustness
   `random_gql_strings_never_panic`, `random_gql_1b_queries_never_panic`,

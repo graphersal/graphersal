@@ -246,17 +246,19 @@ g.with("repeat.max_loops", 1).gql("MATCH (p:person) WHERE EXISTS { (p)-[:knows|c
 Help: The loop of the quantified edge -[:knows|created]->{1,} inside an EXISTS subquery (or pattern predicate) of the gql() query ran 1 iterations, the limit of repeat.max_loops. ... A subquery stops at its first match, so its loop runs this long on a row that has no match, or only a late one. Give the quantifier an upper bound, as in -[:knows|created]->{1,5}, ...
 ```
 
-`COUNT { }` and `COLLECT { }` follow the same rules; a `COLLECT { }` body must end in a
-`RETURN` of exactly one column. Cypher 4's `exists(n.p)` is [refused](refused.md):
+`COUNT { }` and `COLLECT { }` follow the same rules (a variable bound inside one is named as
+bound inside that `COUNT { }` or `COLLECT { }`, and the help explains the two forms); a
+`COLLECT { }` body must end in a `RETURN` of exactly one column. Cypher 4's `exists(n.p)` is [refused](refused.md):
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:knows]->(f) RETURN f.name, f.age } AS l")   // error: COLLECT { } needs a body that ends in a RETURN of exactly one column
-g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:knows]->(f) } AS n, f.name AS x")   // error: the variable `f` is not in scope: it is bound inside a subquery
+g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:knows]->(f) } AS n, f.name AS x")   // error: the variable `f` is not in scope: it is bound inside a COUNT { } subquery
 g.gql("MATCH (p:person) RETURN exists(p.age) AS a")   // refused: exists(value), the Cypher 4 property test, is not supported
 ```
 
 ```text
 Help: return the one value to collect, as in MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS names. A subquery, ...
+Help: bind `f` in the MATCH clause of the query to use it here, or test it inside the COUNT { } body. COUNT { <body> } is the number of matches of its body (or of the records its RETURN gives), and COLLECT { <body> RETURN <expression> } the list of the values it returns; the body reads the variables bound before it, and the variables it binds itself stay inside it, ...
 Help: test a property with n.p IS NOT NULL, here p.age IS NOT NULL; EXISTS tests a graph pattern, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name. ...
 ```
 
@@ -346,19 +348,22 @@ Help: put every MATCH before the RETURN, or continue with NEXT, which passes the
 The errors of a `CALL` share a help text on its scope: the body reads only the variables its
 scope clause names (`CALL (*)` all, `CALL { }` none, Cypher's `CALL { WITH a .. }` those of its
 first `WITH`), returns new names, aggregates per row, and drops a row without records unless the
-`CALL` is `OPTIONAL`. A body without `RETURN` (a unit subquery, which only a write could use) is
+`CALL` is `OPTIONAL`. Cypher's importing `WITH` lists plain variables only, as in Neo4j: a first
+`WITH` with a `WHERE`, an alias, an expression, `DISTINCT`, `ORDER BY`, `OFFSET` or `LIMIT` is
+no importing `WITH`, so the body imports nothing and the error says so. A body without `RETURN` (a unit subquery, which only a write could use) is
 not supported, and `IN TRANSACTIONS` is [refused](refused.md):
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
-g.gql("MATCH (p:person) CALL { WITH p AS q MATCH (q)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body
+g.gql("MATCH (p:person) CALL { WITH p AS q MATCH (q)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body: its first WITH is not an importing WITH
+g.gql("MATCH (p:person) CALL { WITH p WHERE p.age > 30 MATCH (p)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body: its first WITH is not an importing WITH
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN (a unit subquery) only makes sense for writes
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(s) RETURN s.name AS sw } IN TRANSACTIONS RETURN sw")   // refused: CALL { } IN TRANSACTIONS commits writes in batches
 ```
 
 ```text
 Help: rename the column inside the body, as in RETURN ... AS p2. A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query once for each incoming row: the body reads only the variables its scope clause names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } those of its first WITH), and passes on only the columns of its RETURN, which must be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as in g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made"). A row whose body returns no record is dropped; OPTIONAL CALL keeps it with NULL columns.
-Help: name it in the variable scope clause, as in CALL (p) { ... }, or import every variable with CALL (*) { ... }. A CALL subquery, ...
+Help: import `p` with a variable scope clause, as in CALL (p) { MATCH ... WHERE ... }, or in Cypher with a WITH of plain variables first and the rest of the body after it, as in CALL { WITH p MATCH ... WHERE ... }. A CALL subquery, ...
 Help: end the body with RETURN and the columns the query reads after it, for example MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made. A CALL subquery, ...
 Help: remove IN TRANSACTIONS: a read-only subquery needs no batches. A CALL subquery, ...
 ```
@@ -388,8 +393,8 @@ text of a top-level clause; inside a subquery the place named is the innermost s
 | Code | Kind | When |
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import, importing one twice |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery); also `gql()` after other steps |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |

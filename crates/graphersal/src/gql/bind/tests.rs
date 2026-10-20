@@ -2741,3 +2741,109 @@ fn the_former_not_yet_constructs_bind_together() {
         assert!(bind(&parsed).is_ok(), "{query}");
     }
 }
+
+/// A name bound inside `COUNT { }` / `COLLECT { }` and read outside: the message names the
+/// construct (the `EXISTS` text stays for `EXISTS` and pattern predicates).
+#[test]
+fn count_and_collect_locals_name_their_construct() {
+    for (query, construct, fix) in [
+        (
+            "MATCH (a) WHERE COUNT { MATCH (a)-->(b) } > 1 RETURN b",
+            "COUNT { }",
+            "inside the COUNT { } body",
+        ),
+        (
+            "MATCH (a) RETURN COUNT { MATCH (a)-->(b) RETURN b } AS n, b",
+            "COUNT { }",
+            "inside the COUNT { } body",
+        ),
+        (
+            "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS l, b",
+            "COLLECT { }",
+            "return what you need of it from the body",
+        ),
+        (
+            "MATCH (a) WITH a, COLLECT { MATCH (a)-->(b) RETURN b } AS l RETURN b",
+            "COLLECT { }",
+            "return what you need of it from the body",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, "b", "{query}");
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert!(
+            f.message.contains(&format!(
+                "it is bound inside a {construct} subquery, whose variables are visible only \
+                 inside it"
+            )),
+            "{query}: {}",
+            f.message
+        );
+        assert!(!f.message.contains("EXISTS"), "{query}: {}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(alternative.contains(fix), "{query}: {alternative}");
+        assert!(
+            alternative.contains("MATCH clause"),
+            "{query}: {alternative}"
+        );
+    }
+    let f = fail("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } RETURN b");
+    assert!(
+        f.message
+            .contains("bound inside a subquery (EXISTS or a pattern predicate)"),
+        "{}",
+        f.message
+    );
+}
+
+/// A first `WITH` of a `CALL` body without a scope clause that is no importing `WITH` (a
+/// `WHERE`, an alias, an expression, ...) imports nothing: an outer name it reads gets the
+/// targeted message, also when a later `MATCH` of the body binds the same name.
+#[test]
+fn call_body_with_that_is_not_importing_says_why() {
+    for query in [
+        "MATCH (p) CALL { WITH p WHERE p.age > 30 MATCH (p)-->(x) RETURN x } RETURN x",
+        "MATCH (p) CALL { WITH p WHERE p.age > 30 RETURN p.name AS n } RETURN n",
+        "MATCH (p) CALL { WITH p.name AS n RETURN n AS m } RETURN m",
+        "MATCH (p) CALL { WITH p AS q RETURN q AS m } RETURN m",
+        "MATCH (p) CALL { WITH DISTINCT p RETURN p.name AS m } RETURN m",
+        "MATCH (p) CALL { WITH p ORDER BY p.age LIMIT 1 RETURN p.name AS m } RETURN m",
+    ] {
+        let f = fail(query);
+        assert_eq!(f.text, "p", "{query}");
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert!(
+            f.message.contains(
+                "the variable `p` is not imported into the CALL body: its first WITH is not \
+                 an importing WITH, which lists plain variables only"
+            ),
+            "{query}: {}",
+            f.message
+        );
+        assert!(!f.message.contains("later MATCH"), "{query}: {}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("CALL (p) { MATCH ... WHERE ... }")
+                && alternative.contains("CALL { WITH p MATCH ... WHERE ... }"),
+            "{query}: {alternative}"
+        );
+    }
+    // The importing forms and a scope clause stay valid; a name no outer scope holds keeps
+    // its own message; a later WITH of the body is no first WITH.
+    for query in [
+        "MATCH (p) CALL { WITH p MATCH (p)-->(x) WHERE p.age > 30 RETURN x } RETURN x",
+        "MATCH (p) CALL (p) { WITH p WHERE p.age > 30 RETURN p.name AS n } RETURN n",
+        "MATCH (p) CALL { WITH 1 AS one RETURN one } RETURN one",
+    ] {
+        ok(query);
+    }
+    let f = fail("MATCH (p) CALL { WITH q WHERE q.age > 30 RETURN q.name AS n } RETURN n");
+    assert!(!f.message.contains("importing WITH"), "{}", f.message);
+    let f = fail("MATCH (p) CALL { MATCH (x) WITH x WHERE p.age > 1 RETURN x } RETURN x");
+    assert!(!f.message.contains("importing WITH"), "{}", f.message);
+    assert!(
+        f.message.contains("not imported into the CALL body"),
+        "{}",
+        f.message
+    );
+}

@@ -9790,4 +9790,119 @@ mod gql {
             3
         );
     }
+
+    /// A name bound inside `COUNT { }` / `COLLECT { }` and read outside: the message and the
+    /// help name the construct, and the help's examples run (stage 2d.T7b).
+    #[test]
+    fn gql_count_and_collect_scope_errors_name_them() {
+        for (query, construct, fix) in [
+            (
+                "MATCH (a:person) WHERE COUNT { MATCH (a)-->(b) } > 0 RETURN b",
+                "COUNT { }",
+                "bind `b` in the MATCH clause of the query to use it here, or test it inside \
+                 the COUNT { } body. ",
+            ),
+            (
+                "MATCH (a:person) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS l, b",
+                "COLLECT { }",
+                "bind `b` in the MATCH clause of the query to use it here, or return what you \
+                 need of it from the body, as in COLLECT { MATCH (a)-->(b) RETURN b.name }. ",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string()),
+                "{query}"
+            );
+            assert!(
+                report.contains(&format!(
+                    "the variable `b` is not in scope: it is bound inside a {construct} \
+                     subquery, whose variables are visible only inside it"
+                )),
+                "{query}: {report}"
+            );
+            let help = err.help().unwrap();
+            assert!(help.starts_with(fix), "{query}: {help}");
+            assert!(
+                help.contains(
+                    "COUNT { <body> } is the number of matches of its body (or of the records \
+                     its RETURN gives), and COLLECT { <body> RETURN <expression> } the list of \
+                     the values it returns"
+                ),
+                "{help}"
+            );
+            assert!(!help.contains("EXISTS"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    /// A first `WITH` of a `CALL { }` body that is no importing `WITH` (here with a `WHERE`)
+    /// gets the targeted message, not "bound by a later MATCH clause" (stage 2d.T7b).
+    #[test]
+    fn gql_call_with_where_is_no_importing_with() {
+        let query = "MATCH (p:person) CALL { WITH p WHERE p.age > 30 MATCH (p)-->(x) RETURN x } \
+                     RETURN x.name";
+        let (err, report) = gql_failure(|g| g.gql(query).to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Semantic, "42002".to_string())
+        );
+        assert!(
+            report.contains(
+                "the variable `p` is not imported into the CALL body: its first WITH is not an \
+                 importing WITH, which lists plain variables only (no WHERE, alias, expression, \
+                 DISTINCT, ORDER BY, OFFSET or LIMIT), so the body imports nothing"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("later MATCH"), "{report}");
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "import `p` with a variable scope clause, as in CALL (p) { MATCH ... WHERE ... }, \
+                 or in Cypher with a WITH of plain variables first and the rest of the body \
+                 after it, as in CALL { WITH p MATCH ... WHERE ... }. A CALL subquery"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        // Both suggested forms run.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for fixed in [
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(x) WHERE p.age > 30 RETURN x } RETURN x.name",
+            "MATCH (p:person) CALL { WITH p MATCH (p)-->(x) WHERE p.age > 30 RETURN x } \
+             RETURN x.name",
+        ] {
+            let rows = locked.traversal().gql(fixed).to_list();
+            assert_eq!(rows.map(|r| r.len()).ok(), Some(3), "{fixed}");
+        }
+    }
+
+    /// `OTHERWISE` is "not yet" (0A000) like `EXCEPT` / `INTERSECT` (stage 2d.T7b).
+    #[test]
+    fn gql_otherwise_is_not_yet_supported() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (n) RETURN n OTHERWISE MATCH (m) RETURN m")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::NotYet, "0A000".to_string())
+        );
+        assert!(
+            report.contains("OTHERWISE (a conditional query) is not yet supported in this version"),
+            "{report}"
+        );
+        let help = err.help().unwrap();
+        assert!(
+            help.starts_with(
+                "take the first non-empty result in Gremlin with coalesce(), for example \
+                 g.inject(1).coalesce(__.v().has_label(\"robot\"), \
+                 __.v().has_label(\"person\")).values(\"name\")."
+            ),
+            "{help}"
+        );
+    }
 }

@@ -186,8 +186,9 @@
 //!   `q1 UNION q2 NEXT q3` reads the union). `ORDER BY`, `OFFSET` and `LIMIT` belong to their own
 //!   operand. A bare `UNION` is `UNION DISTINCT`; whether the operands' columns agree and whether
 //!   `ALL` and `DISTINCT` are mixed is the binder's check. `UNION` or `NEXT` where no `RETURN`
-//!   ends the query before it is a syntax error naming the form; `NEXT YIELD`, `EXCEPT` and
-//!   `INTERSECT` are "not yet supported". The expected tokens after a clause and after `RETURN`
+//!   ends the query before it is a syntax error naming the form; `NEXT YIELD`, `EXCEPT`,
+//!   `INTERSECT` and `OTHERWISE` (a contextual word, the conditional query) are "not yet
+//!   supported". The expected tokens after a clause and after `RETURN`
 //!   still list the stage 2a clauses only.
 //! - **`CALL { }`** ([`CallClause`]): `[OPTIONAL] CALL (a, b) { .. }`, `CALL () { .. }`, `CALL (*)
 //!   { .. }` and `CALL { .. }` without a scope clause (imports nothing, Neo4j Cypher 25), a
@@ -914,6 +915,21 @@ impl<'a> Parser<'a> {
             .alternative(
                 "remove GROUP BY and list the keys as items next to the aggregates, as in \
                  MATCH (p:person)-[:created]->(s) RETURN p.name, count(s)",
+            );
+            return Some(Box::new(b));
+        }
+        // `OTHERWISE` (ISO GQL's conditional query, `q1 OTHERWISE q2`) is no keyword of the
+        // lexer: a contextual word where it cannot be a name.
+        if token.kind == TokenKind::Ident && text == "OTHERWISE" {
+            let b = err(
+                GqlErrorKind::NotYet,
+                span,
+                "OTHERWISE (a conditional query) is not yet supported in this version",
+            )
+            .alternative(
+                "take the first non-empty result in Gremlin with coalesce(), for example \
+                 g.inject(1).coalesce(__.v().has_label(\"robot\"), \
+                 __.v().has_label(\"person\")).values(\"name\")",
             );
             return Some(Box::new(b));
         }

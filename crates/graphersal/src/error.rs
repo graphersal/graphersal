@@ -4327,6 +4327,8 @@ pub(crate) enum GqlHelpTopic {
     /// A subquery (`EXISTS`, a pattern predicate): its imports, its locals, its size (stage
     /// 2b).
     Subquery,
+    /// A `COUNT { }` or `COLLECT { }` subquery: its value, its imports, its locals (stage 2d).
+    CountCollect,
     /// A pattern comprehension `[(a)-->(b) | expr]`: its list, its imports, its locals (stage
     /// 2c).
     PatternComprehension,
@@ -6950,6 +6952,17 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              s.lang = 'java' } RETURN p.name\"), and bind an element in the MATCH clause of the \
              query to read it after the subquery, as in \
              g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, s.name\")."
+        }
+        GqlHelpTopic::CountCollect => {
+            "COUNT { <body> } is the number of matches of its body (or of the records its \
+             RETURN gives), and COLLECT { <body> RETURN <expression> } the list of the values \
+             it returns; the body reads the variables bound before it, and the variables it \
+             binds itself stay inside it, as in g.gql(\"MATCH (p:person) RETURN p.name, \
+             COUNT { (p)-[:knows]->() } AS friends, COLLECT { MATCH (p)-[:created]->(s) \
+             RETURN s.name } AS made\"). Bind an element in the MATCH clause of the query to \
+             read it after the subquery, or return several columns from a CALL subquery, as \
+             in g.gql(\"MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name \
+             AS made, s.lang AS lang } RETURN p.name, made, lang\")."
         }
         GqlHelpTopic::PatternComprehension => {
             "A pattern comprehension, [(a)-[:knows]->(f) WHERE <condition> | <expression>], \

@@ -3943,3 +3943,38 @@ fn random_composite_queries_never_panic() {
         }
     }
 }
+
+/// `OTHERWISE` (ISO GQL's conditional query) is "not yet" like `EXCEPT` / `INTERSECT`, in any
+/// case, and stays a name where a name stands.
+#[test]
+fn otherwise_is_not_yet_supported() {
+    for (query, text) in [
+        (
+            "MATCH (n) RETURN n OTHERWISE MATCH (m) RETURN m",
+            "OTHERWISE",
+        ),
+        (
+            "MATCH (n) RETURN n otherwise MATCH (m) RETURN m",
+            "otherwise",
+        ),
+        (
+            "MATCH (n:a) RETURN n.x AS x OTHERWISE RETURN 1 AS x",
+            "OTHERWISE",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message.contains("OTHERWISE (a conditional query)"),
+            "{}",
+            f.message
+        );
+        assert!(
+            f.alternative.unwrap_or_default().contains("coalesce()"),
+            "{query}"
+        );
+    }
+    ok("MATCH (otherwise) RETURN otherwise.name AS otherwise");
+}

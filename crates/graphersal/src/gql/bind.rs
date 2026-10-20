@@ -1210,6 +1210,10 @@ enum Dropper {
 enum Hidden {
     /// Inside an `EXISTS` body or a pattern predicate.
     Subquery,
+    /// Inside a `COUNT { }` body.
+    Count,
+    /// Inside a `COLLECT { }` body.
+    Collect,
     /// Inside a pattern comprehension.
     Comprehension,
     /// Inside a `CALL` body that does not return it.
@@ -1242,8 +1246,9 @@ struct RowsInput {
 /// How a pipeline starts.
 enum Start<'a> {
     /// With these names in scope (none at the top, the imports of a `CALL` body, every outer
-    /// name in a whole-query subquery body).
-    Names(Names),
+    /// name in a whole-query subquery body), and the span of the first `WITH` of a `CALL` body
+    /// without a scope clause when that `WITH` is no importing one (for the message).
+    Names(Names, Option<Span>),
     /// With the records of the block before as columns.
     Rows(&'a RowsInput),
 }
@@ -1258,6 +1263,7 @@ struct PipelineState {
     bound_clauses: usize,
     later_clauses: Vec<(usize, String)>,
     later_in_body: Vec<String>,
+    bare_with: Option<Span>,
 }
 
 /// Where the binder stood when a nested body started: everything past these counts was
@@ -1330,6 +1336,10 @@ struct Binder<'q> {
     calls: Vec<Rc<Names>>,
     /// How many `CALL` / whole-query subquery bodies enclose what is being bound.
     body_depth: usize,
+    /// While the first clause of a `CALL` body without a scope clause is bound and it is a
+    /// `WITH` that is no Cypher importing one: its span (an outer name it reads gets the
+    /// message saying why nothing is imported).
+    bare_with: Option<Span>,
 }
 
 impl<'q> Binder<'q> {
@@ -1361,6 +1371,7 @@ impl<'q> Binder<'q> {
             shelved_locals: Vec::new(),
             calls: Vec::new(),
             body_depth: 0,
+            bare_with: None,
         }
     }
 
@@ -1704,6 +1715,7 @@ impl<'q> Binder<'q> {
         if let Some(rows) = rows {
             return Ok(Start::Rows(rows));
         }
+        let mut bare_with = None;
         let names = match entry {
             Entry::Top => Names::default(),
             Entry::Subquery { outer } => outer.clone(),
@@ -1711,7 +1723,12 @@ impl<'q> Binder<'q> {
                 CallScope::Variables { variables, .. } => imported(outer, variables),
                 CallScope::All(_) => outer.clone(),
                 CallScope::Implicit => match &operand.importing {
-                    None => Names::default(),
+                    None => {
+                        if let Some(Stage::With(with)) = operand.stages.first() {
+                            bare_with = Some(with.span);
+                        }
+                        Names::default()
+                    }
                     Some(importing) if importing.star.is_some() => outer.clone(),
                     Some(importing) => {
                         self.check_imports(&importing.variables, "WITH")?;
@@ -1720,7 +1737,7 @@ impl<'q> Binder<'q> {
                 },
             },
         };
-        Ok(Start::Names(names))
+        Ok(Start::Names(names, bare_with))
     }
 
     /// The variables a `CALL` imports must be in scope, each once (42002).
@@ -1769,6 +1786,7 @@ impl<'q> Binder<'q> {
             bound_clauses: self.bound_clauses,
             later_clauses: std::mem::take(&mut self.later_clauses),
             later_in_body: std::mem::take(&mut self.later_in_body),
+            bare_with: self.bare_with.take(),
         });
         let result = self.linear_chain_in(chain, start, align);
         let end: Vec<String> = self.scope.names().map(str::to_string).collect();
@@ -1780,6 +1798,7 @@ impl<'q> Binder<'q> {
         self.bound_clauses = saved.bound_clauses;
         self.later_clauses = saved.later_clauses;
         self.later_in_body = saved.later_in_body;
+        self.bare_with = saved.bare_with;
         let mut linear = result?;
         linear.pipeline = pipeline;
         Ok((linear, end))
@@ -1798,8 +1817,9 @@ impl<'q> Binder<'q> {
             )));
         };
         let unit = match start {
-            Start::Names(names) => {
+            Start::Names(names, bare_with) => {
                 self.scope = names;
+                self.bare_with = bare_with;
                 !matches!(first.stages.first(), Some(Stage::Match(_)))
             }
             Start::Rows(rows) => {
@@ -1811,6 +1831,7 @@ impl<'q> Binder<'q> {
             self.enter_linear(linear)?;
             for stage in &linear.stages {
                 self.stage(linear, stage)?;
+                self.bare_with = None;
             }
             if i + 1 < chain.len() {
                 self.return_before_next(linear)?;
@@ -3328,6 +3349,14 @@ impl<'q> Binder<'q> {
             }
             None => {}
         }
+        if self.bare_with.is_some()
+            && self
+                .calls
+                .last()
+                .is_some_and(|outer| outer.get(name).is_some())
+        {
+            return not_importing_with(var);
+        }
         if self.later_in_body.iter().any(|n| n == name) {
             return semantic(
                 var.span,
@@ -3357,6 +3386,18 @@ impl<'q> Binder<'q> {
             .into();
         }
         if let Some(&hidden) = self.hidden.get(name) {
+            if let Some((construct, fix)) = hidden_count_or_collect(hidden, name) {
+                return semantic(
+                    var.span,
+                    format!(
+                        "the variable `{name}` is not in scope: it is bound inside a \
+                         {construct} subquery, whose variables are visible only inside it"
+                    ),
+                )
+                .alternative(fix)
+                .topic(GqlHelpTopic::CountCollect)
+                .into();
+            }
             if hidden == Hidden::Comprehension {
                 return semantic(
                     var.span,
@@ -4009,10 +4050,11 @@ impl<'q> Binder<'q> {
         self.dropped = dropped;
         let inner = std::mem::replace(&mut self.scope, scope);
         let (clauses, map, query) = body?;
-        let hidden = if subquery.form == SubqueryForm::Comprehension {
-            Hidden::Comprehension
-        } else {
-            Hidden::Subquery
+        let hidden = match (subquery.form, subquery.kind) {
+            (SubqueryForm::Comprehension, _) => Hidden::Comprehension,
+            (_, SubqueryKind::Count) => Hidden::Count,
+            (_, SubqueryKind::Collect) => Hidden::Collect,
+            (_, SubqueryKind::Exists) => Hidden::Subquery,
         };
         let names = query
             .as_ref()
@@ -4966,6 +5008,51 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
         .alternative(alternative)
         .topic(GqlHelpTopic::Grouping),
     )
+}
+
+/// An outer name read by the first `WITH` of a `CALL` body without a scope clause that is no
+/// Cypher importing `WITH`: that `WITH` imports nothing (Neo4j: an importing `WITH`
+/// lists plain variables only).
+fn not_importing_with(var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    semantic(
+        var.span,
+        format!(
+            "the variable `{name}` is not imported into the CALL body: its first WITH is not \
+             an importing WITH, which lists plain variables only (no WHERE, alias, \
+             expression, DISTINCT, ORDER BY, OFFSET or LIMIT), so the body imports nothing"
+        ),
+    )
+    .alternative(format!(
+        "import `{name}` with a variable scope clause, as in CALL ({name}) {{ MATCH ... \
+         WHERE ... }}, or in Cypher with a WITH of plain variables first and the rest of the \
+         body after it, as in CALL {{ WITH {name} MATCH ... WHERE ... }}"
+    ))
+    .topic(GqlHelpTopic::Call)
+    .into()
+}
+
+/// For a name bound inside a `COUNT { }` or `COLLECT { }` body: the construct as the message
+/// names it and the fix (`None` for every other [`Hidden`]).
+fn hidden_count_or_collect(hidden: Hidden, name: &str) -> Option<(&'static str, String)> {
+    match hidden {
+        Hidden::Count => Some((
+            "COUNT { }",
+            format!(
+                "bind `{name}` in the MATCH clause of the query to use it here, or test it \
+                 inside the COUNT {{ }} body"
+            ),
+        )),
+        Hidden::Collect => Some((
+            "COLLECT { }",
+            format!(
+                "bind `{name}` in the MATCH clause of the query to use it here, or return what \
+                 you need of it from the body, as in COLLECT {{ MATCH (a)-->({name}) RETURN \
+                 {name}.name }}"
+            ),
+        )),
+        Hidden::Subquery | Hidden::Comprehension | Hidden::Call => None,
+    }
 }
 
 /// The variables `m` names: path, node and edge variables of every path.
