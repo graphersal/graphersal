@@ -64,7 +64,16 @@ limit bounds it.
 
 `traversal.max_traversers` is an ordinary `g.with()` option, checked once per step boundary (a
 counter comparison, no per-item work). A single step can overshoot the cap by one expansion, since
-the check runs when the step has produced its output.
+the check runs when the step has produced its output. A cross product (a `v()` in the middle of a
+traversal, as in `g.v().v()` or the GQL `MATCH (a), (b)`) is checked *before* it is built: its
+size is known up front, so a product over the cap fails at once instead of allocating it first.
+
+A count that comes from the query (a bulk, a row count, the size of a product) never becomes an
+unchecked up-front reservation. Where the engine reserves an exact size it asks the allocator
+fallibly: when the system cannot provide that block (the limit raised to "unlimited" and a
+product of trillions of rows), the run fails with `ResourceLimitExceeded` of `memory.allocation`
+and is rolled back instead of the process aborting. `memory.allocation` is not an option: narrow
+the query, or bound the run with the [memory budget](#memory-budget).
 
 ```rhai,graph=modern
 g.with("traversal.max_traversers", 50000000).v().out().out().count()

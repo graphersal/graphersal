@@ -3213,7 +3213,23 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     // materializing first instead of the index-backed fast path.
                     if let Some(incoming) = incoming.filter(|_| fused_factor.is_none()) {
                         let found = std::mem::take(&mut source);
-                        source = Vec::with_capacity(incoming.len().saturating_mul(found.len()));
+                        // The cross product leaves `incoming x found` traversers alive: check it
+                        // against `traversal.max_traversers` (and the memory budget) BEFORE
+                        // building it, then reserve exactly that many, fallibly: a product the
+                        // allocator cannot provide (the limit raised to "unlimited") is an error,
+                        // never an abort of the process.
+                        let product = incoming.len().saturating_mul(found.len());
+                        context
+                            .check_traverser_limit(product)
+                            .and_then(|()| context.check_memory_budget(product))
+                            .and_then(|()| {
+                                crate::traversal::capacity::try_reserve_exact(&mut source, product)
+                            })
+                            .with_step_frame(
+                                || step.get_name(),
+                                step_at,
+                                || plan_frame(steps, level, logical_step_idx),
+                            )?;
                         for traverser in &incoming {
                             tick_deadline(&mut context.deadline).with_step_frame(
                                 || step.get_name(),

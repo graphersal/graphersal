@@ -5830,6 +5830,18 @@ fn resource_limit_help(limit: &str, max: Option<u64>, observed: Option<u64>) -> 
                 flag = field.replace('_', "-"),
             )
         }
+        "memory.allocation" => format!(
+            "The traversal needed a block of memory{} the system could not provide, so it was \
+             stopped and everything it changed was rolled back, instead of the process running \
+             out of memory. This is not an option that can be raised: the query builds too many \
+             values at once. Narrow it before the step that grows the stream, for example \
+             g.v().has_label(\"person\").out().limit(100), aggregate with count() or \
+             group_count() instead of listing, or bound the run with a memory budget, for \
+             example g.with(\"memory.limit\", 1000000000).v().out().out().count(). {MEMORY_BUDGET_SETTING}",
+            observed
+                .map(|elements| format!(" for {elements} items"))
+                .unwrap_or_default()
+        ),
         other => format!(
             "The limit '{other}' was exceeded. Raise it through the option or configuration of \
              the same name, for example g.with(\"{other}\", {raised}).v().count()."
@@ -9207,6 +9219,27 @@ mod tests {
                         .contains(&format!("g.with(\"{key}\""))
                 );
             }
+        }
+
+        #[test]
+        fn allocation_failure_help_says_it_is_not_an_option_and_shows_a_narrower_query() {
+            // Built by hand: a refused reservation cannot be provoked reliably from a query.
+            let err = crate::traversal::capacity::allocation_error(1 << 40);
+            assert_eq!(
+                err.to_string(),
+                "Resource limit 'memory.allocation' exceeded (reached 1099511627776)"
+            );
+            let help = err.help().expect("help");
+            assert!(help.contains("for 1099511627776 items"), "{help}");
+            assert!(help.contains("not an option that can be raised"), "{help}");
+            assert!(
+                help.contains("g.v().has_label(\"person\").out().limit(100)"),
+                "{help}"
+            );
+            assert!(
+                help.contains("g.with(\"memory.limit\", 1000000000)"),
+                "{help}"
+            );
         }
 
         #[test]

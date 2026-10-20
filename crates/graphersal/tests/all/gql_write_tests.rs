@@ -563,6 +563,66 @@ fn read_plans_are_unchanged() {
     assert_eq!(actual.trim_end(), READ_PLANS.trim_end());
 }
 
+// ----- cross products feeding a write (fuzz finding of 3a: `MATCH (a), (b) INSERT ()`) -----
+
+#[test]
+fn a_cross_product_inserts_one_element_per_row() {
+    for (query, rows) in [
+        ("MATCH (a), (b) INSERT ()", 36),
+        ("MATCH (a) MATCH (b) INSERT ()", 36),
+        ("MATCH (a), (b), (c) INSERT ()", 216),
+    ] {
+        let (graph, result) = after(query);
+        assert!(result.is_empty(), "{query}: {result:?}");
+        // The later pattern does not see the vertices the write adds (W13): 6 + rows.
+        assert_eq!(graph.vertex_count(), 6 + rows, "{query}");
+        assert_eq!(graph.edge_count(), 6, "{query}");
+    }
+    let (graph, _) = after("MATCH (a), (b) INSERT (:X)-[:T]->(:Y)");
+    assert_eq!(count_label(&graph, "X"), 36);
+    assert_eq!(count_label(&graph, "Y"), 36);
+    assert_eq!(count_edges(&graph, "T"), 36);
+}
+
+#[test]
+fn a_cross_product_over_the_traverser_limit_fails_before_it_is_built() {
+    // Run after run the graph grows quadratically: the product is checked against
+    // `traversal.max_traversers` before a single traverser of it exists, so a huge one is an
+    // error (rolled back), never an allocation of `rows x 80` bytes that aborts the process.
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    write(&mut graph, "MATCH (a), (b) INSERT ()");
+    assert_eq!(graph.vertex_count(), 42);
+    let before = dump(&graph);
+    let error = graph
+        .traversal_mut()
+        .with("traversal.max_traversers", 1000)
+        .gql("MATCH (a), (b) INSERT ()")
+        .to_list()
+        .expect_err("1764 rows exceed 1000");
+    let text = format_diagnostic(&error);
+    assert!(
+        text.contains(
+            "Resource limit 'traversal.max_traversers' exceeded (limit 1000, reached 1764)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("g.with(\"traversal.max_traversers\", 2000).gql("),
+        "{text}"
+    );
+    assert_eq!(dump(&graph), before);
+    // The same bound holds for a Gremlin cross product.
+    let error = graph
+        .traversal()
+        .with("traversal.max_traversers", 1000)
+        .v(None)
+        .v(None)
+        .count()
+        .to_list()
+        .expect_err("1764 traversers exceed 1000");
+    assert!(error.to_string().contains("execution failed"), "{error}");
+}
+
 // ----- the Rhai binding: twins, the write lock, the create time -----
 
 #[cfg(feature = "script")]
@@ -596,6 +656,19 @@ mod script {
             dump(&TraversalGraph::tinkerpop_modern()),
             "{query} changes nothing"
         );
+    }
+
+    #[test]
+    fn cross_product_inserts_leave_the_graph_their_gremlin_twins_leave() {
+        twin("MATCH (a), (b) INSERT ()", "g.v().v().add_v()");
+        twin("MATCH (a) MATCH (b) INSERT ()", "g.v().v().add_v()");
+        twin("MATCH (a), (b), (c) INSERT ()", "g.v().v().v().add_v()");
+        twin(
+            "MATCH (a), (b) INSERT (:X)-[:T]->(:Y)",
+            r#"g.v().v().add_v("X").as("x").add_v("Y").add_e("T").from("x")"#,
+        );
+        // A barrier on the Gremlin side (bulk merging) leaves the same graph.
+        twin("MATCH (a), (b) INSERT ()", "g.v().v().barrier().add_v()");
     }
 
     #[test]

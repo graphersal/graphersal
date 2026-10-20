@@ -165,27 +165,42 @@ fn stored_value<S: GraphStorage>(value: RowValue<S>) -> Result<ElementProperty, 
 /// The traversers one incoming traverser stands for: `source` expanded to bulk-1 copies (W15:
 /// a write step treats a traverser of bulk n as n rows), or one seed holding `null` when the
 /// step starts the traversal. `generated` tells the caller to emit start traversers.
+///
+/// The bulk is an untrusted count (a cross product merged by Gremlin bulking can carry any
+/// number): above 1 it is checked like a bulk expansion at `step` (`bulk.max_expansion`,
+/// `traversal.max_materialized_bytes`, the memory budget) before a single copy is made.
 pub(crate) fn insert_rows<S: GraphStorage>(
     context: &TraverserContext<'_, S>,
     source: Option<Traverser<S>>,
-) -> (Vec<Traverser<S>>, bool) {
+    step: &str,
+) -> TraverserResult<(Vec<Traverser<S>>, bool)> {
     match source {
-        Some(source) => (expand_rows(source), false),
-        None => (
+        Some(source) => {
+            if source.bulk > 1 {
+                crate::traversal::bulk::ExpansionLimits::of(&context.options).check_copies(
+                    &source.value,
+                    source.bulk,
+                    step,
+                )?;
+            }
+            Ok((expand_rows(source), false))
+        }
+        None => Ok((
             vec![Traverser::start(
                 context,
                 TraverserValue::Computed(ElementProperty::Null, None),
             )],
             true,
-        ),
+        )),
     }
 }
 
-/// `source` as bulk-1 copies, one per unit of its bulk (derived: its path and sack).
+/// `source` as bulk-1 copies, one per unit of its bulk (derived: its path and sack). The caller
+/// bounds the bulk ([`insert_rows`]); the up-front capacity is capped either way.
 pub(crate) fn expand_rows<S: GraphStorage>(mut source: Traverser<S>) -> Vec<Traverser<S>> {
     let copies = source.bulk.max(1);
     source.bulk = 1;
-    let mut rows = Vec::with_capacity(usize::try_from(copies).unwrap_or(1).min(64));
+    let mut rows = Vec::with_capacity(crate::traversal::capacity::capped_u64(copies));
     for _ in 1..copies {
         rows.push(source.clone());
     }
@@ -305,9 +320,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlInsertNo
         context: &mut TraverserContext<'_, S>,
         source: Option<Traverser<S>>,
     ) -> TraverserResult<Vec<Traverser<S>>> {
-        let (rows, generated) = insert_rows(context, source);
-        let mut output = Vec::with_capacity(rows.len());
+        let (rows, generated) = insert_rows(context, source, "gql:insert_node")?;
+        let mut output = crate::traversal::capacity::vec_capped(rows.len());
         for row in rows {
+            context.tick()?;
             let properties = self.properties.evaluate(context, &row)?;
             let create = context.create_context_or(self.create_time);
             let vertex =

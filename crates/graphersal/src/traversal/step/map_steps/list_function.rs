@@ -500,7 +500,8 @@ impl<'g, S: GraphStorage + 'g> StepListFunction<'g, S> {
                 return Ok(out);
             }
             ListFunction::Product => {
-                let mut out = Vec::with_capacity(left.len() * right.len());
+                let mut out =
+                    crate::traversal::capacity::vec_capped(left.len().saturating_mul(right.len()));
                 for a in &left {
                     for i in 0..right.len() {
                         out.push(TraverserValue::Array(vec![a.clone(), right.item(i)]));

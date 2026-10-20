@@ -227,9 +227,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlInsertEd
         context: &mut TraverserContext<'_, S>,
         source: Option<Traverser<S>>,
     ) -> TraverserResult<Vec<Traverser<S>>> {
-        let (rows, generated) = insert_rows(context, source);
-        let mut output = Vec::with_capacity(rows.len());
+        let (rows, generated) = insert_rows(context, source, "gql:insert_edge")?;
+        let mut output = crate::traversal::capacity::vec_capped(rows.len());
         for row in rows {
+            context.tick()?;
             let from = self.endpoint(context, &row, 0)?;
             let to = self.endpoint(context, &row, 1)?;
             let properties = self.properties.evaluate(context, &row)?;

@@ -5,6 +5,7 @@ use crate::*;
 
 pub(crate) mod bulk;
 pub mod cancel;
+pub(crate) mod capacity;
 pub(crate) mod context;
 /// The `execute()` terminal and its [`Execution`] result.
 pub mod execution;

@@ -954,3 +954,38 @@ fn profile_text_and_path_requirements() {
     assert!(camel.contains("gql:insertNode("), "{camel}");
     assert!(camel.contains("char_length('a')"), "{camel}");
 }
+
+#[test]
+fn an_untrusted_bulk_is_checked_before_any_row_is_copied() {
+    use crate::traversal::TraversalStrategy;
+    use crate::traversal::step::sideeffect_steps::step_gql_insert_node::insert_rows;
+    use std::collections::HashMap;
+    let mut graph = TraversalGraph::new();
+    let mut context = TraverserContext::new(&mut graph, TraversalStrategy::none(), HashMap::new());
+    let with_bulk = |bulk: u64| {
+        let mut source: Traverser<TraversalGraph> =
+            Traverser::from_value(TraverserValue::Computed(int(7), None));
+        source.bulk = bulk;
+        source
+    };
+    // A garbage bulk (the cross product of two huge streams, merged) is an error, never an
+    // allocation of that many rows.
+    let error = match insert_rows(&context, Some(with_bulk(u64::MAX)), "gql:insert_node") {
+        Ok(_) => panic!("a bulk of u64::MAX was expanded"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(&*error, TraverserError::BulkExpansionLimit { step, requested, .. }
+            if step == "gql:insert_node" && *requested == u64::MAX),
+        "{error:?}"
+    );
+    context.options.bulk_max_expansion = 2;
+    assert!(insert_rows(&context, Some(with_bulk(3)), "gql:insert_edge").is_err());
+    let (rows, generated) = match insert_rows(&context, Some(with_bulk(2)), "gql:insert_edge") {
+        Ok(rows) => rows,
+        Err(error) => panic!("bulk 2 within the limit failed: {error:?}"),
+    };
+    assert!(!generated);
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.bulk == 1));
+}
