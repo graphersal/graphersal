@@ -4149,15 +4149,17 @@ fn gql_3a_script_state(script: &str) -> Result<Vec<String>, String> {
 
 /// Runs `query` as a write on the modern graph: from Rust (rows, profile, the diagnostic in
 /// both spellings) and from Rhai (a writing unit, then the same with a following Gremlin step).
+/// Every run starts on a fresh modern graph: a write repeated on the graph it grew can grow it
+/// quadratically per run (a cross product of all vertices), which tests nothing new.
 #[cfg(feature = "gql")]
 fn exercise_gql_write(query: String) -> Result<(), Outcome> {
     guarded(WATCHDOG, move || {
-        let mut graph = TraversalGraph::tinkerpop_modern();
         let params = [
             ("n", ElementProperty::from(2)),
             ("name", ElementProperty::from("x")),
         ];
         for camel in [false, true] {
+            let mut graph = TraversalGraph::tinkerpop_modern();
             let mut g = graph.traversal_mut();
             if camel {
                 g = g.with("render.spelling", "camel");
@@ -4167,6 +4169,7 @@ fn exercise_gql_write(query: String) -> Result<(), Outcome> {
                 let _ = err.help();
             }
         }
+        let mut graph = TraversalGraph::tinkerpop_modern();
         match graph.traversal_mut().gql(&query).profile() {
             Ok(metrics) => {
                 let _ = metrics.to_string();
@@ -4175,17 +4178,16 @@ fn exercise_gql_write(query: String) -> Result<(), Outcome> {
                 let _ = format_diagnostic(&err);
             }
         }
-        let graph = Arc::new(Graph::new(graph));
-        let script_params: HashMap<String, ElementProperty> =
-            [("q".to_string(), ElementProperty::from(query.as_str()))].into();
-        let _ = eval_value_with_limits(
-            graph,
-            r#"g.gql(q).toList();
-               g.gql(q, #{n: 2, name: "x"}).count().next();
-               g.with("render.spelling", "camel").gql(q).select("n0").out().toList();"#,
-            script_params,
-            &ScriptLimits::default(),
-        );
+        for script in [
+            "g.gql(q).toList();",
+            r#"g.gql(q, #{n: 2, name: "x"}).count().next();"#,
+            r#"g.with("render.spelling", "camel").gql(q).select("n0").out().toList();"#,
+        ] {
+            let graph = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
+            let script_params: HashMap<String, ElementProperty> =
+                [("q".to_string(), ElementProperty::from(query.as_str()))].into();
+            let _ = eval_value_with_limits(graph, script, script_params, &ScriptLimits::default());
+        }
     })
 }
 
