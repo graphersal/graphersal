@@ -148,6 +148,9 @@ pub(crate) mod status {
     pub(crate) const LIMIT: &str = "54001";
     /// Data exception: null value not allowed (an endpoint of an inserted edge that is `NULL`).
     pub(crate) const NULL_VALUE: &str = "22004";
+    /// Dependent object error: edges still exist (a plain `DELETE` of a node that still has
+    /// edges, stage 3d) [ISO].
+    pub(crate) const EDGES_STILL_EXIST: &str = "G1001";
 }
 
 /// A failure of [`compile`] or of an evaluation.
@@ -407,6 +410,12 @@ pub(crate) trait Env {
     fn has_any_label(&self, element: &Self::Element) -> bool;
     /// The element's labels in stored order, the primary label first (an edge: its one label).
     fn labels(&self, element: &Self::Element) -> Vec<CompactString>;
+    /// The one label of an edge (`type(r)`); `None` for a vertex. A row of the traversal also
+    /// answers it for an edge a `DELETE` removed earlier in the query (E3 of stage 3d), where
+    /// every other read is an error. Default: the first of [`Self::labels`].
+    fn edge_type(&self, edge: &Self::Element) -> Option<CompactString> {
+        self.labels(edge).into_iter().next()
+    }
     /// The result of the aggregate call `index` ([`Scope::aggregate`]) for the current group;
     /// `NULL` when the row is not an aggregated one.
     fn aggregate(&self, index: usize) -> Value<Self::Element> {
@@ -490,6 +499,10 @@ impl<E: Clone + PartialEq> Env for LocalEnv<'_, E> {
 
     fn labels(&self, element: &E) -> Vec<CompactString> {
         self.parent.labels(element)
+    }
+
+    fn edge_type(&self, edge: &E) -> Option<CompactString> {
+        self.parent.edge_type(edge)
     }
 
     fn aggregate(&self, index: usize) -> Value<E> {
@@ -2082,9 +2095,7 @@ fn call<En: Env>(
         },
         Function::Type => match &*value {
             Value::Element(element) if env.kind(element) == ElementKind::Edge => Ok(env
-                .labels(element)
-                .into_iter()
-                .next()
+                .edge_type(element)
                 .map(Value::string)
                 .unwrap_or(Value::Null)),
             Value::Element(_) => Err(EvalError::invalid_type(

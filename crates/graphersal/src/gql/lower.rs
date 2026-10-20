@@ -133,6 +133,7 @@ use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
 use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateColumn;
+use crate::traversal::step::flatbarrier_steps::step_gql_delete::GqlDeleteTarget;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
 use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLookupKey};
@@ -1324,6 +1325,40 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     ) -> Self;
     /// `gql:remove(items)`: one `REMOVE` clause (stage 3c).
     fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self;
+    /// `gql:delete(targets)`: one `DELETE` clause (stage 3d); `keyword` the clause keyword(s)
+    /// as written (`DELETE`, `DETACH DELETE`, `NODETACH DELETE`), `detach` for `DETACH`; the
+    /// targets read the slots `bindings` and host the subqueries `children`.
+    #[allow(dead_code, reason = "lowered since 3d.T3")]
+    #[allow(clippy::too_many_arguments)]
+    fn gql_delete(
+        self,
+        query: Arc<str>,
+        keyword: Span,
+        detach: bool,
+        targets: Vec<GqlDeleteTarget<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
+    /// `gql:project(columns)` as the `RETURN` that ends the query: a column holding an element
+    /// a `DELETE` removed earlier is the W28 error (stage 3d).
+    #[allow(dead_code, reason = "lowered since 3d.T3")]
+    fn gql_project_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
+    /// `gql:aggregate(..)` as the `RETURN` that ends the query (W28, stage 3d).
+    #[allow(dead_code, reason = "lowered since 3d.T3")]
+    fn gql_aggregate_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
     fn gql_order(
         self,
         query: Arc<str>,
@@ -1467,6 +1502,36 @@ macro_rules! sink {
             }
             fn gql_remove(self, query: Arc<str>, items: Vec<GqlRemoveItem>) -> Self {
                 self.gql_remove(query, items)
+            }
+            fn gql_delete(
+                self,
+                query: Arc<str>,
+                keyword: Span,
+                detach: bool,
+                targets: Vec<GqlDeleteTarget<S>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_delete(query, keyword, detach, targets, bindings, children)
+            }
+            fn gql_project_returning(
+                self,
+                query: Arc<str>,
+                columns: Vec<GqlColumn<S>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_project_returning(query, columns, bindings, children)
+            }
+            fn gql_aggregate_returning(
+                self,
+                query: Arc<str>,
+                columns: Vec<GqlAggregateColumn<S>>,
+                calls: Vec<AggregateCall<GqlElement<S>>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_aggregate_returning(query, columns, calls, bindings, children)
             }
             fn gql_order(
                 self,

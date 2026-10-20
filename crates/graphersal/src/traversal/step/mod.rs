@@ -375,6 +375,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   when the kind is unknown), a label item `Update` on `Data { Vertex, None }` per label;
     ///   never from `flow` (the current object is not the target);
     /// - `drop()`: `Delete` on `Data` of the elements it receives, like `property`;
+    /// - the GQL `DELETE` step `gql:delete`: `Delete` per target as the step's own static facts
+    ///   state it (`Data { Vertex, None }` for a node, `Data { Edge, label }` per label the edge
+    ///   pattern states, `Data { None, None }` for a path, a list or an unknown kind), what
+    ///   `drop()` asks on the same elements; `DETACH` asks nothing more;
     /// - `schema()`: `Read` on `Schema`;
     /// - `v()` / `e()`: `Read` on `Data { Vertex | Edge, None }`; `out`/`in`/`both`: `Read` on
     ///   edges and on vertices; `out_e`/`in_e`/`both_e`: `Read` on edges;
@@ -502,6 +506,26 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                 }
             }
             GraphStep::Filter("drop", _) => received(flow, Action::Delete, None, &mut visit),
+            // A GQL `DELETE` asks `Delete` on the data of each target as its own static facts
+            // state it (the current object is not the target): what `drop()` asks on the same
+            // elements. `DETACH` asks nothing more, like `drop()` of a vertex with its edges.
+            #[cfg(feature = "gql")]
+            GraphStep::FlatBarrier("gql:delete", step) => {
+                let deletes = step.gql_deletes();
+                if deletes.is_empty() {
+                    return visit(AccessRequest::new(
+                        Action::Delete,
+                        Resource::data(None, None),
+                    ));
+                }
+                for (element, label) in deletes {
+                    visit(AccessRequest::new(
+                        Action::Delete,
+                        Resource::data(element, label),
+                    ))?;
+                }
+                Ok(())
+            }
             GraphStep::Barrier("infer_schema", _) => {
                 visit(AccessRequest::new(Action::Read, Resource::Schema))
             }
@@ -587,7 +611,7 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     /// - every step that passes its input on unchanged keeps the flow: filters, side effects,
     ///   modulators, step labels, `identity()`, the ordering and windowing barriers
     ///   (`barrier`, `dedup`, `limit`, `order`, `range`, `sample`, `skip`, `tail`, the GQL
-    ///   `gql:order` and `gql:distinct`; their
+    ///   `gql:order`, `gql:distinct` and `gql:delete`; their
     ///   `Scope.local` forms are map steps) and the writes of the received
     ///   elements (`property`, ...); `add_label` / `drop_label` / `set_label` keep the kind but
     ///   forget the labels, and so do the GQL `gql:set` / `gql:remove` when an item changes
@@ -663,6 +687,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                 | "gql:order" | "gql:distinct",
                 _,
             ) => flow,
+            // A GQL `DELETE` passes its rows on unchanged (their current objects may be
+            // removed, but the plan states the same kind and labels for them).
+            #[cfg(feature = "gql")]
+            GraphStep::FlatBarrier("gql:delete", _) => flow,
             // The GQL row of an aggregation, the element a variable holds and the items of a
             // `FOR` list: the plan states none of them. No GQL write reads this flow: the GQL
             // `INSERT` steps (`gql:insert_node`, `gql:insert_edge`) state the element they
@@ -1773,6 +1801,14 @@ pub(crate) trait GraphStepFlatBarrier<'g, S: GraphStorage + 'g>:
         context: &mut TraverserContext<'_, S>,
         source: Vec<Traverser<S>>,
     ) -> TraverserResult<Option<Vec<Traverser<S>>>>;
+    /// The data a GQL `DELETE` step (`gql:delete`) removes, from its own static target facts,
+    /// never from the flow (the current object is not the target): one `(element kind,
+    /// label)` per request, in target order ([`GraphStep::for_each_access_in`]). Empty by
+    /// default; only with the `gql` feature.
+    #[cfg(feature = "gql")]
+    fn gql_deletes(&self) -> Vec<(Option<crate::graph::ElementKind>, Option<&str>)> {
+        Vec::new()
+    }
     /// The text query of `nearest("emb", "text", k)` with its property key; see
     /// [`GraphStepMap::text_query_mut`].
     fn text_query_mut(

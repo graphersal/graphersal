@@ -3,6 +3,8 @@ pub(crate) mod step_dedup;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_aggregate;
 #[cfg(feature = "gql")]
+pub(crate) mod step_gql_delete;
+#[cfg(feature = "gql")]
 mod step_gql_distinct;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_order;

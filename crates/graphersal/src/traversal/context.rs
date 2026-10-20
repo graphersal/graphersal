@@ -124,6 +124,11 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// `GraphTraversalSource::with_now`, else taken on the first create
     /// ([`Self::create_context`]).
     pub(crate) create_context: Option<crate::graph::schema::defaults::CreateContext>,
+    /// What the GQL `DELETE` steps of this execution removed (feature `gql`): the labels of
+    /// the deleted edges for `type(r)` (E3 of stage 3d) and whether anything was deleted (the
+    /// returned-element check of a `RETURN`, W28).
+    #[cfg(feature = "gql")]
+    pub(crate) gql_deleted: crate::gql::runtime::GqlDeleted<S>,
 }
 
 /// The loop counter of one active `repeat()`.
@@ -204,6 +209,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             auto_merge: false,
             rng: None,
             create_context: None,
+            #[cfg(feature = "gql")]
+            gql_deleted: crate::gql::runtime::GqlDeleted::default(),
         }
     }
 
