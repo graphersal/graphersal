@@ -574,6 +574,11 @@ impl<'q> Planner<'q> {
                     }));
                     current = None;
                 }
+                Segment::Write(_) => {
+                    // Planned from stage 3a.T4 on: `bind::check_lowerable` refuses a query
+                    // that writes before it is planned.
+                    current = None;
+                }
             }
         }
         PipelinePlan {

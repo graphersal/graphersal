@@ -639,6 +639,11 @@ fn segment_shapes(q: &BoundQuery) -> Vec<String> {
             Segment::For(clause) => format!("for{}", 1 + usize::from(clause.ordinal.is_some())),
             Segment::Call(call) => format!("call{}", call.outputs.len()),
             Segment::Rows(rows) => format!("rows{}", rows.outputs.len()),
+            Segment::Write(write) => match &**write {
+                BoundWrite::Insert(insert) => {
+                    format!("insert{}+{}", insert.nodes.len(), insert.edges.len())
+                }
+            },
         })
         .collect()
 }
@@ -3381,10 +3386,377 @@ fn binding_never_panics_on_parenthesized_path_patterns() {
     assert!(bound_bodies > 300, "{bound_bodies}");
 }
 
-// ----- stage 3a.T1: write clauses parse, the binder refuses them until 3a.T2 -----
+// ----- stage 3a.T2: INSERT / CREATE, FINISH, queries ending in a write -----
+
+fn insert_of(q: &BoundQuery, segment: usize) -> &BoundInsert {
+    match q.segments.get(segment) {
+        Some(Segment::Write(write)) => match &**write {
+            BoundWrite::Insert(insert) => insert,
+        },
+        other => panic!("segment {segment} is no write: {other:?}"),
+    }
+}
+
+/// Every linear query of `q` with those of its `CALL` bodies (what `check_lowerable` is given).
+fn all_linears(q: &BoundQuery) -> Vec<&BoundLinear> {
+    let calls = q.segments.iter().filter_map(|s| match s {
+        Segment::Call(call) => Some(&*call.body),
+        _ => None,
+    });
+    std::iter::once(&q.body)
+        .chain(calls)
+        .flat_map(BoundComposite::linears)
+        .collect()
+}
+
+fn label_texts(labels: &[Identifier]) -> Vec<&str> {
+    labels.iter().map(|l| l.name.as_str()).collect()
+}
 
 #[test]
-fn insert_and_finish_are_not_yet_bound() {
+fn insert_binds_new_nodes_and_edges() {
+    let query = "INSERT (a:person&admin&person {name: 'ann', age: 1 + 1})-[e:knows {since: \
+                 2020}]->(b IS person), (:city)<-[:lives]-(b)";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["insert3+2"]);
+    assert!(q.unit, "a leading INSERT starts from the unit row");
+    assert_eq!(q.end, QueryEnd::Write);
+    assert!(q.columns.is_empty());
+    assert!(q.writes());
+    let insert = insert_of(&q, 0);
+    assert!(!insert.cypher);
+    assert_eq!(&query[insert.keyword.start..insert.keyword.end], "INSERT");
+    let (a, e, b) = (id(&q, "a"), id(&q, "e"), id(&q, "b"));
+    let nodes: Vec<BindingId> = insert.nodes.iter().map(|n| n.binding).collect();
+    assert_eq!(nodes[..2], [a, b]);
+    assert_eq!(label_texts(&insert.nodes[0].labels), ["person", "admin"]);
+    assert_eq!(label_texts(&insert.nodes[1].labels), ["person"]);
+    assert_eq!(label_texts(&insert.nodes[2].labels), ["city"]);
+    let keys: Vec<&str> = insert.nodes[0]
+        .properties
+        .iter()
+        .map(|p| p.key.name.as_str())
+        .collect();
+    assert_eq!(keys, ["name", "age"]);
+    let age = &insert.nodes[0].properties[1];
+    assert_eq!(&query[age.span.start..age.span.end], "age: 1 + 1");
+    assert!(age.bindings.is_empty());
+    let knows = &insert.edges[0];
+    assert_eq!(
+        (knows.binding, knows.source, knows.target),
+        (e, a, b),
+        "-[e]-> leaves a and enters b"
+    );
+    assert_eq!(knows.label.name, "knows");
+    assert_eq!(knows.properties.len(), 1);
+    // `<-[:lives]-(b)`: the edge leaves b and enters the city.
+    let lives = &insert.edges[1];
+    assert_eq!((lives.source, lives.target), (b, insert.nodes[2].binding));
+    assert_eq!(lives.direction, EdgeDirection::Left);
+    assert!(insert.reads.is_empty(), "nothing bound before the clause");
+    for binding in [a, e, b] {
+        let binding = q.binding(binding).unwrap();
+        assert_eq!(binding.segment, 0);
+        assert_eq!(binding.column, None);
+    }
+    assert_eq!(q.binding(e).unwrap().kind, BindingKind::Edge);
+    // CREATE is the same clause.
+    let q = ok("create (a:person)-[:knows]->(a)");
+    let insert = insert_of(&q, 0);
+    assert!(insert.cypher);
+    assert_eq!(insert.nodes.len(), 1);
+    let self_loop = &insert.edges[0];
+    assert_eq!(self_loop.source, self_loop.target);
+}
+
+#[test]
+fn insert_refers_to_bound_nodes_and_cuts_the_pipeline() {
+    let query = "MATCH (n:person) WHERE n.age > 30 INSERT (n)-[:knows]->(m:person {age: n.age + 1}) \
+                 RETURN m, n";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["match[0]", "insert1+1"]);
+    let (n, m) = (id(&q, "n"), id(&q, "m"));
+    let insert = insert_of(&q, 1);
+    assert_eq!(insert.nodes[0].binding, m);
+    assert_eq!((insert.edges[0].source, insert.edges[0].target), (n, m));
+    assert_eq!(insert.reads, [n]);
+    assert_eq!(insert.nodes[0].properties[0].bindings, [n]);
+    assert!(
+        q.binding(n).unwrap().read,
+        "the edge step and the property read n"
+    );
+    assert!(q.binding(m).unwrap().read, "an end of the new edge");
+    assert_eq!(q.binding(m).unwrap().segment, 1);
+    assert_eq!(q.end, QueryEnd::Return);
+    assert_eq!(column_names(&q), ["m", "n"]);
+    // A clause after the write opens a segment of its own (design W9).
+    let q = ok("MATCH (n) INSERT (n)-[:T]->(m) MATCH (m)-->(x) WHERE x.k = n.k RETURN x");
+    assert_eq!(segment_shapes(&q), ["match[0]", "insert1+1", "match[1]"]);
+    let q = ok("INSERT (a:X) FILTER a.k IS NULL RETURN a");
+    assert_eq!(segment_shapes(&q), ["insert1+0", "match[]"]);
+    // RETURN * lists the named variables of the INSERT in the order they entered the scope.
+    let q = ok("MATCH (n) INSERT (n)-[e:T]->(m), (:X) RETURN *");
+    assert_eq!(column_names(&q), ["n", "e", "m"]);
+    // A FOR item may be an end (design E3: it must hold a node when the edge is created).
+    let q = ok("MATCH p = (a)-->(b) FOR x IN nodes(p) INSERT (x)-[:T]->(:Y)");
+    assert_eq!(q.binding(id(&q, "x")).unwrap().kind, BindingKind::Node);
+    // A WITH column holding a node is a node.
+    let q = ok("MATCH (n) WITH DISTINCT n INSERT (n)-[:T]->(:Y)");
+    let insert = insert_of(&q, 2);
+    assert_eq!(insert.reads.len(), 1);
+    // NEXT after a write: the RETURN before it is a WITH.
+    let q = ok("INSERT (a:X) RETURN a NEXT MATCH (a)-[:T]->(b) RETURN b");
+    assert_eq!(segment_shapes(&q), ["insert1+0", "match[0]"]);
+}
+
+#[test]
+fn insert_reference_and_variable_rules() {
+    for (query, text, message) in [
+        (
+            "MATCH (n) INSERT (n:X)-[:T]->(m)",
+            "n",
+            "the variable `n` is already bound; INSERT refers to a bound node only as (n), \
+             without labels or properties",
+        ),
+        (
+            "MATCH (n) CREATE (n {k: 1})-[:T]->(m)",
+            "n",
+            "the variable `n` is already bound; CREATE refers to a bound node only as (n), \
+             without labels or properties",
+        ),
+        (
+            "INSERT (a:X), (a:Y)-[:T]->(b)",
+            "a",
+            "the node `a` is created earlier in this INSERT; a later occurrence refers to it and \
+             carries no labels or properties",
+        ),
+        (
+            "MATCH ()-[e]->() INSERT (a)-[e:T]->(b)",
+            "e",
+            "the variable `e` is already bound; INSERT creates a new edge, whose variable must \
+             be a new name",
+        ),
+        (
+            "INSERT (a)-[e:T]->(b), (b)-[e:T]->(c)",
+            "e",
+            "the variable `e` is already bound; INSERT creates a new edge, whose variable must \
+             be a new name",
+        ),
+        (
+            "MATCH ()-[e]->() INSERT (e)-[:T]->(b)",
+            "e",
+            "the variable `e` is used as a node here but is already bound to an edge; a variable \
+             is either a node or an edge",
+        ),
+        (
+            "INSERT (a)-[e:T]->(e)",
+            "e",
+            "the variable `e` is used as a node here but is already bound to an edge; a variable \
+             is either a node or an edge",
+        ),
+        (
+            "MATCH p = (a)-->(b) INSERT (p)-[:T]->(b)",
+            "p",
+            "the variable `p` is used as a node here but is a path variable; a path variable \
+             cannot name a node or an edge",
+        ),
+        (
+            "LET x = 1 INSERT (x)-[:T]->(b)",
+            "x",
+            "`x` is a value defined by LET or WITH, not a node; a pattern variable is a new name \
+             or a node or edge variable",
+        ),
+        (
+            "FOR x IN [1] WITH ORDINALITY i INSERT (i)-[:T]->(b)",
+            "i",
+            "the variable `i` is the position of a FOR item (a number), not a node",
+        ),
+        (
+            "MATCH (n) INSERT (n)",
+            "(n)",
+            "the pattern (n) creates nothing: `n` is already bound; a node pattern in INSERT \
+             creates a node unless an edge connects it",
+        ),
+        (
+            "INSERT (a:X), (a)",
+            "(a)",
+            "the pattern (a) creates nothing: `a` is already bound; a node pattern in INSERT \
+             creates a node unless an edge connects it",
+        ),
+        (
+            "MATCH (a) ((x)-[r]->(y)){1,2} (b) INSERT (x)-[:T]->(b)",
+            "x",
+            "`x` is a group variable (the list of the nodes of a quantified path pattern), not \
+             one node; an edge in INSERT connects two nodes",
+        ),
+        (
+            "INSERT ({a: 1, a: 2})",
+            "a",
+            "the key `a` appears twice in this map",
+        ),
+        ("INSERT (:X {v: y})", "y", "the variable `y` is not defined"),
+        (
+            "MATCH (n) WITH n.age AS a INSERT (:X {v: n.age})",
+            "n",
+            "the variable `n` is not in scope: the WITH before does not carry it",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.message, message, "{query}");
+    }
+    // An aggregate cannot stand in a property map (design W8).
+    let f = fail("MATCH (n) INSERT (:X {c: count(n)})");
+    assert_eq!(
+        f.message,
+        "the aggregate function count() cannot be used in INSERT"
+    );
+    assert!(
+        f.alternative
+            .as_deref()
+            .is_some_and(|a| a.contains("WITH p, count(f.age) AS n INSERT")),
+        "{f:?}"
+    );
+    let f = fail("MATCH (n) CREATE (:X {c: collect_list(n.k)})");
+    assert_eq!(
+        f.message,
+        "the aggregate function collect_list() cannot be used in CREATE"
+    );
+    // Reading an element the same clause creates: not yet.
+    for (query, text) in [
+        ("INSERT (a {x: 1}), (b {y: a.x})", "a.x"),
+        ("INSERT (a)-[e:T {w: b.k}]->(b)", "b.k"),
+        ("INSERT (a {x: 1})-[:T {w: a.x}]->(b)", "a.x"),
+    ] {
+        let parsed = parse(query).unwrap();
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(
+            f.message,
+            "reading an element that the same INSERT creates is not yet supported in this version"
+        );
+    }
+}
+
+#[test]
+fn substitutions_read_across_a_write_are_materialized_before_it() {
+    // Design W10: `a` stands for `n.age`; read after the write, it is the value from before it.
+    let query = "MATCH (n) WITH n, n.age AS a INSERT (:X {v: a})";
+    let q = ok(query);
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "insert1+0"]);
+    let Some(Segment::With(with)) = q.segments.get(1) else {
+        panic!("{:?}", q.segments);
+    };
+    assert_eq!(
+        with.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["n", "a"]
+    );
+    assert_eq!(with.columns[1].bindings, [id(&q, "n")]);
+    let a = id(&q, "a");
+    let column = q.binding(a).unwrap().column.unwrap();
+    assert_eq!((column.segment, column.column), (1, 1));
+    let value = &insert_of(&q, 2).nodes[0].properties[0];
+    assert_eq!(value.bindings, [a], "the value reads the column, not n.age");
+    // LET too; the RETURN reads the column.
+    let q = ok("MATCH (n) LET a = n.age INSERT (n)-[:T]->(:X) RETURN a, n");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with2", "insert1+1"]);
+    assert_eq!(q.columns[0].bindings, [id(&q, "a")]);
+    let n_column = q.columns[1].variable.unwrap();
+    assert_ne!(n_column, id(&q, "n"), "n continues as the WITH column");
+    assert_eq!(insert_of(&q, 2).edges[0].source, n_column);
+    // A value holding a subquery reads the graph too.
+    // (`match[0]` is the pipeline of the COUNT body.)
+    let q = ok("LET c = COUNT { MATCH (m) RETURN m } INSERT (:X) RETURN c");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with1", "insert1+0"]);
+    // A constant stays a substitution: nothing to materialize.
+    let q = ok("LET a = 1, b = $p INSERT (:X {v: a, w: b}) RETURN a");
+    assert_eq!(segment_shapes(&q), ["insert1+0"]);
+    let values: Vec<&Expr> = insert_of(&q, 0).nodes[0]
+        .properties
+        .iter()
+        .map(|p| &p.value)
+        .collect();
+    assert!(matches!(values[0].kind, ExprKind::Literal(_)), "{values:?}");
+    assert!(
+        matches!(values[1].kind, ExprKind::Parameter(_)),
+        "{values:?}"
+    );
+    // Materialized once: a second write reads the columns.
+    let q = ok("MATCH (n) LET a = n.age INSERT (:X) INSERT (:Y {v: a}) RETURN a");
+    assert_eq!(
+        segment_shapes(&q),
+        ["match[0]", "with2", "insert1+0", "insert1+0"]
+    );
+    // A CALL whose body writes is a write: the values are materialized before it.
+    let q = ok("MATCH (n) LET a = n.age CALL (n) { INSERT (n)-[:T]->(:X) } RETURN a");
+    assert_eq!(
+        segment_shapes(&q),
+        ["match[0]", "with2", "insert1+1", "call0"]
+    );
+    // Without a write a projecting WITH stays a substitution (read-only queries bind as before).
+    let q = ok("MATCH (n) WITH n, n.age AS a RETURN a");
+    assert_eq!(segment_shapes(&q), ["match[0]"]);
+    assert!(!q.writes());
+    let q = ok("MATCH (n) LET a = n.age CALL (n) { MATCH (n)-->(m) RETURN m } RETURN a, m");
+    assert_eq!(segment_shapes(&q), ["match[0]", "match[1]", "call1"]);
+}
+
+#[test]
+fn writes_inside_call_bodies() {
+    let q = ok("MATCH (p) CALL (p) { INSERT (p)-[:T]->(:X) } RETURN p");
+    assert_eq!(segment_shapes(&q), ["match[0]", "insert1+1", "call0"]);
+    let Some(Segment::Call(call)) = q.segments.get(2) else {
+        panic!("{:?}", q.segments);
+    };
+    assert_eq!(call.imports, [id(&q, "p")]);
+    assert!(call.outputs.is_empty(), "a unit subquery returns no column");
+    assert_eq!(call.body.first.first.end, QueryEnd::Write);
+    assert!(
+        call.body.first.first.unit,
+        "the body starts from the outer row"
+    );
+    assert!(q.writes());
+    // A body that writes and returns.
+    let q = ok("MATCH (p) CALL (p) { INSERT (p)-[:T]->(x:X) RETURN x } RETURN p, x");
+    let Some(Segment::Call(call)) = q.segments.get(2) else {
+        panic!("{:?}", q.segments);
+    };
+    assert_eq!(call.outputs.len(), 1);
+    assert_eq!(column_names(&q), ["p", "x"]);
+    // Cypher's importing WITH, and OPTIONAL CALL.
+    let q = ok("MATCH (p) OPTIONAL CALL { WITH p CREATE (p)-[:T]->(:X) } RETURN p");
+    assert!(q.writes());
+    // A name the body does not import is a new node of the body (as in Neo4j).
+    let q = ok("MATCH (p) CALL { INSERT (p)-[:T]->(:X) } RETURN p");
+    let Some(Segment::Call(call)) = q.segments.get(2) else {
+        panic!("{:?}", q.segments);
+    };
+    assert!(call.imports.is_empty());
+    assert_eq!(insert_of(&q, 1).nodes.len(), 2);
+}
+
+#[test]
+fn finish_and_write_endings_return_no_row() {
+    let q = ok("MATCH (n) FINISH");
+    assert!(matches!(q.end, QueryEnd::Finish(_)));
+    assert!(q.columns.is_empty() && q.order_by.is_empty());
+    assert!(!q.writes());
+    let q = ok("MATCH (n) INSERT (n)-[:T]->(:X) FINISH");
+    assert!(matches!(q.end, QueryEnd::Finish(_)));
+    assert!(q.writes());
+    let q = ok("MATCH (n) INSERT (n)-[:T]->(:X);");
+    assert_eq!(q.end, QueryEnd::Write);
+    let q = ok("MATCH (n) RETURN n");
+    assert_eq!(q.end, QueryEnd::Return);
+}
+
+#[test]
+fn the_lowering_boundary_refuses_writes_and_finish_until_they_are_planned() {
     for (query, text, what) in [
         ("INSERT (n:person {name: 'ann'})", "INSERT", "INSERT"),
         (
@@ -3398,9 +3770,16 @@ fn insert_and_finish_are_not_yet_bound() {
             "INSERT",
         ),
         ("MATCH (n) FINISH", "FINISH", "FINISH"),
+        (
+            "MATCH (n) CALL (n) { MATCH (n)-->(m) FINISH } RETURN n",
+            "FINISH",
+            "FINISH",
+        ),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind(&parsed));
+        let q = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
+        let result = check_lowerable(&parsed, &q, &all_linears(&q)).map(|()| q);
+        let f = failure(query, result);
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
         assert_eq!(f.gqlstatus, "0A000");
         assert_eq!(f.text, text, "{query}");
@@ -3410,8 +3789,25 @@ fn insert_and_finish_are_not_yet_bound() {
         );
         assert!(f.alternative.is_some(), "{query}");
     }
+    let parsed = parse("MATCH (n) RETURN n").unwrap();
+    let q = bind(&parsed).unwrap();
+    assert!(check_lowerable(&parsed, &q, &all_linears(&q)).is_ok());
     // A read clause before the INSERT is bound first: its errors come first.
     let parsed = parse("MATCH (n) WHERE x > 1 INSERT (m)").unwrap();
     let f = failure("MATCH (n) WHERE x > 1 INSERT (m)", bind(&parsed));
     assert_eq!(f.kind, GqlErrorKind::Semantic, "{f:?}");
+}
+
+#[test]
+fn insert_property_subqueries_bind_with_their_segment() {
+    // A whole-query subquery body adds segments while the map is bound; the new bindings
+    // still belong to the write segment.
+    let q = ok("MATCH (n) INSERT (n)-[:T]->(x:X {c: COUNT { MATCH (n)-->(m) RETURN m }}) RETURN x");
+    let write = q
+        .segments
+        .iter()
+        .position(|s| matches!(s, Segment::Write(_)))
+        .unwrap();
+    assert_eq!(q.binding(id(&q, "x")).unwrap().segment, write);
+    assert_eq!(insert_of(&q, write).reads, [id(&q, "n")]);
 }

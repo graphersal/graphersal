@@ -111,7 +111,7 @@ use super::ast::{
 };
 use super::bind::{
     BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, BoundStep, Column, ColumnRef,
-    Conjunct, Count, Predicate, Segment, SortKey, bind_with_parameters,
+    Conjunct, Count, Predicate, Segment, SortKey, bind_with_parameters, check_lowerable,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -1321,6 +1321,7 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
+    check_lowerable(&parsed, &bound, &linears(&bound))?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -2733,7 +2734,8 @@ impl<'q> Lowering<'q> {
                 | Segment::Optional(_)
                 | Segment::For(_)
                 | Segment::Call(_)
-                | Segment::Rows(_) => Vec::new(),
+                | Segment::Rows(_)
+                | Segment::Write(_) => Vec::new(),
             })
             .chain(
                 self.linears
@@ -3093,7 +3095,9 @@ impl<'q> Lowering<'q> {
                     Segment::For(_) => 'f',
                     Segment::Call(_) => 'c',
                     Segment::Rows(_) => 'n',
-                    Segment::Match(_) | Segment::Optional(_) => return CompactString::default(),
+                    Segment::Match(_) | Segment::Optional(_) | Segment::Write(_) => {
+                        return CompactString::default();
+                    }
                 };
                 let mut label = format!("#{kind}{k}");
                 while labels.iter().any(|l| l.as_str() == label) {
@@ -3128,7 +3132,8 @@ fn linears(bound: &BoundQuery) -> Vec<&BoundLinear> {
         | Segment::Optional(_)
         | Segment::With(_)
         | Segment::For(_)
-        | Segment::Rows(_) => None,
+        | Segment::Rows(_)
+        | Segment::Write(_) => None,
     });
     let bodies = bound.subqueries.iter().filter_map(|s| s.query.as_deref());
     std::iter::once(&bound.body)

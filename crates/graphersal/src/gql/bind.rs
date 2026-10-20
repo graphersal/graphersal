@@ -240,6 +240,39 @@
 //!   ends in a `RETURN` of exactly one column. A `COUNT { }` of `MATCH` clauses binds like
 //!   `EXISTS`.
 //!
+//! # Writes (stage 3a)
+//!
+//! - **`INSERT` / `CREATE`** is a cut (design W9): a [`Segment::Write`] holding a
+//!   [`BoundInsert`], so the planner never moves a read across it. Every node pattern is a new
+//!   node ([`InsertNode`]: a new binding of that segment, its labels, its property map) unless
+//!   its variable is in scope: then it refers to that node (bound before the clause, or created
+//!   earlier in it) and carries no labels and no properties (design W5, 42002). Every edge
+//!   pattern is a new edge ([`InsertEdge`], its variable a new name, 42002 otherwise) from its
+//!   source to its target as written (`<-[]-` reversed). A FOR item may be an end (design E3);
+//!   a value, a path, an edge, a group variable or a FOR ordinal may not (42002); a pattern
+//!   that is a lone reference creates nothing (42002). Named new elements enter the scope, so
+//!   `RETURN *` lists them. Whether a referenced node is `NULL` (an `OPTIONAL MATCH`) is known
+//!   only when the edge is created.
+//! - **Property maps** (design W8) are expressions over the scope before the clause and
+//!   parameters, substituted like any expression: no aggregate (42002), no key twice (42002),
+//!   no read of an element the same clause creates (`NotYet`: read it in a later clause). The
+//!   bindings they read and the ends bound before the clause are [`BoundInsert::reads`], all
+//!   marked read; so is every end of a new edge.
+//! - **Substitutions across writes (design W10).** A `LET` / projecting-`WITH` name is
+//!   re-evaluated where it is read, which after a write could see the write. So before every
+//!   write clause (an `INSERT`, a `CALL` whose body writes) where a name in scope stands for a
+//!   value that reads a binding or holds a subquery, the whole scope is materialized as a
+//!   `WITH *` ([`Segment::With`]); later reads read its columns. Names standing for constants
+//!   and parameters stay substitutions; a query without writes binds exactly as before.
+//! - **Writes in `CALL` bodies (design W3)** bind like at the top level; a body ending in a
+//!   write returns no column (a unit subquery, its [`BoundCall::outputs`] empty). The parser
+//!   refuses writes in subquery expressions (`EXISTS`, `COUNT`, `COLLECT`, comprehensions).
+//! - **Endings (design W2).** [`BoundLinear::end`]: a linear query ends in `RETURN`, in
+//!   `FINISH` or in a clause that writes; the last two have no columns and return no row.
+//!
+//! The planner and the lowering take writes from stage 3a.T4 on; until then
+//! [`check_lowerable`] refuses a query that writes, or ends in `FINISH`, as not yet supported.
+//!
 //! # Aggregates
 //!
 //! Aggregate calls stand in `RETURN` and `WITH` items only; a key of `ORDER BY` may hold one
@@ -276,6 +309,10 @@
 //! inside one, a variable written twice in one body, an outer name written in a body without
 //! a quantifier. Stage 2e 42002: a quantified body's variable that is bound already, a group
 //! variable of a body bound again or with a property read outside it.
+//! Stage 3a 42002: a node reference in `INSERT` with labels or properties, an `INSERT` edge
+//! variable that is bound already, an end that is no node, a lone reference creating nothing,
+//! an aggregate or a duplicate key in an `INSERT` property map; `NotYet`: a property value
+//! reading an element the same `INSERT` creates.
 //!
 //! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies; every one of them
 //! lowers (`UNION` and `NEXT` since 2d.T4, `[OPTIONAL] CALL { }` since 2d.T5, `COUNT { }`,
@@ -309,12 +346,12 @@ use std::rc::Rc;
 
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery, ComprehensionForm,
-    CountClause, EdgeDirection, Expr, ExprKind, ForClause, GroupBy, Identifier, InsertClause,
-    LabelExpr, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry,
-    MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath,
-    PathPattern, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
-    ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
-    UnionKind, WithClause,
+    CountClause, EdgeDirection, EdgePattern, Expr, ExprKind, ForClause, GroupBy, Identifier,
+    InsertClause, LabelExpr, LabelExprKind, LetClause, LinearQuery, ListComprehension,
+    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NodePattern, OrderBy,
+    OrdinalKind, ParenthesizedPath, PathPattern, PatternStep, ProjectionItem, Quantifier, Query,
+    QueryBlock, QueryEnd, ReduceAccumulator, ReturnItem, SortDirection, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -412,7 +449,13 @@ impl Binding {
         match segments.get(self.segment) {
             Some(Segment::Optional(_)) => true,
             Some(Segment::Call(call)) => call.optional,
-            Some(Segment::Match(_) | Segment::With(_) | Segment::For(_) | Segment::Rows(_))
+            Some(
+                Segment::Match(_)
+                | Segment::With(_)
+                | Segment::For(_)
+                | Segment::Rows(_)
+                | Segment::Write(_),
+            )
             | None => false,
         }
     }
@@ -594,6 +637,10 @@ pub(crate) enum Segment {
     /// design E19: `NEXT` after a `UNION` block, or a `UNION` block after `NEXT`): its columns
     /// are new bindings (module docs, "Composite queries"). It has no conjuncts of its own.
     Rows(Box<BoundRows>),
+    /// A write clause (stage 3a: `INSERT` / `CREATE`): a cut (design W9), so no read moves
+    /// across it; the elements it creates are new bindings of this segment (module docs,
+    /// "Writes"). It has no conjuncts of its own.
+    Write(Box<BoundWrite>),
 }
 
 /// A bound `[OPTIONAL] CALL (..) { body }` (stage 2d).
@@ -623,6 +670,99 @@ pub(crate) struct BoundRows {
     pub(crate) span: Span,
 }
 
+/// A bound write clause (stage 3a, [`Segment::Write`]; module docs, "Writes"). One variant per
+/// write clause; `SET`, `REMOVE`, `DELETE` and `MERGE` join in later stages.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BoundWrite {
+    /// `INSERT` / Cypher `CREATE`.
+    Insert(BoundInsert),
+}
+
+impl BoundWrite {
+    /// The bindings declared before the clause that it reads (endpoints bound before it, the
+    /// bindings its property expressions read), sorted, without duplicates.
+    pub(crate) fn reads(&self) -> &[BindingId] {
+        match self {
+            BoundWrite::Insert(insert) => &insert.reads,
+        }
+    }
+
+    /// The write keyword as written (`INSERT`, `create`, ...).
+    pub(crate) fn keyword(&self) -> Span {
+        match self {
+            BoundWrite::Insert(insert) => insert.keyword,
+        }
+    }
+}
+
+/// A bound `INSERT pattern, ..` / `CREATE pattern, ..` (stage 3a, design W5-W8): the elements
+/// created once per incoming row. Every new node comes before every edge (an edge needs both
+/// ends); each edge's ends are new nodes of this clause or nodes bound before it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundInsert {
+    /// The new nodes in text order (each node pattern that is not a reference).
+    pub(crate) nodes: Vec<InsertNode>,
+    /// The new edges in text order.
+    pub(crate) edges: Vec<InsertEdge>,
+    /// The bindings declared before the clause that it reads (the ends bound before it and
+    /// what the property expressions read), sorted, without duplicates.
+    pub(crate) reads: Vec<BindingId>,
+    /// Written as Cypher `CREATE`.
+    pub(crate) cypher: bool,
+    /// The keyword as written.
+    pub(crate) keyword: Span,
+    /// The clause.
+    pub(crate) span: Span,
+}
+
+/// A node an `INSERT` creates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertNode {
+    /// Its binding (new; named or anonymous, of the clause's [`Segment::Write`]).
+    pub(crate) binding: BindingId,
+    /// Its labels in written order, each once (`:A&B`, `:A:B`, `IS A & B`; none: a node without
+    /// a label).
+    pub(crate) labels: Vec<Identifier>,
+    /// Its inline property map.
+    pub(crate) properties: Vec<InsertProperty>,
+    /// The node pattern.
+    pub(crate) span: Span,
+}
+
+/// An edge an `INSERT` creates.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertEdge {
+    /// Its binding (new; named or anonymous, of the clause's [`Segment::Write`]).
+    pub(crate) binding: BindingId,
+    /// Its one label (its type).
+    pub(crate) label: Identifier,
+    /// The node it leaves (for `<-[]-` the node written after it).
+    pub(crate) source: BindingId,
+    /// The node it enters.
+    pub(crate) target: BindingId,
+    /// The direction as written.
+    pub(crate) direction: EdgeDirection,
+    /// Its inline property map.
+    pub(crate) properties: Vec<InsertProperty>,
+    /// The edge pattern.
+    pub(crate) span: Span,
+}
+
+/// One entry `key: expr` of the inline property map of an inserted element (design W8): any
+/// expression over the bindings before the clause and parameters, no aggregate; `NULL` stores
+/// no property (W20, at run time).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertProperty {
+    /// The property key.
+    pub(crate) key: Identifier,
+    /// The value (`LET` / `WITH` names substituted).
+    pub(crate) value: Expr,
+    /// The bindings it reads, sorted, without duplicates.
+    pub(crate) bindings: Vec<BindingId>,
+    /// `key: expr`.
+    pub(crate) span: Span,
+}
+
 /// A bound linear query: one pipeline and its result statement (a `UNION` operand, a block
 /// after `NEXT`, or the whole query). Chained linear queries `q1 NEXT q2` are desugared into
 /// one (design E19), `q1`'s `RETURN` becoming a `WITH`.
@@ -647,6 +787,10 @@ pub(crate) struct BoundLinear {
     /// holds no binding (design M1). In a `CALL` body or a whole-query subquery body that row is
     /// the outer row.
     pub(crate) unit: bool,
+    /// How it ends (stage 3a): `RETURN` (its columns), `FINISH` or a last clause that writes
+    /// (design W2); the last two return no row and have no columns, sort keys, `OFFSET` or
+    /// `LIMIT`.
+    pub(crate) end: QueryEnd,
     /// From its first clause to the end of its result statement.
     pub(crate) span: Span,
 }
@@ -974,6 +1118,68 @@ impl BoundQuery {
     pub(crate) fn aggregated(&self) -> bool {
         self.columns.iter().any(|c| c.aggregate)
     }
+
+    /// The first write clause of the query in segment order (`CALL` bodies included: their
+    /// segments are in the one table); `None` for a read-only query.
+    pub(crate) fn first_write(&self) -> Option<&BoundWrite> {
+        self.segments.iter().find_map(|segment| match segment {
+            Segment::Write(write) => Some(&**write),
+            Segment::Match(_)
+            | Segment::Optional(_)
+            | Segment::With(_)
+            | Segment::For(_)
+            | Segment::Call(_)
+            | Segment::Rows(_) => None,
+        })
+    }
+
+    /// Whether the query writes (holds a write clause anywhere).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by the tests; the planner from 3a.T4")
+    )]
+    pub(crate) fn writes(&self) -> bool {
+        self.first_write().is_some()
+    }
+}
+
+/// Refuses, as not yet supported, what the binder accepts and the planner and the lowering do
+/// not take yet (stage 3a until 3a.T4): a write clause, `FINISH`, a query ending in a write.
+/// The planner never sees such a query. `linears`: every linear query of `bound`, those of
+/// `CALL` bodies and whole-query subquery bodies included.
+pub(crate) fn check_lowerable(
+    query: &Query,
+    bound: &BoundQuery,
+    linears: &[&BoundLinear],
+) -> Result<(), TraverserError> {
+    let error = if let Some(write) = bound.first_write() {
+        let word = query.text(write.keyword()).to_ascii_uppercase();
+        Some(not_yet(
+            write.keyword(),
+            &word,
+            "create the elements with the Gremlin steps add_v() and add_e(), for example \
+             g.add_v(\"person\").property(\"name\", \"ann\")",
+        ))
+    } else {
+        linears
+            .iter()
+            .find_map(|linear| match linear.end {
+                QueryEnd::Return => None,
+                QueryEnd::Finish(word) => Some((word, "FINISH")),
+                QueryEnd::Write => Some((linear.span, "a query without RETURN")),
+            })
+            .map(|(span, what)| {
+                not_yet(
+                    span,
+                    what,
+                    "end the query with RETURN, for example MATCH (p:person) RETURN count(*)",
+                )
+            })
+    };
+    match error {
+        Some(error) => Err(error.into_error(&query.source)),
+        None => Ok(()),
+    }
 }
 
 /// Binds `query` without checking parameter values (the caller checks them later).
@@ -1131,17 +1337,6 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
     )
 }
 
-/// The refusal of a parsed `INSERT` / `CREATE` until the write clauses are bound (stage 3a.T2).
-fn insert_not_yet(clause: &InsertClause) -> Box<GqlErrorBuilder> {
-    let word = if clause.cypher { "CREATE" } else { "INSERT" };
-    not_yet(
-        clause.keyword,
-        word,
-        "create the elements with the Gremlin steps add_v() and add_e(), for example \
-         g.add_v(\"person\").property(\"name\", \"ann\")",
-    )
-}
-
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {
     Box::new(
         GqlErrorBuilder::new(
@@ -1264,6 +1459,15 @@ struct Substitution {
     shape: Shape,
     /// The bindings it reads, sorted, without duplicates.
     bindings: Vec<BindingId>,
+}
+
+impl Substitution {
+    /// Whether its value may change when the graph changes (design W10): it reads a binding
+    /// (a property, labels, a degree, ...) or holds a subquery. A constant or a parameter
+    /// expression does not.
+    fn reads_graph(&self) -> bool {
+        !self.bindings.is_empty() || holds_subquery(&self.expr)
+    }
 }
 
 /// The size of an expression tree: height, nesting the evaluator recurses on (left spines are
@@ -2068,22 +2272,20 @@ impl<'q> Binder<'q> {
         unit: bool,
         span: Span,
     ) -> BResult<Box<BoundLinear>> {
-        match last.end() {
-            QueryEnd::Return => {}
-            QueryEnd::Finish(word) => {
-                return Err(not_yet(
-                    word,
-                    "FINISH",
-                    "end the query with RETURN, for example MATCH (p:person) RETURN count(*)",
-                ));
-            }
-            QueryEnd::Write => {
-                return Err(not_yet(
-                    last.span,
-                    "a query without RETURN",
-                    "end the query with RETURN, for example MATCH (p:person) RETURN p.name",
-                ));
-            }
+        let end = last.end();
+        if end != QueryEnd::Return {
+            // `FINISH` or a last clause that writes (design W2): no row, no column.
+            return Ok(Box::new(BoundLinear {
+                pipeline: Vec::new(),
+                columns: Vec::new(),
+                distinct: false,
+                order_by: Vec::new(),
+                offset: None,
+                limit: None,
+                unit,
+                end,
+                span,
+            }));
         }
         let ret = &last.ret;
         let mut columns = self.projection(ret.star, &ret.items, "RETURN")?;
@@ -2102,6 +2304,7 @@ impl<'q> Binder<'q> {
             offset,
             limit,
             unit,
+            end,
             span,
         }))
     }
@@ -2167,8 +2370,13 @@ impl<'q> Binder<'q> {
             Stage::Filter(clause) => self.filter_stage(&clause.condition),
             Stage::With(with) => self.with_clause(&WithParts::of(with)),
             Stage::For(clause) => self.for_clause(clause),
-            Stage::Call(clause) => self.call_clause(clause),
-            Stage::Insert(clause) => Err(insert_not_yet(clause)),
+            Stage::Call(clause) => {
+                if composite_writes(&clause.body) {
+                    self.materialize_for_write(clause.span)?;
+                }
+                self.call_clause(clause)
+            }
+            Stage::Insert(clause) => self.insert_clause(clause),
         }
     }
 
@@ -2235,6 +2443,7 @@ impl<'q> Binder<'q> {
             span: ret.span,
             clause: "RETURN",
             dropper: Dropper::Next,
+            materialize: false,
         })
     }
 
@@ -2423,6 +2632,7 @@ impl<'q> Binder<'q> {
                 Segment::For(f) => ids.extend_from_slice(&f.bindings),
                 Segment::With(with) => result(&with.columns, &with.order_by, &mut ids),
                 Segment::Call(call) => ids.extend_from_slice(&call.imports),
+                Segment::Write(write) => ids.extend_from_slice(write.reads()),
                 Segment::Match(_) | Segment::Optional(_) | Segment::Rows(_) => {}
             }
         }
@@ -2875,21 +3085,7 @@ impl<'q> Binder<'q> {
         let (var, id) = match (variable, existing) {
             (Some(var), Some(Symbol::Binding(id))) => (var, id),
             (Some(var), Some(Symbol::Value(_))) => {
-                return Err(semantic(
-                    var.span,
-                    format!(
-                        "`{}` is a value defined by LET or WITH, not a {}; a pattern variable is \
-                         a new name or a node or edge variable",
-                        var.name,
-                        kind_word(site.kind)
-                    ),
-                )
-                .alternative(format!(
-                    "give the pattern element its own name and compare it, as in ({}2 WHERE ...)",
-                    var.name
-                ))
-                .topic(GqlHelpTopic::PatternVariable)
-                .into());
+                return Err(value_as_element(var, site.kind));
             }
             (_, _) => return Ok(self.new_binding(site, variable, span, labels, None)),
         };
@@ -3087,6 +3283,278 @@ impl<'q> Binder<'q> {
         }
     }
 
+    // ----- writes (stage 3a) -----
+
+    /// Before a write clause (an `INSERT`, a `CALL` whose body writes): when a `LET` /
+    /// projecting-`WITH` name in scope stands for a value that may change with the graph
+    /// ([`Substitution::reads_graph`]), the whole scope is materialized as a `WITH *` (a
+    /// [`Segment::With`], design W10), so a read after the write sees the value from before
+    /// it. Without such a name nothing changes (a query without writes binds exactly as
+    /// before).
+    fn materialize_for_write(&mut self, span: Span) -> BResult<()> {
+        let stale = self
+            .scope
+            .entries
+            .iter()
+            .any(|(_, symbol)| matches!(symbol, Symbol::Value(s) if s.reads_graph()));
+        if !stale {
+            return Ok(());
+        }
+        self.with_clause(&WithParts {
+            distinct: false,
+            star: Some(span),
+            items: &[],
+            group_by: None,
+            order_by: None,
+            offset: None,
+            limit: None,
+            where_clause: None,
+            span,
+            clause: "WITH",
+            dropper: Dropper::With,
+            materialize: true,
+        })
+    }
+
+    /// `INSERT pattern, ..` / `CREATE pattern, ..` (module docs, "Writes"): a cut
+    /// ([`Segment::Write`]) whose new nodes and edges enter the scope; the property
+    /// expressions read the scope before the clause.
+    #[inline(never)]
+    fn insert_clause(&mut self, clause: &InsertClause) -> BResult<()> {
+        let word = if clause.cypher { "CREATE" } else { "INSERT" };
+        if self.subquery.is_some() {
+            // The parser refuses writes inside subquery expressions (`write_ban`).
+            return Err(Box::new(semantic(
+                clause.keyword,
+                format!("{word} cannot stand inside a subquery expression"),
+            )));
+        }
+        self.materialize_for_write(clause.keyword)?;
+        let first = self.bindings.len();
+        let mut nodes: Vec<(InsertNode, Option<&MapLiteral>)> = Vec::new();
+        let mut edges: Vec<(InsertEdge, Option<&MapLiteral>)> = Vec::new();
+        for path in &clause.patterns {
+            let (start, created) = self.insert_node(word, first, &path.start, &mut nodes)?;
+            if path.steps.is_empty() && !created {
+                return Err(creates_nothing(
+                    word,
+                    &path.start,
+                    self.query.text(path.span),
+                ));
+            }
+            let mut before = start;
+            for step in &path.steps {
+                let edge = self.insert_edge(word, &step.edge)?;
+                let (node, _) = self.insert_node(word, first, &step.node, &mut nodes)?;
+                let e = &step.edge;
+                let (source, target) = match e.direction {
+                    EdgeDirection::Right => (before, node),
+                    EdgeDirection::Left => (node, before),
+                    EdgeDirection::Any => {
+                        return Err(Box::new(semantic(
+                            e.span,
+                            format!("internal error: an undirected edge in {word}"),
+                        )));
+                    }
+                };
+                edges.push(edge_of(edge, source, target, e)?);
+                before = node;
+            }
+        }
+        let declared = first..self.bindings.len();
+        // The property expressions, in text order of the elements (nodes first).
+        let place = if clause.cypher { IN_CREATE } else { IN_INSERT };
+        let mut reads: Vec<BindingId> = Vec::new();
+        for (node, map) in &mut nodes {
+            node.properties = self.insert_properties(word, place, *map, &declared, &mut reads)?;
+        }
+        for (edge, map) in &mut edges {
+            edge.properties = self.insert_properties(word, place, *map, &declared, &mut reads)?;
+        }
+        // The ends bound before the clause are read by the edge steps too.
+        let mut ends: Vec<BindingId> = edges
+            .iter()
+            .flat_map(|(e, _)| [e.source, e.target])
+            .collect();
+        reads.extend(ends.iter().copied().filter(|id| id.0 < first));
+        reads.retain(|id| id.0 < first);
+        reads.sort_unstable();
+        reads.dedup();
+        ends.sort_unstable();
+        ends.dedup();
+        self.mark_read(&reads);
+        self.mark_read(&ends);
+        // The new bindings belong to the clause's segment, numbered once the property
+        // expressions are bound (a whole-query subquery body inside one adds segments).
+        let segment = self.segments.len();
+        for binding in self.bindings.get_mut(declared).unwrap_or(&mut []) {
+            binding.segment = segment;
+        }
+        let insert = BoundInsert {
+            nodes: nodes.into_iter().map(|(n, _)| n).collect(),
+            edges: edges.into_iter().map(|(e, _)| e).collect(),
+            reads,
+            cypher: clause.cypher,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        self.push_numbered(
+            Segment::Write(Box::new(BoundWrite::Insert(insert))),
+            segment,
+            clause.span,
+        )?;
+        self.open = None;
+        Ok(())
+    }
+
+    /// One node pattern of an `INSERT` (design W5): a new node (appended to `nodes`, its map
+    /// bound later) or a reference to a node bound before the clause or created earlier in it
+    /// (no labels, no properties). Returns its binding and whether it is new.
+    fn insert_node<'n>(
+        &mut self,
+        word: &str,
+        first: usize,
+        node: &'n NodePattern,
+        nodes: &mut Vec<(InsertNode, Option<&'n MapLiteral>)>,
+    ) -> BResult<(BindingId, bool)> {
+        let existing = node
+            .variable
+            .as_ref()
+            .and_then(|var| Some((var, self.scope.get(&var.name)?.clone())));
+        let Some((var, symbol)) = existing else {
+            let site = Site {
+                clause: self.clause,
+                segment: self.segments.len(),
+                kind: BindingKind::Node,
+                group: false,
+            };
+            let labels = node.labels.as_ref();
+            let id = self.new_binding(site, node.variable.as_ref(), node.span, labels, None);
+            let insert = InsertNode {
+                binding: id,
+                labels: labels.map(label_names).unwrap_or_default(),
+                properties: Vec::new(),
+                span: node.span,
+            };
+            nodes.push((insert, node.properties.as_ref()));
+            return Ok((id, true));
+        };
+        let id = match symbol {
+            Symbol::Binding(id) => id,
+            Symbol::Value(_) => return Err(value_as_element(var, BindingKind::Node)),
+        };
+        if node.labels.is_some() || node.properties.is_some() {
+            return Err(reference_with_parts(word, var, id.0 >= first));
+        }
+        let binding = self.bindings.get(id.0).ok_or_else(|| {
+            semantic(
+                var.span,
+                "internal error: a binding id out of range in the binder",
+            )
+        })?;
+        let for_column = if binding.kind == BindingKind::Value {
+            self.for_column(id)
+        } else {
+            None
+        };
+        if for_column == Some(FOR_ORDINAL) {
+            return Err(ordinal_as_element(var, BindingKind::Node));
+        }
+        // A FOR item written as a node takes that kind (design E3); a non-node item is an
+        // error when the edge is created.
+        let retype = for_column == Some(FOR_ITEM);
+        if binding.kind != BindingKind::Node && !retype {
+            return Err(kind_conflict(var, BindingKind::Node, binding.kind));
+        }
+        if binding.group {
+            return Err(group_as_end(word, var));
+        }
+        if let Some(binding) = self.bindings.get_mut(id.0) {
+            binding.kind = BindingKind::Node;
+            binding.occurrences.push(node.span);
+        }
+        Ok((id, false))
+    }
+
+    /// The binding of one edge pattern of an `INSERT` (design W5): always new.
+    fn insert_edge(&mut self, word: &str, edge: &EdgePattern) -> BResult<BindingId> {
+        if let Some(var) = &edge.variable
+            && self.scope.get(&var.name).is_some()
+        {
+            return Err(semantic(
+                var.span,
+                format!(
+                    "the variable `{}` is already bound; {word} creates a new edge, whose \
+                     variable must be a new name",
+                    var.name
+                ),
+            )
+            .alternative(format!(
+                "give the new edge its own name, as in -[{}2:T]->",
+                var.name
+            ))
+            .topic(GqlHelpTopic::PatternVariable)
+            .into());
+        }
+        let site = Site {
+            clause: self.clause,
+            segment: self.segments.len(),
+            kind: BindingKind::Edge,
+            group: false,
+        };
+        Ok(self.new_binding(
+            site,
+            edge.variable.as_ref(),
+            edge.span,
+            edge.labels.as_ref(),
+            None,
+        ))
+    }
+
+    /// The inline property map of an inserted element (design W8): no duplicate key, no
+    /// aggregate, no read of an element the same clause creates (`declared`); what the values
+    /// read is added to `reads`.
+    fn insert_properties(
+        &mut self,
+        word: &str,
+        place: &'static str,
+        map: Option<&MapLiteral>,
+        declared: &std::ops::Range<usize>,
+        reads: &mut Vec<BindingId>,
+    ) -> BResult<Vec<InsertProperty>> {
+        let Some(map) = map else {
+            return Ok(Vec::new());
+        };
+        check_map_keys(map)?;
+        let mut properties = Vec::with_capacity(map.entries.len());
+        for entry in &map.entries {
+            let resolved = self.expression(Ctx::refusing(place), &entry.value)?;
+            if resolved
+                .refs
+                .bindings
+                .iter()
+                .any(|id| declared.contains(&id.0))
+            {
+                return Err(not_yet(
+                    entry.value.span,
+                    &format!("reading an element that the same {word} creates"),
+                    &format!(
+                        "create it in a {word} of its own and read it in the next one, as in \
+                         {word} (a {{x: 1}}) {word} (b {{y: a.x}})"
+                    ),
+                ));
+            }
+            reads.extend_from_slice(&resolved.refs.bindings);
+            properties.push(InsertProperty {
+                key: entry.key.clone(),
+                value: resolved.expr,
+                bindings: resolved.refs.bindings,
+                span: entry.key.span.to(entry.value.span),
+            });
+        }
+        Ok(properties)
+    }
+
     // ----- LET and WITH -----
 
     fn let_clause(&mut self, clause: &LetClause) -> BResult<()> {
@@ -3243,7 +3711,8 @@ impl<'q> Binder<'q> {
         let (columns, names) = self.projection_named(with.star, with.items, with.clause)?;
         let distinct = with.distinct || self.group_by(with.group_by, &columns)?;
         let aggregated = columns.iter().any(|c| c.aggregate);
-        let materializing = aggregated
+        let materializing = with.materialize
+            || aggregated
             || distinct
             || with.order_by.is_some()
             || with.offset.is_some()
@@ -5209,6 +5678,9 @@ struct WithParts<'w> {
     clause: &'static str,
     /// What drops the names it does not carry.
     dropper: Dropper,
+    /// Materialize the columns even without an aggregate, `DISTINCT`, `ORDER BY`, `OFFSET` or
+    /// `LIMIT` (design W10: the `WITH *` before a write clause).
+    materialize: bool,
 }
 
 impl<'w> WithParts<'w> {
@@ -5225,6 +5697,7 @@ impl<'w> WithParts<'w> {
             span: with.span,
             clause: "WITH",
             dropper: Dropper::With,
+            materialize: false,
         }
     }
 }
@@ -5306,6 +5779,187 @@ fn kind_conflict(var: &Identifier, here: BindingKind, there: BindingKind) -> Box
     };
     Box::new(semantic(var.span, message).topic(GqlHelpTopic::PatternVariable))
 }
+
+/// The error of a `LET` / `WITH` value name written as a pattern element.
+fn value_as_element(var: &Identifier, kind: BindingKind) -> Box<GqlErrorBuilder> {
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{}` is a value defined by LET or WITH, not a {}; a pattern variable is a new \
+                 name or a node or edge variable",
+                var.name,
+                kind_word(kind)
+            ),
+        )
+        .alternative(format!(
+            "give the pattern element its own name and compare it, as in ({}2 WHERE ...)",
+            var.name
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a node reference in an `INSERT` with labels or properties (design W5, 42002):
+/// `created` when the same clause creates the node earlier.
+fn reference_with_parts(word: &str, var: &Identifier, created: bool) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    let message = if created {
+        format!(
+            "the node `{name}` is created earlier in this {word}; a later occurrence refers to \
+             it and carries no labels or properties"
+        )
+    } else {
+        format!(
+            "the variable `{name}` is already bound; {word} refers to a bound node only as \
+             ({name}), without labels or properties"
+        )
+    };
+    Box::new(
+        semantic(var.span, message)
+            .alternative(format!(
+                "write ({name}) to connect the node, or give a new node its own name, as in \
+                 {word} ({name})-[:T]->({name}2:Label {{k: 1}})"
+            ))
+            .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a pattern of an `INSERT` that is a lone reference to a node it does not
+/// create (42002).
+fn creates_nothing(word: &str, node: &NodePattern, text: &str) -> Box<GqlErrorBuilder> {
+    let name = node.variable.as_ref().map_or("n", |v| v.name.as_str());
+    Box::new(
+        semantic(
+            node.span,
+            format!(
+                "the pattern {text} creates nothing: `{name}` is already bound; a node pattern in \
+                 {word} creates a node unless an edge connects it"
+            ),
+        )
+        .alternative(format!(
+            "connect it with a new edge, as in {word} ({name})-[:T]->(:Label), or give the new \
+             node its own name, as in {word} ({name}2:Label)"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The error of a group variable (a list of elements) written as an end of an inserted edge.
+fn group_as_end(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
+    let name = &var.name;
+    Box::new(
+        semantic(
+            var.span,
+            format!(
+                "`{name}` is a group variable (the list of the nodes of a quantified path \
+                 pattern), not one node; an edge in {word} connects two nodes"
+            ),
+        )
+        .alternative(format!(
+            "name the node outside the quantified pattern and connect that one, or iterate the \
+             list, as in FOR x IN {name} {word} (x)-[:T]->(:Label)"
+        ))
+        .topic(GqlHelpTopic::PatternVariable),
+    )
+}
+
+/// The label names of an `INSERT` node's conjunction (`A & B`, `A:B`), in written order, each
+/// once; the parser admits nothing else (walked without recursion).
+fn label_names(labels: &LabelExpr) -> Vec<Identifier> {
+    let mut names: Vec<Identifier> = Vec::new();
+    let mut pending = vec![labels];
+    while let Some(label) = pending.pop() {
+        match &label.kind {
+            LabelExprKind::Label(name) => {
+                if !names.iter().any(|n| n.name == name.name) {
+                    names.push(name.clone());
+                }
+            }
+            LabelExprKind::And(left, right) => {
+                pending.push(right);
+                pending.push(left);
+            }
+            LabelExprKind::Or(..) | LabelExprKind::Not(_) | LabelExprKind::Wildcard => {}
+        }
+    }
+    names
+}
+
+/// An inserted edge from `source` to `target` (its map bound later).
+fn edge_of(
+    binding: BindingId,
+    source: BindingId,
+    target: BindingId,
+    edge: &EdgePattern,
+) -> BResult<(InsertEdge, Option<&MapLiteral>)> {
+    let Some(LabelExpr {
+        kind: LabelExprKind::Label(label),
+        ..
+    }) = &edge.labels
+    else {
+        return Err(Box::new(semantic(
+            edge.span,
+            "internal error: an inserted edge without exactly one label",
+        )));
+    };
+    let insert = InsertEdge {
+        binding,
+        label: label.clone(),
+        source,
+        target,
+        direction: edge.direction,
+        properties: Vec::new(),
+        span: edge.span,
+    };
+    Ok((insert, edge.properties.as_ref()))
+}
+
+/// Whether `expr` holds a subquery or a pattern comprehension (walked without recursion).
+fn holds_subquery(expr: &Expr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(e) = pending.pop() {
+        if matches!(
+            e.kind,
+            ExprKind::Subquery(_) | ExprKind::PatternComprehension(_)
+        ) {
+            return true;
+        }
+        for_each_child(e, &mut |child| pending.push(child));
+    }
+    false
+}
+
+/// Whether a linear query of `composite` (nested `CALL` bodies included) holds a write clause
+/// (walked without recursion).
+fn composite_writes(composite: &CompositeQuery) -> bool {
+    let mut pending = vec![composite];
+    while let Some(c) = pending.pop() {
+        let blocks = std::iter::once(&c.first).chain(c.next.iter().map(|n| &n.block));
+        let linears =
+            blocks.flat_map(|b| std::iter::once(&b.first).chain(b.unions.iter().map(|u| &u.query)));
+        for linear in linears {
+            for stage in &linear.stages {
+                match stage {
+                    Stage::Insert(_) => return true,
+                    Stage::Call(call) => pending.push(&call.body),
+                    Stage::Match(_)
+                    | Stage::Let(_)
+                    | Stage::Filter(_)
+                    | Stage::With(_)
+                    | Stage::For(_) => {}
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The place of an aggregate inside an `INSERT` property map (refused, design W8).
+const IN_INSERT: &str = "in INSERT";
+
+/// The place of an aggregate inside a Cypher `CREATE` property map (refused, design W8).
+const IN_CREATE: &str = "in CREATE";
 
 /// `ORDINALITY` / `OFFSET` as written.
 fn ordinal_word(kind: OrdinalKind) -> &'static str {
@@ -5549,6 +6203,16 @@ fn misplaced_aggregate(name: &Identifier, place: &str) -> Box<GqlErrorBuilder> {
             "aggregate in a WITH first and use its column in the | part, as in \
              MATCH (p)-->(f) WITH p, {f}(f.age) AS n RETURN reduce(s = 0, x IN [1, 2, 3] | s + \
              x * n)"
+        )
+    } else if place == IN_INSERT || place == IN_CREATE {
+        let word = if place == IN_CREATE {
+            "CREATE"
+        } else {
+            "INSERT"
+        };
+        format!(
+            "aggregate in a WITH first and insert its column, as in \
+             MATCH (p)-->(f) WITH p, {f}(f.age) AS n {word} (p)-[:stat]->(:summary {{value: n}})"
         )
     } else if place == "in FOR" || place == "in UNWIND" {
         format!(
