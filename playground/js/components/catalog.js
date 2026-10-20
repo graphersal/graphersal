@@ -7,8 +7,10 @@
 //   definitions (a compression rule re-encodes its values).
 // - `CatalogDialogs`: the managers, hosted once by the workspace and opened through
 //   `openCatalog(id)` (store.js).
-//   * Saved queries: the queries by folder with Run, Edit, Delete and New (the editor and run
-//     form are js/components/saved-queries.js's dialog).
+//   * Saved queries: the queries by folder with their access and language badges and Run,
+//     Edit, Delete and New (the editor and run form are js/components/saved-queries.js's
+//     dialog); `openCatalog('save-as-query')` opens the editor on the active tab's text (the
+//     query tabs' "Save as query…", `state.catalogDialogScript`).
 //   * Compression: the rules with their stats (values, plain -> stored size, ratio, saving,
 //     dictionary) with Edit, Recompress and Drop, and the form (name, element, label with the
 //     graph's labels as suggestions, path, minimum size, dictionary) with the engine's field
@@ -33,7 +35,9 @@ import {
   canEstimate, draftToEstimateSpec, estimateView, estimateSummary, histogramRows, applyCandidate,
   CODECS, ESTIMATE_CODECS, withCodec,
 } from '../compression.js';
-import { queryTree, signatureText, errorsByField, accessBadge } from '../saved-queries.js';
+import {
+  queryTree, signatureText, errorsByField, accessBadge, languageBadge, draftFromScript,
+} from '../saved-queries.js';
 import {
   catalogMenuItems, indexRow, indexTotals, newTransformIndexDraft, indexDraftToSpec, defaultIndexName,
   INDEX_TYPES, INDEX_TRANSFORMS, indexTypeOf, indexTransformOf, indexNotServedReason,
@@ -101,6 +105,12 @@ export const SavedQueriesManager = {
     function openNew() { close(); editor.value.openNew('', { back: open }); }
     function openEdit(q) { close(); editor.value.openEdit(q.name, { back: open }); }
     function openRun(q) { close(); editor.value.openRun(q.name, { back: open }); }
+    /** "Save as query…" of a query tab: the editor on a draft of its text; the list after Save. */
+    async function openFromScript(script) {
+      await refreshSavedQueries();
+      close();
+      await editor.value.openDraft(draftFromScript(script), { back: open });
+    }
     async function remove(q) {
       if (!window.confirm(`Delete the saved query "${q.name}"? Scripts that call it fail afterwards.`)) return;
       try {
@@ -112,8 +122,10 @@ export const SavedQueriesManager = {
     }
     const tooltip = (q) => [signatureText(q), q.description, q.status === 'error' ? `Fails: ${q.error}` : null]
       .filter(Boolean).join('\n');
-    expose({ open, close });
-    return { state, dlg, editor, tree, count, close, openNew, openEdit, openRun, remove, tooltip, accessBadge };
+    expose({ open, close, openFromScript });
+    return {
+      state, dlg, editor, tree, count, close, openNew, openEdit, openRun, remove, tooltip, accessBadge, languageBadge,
+    };
   },
   template: `
   <dialog ref="dlg" class="catalog-dialog" aria-labelledby="cq-title">
@@ -122,7 +134,7 @@ export const SavedQueriesManager = {
       <button type="button" class="icon-btn" @click="close" aria-label="Close">×</button>
     </div>
     <div class="dialog-body">
-      <p class="muted sq-note">Named, parameterized queries stored in the graph; call one with g.query("name", #{…}) or Run it here. R/O queries only read; an R/W query changes data, only what its body writes (inferred when it is saved), and Run asks first. They travel with the catalog file (Catalog ▸ Save catalog) and with a snapshot.</p>
+      <p class="muted sq-note">Named, parameterized queries stored in the graph, written in Rhai or in GQL; call one with g.query("name", #{…}) or Run it here. Save as query… in a query tab's ⋯ menu starts one from the tab. R/O queries only read; an R/W query changes data, only what its body writes (inferred when it is saved), and Run asks first. They travel with the catalog file (Catalog ▸ Save catalog) and with a snapshot.</p>
       <div v-if="state.savedQueriesError" class="field-error">{{ state.savedQueriesError }}</div>
       <p v-else-if="!count" class="muted">No saved queries yet.</p>
       <template v-for="grp in tree" :key="grp.folder">
@@ -130,6 +142,7 @@ export const SavedQueriesManager = {
         <div v-for="q in grp.queries" :key="q.name" class="catalog-row">
           <span class="code" :title="tooltip(q)">{{ q.name }}</span>
           <span :class="'badge ' + accessBadge(q).kind" :title="accessBadge(q).title">{{ accessBadge(q).text }}</span>
+          <span class="badge" :title="languageBadge(q).title">{{ languageBadge(q).text }}</span>
           <span v-if="q.description" class="faint sq-desc">{{ q.description }}</span>
           <span class="spacer"></span>
           <button type="button" class="btn small" @click="openRun(q)">Run…</button>
@@ -612,6 +625,11 @@ export const CatalogDialogs = {
       state.catalogDialog = null;
       await nextTick();
       if (id === 'queries' && queries.value) await queries.value.open();
+      if (id === 'save-as-query' && queries.value) {
+        const script = state.catalogDialogScript;
+        state.catalogDialogScript = null;
+        await queries.value.openFromScript(script || '');
+      }
       if (id === 'compression' && compression.value) await compression.value.open();
       if (id === 'indexes' && indexes.value) await indexes.value.open();
     });

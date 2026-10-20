@@ -95,5 +95,7 @@ export const dslHighlight = syntaxHighlighting(HighlightStyle.define([
   { tag: t.atom, color: 'var(--syn-keyword)' },
   { tag: t.comment, color: 'var(--syn-comment)', fontStyle: 'italic' },
   { tag: t.variableName, color: 'var(--syn-var)' },
+  // GQL `$name` parameters (js/editor/gql-language.js).
+  { tag: t.special(t.variableName), color: 'var(--syn-number)', fontWeight: '600' },
   { tag: [t.operator, t.punctuation], color: 'var(--text-muted)' },
 ]));

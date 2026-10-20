@@ -51,3 +51,51 @@ def test_gql_create_writes():
     )
     assert rows == [{"name": "x"}]
     assert graph.query('g.V().has("name", "x").count().next()') == 1
+
+
+def test_a_saved_query_written_in_gql_is_defined_listed_and_called():
+    graph = graphersal.Graph.tinkerpop_modern()
+    graph.define_query(
+        {
+            "name": "older",
+            "language": "gql",
+            "params": {"min": {"schema": {"type": "integer"}, "default": 30}},
+            "body": "MATCH (p:person) WHERE p.age > $min\nRETURN p.name AS name ORDER BY name",
+        }
+    )
+    entry = graph.get_query("older")
+    assert entry["language"] == "gql"
+    assert entry["dialect"] == "graphersal-gql/1"
+    assert entry["body"].startswith("MATCH (p:person)")
+    assert [(q["name"], q["language"]) for q in graph.queries()] == [("older", "gql")]
+    assert graph.call_query("older", {"min": 29}) == [{"name": "josh"}, {"name": "peter"}]
+    assert graph.call_query("older") == [{"name": "josh"}, {"name": "peter"}]
+    # Gremlin steps may continue the call.
+    assert graph.execute('g.query("older", #{min: 0}).count().next()') == 4
+
+    # One that writes: the writing dialect, its effects, denied under a read-only policy.
+    graph.define_query(
+        {
+            "name": "add_person",
+            "language": "gql",
+            "params": {"name": "string"},
+            "body": "INSERT (:person {name: $name})",
+        }
+    )
+    entry = graph.get_query("add_person")
+    assert entry["dialect"] == "graphersal-gql/2"
+    assert [e["text"] for e in entry["effects"]] == ['Create Data(vertex "person")']
+    graph.call_query("add_person", {"name": "ann"})
+    assert graph.execute('g.v().has("name", "ann").count().next()') == 1
+    with pytest.raises(graphersal.GraphersalError) as excinfo:
+        graph.call_query("add_person", {"name": "bob"}, policy=graphersal.AccessPolicy.read_only())
+    assert "Permission denied" in str(excinfo.value)
+    assert graph.execute('g.v().has("name", "bob").count().next()') == 0
+
+    # A $name the params do not declare is refused when it is saved.
+    with pytest.raises(graphersal.GraphersalError) as excinfo:
+        graph.define_query(
+            {"name": "bad", "language": "gql", "body": "MATCH (p) WHERE p.age > $min RETURN p"}
+        )
+    assert "$min" in str(excinfo.value)
+    assert graph.get_query("bad") is None

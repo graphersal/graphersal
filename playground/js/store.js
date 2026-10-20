@@ -114,6 +114,7 @@ export const state = reactive({
   // hosts the dialogs; openCatalog sets it, the dialog clears it when it closes).
   catalogDialog: null,
   catalogDialogN: 0, // bumped by every openCatalog, so opening the same manager again reopens it
+  catalogDialogScript: null, // the tab text "Save as query…" hands to the saved-query editor
   focusPanel: null, // {panel, tab, n}: a request to reveal a panel/tab
   graphRequest: null, // {source, ids, n}: a request to the Graph panel (showNeighbourhood)
   jumpTo: null, // {line, column, n}: a request to move the editor cursor
@@ -1118,6 +1119,17 @@ export async function loadCatalogFile(file) {
 export function openCatalog(id) {
   state.catalogDialog = id;
   state.catalogDialogN++;
+}
+
+/**
+ * The query tabs' "Save as query…": the saved-query editor on the active tab's text (a tab
+ * holding one `g.gql(..)` call becomes a GQL query, js/saved-queries.js `draftFromScript`).
+ */
+export function saveTabAsQuery() {
+  const tab = state.tab;
+  if (!tab || tab.kind === 'ai') return;
+  state.catalogDialogScript = tab.script;
+  openCatalog('save-as-query');
 }
 
 // ------------------------------------------------------------------ compression rules

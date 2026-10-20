@@ -1,9 +1,13 @@
 // The dialog of a saved query, opened from the Catalog dropdown's Saved queries manager
 // (js/components/catalog.js), with two modes:
-// - EDIT (create or change): name, folder, description, the parameter list (name, type,
-//   constraints, default, description; add, remove, reorder) and the function body in a code
-//   editor with the DSL completion. Save calls defineQuery and shows the engine's validation
+// - EDIT (create or change): name, folder, description, the language (Rhai / GQL switch), the
+//   parameter list (name, type, constraints, default, description; add, remove, reorder) and
+//   the body in a code editor: a Rhai function body with the DSL highlighting and completion,
+//   or one GQL query with GQL highlighting (js/editor/gql-language.js) and "Add $parameters"
+//   (declares the `$name`s it reads). Save calls defineQuery and shows the engine's validation
 //   errors next to their field; Delete asks first; moving a query = changing its folder.
+//   "Save as query…" of the query tabs opens it with `draftFromScript` (a `g.gql(..)` tab: a
+//   GQL draft).
 // - RUN: a form built from the parameter schemas (number fields with min/max, a select for an
 //   enum, a checkbox for a boolean, UUID text, one line per item of a list; defaults prefilled,
 //   required fields marked, descriptions as hints). Run WRITES `g.query("name", #{..})` into a
@@ -25,9 +29,10 @@ import { storage } from '../util.js';
 import {
   PARAM_TYPES, ITEM_TYPES, newParam, newDraft, draftFromQuery, draftToSpec,
   errorsByField, formFields, initialValues, formArgs, rememberValues, formatExample,
-  accessBadge, previewText,
+  accessBadge, previewText, languageBadge, switchDraftLanguage, withDetectedParams,
 } from '../saved-queries.js';
 import { dslLanguage, dslHighlight } from '../editor/dsl-language.js';
+import { gqlLanguage } from '../editor/gql-language.js';
 import { dslCompletionSource } from '../editor/completion.js';
 import { loadCompletionData } from '../editor/completion-data.js';
 import { floatingTooltips } from '../editor/tooltips.js';
@@ -67,7 +72,20 @@ export const SavedQueryDialog = {
       await nextTick();
       destroyEditor();
       if (!host.value || !d.draft) return;
-      if (!completionData) completionData = markRaw(await loadCompletionData(state.engine));
+      const gql = d.draft.language === 'gql';
+      if (!gql && !completionData) completionData = markRaw(await loadCompletionData(state.engine));
+      // The language: Rhai with the DSL completion, or GQL (highlighting only).
+      const language = gql
+        ? [gqlLanguage]
+        : [
+          floatingTooltips(host.value),
+          autocompletion({
+            override: [dslCompletionSource(() => completionData, () => state.savedQueries)],
+            activateOnTyping: true,
+            icons: true,
+          }),
+          dslLanguage,
+        ];
       view = markRaw(new EditorView({
         parent: host.value,
         state: EditorState.create({
@@ -75,15 +93,10 @@ export const SavedQueryDialog = {
           extensions: [
             lineNumbers(), history(), drawSelection(), indentOnInput(), bracketMatching(), closeBrackets(),
             highlightActiveLine(),
-            floatingTooltips(host.value),
-            autocompletion({
-              override: [dslCompletionSource(() => completionData, () => state.savedQueries)],
-              activateOnTyping: true,
-              icons: true,
-            }),
+            ...language,
             keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...completionKeymap]),
-            dslLanguage, dslHighlight, editorTheme, EditorView.lineWrapping,
-            EditorView.contentAttributes.of({ 'aria-label': 'Body of the saved query' }),
+            dslHighlight, editorTheme, EditorView.lineWrapping,
+            EditorView.contentAttributes.of({ 'aria-label': gql ? 'GQL query of the saved query' : 'Body of the saved query' }),
             EditorView.updateListener.of((u) => {
               if (u.docChanged && d.draft) d.draft.body = u.state.doc.toString();
             }),
@@ -117,8 +130,13 @@ export const SavedQueryDialog = {
 
     /** "New saved query" (in `folder`); `options.back` is called when the dialog closes. */
     async function openNew(folder = '', options = {}) {
+      await openDraft(newDraft(folder), options);
+    }
+
+    /** The editor on a prepared draft (Save as query: `draftFromScript`); `options.back` as for `openNew`. */
+    async function openDraft(draft, options = {}) {
       back = options.back || null;
-      Object.assign(d, { mode: 'edit', draft: newDraft(folder), entry: null, errors: {}, busy: false });
+      Object.assign(d, { mode: 'edit', draft, entry: null, errors: {}, busy: false });
       show();
       await mountEditor();
     }
@@ -164,7 +182,7 @@ export const SavedQueryDialog = {
       }
     }
 
-    expose({ openNew, openEdit, openRun, close });
+    expose({ openNew, openDraft, openEdit, openRun, close });
 
     // ---------------------------------------------------------------- edit
     const fieldErrors = computed(() => (d.mode === 'edit' ? d.errors : {}));
@@ -173,6 +191,21 @@ export const SavedQueryDialog = {
       const params = d.draft.params.map((p) => p.name.trim() || '?').join(', ');
       return `fn ${d.draft.name.trim() || 'name'}(${params}) {`;
     });
+
+    /** The Rhai / GQL switch: the body is converted (switchDraftLanguage) and the editor remounted. */
+    async function setLanguage(language) {
+      if (!d.draft || d.draft.language === language) return;
+      d.draft = switchDraftLanguage(d.draft, language);
+      d.errors = {};
+      await mountEditor();
+    }
+    /** "Add $parameters": declares the `$name`s the GQL query reads that the list lacks. */
+    function addDetectedParams() {
+      const before = d.draft.params.length;
+      d.draft.params = withDetectedParams(d.draft);
+      if (d.draft.params.length === before) toast('Every $parameter of the query is declared already.', 'info', 4000);
+    }
+    const isGql = computed(() => !!d.draft && d.draft.language === 'gql');
 
     function addParam() {
       d.draft.params.push(newParam(`p${d.draft.params.length + 1}`));
@@ -276,7 +309,7 @@ export const SavedQueryDialog = {
 
     return {
       state, dlg, host, d, PARAM_TYPES, ITEM_TYPES, fieldErrors, signature, close, formatExample, accessBadge,
-      addParam, removeParam, moveParam, paramErrors, save, remove, runNow, editFromRun, onClosed,
+      languageBadge, setLanguage, addDetectedParams, isGql, addParam, removeParam, moveParam, paramErrors, save, remove, runNow, editFromRun, onClosed,
     };
   },
   template: `
@@ -297,10 +330,18 @@ export const SavedQueryDialog = {
           <label for="sq-description">Description</label>
           <input id="sq-description" type="text" v-model="d.draft.description" :class="{ invalid: fieldErrors.description }" placeholder="What it answers, in one sentence">
           <div v-for="m in fieldErrors.description || []" class="field-error sq-span">{{ m }}</div>
+          <span id="sq-language-label">Language</span>
+          <span class="segmented sq-language" role="group" aria-labelledby="sq-language-label">
+            <button v-for="l in [['rhai', 'Rhai'], ['gql', 'GQL']]" :key="l[0]" type="button" class="seg-btn"
+                    :aria-pressed="String(d.draft.language === l[0])" :class="{ active: d.draft.language === l[0] }"
+                    :title="l[0] === 'gql' ? 'One GQL query; its $name parameters are declared below' : 'A Rhai function body (Gremlin steps)'"
+                    @click="setLanguage(l[0])">{{ l[1] }}</button>
+          </span>
+          <div v-for="m in fieldErrors.language || []" class="field-error sq-span">{{ m }}</div>
         </div>
 
         <h3>Parameters</h3>
-        <p v-if="!d.draft.params.length" class="muted sq-note">No parameters. Callers pass named values, for example g.query("name", #{limit: 5}).</p>
+        <p v-if="!d.draft.params.length" class="muted sq-note">No parameters. Callers pass named values, for example g.query("name", #{limit: 5}){{ isGql ? '; the query reads one as $limit' : '' }}.</p>
         <div v-for="(p, i) in d.draft.params" :key="i" class="sq-param" :class="{ invalid: paramErrors(p, i).length }">
           <div class="sq-param-row">
             <input type="text" v-model="p.name" class="sq-param-name" :aria-label="'Name of parameter ' + (i + 1)" placeholder="name" spellcheck="false">
@@ -335,14 +376,18 @@ export const SavedQueryDialog = {
         </div>
         <div v-for="m in fieldErrors.params || []" class="field-error">{{ m }}</div>
         <button type="button" class="btn small" @click="addParam" style="margin-top:6px">+ Add parameter</button>
+        <button v-if="isGql" type="button" class="btn small" @click="addDetectedParams" style="margin-top:6px"
+                title="Declare every $name the query reads that the list above lacks (as a string; change the type)">+ Add $parameters of the query</button>
 
-        <h3>Body</h3>
-        <p v-if="d.draft.raw" class="muted sq-note">The whole function text (its stored layout cannot be split): keep <code>fn {{ d.draft.name || 'name' }}(…)</code> and its parameters in step with the list above.</p>
+        <h3>{{ isGql ? 'GQL query' : 'Body' }}</h3>
+        <p v-if="isGql" class="muted sq-note">One GQL query, stored as written (no g.gql(…) around it). Every $name it reads is a parameter declared above, and every declared parameter is read.</p>
+        <p v-else-if="d.draft.raw" class="muted sq-note">The whole function text (its stored layout cannot be split): keep <code>fn {{ d.draft.name || 'name' }}(…)</code> and its parameters in step with the list above.</p>
         <div v-else class="sq-signature mono">{{ signature }}</div>
         <div ref="host" class="sq-editor" :class="{ invalid: fieldErrors.body }"></div>
-        <div v-if="!d.draft.raw" class="sq-signature mono">}</div>
+        <div v-if="!d.draft.raw && !isGql" class="sq-signature mono">}</div>
         <div v-for="m in fieldErrors.body || []" class="field-error">{{ m }}</div>
-        <p class="muted sq-note">Return a traversal (callers can continue it, read-only) or a value. A body that writes data is saved as R/W: a returned writing traversal such as <code>g.add_v("person").property("name", name)</code> runs when the query is called, and callers continue over what it wrote.</p>
+        <p v-if="isGql" class="muted sq-note">A call returns the query's rows like g.gql(…), and callers may continue it with Gremlin steps. A query with INSERT or CREATE is saved as R/W: it writes when it is called.</p>
+        <p v-else class="muted sq-note">Return a traversal (callers can continue it, read-only) or a value. A body that writes data is saved as R/W: a returned writing traversal such as <code>g.add_v("person").property("name", name)</code> runs when the query is called, and callers continue over what it wrote.</p>
         <div v-for="m in [...(fieldErrors.general || []), ...(fieldErrors.meta || [])]" class="field-error">{{ m }}</div>
 
         <div class="sq-buttons">
@@ -358,6 +403,7 @@ export const SavedQueryDialog = {
       <div class="dialog-head">
         <h2 id="sq-title">Run "{{ d.entry.name }}"</h2>
         <span :class="'badge ' + accessBadge(d.entry).kind" :title="accessBadge(d.entry).title">{{ accessBadge(d.entry).text }}</span>
+        <span class="badge" :title="languageBadge(d.entry).title">{{ languageBadge(d.entry).text }}</span>
         <span class="spacer"></span>
         <button type="button" class="icon-btn" @click="close" aria-label="Close">×</button>
       </div>

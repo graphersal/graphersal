@@ -2825,6 +2825,110 @@ fn saved_queries_that_write_over_http_and_mcp() {
     assert_eq!(ghosts(port), 0);
 }
 
+/// Saved queries written in GQL: defined over HTTP (the playground's editor) and with a script
+/// through the MCP `query` tool, listed with their language and dialect, run with
+/// `run_saved_query` (and as a tool of their own); read-only mode hides the one that writes.
+#[test]
+fn saved_queries_written_in_gql_over_http_and_mcp() {
+    let ui = ui_dir("mcp-gql-queries");
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let older = r#"{"name": "older", "language": "gql", "description": "People older than an age", "params": [{"name": "min", "schema": {"type": "integer"}, "default": 30}], "body": "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name"}"#;
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        &ui_arg,
+        "--mcp",
+        "--mcp-query-tools",
+    ]);
+    let port = server.port;
+    let defined = post(port, "/api/queries/define", older).json();
+    assert_eq!(defined["ok"], true, "{defined}");
+    assert_eq!(defined["query"]["language"], "gql");
+    assert_eq!(defined["query"]["dialect"], "graphersal-gql/1");
+    let mut mcp = McpClient::connect(port, &[]);
+    let tools = mcp.rpc("tools/list", serde_json::json!({}));
+    let listed = tools["result"]["tools"].as_array().unwrap();
+    for name in ["list_saved_queries", "run_saved_query"] {
+        let tool = listed.iter().find(|t| t["name"] == name).unwrap();
+        assert!(
+            tool["description"].as_str().unwrap().contains("gql"),
+            "{tool}"
+        );
+    }
+    // A writing GQL query defined by a script through the query tool.
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.define_query(#{name: \"add_person\", language: \"gql\", params: #{name: \"string\"}, body: \"INSERT (:person {name: $name})\"})"}),
+    );
+    assert!(!error, "{text}");
+    let (error, text) = mcp.call("list_saved_queries", serde_json::json!({}));
+    assert!(!error, "{text}");
+    assert!(text.contains("\"language\": \"gql\""), "{text}");
+    assert!(text.contains("\"dialect\": \"graphersal-gql/1\""), "{text}");
+    assert!(text.contains("\"dialect\": \"graphersal-gql/2\""), "{text}");
+    assert!(text.contains(r#"Create Data(vertex \"person\")"#), "{text}");
+    let (error, text) = mcp.call(
+        "run_saved_query",
+        serde_json::json!({"name": "older", "params": {"min": 29}}),
+    );
+    assert!(!error, "{text}");
+    assert!(
+        text.contains("\"name\": \"josh\"") && text.contains("\"name\": \"peter\""),
+        "{text}"
+    );
+    let (error, text) = mcp.call("older", serde_json::json!({"min": 33}));
+    assert!(
+        !error && text.contains("peter") && !text.contains("josh"),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "run_saved_query",
+        serde_json::json!({"name": "add_person", "params": {"name": "ann"}}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(
+        execute(port, "g.v().has(\"name\", \"ann\").count().next()")["execution"]["results"][0],
+        1
+    );
+    let (error, text) = mcp.call(
+        "run_saved_query",
+        serde_json::json!({"name": "older", "params": {"min": "x"}}),
+    );
+    assert!(error && text.contains("Help:"), "{text}");
+    drop(server);
+
+    // Read-only: the reading GQL query runs, the writing one is neither listed nor run.
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        &ui_arg,
+        "--mcp",
+        "--mcp-read-only",
+    ]);
+    let port = server.port;
+    assert_eq!(post(port, "/api/queries/define", older).json()["ok"], true);
+    let add = r#"{"name": "add_person", "language": "gql", "params": [{"name": "name", "schema": {"type": "string"}}], "body": "INSERT (:person {name: $name})"}"#;
+    assert_eq!(post(port, "/api/queries/define", add).json()["ok"], true);
+    let mut mcp = McpClient::connect(port, &[]);
+    let (_, text) = mcp.call("list_saved_queries", serde_json::json!({}));
+    assert!(
+        text.contains("\"older\"") && !text.contains("add_person"),
+        "{text}"
+    );
+    let (error, text) = mcp.call("run_saved_query", serde_json::json!({"name": "older"}));
+    assert!(!error && text.contains("josh"), "{text}");
+    let (error, text) = mcp.call(
+        "run_saved_query",
+        serde_json::json!({"name": "add_person", "params": {"name": "ann"}}),
+    );
+    assert!(
+        error && text.contains("changes data, and this server is read-only for MCP"),
+        "{text}"
+    );
+}
+
 /// MCP works with the graph only, also on a Store: exactly the graph tools, the persistence
 /// tools are unknown; a read-only view the browser opens is server-wide: `graph_info` and a
 /// refused write say so, the change feed carries it.

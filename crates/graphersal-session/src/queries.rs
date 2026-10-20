@@ -14,21 +14,28 @@
 //!
 //! - an **entry** (`list_queries`, `get_query`): `{name, folder, description, params: [{name,
 //!   schema, default?, required, description?}], status: "ok"|"error", error?, writes,
-//!   effects: [effect], denied_writes: [effect]}` with an effect `{action, element, label,
-//!   text}` (`element` / `label` `null` when open); `status: "error"` means the query cannot
+//!   effects: [effect], denied_writes: [effect], language, dialect}` with an effect `{action,
+//!   element, label, text}` (`element` / `label` `null` when open); `status: "error"` means the query cannot
 //!   run (unavailable: its body does not compile, its dialect is unknown, ...); `writes` says a
 //!   call may write, `denied_writes` lists the writes of a read-only query's body that a call
-//!   denies; `get_query` adds `body` (the stored function text), `dialect` and `meta`;
+//!   denies; `language` is `"rhai"` or `"gql"` (derived from the `dialect`, for example
+//!   `graphersal-rhai/1` or `graphersal-gql/2`; an unknown dialect gives its own name);
+//!   `get_query` adds `body` (the stored text) and `meta`;
 //! - a **spec** (`define_query`): `{name, folder?, description?, params?: [{name, schema,
-//!   default?}], body, meta?, replaces?}`: `body` is the text of ONE Rhai function named
-//!   `name` whose parameters are the declared ones; `replaces` names the query an edit started
-//!   from (a rename stores the new name and drops the old one in one commit);
+//!   default?}], language?, body, meta?, replaces?}`: `language` is `"rhai"` (the default) or
+//!   `"gql"`; a Rhai `body` is the text of ONE Rhai function named `name` whose parameters are
+//!   the declared ones, a GQL `body` is one plain GQL query (no `g.gql(..)` around it) whose
+//!   `$name`s are exactly the declared parameters, stored in the declared order; `replaces`
+//!   names the query an edit started from (a rename stores the new name and drops the old one
+//!   in one commit);
 //! - **field errors** (a refused `define_query`): `[{field, message, help?}]` with `field` one
-//!   of `name`, `folder`, `description`, `meta`, `body`, `params`, `params.<parameter>`, or
-//!   `general`, so an editor shows each next to its input.
+//!   of `name`, `folder`, `description`, `meta`, `language`, `body`, `params`,
+//!   `params.<parameter>`, or `general`, so an editor shows each next to its input.
 
 use graphersal::auth::{AccessRequestBuf, Resource};
-use graphersal::catalog::{Definition, DefinitionKind, QueryDefinition, QueryParam};
+use graphersal::catalog::{
+    Definition, DefinitionKind, GQL_QUERY_DIALECT, QueryDefinition, QueryParam,
+};
 use graphersal::catalog::{catalog_from_json, catalog_to_json};
 use graphersal::changes::Mutation;
 use graphersal::prelude::*;
@@ -43,8 +50,8 @@ const MAX_LITERAL_DEPTH: usize = 128;
 /// A refused definition: what is wrong with which field of the editor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldError {
-    /// `name`, `folder`, `description`, `meta`, `body`, `params`, `params.<parameter>`,
-    /// `general`; a compression rule's and a property index's form add their own fields
+    /// `name`, `folder`, `description`, `meta`, `language`, `body`, `params`,
+    /// `params.<parameter>`, `general`; a compression rule's and a property index's form add their own fields
     /// (`label`, `path`, `key`, ...).
     pub field: String,
     /// One line: what is wrong.
@@ -283,8 +290,7 @@ impl Session {
         )
     }
 
-    /// The saved query `name` (its entry plus `body`, `dialect`, `meta`), `null` when there is
-    /// none.
+    /// The saved query `name` (its entry plus `body` and `meta`), `null` when there is none.
     pub fn get_query(&self, name: &str) -> Value {
         match self.graph.query(name) {
             Some(query) => self.query_entry(name, &query, true),
@@ -341,9 +347,10 @@ impl Session {
         entry["writes"] = json!(effects.writes);
         entry["effects"] = effects.effects.iter().map(effect_json).collect();
         entry["denied_writes"] = effects.denied_writes.iter().map(effect_json).collect();
+        entry["language"] = json!(query.language());
+        entry["dialect"] = json!(query.dialect());
         if full {
             entry["body"] = json!(query.source());
-            entry["dialect"] = json!(query.dialect());
             entry["meta"] = json!(query.meta());
         }
         entry
@@ -351,7 +358,8 @@ impl Session {
 
     /// Defines (or replaces) a saved query from a spec (module docs): checked like the DSL's
     /// `g.define_query` (the catalog's rules, then the body compiled: exactly one function named
-    /// like the query, its parameters the declared ones), stored in ONE commit. Without
+    /// like the query, its parameters the declared ones; a GQL body parsed, bound and lowered,
+    /// its `$name`s the declared parameters), stored in ONE commit. Without
     /// `replaces` an existing query of that name is not overwritten (the editor's "New"); with
     /// `replaces` naming another query, the new name must be free and the old query is dropped
     /// in the same commit (a rename). Answers `{ok: true, query: <entry>}` or `{ok: false,
@@ -367,11 +375,12 @@ impl Session {
     }
 
     fn define_query_checked(&mut self, spec: &Value) -> Result<Value, Vec<FieldError>> {
-        const KEYS: [&str; 7] = [
+        const KEYS: [&str; 8] = [
             "name",
             "folder",
             "description",
             "params",
+            "language",
             "body",
             "meta",
             "replaces",
@@ -379,8 +388,8 @@ impl Session {
         let Some(object) = spec.as_object() else {
             return Err(vec![FieldError::new(
                 "general",
-                "the definition is a JSON object {name, folder?, description?, params?, body, \
-                 meta?, replaces?}",
+                "the definition is a JSON object {name, folder?, description?, params?, \
+                 language?, body, meta?, replaces?}",
             )]);
         };
         if let Some(unknown) = object.keys().find(|key| !KEYS.contains(&key.as_str())) {
@@ -403,6 +412,7 @@ impl Session {
         let folder = text("folder").map(|f| f.trim().to_string());
         let description = text("description");
         let meta = text("meta");
+        let language = text("language");
         let body = text("body").unwrap_or_default();
         let replaces = text("replaces").filter(|old| *old != name);
         let is_edit = spec
@@ -416,10 +426,25 @@ impl Session {
                 "a saved query needs a name (a Rhai identifier such as top_customers)",
             ));
         }
+        let gql = match language.as_deref().map(str::trim) {
+            None | Some("rhai") => false,
+            Some("gql") => true,
+            Some(other) => {
+                errors.push(FieldError::new(
+                    "language",
+                    format!("unknown language '{other}' (the languages are rhai and gql)"),
+                ));
+                false
+            }
+        };
         if body.trim().is_empty() {
             errors.push(FieldError::new(
                 "body",
-                "the body is empty: write the function's body",
+                if gql {
+                    "the body is empty: write the GQL query"
+                } else {
+                    "the body is empty: write the function's body"
+                },
             ));
         }
 
@@ -436,6 +461,11 @@ impl Session {
             probe_name = "q";
         }
         let mut query = QueryDefinition::new(body.clone());
+        if gql {
+            // The language travels as the dialect; `with_inferred_dialect` keeps it and sets the
+            // version the plan's writes give.
+            query = query.with_dialect(GQL_QUERY_DIALECT);
+        }
         if let Some(folder) = &folder {
             query = query.with_folder(folder.clone());
             if let Err(err) = Definition::query(
@@ -517,8 +547,10 @@ impl Session {
         }
 
         // The parameters in the order of the function's signature (as `g.define_query` stores
-        // them); a body that does not compile keeps the declared order and fails below.
-        if let Ok(ast) = self.engine.compile(&body)
+        // them); a body that does not compile keeps the declared order and fails below. A GQL
+        // query keeps the order of the editor.
+        if !gql
+            && let Ok(ast) = self.engine.compile(&body)
             && let Some(function) = ast.iter_fn_def().next()
         {
             let signature: Vec<String> = function.params.iter().map(|p| p.to_string()).collect();
@@ -916,6 +948,93 @@ mod tests {
                 .contains("it changes the schema"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_query_written_in_gql_is_defined_listed_and_run() {
+        let mut s = modern();
+        let answer = s.define_query(&json!({
+            "name": "older",
+            "language": "gql",
+            "params": [{"name": "min", "schema": {"type": "integer"}, "default": 30}],
+            "body": "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name",
+        }));
+        assert_eq!(answer["ok"], true, "{answer}");
+        let entry = &answer["query"];
+        assert_eq!(entry["language"], "gql");
+        assert_eq!(entry["dialect"], "graphersal-gql/1");
+        assert_eq!(entry["writes"], false);
+        assert!(
+            entry["body"]
+                .as_str()
+                .unwrap()
+                .starts_with("MATCH (p:person)")
+        );
+        let listed = &s.list_queries(None)[0];
+        assert_eq!(listed["language"], "gql");
+        assert_eq!(listed["dialect"], "graphersal-gql/1");
+        assert!(listed.get("body").is_none());
+
+        let text = query_call_text("older", &json!({"min": 29})).unwrap();
+        let r = run(&mut s, &format!("{text}.to_list()"));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(
+            r["execution"]["results"],
+            json!([{"name": "josh"}, {"name": "peter"}])
+        );
+
+        // A GQL query that writes: the writing dialect and its effects, previewed as a dry run.
+        let answer = s.define_query(&json!({
+            "name": "add_person",
+            "language": "gql",
+            "params": [{"name": "name", "schema": {"type": "string"}}],
+            "body": "INSERT (:person {name: $name})",
+        }));
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["query"]["dialect"], "graphersal-gql/2");
+        assert_eq!(answer["query"]["writes"], true);
+        assert_eq!(
+            answer["query"]["effects"][0]["text"],
+            "Create Data(vertex \"person\")"
+        );
+        let preview = s.preview_query("add_person", &json!({"name": "ann"}));
+        assert_eq!(preview["changes"]["vertices_added"], 1, "{preview}");
+        // A Rhai query keeps its language.
+        assert_eq!(s.define_query(&older_than())["query"]["language"], "rhai");
+
+        // Refused: a parameter the query does not declare, one it never reads, a GQL error,
+        // an unknown language.
+        let refused = s.define_query(&json!({
+            "name": "q", "language": "gql", "body": "MATCH (p) WHERE p.age > $min RETURN p",
+        }));
+        assert_eq!(refused["errors"][0]["field"], "body", "{refused}");
+        assert!(
+            refused["errors"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("$min"),
+            "{refused}"
+        );
+        let refused = s.define_query(&json!({
+            "name": "q", "language": "gql", "body": "MATCH (p) RETURN p",
+            "params": [{"name": "min", "schema": {"type": "integer"}}],
+        }));
+        assert!(
+            refused["errors"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("'min'"),
+            "{refused}"
+        );
+        let refused = s.define_query(&json!({
+            "name": "q", "language": "gql", "body": "MATCH (p RETURN p",
+        }));
+        assert_eq!(refused["errors"][0]["field"], "body", "{refused}");
+        let refused = s.define_query(&json!({
+            "name": "q", "language": "cypher", "body": "MATCH (p) RETURN p",
+        }));
+        assert_eq!(refused["errors"][0]["field"], "language", "{refused}");
+        assert_eq!(s.query_count(), 3);
     }
 
     #[test]

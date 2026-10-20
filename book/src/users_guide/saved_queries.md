@@ -405,6 +405,8 @@ g.query("hire", #{name: "ann", company: "lop"}).toList()
   include those of the GQL query, as with any called query.
 - `get_query` and `queries()` show `language: "gql"` and the dialect; the body is the query text.
 - `g.define_queries(folder, source)` stays Rhai only: define GQL queries one by one.
+- Every front end below works with GQL queries: the playground's editor has a **Rhai / GQL**
+  switch, MCP and Python list them with their `language` and call them like any other.
 
 ## Errors name the query
 
@@ -499,7 +501,14 @@ saved queries, like they carry no schema. The byte layout is in the
   reason), creates and edits them in an editor with a parameter list and the body in the code
   editor, deletes them, and runs one from a form built from its parameter schemas, which writes
   the `g.query(..)` call into a query tab. Running an **R/W** query shows a preview of what the
-  call would change first (a dry run, rolled back) and asks. Saved queries travel in the catalog file with the other
+  call would change first (a dry run, rolled back) and asks. The editor's **Rhai / GQL** switch
+  picks the [language](#saved-queries-in-gql): a GQL query is edited with GQL highlighting as the
+  whole query text (**+ Add $parameters of the query** declares the `$name`s it reads), and the
+  list shows a **Rhai** or **GQL** badge per query. **Save as query…** in a query tab's **⋯**
+  menu opens the editor on the tab's text: a tab holding one `` g.gql(`...`) `` call becomes a GQL
+  query of its inner text, with every `$name` as a parameter (typed and defaulted by the values
+  the tab passes in `#{..}`); any other tab becomes a Rhai query whose body is the tab's text.
+  Saved queries travel in the catalog file with the other
   definitions (**Catalog ▾ ▸ Save catalog**, **Load catalog**), like the schema. See
   [Web Playground](web_playground.md#saved-queries).
 - **MCP** (the [dev server](../persistence/dev_server.md#what-the-agent-gets) with `--mcp`): an AI
@@ -507,14 +516,19 @@ saved queries, like they carry no schema. The byte layout is in the
   `graphersal://saved-queries`, and is told to look for a saved query before writing a new one
   and to run one with `writes: true` only when the user asked for that change;
   `--mcp-query-tools` also offers each query as a tool of its own (`readOnlyHint` /
-  `destructiveHint` from its effects). With `--mcp-read-only` the queries that write are neither
+  `destructiveHint` from its effects). The listing carries each query's `language` (`rhai` or
+  `gql`) and `dialect`; a GQL query runs the same way and answers rows like the `gql` tool. MCP
+  has no tool that defines queries: the user does that (playground, Python, a script), or the
+  agent through the `query` tool with `g.define_query(#{..})`. With `--mcp-read-only` the queries that write are neither
   listed nor run. The **AI Chat** runs a query that writes only after the user confirmed it in the
   chat.
 - **Python**: `graph.queries(folder)`, `graph.get_query(name)`, `graph.define_query(spec)`,
   `graph.drop_query(name)` and `graph.call_query(name, params)` (`graph.query` stays the alias of
-  `execute`).
-- **CLI**: the DSL calls (`graphersal -e 'g.queries()'`); `graphersal store info <dir>` prints how
-  many definitions a Store's catalog holds.
+  `execute`); `graph.define_query({"name": .., "language": "gql", "body": "MATCH ..", "params":
+  {..}})` stores a GQL query, whose call returns its rows as `dict`s.
+- **CLI**: the DSL calls (`graphersal -e 'g.queries()'`, `g.define_query(#{.., language:
+  "gql", ..})`); `graphersal store info <dir>` prints how many definitions a Store's catalog
+  holds.
 
 In the playground, **Catalog ▾ ▸ Saved queries** lists the queries by folder:
 

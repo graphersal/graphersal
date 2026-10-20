@@ -3,12 +3,14 @@
 // A tab shows a pulsing dot while its query runs and an amber dot when its result is possibly
 // stale (another tab changed the graph after it ran). "+" opens a menu: a Query tab or an AI Chat
 // tab (its own accent colour; js/ai-chat.js). "Share as link…" opens the share dialog, like the
-// top bar's Share button (components/share-dialog.js). The state and the actions are in store.js.
+// top bar's Share button (components/share-dialog.js). "Save as query…" opens the saved-query
+// editor on the tab's text (a `g.gql(..)` tab: a query written in GQL). The state and the
+// actions are in store.js.
 
 import { ref, nextTick, watch } from 'vue';
 import {
   state, switchTab, newTab, newChatTab, closeTab, closeOtherTabs, duplicateTab, renameTab, moveTab, runAllTabs,
-  openShareDialog,
+  openShareDialog, saveTabAsQuery,
 } from '../store.js';
 import { modKey } from '../util.js';
 import { DropMenu } from './drop-menu.js';
@@ -79,7 +81,7 @@ export const QueryTabs = {
     expose({ rename: () => startRename(state.tab) });
 
     return {
-      state, editing, draftName, strip, modKey, tabTitle, openShare: openShareDialog,
+      state, editing, draftName, strip, modKey, tabTitle, openShare: openShareDialog, saveTabAsQuery,
       switchTab, closeTab, closeOtherTabs, duplicateTab, runAllTabs,
       newTab: () => newTab(), newChatTab: () => newChatTab(), startRename, commitRename, cancelRename, onAux, onDragStart, onDrop,
     };
@@ -116,6 +118,8 @@ export const QueryTabs = {
       <button class="menu-item" @click="startRename(state.tab)">Rename tab</button>
       <div class="menu-sep"></div>
       <button class="menu-item" @click="openShare()" :disabled="state.running || !state.graph" title="A link that opens this tab's query with the graph (small graphs only)">Share as link…</button>
+      <button class="menu-item" @click="saveTabAsQuery()" :disabled="!state.graph || state.tab.kind === 'ai' || !state.tab.script.trim()"
+              title="Store this tab's query in the graph as a saved query: a tab holding one g.gql(…) call is saved as a GQL query with its $parameters">Save as query…</button>
       <div class="menu-sep"></div>
       <button class="menu-item" @click="runAllTabs()" :disabled="state.running">Run all tabs <span class="spacer"></span><kbd>{{ modKey }}+Shift+Enter</kbd></button>
       <div class="menu-sep"></div>

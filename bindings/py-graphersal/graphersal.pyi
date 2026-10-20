@@ -515,7 +515,8 @@ class Graph:
     ) -> list[dict[str, Any]]:
         """The saved queries (in ``folder`` and below it): ``name``, ``folder``,
         ``description``, ``params``, ``status`` and ``error``, ``writes``, ``effects`` and
-        ``denied_writes`` each (an effect ``{"action", "element", "label", "text"}``)."""
+        ``denied_writes`` (an effect ``{"action", "element", "label", "text"}``), ``language``
+        (``"rhai"`` or ``"gql"``) and ``dialect`` each."""
     def get_query(
         self, name: str, *, policy: Optional[AccessPolicy] = None
     ) -> Optional[dict[str, Any]]:
@@ -523,8 +524,10 @@ class Graph:
     def define_query(
         self, spec: Mapping[str, Any], *, policy: Optional[AccessPolicy] = None
     ) -> None:
-        """Stores (or replaces) a saved query: ``{"name", "body", "folder"?, "description"?,
-        "params"?, "meta"?}`` as for the DSL's ``g.define_query``."""
+        """Stores (or replaces) a saved query: ``{"name", "body", "language"?, "folder"?,
+        "description"?, "params"?, "meta"?}`` as for the DSL's ``g.define_query``; with
+        ``"language": "gql"`` the body is one plain GQL query whose ``$name`` parameters are
+        exactly the declared ones (``"rhai"``, the default: one Rhai function)."""
     def drop_query(self, name: str, *, policy: Optional[AccessPolicy] = None) -> bool:
         """Removes the saved query; ``False`` when there is none."""
     def define_compression(
@@ -622,7 +625,8 @@ class Graph:
     ) -> Any:
         """Calls the saved query ``name`` with named arguments (``g.query(name, #{..})``) and
         returns its result like ``execute``. A query whose body writes data (``writes`` in
-        ``queries()``) changes only its inferred ``effects``, as one transaction."""
+        ``queries()``) changes only its inferred ``effects``, as one transaction; a query
+        written in GQL returns its rows as ``dict``s like ``g.gql()``."""
     def execute(
         self,
         script: str,

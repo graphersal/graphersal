@@ -449,7 +449,7 @@ traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries 
 see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
-stored in the graph; run one with `run_saved_query` {name, params} instead of writing it again. \
+stored in the graph (written in Rhai or, `language: \"gql\"`, in GQL); run one with `run_saved_query` {name, params} instead of writing it again. \
 Saved queries marked `writes: true` change data (their `effects` say what); run them only when \
 the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept \
 compressed in memory with a compression rule: `list_compressions`, `estimate_compression` \
@@ -729,10 +729,11 @@ fn all_tools() -> Vec<Tool> {
             Kind::Read,
             "The saved queries stored in the graph: named, parameterized queries the user wrote \
              for recurring questions and tasks. Each has a name, a folder, a description, its \
-             parameters (JSON Schema, default, required, description), a status (error: it \
-             cannot run) and writes (true: it changes data, effects lists what; run it only when \
-             the user asked for that change). Check them before writing a new query, and run \
-             one with run_saved_query.",
+             parameters (JSON Schema, default, required, description), a language (rhai: a \
+             Gremlin script function; gql: one GQL query whose $name parameters are the \
+             declared ones), a status (error: it cannot run) and writes (true: it changes data, \
+             effects lists what; run it only when the user asked for that change). Check them \
+             before writing a new query, and run one with run_saved_query.",
             json!({
                 "type": "object",
                 "properties": {
@@ -749,6 +750,8 @@ fn all_tools() -> Vec<Tool> {
              g.query(name, #{..}): the parameters are checked against their declared schemas \
              (missing required, wrong type, violated constraint: an error with a Help line), \
              defaults fill the omitted ones, and the answer is bounded like query's. A query \
+             listed with language: \"gql\" runs the same way (its parameters become the $name \
+             values of its GQL text) and answers rows like the gql tool. A query \
              listed with writes: true changes data (only what its effects name, as one \
              transaction): run it only when the user asked for that change.",
             json!({
@@ -1840,8 +1843,8 @@ const RESOURCES: [Resource; 5] = [
         name: "saved-queries",
         title: "Saved queries",
         description: "The saved queries stored in the graph (name, folder, description, \
-                      parameters, status), as list_saved_queries returns them: check them \
-                      before writing a new query.",
+                      parameters, language rhai or gql, status), as list_saved_queries returns \
+                      them: check them before writing a new query.",
         mime: "application/json",
     },
 ];

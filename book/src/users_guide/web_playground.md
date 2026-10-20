@@ -314,11 +314,12 @@ The Fast tier draws the first 10 000 vertices of the generated 110k-element grap
 bar's **Catalog ▾ ▸ Saved queries** manager lists them by folder (the description and the
 signature) with a badge each: **R/O** (it only reads), **R/W** (it changes data; the tooltip lists
 what, as inferred from its body), **R/O ⚠** (read-only, its writing steps are denied until it is
-saved again) or **unavailable** (it cannot run; the tooltip says why). It manages them on the
+saved again) or **unavailable** (it cannot run; the tooltip says why), and its language, **Rhai**
+or **GQL** (the tooltip names the dialect). It manages them on the
 WebAssembly playground and on the [dev server](../persistence/dev_server.md) alike:
 
-- **New saved query…** / **✎** opens the editor: name, folder, description, the parameter list and
-  the body. Each parameter has a name, a type (`string`, `integer`, `number`, `boolean`, `uuid`,
+- **New saved query…** / **✎** opens the editor: name, folder, description, the language, the
+  parameter list and the body. Each parameter has a name, a type (`string`, `integer`, `number`, `boolean`, `uuid`,
   `array` of one of these, `object`, or a schema written as JSON), constraints (minimum and
   maximum, length, pattern, allowed values), a default (empty: the parameter is required) and a
   description; ↑/↓ reorder and ✕ removes one. The body is what goes inside the function, in the code
@@ -327,6 +328,15 @@ WebAssembly playground and on the [dev server](../persistence/dev_server.md) ali
   name in the same commit); what the engine refuses is shown next to its field (a bad name or
   folder, a parameter whose default breaks its schema, a body that does not compile). Moving a
   query to another folder is changing its folder here. **Delete…** asks first.
+- The **Rhai / GQL** switch picks the language. A [GQL query](saved_queries.md#saved-queries-in-gql)
+  is the whole query text, highlighted as GQL, with no function line around it; every `$name` it
+  reads must be a declared parameter and every parameter must be read (**+ Add $parameters of
+  the query** declares the missing ones as strings). Switching a `` g.gql(`...`) `` body to GQL keeps
+  its query; switching a GQL query to Rhai wraps it into `` g.gql(`...`, #{p: p}) ``.
+- **Save as query…** in a query tab's **⋯** menu opens the editor on the tab's text. A tab holding
+  exactly one `` g.gql(`...`) `` call (as **Wrap as GQL** writes it) becomes a GQL query of the inner
+  text with every `$name` as a parameter, typed and defaulted by the values the tab passes in its
+  `#{..}` map; any other tab becomes a Rhai query whose body is the tab's text.
 - Clicking a query opens its **run form**, built from the parameter schemas: a number field with
   its minimum and maximum, a list for allowed values, a checkbox for a boolean, UUID text that is
   checked, one line per item for a list; defaults are prefilled and required fields marked with

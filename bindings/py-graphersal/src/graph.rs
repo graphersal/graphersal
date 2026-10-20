@@ -885,7 +885,8 @@ impl Graph {
     // and is read back with ``parse_json``). Each is one unit of its own.
     /// ``graph.queries(folder=None, *, policy=None)``: the saved queries (in ``folder`` and
     /// below it), each a ``dict`` with ``name``, ``folder``, ``description``, ``params``
-    /// (``name``, ``schema``, ``default``, ``required``), ``status`` and ``error``.
+    /// (``name``, ``schema``, ``default``, ``required``), ``status`` and ``error``, ``writes``,
+    /// ``effects``, ``denied_writes``, ``language`` (``"rhai"`` or ``"gql"``) and ``dialect``.
     #[pyo3(signature = (folder=None, *, policy=None))]
     fn queries(
         &self,
@@ -926,10 +927,12 @@ impl Graph {
 
     /// ``graph.define_query(spec, *, policy=None)``: stores (or replaces) a saved query, like
     /// the DSL's ``g.define_query(#{..})``: ``spec`` is a ``dict`` with ``name``, ``body`` (the
-    /// text of one Rhai function named like the query), and optionally ``folder``,
-    /// ``description``, ``params`` (parameter name -> a type name such as ``"integer"`` or
-    /// ``{"schema": {...}, "default": ...}``) and ``meta``. Raises ``GraphersalError`` with the
-    /// engine's diagnostic when the definition is refused.
+    /// text of one Rhai function named like the query, or with ``"language": "gql"`` one plain
+    /// GQL query whose ``$name`` parameters are exactly the declared ones), and optionally
+    /// ``language`` (``"rhai"``, the default, or ``"gql"``), ``folder``, ``description``,
+    /// ``params`` (parameter name -> a type name such as ``"integer"`` or ``{"schema": {...},
+    /// "default": ...}``) and ``meta``. Raises ``GraphersalError`` with the engine's diagnostic
+    /// when the definition is refused.
     #[pyo3(signature = (spec, *, policy=None))]
     fn define_query(
         &self,
@@ -1217,7 +1220,9 @@ impl Graph {
     /// with named arguments (``g.query(name, #{..})``; ``graph.query`` is the alias of
     /// ``execute``) and returns its result like ``execute`` (a traversal's results as a
     /// ``list``, a value as it is). The arguments are checked against the parameter schemas
-    /// (defaults fill the omitted ones); a saved query never writes.
+    /// (defaults fill the omitted ones). A query whose body writes data (``writes`` in
+    /// ``queries()``) changes only its inferred ``effects``, as one transaction; a query written
+    /// in GQL returns its rows as ``dict``s like ``g.gql()``.
     #[pyo3(signature = (name, params=None, *, policy=None))]
     fn call_query(
         &self,

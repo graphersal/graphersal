@@ -4,18 +4,31 @@
 // The engine's forms (crates/graphersal-session/src/queries.rs):
 // - an ENTRY (listQueries/getQuery): {name, folder, description, params: [{name, schema,
 //   default?, required, description?}], status: 'ok'|'error', error?, writes, effects: [effect],
-//   denied_writes: [effect]} with an effect {action, element, label, text}; getQuery adds `body`
-//   (the stored function text), `dialect`, `meta`;
-// - a SPEC (defineQuery): {name, folder, description, params: [{name, schema, default?}], body,
-//   replaces?}: `body` is the text of ONE Rhai function named like the query whose parameters
-//   are the declared ones, in that order; `replaces` names the query an edit started from;
+//   denied_writes: [effect], language: 'rhai'|'gql', dialect} with an effect {action, element,
+//   label, text}; getQuery adds `body` (the stored text) and `meta`;
+// - a SPEC (defineQuery): {name, folder, description, params: [{name, schema, default?}],
+//   language, body, replaces?}: a Rhai `body` is the text of ONE Rhai function named like the
+//   query whose parameters are the declared ones, in that order; a GQL `body` is one plain GQL
+//   query whose `$name`s are exactly the declared parameters; `replaces` names the query an
+//   edit started from;
 // - FIELD ERRORS (a refused defineQuery): [{field, message, help?}] with `field` one of name,
-//   folder, description, meta, body, params, params.<parameter>, general.
+//   folder, description, meta, language, body, params, params.<parameter>, general.
 //
-// The editor shows the function's BODY only (what is inside its braces): the signature is
+// The editor shows a Rhai function's BODY only (what is inside its braces): the signature is
 // written from the parameter list, so adding, removing, renaming or reordering a parameter
 // never needs a second edit. A stored source this model cannot split (comments before `fn`, an
-// unusual layout) is edited as the whole function text (`raw`).
+// unusual layout) is edited as the whole function text (`raw`). A GQL query is edited as it is
+// stored. "Save as query" (`draftFromScript`) starts a draft from a query tab: a tab holding
+// one `g.gql(`...`[, #{..}])` call becomes a GQL query with the `$name`s it reads as parameters.
+
+import { gqlParamNames } from './editor/gql-tokens.js';
+import { wrapGql } from './editor/gql-wrap.js';
+
+/** The languages of a saved query's body. */
+export const QUERY_LANGUAGES = Object.freeze(['rhai', 'gql']);
+
+/** The body a new GQL draft starts with. */
+export const GQL_DRAFT_BODY = 'MATCH (p:person)\nRETURN p.name AS name\nORDER BY name';
 
 /**
  * The string `format`s the editor offers as types of their own: a uuid and the date and time
@@ -101,6 +114,18 @@ export function accessBadge(entry) {
   return { text: 'R/O', kind: 'ok', title: 'Read-only: never changes the graph' };
 }
 
+/**
+ * The language badge of a saved query (Catalog manager, run form): `{text, title}`; `text` is
+ * 'GQL' or 'Rhai' (an unknown language: its name), `title` names the dialect.
+ * @param {{language?:string, dialect?:string}} entry
+ */
+export function languageBadge(entry) {
+  const language = (entry && entry.language) || 'rhai';
+  const text = language === 'gql' ? 'GQL' : language === 'rhai' ? 'Rhai' : language;
+  const what = language === 'gql' ? 'one GQL query' : language === 'rhai' ? 'a Rhai function' : `the language ${language}`;
+  return { text, title: `Written as ${what}${entry && entry.dialect ? ` (dialect ${entry.dialect})` : ''}` };
+}
+
 /** The changes of a call preview (`previewQuery`'s `changes`) as one sentence. */
 export function previewText(changes) {
   const parts = [
@@ -149,9 +174,12 @@ export function splitSource(source, name) {
   return { params, body };
 }
 
-/** The function text of a draft: `fn name(p1, p2) {\n<body>\n}` (a raw draft: its text). */
+/**
+ * The stored text of a draft: a Rhai draft's function `fn name(p1, p2) {\n<body>\n}` (a raw
+ * draft: its text), a GQL draft's query as written.
+ */
 export function composeSource(draft) {
-  if (draft.raw) return draft.body;
+  if (draft.raw || draft.language === 'gql') return draft.body;
   const params = draft.params.map((p) => p.name.trim()).filter(Boolean).join(', ');
   return `fn ${draft.name.trim()}(${params}) {\n${draft.body}\n}`;
 }
@@ -327,13 +355,28 @@ export function paramDeclaration(param) {
 
 // ------------------------------------------------------------------ the editor draft
 
-/** A draft for "New saved query" (in `folder`, optional). */
-export function newDraft(folder = '') {
-  return { name: '', folder, description: '', params: [], body: 'g.v()', raw: false, replaces: null };
+/** A draft for "New saved query" (in `folder`, optional; `language` 'rhai' or 'gql'). */
+export function newDraft(folder = '', language = 'rhai') {
+  const body = language === 'gql' ? GQL_DRAFT_BODY : 'g.v()';
+  return { name: '', folder, description: '', params: [], language, body, raw: false, replaces: null };
 }
 
 /** A draft for editing a stored query (`getQuery` entry). */
 export function draftFromQuery(entry) {
+  const language = entry.language || 'rhai';
+  if (language !== 'rhai') {
+    // A GQL query (or a language this playground does not know: kept and sent back as it is).
+    return {
+      name: entry.name,
+      folder: entry.folder || '',
+      description: entry.description || '',
+      params: (entry.params || []).map(paramFromEntry),
+      language,
+      body: entry.body || '',
+      raw: false,
+      replaces: entry.name,
+    };
+  }
   const split = splitSource(entry.body || '', entry.name);
   const params = (entry.params || []).map(paramFromEntry);
   const sameSignature = split && split.params.join(',') === params.map((p) => p.name).join(',');
@@ -342,10 +385,261 @@ export function draftFromQuery(entry) {
     folder: entry.folder || '',
     description: entry.description || '',
     params,
+    language,
     body: split && sameSignature ? split.body : entry.body || '',
     raw: !(split && sameSignature),
     replaces: entry.name,
   };
+}
+
+/**
+ * The draft's body after its language switches to `language` (the editor's Rhai / GQL switch):
+ * Rhai -> GQL takes the query out of a body that is one `g.gql(..)` call, gives the GQL
+ * template for the untouched new-query body, and keeps any other text (to be rewritten); GQL ->
+ * Rhai wraps the query into `g.gql(`...`, #{p: p, ..})` passing every declared parameter.
+ * A raw draft stops being raw (a GQL query has no signature to keep).
+ */
+export function switchDraftLanguage(draft, language) {
+  if (draft.language === language) return draft;
+  const params = draft.params.map((p) => p.name.trim()).filter(Boolean);
+  let body = draft.body;
+  if (language === 'gql') {
+    const call = parseGqlCall(draft.raw ? (splitSource(body, draft.name.trim())?.body ?? body) : body);
+    if (call) body = storedGqlText(call.query);
+    else if (!body.trim() || body.trim() === 'g.v()') body = GQL_DRAFT_BODY;
+  } else if (body.trim()) {
+    body = wrapGql(body);
+    if (params.length) body = `${body.slice(0, -1)}, #{${params.map((p) => `${p}: ${p}`).join(', ')}})`;
+  } else {
+    body = 'g.v()';
+  }
+  return { ...draft, language, body, raw: false };
+}
+
+/**
+ * The parameters a GQL draft's query reads that the list does not declare yet, added as
+ * string parameters (the "Add $parameters" button): the new params list.
+ */
+export function withDetectedParams(draft) {
+  const declared = new Set(draft.params.map((p) => p.name.trim()));
+  const added = gqlParamNames(draft.body).filter((name) => !declared.has(name)).map((name) => newParam(name));
+  return [...draft.params, ...added];
+}
+
+// ------------------------------------------------------------------ Save as query
+
+/** Reads a Rhai string literal at `pos` of `text` (backtick or double-quoted): `{value, end}` or null. */
+function readRhaiString(text, pos) {
+  const quote = text[pos];
+  if (quote === '`') {
+    let value = '';
+    let i = pos + 1;
+    while (i < text.length) {
+      if (text[i] === '`') {
+        if (text[i + 1] === '`') {
+          value += '`';
+          i += 2;
+          continue;
+        }
+        return { value, end: i + 1 };
+      }
+      if (text.startsWith('${', i)) return null; // an interpolation: not a plain text
+      value += text[i];
+      i += 1;
+    }
+    return null;
+  }
+  if (quote !== '"') return null;
+  const SIMPLE = { n: '\n', r: '\r', t: '\t', '\\': '\\', '"': '"', "'": "'", 0: '\0' };
+  let value = '';
+  let i = pos + 1;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') return { value, end: i + 1 };
+    if (c === '\\') {
+      const e = text[i + 1];
+      if (e in SIMPLE) {
+        value += SIMPLE[e];
+        i += 2;
+        continue;
+      }
+      const hex = { x: 2, u: 4, U: 8 }[e];
+      const digits = hex ? text.slice(i + 2, i + 2 + hex) : '';
+      if (!hex || !/^[0-9a-fA-F]+$/.test(digits) || digits.length !== hex) return null;
+      const code = parseInt(digits, 16);
+      if (code > 0x10ffff) return null;
+      value += String.fromCodePoint(code);
+      i += 2 + hex;
+      continue;
+    }
+    if (c === '\n') return null; // a double-quoted Rhai string ends at the line
+    value += c;
+    i += 1;
+  }
+  return null;
+}
+
+/** Skips whitespace and Rhai comments from `pos`. */
+function skipSpace(text, pos) {
+  let i = pos;
+  for (;;) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (text.startsWith('//', i)) {
+      const nl = text.indexOf('\n', i);
+      i = nl < 0 ? text.length : nl + 1;
+    } else if (text.startsWith('/*', i)) {
+      const close = text.indexOf('*/', i + 2);
+      if (close < 0) return text.length;
+      i = close + 2;
+    } else {
+      return i;
+    }
+  }
+}
+
+/** Reads one literal value of a `#{..}` map: `{value, end}` (undefined value: not a literal) or null. */
+function readLiteral(text, pos) {
+  const string = readRhaiString(text, pos);
+  if (string) return string;
+  const m = /^(-?\d[\d_]*(\.\d[\d_]*)?([eE][-+]?\d+)?|true|false|\(\s*\))/.exec(text.slice(pos));
+  if (!m) return null;
+  const word = m[0];
+  let value;
+  if (word === 'true' || word === 'false') value = word === 'true';
+  else if (word.startsWith('(')) value = null;
+  else {
+    const n = Number(word.replace(/_/g, ''));
+    value = Number.isFinite(n) ? { number: n, integer: !/[.eE]/.test(word) } : undefined;
+  }
+  return { value, end: pos + word.length };
+}
+
+/** Reads a `#{key: literal, ..}` map at `pos`: `{map, end}` (each value a literal or undefined) or null. */
+function readMap(text, pos) {
+  if (!text.startsWith('#{', pos)) return null;
+  const map = {};
+  let i = skipSpace(text, pos + 2);
+  if (text[i] === '}') return { map, end: i + 1 };
+  for (;;) {
+    let key;
+    const quoted = readRhaiString(text, i);
+    if (quoted) {
+      key = quoted.value;
+      i = quoted.end;
+    } else {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i));
+      if (!m) return null;
+      key = m[0];
+      i += key.length;
+    }
+    i = skipSpace(text, i);
+    if (text[i] !== ':') return null;
+    i = skipSpace(text, i + 1);
+    const literal = readLiteral(text, i);
+    if (!literal) return null;
+    map[key] = literal.value;
+    i = skipSpace(text, literal.end);
+    if (text[i] === ',') {
+      i = skipSpace(text, i + 1);
+      if (text[i] === '}') return { map, end: i + 1 };
+      continue;
+    }
+    if (text[i] === '}') return { map, end: i + 1 };
+    return null;
+  }
+}
+
+/**
+ * The GQL query of a script that is exactly one call `g.gql(<string>[, #{..}])` (optionally
+ * followed by `;`, comments around it): `{query, args}` (`args`: the map's literal values by
+ * name, `{}` without a map or when its values are not plain literals), or null for any other
+ * script (a continued traversal, a computed text, an interpolating backtick string).
+ */
+export function parseGqlCall(script) {
+  const text = String(script ?? '');
+  let i = skipSpace(text, 0);
+  const head = /^g\s*\.\s*gql\s*\(/.exec(text.slice(i));
+  if (!head) return null;
+  i = skipSpace(text, i + head[0].length);
+  const literal = readRhaiString(text, i);
+  if (!literal) return null;
+  i = skipSpace(text, literal.end);
+  let args = {};
+  if (text[i] === ',') {
+    i = skipSpace(text, i + 1);
+    if (text.startsWith('#{', i)) {
+      const map = readMap(text, i);
+      if (map) {
+        args = map.map;
+        i = skipSpace(text, map.end);
+      } else {
+        // Not a literal map: skip to its closing brace (string-blind, best effort).
+        let depth = 0;
+        let j = i + 1;
+        for (; j < text.length; j++) {
+          if (text[j] === '{') depth += 1;
+          else if (text[j] === '}' && --depth === 0) break;
+        }
+        if (j >= text.length) return null;
+        i = skipSpace(text, j + 1);
+      }
+    } else {
+      return null;
+    }
+  }
+  if (text[i] !== ')') return null;
+  i = skipSpace(text, i + 1);
+  if (text[i] === ';') i = skipSpace(text, i + 1);
+  if (i !== text.length) return null;
+  return { query: literal.value, args };
+}
+
+/**
+ * The query text of a `g.gql(..)` literal as it is stored: without the blank lines around it and
+ * the indentation `wrapGql` writes (the common indentation of its lines), trailing spaces cut.
+ */
+export function storedGqlText(query) {
+  const lines = String(query ?? '').replace(/\r\n?/g, '\n').split('\n');
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  const used = lines.filter((l) => l.trim());
+  const indent = used.length ? Math.min(...used.map((l) => l.length - l.trimStart().length)) : 0;
+  return lines.map((l) => l.slice(indent).trimEnd()).join('\n');
+}
+
+/** An editor parameter for the `$name` of a tab's query, typed by the tab's value when it has one. */
+function paramFromArg(name, value) {
+  const param = newParam(name);
+  if (value === undefined || value === null) return param;
+  if (typeof value === 'boolean') {
+    param.type = 'boolean';
+    param.defaultText = String(value);
+  } else if (typeof value === 'string') {
+    param.defaultText = value;
+  } else if (typeof value === 'object' && 'number' in value) {
+    param.type = value.integer ? 'integer' : 'number';
+    param.defaultText = String(value.number);
+  }
+  return param;
+}
+
+/**
+ * The draft "Save as query" starts from the text of a query tab: a tab holding exactly one
+ * `g.gql(`...`[, #{..}])` call gives a GQL draft (its query text, its `$name`s as parameters,
+ * typed and defaulted by the tab's literal values); any other text a Rhai draft whose body is
+ * the tab's text, without parameters.
+ */
+export function draftFromScript(script, folder = '') {
+  const call = parseGqlCall(script);
+  if (call) {
+    return {
+      ...newDraft(folder, 'gql'),
+      body: storedGqlText(call.query),
+      params: gqlParamNames(call.query).map((name) => paramFromArg(name, call.args[name])),
+    };
+  }
+  const body = String(script ?? '').trim();
+  return { ...newDraft(folder, 'rhai'), body: body || 'g.v()' };
 }
 
 /**
@@ -383,6 +677,8 @@ export function draftToSpec(draft) {
     params,
     body: composeSource({ ...draft, name }),
   };
+  // Rhai is the engine's default: a Rhai spec stays as it always was.
+  if (draft.language && draft.language !== 'rhai') spec.language = draft.language;
   if (draft.replaces) spec.replaces = draft.replaces;
   return { spec };
 }
