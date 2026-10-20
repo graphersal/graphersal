@@ -35,8 +35,19 @@ def test_gql_syntax_error_raises_with_help():
     assert "RETRUN" in str(exc_info.value)
 
 
-def test_gql_write_clause_is_refused():
+def test_gql_refused_query_changes_nothing():
     graph = graphersal.Graph.tinkerpop_modern()
     with pytest.raises(graphersal.GraphersalError):
-        graph.query('g.gql("CREATE (n:person {name: \'x\'}) RETURN n").to_list()')
+        graph.query(
+            'g.gql("CALL { CREATE (n:person {name: \'x\'}) } IN TRANSACTIONS").to_list()'
+        )
     assert graph.query('g.V().has("name", "x").count().next()') == 0
+
+
+def test_gql_create_writes():
+    graph = graphersal.Graph.tinkerpop_modern()
+    rows = graph.query(
+        'g.gql("CREATE (n:person {name: \'x\'}) RETURN n.name AS name").to_list()'
+    )
+    assert rows == [{"name": "x"}]
+    assert graph.query('g.V().has("name", "x").count().next()') == 1

@@ -3397,18 +3397,6 @@ fn insert_of(q: &BoundQuery, segment: usize) -> &BoundInsert {
     }
 }
 
-/// Every linear query of `q` with those of its `CALL` bodies (what `check_lowerable` is given).
-fn all_linears(q: &BoundQuery) -> Vec<&BoundLinear> {
-    let calls = q.segments.iter().filter_map(|s| match s {
-        Segment::Call(call) => Some(&*call.body),
-        _ => None,
-    });
-    std::iter::once(&q.body)
-        .chain(calls)
-        .flat_map(BoundComposite::linears)
-        .collect()
-}
-
 fn label_texts(labels: &[Identifier]) -> Vec<&str> {
     labels.iter().map(|l| l.name.as_str()).collect()
 }
@@ -3756,42 +3744,7 @@ fn finish_and_write_endings_return_no_row() {
 }
 
 #[test]
-fn the_lowering_boundary_refuses_writes_and_finish_until_they_are_planned() {
-    for (query, text, what) in [
-        ("INSERT (n:person {name: 'ann'})", "INSERT", "INSERT"),
-        (
-            "MATCH (n) create (n)-[:T]->(m) RETURN m",
-            "create",
-            "CREATE",
-        ),
-        (
-            "MATCH (p) CALL (p) { INSERT (p)-[:T]->(:X) } RETURN p",
-            "INSERT",
-            "INSERT",
-        ),
-        ("MATCH (n) FINISH", "FINISH", "FINISH"),
-        (
-            "MATCH (n) CALL (n) { MATCH (n)-->(m) FINISH } RETURN n",
-            "FINISH",
-            "FINISH",
-        ),
-    ] {
-        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let q = bind(&parsed).unwrap_or_else(|e| panic!("{query:?} does not bind: {e}"));
-        let result = check_lowerable(&parsed, &q, &all_linears(&q)).map(|()| q);
-        let f = failure(query, result);
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000");
-        assert_eq!(f.text, text, "{query}");
-        assert_eq!(
-            f.message,
-            format!("{what} is not yet supported in this version")
-        );
-        assert!(f.alternative.is_some(), "{query}");
-    }
-    let parsed = parse("MATCH (n) RETURN n").unwrap();
-    let q = bind(&parsed).unwrap();
-    assert!(check_lowerable(&parsed, &q, &all_linears(&q)).is_ok());
+fn a_read_error_before_an_insert_comes_first() {
     // A read clause before the INSERT is bound first: its errors come first.
     let parsed = parse("MATCH (n) WHERE x > 1 INSERT (m)").unwrap();
     let f = failure("MATCH (n) WHERE x > 1 INSERT (m)", bind(&parsed));

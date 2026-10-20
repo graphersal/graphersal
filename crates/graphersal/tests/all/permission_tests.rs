@@ -2051,8 +2051,7 @@ mod gql {
             "MATCH (a)-[e:knows]->(b), (b)-[:created]->(c) RETURN a, e, b, c",
             "MATCH (a)-[:created]->(s)<-[:created]-(b) WHERE a <> b RETURN DISTINCT s.name",
             "MATCH (a)-[e]-(b) RETURN element_id(e), labels(a), type(e)",
-            // Refused write clauses fail before anything is asked of the data.
-            "CREATE (p:person {name: 'x'})",
+            // Write clauses not yet supported fail before anything is asked of the data.
             "MATCH (p) SET p.age = 1 RETURN p",
             "MATCH (p) DETACH DELETE p",
         ] {

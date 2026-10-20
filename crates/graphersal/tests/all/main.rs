@@ -83,6 +83,7 @@ mod gql_qpp_tests;
 mod gql_quantifier_tests;
 mod gql_script_tests;
 mod gql_tests;
+mod gql_write_tests;
 mod graphml_edge_case_tests;
 mod graphml_empty_value_tests;
 mod graphml_roundtrip_tests;

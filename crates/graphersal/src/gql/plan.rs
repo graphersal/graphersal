@@ -19,13 +19,15 @@
 //!   per later segment of the [`BoundQuery`] in order: a [`Stage::Match`] (plain `MATCH`
 //!   clauses after a cut, or only the conjuncts of a `FILTER`), a [`Stage::Optional`] (an
 //!   `OPTIONAL MATCH`, lowered inside `optional()`), a [`Stage::Materialize`] (a materializing
-//!   `WITH`), a [`Stage::For`] (`FOR` / `UNWIND`, stage 2a). A segment's components start at a
+//!   `WITH`), a [`Stage::For`] (`FOR` / `UNWIND`, stage 2a), a [`Stage::Write`] (`INSERT` /
+//!   `CREATE`, stage 3a). A segment's components start at a
 //!   binding an earlier segment bound ([`Op::Resume`]) when they hold one, else with a
 //!   mid-traversal [`Op::Scan`]. Empty for a stage 1a query, whose plan is exactly the stage 1a
 //!   plan;
 //! - **the result pipeline** ([`PipelinePlan::result`]): [`ResultOp::Project`] (or
 //!   [`ResultOp::Aggregate`] when a column aggregates), then [`ResultOp::Distinct`],
-//!   [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as far as the query has them.
+//!   [`ResultOp::Order`], [`ResultOp::Offset`], [`ResultOp::Limit`] as far as the query has them;
+//!   empty for a pipeline ending in `FINISH` or in a write clause (stage 3a, design W2: no row).
 //!
 //! The conjuncts over one binding are not operations of their own: they belong to the element
 //! that binds it ([`ElementFilters`]: the scan's node, an expansion's edge or new node), split
@@ -180,7 +182,8 @@ pub(crate) struct PipelinePlan {
     pub(crate) ops: Vec<Op>,
     /// The later segments in order (empty for a stage 1a query).
     pub(crate) stages: Vec<Stage>,
-    /// The result pipeline of its `RETURN`.
+    /// The result pipeline of its `RETURN` (empty when it ends in `FINISH` or a write clause:
+    /// it returns no row).
     pub(crate) result: Vec<ResultOp>,
 }
 
@@ -424,6 +427,20 @@ pub(crate) enum Stage {
     /// The records of the block before, as rows (stage 2d, design E19): the first stage of each
     /// operand of a block after `NEXT`.
     Rows(RowsStage),
+    /// A write clause (stage 3a, `INSERT` / Cypher `CREATE`): per row the elements it creates,
+    /// in the order of the clause ([`WriteStage`]). A cut: no read moves across it.
+    Write(WriteStage),
+}
+
+/// A write clause (stage 3a, a `Segment::Write`): an `INSERT` creates its new nodes in text
+/// order, then its new edges in text order, once per incoming row (`gql:insert_node` /
+/// `gql:insert_edge`, design W-d), each element labelled only when read later (D11). After it
+/// the last element created is the current element (a row passes on with every element the
+/// clause created bound). A query that writes has no merge point of the lowering (design W15).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WriteStage {
+    /// The segment (index into [`BoundQuery::segments`], a `Segment::Write`).
+    pub(crate) segment: usize,
 }
 
 /// `[OPTIONAL] CALL (..) { body }` (stage 2d): per incoming row the records of the body (a

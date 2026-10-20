@@ -64,22 +64,39 @@ impl ScriptGraphTraversalSource {
     /// The root hook of `gql()`: a leading `Step::Gql` (source steps may come before it) is
     /// lowered by [`GraphTraversalSource::gql_with`], which needs the storage (the planner reads
     /// its statistics and index catalog); its steps start the body [`Self::lower_onto`]
-    /// continues, so the Gremlin steps written after `gql()` follow them.
+    /// continues, so the Gremlin steps written after `gql()` follow them. Every creating step
+    /// of a GQL write (`gql:insert_node`, `gql:insert_edge`, in `CALL` bodies too) carries the
+    /// evaluation's `now()` like `add_v` (design C8 of stage 3a).
     #[cfg(feature = "gql")]
-    fn gql_start<'g, S: GraphStorage + 'g>(
+    pub(super) fn gql_start<'g, S: GraphStorage + 'g>(
         &self,
         mut graph: GraphTraversalSource<'g, S>,
     ) -> (GraphTraversalSource<'g, S>, AnonymousTraversal<'g, S>) {
         let mut start = AnonymousTraversal::new();
+        if let Some((query, params)) = self.leading_gql() {
+            graph = graph.gql_with(query.as_str(), params.iter().cloned());
+            start.steps = std::mem::take(&mut graph.steps);
+            if let Some(now) = self.now {
+                stamp_create_times(&mut start.steps, now);
+            }
+        }
+        (graph, start)
+    }
+
+    /// The query and parameters of a `gql()` that starts the root traversal (source steps may
+    /// come before it).
+    #[cfg(feature = "gql")]
+    pub(super) fn leading_gql(
+        &self,
+    ) -> Option<(&CompactString, &[(CompactString, ElementProperty)])> {
         let leading = self
             .steps
             .iter()
             .find(|step| !matches!(step, Step::Source(_)));
-        if let Some(Step::Gql(query, params)) = leading {
-            graph = graph.gql_with(query.as_str(), params.iter().cloned());
-            start.steps = std::mem::take(&mut graph.steps);
+        match leading {
+            Some(Step::Gql(query, params)) => Some((query, params.as_slice())),
+            _ => None,
         }
-        (graph, start)
     }
 
     /// Converts this script-level step pipeline into an [`AnonymousTraversal`], for use as a
@@ -96,7 +113,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// [`Self::lower`] continuing `graph`, the steps a root hook already built (`gql()`).
-    fn lower_onto<'g, S: GraphStorage + 'g>(
+    pub(super) fn lower_onto<'g, S: GraphStorage + 'g>(
         &self,
         root: bool,
         mut graph: AnonymousTraversal<'g, S>,
@@ -536,4 +553,21 @@ fn lower_all<'g, S: GraphStorage + 'g>(
         .iter()
         .map(ScriptGraphTraversalSource::ast_convert_to_anonymous)
         .collect()
+}
+
+/// Pins `now` on every creating step of `steps`, child traversals included (the steps a GQL
+/// write lowers to; a step that creates nothing ignores it).
+#[cfg(feature = "gql")]
+fn stamp_create_times<'g, S: GraphStorage + 'g>(
+    steps: &mut [crate::GraphStep<'g, S>],
+    now: crate::value::temporal::DateTime,
+) {
+    for step in steps {
+        if let crate::GraphStep::SideEffectMut(_, step) = step {
+            step.set_create_time(now);
+        }
+        for child in step.child_traversals_mut() {
+            stamp_create_times(&mut child.steps, now);
+        }
+    }
 }

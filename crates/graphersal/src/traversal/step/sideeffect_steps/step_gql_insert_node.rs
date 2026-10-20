@@ -260,7 +260,6 @@ fn insert_node_step<'g, S: GraphStorage + 'g>(
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:insert_node(labels, properties)` hosting the subqueries `children` (child
     /// `i` answers the values' subquery `i`); see [`StepGqlInsertNode`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from INSERT by 3a.T4"))]
     pub(crate) fn gql_insert_node(
         self,
         query: Arc<str>,
@@ -278,7 +277,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:insert_node(labels, properties)` hosting the subqueries `children`; see
     /// [`StepGqlInsertNode`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from INSERT by 3a.T4"))]
     pub(crate) fn gql_insert_node(
         self,
         query: Arc<str>,

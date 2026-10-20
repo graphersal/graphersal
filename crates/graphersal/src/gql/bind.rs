@@ -270,8 +270,9 @@
 //! - **Endings (design W2).** [`BoundLinear::end`]: a linear query ends in `RETURN`, in
 //!   `FINISH` or in a clause that writes; the last two have no columns and return no row.
 //!
-//! The planner and the lowering take writes from stage 3a.T4 on; until then
-//! [`check_lowerable`] refuses a query that writes, or ends in `FINISH`, as not yet supported.
+//! The planner plans a write clause as a `Stage::Write` of its pipeline; a `CALL` whose body
+//! ends in `FINISH` or a write is a unit subquery ([`BoundCall::unit`]): the outer row passes
+//! on unchanged once the body ran.
 //!
 //! # Aggregates
 //!
@@ -661,6 +662,14 @@ pub(crate) struct BoundCall {
     pub(crate) span: Span,
 }
 
+impl BoundCall {
+    /// Whether it is a unit subquery (stage 3a, design W3): its body ends in `FINISH` or in a
+    /// write clause, so it returns no record and each outer row passes on once the body ran.
+    pub(crate) fn unit(&self) -> bool {
+        self.body.last().first.end != QueryEnd::Return
+    }
+}
+
 /// The records of the block before a pipeline, read as columns (stage 2d, [`Segment::Rows`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoundRows {
@@ -684,13 +693,6 @@ impl BoundWrite {
     pub(crate) fn reads(&self) -> &[BindingId] {
         match self {
             BoundWrite::Insert(insert) => &insert.reads,
-        }
-    }
-
-    /// The write keyword as written (`INSERT`, `create`, ...).
-    pub(crate) fn keyword(&self) -> Span {
-        match self {
-            BoundWrite::Insert(insert) => insert.keyword,
         }
     }
 }
@@ -1134,51 +1136,8 @@ impl BoundQuery {
     }
 
     /// Whether the query writes (holds a write clause anywhere).
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "used by the tests; the planner from 3a.T4")
-    )]
     pub(crate) fn writes(&self) -> bool {
         self.first_write().is_some()
-    }
-}
-
-/// Refuses, as not yet supported, what the binder accepts and the planner and the lowering do
-/// not take yet (stage 3a until 3a.T4): a write clause, `FINISH`, a query ending in a write.
-/// The planner never sees such a query. `linears`: every linear query of `bound`, those of
-/// `CALL` bodies and whole-query subquery bodies included.
-pub(crate) fn check_lowerable(
-    query: &Query,
-    bound: &BoundQuery,
-    linears: &[&BoundLinear],
-) -> Result<(), TraverserError> {
-    let error = if let Some(write) = bound.first_write() {
-        let word = query.text(write.keyword()).to_ascii_uppercase();
-        Some(not_yet(
-            write.keyword(),
-            &word,
-            "create the elements with the Gremlin steps add_v() and add_e(), for example \
-             g.add_v(\"person\").property(\"name\", \"ann\")",
-        ))
-    } else {
-        linears
-            .iter()
-            .find_map(|linear| match linear.end {
-                QueryEnd::Return => None,
-                QueryEnd::Finish(word) => Some((word, "FINISH")),
-                QueryEnd::Write => Some((linear.span, "a query without RETURN")),
-            })
-            .map(|(span, what)| {
-                not_yet(
-                    span,
-                    what,
-                    "end the query with RETURN, for example MATCH (p:person) RETURN count(*)",
-                )
-            })
-    };
-    match error {
-        Some(error) => Err(error.into_error(&query.source)),
-        None => Ok(()),
     }
 }
 

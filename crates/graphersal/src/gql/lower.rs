@@ -59,6 +59,10 @@
 //! | `CALL (a) { body }`, `CALL (*) { .. }`, `CALL { .. }`, Cypher `CALL { WITH a .. }` (stage 2d, design mechanism 6, E16) | `flat_map(__.<body>)`: the body (a whole query: stages, `UNION`, `NEXT`) lowered onto the child from the site of the `CALL`, so it starts on the incoming row (no unit row): an import that is the current element needs no step (`Op::Resume` from it), another import is read where it is (`select("a")`, `gql:bind` from a `WITH` column, `Binding::Label` / `RowColumn` in expressions), an unanchored first component is a child-leading `v()` with its pushdown and index, or `gql:lookup` when its equality reads an import; the body's aggregation, `DISTINCT`, `ORDER BY`, `OFFSET` / `LIMIT` and `UNION` run per incoming row (`flat_map` runs the child once per traverser and multiplies its records by the bulk); an uncorrelated body runs per row too (E16). Its records continue the incoming path (outer labels stay readable); its `RETURN` row is the current object after it (`Binding::Column`), labelled `as("#c<k>")` only when a later step reads a column after leaving it; no `Binding::Current` of an outer binding after it. `MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.age DESC LIMIT 2 } RETURN p.name, f.name` is `v(labels: ["person"]).as("p").flat_map(__.out().as("f").gql:project("f").gql:order("f.age DESC").limit(2)).gql:project(..)` |
 //! | `OPTIONAL CALL (a) { body }` | `optional(__.flat_map(__.<body>).as("#c<k>"))`: the row label inside, so a row the body gives no record continues unchanged and reads the returned names `NULL` (absent label); every later read of a returned name goes through `#c<k>` |
 //! | parenthesized path pattern `(a) ((x)-[e:T]->(y)-[f]->(z) WHERE cond){m,n} (b)` (stage 2e, design item 9 and M5; also `*`, `+`, `?`, no quantifier) | `repeat(B)` with the modulators of a quantified edge (`?` is `{0,1}`: `emit().repeat(B).times(1)`; `{0}` no step, `b` is `a`; without a quantifier `B` inline, once). `B` is one iteration in walk order from the current element, which is the node the iteration before ended on (the merge rule: `a` for the first): `x`'s label factors, filters and `as("x")` (when read), then per body edge its 1a hop with `gql:trail([e, f, ..])` before `as("e")` (its own earlier iterations, every other body edge, the clause's other edges; without a repeating body a single edge is compared by `where(P.neq(..))`, a `?` edge always by `gql:trail`, which an absent edge passes), the node reached with its filters and `as()`, and the body conditions over several body elements as `gql:filter` right after the last of them, reading this iteration's elements (the latest occurrence of each label). Walked from `b` the body runs from its last node, hop by hop reversed. After the loop `b`'s filters and `as("b")`, or a join when `b` was bound earlier (`(a) ((x)-->(y))+ (a)`). No merge point of the lowering (every iteration labels its edges). A body variable read outside the body is a group list (`Binding::Group`, reversed when walked from `b`); with `?` a singleton, `NULL` after zero iterations; a path variable assembles the iterations from the body labels (`PathPart::Body`) |
+//! | `INSERT pattern, ..` / Cypher `CREATE` (stage 3a, design W-d, W13) | per new node in text order `gql:insert_node(labels, "{k: expr, ..}")`, then per new edge in text order `gql:insert_edge(label, from, to, "{..}")`, each followed by its element's `as()` only when read later (D11): the first step reads the row before the clause, each later one runs on the element created just before (an edge's end inserted right before it is `Binding::Current`, another end a label, a `WITH` column or a `FOR` item as for any read); per row and per unit of bulk one element, emitted with bulk 1; the values' subqueries hosted by the step (`runtime::SubqueryHost`). `MATCH (p:person) INSERT (p)-[:R]->(:Q)` is `v(labels: ["person"]).as("p").gql:insert_node(["Q"]).gql:insert_edge("R", "p", "(#2)").discard()`. A leading `INSERT` starts from the unit row `inject(0)` (M1). After the clause the last element created is the current element; later clauses (`MATCH`, `RETURN`, ...) see the writes (the step-at-a-time executor: each step consumes its whole input before the next runs, so a clause never reads its own writes, W13) |
+//! | `FINISH`, a query ending in a write clause (design W2) | `discard()` in place of the result pipeline: no row |
+//! | `CALL { .. }` whose body ends in `FINISH` or a write (a unit subquery, design W3), also `OPTIONAL CALL` | `optional(__.<body>.discard())`: the body runs per row, the row passes on unchanged with its current element |
+//! | a query that writes (design W15) | no merge point of the lowering (the executor never merges a mutating plan); the optimizer's general `lazy_barrier` rule still places its pass-through `lazy_barrier()` between adjacent vertex steps, as in a Gremlin write |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
@@ -107,11 +111,12 @@ use std::sync::Arc;
 use super::aggregate::{AggregateCall, Aggregating, compile_aggregating};
 use super::ast::{
     BinaryOp, CallArgs, EdgeDirection, Expr, ExprKind, Identifier, LabelExpr, Literal, MapEntry,
-    ProjectionItem, Quantifier, SortDirection, SubqueryKind,
+    ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundLinear, BoundQuery, BoundStep, Column, ColumnRef,
-    Conjunct, Count, Predicate, Segment, SortKey, bind_with_parameters, check_lowerable,
+    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundStep,
+    BoundWrite, Column, ColumnRef, Conjunct, Count, InsertProperty, Predicate, Segment, SortKey,
+    bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
@@ -119,7 +124,7 @@ use super::parser::parse;
 use super::plan::{
     CallStage, CompositePlan, ElementFilters, Expand, ForStage, GroupExpand, LogicalPlan, Lookup,
     LookupBy, Materialize, Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage,
-    SubqueryUse, UnionPlan, and_factors, exists_conjunct, label_disjuncts,
+    SubqueryUse, UnionPlan, WriteStage, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
@@ -490,6 +495,37 @@ enum Instr<S: GraphStorage> {
     /// the body's `RETURN` record (the current object, `Binding::Column(0)`, `expr` its slot
     /// 0); the host collects the values into the list.
     Collect(RowExpr<S>),
+    /// `gql:insert_node(labels, properties)` at `site` (stage 3a): one new node of an `INSERT`
+    /// per row, its values read at `site`, hosting the subqueries they hold.
+    InsertNode {
+        labels: Vec<CompactString>,
+        properties: Vec<GqlInsertProperty<S>>,
+        site: Site,
+        subqueries: Bodies<S>,
+    },
+    /// `gql:insert_edge(label, from, to, properties)` at `site` (stage 3a): one new edge of an
+    /// `INSERT` per row, its ends and values read at `site`.
+    InsertEdge {
+        label: CompactString,
+        from: InsertEnd,
+        to: InsertEnd,
+        properties: Vec<GqlInsertProperty<S>>,
+        site: Site,
+        subqueries: Bodies<S>,
+    },
+    /// `discard()`: the end of a pipeline ending in `FINISH` or a write clause (stage 3a, design
+    /// W2): every row has done its work, none is returned.
+    Discard,
+}
+
+/// One end of an edge an `INSERT` creates ([`Instr::InsertEdge`]): the node binding, its
+/// variable as written (`None`: anonymous, shown by its path label) and the node pattern at
+/// that end.
+#[derive(Debug, Clone)]
+struct InsertEnd {
+    id: BindingId,
+    name: Option<CompactString>,
+    span: Span,
 }
 
 /// Where a linear query starts ([`Lowering::linear`]).
@@ -559,6 +595,9 @@ struct Lowered<S: GraphStorage> {
     inner_labels: Vec<CompactString>,
     /// Per binding: how a path variable is assembled (`None`: not a path variable).
     paths: Vec<Option<PathRead>>,
+    /// The query writes (stage 3a): no merge point of the lowering (design W15; the executor
+    /// never merges a mutating plan, so `lazy_barrier()` would be a no-op in the profile).
+    writes: bool,
 }
 
 /// How a path variable is read (`Binding::Path`, plan mechanism 6).
@@ -817,6 +856,7 @@ impl<S: GraphStorage> Lowered<S> {
                     Some(label) if !label.is_empty() => g.as_(label.clone()),
                     _ => g,
                 },
+                Instr::Merge { .. } if self.writes => g,
                 Instr::Merge { direction, labels } => {
                     let walk = AnonymousTraversal::<'g, S>::new();
                     let mut walk = match direction {
@@ -863,6 +903,35 @@ impl<S: GraphStorage> Lowered<S> {
                     Arc::from([Binding::Column(0)]),
                     Vec::new(),
                 ),
+                Instr::InsertNode {
+                    labels,
+                    properties,
+                    site,
+                    subqueries,
+                } => g.gql_insert_node(
+                    Arc::clone(&self.query),
+                    labels,
+                    properties,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
+                Instr::InsertEdge {
+                    label,
+                    from,
+                    to,
+                    properties,
+                    site,
+                    subqueries,
+                } => g.gql_insert_edge(
+                    Arc::clone(&self.query),
+                    label,
+                    self.endpoint(from, site),
+                    self.endpoint(to, site),
+                    properties,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
+                Instr::Discard => g.discard(),
             };
         }
         g
@@ -877,6 +946,18 @@ impl<S: GraphStorage> Lowered<S> {
             .into_iter()
             .map(|body| self.emit_into(AnonymousTraversal::new(), body))
             .collect()
+    }
+
+    /// The endpoint of an inserted edge read at `site` (the node inserted just before is the
+    /// current object there).
+    fn endpoint(&self, end: InsertEnd, site: Site) -> GqlEndpoint {
+        GqlEndpoint {
+            name: end
+                .name
+                .unwrap_or_else(|| CompactString::from(format!("({})", self.label(end.id)))),
+            binding: self.binding(end.id.0, site),
+            span: end.span,
+        }
     }
 
     /// The path label of binding `id`.
@@ -1072,7 +1153,10 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Collect(_)
             | Instr::Optional(_)
             | Instr::Union(_)
-            | Instr::Call(_) => t,
+            | Instr::Call(_)
+            | Instr::InsertNode { .. }
+            | Instr::InsertEdge { .. }
+            | Instr::Discard => t,
         }
     }
 }
@@ -1126,7 +1210,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     fn gql_distinct(self) -> Self;
-    #[allow(dead_code, reason = "lowered from INSERT by 3a.T4")]
+    fn discard(self) -> Self;
     fn gql_insert_node(
         self,
         query: Arc<str>,
@@ -1135,7 +1219,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         bindings: Arc<[Binding]>,
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
-    #[allow(dead_code, reason = "lowered from INSERT by 3a.T4")]
     #[allow(clippy::too_many_arguments)]
     fn gql_insert_edge(
         self,
@@ -1254,6 +1337,9 @@ macro_rules! sink {
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
             }
+            fn discard(self) -> Self {
+                self.discard()
+            }
             fn gql_insert_node(
                 self,
                 query: Arc<str>,
@@ -1366,7 +1452,6 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    check_lowerable(&parsed, &bound, &linears(&bound))?;
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
 }
@@ -1624,6 +1709,7 @@ impl<'q> Lowering<'q> {
             part_labels,
             inner_labels,
             paths,
+            writes: bound.writes(),
         })
     }
 
@@ -1718,16 +1804,126 @@ impl<'q> Lowering<'q> {
                     Site::row(rows.segment)
                 }
                 Stage::Call(call) => self.call(call, site, instrs)?,
+                Stage::Write(write) => self.write(write, site, instrs)?,
             };
         }
-        self.pipeline(
-            &plan.result,
-            &linear.columns,
-            &linear.order_by,
-            (site, self.result_of(linear)),
-            instrs,
-        )?;
+        if linear.end == QueryEnd::Return {
+            self.pipeline(
+                &plan.result,
+                &linear.columns,
+                &linear.order_by,
+                (site, self.result_of(linear)),
+                instrs,
+            )?;
+        } else {
+            // `FINISH` or a write ending (design W2): the rows did their work, none returns.
+            instrs.push(Instr::Discard);
+        }
         Ok(())
+    }
+
+    /// Lowers a write clause at `site` (stage 3a, [`WriteStage`]): an `INSERT` as one insert
+    /// step per new node in text order, then one per new edge in text order (design W-d),
+    /// each followed by its element's `as()` (emitted only when read later, D11). The first
+    /// step reads the row at `site`; each later one runs on the element created just before
+    /// (the current object), so an edge's end inserted right before it is `Binding::Current`.
+    /// Returns the site on the last element created.
+    fn write<S: GraphStorage>(
+        &self,
+        stage: &WriteStage,
+        mut site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(Segment::Write(write)) = self.bound.segments.get(stage.segment) else {
+            return Err(self.unlowered());
+        };
+        match &**write {
+            BoundWrite::Insert(insert) => {
+                for node in &insert.nodes {
+                    let hooks = Hooks::default();
+                    let properties = self.insert_properties(&node.properties, &hooks)?;
+                    instrs.push(Instr::InsertNode {
+                        labels: node
+                            .labels
+                            .iter()
+                            .map(|l| CompactString::from(l.name.as_str()))
+                            .collect(),
+                        properties,
+                        site,
+                        subqueries: self.bodies(hooks, site)?,
+                    });
+                    instrs.push(Instr::Label(node.binding));
+                    site = Site::on(node.binding);
+                }
+                for edge in &insert.edges {
+                    let hooks = Hooks::default();
+                    let properties = self.insert_properties(&edge.properties, &hooks)?;
+                    instrs.push(Instr::InsertEdge {
+                        label: CompactString::from(edge.label.name.as_str()),
+                        from: self.insert_end(insert, edge.source, edge.span),
+                        to: self.insert_end(insert, edge.target, edge.span),
+                        properties,
+                        site,
+                        subqueries: self.bodies(hooks, site)?,
+                    });
+                    instrs.push(Instr::Label(edge.binding));
+                    site = Site::on(edge.binding);
+                }
+            }
+        }
+        Ok(site)
+    }
+
+    /// The values of an inserted element, compiled for a step hosting the subqueries they
+    /// hold (`hooks`).
+    fn insert_properties<S: GraphStorage>(
+        &self,
+        properties: &[InsertProperty],
+        hooks: &Hooks,
+    ) -> Result<Vec<GqlInsertProperty<S>>, TraverserError> {
+        properties
+            .iter()
+            .map(|p| {
+                Ok(GqlInsertProperty {
+                    key: CompactString::from(p.key.name.as_str()),
+                    value: self.compile_in(&p.value, None, &[], Some(hooks))?,
+                })
+            })
+            .collect()
+    }
+
+    /// The end `id` of the edge of `insert` written at `edge`: its node pattern is the one of
+    /// the clause nearest to the edge pattern (each occurrence of the node in the clause, the
+    /// pattern of a new node included).
+    fn insert_end(&self, insert: &BoundInsert, id: BindingId, edge: Span) -> InsertEnd {
+        let binding = self.bound.binding(id);
+        let created = insert
+            .nodes
+            .iter()
+            .filter(|n| n.binding == id)
+            .map(|n| n.span);
+        let occurrences = binding
+            .into_iter()
+            .flat_map(|b| b.occurrences.iter().copied())
+            .filter(|o| o.start >= insert.span.start && o.end <= insert.span.end);
+        let distance = |o: &Span| {
+            if o.end <= edge.start {
+                edge.start - o.end
+            } else {
+                o.start.saturating_sub(edge.end)
+            }
+        };
+        let span = created
+            .chain(occurrences)
+            .min_by_key(distance)
+            .unwrap_or(edge);
+        InsertEnd {
+            id,
+            name: binding
+                .and_then(|b| b.name.as_ref())
+                .map(|n| CompactString::from(n.name.as_str())),
+            span,
+        }
     }
 
     /// Lowers a `[OPTIONAL] CALL { }` at `site` (stage 2d, design mechanism 6): its body onto
@@ -1750,6 +1946,13 @@ impl<'q> Lowering<'q> {
         };
         let mut body = Vec::new();
         self.composite(&call.plan, &bound_call.body, Start::At(site), &mut body)?;
+        if bound_call.unit() {
+            // A unit subquery (stage 3a, design W3): the body (ending in `discard()`) runs per
+            // row, and the row passes on unchanged: `optional(__.<body>.discard())`, also for
+            // `OPTIONAL CALL`.
+            instrs.push(Instr::Optional(body));
+            return Ok(site);
+        }
         if call.optional {
             instrs.push(Instr::Optional(vec![
                 Instr::Call(body),
@@ -2705,6 +2908,12 @@ impl<'q> Lowering<'q> {
                 }
                 | Instr::Value {
                     site, subqueries, ..
+                }
+                | Instr::InsertNode {
+                    site, subqueries, ..
+                }
+                | Instr::InsertEdge {
+                    site, subqueries, ..
                 } => {
                     site.ordered = Some(result);
                     for nested in subqueries.iter_mut() {
@@ -2751,7 +2960,8 @@ impl<'q> Lowering<'q> {
                 | Instr::PartLabel(_)
                 | Instr::Merge { .. }
                 | Instr::Count
-                | Instr::Collect(_) => {}
+                | Instr::Collect(_)
+                | Instr::Discard => {}
             }
         }
         Ok(())
@@ -2895,7 +3105,7 @@ impl<'q> Lowering<'q> {
                 Stage::For(f) => (f.segment, f.labelled),
                 Stage::Call(c) => (c.segment, c.labelled),
                 Stage::Rows(r) => (r.segment, r.labelled),
-                Stage::Match { .. } | Stage::Optional { .. } => continue,
+                Stage::Match { .. } | Stage::Optional { .. } | Stage::Write(_) => continue,
             };
             if labelled && let Some(flag) = rows.get_mut(segment) {
                 *flag = true;
@@ -2967,7 +3177,11 @@ impl<'q> Lowering<'q> {
             std::iter::once(p.ops.as_slice()).chain(p.stages.iter().filter_map(
                 |stage| match stage {
                     Stage::Match { ops, .. } | Stage::Optional { ops, .. } => Some(ops.as_slice()),
-                    Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => None,
+                    Stage::Materialize(_)
+                    | Stage::For(_)
+                    | Stage::Call(_)
+                    | Stage::Rows(_)
+                    | Stage::Write(_) => None,
                 },
             ))
         });
@@ -3417,6 +3631,33 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 marks.read(&mut slots, *site);
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
+            Instr::InsertNode {
+                properties,
+                site,
+                subqueries,
+                ..
+            } => {
+                for property in properties {
+                    property.value.variables(&mut slots);
+                }
+                marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
+            }
+            Instr::InsertEdge {
+                from,
+                to,
+                properties,
+                site,
+                subqueries,
+                ..
+            } => {
+                for property in properties {
+                    property.value.variables(&mut slots);
+                }
+                slots.extend([from.id.0, to.id.0]);
+                marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
+            }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part)
             | Instr::Exists { body: part, .. }
@@ -3441,7 +3682,8 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             | Instr::PartLabel(_)
             | Instr::Merge { .. }
             | Instr::Count
-            | Instr::Collect(_) => {}
+            | Instr::Collect(_)
+            | Instr::Discard => {}
         }
     }
 }
@@ -3464,6 +3706,12 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 site, subqueries, ..
             }
             | Instr::Value {
+                site, subqueries, ..
+            }
+            | Instr::InsertNode {
+                site, subqueries, ..
+            }
+            | Instr::InsertEdge {
                 site, subqueries, ..
             } => {
                 site.part = Some(segment);
@@ -3500,7 +3748,8 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             | Instr::PartLabel(_)
             | Instr::Merge { .. }
             | Instr::Count
-            | Instr::Collect(_) => {}
+            | Instr::Collect(_)
+            | Instr::Discard => {}
         }
     }
 }

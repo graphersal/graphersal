@@ -520,7 +520,13 @@ pub(super) fn register(registry: &mut Registry) {
     // One word: snake_case and camelCase are the same spelling.
     #[cfg(feature = "gql")]
     registry
-        .register_fn_as(&["gql"], ScriptGraphTraversalSource::gql)
+        .register_fn_as(
+            &["gql"],
+            |ctx: NativeCallContext, this: &mut ScriptGraphTraversalSource, query: String| {
+                // A GQL write's creating steps carry the evaluation's `now()` (like `addV`).
+                this.gql(query).map(|source| source.stamped(&ctx))
+            },
+        )
         .register_fn_as(&["gql"], ScriptGraphTraversalSource::gql_with);
 
     registry

@@ -43,7 +43,9 @@ impl ScriptGraphTraversalSource {
             let value = dynamic_to_element_property(value, max)?;
             values.push((CompactString::new(name.as_str()), value));
         }
+        // A GQL write's creating steps carry the evaluation's `now()` (like `addV`).
         this.gql_step(query, values)
+            .map(|source| source.stamped(&ctx))
     }
 
     fn gql_step(

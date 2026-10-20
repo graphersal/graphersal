@@ -740,6 +740,7 @@ fn stages(b: &BoundQuery, p: &LogicalPlan) -> Vec<String> {
             Stage::For(f) => format!("for{}", if f.labelled { " labelled" } else { "" }),
             Stage::Call(c) => format!("call{}", if c.labelled { " labelled" } else { "" }),
             Stage::Rows(r) => format!("rows{}", if r.labelled { " labelled" } else { "" }),
+            Stage::Write(_) => "write".to_string(),
         })
         .collect()
 }
@@ -1127,7 +1128,11 @@ fn for_is_a_stage_whose_row_is_labelled_only_when_read_after_leaving_it() {
 fn first_lookup(p: &LogicalPlan) -> Option<&Lookup> {
     let stage_ops = p.stages.iter().flat_map(|stage| match stage {
         Stage::Match { ops, .. } | Stage::Optional { ops, .. } => ops.as_slice(),
-        Stage::Materialize(_) | Stage::For(_) | Stage::Call(_) | Stage::Rows(_) => &[],
+        Stage::Materialize(_)
+        | Stage::For(_)
+        | Stage::Call(_)
+        | Stage::Rows(_)
+        | Stage::Write(_) => &[],
     });
     p.ops.iter().chain(stage_ops).find_map(|op| match op {
         Op::Lookup(l) => Some(l),
@@ -2025,7 +2030,7 @@ fn reached(p: &LogicalPlan) -> BTreeSet<BindingId> {
                         ops_reached(ops, out);
                     }
                     Stage::Call(call) => composite_reached(&call.plan, out),
-                    Stage::Materialize(_) | Stage::For(_) | Stage::Rows(_) => {}
+                    Stage::Materialize(_) | Stage::For(_) | Stage::Rows(_) | Stage::Write(_) => {}
                 }
             }
         }

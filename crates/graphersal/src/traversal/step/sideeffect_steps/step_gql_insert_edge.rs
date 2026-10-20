@@ -175,7 +175,6 @@ fn insert_edge_step<'g, S: GraphStorage + 'g>(
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:insert_edge(label, from, to, properties)` hosting the subqueries
     /// `children` (child `i` answers the values' subquery `i`); see [`StepGqlInsertEdge`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from INSERT by 3a.T4"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gql_insert_edge(
         self,
@@ -196,7 +195,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:insert_edge(label, from, to, properties)` hosting the subqueries
     /// `children`; see [`StepGqlInsertEdge`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered from INSERT by 3a.T4"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gql_insert_edge(
         self,

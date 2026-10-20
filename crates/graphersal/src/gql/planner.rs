@@ -39,6 +39,13 @@
 //! returned columns are bound after it, and there is no current element after it. A
 //! [`Segment::Rows`] is a [`Stage::Rows`] binding the columns of the block before.
 //!
+//! Stage 3a: a write clause ([`Segment::Write`]) is a [`Stage::Write`]: the elements it creates
+//! are bound after it, the last one the current element; a `CALL` whose body ends in `FINISH`
+//! or a write (a unit subquery, [`BoundCall::unit`]) keeps the outer row and its current
+//! element; a pipeline ending in `FINISH` or a write has no result pipeline. The position pass
+//! reads each inserted element's values where its insert step runs and hosts the subqueries
+//! they hold there.
+//!
 //! A query that does not start with `MATCH` starts from one unit row (design M1): the first
 //! segment's operations are then empty (or only the conjuncts of a leading `LET` / `FILTER`
 //! pipeline), and the lowering emits `inject(0)` first.
@@ -174,10 +181,11 @@
 //! column, a sort key, a `FOR` list) while it is not the current element gets the `subquery`
 //! reason.
 
+use super::ast::QueryEnd;
 use super::ast::{EdgeDirection, Quantifier};
 use super::bind::{
-    BindingId, BindingKind, BoundCall, BoundComposite, BoundLinear, BoundQuery, BoundWith, Count,
-    Predicate, Segment,
+    BindingId, BindingKind, BoundCall, BoundComposite, BoundLinear, BoundQuery, BoundWith,
+    BoundWrite, Count, InsertProperty, Predicate, Segment,
 };
 use std::collections::BTreeSet;
 
@@ -186,8 +194,9 @@ use super::bind::BoundGroupStep;
 use super::plan::{
     BodyHop, CallStage, CompositePlan, EdgeLabels, ElementFilters, Expand, ForStage, GroupExpand,
     GroupRef, Labelling, LogicalPlan, Lookup, LookupBy, Materialize, Op, PipelinePlan, Pushdown,
-    ResultOp, Resume, RowsStage, Scan, Stage, SubqueryPlan, SubqueryUse, UnionPlan, and_factors,
-    classify_all, element_filters, lookup_form, scan_labels, subqueries_in, subquery_start,
+    ResultOp, Resume, RowsStage, Scan, Stage, SubqueryPlan, SubqueryUse, UnionPlan, WriteStage,
+    and_factors, classify_all, element_filters, lookup_form, scan_labels, subqueries_in,
+    subquery_start,
 };
 use crate::graph::ElementKind;
 use crate::graph::GraphStatistics;
@@ -560,8 +569,11 @@ impl<'q> Planner<'q> {
                 }
                 Segment::Call(call) => {
                     stages.push(self.call(index, call, current));
-                    // Its rows are the body's records: no current element (design item 8).
-                    current = None;
+                    // Its rows are the body's records: no current element (design item 8);
+                    // after a unit subquery the outer row itself (stage 3a, design W3).
+                    if !call.unit() {
+                        current = None;
+                    }
                 }
                 Segment::Rows(rows) => {
                     // The columns of the records before (column bindings of its row).
@@ -574,23 +586,36 @@ impl<'q> Planner<'q> {
                     }));
                     current = None;
                 }
-                Segment::Write(_) => {
-                    // Planned from stage 3a.T4 on: `bind::check_lowerable` refuses a query
-                    // that writes before it is planned.
-                    current = None;
+                Segment::Write(write) => {
+                    // The elements it creates are bound after it; the last one is the current
+                    // element (the lowering's insert chain ends on it).
+                    let created = write_created(write);
+                    for &id in &created {
+                        self.bind(id);
+                    }
+                    if let Some(&last) = created.last() {
+                        current = Some(last);
+                    }
+                    stages.push(Stage::Write(WriteStage { segment: index }));
                 }
             }
         }
-        PipelinePlan {
-            ops: first,
-            stages,
-            result: result_ops(
+        // A pipeline ending in `FINISH` or a write returns no row (stage 3a, design W2).
+        let result = if linear.end == QueryEnd::Return {
+            result_ops(
                 linear.columns.iter().any(|c| c.aggregate),
                 linear.distinct,
                 !linear.order_by.is_empty(),
                 &linear.offset,
                 &linear.limit,
-            ),
+            )
+        } else {
+            Vec::new()
+        };
+        PipelinePlan {
+            ops: first,
+            stages,
+            result,
         }
     }
 
@@ -1563,13 +1588,25 @@ impl<'q> Planner<'q> {
                 Stage::Call(c) => {
                     // The body runs on the row here; its records are the new rows (of an
                     // `OPTIONAL CALL` a row may stay the incoming one: no row to read from).
+                    // After a unit subquery (stage 3a) the row is the incoming one.
                     self.call_positions(c, current, at, hosts, body);
-                    at.row = (!c.optional).then_some(c.segment);
-                    current = None;
+                    let unit = matches!(
+                        bound.segments.get(c.segment),
+                        Some(Segment::Call(call)) if call.unit()
+                    );
+                    if !unit {
+                        at.row = (!c.optional).then_some(c.segment);
+                        current = None;
+                    }
                 }
                 Stage::Rows(r) => {
                     at.row = Some(r.segment);
                     current = None;
+                }
+                Stage::Write(w) => {
+                    if let Some(Segment::Write(write)) = bound.segments.get(w.segment) {
+                        self.write_positions(write, &mut current, at, &mut reads, hosts, body);
+                    }
                 }
             }
         }
@@ -1586,6 +1623,60 @@ impl<'q> Planner<'q> {
             self.expr_hosts(&key.expr, sorted, hosts);
         }
         self.read_all(&mut reads, at);
+    }
+
+    /// The position pass over a write clause (stage 3a), run on `current`: each element's
+    /// property values (and the ends of an edge) are read where its insert step runs, on the
+    /// row before the clause for the first element, then on the element created just before
+    /// (the lowering's insert chain); the subqueries the values hold are hosted there. Leaves
+    /// `current` on the last element created.
+    fn write_positions(
+        &mut self,
+        write: &BoundWrite,
+        current: &mut Option<BindingId>,
+        at: &mut Position,
+        reads: &mut Vec<BindingId>,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        match write {
+            BoundWrite::Insert(insert) => {
+                for node in &insert.nodes {
+                    self.insert_reads(&node.properties, &[], *current, at, reads, hosts, body);
+                    *current = Some(node.binding);
+                }
+                for edge in &insert.edges {
+                    let ends = [edge.source, edge.target];
+                    self.insert_reads(&edge.properties, &ends, *current, at, reads, hosts, body);
+                    *current = Some(edge.binding);
+                }
+            }
+        }
+    }
+
+    /// The reads of one insert step at `current` (see [`Self::write_positions`]): its
+    /// property values and `ends`; the step leaves the row.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_reads(
+        &mut self,
+        properties: &[InsertProperty],
+        ends: &[BindingId],
+        current: Option<BindingId>,
+        at: &mut Position,
+        reads: &mut Vec<BindingId>,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        let here = at.host(current);
+        for property in properties {
+            self.body_reads_away(body, &property.bindings, current);
+            reads.extend_from_slice(&property.bindings);
+            self.expr_hosts(&property.value, here, hosts);
+        }
+        self.body_reads_away(body, ends, current);
+        reads.extend_from_slice(ends);
+        self.read_all(reads, at);
+        at.row = None;
     }
 
     /// The position pass over the body of the `CALL` stage `call`, run on `current`. A thin
@@ -1652,7 +1743,7 @@ impl<'q> Planner<'q> {
                         let w = *w;
                         self.mark(w, |l| l.optional = true);
                     }
-                    Stage::Optional { .. } | Stage::Match { .. } => {}
+                    Stage::Optional { .. } | Stage::Match { .. } | Stage::Write(_) => {}
                 }
             }
         }
@@ -2143,6 +2234,19 @@ fn flip(direction: EdgeDirection) -> EdgeDirection {
         EdgeDirection::Right => EdgeDirection::Left,
         EdgeDirection::Left => EdgeDirection::Right,
         EdgeDirection::Any => EdgeDirection::Any,
+    }
+}
+
+/// The bindings a write clause creates, in the order its steps create them (stage 3a: an
+/// `INSERT`'s new nodes, then its new edges).
+fn write_created(write: &BoundWrite) -> Vec<BindingId> {
+    match write {
+        BoundWrite::Insert(insert) => insert
+            .nodes
+            .iter()
+            .map(|n| n.binding)
+            .chain(insert.edges.iter().map(|e| e.binding))
+            .collect(),
     }
 }
 

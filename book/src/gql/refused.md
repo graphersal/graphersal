@@ -22,7 +22,6 @@ syntax error whose help shows the query without it ([Aggregation](subset.md#aggr
 | vendor and namespaced functions `apoc.*`, `db.*`, `gds.*`, `text.*`, ... | vendor extensions, not GQL; the accepted Cypher functions are a fixed list ([compatibility functions](aliases.md#compatibility-functions)) | a `gql()` function, or Gremlin steps after `gql()` |
 
 ```rhai,graph=modern
-g.gql("CREATE (n:person {name: 'ann'}) RETURN n")   // refused: CREATE writes to the graph; gql() is read-only
 g.gql("MATCH (n) DETACH DELETE n RETURN n")   // refused: DETACH DELETE writes to the graph
 g.gql("MATCH (a)~[e]~(b) RETURN a")   // refused: undirected edges (`~`) are not supported
 g.gql("CALL db.labels() YIELD label RETURN label")   // refused: procedure calls are vendor extensions
