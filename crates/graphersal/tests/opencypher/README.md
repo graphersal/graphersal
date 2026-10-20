@@ -35,7 +35,7 @@ material existed outside the tag.
   the tag, commit and copied paths, followed by the upstream `NOTICE` verbatim (the repository
   root `NOTICE` repeats it for the project as a whole).
 - `harness/`, `baseline.toml` — the runner's harness modules and the ratchet baseline (ours, not
-  vendored); see "Runner, baseline and report" below. Not added yet: they are being built.
+  vendored); see "Runner, baseline and report" below.
 
 ## License
 
@@ -72,7 +72,7 @@ Cypher" and "proposed changes to Cypher that are not yet approved by the openCyp
 
 ## Runner, baseline and report
 
-Being built (sub-stage 3b of the GQL writes plan). The runner is the separate integration test
+The runner is the separate integration test
 target `crates/graphersal/tests/opencypher_tck.rs` (own process: parallel lanes, a panic hook,
 per-scenario timeouts and a report, the same reasons as `tinkerpop_features.rs`), gated on the
 `gql` feature only: it calls the Rust GQL API directly, not the Rhai DSL. Run it with
@@ -101,5 +101,9 @@ It is also part of the plain `cargo test --package graphersal --features script,
   ```bash
   OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
   ```
+- **Scope.** `harness/scope.rs` lists the excluded case ids by reason (vendor procedures, the
+  upstream `@ignore`, deliberate deviations decided by the user); the compliance page shows the
+  table with the reasons.
 - **Report.** Every run writes `target/opencypher-report.md` (headline Unsupported vs Wrong
-  behaviour, per-directory table, ranked missing constructs, the wrong-behaviour list).
+  behaviour, per-directory table, exclusions, the full wrong-behaviour list, ranked missing
+  constructs, setup failures by reason).

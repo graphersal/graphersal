@@ -11,6 +11,9 @@ identifiers and short descriptive names of our own; it does not reproduce the st
 identifier marked *(provisional)* could not be checked against the standard text yet and may be
 corrected.
 
+How far the Cypher compatibility forms agree with Neo4j's behaviour is measured against the
+openCypher TCK: [TCK Compliance](tck_compliance.md).
+
 Status: **supported**, **partial** (what is missing is named), **not yet** (planned), **no**
 (refused for good; see [Refused Constructs](refused.md)).
 

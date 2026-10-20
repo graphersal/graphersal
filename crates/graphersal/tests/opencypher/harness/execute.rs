@@ -6,9 +6,8 @@
 //!
 //! # Flow
 //!
-//! 1. A case with a procedure step (`there exists a procedure`) or the upstream `@ignore` tag is
-//!    not run ([`RawOutcome::NotRun`]; the scope table of 3b.T5 replaces
-//!    [`temporary_not_run`]).
+//! 1. A case out of scope (`scope.rs`: vendor procedures, `@ignore`, deliberate deviations; ids
+//!    only) is never handed to [`run`]: the runner classifies it `excluded` without running it.
 //! 2. On a worker thread, a **fresh empty graph** per case, on the storage selected by
 //!    `GRAPHERSAL_TEST_STORAGE` (`storage.rs`): `TraversalGraph`, or `Forwarding` over one.
 //!    `Given an empty graph` and `Given any graph` both start from it; `Given the <name> graph`
@@ -168,8 +167,6 @@ pub struct MainRun {
 /// What happened when a case ran; no comparison with the expectation yet.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RawOutcome {
-    /// Not run, with the reason (procedures, `@ignore`).
-    NotRun(String),
     /// A setup step failed (named graph, `having executed`, a parameter value), with the reason.
     Setup(String),
     /// The query ran (successfully or not).
@@ -180,22 +177,8 @@ pub enum RawOutcome {
     Panic(String),
 }
 
-/// Why a case is not run, until the scope table of 3b.T5 (`scope.rs`, ids only) replaces this.
-pub fn temporary_not_run(case: &Case) -> Option<String> {
-    if case.is_ignored() {
-        return Some("upstream @ignore".to_string());
-    }
-    case.steps
-        .iter()
-        .any(|s| matches!(s.step, Step::Procedure { .. }))
-        .then(|| "vendor procedures".to_string())
-}
-
 /// Runs one case; never panics and never blocks longer than about [`WALL_CLOCK_LIMIT`].
 pub fn run(case: &Case) -> RawOutcome {
-    if let Some(reason) = temporary_not_run(case) {
-        return RawOutcome::NotRun(reason);
-    }
     let job = Job {
         case: case.clone(),
         storage: super::storage::current(),
@@ -380,7 +363,13 @@ fn execute_on<S: GraphStorage>(mut graph: S, case: &Case) -> RawOutcome {
                     }
                 }
             }
-            Step::Procedure { .. } => return RawOutcome::NotRun("vendor procedures".to_string()),
+            // Procedure scenarios are excluded by id (`scope.rs`); one that is not listed fails
+            // its setup instead of being skipped silently.
+            Step::Procedure { .. } => {
+                return RawOutcome::Setup(
+                    "vendor procedure: the harness registers no procedures".to_string(),
+                );
+            }
             Step::ExecutingQuery(query) => {
                 let before = state::snapshot(&graph);
                 let outcome = run_query(&mut graph, query, &params);

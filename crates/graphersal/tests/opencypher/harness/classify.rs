@@ -3,8 +3,9 @@
 //! # Classes
 //!
 //! Unsupported: `missing` (the query, or a control query, was refused as `Refused` / `NotYet`,
-//! GQLSTATUS 0A000; the reason is the refusal's message, which names the construct), `setup` (a
-//! named graph, `having executed` query or parameter value failed), `excluded` (not run).
+//! GQLSTATUS 0A000; the reason is the refusal's message, which names the construct, see
+//! [`construct`]), `setup` (a named graph, `having executed` query or parameter value failed),
+//! `excluded` (out of scope, `scope.rs`: not run, [`Outcome::excluded`]).
 //! Wrong behaviour: `wrong_result`, `wrong_columns`, `wrong_side_effects`, `wrong_error` (an
 //! error was expected and another one, or none, came), `unexpected_error` (an error of a
 //! supported construct where a result was expected), `timeout` (the wall-clock guard or a limit
@@ -36,6 +37,7 @@
 use super::compare::{self, ActualResult};
 use super::execute::{ErrorRoot, MainRun, Phase, QueryError, QueryOutcome, RawOutcome};
 use super::gherkin::{Case, ErrorPhase, ErrorType, Step};
+use super::scope::{DETAIL_PREFIX, Exclusion};
 use super::state::SideEffects;
 
 /// The class of a case.
@@ -129,6 +131,53 @@ impl Outcome {
             detail: detail.into(),
         }
     }
+
+    /// The outcome of a case out of scope (`scope.rs`): class `excluded`, detail
+    /// `excluded:<code>`.
+    pub fn excluded(exclusion: &Exclusion) -> Self {
+        Self::new(
+            Class::Excluded,
+            format!("{DETAIL_PREFIX}{}", exclusion.code),
+        )
+    }
+}
+
+/// The refused or "not yet" construct a `missing` / `setup` detail names, with its family:
+/// `not yet: datetime()`, `refused: rand()`. The context prefix (`control query: `,
+/// `having executed: `), the position and the rest of the message are dropped, so the name is
+/// stable across message edits and ranks the backlog (P0 G11: the namespaced temporal functions
+/// keep their function name). A detail without a refusal is returned on one line, unchanged.
+pub fn construct(detail: &str) -> String {
+    const MARKERS: [(&str, &str); 2] = [
+        ("GQL construct not supported yet", "not yet"),
+        ("GQL unsupported construct", "refused"),
+    ];
+    let Some((at, marker, family)) = MARKERS
+        .iter()
+        .find_map(|(m, f)| detail.find(m).map(|at| (at, *m, *f)))
+    else {
+        return one_line(detail);
+    };
+    let rest = &detail[at + marker.len()..];
+    // Skip ` at line N, column M`, then `: `.
+    let rest = rest.split_once(": ").map_or(rest, |(_, r)| r);
+    let end = [
+        " (a ",
+        " is not yet supported",
+        " is not supported",
+        ": ",
+        " (step #",
+    ]
+    .iter()
+    .filter_map(|cut| rest.find(cut))
+    .min()
+    .unwrap_or(rest.len());
+    format!("{family}: {}", rest[..end].trim())
+}
+
+/// The context prefix of a detail before its GQL message (`having executed: `), or "".
+pub fn context_prefix(detail: &str) -> &str {
+    detail.find("GQL ").map_or("", |at| &detail[..at])
 }
 
 /// What a case expects of its query.
@@ -182,7 +231,6 @@ fn expectations(case: &Case) -> (Option<Expectation<'_>>, Option<SideEffects>, V
 /// Classifies one case's run.
 pub fn classify(case: &Case, run: &RawOutcome) -> Outcome {
     match run {
-        RawOutcome::NotRun(reason) => Outcome::new(Class::Excluded, reason.clone()),
         RawOutcome::Setup(reason) => Outcome::new(Class::Setup, reason.clone()),
         RawOutcome::Timeout => Outcome::new(
             Class::Timeout,
@@ -419,6 +467,30 @@ mod tests {
             },
             message: String::new(),
         }
+    }
+
+    #[test]
+    fn construct_names_are_extracted() {
+        let d = "GQL construct not supported yet at line 1, column 8: datetime() (a date or time \
+                 function) is not yet supported in this version (step #1 'gql:error(\"0A000\")' x)";
+        assert_eq!(construct(d), "not yet: datetime()");
+        let d = "having executed: GQL unsupported construct at line 2, column 3: \
+                 datetime.truncate(): namespaced functions are not supported (`.truncate` ...)";
+        assert_eq!(construct(d), "refused: datetime.truncate()");
+        assert_eq!(context_prefix(d), "having executed: ");
+        let d = "GQL unsupported construct at line 1, column 8: rand() is not supported: x";
+        assert_eq!(construct(d), "refused: rand()");
+        let d = "control query: GQL construct not supported yet at line 1, column 1: MERGE is not \
+                 yet supported in this version";
+        assert_eq!(construct(d), "not yet: MERGE");
+        let d = "GQL construct not supported yet at line 1, column 1: list indexing and slicing \
+                 (x[0], x[1..2]) is not yet supported in this version";
+        assert_eq!(
+            construct(d),
+            "not yet: list indexing and slicing (x[0], x[1..2])"
+        );
+        assert_eq!(construct("other\nerror"), "other | error");
+        assert_eq!(context_prefix("other"), "");
     }
 
     #[test]

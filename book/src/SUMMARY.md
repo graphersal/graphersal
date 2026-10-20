@@ -75,6 +75,7 @@
   - [Errors](gql/errors.md)
   - [Plans and Performance](gql/plans.md)
   - [GQL Conformance](gql/conformance.md)
+  - [TCK Compliance](gql/tck_compliance.md)
 
 # The Gremlin DSL
 

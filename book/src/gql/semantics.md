@@ -441,6 +441,26 @@ before the optimizer folds the property into the creation), so a policy that den
 | a property value must be a scalar or a list of scalars of one kind; a map, a list of mixed kinds, a nested list or a `NULL` inside a list is a type error | stored as given: maps, mixed and nested lists (a `NULL` inside a list stays in the list) | Graphersal's data model stores JSON-like values ([jpath keys](../users_guide/jpath_keys.md)); a [schema](../users_guide/schema_enforcement.md) restricts a property's type where wanted |
 | `CREATE` requires `WITH` between a write and a following `MATCH` (Cypher 5) | `MATCH` may follow `INSERT` directly | GQL's linear statements allow it, as Neo4j's Cypher 25 does |
 
+## Type errors surface at evaluation time
+
+An operand of the wrong kind (`123 AND true`, a property read of a number, `'a' + 1`) is a
+type error (`22G03`) when a row reaches the expression, never before the run, even when the
+kind is already clear from the query text. `gql()` compiles into a Gremlin traversal and its
+expressions are evaluated per row inside the traversal's steps, like every Gremlin step's
+arguments; so a query whose rows never reach the expression raises nothing:
+
+```rhai,graph=empty
+g.gql("RETURN 123 AND true AS x").to_list()   // error: a condition must be a boolean, not a number (22G03)
+g.gql("MATCH (n) RETURN n.k AND 123 AS x").to_list()   // [] on the empty graph: no row reaches the expression
+```
+
+**A deliberate deviation from Neo4j:** Neo4j (and the openCypher TCK) rejects such a query at
+compile time with a `SyntaxError` or `TypeError` (`InvalidArgumentType`) when the operand's kind
+is known statically. The TCK cases that expect this are excluded from the measured scope with
+this reason ([TCK Compliance](tck_compliance.md#out-of-scope)). Errors that do not depend on a
+row (syntax, unknown variables, misplaced aggregates) are raised before the run, as always
+([Errors](errors.md#errors-before-the-run)).
+
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,

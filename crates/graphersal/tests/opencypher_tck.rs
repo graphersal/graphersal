@@ -4,8 +4,10 @@
 //! A separate test target (an exception to the one-binary rule, like `tinkerpop_features.rs`):
 //! own process for parallel lanes, the panic hook and per-case timeouts. The harness lives under
 //! `tests/opencypher/harness/`; its unit tests run as part of this target. The target parses
-//! the whole tree and runs and classifies every case (`harness::execute`, `harness::classify`
-//! with `harness::compare`); the baseline and the report come with the next harness step.
+//! the whole tree, runs and classifies every in-scope case (`harness::execute`,
+//! `harness::classify` with `harness::compare`; the scope is `harness::scope`), writes the
+//! report (`harness::report`) and gates the run against the ratchet baseline
+//! (`harness::baseline`) and the generated blocks of the book page (`harness::page`).
 #![cfg(feature = "gql")]
 
 #[path = "opencypher/harness/mod.rs"]
@@ -355,12 +357,13 @@ fn lanes() -> usize {
         .max(1)
 }
 
-/// Whether the debug environment variable `name` is set (non-empty, not `0`).
+/// Whether the environment variable `name` is set (non-empty, not `0`).
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-/// Writes to the process's stderr directly, bypassing the test harness's output capture.
+/// Writes to the process's stderr directly, bypassing the test harness's output capture, so the
+/// summary shows on every run (not only on failure or with `--nocapture`).
 fn stderr_uncaptured(text: &str) {
     use std::io::Write as _;
     let mut err = std::io::stderr().lock();
@@ -368,33 +371,44 @@ fn stderr_uncaptured(text: &str) {
     let _ = err.flush();
 }
 
-/// Runs every case of the tree in parallel lanes and classifies it. Until the baseline lands
-/// (3b.T5) it only asserts that every case reports a class.
-///
-/// Debug output (TEMPORARY, until the report of 3b.T5): `OPENCYPHER_SUMMARY=1` prints the class
-/// counts (overall and per top directory), `OPENCYPHER_DETAILS=1` one line per case that does
-/// not pass. `OPENCYPHER_LANES` sets the number of lanes.
-#[test]
-fn opencypher_tck_runs_every_case() {
-    use harness::classify::{self, Class, Outcome};
+/// Path of the committed ratchet baseline.
+fn baseline_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/opencypher/baseline.toml")
+}
+
+/// Path of the Markdown report: `$CARGO_TARGET_DIR/opencypher-report.md` (relative values resolve
+/// against the workspace root), else `<workspace root>/target/opencypher-report.md`; on the
+/// forwarding storage (`GRAPHERSAL_TEST_STORAGE=forwarding`) `opencypher-report-forwarding.md`.
+fn report_path() -> PathBuf {
+    use harness::storage::TestStorage;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = workspace.canonicalize().unwrap_or(workspace);
+    let target = match std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => workspace.join(dir),
+        None => workspace.join("target"),
+    };
+    target.join(match harness::storage::current() {
+        TestStorage::TraversalGraph => "opencypher-report.md",
+        TestStorage::Forwarding => "opencypher-report-forwarding.md",
+    })
+}
+
+/// Every case of the tree, sorted by id.
+fn all_cases(features: &[gherkin::Feature]) -> Vec<&gherkin::Case> {
+    let mut cases: Vec<&gherkin::Case> = features
+        .iter()
+        .flat_map(|f| f.scenarios.iter().flat_map(|s| s.cases.iter()))
+        .collect();
+    cases.sort_by(|a, b| a.id.cmp(&b.id));
+    cases
+}
+
+/// Runs `cases` in parallel lanes and classifies each.
+fn run_and_classify(cases: &[&gherkin::Case]) -> Vec<harness::classify::Outcome> {
     use harness::execute::{self, RawOutcome};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let storage = harness::storage::current();
-    let features =
-        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
-    let mut cases: Vec<(&str, &gherkin::Case)> = features
-        .iter()
-        .flat_map(|f| {
-            f.scenarios
-                .iter()
-                .flat_map(move |s| s.cases.iter().map(move |c| (f.path.as_str(), c)))
-        })
-        .collect();
-    cases.sort_by(|a, b| a.1.id.cmp(&b.1.id));
-
-    let started = std::time::Instant::now();
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<RawOutcome>>> = Mutex::new(vec![None; cases.len()]);
     std::thread::scope(|s| {
@@ -402,7 +416,7 @@ fn opencypher_tck_runs_every_case() {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((_, case)) = cases.get(i) else {
+                    let Some(case) = cases.get(i) else {
                         break;
                     };
                     let run = execute::run(case);
@@ -411,60 +425,312 @@ fn opencypher_tck_runs_every_case() {
             });
         }
     });
-    let elapsed = started.elapsed();
     let results = results.into_inner().unwrap_or_else(|p| p.into_inner());
+    cases
+        .iter()
+        .zip(results.iter())
+        .map(|(case, run)| {
+            let Some(run) = run else {
+                panic!("case {} did not report", case.id);
+            };
+            harness::classify::classify(case, run)
+        })
+        .collect()
+}
 
-    let mut outcomes: Vec<(&str, &gherkin::Case, Outcome)> = Vec::with_capacity(cases.len());
-    for ((path, case), run) in cases.iter().zip(results.iter()) {
-        let Some(run) = run else {
-            panic!("case {} did not report", case.id);
-        };
-        outcomes.push((path, case, classify::classify(case, run)));
-    }
-    assert_eq!(outcomes.len(), 3897);
+/// The scope table (`harness::scope`) names existing cases only, covers every procedure and
+/// `@ignore` case, links existing book pages, and its type-error deviation lists only cases
+/// that expect a compile-time `InvalidArgumentType` error.
+#[test]
+fn scope_table_is_consistent() {
+    use gherkin::{ErrorPhase, ErrorType};
+    use harness::scope;
 
-    if env_flag("OPENCYPHER_DETAILS") {
-        for (_, case, outcome) in &outcomes {
-            if outcome.class != Class::Pass {
-                eprintln!(
-                    "detail {} {}: {}",
-                    outcome.class.name(),
-                    case.id,
-                    outcome.detail
-                );
+    let features =
+        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let cases = all_cases(&features);
+    let by_id: BTreeMap<&str, &gherkin::Case> = cases.iter().map(|c| (c.id.as_str(), *c)).collect();
+    let book = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../book/src");
+    let mut problems = Vec::new();
+    for e in scope::EXCLUSIONS {
+        let page = e.docs.split('#').next().unwrap_or(e.docs);
+        if !book.join(page).is_file() {
+            problems.push(format!(
+                "{}: docs page book/src/{page} does not exist",
+                e.code
+            ));
+        }
+        for id in e.ids {
+            if !by_id.contains_key(id) {
+                problems.push(format!("{}: no case `{id}` in the tree", e.code));
             }
         }
     }
-    if env_flag("OPENCYPHER_SUMMARY") {
-        let mut total: BTreeMap<Class, usize> = BTreeMap::new();
-        let mut per_dir: BTreeMap<String, BTreeMap<Class, usize>> = BTreeMap::new();
-        for (path, _, outcome) in &outcomes {
-            *total.entry(outcome.class).or_default() += 1;
-            let dir = path.split('/').take(2).collect::<Vec<_>>().join("/");
-            *per_dir
-                .entry(dir)
-                .or_default()
-                .entry(outcome.class)
-                .or_default() += 1;
+    for case in &cases {
+        let procedure = case
+            .steps
+            .iter()
+            .any(|s| matches!(s.step, Step::Procedure { .. }));
+        let code = scope::exclusion(&case.id).map(|e| e.code);
+        if procedure && code != Some("procedures") {
+            problems.push(format!(
+                "{}: uses a vendor procedure, not in `procedures`",
+                case.id
+            ));
         }
-        let render = |counts: &BTreeMap<Class, usize>| {
-            Class::ALL
-                .iter()
-                .filter_map(|c| counts.get(c).map(|n| format!("{} {n}", c.name())))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let mut text = format!(
-            "opencypher tck ({}): {} cases in {:.1} s ({} lanes): {}\n",
-            storage.name(),
-            outcomes.len(),
-            elapsed.as_secs_f64(),
-            lanes(),
-            render(&total)
-        );
-        for (dir, counts) in &per_dir {
-            text.push_str(&format!("  {dir}: {}\n", render(counts)));
+        if case.is_ignored() && code != Some("upstream-ignore") {
+            problems.push(format!("{}: @ignore, not in `upstream-ignore`", case.id));
+        }
+    }
+    let deviation = scope::by_code("type-error-at-evaluation")
+        .unwrap_or_else(|| panic!("the type-error deviation is missing"));
+    for id in deviation.ids {
+        let Some(case) = by_id.get(id) else { continue };
+        let expects = case.steps.iter().any(|s| {
+            matches!(
+                &s.step,
+                Step::Error { kind: ErrorType::SyntaxError | ErrorType::TypeError, phase: ErrorPhase::CompileTime, detail }
+                    if detail == "InvalidArgumentType"
+            )
+        });
+        if !expects {
+            problems.push(format!(
+                "{id}: does not expect a compile-time InvalidArgumentType error"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The deliberate deviations of the scope still deviate: run, no case of them passes (then it
+/// belongs back in scope), and every type-error case still raises `22G03` at runtime (the
+/// documented reason).
+#[test]
+fn deviation_cases_still_deviate() {
+    use harness::classify::Class;
+    use harness::scope;
+
+    let features =
+        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let cases: Vec<&gherkin::Case> = all_cases(&features)
+        .into_iter()
+        .filter(|c| scope::exclusion(&c.id).is_some_and(|e| e.deviation))
+        .collect();
+    assert!(!cases.is_empty());
+    let outcomes = run_and_classify(&cases);
+    let mut problems = Vec::new();
+    for (case, outcome) in cases.iter().zip(&outcomes) {
+        let code = scope::exclusion(&case.id).map_or("", |e| e.code);
+        if outcome.class == Class::Pass {
+            problems.push(format!(
+                "{} ({code}) passes now: remove it from harness/scope.rs",
+                case.id
+            ));
+        } else if code == "type-error-at-evaluation"
+            && !(outcome.class == Class::WrongError
+                && outcome.detail.contains("got 22G03 at runtime"))
+        {
+            problems.push(format!(
+                "{} ({code}) no longer raises 22G03 at runtime: {} {}",
+                case.id,
+                outcome.class.name(),
+                outcome.detail
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Whether `OPENCYPHER_UPDATE_BASELINE` asks for a rewrite (set, non-empty, not `0`).
+fn update_requested() -> bool {
+    env_flag(harness::baseline::UPDATE_ENV)
+}
+
+/// Runs every in-scope case, writes the report and gates the result against the ratchet
+/// baseline (`tests/opencypher/baseline.toml`): fails on regressions and on stale entries. It
+/// also compares the generated blocks of the book page `book/src/gql/tck_compliance.md` with
+/// this run and fails when they drifted. `OPENCYPHER_UPDATE_BASELINE=1` rewrites the baseline and
+/// those blocks from this run instead of gating.
+///
+/// `GRAPHERSAL_TEST_STORAGE=forwarding` runs every case on `Graph<Forwarding>`: the same gate
+/// against the same baseline and page, plus no case may change class against the baseline; it
+/// never rewrites the baseline or the page and writes `opencypher-report-forwarding.md`.
+///
+/// Debug: `OPENCYPHER_DETAILS=1` prints one line per in-scope case that does not pass;
+/// `OPENCYPHER_LANES` sets the number of lanes.
+#[test]
+fn opencypher_tck_conformance() {
+    use harness::classify::{Class, Outcome};
+    use harness::storage::TestStorage;
+    use harness::{baseline, page, report, scope};
+
+    let storage = harness::storage::current();
+    assert!(
+        !(storage == TestStorage::Forwarding && update_requested()),
+        "{}=1 is refused with {}=forwarding: the default run (on TraversalGraph) owns the \
+         baseline and the compliance page",
+        baseline::UPDATE_ENV,
+        harness::storage::STORAGE_ENV,
+    );
+    let features =
+        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let cases = all_cases(&features);
+    assert_eq!(cases.len(), 3897);
+    let (excluded, in_scope): (Vec<&gherkin::Case>, Vec<&gherkin::Case>) = cases
+        .iter()
+        .partition(|c| scope::exclusion(&c.id).is_some());
+
+    let started = std::time::Instant::now();
+    let ran = run_and_classify(&in_scope);
+    let elapsed = started.elapsed();
+    let mut outcomes: Vec<(&str, Outcome)> =
+        in_scope
+            .iter()
+            .map(|c| c.id.as_str())
+            .zip(ran)
+            .chain(excluded.iter().filter_map(|c| {
+                scope::exclusion(&c.id).map(|e| (c.id.as_str(), Outcome::excluded(e)))
+            }))
+            .collect();
+    outcomes.sort_by(|a, b| a.0.cmp(b.0));
+    stderr_uncaptured(&format!(
+        "opencypher tck ({}): {} cases in {:.1} s ({} lanes)\n",
+        storage.name(),
+        outcomes.len(),
+        elapsed.as_secs_f64(),
+        lanes()
+    ));
+    if env_flag("OPENCYPHER_DETAILS") {
+        let mut text = String::new();
+        for (id, outcome) in &outcomes {
+            if !matches!(outcome.class, Class::Pass | Class::Excluded) {
+                text.push_str(&format!(
+                    "detail {} {id}: {}\n",
+                    outcome.class.name(),
+                    outcome.detail
+                ));
+            }
         }
         stderr_uncaptured(&text);
     }
+
+    let by_id = || outcomes.iter().map(|(id, o)| (*id, o));
+
+    // Gate against the baseline as committed (before any rewrite).
+    let path = baseline_path();
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(
+            baseline::parse(&text)
+                .unwrap_or_else(|e| panic!("{}: invalid baseline: {e}", path.display())),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!("read {}: {e}", path.display()),
+    };
+    let gate = recorded.as_ref().map(|b| baseline::gate(b, by_id()));
+
+    let update = update_requested();
+    let note = if update {
+        let fresh = baseline::from_outcomes(by_id());
+        let text = baseline::render(&fresh);
+        std::fs::write(&path, &text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+        let old = recorded.as_ref().map_or(0, |b| b.len());
+        let added = recorded.as_ref().map_or(fresh.len(), |b| {
+            fresh.keys().filter(|k| !b.contains_key(*k)).count()
+        });
+        let removed = recorded
+            .as_ref()
+            .map_or(0, |b| b.keys().filter(|k| !fresh.contains_key(*k)).count());
+        stderr_uncaptured(&format!(
+            "{}=1: rewrote {} with {} entries (was {old}; +{added} -{removed}); review the diff\n",
+            baseline::UPDATE_ENV,
+            path.display(),
+            fresh.len()
+        ));
+        format!(
+            "regenerated by this run ({} entries; the comparison is against the previous file).",
+            fresh.len()
+        )
+    } else {
+        match &recorded {
+            Some(b) => format!("`tests/opencypher/baseline.toml`, {} entries.", b.len()),
+            None => "missing (`tests/opencypher/baseline.toml` does not exist).".to_string(),
+        }
+    };
+
+    let rows: Vec<report::Row<'_>> = outcomes
+        .iter()
+        .map(|(id, o)| report::Row { id, outcome: o })
+        .collect();
+    let report_file = report_path();
+    if let Some(dir) = report_file.parent() {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+    }
+    std::fs::write(&report_file, report::markdown(&rows, gate.as_ref(), &note))
+        .unwrap_or_else(|e| panic!("write {}: {e}", report_file.display()));
+    stderr_uncaptured(&report::summary(&rows, &report_file.display().to_string()));
+    if let Some(g) = &gate
+        && !g.class_changed.is_empty()
+    {
+        stderr_uncaptured(&format!(
+            "note: {} baseline case(s) still fail under another class than recorded (listed in the report)\n",
+            g.class_changed.len()
+        ));
+    }
+
+    // The generated blocks of the book page: rewritten on update, compared (and failing) otherwise.
+    let blocks = page::render_blocks(&rows);
+    let page_file = page::page_path();
+    let page_text = std::fs::read_to_string(&page_file)
+        .unwrap_or_else(|e| panic!("read {}: {e}", page_file.display()));
+    let page_problem = if update {
+        let new = page::rewrite(&page_text, &blocks)
+            .unwrap_or_else(|e| panic!("{}: {e}", page_file.display()));
+        if new != page_text {
+            std::fs::write(&page_file, &new)
+                .unwrap_or_else(|e| panic!("write {}: {e}", page_file.display()));
+            stderr_uncaptured(&format!(
+                "{}=1: rewrote the generated blocks of {}; review the diff\n",
+                baseline::UPDATE_ENV,
+                page_file.display()
+            ));
+        }
+        None
+    } else {
+        match page::check(&page_text, &blocks) {
+            Ok(None) => None,
+            Ok(Some(diff)) => Some(format!(
+                "the generated blocks of {} are out of date:\n{diff}run `{}=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck` and commit the page",
+                page_file.display(),
+                baseline::UPDATE_ENV
+            )),
+            Err(e) => Some(format!("{}: {e}", page_file.display())),
+        }
+    };
+    if update {
+        return;
+    }
+    let Some(gate) = gate else {
+        panic!(
+            "no baseline at {}; generate it with {}=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck",
+            path.display(),
+            baseline::UPDATE_ENV
+        );
+    };
+    let mut problems: Vec<String> = Vec::new();
+    if gate.failed() {
+        problems.push(format!(
+            "the openCypher TCK run does not match the baseline:\n{}",
+            gate.failure_message()
+        ));
+    }
+    problems.extend(page_problem);
+    if storage != TestStorage::TraversalGraph && !gate.class_changed.is_empty() {
+        problems.push(format!(
+            "{} baseline case(s) fail under another class on the {} storage than recorded: {:?}",
+            gate.class_changed.len(),
+            storage.name(),
+            gate.class_changed
+        ));
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n\n"));
 }

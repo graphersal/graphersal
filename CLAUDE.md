@@ -65,7 +65,7 @@ cargo test  --package graphersal --features script,io,display,serde,persist,gql 
 # writes the full report to target/tinkerpop-report.md
 cargo test  --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features
 TINKERPOP_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test tinkerpop_features   # rewrite the baseline AND the generated blocks of the compliance page
-# openCypher TCK 2024.3 against GQL (separate target, feature gql; runner being built in 3b); every run
+# openCypher TCK 2024.3 against GQL (separate target, feature gql; GRAPHERSAL_TEST_STORAGE=forwarding as for TinkerPop); every run
 # writes target/opencypher-report.md
 cargo test  --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
 OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck   # rewrite its baseline AND the generated blocks of book/src/gql/tck_compliance.md
