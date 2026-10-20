@@ -144,8 +144,7 @@
 //!   Each parenthesized path pattern is one [`MAX_DEPTH`] level; the functions from
 //!   [`Parser::path_pattern`] down to [`Parser::node_pattern`] are thin, out-of-line frames
 //!   that fill nodes in place, since they lie under every nested expression of a pattern.
-//!   The pattern-predicate and pattern-comprehension lookaheads do not look for them (a
-//!   parenthesized path pattern there is written in an `EXISTS { }` body).
+//!   The pattern-predicate and pattern-comprehension lookaheads find them too (2e.T5, below).
 //! - **Path variables:** `p = path`; the path's span starts at the variable.
 //! - **`FOR` / `UNWIND`** ([`ForClause`]): GQL `FOR x IN expr [WITH ORDINALITY i | WITH OFFSET
 //!   i]` and its Cypher alias `UNWIND expr AS x` (one meaning, no ordinal). The variables are
@@ -177,6 +176,14 @@
 //!   parenthesized expression. So `(a) - (b)` and `(a)-1` stay arithmetic, `(a)<-(b)` stays
 //!   `a < -b`, `(a) - [1]` stays list arithmetic; `(a)--(b)`, `(a)-->(b)` and `(a)-(b)-->(c)` are
 //!   patterns (Cypher's reading wins over `a - -b`, which is written without parentheses).
+//!   Stage 2e: a node followed by `((` is a pattern (a juxtaposed parenthesized path pattern,
+//!   `(n) ((x)-->(y)){2}`; `(n) (` is no expression). `((` is a parenthesized path pattern when
+//!   its body reads as a pattern ending at its `)` (or its `WHERE`) and the `)` is followed by
+//!   what only a pattern continues with: `{..}`, `?`, `(`, an edge that is no operator, or `*`
+//!   / `+` not followed by an operand. So `((a)-->(b))` alone stays a parenthesized pattern
+//!   predicate and `((a)-->(b)) * 2` arithmetic, while `((a)-->(b)) + (c)` reads as a pattern
+//!   (arithmetic on a pattern predicate's boolean is a type error anyway). The body scan does
+//!   not look for nested ones, so the scan never recurses.
 //! - **Map projections and comprehensions** (stage 2c, design item 7; openCypher compatibility
 //!   forms, the GQL counterpart of a map projection is the record constructor `{k: expr}`): a
 //!   variable followed by `{` is a map projection ([`MapProjection`]; items `.key`, `.*`, a
@@ -2182,14 +2189,22 @@ impl<'a> Parser<'a> {
     /// node pattern never has these: a node's variable is followed by `:`, `IS`, `{`, `WHERE`
     /// or `)`.
     fn group_ahead(&self) -> bool {
-        if !self.at(&TokenKind::LParen) {
+        self.group_ahead_at(self.pos)
+    }
+
+    /// [`Parser::group_ahead`] at token `i` (a token scan for the lookaheads).
+    fn group_ahead_at(&self, i: usize) -> bool {
+        if self.token_at(i).kind != TokenKind::LParen {
             return false;
         }
-        let next = self.nth(1);
+        let next = self.token_at(i.saturating_add(1));
+        let after = self.token_at(i.saturating_add(2));
         match &next.kind {
             TokenKind::LParen => true,
-            TokenKind::QuotedIdent(_) => self.nth(2).kind == TokenKind::Eq,
-            TokenKind::Ident => self.nth(2).kind == TokenKind::Eq || self.prefix_word_at(1),
+            TokenKind::QuotedIdent(_) => after.kind == TokenKind::Eq,
+            TokenKind::Ident => {
+                after.kind == TokenKind::Eq || self.prefix_word_index(i.saturating_add(1))
+            }
             _ => false,
         }
     }
@@ -2198,8 +2213,13 @@ impl<'a> Parser<'a> {
     /// followed by what continues a prefix (`(`, a word, a count, `SHORTEST`), which no node
     /// pattern holds.
     fn prefix_word_at(&self, i: usize) -> bool {
-        let token = self.nth(i);
-        let next = self.nth(i.saturating_add(1));
+        self.prefix_word_index(self.pos.saturating_add(i))
+    }
+
+    /// [`Parser::prefix_word_at`] at the absolute token index `i`.
+    fn prefix_word_index(&self, i: usize) -> bool {
+        let token = self.token_at(i);
+        let next = self.token_at(i.saturating_add(1));
         token.kind == TokenKind::Ident
             && PATH_PREFIX_WORDS
                 .iter()
@@ -2433,7 +2453,11 @@ impl<'a> Parser<'a> {
                 token.span,
                 "a quantifier cannot follow a node pattern; it repeats the edge before it",
             )
-            .alternative("quantify the edge, for example MATCH (a)-[:knows]->{1,3}(b) RETURN b");
+            .alternative(
+                "quantify the edge, for example MATCH (a)-[:knows]->{1,3}(b) RETURN b, or \
+                 repeat a pattern with its nodes as a quantified path pattern, for example \
+                 MATCH (a) ((x:person)-[:knows]->(y)){1,3} (b) RETURN b",
+            );
             return Err(Box::new(b));
         }
         Ok(())
@@ -3555,27 +3579,43 @@ impl<'a> Parser<'a> {
         self.pattern_ahead_at(self.pos)
     }
 
-    /// [`Parser::pattern_ahead`] at token `i`.
-    fn pattern_ahead_at(&self, mut i: usize) -> bool {
+    /// [`Parser::pattern_ahead`] at token `i`. Stage 2e: a parenthesized path pattern counts
+    /// as a pattern element where it stands ([`Parser::group_predicate_at`]), and a node
+    /// followed by `((` is a pattern (a juxtaposed parenthesized path pattern: `(n) (` is no
+    /// expression).
+    fn pattern_ahead_at(&self, i: usize) -> bool {
+        self.chain_ahead_at(i, true)
+    }
+
+    /// The scan of [`Parser::pattern_ahead_at`]; `groups` false reads `((` as a node group
+    /// (the body of a parenthesized path pattern, so the scan never recurses).
+    #[inline(never)]
+    fn chain_ahead_at(&self, mut i: usize, groups: bool) -> bool {
         for _ in 0..=PREDICATE_LOOKAHEAD_EDGES {
             if self.token_at(i).kind != TokenKind::LParen {
                 return false;
             }
-            let Some((after, edge)) = self.skip_group(i).and_then(|j| self.edge_ahead(j)) else {
+            if groups && self.token_at(i.saturating_add(1)).kind == TokenKind::LParen {
+                return self.group_predicate_at(i);
+            }
+            let Some(end) = self.skip_group(i) else {
+                return false;
+            };
+            if groups
+                && self.token_at(end).kind == TokenKind::LParen
+                && self.token_at(end.saturating_add(1)).kind == TokenKind::LParen
+            {
+                return true;
+            }
+            let Some((after, edge)) = self.edge_ahead(end) else {
                 return false;
             };
             if edge == EdgeAhead::Decisive {
                 return true;
             }
-            let mut j = after;
-            match self.token_at(j).kind {
-                TokenKind::LBrace => match self.skip_group(j) {
-                    Some(k) => j = k,
-                    None => return false,
-                },
-                TokenKind::Star | TokenKind::Plus => j = j.saturating_add(1),
-                _ => {}
-            }
+            let Some(j) = self.edge_quantifier_end(after) else {
+                return false;
+            };
             if self.token_at(j).kind != TokenKind::LParen {
                 return false;
             }
@@ -3585,6 +3625,77 @@ impl<'a> Parser<'a> {
             i = j;
         }
         false
+    }
+
+    /// At `((` where an expression stands: whether a parenthesized path pattern opens at token
+    /// `i` rather than a parenthesized expression. Its body must read as a pattern (a decisive
+    /// or strong edge) ending at the closing `)` or at its `WHERE`, and something only a
+    /// pattern continues with must follow the `)`: a quantifier `{..}` or `?`, a node or
+    /// another parenthesized path pattern `(`, an edge that is no operator, or `*` / `+` not
+    /// followed by an operand (`((a)-->(b)) * 2` stays arithmetic). So `((a)-->(b))` alone
+    /// stays a parenthesized pattern predicate.
+    #[inline(never)]
+    fn group_predicate_at(&self, i: usize) -> bool {
+        let body = i.saturating_add(1);
+        let Some(close) = self.skip_group(i) else {
+            return false;
+        };
+        let body_ends_at_close = self.pattern_end(body).is_some_and(|end| {
+            let token = self.token_at(end);
+            (token.kind == TokenKind::RParen && end.saturating_add(1) == close)
+                || token.keyword() == Some(Keyword::Where)
+        });
+        if !body_ends_at_close || !self.chain_ahead_at(body, false) {
+            return false;
+        }
+        match self.token_at(close).kind {
+            TokenKind::LBrace | TokenKind::Question | TokenKind::LParen => true,
+            TokenKind::Star | TokenKind::Plus => !self.operand_ahead(close.saturating_add(1)),
+            _ => self
+                .edge_ahead(close)
+                .is_some_and(|(_, edge)| edge != EdgeAhead::Weak),
+        }
+    }
+
+    /// Whether token `i` starts an operand of an arithmetic operator rather than continuing a
+    /// pattern (a node `(` or an edge reads as the pattern: arithmetic on a pattern predicate's
+    /// boolean is a type error anyway).
+    fn operand_ahead(&self, i: usize) -> bool {
+        let token = self.token_at(i);
+        match &token.kind {
+            TokenKind::LParen => false,
+            TokenKind::Minus | TokenKind::LeftArrow if self.edge_ahead(i).is_some() => false,
+            TokenKind::Ident
+            | TokenKind::QuotedIdent(_)
+            | TokenKind::Parameter(_)
+            | TokenKind::Integer(_)
+            | TokenKind::Float(_)
+            | TokenKind::Str(_)
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Minus
+            | TokenKind::Plus => true,
+            TokenKind::Keyword(k) => matches!(
+                k,
+                Keyword::Not
+                    | Keyword::Null
+                    | Keyword::True
+                    | Keyword::False
+                    | Keyword::Case
+                    | Keyword::Exists
+            ),
+            _ => false,
+        }
+    }
+
+    /// The index after an edge's quantifier (`{..}`, `*`, `+`) starting at token `j`, `j`
+    /// itself when there is none; `None` for an unclosed `{`.
+    fn edge_quantifier_end(&self, j: usize) -> Option<usize> {
+        match self.token_at(j).kind {
+            TokenKind::LBrace => self.skip_group(j),
+            TokenKind::Star | TokenKind::Plus => Some(j.saturating_add(1)),
+            _ => Some(j),
+        }
     }
 
     /// A Cypher pattern predicate `(a)-[:T]->(b)`: an alias of `EXISTS { pattern }`.
@@ -4126,27 +4237,36 @@ impl<'a> Parser<'a> {
     }
 
     /// The index after the path pattern whose first node pattern opens at token `i`, read as
-    /// [`Parser::path_pattern`] reads it (node groups, edges as [`Parser::edge_ahead`] reads
-    /// them, GQL quantifiers); `None` when the tokens there are no complete pattern. A token
-    /// scan, no parse: every step moves forward, so it ends.
-    fn pattern_end(&self, i: usize) -> Option<usize> {
-        if self.token_at(i).kind != TokenKind::LParen {
-            return None;
-        }
-        let mut end = self.skip_group(i)?;
-        while let Some((after, _)) = self.edge_ahead(end) {
-            let mut j = after;
-            match self.token_at(j).kind {
-                TokenKind::LBrace => j = self.skip_group(j)?,
-                TokenKind::Star | TokenKind::Plus => j = j.saturating_add(1),
-                _ => {}
+    /// [`Parser::path_pattern`] reads it (node groups, parenthesized path patterns with their
+    /// quantifier and juxtaposed `(`, edges as [`Parser::edge_ahead`] reads them, GQL
+    /// quantifiers); `None` when the tokens there are no complete pattern. A token scan, no
+    /// parse: every step moves forward, so it ends.
+    fn pattern_end(&self, mut i: usize) -> Option<usize> {
+        loop {
+            if self.token_at(i).kind != TokenKind::LParen {
+                return None;
             }
+            let group = self.group_ahead_at(i);
+            let mut end = self.skip_group(i)?;
+            if group {
+                end = match self.token_at(end).kind {
+                    TokenKind::Question => end.saturating_add(1),
+                    _ => self.edge_quantifier_end(end)?,
+                };
+            }
+            if self.token_at(end).kind == TokenKind::LParen && (group || self.group_ahead_at(end)) {
+                i = end;
+                continue;
+            }
+            let Some((after, _)) = self.edge_ahead(end) else {
+                return Some(end);
+            };
+            let j = self.edge_quantifier_end(after)?;
             if self.token_at(j).kind != TokenKind::LParen {
                 return None;
             }
-            end = self.skip_group(j)?;
+            i = j;
         }
-        Some(end)
     }
 
     /// `[p = (a)-[:T]->(b) WHERE cond | expr]`, at `[`. Like a subquery, the names declared in

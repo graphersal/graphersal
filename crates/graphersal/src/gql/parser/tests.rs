@@ -4330,3 +4330,135 @@ fn never_panics_on_mutated_parenthesized_path_patterns() {
         }
     }
 }
+
+// ----- stage 2e.T5: parenthesized path patterns where an expression stands -----
+
+/// The path pattern of the subquery `src` stands for (a pattern predicate or a pattern
+/// comprehension, the first RETURN item of `MATCH (n) RETURN <src>`), as [`path_shape`].
+fn expression_path_shape(src: &str) -> String {
+    let query = ok(&format!("MATCH (n) RETURN {src}"));
+    match &query.ret.items[0].expr.kind {
+        ExprKind::Subquery(s) => path_shape(&s.matches[0].patterns[0]),
+        ExprKind::PatternComprehension(c) => path_shape(&c.body.patterns[0]),
+        other => panic!("{src}: neither a subquery nor a comprehension: {other:?}"),
+    }
+}
+
+#[test]
+fn parenthesized_path_patterns_in_pattern_predicates() {
+    // A juxtaposed group after a node, a leading group, a group after an edge, every
+    // quantifier form: a pattern predicate.
+    for (src, shape) in [
+        ("(n) ((x)-->(y)){2}", "n (x-_-y){2,2} ."),
+        ("(n) (()-[:knows]->()){1,3} (m)", "n (_-_-_){1,3} m"),
+        ("(n) ((x)-->(y))", "n (x-_-y) ."),
+        ("(n) ((x)-->(y))? (m)", "n (x-_-y){0,1} m"),
+        ("((x)-->(y)){2} (n)", ". (x-_-y){2,2} n"),
+        ("((x)-->(y))? (n)", ". (x-_-y){0,1} n"),
+        ("((x)-->(y) WHERE x.a > 1){1,2}", ". (x-_-y WHERE){1,2} ."),
+        ("((x)-[e]-(y)) (n)", ". (x-e-y) n"),
+        ("((x)-->(y))-->(n)", ". (x-_-y) .-_-n"),
+        ("((x)-->(y))+ -->(n)", ". (x-_-y){1,} .-_-n"),
+        ("((x)-->(y))* (n)", ". (x-_-y){0,} n"),
+        ("(n)-->((x)-->(y)){2}", "n-_-. (x-_-y){2,2} ."),
+        ("(n)-((x)-->(y)){2}", "n-_-. (x-_-y){2,2} ."),
+        (
+            "(n) ((x)-->(y)){2} ((u)<--(v))+ (m)",
+            "n (x-_-y){2,2} . (u-_-v){1,} m",
+        ),
+    ] {
+        assert_eq!(expression_path_shape(src), shape, "{src}");
+        assert!(expr(src).starts_with("(pattern "), "{src}: {}", expr(src));
+    }
+    // In a condition, with the other operators around it.
+    assert_eq!(
+        expr("(n) (()-->()){2} AND NOT ((a)-->(b))? (n) OR true"),
+        "(or (and (pattern (match 1)) (not (pattern (match 1)))) true)"
+    );
+    assert_eq!(
+        expr("((x)-->(y))+ AND true"),
+        "(and (pattern (match 1)) true)"
+    );
+    // A parenthesized pattern predicate without what only a group continues with stays one, and
+    // arithmetic on parentheses stays arithmetic.
+    for (src, tree) in [
+        ("((n)-->(m))", "(pattern (match 1))"),
+        ("((n)-->(m)) * 2", "(* (pattern (match 1)) 2)"),
+        ("((n)-->(m)) + [1]", "(+ (pattern (match 1)) [1])"),
+        ("((n)-->(m)) + x", "(+ (pattern (match 1)) x)"),
+        ("((n)-->(m)) + -1", "(+ (pattern (match 1)) -1)"),
+        ("((n)-->(m)) = true", "(= (pattern (match 1)) true)"),
+        ("((n) - (m)) * (k)", "(* (- n m) k)"),
+        ("((n)) * (m)", "(* n m)"),
+        ("((1 + 2)) * 3", "(* (+ 1 2) 3)"),
+        ("(n) - ((m) - (k))", "(- n (- m k))"),
+    ] {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    // Pattern after the operator: `+` / `*` followed by a node reads as a quantifier.
+    assert_eq!(
+        expression_path_shape("((n)-->(m)) + (k)"),
+        ". (n-_-m){1,} k"
+    );
+    // Errors stay where they were: a body without an edge, a nested group (E17).
+    let f = fail("MATCH (n) WHERE (n) ((x)){2} RETURN n");
+    assert_eq!(f.gqlstatus, "0A000", "{}", f.message);
+    let f = fail("MATCH (n) WHERE (n) (((x)-->(y)){2}){2} RETURN n");
+    assert_eq!(f.gqlstatus, "0A000", "{}", f.message);
+}
+
+#[test]
+fn parenthesized_path_patterns_in_pattern_comprehensions() {
+    for (src, shape) in [
+        ("[(n) ((x)-->(y)){1,2} | y]", "n (x-_-y){1,2} ."),
+        (
+            "[(n) ((x)-->(y)){1,2} (m) WHERE m.a > 1 | m]",
+            "n (x-_-y){1,2} m",
+        ),
+        ("[((x)-->(y)){2} | x]", ". (x-_-y){2,2} ."),
+        ("[((x)-->(y))? (m) | m]", ". (x-_-y){0,1} m"),
+        ("[((x)-->(y))+ | 1]", ". (x-_-y){1,} ."),
+        ("[((x)-->(y))* WHERE true | 1]", ". (x-_-y){0,} ."),
+        ("[(n)-->((x)-->(y)){2} | y]", "n-_-. (x-_-y){2,2} ."),
+        (
+            "[(n) ((x)-->(y)) ((u)<--(v)){2} | v]",
+            "n (x-_-y) . (u-_-v){2,2} .",
+        ),
+        ("[p = (n) ((x)-->(y)){1,2} | p]", "n (x-_-y){1,2} ."),
+        ("[p = ((x)-->(y)){1,2} (m) | p]", ". (x-_-y){1,2} m"),
+    ] {
+        assert_eq!(expression_path_shape(src), shape, "{src}");
+        assert!(expr(src).starts_with("(collect "), "{src}: {}", expr(src));
+    }
+    // Without `WHERE` or `|` the bracket stays a list holding a pattern predicate.
+    assert_eq!(expr("[(n) ((x)-->(y)){2}]"), "[(pattern (match 1))]");
+    assert_eq!(expr("[((x)-->(y)){2} (n), 1]"), "[(pattern (match 1)) 1]");
+    assert_eq!(expr("[((n)-->(m))]"), "[(pattern (match 1))]");
+}
+
+#[test]
+fn parenthesized_path_patterns_in_expressions_are_bounded() {
+    // Nesting through a pattern predicate in a body node's WHERE and through comprehensions:
+    // the depth limit, never a stack overflow, and the lookahead stays a forward scan.
+    let mut predicate = "(n)-->()".to_string();
+    let mut comprehension = "1".to_string();
+    for _ in 0..300 {
+        predicate = format!("(n) ((x WHERE {predicate})-->(y)){{1,2}}");
+        comprehension = format!("[(n) ((x)-->(y)){{2}} | {comprehension}]");
+    }
+    for query in [
+        format!("MATCH (n) WHERE {predicate} RETURN n"),
+        format!("MATCH (n) RETURN {comprehension} AS l"),
+    ] {
+        let f = fail(&query);
+        assert_eq!(f.kind, GqlErrorKind::Limit, "{}", &query[..60]);
+    }
+    // Long unclosed or unbalanced input ends the scan.
+    for query in [
+        format!("MATCH (n) WHERE {} RETURN n", "((".repeat(5000)),
+        format!("MATCH (n) WHERE (n) {}", "((x)-->(y)){2} ".repeat(2000)),
+        format!("MATCH (n) RETURN [{}", "((x)-->(y))+ ".repeat(2000)),
+    ] {
+        let _ = fail(&query);
+    }
+}

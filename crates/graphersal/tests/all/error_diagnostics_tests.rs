@@ -7410,6 +7410,111 @@ mod gql {
         );
     }
 
+    /// The MATCH examples (`MATCH .. RETURN <var>`) written in an alternative, in order.
+    fn match_examples(help: &str) -> Vec<String> {
+        let mut examples = Vec::new();
+        let mut rest = help;
+        while let Some(at) = rest.find("MATCH (") {
+            let tail = &rest[at..];
+            let Some(ret) = tail.find(" RETURN ") else {
+                break;
+            };
+            let after = &tail[ret + " RETURN ".len()..];
+            let end = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .unwrap_or(after.len());
+            let example = tail[..ret + " RETURN ".len() + end].trim_end_matches('.');
+            examples.push(example.to_string());
+            rest = &tail[ret..];
+        }
+        examples
+    }
+
+    #[test]
+    fn gql_help_names_quantified_path_patterns_where_they_fix_the_error() {
+        // Stage 2e.T5, rule 6: a quantified path pattern reads an edge together with its nodes
+        // in every iteration, and repeats a pattern a quantifier after a node cannot.
+        let graph = GraphSource::tinkerpop_modern();
+        let locked = graph.read();
+        for (query, names) in [
+            (
+                "MATCH (a)-[e WHERE e.weight > a.age]->{1,3}(b) RETURN b",
+                "or read the edge and its nodes together in every iteration of a quantified \
+                 path pattern, as in MATCH (a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} \
+                 (b) RETURN b, or test the list of edges in the WHERE of the MATCH clause",
+            ),
+            (
+                "MATCH (a){2}-->(b) RETURN b",
+                "quantify the edge, for example MATCH (a)-[:knows]->{1,3}(b) RETURN b, or repeat \
+                 a pattern with its nodes as a quantified path pattern, for example MATCH (a) \
+                 ((x:person)-[:knows]->(y)){1,3} (b) RETURN b",
+            ),
+        ] {
+            let help = gql_help(query);
+            assert!(help.contains(names), "{query}: {help}");
+            let examples = match_examples(names);
+            assert!(!examples.is_empty(), "{names}");
+            for example in examples {
+                let rows = locked.traversal().gql(&example).to_list();
+                assert!(rows.is_ok(), "{example}: {rows:?}");
+            }
+        }
+        // The refusals inside a parenthesized path pattern (E17) stay, each with an alternative
+        // that runs as written.
+        for (query, what) in [
+            (
+                "MATCH (a) (((x)-->(y)){2}){1,3} (b) RETURN b",
+                "a parenthesized path pattern nested in another one",
+            ),
+            (
+                "MATCH (a) ((x)-[:knows]->{2}(y)){1,3} (b) RETURN b",
+                "a quantified edge inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) (p = (x)-->(y)){1,3} (b) RETURN b",
+                "a path variable inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) ((x)-->(y), (y)-->(z)){1,3} (b) RETURN b",
+                "several path patterns inside a parenthesized path pattern",
+            ),
+            (
+                "MATCH (a) ((x)){1,3} (b) RETURN b",
+                "a parenthesized path pattern without an edge",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{report}"
+            );
+            assert!(
+                report.contains(&format!("{what} is not yet supported")),
+                "{report}"
+            );
+            let help = err.help().expect("a GQL error has help");
+            assert!(!help.contains("not yet supported"), "{help}");
+            for example in match_examples(&help) {
+                let rows = locked.traversal().gql(&example).to_list();
+                assert!(rows.is_ok(), "{query}: {example}: {rows:?}");
+            }
+        }
+        // A parenthesized path pattern itself is no longer refused anywhere a pattern stands.
+        for query in [
+            "MATCH (a) ((x)-->(y)){1,3} (b) RETURN b",
+            "MATCH (a) WHERE (a) (()-->()){1,2} RETURN a",
+            "MATCH (a) RETURN [(a) ((x)-->(y)){1,2} | y] AS l",
+            "MATCH (a) RETURN [((x)-->(y))? (a) | x] AS l",
+            "MATCH (a) WHERE EXISTS { (a) ((x)-->(y))+ } RETURN a",
+            "MATCH (a) OPTIONAL MATCH (a) ((x)-->(y)){2} (b) RETURN a, b",
+            "MATCH (a) CALL (a) { MATCH (a) ((x)-->(y)) (b) RETURN b } RETURN b",
+        ] {
+            let rows = locked.traversal().gql(query).to_list();
+            assert!(rows.is_ok(), "{query}: {rows:?}");
+        }
+    }
+
     #[test]
     fn gql_nesting_past_the_bound_is_a_limit_error() {
         let query = format!("MATCH (p) RETURN {}1{}", "(".repeat(2000), ")".repeat(2000));

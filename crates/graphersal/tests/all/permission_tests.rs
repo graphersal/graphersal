@@ -2705,4 +2705,123 @@ mod gql {
             )
         );
     }
+
+    /// Stage 2e.T5: a parenthesized path pattern is `repeat(__.<body>)` (or its body inline),
+    /// and the authorization walk visits the body: an edge read only a body hop makes (the
+    /// outer pattern reads vertices only) is refused before the run at the body's edge step,
+    /// like the Gremlin `repeat(__.outE(..).inV())` twin, for every quantifier, walked from
+    /// either end, in a two-hop body, inside `OPTIONAL MATCH`, `EXISTS`, a pattern predicate, a
+    /// pattern comprehension, `COUNT { }` and `CALL`, also when no row reaches it. A vertex read
+    /// only a body's node label asks (a read states no label) is refused likewise when it is
+    /// the only vertex read, in an uncorrelated subquery body. Allowed, it asks what the twin
+    /// asks.
+    #[test]
+    fn a_denied_read_inside_a_parenthesized_path_pattern_refuses_gql_like_repeat() {
+        let graph = modern();
+        // Without a quantifier (and with `?`, one iteration at most) an unread edge is the 1a
+        // `out()` hop; a repeating body labels its edges, so its hop is `out_e()`.
+        for (script, step) in [
+            (
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[e:knows]->(y)) (f) RETURN f.name").toList()"#,
+                "out",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y))? (f) RETURN f.name").toList()"#,
+                "out",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y))* (f) RETURN count(*) AS c").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(m)-[:created]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:nobody) ((x)-[:knows]->(y)){1,2} (f) RETURN f").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE EXISTS { (p) ((x)-[:knows]->(y)){1,2} } RETURN p.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE (p) (()-[:knows]->()){1,2} RETURN p.name").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN [(p) ((x)-[:knows]->(y)){1,2} (f) | f.name] AS l").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) RETURN COUNT { (p) ((x)-[:knows]->(y))+ } AS c").toList()"#,
+                "out_e",
+            ),
+            (
+                r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p) ((x)-[:knows]->(y)){1,2} (f) RETURN f } RETURN f.name").toList()"#,
+                "out_e",
+            ),
+        ] {
+            assert_denied(run(&graph, script, NoEdges), step, "Read Data(edge)");
+        }
+        // Walked from the far end the hop is reversed: the edge step is in_e.
+        for script in [
+            r#"g.V().has("name", "lop").repeat(__.inE("created").outV()).times(1).values("name").toList()"#,
+            r#"g.gql("MATCH (a) ((x)-[:created]->(y)){1} (s:software {name: 'lop'}) RETURN a.name").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "in_e", "Read Data(edge)");
+        }
+        // Either direction: the first hop of the `union()` of both.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]-(y)){1,2} (f) RETURN f.name").toList()"#,
+                NoEdges,
+            ),
+            "out_e",
+            "Read Data(edge)",
+        );
+        // A vertex read that only a body's node pattern (with its label) makes.
+        for script in [
+            r#"g.gql("FOR i IN [1] RETURN COUNT { MATCH ((x:person)-[:knows]->(y)){1,2} } AS c").toList()"#,
+            r#"g.gql("FOR i IN [] RETURN COLLECT { MATCH ((x:person)-[:knows]->(y:person))+ RETURN y } AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Allowed, a parenthesized path pattern asks what its Gremlin twin asks.
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) ((x)-[:knows]->(y)){1,2} (f) RETURN f.name").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").repeat(__.outE("knows").inV()).emit().times(2).values("name").toList()"#
+            )
+        );
+        for query in [
+            "MATCH (p:person) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20)? (b) RETURN p, b",
+            "MATCH p = (a) ((x)-->(y)){1,2} (b) RETURN p",
+            "MATCH (a) WHERE (a) (()-->()){2} RETURN [(a) ((x)-->(y))+ | y] AS l",
+        ] {
+            let script = format!("g.gql({query:?}).toList()");
+            let seen = requests(&graph, &script);
+            assert!(
+                seen.iter().all(|request| request.starts_with("Read ")),
+                "{query}: {seen:?}"
+            );
+        }
+    }
 }

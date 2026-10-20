@@ -548,6 +548,62 @@ const GQL_CURATED_2D: &[&str] = &[
     r#"g.gql("RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x").toList()"#,
 ];
 
+/// Stage 2e (parenthesized and quantified path patterns): the `repeat()` of the body with
+/// `gql:trail` per body edge, body conditions per iteration, group lists and paths in text order
+/// (also walked from the far end), `?` singletons, the forms inside subqueries, pattern
+/// predicates and comprehensions, a correlated lookup by index into a body, and two errors
+/// (the loop limit naming the pattern, an E17 refusal).
+const GQL_CURATED_2E: &[&str] = &[
+    r#"g.gql("MATCH (a {name: 'marko'}) ((x)-[e]->(y)){1,3} (b) RETURN b.name AS b, [v IN x | v.name] AS xs, e ORDER BY b, xs").toList()"#,
+    r#"g.gql("MATCH (a) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20){1,2} (b) RETURN a.name AS a, b.name AS b, e, f ORDER BY a, b").toList()"#,
+    r#"g.gql("MATCH (a) ((x)-[e]-(y) WHERE e.weight > 0.3)+ (b:software {name: 'ripple'}) RETURN a.name AS a, [v IN y | v.name] AS ys ORDER BY a, ys").toList()"#,
+    r#"g.gql("MATCH p = (a:person) ((x)-->(y))? (b) RETURN a.name AS a, y.name AS y, length(p) AS l ORDER BY a, y").toList()"#,
+    r#"g.gql("MATCH (a:person) ((x)-->(y)) (b) RETURN a.name AS a, x.name AS x, b.name AS b ORDER BY a, b").toList()"#,
+    r#"g.gql("MATCH (a) ((x)-->(y)){0} (b) RETURN a.name AS a, b.name AS b ORDER BY a").toList()"#,
+    r#"g.gql("MATCH (a) ((x)-->(y))* (b) ((u)<--(v)){1,2} (c) RETURN count(*) AS n").toList()"#,
+    r#"g.gql("MATCH (a:person) WHERE (a) (()-[:knows]->()){1} RETURN a.name AS a ORDER BY a").toList()"#,
+    r#"g.gql("MATCH (b) WHERE NOT (()-->())+ (b) RETURN b.name AS b ORDER BY b").toList()"#,
+    r#"g.gql("MATCH (a:person) RETURN a.name AS a, [(a) ((x)-->(y)){1,2} (b) | b.name] AS l, COUNT { (a) ((x)--(y)){2} } AS c ORDER BY a").toList()"#,
+    r#"g.gql("MATCH (a:person) WHERE EXISTS { (a) ((x)-[:created]->(y))+ } RETURN a.name AS a ORDER BY a").toList()"#,
+    r#"g.gql("MATCH (a:person) OPTIONAL MATCH (a) ((x)-[:knows]->(y)){1,2} (b) RETURN a.name AS a, b.name AS b ORDER BY a, b").toList()"#,
+    r#"g.gql("MATCH (a:person) CALL (a) { MATCH (a) ((x)-->(y)){1,2} (b) RETURN count(b) AS n } RETURN a.name AS a, n ORDER BY a").toList()"#,
+    r#"g.create_index(#{label: "person", key: "name"}); g.gql("FOR n IN ['marko', 'josh'] MATCH (a:person {name: n}) ((x)-->(y)){1,2} (b) RETURN n, b.name AS b ORDER BY n, b").toList()"#,
+    r#"g.gql("MATCH (a) ((x)-[e]->(y)){1,} (b) RETURN count(*) AS c").profile().to_string().contains("gql:trail(")"#,
+    r#"g.with("repeat.max_loops", 1).gql("MATCH (a) ((x)-[e]-(y)){1,} (b) RETURN b").toList()"#,
+    r#"g.gql("MATCH (a) (((x)-->(y)){2}){1,3} (b) RETURN b").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_2e_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = 0;
+    for script in GQL_CURATED_2E {
+        let expected = run_curated(reference(), Mode::Plain, script);
+        let actual = run_curated(forwarded(), Mode::Plain, script);
+        failing += usize::from(expected.result.is_err());
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 2e, not fail on the way: only the two error cases fail.
+    assert_eq!(failing, 2, "only the two error cases fail");
+    let at = GQL_CURATED_2E.len() - 3;
+    let result = run_curated(reference(), Mode::Plain, GQL_CURATED_2E[at]).result;
+    assert!(
+        result.as_deref().is_ok_and(|text| text.ends_with("true")),
+        "{result:?}"
+    );
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2d_scripts_give_the_same_result_on_both_storages() {

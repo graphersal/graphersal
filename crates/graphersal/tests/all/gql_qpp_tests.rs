@@ -778,6 +778,97 @@ fn quantified_path_patterns_inside_subqueries_and_optional_match() {
     assert_eq!(table(&rows(&graph, query), &["a"]), expected);
 }
 
+/// `body_text` without variables (a pattern predicate introduces none).
+fn anonymous(body: &str) -> String {
+    let mut text = body.to_string();
+    for node in ["x", "y", "m", "n", "o", "q"] {
+        text = text.replace(&format!("({node})"), "()");
+    }
+    for edge in EDGE_NAMES.iter().chain(&["k"]) {
+        text = text.replace(&format!("[{edge}"), "[");
+    }
+    text
+}
+
+#[test]
+fn pattern_predicates_and_comprehensions_hold_parenthesized_path_patterns() {
+    // Stage 2e.T5: a juxtaposed or leading parenthesized path pattern where an expression
+    // stands (a pattern predicate, a pattern comprehension) matches what the brute-force walk
+    // enumerates, for every body and bound.
+    let graph = cycle();
+    for hops in BODIES {
+        let body = body_text(hops);
+        let blank = anonymous(&body);
+        for &(quantifier, min, max) in BOUNDS {
+            let walks = qpp(hops, (min, max), VERTICES, &[], &any);
+            let starts = sorted(
+                VERTICES
+                    .iter()
+                    .filter(|v| walks.iter().any(|w| w.start == **v))
+                    .map(|v| v.to_string())
+                    .collect(),
+            );
+            let ends = sorted(
+                VERTICES
+                    .iter()
+                    .filter(|v| walks.iter().any(|w| w.end == **v))
+                    .map(|v| v.to_string())
+                    .collect(),
+            );
+            // A node, then the group juxtaposed.
+            let query = format!("MATCH (a) WHERE (a) ({blank}){quantifier} RETURN a.name AS a");
+            assert_eq!(table(&rows(&graph, &query), &["a"]), starts, "{query}");
+            // A leading group, then the node.
+            let query = format!("MATCH (b) WHERE ({blank}){quantifier} (b) RETURN b.name AS b");
+            assert_eq!(table(&rows(&graph, &query), &["b"]), ends, "{query}");
+            // Negated: every other vertex.
+            let query = format!("MATCH (a) WHERE NOT (a) ({blank}){quantifier} RETURN a.name AS a");
+            let others = sorted(
+                VERTICES
+                    .iter()
+                    .filter(|v| !starts.contains(&v.to_string()))
+                    .map(|v| v.to_string())
+                    .collect(),
+            );
+            assert_eq!(table(&rows(&graph, &query), &["a"]), others, "{query}");
+            // A comprehension: one item per walk, the lists in text order.
+            let query = format!(
+                "MATCH (a) FOR r IN [(a) ({body}){quantifier} (b) | {{b: b.name, e: e}}] \
+                 RETURN a.name AS a, r.b AS b, r.e AS e"
+            );
+            let expected = sorted(
+                walks
+                    .iter()
+                    .map(|w| format!("{}|{}|{}", w.start, w.end, w.edge_list(0)))
+                    .collect(),
+            );
+            assert_eq!(
+                table(&rows(&graph, &query), &["a", "b", "e"]),
+                expected,
+                "{query}"
+            );
+            let query =
+                format!("MATCH (a) RETURN a.name AS a, size([({body}){quantifier} (a) | x]) AS n");
+            let expected = sorted(
+                VERTICES
+                    .iter()
+                    .map(|v| format!("{v}|{}", walks.iter().filter(|w| w.end == *v).count()))
+                    .collect(),
+            );
+            assert_eq!(
+                table(&rows(&graph, &query), &["a", "n"]),
+                expected,
+                "{query}"
+            );
+        }
+    }
+    // `?` in either form: an ISO conditional singleton, NULL after zero iterations.
+    let query = "MATCH (a {name: 'w'}) RETURN [(a) ((x)-[e]->(y))? (b) | [b.name, y]] AS l";
+    assert_eq!(table(&rows(&graph, query), &["l"]), vec!["[[w null]]"]);
+    let query = "MATCH (a {name: 'w'}) WHERE (a) (()-[]->())? RETURN a.name AS a";
+    assert_eq!(table(&rows(&graph, query), &["a"]), vec!["w"]);
+}
+
 #[test]
 fn the_former_not_yet_forms_lower_and_run() {
     let graph = modern();

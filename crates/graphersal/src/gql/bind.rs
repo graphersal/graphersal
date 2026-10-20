@@ -2992,8 +2992,10 @@ impl<'q> Binder<'q> {
                     conjunct.span,
                     "a condition inside a quantified edge that reads another variable",
                     "compare the edge with a value or a parameter inside the edge pattern, as in \
-                     -[e WHERE e.weight > $w]->{1,3}, or test the list of edges in the WHERE of \
-                     the MATCH clause",
+                     -[e WHERE e.weight > $w]->{1,3}, or read the edge and its nodes together in \
+                     every iteration of a quantified path pattern, as in \
+                     MATCH (a) ((x)-[e:knows]->(y) WHERE x.age < y.age){1,3} (b) RETURN b, or \
+                     test the list of edges in the WHERE of the MATCH clause",
                 ));
             }
         }

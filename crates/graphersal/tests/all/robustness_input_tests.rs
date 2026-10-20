@@ -3628,3 +3628,312 @@ fn random_gql_2d_composite_queries_never_panic_and_equal_their_rewrites() {
     }
     fatal.assert_empty("GQL 2d composite");
 }
+
+/// Stage 2e (parenthesized and quantified path patterns) corpus for the mutations.
+#[cfg(feature = "gql")]
+const GQL_2E_CORPUS: &[&str] = &[
+    "MATCH (a) ((x)-[e]->(y)){1,3} (b) RETURN a, b, x, e",
+    "MATCH (a {name: 'marko'}) ((x)-[e:knows]->(m)<-[f]-(y) WHERE m.age > 20){1,2} (b) RETURN b, m",
+    "MATCH p = (a) ((x)-->(y))? (b) RETURN p, y",
+    "MATCH (a:person) WHERE (a) (()-[:created]->()){1} RETURN a",
+    "MATCH (a) WHERE ((x)-->(y))+ (a) RETURN a",
+    "MATCH (a) RETURN [(a) ((x)-->(y)){1,2} (b) | b.name] AS l",
+    "MATCH (a) RETURN [((x)-->(y))? (a) | x] AS l",
+    "MATCH (a) WHERE EXISTS { (a) ((x)-->(y))+ (:software) } RETURN a",
+    "MATCH (a) CALL (a) { MATCH (a) ((x)--(y)){2} (b) RETURN b } RETURN a, b",
+    "MATCH (a) OPTIONAL MATCH (a) ((x)-[e]->(y)){0,2} (b) RETURN a, b, e",
+    "MATCH (a) ((x)-[e]-(y)){0} (b) RETURN a, b",
+    "MATCH (a) ((x)-->(y)) ((u)<--(v)){1,2} (b) RETURN a, b, v",
+    "MATCH (a) ((x)-->(y) WHERE x.age < y.age)* (b) RETURN a, b",
+    "MATCH (a) RETURN COUNT { (a) ((x)-[:knows]->(y)){1,} } AS c",
+];
+
+/// Tokens of stage 2e for the token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_2E_TOKENS: &[&str] = &[
+    "(",
+    ")",
+    "((",
+    "))",
+    "(x)",
+    "(y)",
+    "(a)",
+    "(b)",
+    "()",
+    "-->",
+    "<--",
+    "--",
+    "-[e]->",
+    "-[e:knows]-",
+    "<-[f]-",
+    "{1,3}",
+    "{0}",
+    "{2,}",
+    "{,2}",
+    "{1}",
+    "?",
+    "*",
+    "+",
+    "WHERE",
+    "x.age > 20",
+    "e.weight < 0.5",
+    "MATCH",
+    "RETURN",
+    "RETURN a",
+    "a",
+    "b",
+    "x",
+    "e",
+    ",",
+    "p =",
+    "EXISTS {",
+    "COUNT {",
+    "}",
+    "[",
+    "|",
+    "]",
+    "OPTIONAL MATCH",
+    "TRAIL",
+    "AND",
+    "NOT",
+    "CALL (a) {",
+    "MATCH (a)",
+];
+
+/// A random stage 2e query as groups of forms with the same rows; `kind` picks the rewrite:
+/// 0. no quantifier vs the plain edge (body variables singletons);
+/// 1. a one-edge quantified path pattern vs the quantified edge (`e` a list in both);
+/// 2. `?` (conditional singletons) vs `{0,1}` (lists, read with `head`);
+/// 3. the body written reversed from the other end (lists read with `reverse`);
+/// 4. `{2}` of one edge vs two written edges, and `{1}` of two edges vs the plain chain;
+/// 5. nested: `EXISTS { }`, a pattern predicate, `COUNT { }` / a pattern comprehension, `CALL`
+///    and `OPTIONAL MATCH` vs the same with the quantified edge.
+#[cfg(feature = "gql")]
+fn random_gql_2e_forms(rng: &mut Rng, kind: usize) -> Vec<Vec<String>> {
+    let a = *rng.pick(&[
+        "(a)",
+        "(a:person)",
+        "(a {name: 'marko'})",
+        "(a:software)",
+        "(a WHERE a.age > 30)",
+    ]);
+    let (b, blank_b) = *rng.pick(&[
+        ("(b)", "()"),
+        ("(b:software)", "(:software)"),
+        ("(b {name: 'lop'})", "({name: 'lop'})"),
+        ("(b:person)", "(:person)"),
+    ]);
+    let label = *rng.pick(&["", ":knows", ":created", ":knows|created"]);
+    // The edge written forward, the same edge written from its other end.
+    let ((l, r), (rl, rr)) = *rng.pick(&[
+        (("-[", "]->"), ("<-[", "]-")),
+        (("<-[", "]-"), ("-[", "]->")),
+        (("-[", "]-"), ("-[", "]-")),
+    ]);
+    let q = *rng.pick(&[
+        "{1,2}", "{0,2}", "{1}", "{2}", "{0}", "{2,3}", "+", "*", "{,2}",
+    ]);
+    let cond = *rng.pick(&["", " WHERE e.weight > 0.3", " WHERE e.weight <= 0.5"]);
+    let edge = format!("{l}e{label}{r}");
+    let back = format!("{rl}e{label}{rr}");
+    let inline = format!("{l}e{label}{cond}{r}");
+    let blank = format!("{l}{label}{r}");
+    let outer = cond;
+    match kind {
+        0 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}) {b} RETURN a, b, e, x, y"),
+            format!("MATCH {a}{edge}{b}{outer} RETURN a, b, e, a AS x, b AS y"),
+        ]],
+        1 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}){q} {b} RETURN a, b, e, size(x) AS n"),
+            format!("MATCH {a}{inline}{q}{b} RETURN a, b, e, size(e) AS n"),
+        ]],
+        2 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond})? {b} RETURN a, b, e, y"),
+            format!(
+                "MATCH {a} ((x){edge}(y){cond}){{0,1}} {b} RETURN a, b, head(e) AS e, head(y) AS y"
+            ),
+        ]],
+        3 => vec![vec![
+            format!("MATCH {a} ((x){edge}(y){cond}){q} {b} RETURN a, b, e, x, y"),
+            format!(
+                "MATCH {b} ((y){back}(x){cond}){q} {a} RETURN a, b, reverse(e) AS e, reverse(x) \
+                 AS x, reverse(y) AS y"
+            ),
+        ]],
+        4 => {
+            let f = format!("{l}f{label}{r}");
+            let second = cond.replace("e.", "f.");
+            vec![
+                vec![
+                    format!("MATCH {a} ((x){edge}(y){cond}){{2}} {b} RETURN a, b, e"),
+                    format!(
+                        "MATCH {a}{edge}(){f}{b} WHERE true{} RETURN a, b, [e, f] AS e",
+                        if cond.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" AND {} AND {}", &cond[7..], &second[7..])
+                        }
+                    ),
+                ],
+                vec![
+                    format!(
+                        "MATCH {a} ((x){edge}(m){f}(y)){{1}} {b} RETURN a, b, head(m) AS m, \
+                         head(e) AS e, head(f) AS f"
+                    ),
+                    format!("MATCH {a}{edge}(m){f}{b} RETURN a, b, m, e, f"),
+                ],
+            ]
+        }
+        _ => vec![
+            {
+                let mut exists = vec![
+                    format!(
+                        "MATCH {a} WHERE EXISTS {{ (a) ((x){edge}(y){cond}){q} {b} }} RETURN a"
+                    ),
+                    format!("MATCH {a} WHERE EXISTS {{ (a){inline}{q}{b} }} RETURN a"),
+                ];
+                // A pattern predicate introduces no variable, so it has no edge condition.
+                if cond.is_empty() {
+                    exists.push(format!(
+                        "MATCH {a} WHERE (a) ((){blank}()){q} {blank_b} RETURN a"
+                    ));
+                    exists.push(format!("MATCH {a} WHERE (a){blank}{q}{blank_b} RETURN a"));
+                }
+                exists
+            },
+            vec![
+                format!("MATCH {a} RETURN a, COUNT {{ (a) ((x){edge}(y){cond}){q} {b} }} AS c"),
+                format!("MATCH {a} RETURN a, size([(a) ((x){edge}(y){cond}){q} {b} | 1]) AS c"),
+                format!("MATCH {a} RETURN a, COUNT {{ (a){inline}{q}{b} }} AS c"),
+            ],
+            vec![
+                format!(
+                    "MATCH {a} CALL (a) {{ MATCH (a) ((x){edge}(y){cond}){q} {b} RETURN b, e }} \
+                     RETURN a, b, e"
+                ),
+                format!("MATCH {a} MATCH (a){inline}{q}{b} RETURN a, b, e"),
+            ],
+            vec![
+                format!("MATCH {a} OPTIONAL MATCH (a) ((x){edge}(y){cond}){q} {b} RETURN a, b, e"),
+                format!("MATCH {a} OPTIONAL MATCH (a){inline}{q}{b} RETURN a, b, e"),
+            ],
+        ],
+    }
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_2e_queries_never_panic_and_equal_their_rewrites() {
+    let mut fatal = Fatal::default();
+    let mut syntax = Vec::new();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x6A2_E5E5);
+    let mut generated: Vec<Vec<String>> = Vec::new();
+    for _ in 0..budget(100) {
+        for _ in 0..2 {
+            let kind = rng.below(6);
+            generated.extend(random_gql_2e_forms(&mut rng, kind));
+        }
+    }
+    // Every generated query parses; enough of them run; the forms of a group give the same
+    // rows (or the same error), with and without property indexes.
+    let mut ran = 0;
+    let mut total = 0;
+    for forms in &generated {
+        total += forms.len();
+        let texts = forms.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            texts
+                .iter()
+                .map(|q| (gql_2a_rows(q, false), gql_2a_rows(q, true)))
+                .collect::<Vec<_>>()
+        });
+        match outcome {
+            Ok(results) => {
+                for (query, (plain, indexed)) in forms.iter().zip(&results) {
+                    match plain {
+                        Ok(_) => ran += 1,
+                        Err(message) if message.starts_with("Syntax") => {
+                            syntax.push(format!("{query}: {message}"));
+                        }
+                        Err(_) => {}
+                    }
+                    if plain != indexed {
+                        differences.push(format!(
+                            "{query}\n  without index: {plain:?}\n  with indexes:  {indexed:?}"
+                        ));
+                    }
+                }
+                for (form, result) in forms.iter().zip(&results).skip(1) {
+                    if result.0 != results[0].0 {
+                        differences.push(format!(
+                            "{}\n  {:?}\n{form}\n  {:?}",
+                            forms[0], results[0].0, result.0
+                        ));
+                    }
+                }
+            }
+            Err(outcome) => fatal.check(&forms[0], Err::<(), _>(outcome)),
+        }
+    }
+    assert!(
+        ran * 10 >= total * 9,
+        "only {ran} of {total} generated 2e queries ran"
+    );
+    assert!(
+        syntax.is_empty(),
+        "generated 2e queries that do not parse:\n{}",
+        syntax.join("\n")
+    );
+    assert!(
+        differences.is_empty(),
+        "{} 2e queries whose rows depend on the form or an index:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = generated.into_iter().flatten().collect();
+    texts.extend(GQL_2E_CORPUS.iter().map(|s| s.to_string()));
+    // Nesting, long bodies and unbounded loops: a result or a bounded error. (Every level of
+    // nested comprehensions runs per item of the one around it: deep nesting is a parser
+    // limit, shallow nesting runs.)
+    for depth in [3, 300] {
+        let mut exists = "(n)-->()".to_string();
+        let mut comprehension = "1".to_string();
+        for _ in 0..depth {
+            exists = format!("(n) ((x WHERE EXISTS {{ {exists} }})-->(y)){{1,2}}");
+            comprehension = format!("[(n) (()-->()){{1,2}} (m) | {comprehension}]");
+        }
+        texts.push(format!("MATCH (n) WHERE {exists} RETURN n"));
+        texts.push(format!("MATCH (n) RETURN {comprehension} AS l"));
+    }
+    texts.push(format!(
+        "MATCH (a) ({}){{1,3}} (b) RETURN count(*) AS c",
+        (0..64)
+            .map(|i| format!("(x{i})-[e{i}]-"))
+            .collect::<String>()
+            + "(x64)"
+    ));
+    texts.push("MATCH (a) ((x)-[e]-(y))* (b) ((u)-[f]-(v))* (c) RETURN count(*) AS c".into());
+    texts.push("MATCH (a) WHERE (a) ((x)-->(y)){2} RETURN a".into());
+    texts.push("MATCH (a) WHERE ((a)-->(b)) * 2 RETURN a".into());
+    texts.push("MATCH (a) RETURN [((x)-->(y)){2} (a), ((a)-->(b))] AS l".into());
+    for _ in 0..budget(100) {
+        let base = rng.pick(GQL_2E_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(100) {
+        let len = 1 + rng.below(20);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_2E_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (a) WHERE");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 2e quantified path patterns");
+}

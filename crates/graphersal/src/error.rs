@@ -4374,7 +4374,7 @@ pub enum GqlErrorKind {
     /// `CALL { } IN TRANSACTIONS`, Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern `((a)-->(b)){1,3}`, `sin(x)` or `EXCEPT`.
+    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)` or `EXCEPT`.
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
