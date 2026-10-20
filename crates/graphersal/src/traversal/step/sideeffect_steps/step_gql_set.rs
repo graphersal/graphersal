@@ -325,7 +325,7 @@ impl WriteItems {
 
 /// `query` with the bytes of `span` replaced by `with`, as a runnable `g.gql(..)` (rule 6: the
 /// fix built from the failing query); `None` when the span does not fit the query.
-fn rewritten(query: &str, span: Span, with: &str) -> Option<String> {
+pub(crate) fn rewritten(query: &str, span: Span, with: &str) -> Option<String> {
     let before = query.get(..span.start)?;
     let after = query.get(span.end..)?;
     let quoted = crate::value::literal::rhai_query(&format!("{before}{with}{after}"))?;

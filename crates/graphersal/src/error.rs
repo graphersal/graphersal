@@ -4423,7 +4423,7 @@ pub(crate) enum GqlHelpTopic {
 /// | [`Refused`](Self::Refused) | `0A000` | feature not supported (provisional) |
 /// | [`NotYet`](Self::NotYet) | `0A000` | feature not supported (provisional) |
 /// | [`Limit`](Self::Limit) | `54001` | statement too complex (provisional, SQLSTATE) |
-/// | [`Data`](Self::Data) | `22000` | data exception; an error carries the specific code: `22012` division by zero, `22003` numeric value out of range, `22G03` invalid value type |
+/// | [`Data`](Self::Data) | `22000` | data exception; an error carries the specific code: `22012` division by zero, `22003` numeric value out of range, `22G03` invalid value type, `G1001` dependent object error: edges still exist (a `DELETE` of a node with edges) |
 #[cfg(feature = "gql")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4768,6 +4768,16 @@ impl TraverserError {
                     }) =>
                 {
                     gql_set_schema_help(schema).or_else(|| schema.help())
+                }
+                // A GQL read, write or `RETURN` of an element a `DELETE` removed earlier (W27,
+                // W28): the fix is GQL text, not the Gremlin `element_map()` advice.
+                #[cfg(feature = "gql")]
+                TraverserError::Graph(GraphError::ElementRemoved { kind })
+                    if self
+                        .innermost_failed_step()
+                        .is_some_and(|step| step.starts_with("gql:")) =>
+                {
+                    Some(gql_element_removed_help(*kind))
                 }
                 TraverserError::RepeatWithoutBody { modulator } => {
                     Some(repeat_without_body_help(modulator, self.failing_level_prefix()))
@@ -6988,6 +6998,25 @@ const GQL_SET_ADVICE: &str = "SET changes the nodes and edges of each row, item 
      g.gql(\"MATCH (s:software) SET s += {open: true}\").";
 
 /// The advice of a schema violation a GQL `SET` / `REMOVE` raised (stage 3c), with a runnable
+/// The help of a read of an element removed earlier in a GQL query (W27, W28 of stage 3d): what
+/// still works after a `DELETE`, and the query that reads what it needs before it.
+#[cfg(feature = "gql")]
+fn gql_element_removed_help(kind: GraphNodeType) -> String {
+    let (kind, still) = match kind {
+        GraphNodeType::Vertex => ("node", "count(n) and n IS NULL"),
+        GraphNodeType::Edge => ("edge", "count(r), r IS NULL and type(r)"),
+    };
+    format!(
+        "The {kind} was deleted earlier in this query (by DELETE or DETACH DELETE, or together \
+         with a node a DETACH DELETE removed), but a later part of the query still reads it: a \
+         deleted {kind} has no properties, labels or id any more, it cannot be returned, \
+         changed or walked from; only {still} still work. Read what you need before the \
+         DELETE and keep that instead, for example g.gql(\"MATCH (n:person {{name: 'marko'}}) \
+         WITH n, properties(n) AS p DETACH DELETE n RETURN p\"), or run the DELETE as a \
+         separate query after reading."
+    )
+}
+
 /// `SET` of the failing label and key: the conversion of a value of the wrong type, keeping a
 /// required property, setting it before the label that requires it. `None` for the violations
 /// whose own help fits (labels, connections, undeclared keys).

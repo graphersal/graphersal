@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::gql::runtime::{
-    Binding, Row, RowExpr, SubqueryAnswers, SubqueryHost, eval_error, history_read,
+    Binding, Row, RowExpr, SubqueryAnswers, SubqueryHost, check_returned, eval_error, history_read,
     into_traverser_value, labels_read,
 };
 use crate::graph::GraphStorage;
@@ -43,6 +43,9 @@ struct StepGqlProject<'g, S: GraphStorage + 'g> {
     history: Arc<[CompactString]>,
     /// The subqueries the columns hold.
     host: SubqueryHost<'g, S>,
+    /// The `RETURN` that ends the query (not a `WITH`, not a subquery body's): a column holding
+    /// an element a `DELETE` removed earlier is the W28 error (`runtime::check_returned`).
+    returning: bool,
 }
 
 impl<'g, S: GraphStorage + 'g> Clone for StepGqlProject<'g, S> {
@@ -55,6 +58,7 @@ impl<'g, S: GraphStorage + 'g> Clone for StepGqlProject<'g, S> {
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
             host: self.host.clone(),
+            returning: self.returning,
         }
     }
 }
@@ -76,6 +80,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlProject<'g, S> {
         columns: Vec<GqlColumn<S>>,
         bindings: Arc<[Binding]>,
         host: SubqueryHost<'g, S>,
+        returning: bool,
     ) -> Self {
         let labels = labels_read(columns.iter().map(|column| &column.expr), &bindings).into();
         let history = history_read(columns.iter().map(|column| &column.expr), &bindings).into();
@@ -91,6 +96,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlProject<'g, S> {
             labels,
             history,
             host,
+            returning,
         }
     }
 
@@ -136,6 +142,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
                 columns,
                 bindings,
                 SubqueryHost::default(),
+                false,
             )),
         ))
     }
@@ -156,6 +163,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
                 columns,
                 bindings,
                 SubqueryHost::new(children),
+                false,
             )),
         ))
     }
@@ -178,6 +186,56 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
                 columns,
                 bindings,
                 SubqueryHost::new(children),
+                false,
+            )),
+        ))
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
+    /// Appends `gql:project(columns)` as the `RETURN` that ends the query: like
+    /// [`Self::gql_project_hosted`], and a column holding an element a `DELETE` removed earlier
+    /// in the query is the W28 error; see [`StepGqlProject`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
+    pub(crate) fn gql_project_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::Map(
+            "gql:project",
+            Box::new(StepGqlProject::new(
+                query,
+                columns,
+                bindings,
+                SubqueryHost::new(children),
+                true,
+            )),
+        ))
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
+    /// Appends `gql:project(columns)` as the `RETURN` that ends the query (a `UNION` operand
+    /// or the query after `NEXT`); see [`GraphTraversalSource::gql_project_returning`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
+    pub(crate) fn gql_project_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlColumn<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::Map(
+            "gql:project",
+            Box::new(StepGqlProject::new(
+                query,
+                columns,
+                bindings,
+                SubqueryHost::new(children),
+                true,
             )),
         ))
     }
@@ -204,6 +262,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepGqlProject<'g, S> {
                             self.column(row, column).map_err(|error| *error)
                         })?;
                 values.push(value.map_err(Box::new)?);
+            }
+        }
+        if self.returning {
+            for value in &values {
+                check_returned(context, value)?;
             }
         }
         Ok(source.split(TraverserValue::Record {

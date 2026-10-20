@@ -8,8 +8,8 @@ use indexmap::IndexMap;
 
 use crate::gql::aggregate::{Accumulator, Aggregate, AggregateCall, GroupKey, WithAggregates};
 use crate::gql::runtime::{
-    Binding, GqlElement, RowExpr, SubqueryAnswers, SubqueryHost, eval_error, history_read,
-    into_traverser_value, labels_read, source_text,
+    Binding, GqlElement, RowExpr, SubqueryAnswers, SubqueryHost, check_returned, eval_error,
+    history_read, into_traverser_value, labels_read, source_text,
 };
 use crate::graph::GraphStorage;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
@@ -72,6 +72,9 @@ struct StepGqlAggregate<'g, S: GraphStorage + 'g> {
     history: Arc<[CompactString]>,
     /// The subqueries the keys, the arguments and the outputs hold.
     host: SubqueryHost<'g, S>,
+    /// The `RETURN` that ends the query (not a `WITH`, not a subquery body's): a column holding
+    /// an element a `DELETE` removed earlier is the W28 error (`runtime::check_returned`).
+    returning: bool,
 }
 
 impl<'g, S: GraphStorage + 'g> Clone for StepGqlAggregate<'g, S> {
@@ -86,6 +89,7 @@ impl<'g, S: GraphStorage + 'g> Clone for StepGqlAggregate<'g, S> {
             labels: Arc::clone(&self.labels),
             history: Arc::clone(&self.history),
             host: self.host.clone(),
+            returning: self.returning,
         }
     }
 }
@@ -127,6 +131,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlAggregate<'g, S> {
         calls: Vec<AggregateCall<GqlElement<S>>>,
         bindings: Arc<[Binding]>,
         host: SubqueryHost<'g, S>,
+        returning: bool,
     ) -> Self {
         let exprs = || {
             columns
@@ -156,6 +161,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlAggregate<'g, S> {
             labels,
             history,
             host,
+            returning,
         }
     }
 
@@ -232,6 +238,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
                 calls,
                 bindings,
                 SubqueryHost::default(),
+                false,
             )),
         ))
     }
@@ -254,6 +261,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
                 calls,
                 bindings,
                 SubqueryHost::new(children),
+                false,
             )),
         ))
     }
@@ -278,6 +286,60 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
                 calls,
                 bindings,
                 SubqueryHost::new(children),
+                false,
+            )),
+        ))
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
+    /// Appends `gql:aggregate(..)` as the `RETURN` that ends the query: like
+    /// [`Self::gql_aggregate_hosted`], and a column holding an element a `DELETE` removed
+    /// earlier in the query is the W28 error; see [`StepGqlAggregate`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
+    pub(crate) fn gql_aggregate_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatBarrier(
+            "gql:aggregate",
+            Box::new(StepGqlAggregate::new(
+                query,
+                columns,
+                calls,
+                bindings,
+                SubqueryHost::new(children),
+                true,
+            )),
+        ))
+    }
+}
+
+impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
+    /// Appends `gql:aggregate(..)` as the `RETURN` that ends the query (a `UNION` operand or
+    /// the query after `NEXT`); see [`GraphTraversalSource::gql_aggregate_returning`].
+    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
+    pub(crate) fn gql_aggregate_returning(
+        self,
+        query: Arc<str>,
+        columns: Vec<GqlAggregateColumn<S>>,
+        calls: Vec<AggregateCall<GqlElement<S>>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        self.push_step(GraphStep::FlatBarrier(
+            "gql:aggregate",
+            Box::new(StepGqlAggregate::new(
+                query,
+                columns,
+                calls,
+                bindings,
+                SubqueryHost::new(children),
+                true,
             )),
         ))
     }
@@ -396,6 +458,11 @@ impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepGqlAggregate<
                 }
                 values
             };
+            if self.returning {
+                for value in &values {
+                    check_returned(context, value)?;
+                }
+            }
             let traverser = Traverser::start(
                 context,
                 TraverserValue::Record {

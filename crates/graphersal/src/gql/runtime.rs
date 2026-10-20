@@ -51,7 +51,10 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use fnv::FnvBuildHasher;
 
 use super::eval::{Compiled, Env, EvalError, Scope, Value, status};
 use crate::error::TraverserResult;
@@ -62,8 +65,10 @@ use crate::traversal::{AnonymousTraversal, Traverser, TraverserContext, bulk};
 use crate::value::path_arena::PathNode;
 use crate::value::scalar::compare_scalars;
 use crate::value::{RecordKey, TraverserPath, TraverserValue, compare_element_property};
-use crate::{CompactString, ElementKind, ElementProperty};
+use crate::{CompactString, ElementKind, ElementProperty, GraphError, GraphNodeType};
 
+#[cfg(test)]
+mod delete_step_tests;
 #[cfg(test)]
 mod for_step_tests;
 #[cfg(test)]
@@ -76,6 +81,90 @@ mod step_tests;
 mod tests;
 #[cfg(test)]
 mod value_step_tests;
+
+/// What the `gql:delete` steps of one execution removed, kept on the traversal context
+/// (`TraverserContext::gql_deleted`, shared by every nested traversal of the execution).
+pub(crate) struct GqlDeleted<S: GraphStorage> {
+    /// Whether a `gql:delete` removed an element in this execution: only then does a returning
+    /// `RETURN` look for removed elements in its columns (W28), so a query without a `DELETE`
+    /// pays one flag test per row.
+    pub(crate) any: bool,
+    /// The label of every edge a `gql:delete` removed (also the edges a `DETACH DELETE` took
+    /// with a node), so `type(r)` of an edge deleted earlier in the query still answers (E3 of
+    /// stage 3d, the openCypher behaviour); every other read of it is the W27 error. Bounded
+    /// by the edges the execution removed, like their undo entries.
+    pub(crate) edge_types: HashMap<S::EdgeId, CompactString, FnvBuildHasher>,
+}
+
+impl<S: GraphStorage> Default for GqlDeleted<S> {
+    fn default() -> Self {
+        Self {
+            any: false,
+            edge_types: HashMap::default(),
+        }
+    }
+}
+
+/// The error of a read of a vertex or an edge removed earlier in the query (W27): the
+/// storage's `ElementRemoved`, as for the Gremlin reads of a dropped element, so its root
+/// cause stays the same everywhere (openCypher `EntityNotFound`).
+pub(crate) fn removed_error<S: GraphStorage>(element: &GqlElement<S>) -> BoxedTraverserError {
+    let kind = match element {
+        GqlElement::Vertex(_) => GraphNodeType::Vertex,
+        GqlElement::Edge(_) => GraphNodeType::Edge,
+    };
+    Box::new(GraphError::element_removed(kind).into())
+}
+
+/// Whether `element` is still in the graph.
+pub(crate) fn is_live<S: GraphStorage>(storage: &S, element: &GqlElement<S>) -> bool {
+    match element {
+        GqlElement::Vertex(v) => storage.contains_vertex(*v),
+        GqlElement::Edge(e) => storage.contains_edge(*e),
+    }
+}
+
+/// W28: a `RETURN` column holding a vertex or an edge removed earlier in the query (itself, or
+/// inside a list, a map or a path) is an error, since a removed element can be neither
+/// materialized nor walked from. Checked only after a `gql:delete` removed something in this
+/// execution ([`GqlDeleted::any`]); an explicit stack, so a deeply nested value cannot
+/// overflow the call stack.
+pub(crate) fn check_returned<S: GraphStorage>(
+    context: &TraverserContext<'_, S>,
+    value: &TraverserValue<S>,
+) -> TraverserResult<()> {
+    if !context.gql_deleted.any {
+        return Ok(());
+    }
+    let storage = &*context.storage;
+    let mut stack: Vec<&TraverserValue<S>> = vec![value];
+    while let Some(value) = stack.pop() {
+        match value {
+            TraverserValue::Vertex(v) => {
+                if !storage.contains_vertex(*v) {
+                    return Err(removed_error(&GqlElement::<S>::Vertex(*v)));
+                }
+            }
+            TraverserValue::Edge(e) => {
+                if !storage.contains_edge(*e) {
+                    return Err(removed_error(&GqlElement::<S>::Edge(*e)));
+                }
+            }
+            TraverserValue::Array(items) => stack.extend(items.iter()),
+            TraverserValue::Record { values, .. } => stack.extend(values.iter()),
+            TraverserValue::Path(path) => stack.extend(path.objects()),
+            TraverserValue::Computed(..)
+            | TraverserValue::VertexProperty(..)
+            | TraverserValue::EdgeProperty(..)
+            | TraverserValue::PathProperty(_)
+            | TraverserValue::Object(_)
+            | TraverserValue::Entry(_)
+            | TraverserValue::Schema(_)
+            | TraverserValue::Graph(_) => {}
+        }
+    }
+    Ok(())
+}
 
 /// A vertex or an edge as the evaluator sees it: a storage handle.
 pub(crate) enum GqlElement<S: GraphStorage> {
@@ -421,6 +510,20 @@ impl<'a, 'c, S: GraphStorage> Row<'a, 'c, S> {
         }
     }
 
+    /// Keeps the W27 error when `element` was removed earlier in the query: an `Env` read that
+    /// found nothing of it (no id, no properties, no label) is then no silent `NULL`, empty
+    /// list or `FALSE` but the storage's `ElementRemoved` for [`Self::finish`]. Called only
+    /// when a read already came back empty, so a live element costs nothing more on the
+    /// common path.
+    #[inline(never)]
+    fn removed(&self, element: &GqlElement<S>) {
+        if !is_live(&*self.context.storage, element) {
+            self.failure
+                .borrow_mut()
+                .get_or_insert_with(|| removed_error(element));
+        }
+    }
+
     /// The traverser value bound to `slot`, as stored (`None`: nothing bound, read as `NULL`).
     pub(crate) fn bound(&self, slot: usize) -> Option<Cow<'a, TraverserValue<S>>> {
         match self.bindings.get(slot)? {
@@ -672,7 +775,13 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_id(*v),
             GqlElement::Edge(e) => storage.edge_id(*e),
         };
-        id.map(CompactString::from).unwrap_or_default()
+        match id {
+            Some(id) => CompactString::from(id),
+            None => {
+                self.removed(element);
+                CompactString::default()
+            }
+        }
     }
 
     fn property(&self, element: &GqlElement<S>, key: &str) -> Option<ElementProperty> {
@@ -681,33 +790,70 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_properties(*v),
             GqlElement::Edge(e) => storage.edge_properties(*e),
         };
-        properties?.get(key).cloned()
+        match properties {
+            Some(properties) => properties.get(key).cloned(),
+            None => {
+                self.removed(element);
+                None
+            }
+        }
     }
 
     fn has_label(&self, element: &GqlElement<S>, label: &str) -> bool {
         let storage = &*self.context.storage;
-        match element {
+        let found = match element {
             GqlElement::Vertex(v) => storage.vertex_has_label(*v, label),
             GqlElement::Edge(e) => storage.edge_label(*e) == Some(label),
+        };
+        if !found {
+            self.removed(element);
         }
+        found
     }
 
     fn has_any_label(&self, element: &GqlElement<S>) -> bool {
         let storage = &*self.context.storage;
-        match element {
+        let found = match element {
             GqlElement::Vertex(v) => !storage.vertex_labels(*v).is_empty(),
             GqlElement::Edge(e) => storage.edge_label(*e).is_some_and(|l| !l.is_empty()),
+        };
+        if !found {
+            self.removed(element);
         }
+        found
     }
 
     fn labels(&self, element: &GqlElement<S>) -> Vec<CompactString> {
         let storage = &*self.context.storage;
-        match element {
+        let labels = match element {
             GqlElement::Vertex(v) => storage.vertex_labels(*v).to_vec(),
             GqlElement::Edge(e) => storage
                 .edge_label(*e)
                 .map(|label| vec![CompactString::from(label)])
                 .unwrap_or_default(),
+        };
+        if labels.is_empty() {
+            self.removed(element);
+        }
+        labels
+    }
+
+    /// The label of a live edge; of an edge a `gql:delete` removed earlier in this execution
+    /// the label it had (E3 of stage 3d, the openCypher behaviour); of any other removed edge
+    /// the W27 error.
+    fn edge_type(&self, edge: &GqlElement<S>) -> Option<CompactString> {
+        match edge {
+            GqlElement::Vertex(_) => None,
+            GqlElement::Edge(e) => match self.context.storage.edge_label(*e) {
+                Some(label) => Some(CompactString::from(label)),
+                None => match self.context.gql_deleted.edge_types.get(e) {
+                    Some(label) => Some(label.clone()),
+                    None => {
+                        self.removed(edge);
+                        None
+                    }
+                },
+            },
         }
     }
 
@@ -717,22 +863,30 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             GqlElement::Vertex(v) => storage.vertex_properties(*v),
             GqlElement::Edge(e) => storage.edge_properties(*e),
         };
-        properties
-            .map(|map| {
-                map.iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        match properties {
+            Some(map) => map
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            None => {
+                self.removed(element);
+                Vec::new()
+            }
+        }
     }
 
     fn endpoints(&self, edge: &GqlElement<S>) -> Option<(GqlElement<S>, GqlElement<S>)> {
         match edge {
             GqlElement::Vertex(_) => None,
-            GqlElement::Edge(e) => {
-                let (source, target) = self.context.storage.edge_endpoints(*e)?;
-                Some((GqlElement::Vertex(source), GqlElement::Vertex(target)))
-            }
+            GqlElement::Edge(e) => match self.context.storage.edge_endpoints(*e) {
+                Some((source, target)) => {
+                    Some((GqlElement::Vertex(source), GqlElement::Vertex(target)))
+                }
+                None => {
+                    self.removed(edge);
+                    None
+                }
+            },
         }
     }
 

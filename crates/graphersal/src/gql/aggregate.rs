@@ -264,6 +264,10 @@ impl<En: Env> Env for WithAggregates<'_, En> {
         self.env.labels(element)
     }
 
+    fn edge_type(&self, edge: &Self::Element) -> Option<CompactString> {
+        self.env.edge_type(edge)
+    }
+
     fn aggregate(&self, index: usize) -> Value<Self::Element> {
         self.results.get(index).cloned().unwrap_or(Value::Null)
     }

@@ -128,7 +128,21 @@ Files appear as their stage lands; this table is the target layout.
   whole map before its first write; a `NULL` target is a no-op, a removed one
   `ElementRemoved`, a non-element or an edge label item 22G03, a `NULL` map 22004; access from
   the step's own `GqlWriteTarget` facts through `gql_updates()` / `gql_relabels()`, never the
-  flow; tests `runtime/set_step_tests.rs`).
+  flow; tests `runtime/set_step_tests.rs`);
+  stage 3d: `gql:delete` (FlatBarrier, `flatbarrier_steps/step_gql_delete.rs`, `GqlDeleteTarget`:
+  collects the targets of every row first (elements, path elements, list items through an
+  explicit stack; `NULL` and removed ones skipped, each element once, a row of bulk n once),
+  the NODETACH check per clause before any removal (G1001, `status::EDGES_STILL_EXIST`), edges
+  then vertices through `drop_edge` / `drop_vertex`, rows emitted unchanged; a non-element
+  22G03; `Delete` from the step's own facts through `gql_deletes()`, flow passed on; every
+  removed edge's label in `TraverserContext::gql_deleted` (E3: `Env::edge_type`, `type(r)` of
+  a deleted edge); tests `runtime/delete_step_tests.rs`). Reads of a removed element through
+  `runtime::Row` (`element_id`, properties, labels, `%`, `keys` / `properties`, endpoints, sort
+  keys) keep the storage's `ElementRemoved` for `row.finish()` (W27, checked only when a read
+  came back empty); a `RETURN` built with `gql_project_returning` / `gql_aggregate_returning`
+  checks its columns for removed elements once a `gql:delete` removed something
+  (`runtime::check_returned`, W28); the GQL help of `ElementRemoved` is chosen by the innermost
+  failed `gql:` step (`error.rs` `gql_element_removed_help`).
   The others ask no permission of
   their own (value-only, like `has()`); `gql:filter`, `gql:project`, `gql:value`, `gql:order`,
   `gql:aggregate` and `gql:for` may hold subquery children (`runtime::SubqueryHost`), which every
