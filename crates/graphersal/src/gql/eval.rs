@@ -77,6 +77,17 @@
 //!   frame on the call stack (`LocalEnv`), so a comprehension allocates nothing per item
 //!   besides the result values. The binder refuses a variable that shadows another name (E14),
 //!   so a local never hides a row variable.
+//! - **List predicates and `reduce`** (stage 2d, user decision D23, openCypher compatibility
+//!   forms) compile to the same node with their form: `all` / `any` / `none` / `single(x IN
+//!   list WHERE cond)` give `NULL` for a `NULL` list and error 22G03 for a value that is not a
+//!   list; then a decided result returns at once (`all` at the first FALSE, `any` / `none` at
+//!   the first TRUE, `single` at the second TRUE), else a `NULL` (UNKNOWN) condition for some
+//!   item gives `NULL`, else `all` / `none` give TRUE, `any` FALSE, `single` whether exactly one
+//!   item was TRUE (the openCypher TCK `Quantifier1`..`4` tables, which Neo4j passes; an empty
+//!   list: `all` / `none` TRUE, `any` / `single` FALSE). `reduce(acc = init, x IN list | expr)`
+//!   gives `NULL` for a `NULL` list, 22G03 for a non-list, else folds: `acc` starts at `init`
+//!   (evaluated outside the locals) and takes `expr` per item; `acc` and `x` are two locals
+//!   bound by two `LocalEnv` frames.
 //! - **Aggregates** (`count`, `sum`, `avg`, `min`, `max`, `collect_list`) are compiled only where
 //!   the [`Scope`] admits them ([`Scope::aggregate`], the aggregating stage `aggregate.rs`); the
 //!   compiled call reads its result through [`Env::aggregate`]. Elsewhere they are error 0A000.
@@ -88,8 +99,9 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use super::ast::{
-    BinaryOp, CallArgs, CaseExpr, CastTarget, Endpoint, Expr, ExprKind, LabelExpr, LabelExprKind,
-    ListComprehension, Literal, MapLiteral, MapProjection, ProjectionItem, TrimSide, UnaryOp,
+    BinaryOp, CallArgs, CaseExpr, CastTarget, ComprehensionForm, Endpoint, Expr, ExprKind,
+    LabelExpr, LabelExprKind, ListComprehension, ListPredicate, Literal, MapLiteral, MapProjection,
+    ProjectionItem, TrimSide, UnaryOp,
 };
 use super::functions::{self, Arg, Family};
 use super::lexer::Span;
@@ -642,13 +654,26 @@ enum ProjectionPart<E> {
     Entry(CompactString, Compiled<E>),
 }
 
-/// A compiled list comprehension: `index` is its variable's local index.
+/// A compiled list comprehension: `index` is its variable's local index. The list predicates
+/// and `reduce` (stage 2d, D23) compile to it too, told apart by `form`.
 #[derive(Debug, Clone)]
 struct Comprehension<E> {
+    form: Form<E>,
     index: usize,
     list: Compiled<E>,
     filter: Option<Compiled<E>>,
     map: Option<Compiled<E>>,
+}
+
+/// What a [`Comprehension`] computes.
+#[derive(Debug, Clone)]
+enum Form<E> {
+    /// The list of kept (and mapped) items.
+    List,
+    /// `all` / `any` / `none` / `single`: a truth value.
+    Predicate(ListPredicate),
+    /// `reduce`: the accumulator (local `index - 1`) after the last item, starting at `init`.
+    Reduce(Box<Compiled<E>>),
 }
 
 /// One link of a [`Node::Chain`].
@@ -906,9 +931,27 @@ fn compile_comprehension<E: Clone>(
     scope: &impl Scope,
 ) -> Result<Node<E>, EvalError> {
     let list = compile(&comprehension.list, scope)?;
-    let index = scope.locals();
+    // `reduce`: its initial value outside the locals, its accumulator the local before the
+    // item variable (the item variable's scope is nested in the accumulator's).
+    let (form, accumulator) = match &comprehension.form {
+        ComprehensionForm::List => (Form::List, None),
+        ComprehensionForm::Predicate(predicate) => (Form::Predicate(*predicate), None),
+        ComprehensionForm::Reduce(accumulator) => (
+            Form::Reduce(Box::new(compile(&accumulator.init, scope)?)),
+            Some(LocalScope {
+                parent: scope,
+                name: &accumulator.variable.name,
+                index: scope.locals(),
+            }),
+        ),
+    };
+    let outer: &dyn Scope = match &accumulator {
+        Some(accumulator) => accumulator,
+        None => scope,
+    };
+    let index = outer.locals();
     let local = LocalScope {
-        parent: scope,
+        parent: outer,
         name: &comprehension.variable.name,
         index,
     };
@@ -923,6 +966,7 @@ fn compile_comprehension<E: Clone>(
         .map(|map| compile(map, &local))
         .transpose()?;
     Ok(Node::Comprehension(Box::new(Comprehension {
+        form,
         index,
         list,
         filter,
@@ -1182,6 +1226,9 @@ impl<E> Compiled<E> {
                 }
             }
             Node::Comprehension(comprehension) => {
+                if let Form::Reduce(init) = &comprehension.form {
+                    init.variables(slots);
+                }
                 comprehension.list.variables(slots);
                 if let Some(filter) = &comprehension.filter {
                     filter.variables(slots);
@@ -1396,15 +1443,25 @@ impl<E: Clone + PartialEq> Comprehension<E> {
             Value::Null => return Ok(Value::Null),
             Value::List(items) => items,
             other => {
+                let what = match &self.form {
+                    Form::List => "a list comprehension",
+                    Form::Predicate(ListPredicate::All) => "all()",
+                    Form::Predicate(ListPredicate::Any) => "any()",
+                    Form::Predicate(ListPredicate::None) => "none()",
+                    Form::Predicate(ListPredicate::Single) => "single()",
+                    Form::Reduce(_) => "reduce()",
+                };
                 return Err(EvalError::invalid_type(
-                    format!(
-                        "a list comprehension iterates over a list, not {}",
-                        other.kind_name()
-                    ),
+                    format!("{what} iterates over a list, not {}", other.kind_name()),
                     self.list.span,
                 ));
             }
         };
+        match &self.form {
+            Form::List => {}
+            Form::Predicate(predicate) => return self.predicate(*predicate, &items, env),
+            Form::Reduce(init) => return self.reduce(init, items, env),
+        }
         let mut out = Vec::with_capacity(if self.filter.is_some() {
             0
         } else {
@@ -1427,6 +1484,94 @@ impl<E: Clone + PartialEq> Comprehension<E> {
             }
         }
         Ok(Value::List(out))
+    }
+
+    /// `all` / `any` / `none` / `single(x IN list WHERE cond)` over the items of a list that is
+    /// not `NULL`, three-valued as the openCypher TCK (`Quantifier1`..`4`) and Neo4j give them:
+    /// a decided result returns at once (`all` at the first FALSE, `any` / `none` at the first
+    /// TRUE, `single` at the second TRUE; later items are not evaluated); otherwise an UNKNOWN
+    /// condition anywhere gives `NULL`; otherwise `all` and `none` are TRUE, `any` FALSE and
+    /// `single` whether exactly one item was TRUE. An empty list: `all` / `none` TRUE, `any` /
+    /// `single` FALSE.
+    #[inline(never)]
+    fn predicate<En: Env<Element = E>>(
+        &self,
+        predicate: ListPredicate,
+        items: &[Value<E>],
+        env: &En,
+    ) -> Result<Value<E>, EvalError> {
+        let mut unknown = false;
+        let mut matched = false;
+        for item in items {
+            let local = LocalEnv {
+                parent: env,
+                index: self.index,
+                value: item,
+            };
+            let truth = match &self.filter {
+                Some(filter) => filter.truth(&local)?,
+                None => truth_of(item, self.list.span)?,
+            };
+            match (predicate, truth) {
+                (ListPredicate::All, Truth::False) => return Ok(Truth::False.into_value()),
+                (ListPredicate::Any, Truth::True) => return Ok(Truth::True.into_value()),
+                (ListPredicate::None, Truth::True) => return Ok(Truth::False.into_value()),
+                (ListPredicate::Single, Truth::True) if matched => {
+                    return Ok(Truth::False.into_value());
+                }
+                (ListPredicate::Single, Truth::True) => matched = true,
+                (_, Truth::Unknown) => unknown = true,
+                (ListPredicate::All, Truth::True)
+                | (
+                    ListPredicate::Any | ListPredicate::None | ListPredicate::Single,
+                    Truth::False,
+                ) => {}
+            }
+        }
+        let truth = if unknown {
+            Truth::Unknown
+        } else {
+            Truth::of(match predicate {
+                ListPredicate::All | ListPredicate::None => true,
+                ListPredicate::Any => false,
+                ListPredicate::Single => matched,
+            })
+        };
+        Ok(truth.into_value())
+    }
+
+    /// `reduce(acc = init, x IN list | expr)` over the items of a list that is not `NULL`: the
+    /// accumulator starts at `init` and takes the value of `expr` for each item in list order,
+    /// with both locals bound by two [`LocalEnv`] frames (no allocation besides the values
+    /// `expr` builds); an empty list gives `init`.
+    #[inline(never)]
+    fn reduce<En: Env<Element = E>>(
+        &self,
+        init: &Compiled<E>,
+        items: Vec<Value<E>>,
+        env: &En,
+    ) -> Result<Value<E>, EvalError> {
+        let mut accumulator = init.eval(env)?;
+        let Some(map) = &self.map else {
+            return Ok(accumulator);
+        };
+        for item in &items {
+            let next = {
+                let outer = LocalEnv {
+                    parent: env,
+                    index: self.index.saturating_sub(1),
+                    value: &accumulator,
+                };
+                let local = LocalEnv {
+                    parent: &outer,
+                    index: self.index,
+                    value: item,
+                };
+                map.eval(&local)?
+            };
+            accumulator = next;
+        }
+        Ok(accumulator)
     }
 }
 

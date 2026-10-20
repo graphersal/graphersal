@@ -6949,7 +6949,10 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              new name, used nowhere else in the query: not a variable or column in scope, not \
              the variable of a comprehension around it, and not a name that an earlier clause \
              bound and dropped, as in g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, \
-             p.age + 1] WHERE a > 30 | a * 2] AS l\")."
+             p.age + 1] WHERE a > 30 | a * 2] AS l\"). The same holds for the variable of \
+             all(), any(), none() and single() and for both variables of reduce(), as in \
+             g.gql(\"MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS old, \
+             reduce(s = 0, a IN [p.age, 1] | s + a) AS total\")."
         }
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \

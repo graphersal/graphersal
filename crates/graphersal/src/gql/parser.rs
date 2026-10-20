@@ -165,9 +165,13 @@
 //!   ([`Parser::pattern_end`]) finds the pattern's end, no backtracking. Inside the list and the
 //!   `WHERE` of a comprehension, a `|` at the comprehension's own bracket level ends the part
 //!   instead of continuing a label expression (`[x IN l WHERE x:A | x.name]`); a label
-//!   alternative there is written in parentheses, `x:(A|B)`. Cypher's `all` / `any` / `none` /
-//!   `single(x IN l WHERE c)` and `reduce(..)` stay "not yet supported", naming the
-//!   comprehension form.
+//!   alternative there is written in parentheses, `x:(A|B)`.
+//! - **List predicates and `reduce`** (stage 2d, user decision D23; openCypher compatibility
+//!   forms): `all` / `any` / `none` / `single(x IN l WHERE c)` (the `WHERE` is required) and
+//!   `reduce(acc = init, x IN l | expr)` are recognized by name (any case, before `(`, ahead of
+//!   the function table, [`list_function`]) and parse into a [`ListComprehension`] with its
+//!   [`ComprehensionForm`]; inside `reduce` a `|` at its own bracket level ends the list, as in
+//!   a list comprehension.
 //! - **Record constructor** (stage 2c): `RECORD {k: expr, ...}` is the map literal
 //!   `{k: expr, ...}` with the ISO keyword written out ([`Parser::record_ahead`]). `RECORD` is
 //!   contextual (an identifier, any case): it is the keyword when `{` follows and then `}` or a
@@ -212,14 +216,14 @@
 
 use super::ast::BinaryOp;
 use super::ast::{
-    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery, CountClause,
-    EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind, FilterClause, ForClause, GroupBy,
-    Identifier, ImportingWith, LabelExpr, LabelExprKind, LetBinding, LetClause, LinearQuery,
-    ListComprehension, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock,
-    NodePattern, OrderBy, Ordinal, OrdinalKind, PathPattern, PatternComprehension, PatternStep,
-    ProjectionItem, Quantifier, Query, QueryBlock, ReturnClause, ReturnItem, SortDirection,
-    SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind,
-    UnionOperand, WithClause,
+    CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
+    ComprehensionForm, CountClause, EdgeDirection, EdgePattern, Endpoint, Expr, ExprKind,
+    FilterClause, ForClause, GroupBy, Identifier, ImportingWith, LabelExpr, LabelExprKind,
+    LetBinding, LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry,
+    MapLiteral, MapProjection, MatchClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind,
+    PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock,
+    ReduceAccumulator, ReturnClause, ReturnItem, SortDirection, SortItem, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, TraverserError};
@@ -590,22 +594,6 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "store normalized text, or compare with lower() / upper()",
     ),
     not_yet_function(
-        &["any", "all", "none", "single", "reduce"],
-        "a list function that binds a variable inside the call",
-        "test the items in Gremlin after gql(), for example \
-         g.gql(\"MATCH (n) RETURN n.tags AS t\").select(\"t\").unfold().is(\"a\"), or with FOR \
-         in gql(), as in g.gql(\"MATCH (n) FOR t IN n.tags FILTER t = 'a' RETURN DISTINCT n\"); \
-         a list comprehension counts the items a condition keeps (an item whose condition is \
-         NULL is not kept): all(x IN l WHERE c) as size([x IN l WHERE c]) = size(l), \
-         any(x IN l WHERE c) as size([x IN l WHERE c]) > 0, none(x IN l WHERE c) as \
-         size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1, \
-         as in g.gql(\"RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS \
-         all_positive\"), and a pattern comprehension tests the matches of a pattern, as in \
-         g.gql(\"MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 \
-         RETURN p.name\") for any(); reduce() folds a list: aggregate its items with FOR, as in \
-         g.gql(\"FOR x IN [1, 2, 3] RETURN sum(x) AS s\")",
-    ),
-    not_yet_function(
         &["elements"],
         "a GQL path function pending verification",
         "nodes(p) and relationships(p) return the vertices and the edges of a path",
@@ -616,6 +604,22 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "collect the values with collect_list(x) and compute it after gql()",
     ),
 ];
+
+/// Cypher's list functions that bind a variable inside the call (stage 2d, D23): the predicate,
+/// or `None` for `reduce`; `None` outside them. Matched ASCII case-insensitively. They are no
+/// [`FUNCTIONS`] entries: their arguments are no expression list.
+pub(crate) fn list_function(name: &str) -> Option<Option<ListPredicate>> {
+    [
+        ("all", Some(ListPredicate::All)),
+        ("any", Some(ListPredicate::Any)),
+        ("none", Some(ListPredicate::None)),
+        ("single", Some(ListPredicate::Single)),
+        ("reduce", None),
+    ]
+    .into_iter()
+    .find(|(spelling, _)| spelling.eq_ignore_ascii_case(name))
+    .map(|(_, form)| form)
+}
 
 /// The not yet supported function spelled `name`, if any.
 pub(crate) fn lookup_unsupported_function(name: &str) -> Option<&'static UnsupportedFunction> {
@@ -3722,6 +3726,7 @@ impl<'a> Parser<'a> {
         self.comprehension_close(expected)?;
         Ok((
             ListComprehension {
+                form: ComprehensionForm::List,
                 variable,
                 list,
                 filter,
@@ -3975,6 +3980,9 @@ impl<'a> Parser<'a> {
     }
 
     fn function_call(&mut self) -> PResult<(Expr, usize)> {
+        if let Some(form) = list_function(self.peek().name().unwrap_or("")) {
+            return self.list_function(form);
+        }
         let spec = self.function_spec()?;
         let token = self.advance();
         let name = Identifier {
@@ -3994,6 +4002,102 @@ impl<'a> Parser<'a> {
         }
         let (args, height) = self.expr_list(&TokenKind::RParen, &["`,`", "`)`"])?;
         self.finish_call(spec, name, false, args, height)
+    }
+
+    /// Cypher's `all` / `any` / `none` / `single(x IN list WHERE cond)` (`form` the predicate)
+    /// and `reduce(acc = init, x IN list | expr)` (`form` `None`), at the name (stage 2d, user
+    /// decision D23): one [`ListComprehension`] node with its [`ComprehensionForm`]. One
+    /// [`MAX_DEPTH`] level, like a list comprehension.
+    #[inline(never)]
+    fn list_function(&mut self, form: Option<ListPredicate>) -> PResult<(Expr, usize)> {
+        let name = self.advance().span;
+        self.expect(&TokenKind::LParen, &["`(`"])?;
+        self.enter()?;
+        let saved_bar = self.bar_ends;
+        let result = self.list_function_parts(form);
+        self.bar_ends = saved_bar;
+        self.leave();
+        let (comprehension, height) = result?;
+        let span = name.to(self.last);
+        let height = self.height(height, span)?;
+        Ok((
+            Expr {
+                kind: ExprKind::ListComprehension(Box::new(comprehension)),
+                span,
+            },
+            height,
+        ))
+    }
+
+    /// The parts of [`Self::list_function`] after its `(` through its `)`, with the greatest
+    /// height among them. Inside `reduce` a `|` at its own bracket level ends the list, as in a
+    /// list comprehension.
+    fn list_function_parts(
+        &mut self,
+        form: Option<ListPredicate>,
+    ) -> PResult<(ListComprehension, usize)> {
+        let mut height = 0;
+        let accumulator = match form {
+            Some(_) => None,
+            None => {
+                let variable = self.local_variable()?;
+                self.expect(&TokenKind::Eq, &["`=`"])?;
+                let (init, init_height) = self.expr_bp(0)?;
+                height = init_height;
+                self.expect(&TokenKind::Comma, &["`,`"])?;
+                Some(ReduceAccumulator { variable, init })
+            }
+        };
+        let variable = self.local_variable()?;
+        self.expect_kw(Keyword::In, &["IN"])?;
+        if accumulator.is_some() {
+            self.bar_ends = Some(self.open);
+        }
+        let (list, list_height) = self.expr_bp(0)?;
+        height = height.max(list_height);
+        let (filter, map) = if accumulator.is_some() {
+            self.expect(&TokenKind::Pipe, &["`|`"])?;
+            self.bar_ends = None;
+            let (map, map_height) = self.expr_bp(0)?;
+            height = height.max(map_height);
+            (None, Some(map))
+        } else {
+            self.expect_kw(Keyword::Where, &["WHERE"])?;
+            let (filter, filter_height) = self.expr_bp(0)?;
+            height = height.max(filter_height);
+            (Some(filter), None)
+        };
+        self.expect(&TokenKind::RParen, &["`)`"])?;
+        let form = match (form, accumulator) {
+            (Some(predicate), _) => ComprehensionForm::Predicate(predicate),
+            (None, Some(accumulator)) => ComprehensionForm::Reduce(Box::new(accumulator)),
+            (None, None) => ComprehensionForm::List,
+        };
+        Ok((
+            ListComprehension {
+                form,
+                variable,
+                list,
+                filter,
+                map,
+            },
+            height,
+        ))
+    }
+
+    /// The local variable of a list function: a plain or back-quoted name.
+    fn local_variable(&mut self) -> PResult<Identifier> {
+        if !matches!(
+            self.peek().kind,
+            TokenKind::Ident | TokenKind::QuotedIdent(_)
+        ) {
+            return Err(self.unexpected(&["a variable"]));
+        }
+        let token = self.advance();
+        Ok(Identifier {
+            name: token.name().unwrap_or("").to_string(),
+            span: token.span,
+        })
     }
 
     /// `CAST(operand AS type)` after its `(`.

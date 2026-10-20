@@ -205,7 +205,16 @@ fn sexp(e: &Expr) -> String {
             format!("(project {} {{{items}}})", sexp(&projection.target))
         }
         ExprKind::ListComprehension(c) => {
-            let mut out = format!("(for {} {}", c.variable.name, sexp(&c.list));
+            let head = match &c.form {
+                ComprehensionForm::List => "for".to_string(),
+                ComprehensionForm::Predicate(predicate) => predicate.name().to_string(),
+                ComprehensionForm::Reduce(accumulator) => format!(
+                    "reduce {} {}",
+                    accumulator.variable.name,
+                    sexp(&accumulator.init)
+                ),
+            };
+            let mut out = format!("({head} {} {}", c.variable.name, sexp(&c.list));
             if let Some(filter) = &c.filter {
                 out.push_str(&format!(" (where {})", sexp(filter)));
             }
@@ -2112,7 +2121,6 @@ fn not_yet_functions_name_the_reason_and_the_alternative() {
         ("timestamp()", GqlErrorKind::NotYet, "0.2.0"),
         ("toIntegerList(n.l)", GqlErrorKind::NotYet, "unfold()"),
         ("normalize(n.s)", GqlErrorKind::NotYet, "lower()"),
-        ("reduce(n.l)", GqlErrorKind::NotYet, "unfold()"),
         ("elements(p)", GqlErrorKind::NotYet, "nodes(p)"),
         (
             "percentileCont(n.x, 0.5)",
@@ -3149,25 +3157,89 @@ fn pattern_comprehension_errors() {
     assert!(!alternative.contains("zz"), "{alternative}");
 }
 
-/// Cypher's quantifier predicates and `reduce` stay "not yet supported" (2c.P0, E18), naming
-/// the comprehension forms.
+/// Cypher's list predicates and `reduce` (2d.T5d, D23) parse into the comprehension node with
+/// their form, in any case; `reduce`'s list ends at a `|` of its own bracket level.
 #[test]
-fn quantifier_functions_stay_refused_naming_comprehensions() {
-    for call in [
-        "all(x IN n.l WHERE x > 1)",
-        "any(x IN n.l WHERE x > 1)",
-        "none(x IN n.l WHERE x > 1)",
-        "single(x IN n.l WHERE x > 1)",
-        "reduce(s = 0, x IN n.l | s + x)",
+fn list_functions_parse_into_comprehensions() {
+    assert_eq!(
+        expr("all(x IN n.l WHERE x > 1)"),
+        "(all x n.l (where (> x 1)))"
+    );
+    assert_eq!(
+        expr("ANY(x IN n.l WHERE x > 1)"),
+        "(any x n.l (where (> x 1)))"
+    );
+    assert_eq!(expr("None(x IN [1] WHERE x)"), "(none x [1] (where x))");
+    assert_eq!(
+        expr("single(`a b` IN n.l WHERE `a b` IS NULL)"),
+        "(single a b n.l (where (null? a b)))"
+    );
+    assert_eq!(
+        expr("reduce(s = 0, x IN n.l | s + x)"),
+        "(reduce s 0 x n.l (map (+ s x)))"
+    );
+    // A label alternative in reduce's list is written in parentheses; in its `|` part a `|`
+    // continues the label expression.
+    assert_eq!(
+        expr("reduce(s = 0, x IN [n:(A|B)] | s + x)"),
+        "(reduce s 0 x [(labeled n (| A B))] (map (+ s x)))"
+    );
+    // Nested, and inside a list comprehension.
+    assert_eq!(
+        expr("[y IN n.l WHERE any(x IN y WHERE x > 0) | reduce(t = y, z IN [1] | t)]"),
+        "(for y n.l (where (any x y (where (> x 0)))) (map (reduce t y z [1] (map t))))"
+    );
+    // Span: from the name to `)`.
+    let q = ok("MATCH (n) RETURN reduce(s = 0, x IN n.l | s + x) AS r");
+    assert_eq!(
+        q.text(q.ret.items[0].expr.span),
+        "reduce(s = 0, x IN n.l | s + x)"
+    );
+    // Deep nesting is the depth limit, a tall part the height limit, never a stack overflow.
+    for (open, close) in [
+        ("reduce(s = 0, x IN ", " | s)"),
+        ("reduce(s = ", ", x IN [1] | s)"),
+        ("reduce(s = 0, x IN [1] | ", ")"),
+        ("all(x IN [1] WHERE ", ")"),
+        ("any(x IN ", " WHERE true)"),
+    ] {
+        let query = format!(
+            "MATCH (n) RETURN {}1{}",
+            open.repeat(300),
+            close.repeat(300)
+        );
+        assert_eq!(fail(&query).kind, GqlErrorKind::Limit, "{open}");
+    }
+    let tall = vec!["n.a"; MAX_HEIGHT - 2].join(" OR ");
+    ok(&format!("MATCH (n) RETURN all(x IN [1] WHERE {tall})"));
+    ok(&format!(
+        "MATCH (n) RETURN reduce(s = {tall}, x IN [1] | s)"
+    ));
+    for query in [
+        format!("MATCH (n) RETURN NOT all(x IN [1] WHERE {tall})"),
+        format!("MATCH (n) RETURN NOT reduce(s = {tall}, x IN [1] | s)"),
+    ] {
+        assert_eq!(fail(&query).kind, GqlErrorKind::Limit, "{}", &query[..40]);
+    }
+    // A missing part is a syntax error naming what is expected.
+    for (call, expected) in [
+        ("all(x IN n.l)", "WHERE"),
+        ("all(x IN n.l | x)", "WHERE"),
+        ("any(1 IN n.l WHERE true)", "a variable"),
+        ("none(x n.l WHERE true)", "IN"),
+        ("reduce(s, x IN n.l | s)", "`=`"),
+        ("reduce(s = 0 x IN n.l | s)", "`,`"),
+        ("reduce(s = 0, x IN n.l)", "`|`"),
+        ("reduce(s = 0, x IN n.l WHERE x > 0 | s)", "`|`"),
+        ("single(x IN n.l WHERE true", "`)`"),
     ] {
         let f = fail(&format!("MATCH (n) RETURN {call}"));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
-        let alternative = f.alternative.unwrap_or_default();
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{call}");
         assert!(
-            alternative.contains("size([x IN l WHERE c]) = size(l)"),
-            "{call}: {alternative}"
+            f.expected.iter().any(|e| e == expected),
+            "{call}: {:?}",
+            f.expected
         );
-        assert!(alternative.contains("sum(x)"), "{call}: {alternative}");
     }
 }
 

@@ -588,8 +588,15 @@ pub(crate) enum ProjectionItem {
 
 /// A list comprehension `[x IN list WHERE cond | expr]` (stage 2c): the items of `list` for
 /// which `cond` is TRUE, each mapped through `expr`. `variable` is local to `filter` and `map`.
+///
+/// Stage 2d (user decision D23) parses Cypher's list predicates and `reduce` into the same
+/// node, told apart by [`Self::form`]: `all(x IN list WHERE cond)` has `filter` (always) and
+/// no `map`; `reduce(acc = init, x IN list | expr)` has `map` (always), no `filter`, and its
+/// accumulator in the form. Every walk over the parts visits [`Self::init`] too.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ListComprehension {
+    /// What the node computes.
+    pub(crate) form: ComprehensionForm,
     /// The item variable.
     pub(crate) variable: Identifier,
     /// The list iterated over.
@@ -598,6 +605,69 @@ pub(crate) struct ListComprehension {
     pub(crate) filter: Option<Expr>,
     /// The expression after `|`; the item itself when absent.
     pub(crate) map: Option<Expr>,
+}
+
+impl ListComprehension {
+    /// The initial value of a `reduce` accumulator (evaluated outside the locals).
+    pub(crate) fn init(&self) -> Option<&Expr> {
+        match &self.form {
+            ComprehensionForm::Reduce(accumulator) => Some(&accumulator.init),
+            ComprehensionForm::List | ComprehensionForm::Predicate(_) => None,
+        }
+    }
+
+    /// The initial value of a `reduce` accumulator, mutable.
+    pub(crate) fn init_mut(&mut self) -> Option<&mut Expr> {
+        match &mut self.form {
+            ComprehensionForm::Reduce(accumulator) => Some(&mut accumulator.init),
+            ComprehensionForm::List | ComprehensionForm::Predicate(_) => None,
+        }
+    }
+}
+
+/// What a [`ListComprehension`] node computes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ComprehensionForm {
+    /// `[x IN list WHERE cond | expr]`: a list.
+    List,
+    /// `all` / `any` / `none` / `single(x IN list WHERE cond)`: a boolean (or `NULL`).
+    Predicate(ListPredicate),
+    /// `reduce(acc = init, x IN list | expr)`: the accumulator after the last item.
+    Reduce(Box<ReduceAccumulator>),
+}
+
+/// Cypher's list predicates (openCypher compatibility forms, stage 2d, D23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListPredicate {
+    /// `all(..)`: no item is FALSE.
+    All,
+    /// `any(..)`: some item is TRUE.
+    Any,
+    /// `none(..)`: no item is TRUE.
+    None,
+    /// `single(..)`: exactly one item is TRUE.
+    Single,
+}
+
+impl ListPredicate {
+    /// The function name, for messages.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            ListPredicate::All => "all",
+            ListPredicate::Any => "any",
+            ListPredicate::None => "none",
+            ListPredicate::Single => "single",
+        }
+    }
+}
+
+/// The accumulator of `reduce(acc = init, x IN list | expr)`: a second local of the `|` part.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReduceAccumulator {
+    /// The accumulator variable.
+    pub(crate) variable: Identifier,
+    /// Its initial value.
+    pub(crate) init: Expr,
 }
 
 /// A pattern comprehension `[p = (a)-[:T]->(b) WHERE cond | expr]` (stage 2c): `expr` for every

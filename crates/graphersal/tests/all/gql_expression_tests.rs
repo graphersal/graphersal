@@ -311,6 +311,37 @@ mod twins {
         }
     }
 
+    /// The list predicates and `reduce` (2d.T5d, D23) over pattern comprehensions against
+    /// `where(__..)` / `not(__..)` / `count().is(..)` and `sum()`.
+    #[test]
+    fn list_functions_match_where_not_and_sum() {
+        let graph = modern();
+        for (gql, gremlin) in [
+            (
+                r#"g.gql("MATCH (p:person) WHERE any(k IN [(p)-[:knows]->(f) | f.age] WHERE k > 30) RETURN p.name AS x")"#,
+                r#"g.V().hasLabel("person").where(__.out("knows").has("age", P.gt(30))).values("name")"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE none(t IN [(p)-[:created]->(s) | s] WHERE t.name = 'lop') RETURN p.name AS x")"#,
+                r#"g.V().hasLabel("person").not(__.out("created").has("name", "lop")).values("name")"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE all(t IN [(p)-->(q) | q] WHERE t.lang = 'java') RETURN p.name AS x")"#,
+                r#"g.V().hasLabel("person").not(__.out().not(__.has("lang", "java"))).values("name")"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE single(t IN [(p)-->(q) | q] WHERE t.name = 'lop') RETURN p.name AS x")"#,
+                r#"g.V().hasLabel("person").where(__.out().has("name", "lop").count().is(1)).values("name")"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person) WHERE size([(p)-->(q:person) | q]) > 0 RETURN reduce(s = 0, a IN [(p)-->(q:person) | q.age] | s + a) AS x")"#,
+                r#"g.V().hasLabel("person").filter(__.out().hasLabel("person")).map(__.out().hasLabel("person").values("age").fold().sum(Scope.local))"#,
+            ),
+        ] {
+            twin(&graph, gql, gremlin);
+        }
+    }
+
     /// The JSON-shaped answer an LLM asks for, `p {.name, friends: [(p)-->(f) | f {.name}]}`,
     /// renders as nested JSON objects and arrays exactly like its Gremlin twin
     /// `project().by(__.out().project().fold())`; an element inside renders as the element.
@@ -961,4 +992,352 @@ fn a_pattern_comprehension_list_obeys_the_memory_budget() {
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(column(&rows[0], "n"), column(&count[0], "n"));
     assert_ne!(column(&rows[0], "n"), &ElementProperty::from(0));
+}
+
+// ----- list predicates and reduce (2d.T5d, user decision D23) -----
+
+/// The openCypher TCK tables of the quantifiers (`Quantifier1`..`4`, "on lists containing
+/// nulls", which Neo4j Cypher 25 passes): three-valued, a decided result wins over `NULL`.
+#[test]
+fn list_predicates_follow_the_tck_null_tables() {
+    let graph = modern();
+    // (list, condition, all, any, none, single)
+    for (list, condition, all, any, none, single) in [
+        ("[null]", "x = 2", "null", "null", "null", "null"),
+        ("[null, null]", "x = 2", "null", "null", "null", "null"),
+        ("[0, null]", "x = 2", "false", "null", "null", "null"),
+        ("[2, null]", "x = 2", "null", "true", "false", "null"),
+        ("[null, 2]", "x = 2", "null", "true", "false", "null"),
+        (
+            "[34, 0, null, 5, 900]",
+            "x < 10",
+            "false",
+            "true",
+            "false",
+            "false",
+        ),
+        (
+            "[34, 10, null, 15, 900]",
+            "x < 10",
+            "false",
+            "null",
+            "null",
+            "null",
+        ),
+        (
+            "[4, 0, null, -15, 9]",
+            "x < 10",
+            "null",
+            "true",
+            "false",
+            "false",
+        ),
+        ("[2, 2]", "x = 2", "true", "true", "false", "false"),
+        ("[1, 2]", "x = 2", "false", "true", "false", "true"),
+        ("[]", "x = 2", "true", "false", "true", "false"),
+        ("null", "x = 2", "null", "null", "null", "null"),
+        // IS NULL / IS NOT NULL conditions are never NULL themselves.
+        (
+            "[null, 123, null, null]",
+            "x IS NULL",
+            "false",
+            "true",
+            "false",
+            "false",
+        ),
+        (
+            "[null, 123, null, null]",
+            "x IS NOT NULL",
+            "false",
+            "true",
+            "false",
+            "true",
+        ),
+        (
+            "[34, 0, null, 8, 900]",
+            "x IS NULL",
+            "false",
+            "true",
+            "false",
+            "true",
+        ),
+    ] {
+        let query = format!(
+            "RETURN all(x IN {list} WHERE {condition}) AS a, any(x IN {list} WHERE {condition}) \
+             AS b, none(x IN {list} WHERE {condition}) AS c, single(x IN {list} WHERE \
+             {condition}) AS d"
+        );
+        assert_eq!(
+            table(&graph, &query, &["a", "b", "c", "d"]),
+            [format!("{all}|{any}|{none}|{single}")],
+            "{query}"
+        );
+    }
+    // Statically FALSE / TRUE conditions over a list holding NULL (TCK Quantifier2 [13], [14]).
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN single(x IN [1, null, true, 4.5, 'abc', false] WHERE false) AS a, \
+             single(x IN [1, null, true, 4.5, 'abc', false] WHERE true) AS b, \
+             all(x IN [1, null] WHERE true) AS c, none(x IN [1, null] WHERE false) AS d",
+            &["a", "b", "c", "d"]
+        ),
+        ["false|false|true|true"]
+    );
+}
+
+/// A decided result returns at once: the items after it are not evaluated (their condition
+/// would divide by zero).
+#[test]
+fn list_predicates_stop_once_decided() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN all(x IN [2, 0] WHERE 1 / x = 1) AS a, any(x IN [1, 0] WHERE 1 / x = 1) AS b, \
+             none(x IN [1, 0] WHERE 1 / x = 1) AS c, single(x IN [1, 1, 0] WHERE 1 / x = 1) AS d",
+            &["a", "b", "c", "d"]
+        ),
+        ["false|true|false|false"]
+    );
+    // Undecided: the division runs and fails.
+    let text = failure(&graph, "RETURN all(x IN [1, 0] WHERE 1 / x = 1) AS a");
+    assert!(text.contains("22012"), "{text}");
+}
+
+/// Every list predicate equals the list-comprehension count the help offered before 2d (on
+/// lists without `NULL` items: the count drops an item whose condition is `NULL`); in `WHERE`
+/// over pattern comprehensions they test the matches of a pattern per row.
+#[test]
+fn list_predicates_equal_their_comprehension_counts() {
+    let graph = modern();
+    for condition in ["a > 30", "a < 30", "a = 29", "a > 0"] {
+        let forms = format!(
+            "MATCH (p:person) WITH collect_list(p.age) AS l RETURN \
+             all(a IN l WHERE {condition}) AS a1, size([a IN l WHERE {condition}]) = size(l) AS a2, \
+             any(a IN l WHERE {condition}) AS b1, size([a IN l WHERE {condition}]) > 0 AS b2, \
+             none(a IN l WHERE {condition}) AS c1, size([a IN l WHERE {condition}]) = 0 AS c2, \
+             single(a IN l WHERE {condition}) AS d1, size([a IN l WHERE {condition}]) = 1 AS d2"
+        );
+        let row = &rows(&graph, &forms)[0];
+        for (left, right) in [("a1", "a2"), ("b1", "b2"), ("c1", "c2"), ("d1", "d2")] {
+            assert_eq!(column(row, left), column(row, right), "{condition} {left}");
+        }
+    }
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) WHERE any(k IN [(p)-[:knows]->(f) | f] WHERE k.age > 30) \
+             RETURN p.name AS n",
+            &["n"]
+        ),
+        ["'marko'"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) WHERE all(l IN [(p)-[:created]->(s) | s.lang] WHERE l = 'java') \
+             AND none(m IN [(p)-[:created]->(s) | s.name] WHERE m = 'ripple') RETURN p.name AS n",
+            &["n"]
+        ),
+        sorted(&["'marko'", "'peter'", "'vadas'"])
+    );
+}
+
+/// `reduce` folds in list order from its initial value: `NULL` for a `NULL` list, the initial
+/// value for an empty one, any value as accumulator (numbers, text, lists, maps); `NULL` items
+/// flow through the expression like any value.
+#[test]
+fn reduce_folds_in_list_order() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN reduce(s = 0, x IN [1, 2, 3] | s + x) AS a, \
+             reduce(s = '', x IN ['a', 'b', 'c'] | s || x) AS b, \
+             reduce(s = [], x IN [3, 1, 2] | [x] + s) AS c, \
+             reduce(s = 10, x IN [] | s + x) AS d, \
+             reduce(s = 0, x IN null | s + x) AS e, \
+             reduce(s = 0, x IN [1, null, 2] | s + x) AS f, \
+             reduce(s = 0, x IN [1, null, 2] | coalesce(x, 0) + s) AS g, \
+             reduce(m = {n: 0}, x IN [1, 2] | {n: m.n + x}) AS h",
+            &["a", "b", "c", "d", "e", "f", "g", "h"]
+        ),
+        ["i:6|'abc'|[i:2, i:1, i:3]|i:10|null|null|i:3|{n: i:3}"]
+    );
+    // The initial value and the list read the row, the | part both locals and the row.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, \
+             reduce(t = p.age, k IN [(p)-[:knows]->(f) | f.age] | t + k * 100) AS r",
+            &["n", "r"]
+        ),
+        sorted(&[
+            "'josh'|i:32",
+            "'marko'|i:5929",
+            "'peter'|i:35",
+            "'vadas'|i:27"
+        ])
+    );
+    // A pattern comprehension and a WITH alias as the initial value (outside the locals).
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) WITH p, p.name AS nm RETURN nm AS n, \
+             reduce(s = size([(p)-->(q) | q]), x IN [1] | s + x) AS r, \
+             reduce(t = nm, x IN ['!'] | t || x) AS t",
+            &["n", "r", "t"]
+        ),
+        sorted(&[
+            "'josh'|i:3|'josh!'",
+            "'marko'|i:4|'marko!'",
+            "'peter'|i:2|'peter!'",
+            "'vadas'|i:1|'vadas!'"
+        ])
+    );
+    // Over an aggregate; an aggregate as the initial value.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN reduce(s = count(*), x IN collect_list(p.age) | s + x) AS r",
+            &["r"]
+        ),
+        ["i:127"]
+    );
+    // A data error inside surfaces with its own status.
+    for (query, status) in [
+        (
+            "RETURN reduce(s = 0, x IN [1, 0] | s + 1 / x) AS r",
+            "22012",
+        ),
+        ("RETURN reduce(s = 0, x IN ['a'] | s + x) AS r", "22G03"),
+        ("RETURN reduce(s = 0, x IN 'abc' | s) AS r", "22G03"),
+    ] {
+        let text = failure(&graph, query);
+        assert!(text.contains(status), "{query}: {text}");
+    }
+}
+
+/// The forms nest in each other and in comprehensions, read every local around them, take
+/// `$parameters` and any case, and their variables follow E14.
+#[test]
+fn list_functions_nest_and_bind_locals() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN reduce(s = 0, l IN [[1, 2], [3]] | s + reduce(t = 0, y IN l | t + y)) AS a, \
+             [l IN [[1, 2], [0]] WHERE all(y IN l WHERE y > 0) | reduce(t = 1, y IN l | t * y)] AS b, \
+             any(l IN [[1], [2, 3]] WHERE single(y IN l WHERE y > 2)) AS c, \
+             reduce(acc = [], x IN [1, 2] | acc + [all(y IN [x, acc] WHERE y IS NOT NULL)]) AS d",
+            &["a", "b", "c", "d"]
+        ),
+        ["i:6|[i:2]|true|[true, true]"]
+    );
+    let rows = graph
+        .read()
+        .traversal()
+        .gql_with(
+            "RETURN ALL(x IN $l WHERE x > 0) AS a, Reduce(s = 0, x IN $l | s + x) AS b",
+            [("l", ElementProperty::Array(vec![1.into(), 2.into()]))],
+        )
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(norm(column(&rows[0], "a")), "true");
+    assert_eq!(norm(column(&rows[0], "b")), "i:3");
+    for (query, message) in [
+        (
+            "MATCH (p:person) RETURN all(p IN [1] WHERE p > 0) AS l",
+            "the variable `p` of all() shadows the variable `p` in scope",
+        ),
+        (
+            "RETURN reduce(s = 0, s IN [1] | s) AS l",
+            "the variable `s` of reduce() shadows the variable `s` in scope",
+        ),
+        (
+            "RETURN [x IN [1] | reduce(x = 0, y IN [1] | x)] AS l",
+            "the accumulator `x` of reduce() shadows the variable `x` in scope",
+        ),
+        (
+            "RETURN reduce(s = s, x IN [1] | s) AS l",
+            "the variable `s` is not defined",
+        ),
+        (
+            "RETURN all(x IN [1] WHERE true) AS l ORDER BY x",
+            "the variable `x` is not defined",
+        ),
+        (
+            "MATCH (p:person) RETURN none(x IN [1] WHERE count(*) > 0) AS l",
+            "cannot be used inside the WHERE part of all(), any(), none() or single()",
+        ),
+    ] {
+        let text = failure(&graph, query);
+        assert!(text.contains(message), "{query}: {text}");
+        assert!(text.contains("42002"), "{query}: {text}");
+    }
+}
+
+/// `WITH` and `LET` names inside the forms are substituted (the initial value of `reduce`
+/// included); rows merged into one traverser with bulk keep their multiplicity.
+#[test]
+fn list_functions_read_substituted_names_and_keep_bulk() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) LET k = p.age WITH p.name AS n, k \
+             RETURN n, reduce(acc = k, x IN [1, 2] | acc + x + k) AS r, all(x IN [k] WHERE x > 30) AS o",
+            &["n", "r", "o"]
+        ),
+        sorted(&[
+            "'josh'|i:99|true",
+            "'marko'|i:90|false",
+            "'peter'|i:108|true",
+            "'vadas'|i:84|false",
+        ])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person)-[:created]->(s) RETURN s.name AS n, \
+             reduce(t = 0, x IN [1, 2] | t + x) AS r",
+            &["n", "r"]
+        ),
+        sorted(&["'lop'|i:3", "'lop'|i:3", "'lop'|i:3", "'ripple'|i:3"])
+    );
+}
+
+/// The deepest nesting the parser accepts runs for the list functions too (debug builds
+/// included): `reduce` binds two locals per level and adds one evaluator frame.
+#[test]
+fn the_deepest_accepted_list_function_nesting_runs() {
+    let graph = modern();
+    for form in ["reduce", "all"] {
+        let mut ran = 0;
+        for depth in (1..=80).rev() {
+            let mut expr = "1".to_string();
+            for i in 0..depth {
+                expr = if form == "reduce" {
+                    format!("reduce(s{i} = 0, x{i} IN [1] | s{i} + {expr})")
+                } else {
+                    format!("head([x{i} IN [1] WHERE all(y{i} IN [x{i}] WHERE y{i} > 0) | {expr}])")
+                };
+            }
+            let query = format!("RETURN {expr} AS c");
+            match graph.read().traversal().gql(&query).to_list() {
+                Ok(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(norm(column(&rows[0], "c")), "i:1", "{form} {depth}");
+                    ran = depth;
+                    break;
+                }
+                Err(error) => match error.root_cause() {
+                    TraverserError::Gql { gqlstatus, .. } if gqlstatus == "54001" => {}
+                    other => panic!("{form} depth {depth}: {other}"),
+                },
+            }
+        }
+        assert!(ran > 15, "{form}: nothing ran below the nesting bound");
+    }
 }

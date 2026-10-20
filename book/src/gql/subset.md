@@ -630,18 +630,36 @@ All three stand anywhere an expression does (`WHERE`, `RETURN`, `WITH`, `LET`, `
   its `WHERE` or `|` part yet ([Not supported yet](#not-supported-yet)).
 - A pattern comprehension counts as a subquery: a query holds at most 64 subqueries
   ([Errors](errors.md#subqueries)).
-- `all()`, `any()`, `none()`, `single()` and `reduce()` are not supported yet; a list
-  comprehension counts the items a condition keeps: `size([x IN l WHERE c]) = size(l)` for
-  `all`, `> 0` for `any`, `= 0` for `none`, `= 1` for `single` (an item whose condition is `NULL`
-  is not kept, so these differ from Neo4j's three-valued answers only when a condition is
-  `NULL`).
+- The list predicates `all()`, `any()`, `none()`, `single()` and `reduce()` follow the same
+  rules for their variables (below).
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) RETURN [p IN [1, 2] | p * 2] AS l")   // error: the comprehension variable `p` shadows the variable `p` in scope
 g.gql("MATCH (p:person) RETURN [(p)-[:knows]->(f) | count(f)] AS l")   // error: count() cannot be used inside the | part of a pattern comprehension
 g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f.name] AS l ORDER BY f.name")   // error: `f` is bound inside a pattern comprehension
-g.gql("MATCH (p:person) RETURN all(x IN [1, 2] WHERE x > 0) AS a")   // error: all() is not yet supported
 g.gql("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive").to_list()   // #{"all_positive": true}
+```
+
+### List predicates and `reduce`
+
+Cypher's `all(x IN l WHERE c)`, `any(..)`, `none(..)`, `single(..)` and
+`reduce(acc = init, x IN l | expr)` are openCypher compatibility forms
+([Cypher Aliases](aliases.md#list-predicates-and-reduce) has their `NULL` rules). The predicates
+are three-valued: a `NULL` list or, when no item decides the answer, a `NULL` condition gives
+`NULL`. A list comprehension counted with `size()` gives the same answer when no condition is
+`NULL`; over a pattern comprehension they are the Gremlin `where(__..)` / `not(__..)` of a
+pattern. `reduce` folds a list per row, where `FOR` and an aggregate fold the rows of a query.
+
+```rhai,graph=modern
+g.gql("RETURN all(x IN [1, 2, 3] WHERE x > 0) AS a, any(x IN [1, NULL] WHERE x > 1) AS b, single(x IN [1, 2] WHERE x > 1) AS c").to_list()   // #{"a": true, "b": (), "c": true}
+g.gql("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS a").to_list()   // #{"a": true}, the count form of all()
+g.gql("MATCH (p:person) WHERE all(w IN [(p)-[:created]->(s) | s] WHERE w.lang = 'java') AND any(a IN [(p)-[:knows]->(f) | f.age] WHERE a > 30) RETURN p.name AS name").to_list()   // #{"name": "marko"}
+g.V().hasLabel("person").not(__.out("created").has("lang", P.neq("java"))).where(__.out("knows").has("age", P.gt(30))).values("name").to_list()   // "marko"
+g.gql("MATCH (p:person) RETURN p.name AS name, reduce(s = 0, a IN [(p)-[:knows]->(f) | f.age] | s + a) AS ages ORDER BY name").to_list()   // josh 0, marko 59, peter 0, vadas 0
+g.gql("FOR x IN [1, 2, 3] RETURN sum(x) AS s").to_list()   // #{"s": 6}, one fold over the rows
+g.gql("RETURN reduce(s = 0, x IN [1, 2, 3] | s + x) AS s").to_list()   // #{"s": 6}, one fold per row
+g.gql("MATCH (p:person) RETURN all(p IN [1] WHERE p > 0) AS a")   // error: the variable `p` of all() shadows the variable `p` in scope
+g.gql("MATCH (p:person) RETURN any(x IN [1] WHERE x > count(*)) AS a")   // error: count() cannot be used inside the WHERE part of all(), any(), none() or single()
 ```
 
 ## Functions
@@ -892,7 +910,6 @@ construct and the alternative.
 | list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
-| `any()` / `all()` / `none()` / `single()`, `reduce()` | a list comprehension counted with `size()` (`size([x IN l WHERE c]) = size(l)` for `all`, `> 0` for `any`), `FOR x IN list` with an aggregate for `reduce()` |
 | a list-comprehension variable read inside an `EXISTS` or a pattern comprehension of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
@@ -905,8 +922,6 @@ construct and the alternative.
 ```rhai,graph=modern
 g.gql("MATCH ((a)-[:knows]->(b)){1,3} RETURN b")   // error: quantified path patterns are not yet supported
 g.gql("MATCH (a)-[:knows]->{1,3}(b) RETURN b.name AS b ORDER BY b").to_list()   // #{"b": "josh"}, #{"b": "vadas"}
-g.gql("MATCH (p:person) RETURN reduce(s = 0, x IN [1, 2] | s + x) AS a")   // error: reduce() is not yet supported
-g.gql("FOR x IN [1, 2] RETURN sum(x) AS a").to_list()   // #{"a": 3}
 g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-[:created]->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
 g.gql("MATCH (p:person) WHERE (p)-[:created]->() RETURN [x IN [p] | x.name] AS l ORDER BY l").to_list()   // #{"l": ["josh"]}, #{"l": ["marko"]}, #{"l": ["peter"]}
 g.gql("MATCH (n:person) RETURN sin(n.age) AS s")   // error: sin() (a trigonometric function) is not yet supported

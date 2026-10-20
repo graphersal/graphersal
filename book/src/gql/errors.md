@@ -282,20 +282,24 @@ Help: a `|` in a comprehension ends its list or its WHERE condition; write a lab
 ```
 
 A map projection of a value that is not an element or a map, and a list comprehension over a
-value that is not a list, are data errors (`22G03`) of the row. A list-comprehension variable
-read inside an `EXISTS` or a pattern comprehension of its own `WHERE` or `|` part is not
-supported yet (`0A000`); nor are Cypher's `all()`, `any()`, `none()`, `single()` and `reduce()`,
-whose help shows the list-comprehension forms that work today:
+value that is not a list, are data errors (`22G03`) of the row; so is `all()`, `any()`,
+`none()`, `single()` or `reduce()` over a value that is not a list, and the message names the
+function. Their variables are new names like a comprehension's (`42002`), and an aggregate
+inside their condition or `|` part is `42002` with a `WITH` example of the same form. A
+list-comprehension variable read inside an `EXISTS` or a pattern comprehension of its own
+`WHERE` or `|` part is not supported yet (`0A000`), the variables of the list predicates and
+`reduce()` neither:
 
 ```rhai,graph=modern
 g.gql("WITH 1 AS m RETURN m {.a} AS x")   // error: a map projection reads a node, an edge or a map, not a number
 g.gql("MATCH (p:person) RETURN [x IN [p] WHERE (x)-->() | x.name] AS l")   // error: reading the comprehension variable `x` inside a subquery is not yet supported
-g.gql("MATCH (p:person) RETURN all(x IN [1, 2] WHERE x > 0) AS a")   // error: all() is not yet supported
+g.gql("RETURN any(x IN 5 WHERE x > 1) AS a")   // error: any() iterates over a list, not a number (22G03)
+g.gql("MATCH (p:person) RETURN reduce(p = 0, x IN [1] | p + x) AS a")   // error: the accumulator `p` of reduce() shadows the variable `p` in scope
 ```
 
 ```text
 Help: test `x` outside the subquery, as in [x IN list WHERE x > 0 AND EXISTS { MATCH (n)-->() }]. ...
-Help: ... a list comprehension counts the items a condition keeps (an item whose condition is NULL is not kept): all(x IN l WHERE c) as size([x IN l WHERE c]) = size(l), any(x IN l WHERE c) as size([x IN l WHERE c]) > 0, none(x IN l WHERE c) as size([x IN l WHERE c]) = 0, single(x IN l WHERE c) as size([x IN l WHERE c]) = 1, as in g.gql("RETURN size([x IN [1, 2, 3] WHERE x > 0]) = size([1, 2, 3]) AS all_positive"), and a pattern comprehension tests the matches of a pattern, as in g.gql("MATCH (p:person) WHERE size([(p)-[:knows]->(f) WHERE f.age > 30 | f]) > 0 RETURN p.name") for any(); reduce() folds a list: aggregate its items with FOR, as in g.gql("FOR x IN [1, 2, 3] RETURN sum(x) AS s"). ...
+Help: give reduce() an accumulator of its own, as in reduce(p2 = 0, item IN list | p2 + item). ... The same holds for the variable of all(), any(), none() and single() and for both variables of reduce(), as in g.gql("MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS old, reduce(s = 0, a IN [p.age, 1] | s + a) AS total").
 ```
 
 A resource limit reached inside a pattern comprehension names it. A quantified edge in its
@@ -319,7 +323,7 @@ Help: ... A function whose result can be larger than its arguments (range(), spl
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
 | `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`; `all()`, `any()`, `none()`, `single()`, `reduce()`; a list-comprehension variable read inside a subquery); also `gql()` after other steps |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `COUNT { }`; `OPTIONAL MATCH`, `WITH`, `RETURN`, ... inside an `EXISTS` body; Cypher 4's `exists(n.p)`; a list-comprehension variable read inside a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates and pattern comprehensions, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader) |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths); split it into several MATCH clauses that share a variable, or use Gremlin `repeat()` |

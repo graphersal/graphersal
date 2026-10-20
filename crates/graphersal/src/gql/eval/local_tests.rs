@@ -302,6 +302,175 @@ fn a_null_target_gives_null_and_other_values_are_errors() {
     }
 }
 
+// ----- list predicates and reduce (2d.T5d, D23) -----
+
+/// The truth table of the four list predicates over one item each, and over TRUE / FALSE /
+/// UNKNOWN mixes: a decided result wins, else UNKNOWN gives `NULL` (openCypher TCK
+/// `Quantifier1`..`4`).
+#[test]
+fn list_predicates_are_three_valued() {
+    // (items as conditions, all, any, none, single)
+    let t = || boolean(true);
+    let f = || boolean(false);
+    for (items, all, any, none, single) in [
+        ("[]", t(), f(), t(), f()),
+        ("[true]", t(), t(), f(), t()),
+        ("[false]", f(), f(), t(), f()),
+        ("[null]", null(), null(), null(), null()),
+        ("[true, true]", t(), t(), f(), f()),
+        ("[true, false]", f(), t(), f(), t()),
+        ("[false, false]", f(), f(), t(), f()),
+        ("[true, null]", null(), t(), f(), null()),
+        ("[null, true]", null(), t(), f(), null()),
+        ("[false, null]", f(), null(), null(), null()),
+        ("[null, false]", f(), null(), null(), null()),
+        ("[true, true, null]", null(), t(), f(), f()),
+        ("[null, true, true]", null(), t(), f(), f()),
+        ("[true, false, null]", f(), t(), f(), null()),
+    ] {
+        for (function, expected) in [
+            ("all", all),
+            ("any", any),
+            ("none", none),
+            ("single", single),
+        ] {
+            assert_eq!(
+                value(&format!("{function}(c IN {items} WHERE c)")),
+                expected,
+                "{function} {items}"
+            );
+        }
+    }
+    // A NULL list gives NULL for each; a condition reading the row and the item.
+    check_values(&[
+        ("all(c IN null WHERE c)", null()),
+        ("any(c IN $nothing WHERE c)", null()),
+        ("none(c IN x WHERE c > 1)", null()),
+        ("single(c IN null WHERE c)", null()),
+        ("all(c IN l WHERE c > 0 AND n.age = 29)", t()),
+        ("any(c IN l WHERE c > n.age)", f()),
+        ("single(c IN [n, m] WHERE c.name = 'vadas')", t()),
+        ("none(t IN n.tags WHERE t = 'z')", t()),
+    ]);
+}
+
+#[test]
+fn list_predicates_stop_once_decided_and_type_their_errors() {
+    check_values(&[
+        ("all(c IN [2, 0] WHERE 1 / c = 1)", boolean(false)),
+        ("any(c IN [1, 0] WHERE 1 / c = 1)", boolean(true)),
+        ("none(c IN [1, 0] WHERE 1 / c = 1)", boolean(false)),
+        ("single(c IN [1, 1, 0] WHERE 1 / c = 1)", boolean(false)),
+        // An empty list evaluates no condition.
+        ("all(c IN [] WHERE 1 / 0 = 1)", boolean(true)),
+    ]);
+    check_statuses(&[
+        ("all(c IN [1, 0] WHERE 1 / c = 1)", "22012"),
+        ("single(c IN [1, 0] WHERE 1 / c = 1)", "22012"),
+        ("any(c IN 5 WHERE c)", "22G03"),
+        ("none(c IN n WHERE c)", "22G03"),
+        ("single(c IN mp WHERE c)", "22G03"),
+        // A condition that is not a boolean.
+        ("all(c IN [1] WHERE c)", "22G03"),
+        ("any(c IN ['a'] WHERE c)", "22G03"),
+    ]);
+    for (expr, message) in [
+        (
+            "all(c IN 5 WHERE c)",
+            "all() iterates over a list, not a number",
+        ),
+        (
+            "any(c IN 'a' WHERE c)",
+            "any() iterates over a list, not a string",
+        ),
+        ("none(c IN 5 WHERE c)", "none() iterates over a list"),
+        ("single(c IN 5 WHERE c)", "single() iterates over a list"),
+        (
+            "reduce(s = 0, c IN 5 | s)",
+            "reduce() iterates over a list, not a number",
+        ),
+    ] {
+        match eval(expr) {
+            Err(e) => assert!(e.message.contains(message), "{expr}: {}", e.message),
+            Ok(value) => panic!("{expr}: {value:?}"),
+        }
+    }
+}
+
+#[test]
+fn reduce_folds_with_two_locals() {
+    check_values(&[
+        ("reduce(s = 0, c IN [1, 2, 3] | s + c)", int(6)),
+        ("reduce(s = 0, c IN [] | s + c)", int(0)),
+        ("reduce(s = 'x', c IN [] | 1 / 0)", string("x")),
+        ("reduce(s = 0, c IN null | s + c)", null()),
+        ("reduce(s = 0, c IN x | s + c)", null()),
+        ("reduce(s = 1, c IN [1, null] | s + c)", null()),
+        ("reduce(s = null, c IN [1, 2] | coalesce(s, 0) + c)", int(3)),
+        (
+            "reduce(s = [], c IN [1, 2] | s + [c * 10])",
+            list(vec![int(10), int(20)]),
+        ),
+        ("reduce(s = 0.5, c IN [1, 2] | s * c)", float(1.0)),
+        // The initial value and the parts read the row.
+        ("reduce(s = n.age, c IN l | s + c)", int(35)),
+        (
+            "reduce(s = '', c IN [n, m] | s || c.name)",
+            string("markovadas"),
+        ),
+        // Nested: each level sees both of its locals and those around it.
+        (
+            "reduce(s = 0, a IN [[1, 2], [3]] | s + reduce(t = s, b IN a | t + b))", // 0 + 3, then 3 + 6
+            int(9),
+        ),
+        (
+            "[a IN [1, 2] | reduce(s = a, b IN [10] | s + a + b)]",
+            list(vec![int(12), int(14)]),
+        ),
+        (
+            "reduce(s = 0, a IN [1, 2, 3] | CASE WHEN any(b IN [a] WHERE b > s) THEN a ELSE s END)",
+            int(3),
+        ),
+    ]);
+    check_statuses(&[
+        ("reduce(s = 0, c IN [1, 0] | s + 1 / c)", "22012"),
+        ("reduce(s = 1 / 0, c IN [1] | s)", "22012"),
+        ("reduce(s = 0, c IN ['a'] | s + c)", "22G03"),
+    ]);
+    // `||` inside the fold reserves through the row around it, like a comprehension.
+    match eval_in(
+        &TestRow::with_limit(3),
+        "reduce(s = 'ab', c IN ['cd'] | s || c)",
+    ) {
+        Err(e) => assert_eq!(e.gqlstatus, "54001"),
+        Ok(value) => panic!("{value:?}"),
+    }
+}
+
+#[test]
+fn list_function_locals_are_no_slots_of_the_row() {
+    let mut slots = Vec::new();
+    compiled("reduce(s = n.age, c IN l | s + c + m.age) + size([y IN [1] WHERE all(c IN [y] WHERE c > p)])")
+        .unwrap_or_else(|e| panic!("{e:?}"))
+        .variables(&mut slots);
+    slots.sort_unstable();
+    slots.dedup();
+    let names: Vec<&str> = slots.iter().map(|slot| VARIABLES[*slot]).collect();
+    assert_eq!(names, ["n", "m", "p", "l"]);
+    // The accumulator is unknown in the initial value and outside.
+    for expr in [
+        "reduce(acc = acc, c IN [1] | acc)",
+        "reduce(acc = c, c IN [1] | acc)",
+        "reduce(acc = 0, c IN [1] | acc) + acc",
+        "all(c IN [1] WHERE true) AND c",
+    ] {
+        match compiled(expr) {
+            Err(e) => assert_eq!(e.gqlstatus, "42002", "{expr}"),
+            Ok(_) => panic!("{expr}: compiled"),
+        }
+    }
+}
+
 #[test]
 fn projections_and_comprehensions_combine() {
     check_values(&[
