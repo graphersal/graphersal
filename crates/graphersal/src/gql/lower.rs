@@ -132,6 +132,8 @@ use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
 use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLookupKey};
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
+use crate::traversal::step::sideeffect_steps::step_gql_insert_edge::GqlEndpoint;
+use crate::traversal::step::sideeffect_steps::step_gql_insert_node::GqlInsertProperty;
 use crate::value::{Number, P, PValue};
 use crate::{
     AnonymousTraversal, ArgStrings, CompactString, ElementKind, ElementProperty,
@@ -1124,6 +1126,27 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     fn gql_distinct(self) -> Self;
+    #[allow(dead_code, reason = "lowered from INSERT by 3a.T4")]
+    fn gql_insert_node(
+        self,
+        query: Arc<str>,
+        labels: Vec<CompactString>,
+        properties: Vec<GqlInsertProperty<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
+    #[allow(dead_code, reason = "lowered from INSERT by 3a.T4")]
+    #[allow(clippy::too_many_arguments)]
+    fn gql_insert_edge(
+        self,
+        query: Arc<str>,
+        label: CompactString,
+        from: GqlEndpoint,
+        to: GqlEndpoint,
+        properties: Vec<GqlInsertProperty<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
     fn gql_order(
         self,
         query: Arc<str>,
@@ -1230,6 +1253,28 @@ macro_rules! sink {
             }
             fn gql_distinct(self) -> Self {
                 self.gql_distinct()
+            }
+            fn gql_insert_node(
+                self,
+                query: Arc<str>,
+                labels: Vec<CompactString>,
+                properties: Vec<GqlInsertProperty<S>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_insert_node(query, labels, properties, bindings, children)
+            }
+            fn gql_insert_edge(
+                self,
+                query: Arc<str>,
+                label: CompactString,
+                from: GqlEndpoint,
+                to: GqlEndpoint,
+                properties: Vec<GqlInsertProperty<S>>,
+                bindings: Arc<[Binding]>,
+                children: Vec<AnonymousTraversal<'g, S>>,
+            ) -> Self {
+                self.gql_insert_edge(query, label, from, to, properties, bindings, children)
             }
             fn gql_order(
                 self,

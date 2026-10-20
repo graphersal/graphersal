@@ -283,12 +283,12 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             GraphStep::FlatMap(_, step) => step.history_labels(),
             GraphStep::FlatBarrier(_, step) => step.history_labels(),
             GraphStep::Filter(_, step) => step.history_labels(),
+            GraphStep::SideEffectMut(_, step) => step.history_labels(),
             GraphStep::Init(_, _)
             | GraphStep::Append(_, _)
             | GraphStep::Barrier(_, _)
             | GraphStep::As(_, _)
             | GraphStep::SideEffect(_, _)
-            | GraphStep::SideEffectMut(_, _)
             | GraphStep::Modulator(_, _)
             | GraphStep::Count(_, _) => &[],
         }
@@ -361,7 +361,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///
     /// - `add_v(labels)` / `add_e(label)`: `Create` on `Data { Vertex | Edge, label }`, one
     ///   request per statically known label (`None` when the label comes from a traversal or is
-    ///   absent);
+    ///   absent); the GQL `INSERT` steps `gql:insert_node(labels, ..)` /
+    ///   `gql:insert_edge(label, ..)` ask exactly the same;
     /// - `merge_v` / `merge_e`: `Create` and `Update` on `Data { Vertex | Edge, None }`;
     /// - `property`, `property_json`, `remove_property`: `Update` on `Data` of the elements the
     ///   step receives as far as the plan states them (`flow`, [`AccessFlow`]): one request per
@@ -437,12 +438,14 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         match self {
             GraphStep::SideEffectMut(kind, step) => {
                 let element = match *kind {
-                    "add_v" | "merge_v" | "add_label" | "drop_label" => vertex,
-                    "add_e" | "merge_e" | "set_label" => edge,
+                    "add_v" | "merge_v" | "add_label" | "drop_label" | "gql:insert_node" => vertex,
+                    "add_e" | "merge_e" | "set_label" | "gql:insert_edge" => edge,
                     _ => None,
                 };
                 match *kind {
-                    "add_v" | "add_e" => {
+                    // A GQL `INSERT` asks what its Gremlin twin `add_v(labels)` /
+                    // `add_e(label)` asks, from the labels the pattern writes.
+                    "add_v" | "add_e" | "gql:insert_node" | "gql:insert_edge" => {
                         let labels = step.static_labels();
                         if labels.is_empty() {
                             return visit(AccessRequest::new(
@@ -544,7 +547,8 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     /// reaching it: the input of the next step for [`Self::for_each_access_in`].
     ///
     /// - `v()` / `merge_v()` and `out`/`in`/`both` and the endpoint steps yield vertices,
-    ///   `add_v(labels)` vertices with exactly these labels; `e(labels)` / `add_e(label)` /
+    ///   `add_v(labels)` and `gql:insert_node(labels, ..)` vertices with exactly these labels;
+    ///   `gql:insert_edge(label, ..)` edges with the label; `e(labels)` / `add_e(label)` /
     ///   `merge_e()` / `out_e(labels)` / `in_e(labels)` / `both_e(labels)` yield edges (with
     ///   the labels when given);
     /// - `has_label(labels)` keeps the kind and, for edges, states the labels (an edge has
@@ -580,11 +584,11 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             GraphStep::FlatMap("out_e" | "in_e" | "both_e", step) => {
                 of(ElementKind::Edge, step.labels())
             }
-            GraphStep::SideEffectMut("add_v", step) => AccessFlow {
+            GraphStep::SideEffectMut("add_v" | "gql:insert_node", step) => AccessFlow {
                 element: Some(ElementKind::Vertex),
                 labels: step.static_labels().into_iter().map(String::from).collect(),
             },
-            GraphStep::SideEffectMut("add_e", step) => AccessFlow {
+            GraphStep::SideEffectMut("add_e" | "gql:insert_edge", step) => AccessFlow {
                 element: Some(ElementKind::Edge),
                 labels: step.static_labels().into_iter().map(String::from).collect(),
             },
@@ -619,8 +623,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                 _,
             ) => flow,
             // The GQL row of an aggregation, the element a variable holds and the items of a
-            // `FOR` list: the plan states none of them (a GQL query writes nothing, so no write
-            // ever reads this flow).
+            // `FOR` list: the plan states none of them. No GQL write reads this flow: the GQL
+            // `INSERT` steps (`gql:insert_node`, `gql:insert_edge`) state the element they
+            // create from the labels the pattern writes (above), and a GQL write of an element
+            // a variable holds must state its kind and labels from its own static data.
             GraphStep::FlatBarrier("gql:aggregate", _)
             | GraphStep::FlatMap("gql:bind" | "gql:for", _) => AccessFlow::default(),
             GraphStep::Init(_, _)
@@ -907,6 +913,13 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
         _downstream: &crate::traversal::optimizer::path_analysis::PathRequirement,
     ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
+    }
+    /// The step labels whose every occurrence this step reads (a GQL write step whose values
+    /// read a group variable); see [`GraphStepFilter::history_labels`]. Empty by default; only
+    /// with the `gql` feature.
+    #[cfg(feature = "gql")]
+    fn history_labels(&self) -> &[compact_str::CompactString] {
+        &[]
     }
     /// Whether each output object is a new path position. Steps that return their input element,
     /// such as `property()`, override it with `false`.

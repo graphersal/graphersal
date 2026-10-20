@@ -98,7 +98,14 @@ Files appear as their stage lands; this table is the target layout.
   by id or `n.k = e` through the property index of every scan label, each checked with GQL `=`,
   an unservable value or a storage serving no index scans the scan labels; planned only where an
   id or index serves it, E5; the one internal step that asks a permission: `Read` on vertices,
-  like `v()`). The others ask no permission of
+  like `v()`); stage 3a: `gql:insert_node` / `gql:insert_edge` (SideEffectMut,
+  `sideeffect_steps/step_gql_insert_node.rs` / `step_gql_insert_edge.rs`: one element per row
+  and per unit of bulk, emitted with bulk 1; values evaluated per row, `NULL` skipped, a graph
+  element refused (22G03); one `add_vertex_with` / `add_edge_with` call per element, so schema
+  defaults and `required` see every property; `set_create_time`; endpoints through `Binding`,
+  `NULL` 22004, removed `ElementRemoved`; `Create` exactly like `add_v(labels)` / `add_e(label)`
+  and `access_flow_after` states the created element; tests `runtime/insert_step_tests.rs`).
+  The others ask no permission of
   their own (value-only, like `has()`); `gql:filter`, `gql:project`, `gql:value`, `gql:order`,
   `gql:aggregate` and `gql:for` may hold subquery children (`runtime::SubqueryHost`), which every
   walker reaches through `child_traversals_mut` (the authorization walk included: their reads

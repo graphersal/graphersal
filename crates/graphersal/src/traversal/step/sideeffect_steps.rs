@@ -5,6 +5,10 @@ mod step_add_v;
 mod step_aggregate;
 mod step_drop_label;
 mod step_fail;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_insert_edge;
+#[cfg(feature = "gql")]
+pub(crate) mod step_gql_insert_node;
 mod step_group_side_effect;
 mod step_merge_e;
 mod step_merge_v;
