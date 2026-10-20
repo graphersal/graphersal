@@ -236,9 +236,10 @@
 //! subquery (a pattern comprehension's body and `|` part included).
 //!
 //! Stage 2d binds and plans composite queries, `CALL` and whole-query subquery bodies ahead of
-//! their lowering; `UNION` and `NEXT` lower (2d.T4), and [`refuse_not_yet`] (which the lowering
-//! calls between planning and lowering) refuses the rest with `NotYet`: the first in text order
-//! of a `[OPTIONAL] CALL { }`, `COUNT { }`, `COLLECT { }` and a whole-query `EXISTS` body.
+//! their lowering; `UNION` and `NEXT` lower (2d.T4), `[OPTIONAL] CALL { }` (2d.T5), and
+//! [`refuse_not_yet`] (which the lowering calls between planning and lowering) refuses the rest
+//! with `NotYet`: the first in text order of a `COUNT { }`, `COLLECT { }` and a whole-query
+//! `EXISTS` body.
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -362,7 +363,7 @@ impl Binding {
 
     /// Whether it was first bound by an `OPTIONAL MATCH` of `segments`, or returned by an
     /// `OPTIONAL CALL` (it may be NULL).
-    #[cfg_attr(not(test), allow(dead_code, reason = "read by the tests until T5"))]
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by the tests"))]
     pub(crate) fn optional(&self, segments: &[Segment]) -> bool {
         match segments.get(self.segment) {
             Some(Segment::Optional(_)) => true,
@@ -966,8 +967,8 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
 }
 
 /// Refuses (kind `NotYet`, `0A000`) what stage 2d binds and plans but does not lower yet (the
-/// lowering follows in tasks 2d.T5 to 2d.T5c; `UNION` and `NEXT` lower since 2d.T4): the first
-/// in text order of a `[OPTIONAL] CALL { }`, a `COUNT { }`, a `COLLECT { }` and a whole-query
+/// lowering follows in task 2d.T5c; `UNION` and `NEXT` lower since 2d.T4, `[OPTIONAL] CALL { }`
+/// since 2d.T5): the first in text order of a `COUNT { }`, a `COLLECT { }` and a whole-query
 /// `EXISTS { }` body. Called on a bound query
 /// after it is planned (so every bound query goes through the planner) and before it is
 /// lowered.
@@ -976,36 +977,14 @@ pub(crate) fn refuse_not_yet(query: &Query, bound: &BoundQuery) -> Result<(), Tr
 }
 
 fn not_yet_in(bound: &BoundQuery) -> BResult<()> {
-    let calls = bound.segments.iter().filter_map(|segment| match segment {
-        Segment::Call(call) => Some((call.span, call_not_yet(call))),
-        Segment::Match(_)
-        | Segment::Optional(_)
-        | Segment::With(_)
-        | Segment::For(_)
-        | Segment::Rows(_) => None,
-    });
     let subqueries = bound
         .subqueries
         .iter()
         .filter_map(|s| subquery_not_yet(s).map(|error| (s.span, error)));
-    match calls.chain(subqueries).min_by_key(|(span, _)| span.start) {
+    match subqueries.min_by_key(|(span, _)| span.start) {
         Some((_, error)) => Err(error),
         None => Ok(()),
     }
-}
-
-/// The "not yet" error of a `CALL { }` subquery (stage 2d: bound, lowered in a later task).
-fn call_not_yet(call: &BoundCall) -> Box<GqlErrorBuilder> {
-    let what = if call.optional {
-        "OPTIONAL CALL { } (a subquery)"
-    } else {
-        "CALL { } (a subquery)"
-    };
-    not_yet(
-        call.span,
-        what,
-        "run the inner query as its own gql() call, or write it as Gremlin steps",
-    )
 }
 
 /// The "not yet" error of the stage 2d subquery forms that bind before they run: `COUNT { }`,

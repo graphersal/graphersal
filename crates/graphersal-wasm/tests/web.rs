@@ -588,6 +588,28 @@ fn deeply_nested_gql_bodies_stay_within_the_wasm_stack() {
     }
 }
 
+/// Stage 2d.T5: the deepest accepted `CALL { }` nesting (`bind::MAX_BODY_DEPTH`, 16) lowers and
+/// runs within the 1 MB wasm32 stack, each level a `UNION ALL` body or a correlated body
+/// importing the row, the tallest expression innermost.
+#[wasm_bindgen_test]
+fn deeply_nested_calls_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = (0..500)
+        .map(|i| format!("x = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut unions = format!("WITH 1 AS x RETURN {ors} AS y");
+    let mut imports = format!("MATCH (p:person) WITH p, 1 AS x RETURN {ors} AS y");
+    for _ in 0..16 {
+        unions = format!("CALL {{ {unions} UNION ALL RETURN 2 AS y }} RETURN y");
+        imports = format!("MATCH (p:person) CALL (p) {{ {imports} }} RETURN y");
+    }
+    for query in [unions, imports] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}
+
 /// Stage 2d.T4: `UNION` operands and `NEXT` blocks lower and run the tallest expression (a
 /// substituted `LET` and a column read from the rows before) within the 1 MB wasm32 stack.
 #[wasm_bindgen_test]

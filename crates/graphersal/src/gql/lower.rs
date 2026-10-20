@@ -53,6 +53,8 @@
 //! | path variable `p = (a)-[e]->(b)` (plan mechanism 6, decision C11) | no step of its own: every node and edge of the pattern of a read path variable gets `as()` (a `WITH` column node after its `gql:bind` or join), a quantified edge also `as("#gv<id>")` on the vertex each iteration reaches (after `in_v()` / `out_v()` in the `repeat()` body); the slot reads `Binding::Path`, which assembles the path value in text order from those labels (a group reversed when walked from its far end), whichever node the planner starts at. Never `path()` (it needs full paths on every step). In an `OPTIONAL MATCH` part the path is anchored like a group variable, so a part not matched reads `NULL` |
 //! | `q1 UNION [DISTINCT] q2`, `q1 UNION ALL q2` (stage 2d, design E15) | `union(__.<q1>, __.<q2>)`, each operand lowered onto its child like a query of its own (its own root scan, so its leading `v()` keeps the source pushdown and the property index; a unit operand `__.inject(0)`; its own `ORDER BY` / `OFFSET` / `LIMIT`; columns of a later operand projected in the first operand's order by the binder), the start step `g.union(..)` at the start of the query; then `gql:distinct()` for `UNION` / `UNION DISTINCT` (GQL equality, decision C3), nothing for `UNION ALL`. Each operand's `RETURN` row is a result pipeline of its own (`segments.len() + p`, row label `#r` for the first linear query, `#r<p>` for the others) |
 //! | `q1 NEXT q2` (stage 2d, design E19) | after a linear query: the `WITH` it desugars to (the binder makes one pipeline). After a `UNION` block, or a `UNION` block after `NEXT`: each operand starts from the records ([`Stage::Rows`], read like the row of a materializing `WITH`: `Binding::Column` on the row, `RowColumn` through `as("#n<k>")` only when read after leaving it, `gql:bind` to continue a pattern from an element column); several operands are a mid-traversal `union()`, whose children each see every record (an aggregation in an operand reads the whole table) |
+//! | `CALL (a) { body }`, `CALL (*) { .. }`, `CALL { .. }`, Cypher `CALL { WITH a .. }` (stage 2d, design mechanism 6, E16) | `flat_map(__.<body>)`: the body (a whole query: stages, `UNION`, `NEXT`) lowered onto the child from the site of the `CALL`, so it starts on the incoming row (no unit row): an import that is the current element needs no step (`Op::Resume` from it), another import is read where it is (`select("a")`, `gql:bind` from a `WITH` column, `Binding::Label` / `RowColumn` in expressions), an unanchored first component is a child-leading `v()` with its pushdown and index, or `gql:lookup` when its equality reads an import; the body's aggregation, `DISTINCT`, `ORDER BY`, `OFFSET` / `LIMIT` and `UNION` run per incoming row (`flat_map` runs the child once per traverser and multiplies its records by the bulk); an uncorrelated body runs per row too (E16). Its records continue the incoming path (outer labels stay readable); its `RETURN` row is the current object after it (`Binding::Column`), labelled `as("#c<k>")` only when a later step reads a column after leaving it; no `Binding::Current` of an outer binding after it. `MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.age DESC LIMIT 2 } RETURN p.name, f.name` is `v(labels: ["person"]).as("p").flat_map(__.out().as("f").gql:project("f").gql:order("f.age DESC").limit(2)).gql:project(..)` |
+//! | `OPTIONAL CALL (a) { body }` | `optional(__.flat_map(__.<body>).as("#c<k>"))`: the row label inside, so a row the body gives no record continues unchanged and reads the returned names `NULL` (absent label); every later read of a returned name goes through `#c<k>` |
 //! | group variable `e` read outside its element | `Binding::Group`: every occurrence of `as("e")` as a list in text order (reversed when walked from the far end), `[]` for a zero-length match; inside an `OPTIONAL MATCH` part anchored on the part's witness node, or on `as("#o<k>")` at the end of a part without a new node, so a part not matched reads `NULL` |
 //!
 //! # Path labels (design D11)
@@ -82,9 +84,9 @@
 //! The phase 2 anchor ([`Op::Anchor`], a `gql()` continuing a traversal) fails with
 //! [`GqlErrorKind::NotYet`]; stage 1a never plans one. The constructs still out of scope are
 //! refused by the parser (quantified path patterns, shortest paths, `EXCEPT`, ...) and the
-//! binder; stage 2d's `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query subquery bodies
-//! parse, bind and plan, and `bind::refuse_not_yet` refuses them between planning and lowering
-//! until they are lowered (`UNION` and `NEXT` lower since 2d.T4). A component that is not the root scan and has no
+//! binder; stage 2d's `COUNT { }`, `COLLECT { }` and whole-query subquery bodies parse, bind and
+//! plan, and `bind::refuse_not_yet` refuses them between planning and lowering until they are
+//! lowered (`UNION` and `NEXT` lower since 2d.T4, `[OPTIONAL] CALL { }` since 2d.T5). A component that is not the root scan and has no
 //! equality an id or index serves stays a mid-traversal `v()` plus filters per row (design E5).
 //!
 //! # Aggregation
@@ -110,9 +112,9 @@ use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
-    CompositePlan, ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy, Materialize,
-    Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage, SubqueryUse, UnionPlan,
-    and_factors, exists_conjunct, label_disjuncts,
+    CallStage, CompositePlan, ElementFilters, Expand, ForStage, LogicalPlan, Lookup, LookupBy,
+    Materialize, Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage, SubqueryUse,
+    UnionPlan, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
@@ -436,6 +438,10 @@ enum Instr<S: GraphStorage> {
     /// lowered onto its child like a query of its own; the start step `g.union(..)` when the
     /// block starts the query.
     Union(Vec<Vec<Instr<S>>>),
+    /// `flat_map(__.<body>)`: the body of a `CALL { }` (stage 2d, design mechanism 6), lowered
+    /// onto the child from the site of the `CALL`; per incoming row its records, which continue
+    /// the incoming path. An `OPTIONAL CALL` is this inside an [`Instr::Optional`].
+    Call(Vec<Instr<S>>),
     /// `filter(__.<body>)` (`not(__.<body>)` when `negated`): a top-level `[NOT] EXISTS`
     /// conjunct or pattern predicate, the subquery body lowered onto the child from the host's
     /// site (design M2, the 2b fast path); the child short-circuits at its first match.
@@ -447,6 +453,16 @@ enum Instr<S: GraphStorage> {
         site: Site,
         subqueries: Bodies<S>,
     },
+}
+
+/// Where a linear query starts ([`Lowering::linear`]).
+#[derive(Debug, Clone, Copy)]
+enum Start {
+    /// It starts the query: one unit row first unless it starts with `MATCH`.
+    Query,
+    /// It starts at this site: on the incoming row of a `CALL` body, or (`Site::default()`)
+    /// with the [`Stage::Rows`] of the block before `NEXT`.
+    At(Site),
 }
 
 /// The subquery bodies a `gql:*` step hosts (the 2b hook, `runtime::SubqueryHost`): body `i`
@@ -761,6 +777,10 @@ impl<S: GraphStorage> Lowered<S> {
                     g.optional(part)
                 }
                 Instr::Union(operands) => g.union(self.children(operands)),
+                Instr::Call(body) => {
+                    let child = self.emit_into(AnonymousTraversal::new(), body);
+                    g.flat_map(child)
+                }
                 Instr::Exists { negated, body } => {
                     let child = self.emit_into(AnonymousTraversal::new(), body);
                     if negated {
@@ -970,7 +990,8 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Merge { .. }
             | Instr::Value { .. }
             | Instr::Optional(_)
-            | Instr::Union(_) => t,
+            | Instr::Union(_)
+            | Instr::Call(_) => t,
         }
     }
 }
@@ -1045,6 +1066,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn out_v(self) -> Self;
     fn union(self, branches: Vec<AnonymousTraversal<'g, S>>) -> Self;
     fn optional(self, part: AnonymousTraversal<'g, S>) -> Self;
+    fn flat_map(self, child: AnonymousTraversal<'g, S>) -> Self;
     fn filter_t(self, child: AnonymousTraversal<'g, S>) -> Self;
     fn not(self, child: AnonymousTraversal<'g, S>) -> Self;
     fn push_step(self, step: GraphStep<'g, S>) -> Self;
@@ -1179,6 +1201,9 @@ macro_rules! sink {
             }
             fn optional(self, part: AnonymousTraversal<'g, S>) -> Self {
                 self.optional(part)
+            }
+            fn flat_map(self, child: AnonymousTraversal<'g, S>) -> Self {
+                self.flat_map(child)
             }
             fn filter_t(self, child: AnonymousTraversal<'g, S>) -> Self {
                 self.filter_t(child)
@@ -1431,7 +1456,7 @@ impl<'q> Lowering<'q> {
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
         let bound = self.bound;
-        self.composite(&self.plan.body, &bound.body, &mut instrs)?;
+        self.composite(&self.plan.body, &bound.body, Start::Query, &mut instrs)?;
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
@@ -1463,15 +1488,19 @@ impl<'q> Lowering<'q> {
         })
     }
 
-    /// Lowers a composite query (stage 2d, design item 8) at the start of the query: its
-    /// blocks in `NEXT` order, each one operand inline or several as `union(__.<op>, ..)` (the
-    /// start step `g.union(..)` for the first block, a mid-traversal `union()` after `NEXT`,
-    /// whose operands each read every record of the block before: the children of `union()`
-    /// see the whole input), then `gql:distinct()` for `UNION` / `UNION DISTINCT`.
+    /// Lowers a composite query (stage 2d, design item 8), the whole query or the body of a
+    /// `CALL` (`start`: where its first block starts): its blocks in `NEXT` order, each one
+    /// operand inline or several as `union(__.<op>, ..)` (the start step `g.union(..)` for the
+    /// first block of the query, a mid-traversal `union()` after `NEXT` or in a `CALL` body,
+    /// whose operands each read every record of the block before, or the incoming row: the
+    /// children of `union()` see the whole input), then `gql:distinct()` for `UNION` /
+    /// `UNION DISTINCT`.
+    #[inline(never)]
     fn composite<S: GraphStorage>(
         &self,
         plan: &'q CompositePlan,
         bound: &'q BoundComposite,
+        start: Start,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<(), TraverserError> {
         let blocks = std::iter::once(&bound.first).chain(&bound.next);
@@ -1482,13 +1511,19 @@ impl<'q> Lowering<'q> {
             if block_plan.operands().count() != block.operands().count() {
                 return Err(self.unlowered());
             }
+            // A block after `NEXT` starts with the `Stage::Rows` of the block before.
+            let start = if k == 0 {
+                start
+            } else {
+                Start::At(Site::default())
+            };
             if block_plan.unions.is_empty() {
-                self.linear(&block_plan.first, &block.first, k == 0, instrs)?;
+                self.linear(&block_plan.first, &block.first, start, instrs)?;
             } else {
                 let mut branches = Vec::with_capacity(block_plan.unions.len() + 1);
                 for (pipeline, linear) in block_plan.operands().zip(block.operands()) {
                     let mut branch = Vec::new();
-                    self.linear(pipeline, linear, k == 0, &mut branch)?;
+                    self.linear(pipeline, linear, start, &mut branch)?;
                     branches.push(branch);
                 }
                 instrs.push(Instr::Union(branches));
@@ -1500,22 +1535,28 @@ impl<'q> Lowering<'q> {
         Ok(())
     }
 
-    /// Lowers one linear query: its match pipeline, its later stages, its result pipeline.
-    /// `first`: it starts the query (one unit row unless it starts with `MATCH`); else it
-    /// starts with the [`Stage::Rows`] of the block before.
+    /// Lowers one linear query: its match pipeline, its later stages, its result pipeline,
+    /// from `start` (see [`Start`]).
     fn linear<S: GraphStorage>(
         &self,
-        plan: &PipelinePlan,
+        plan: &'q PipelinePlan,
         linear: &BoundLinear,
-        first: bool,
+        start: Start,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<(), TraverserError> {
-        // A query that does not start with `MATCH` (`OPTIONAL MATCH`, `FOR`, `WITH`, `RETURN`,
-        // or the conjuncts of a leading `LET` / `FILTER` pipeline) starts from one unit row.
-        if first && !matches!(plan.ops.first(), Some(Op::Scan(_) | Op::Anchor(_))) {
-            instrs.push(Instr::Unit);
-        }
-        let mut site = self.ops(&plan.ops, Site::default(), instrs)?;
+        let site = match start {
+            Start::Query => {
+                // A query that does not start with `MATCH` (`OPTIONAL MATCH`, `FOR`, `WITH`,
+                // `RETURN`, `CALL`, or the conjuncts of a leading `LET` / `FILTER` pipeline)
+                // starts from one unit row.
+                if !matches!(plan.ops.first(), Some(Op::Scan(_) | Op::Anchor(_))) {
+                    instrs.push(Instr::Unit);
+                }
+                Site::default()
+            }
+            Start::At(site) => site,
+        };
+        let mut site = self.ops(&plan.ops, site, instrs)?;
         for stage in &plan.stages {
             site = match stage {
                 Stage::Match { ops, .. } => self.ops(ops, site, instrs)?,
@@ -1537,8 +1578,7 @@ impl<'q> Lowering<'q> {
                     instrs.push(Instr::RowLabel(rows.segment));
                     Site::row(rows.segment)
                 }
-                // Stage 2d: refused by `bind::refuse_not_yet` before the lowering (2d.T5).
-                Stage::Call(_) => return Err(self.unlowered()),
+                Stage::Call(call) => self.call(call, site, instrs)?,
             };
         }
         self.pipeline(
@@ -1549,6 +1589,39 @@ impl<'q> Lowering<'q> {
             instrs,
         )?;
         Ok(())
+    }
+
+    /// Lowers a `[OPTIONAL] CALL { }` at `site` (stage 2d, design mechanism 6): its body onto
+    /// the child of `flat_map()`, from `site` (the body starts on the incoming row: at its
+    /// current element, reading the imports where they are), then the row label `#c<k>`
+    /// (emitted only when read later); `OPTIONAL CALL` is `optional(__.flat_map(__.<body>)
+    /// .as("#c<k>"))`, the row label inside, so a row the body gives no record keeps going and
+    /// reads its returned names `NULL` (absent label). Returns the site after it: the body's
+    /// record is the current object (its columns read `Binding::Column`); after an
+    /// `OPTIONAL CALL` nothing (every read through a label).
+    #[inline(never)]
+    fn call<S: GraphStorage>(
+        &self,
+        call: &'q CallStage,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(Segment::Call(bound_call)) = self.bound.segments.get(call.segment) else {
+            return Err(self.unlowered());
+        };
+        let mut body = Vec::new();
+        self.composite(&call.plan, &bound_call.body, Start::At(site), &mut body)?;
+        if call.optional {
+            instrs.push(Instr::Optional(vec![
+                Instr::Call(body),
+                Instr::RowLabel(call.segment),
+            ]));
+            Ok(Site::default())
+        } else {
+            instrs.push(Instr::Call(body));
+            instrs.push(Instr::RowLabel(call.segment));
+            Ok(Site::row(call.segment))
+        }
     }
 
     /// Lowers the match pipeline `ops` of one segment, starting at `site`; returns the site
@@ -2356,7 +2429,7 @@ impl<'q> Lowering<'q> {
                 | Instr::Bind { site, .. }
                 | Instr::RowCheck(_, site) => site.ordered = Some(result),
                 Instr::Hop(hop) => self.in_order(&mut hop.steps, result)?,
-                Instr::Optional(part) | Instr::Exists { body: part, .. } => {
+                Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
                     self.in_order(part, result)?;
                 }
                 Instr::Union(operands) => {
@@ -2994,7 +3067,9 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
-            Instr::Optional(part) | Instr::Exists { body: part, .. } => mark_reads(part, marks),
+            Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
+                mark_reads(part, marks);
+            }
             Instr::Union(operands) => operands.iter().for_each(|o| mark_reads(o, marks)),
             Instr::Scan
             | Instr::Unit
@@ -3045,7 +3120,9 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 .for_each(|body| in_part(body, segment)),
             Instr::Lookup { site, .. } | Instr::Bind { site, .. } => site.part = Some(segment),
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
-            Instr::Optional(part) | Instr::Exists { body: part, .. } => in_part(part, segment),
+            Instr::Optional(part) | Instr::Exists { body: part, .. } | Instr::Call(part) => {
+                in_part(part, segment);
+            }
             Instr::Union(operands) => operands.iter_mut().for_each(|o| in_part(o, segment)),
             Instr::Scan
             | Instr::Unit

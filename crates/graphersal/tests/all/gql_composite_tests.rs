@@ -6,6 +6,11 @@
 //! `dedup()` where GQL equality agrees with it compare the rows as multisets (design D18);
 //! GQL equality (`1 = 1.0`, `NULL`s equal), column reordering, per-operand `ORDER BY` / `LIMIT`
 //! and `NEXT` chains are hand-computed rows.
+//!
+//! Stage 2d.T5: `[OPTIONAL] CALL { }` (design mechanism 6, E16) is `flat_map(__.<body>)`, the
+//! body lowered onto the child from the incoming row; twins against Gremlin `flat_map(..)` and
+//! `local(..)`, per-row aggregation and top-k, imports from labels / the current element / row
+//! columns, `OPTIONAL CALL` `NULL`s, bulk and the stack.
 #![cfg(feature = "gql")]
 
 use std::sync::Arc;
@@ -608,19 +613,548 @@ fn the_union_is_the_start_step() {
     assert_eq!(text.matches("as(\"#n").count(), 1, "{text}");
 }
 
-// ----- still refused -----
+// ----- a CALL inside a UNION operand -----
 
+/// A `CALL` inside a `UNION` operand runs in its branch (refused "not yet" before 2d.T5); the
+/// column mismatch of the operands is still 42002.
 #[test]
-fn call_inside_a_union_is_still_refused() {
+fn call_inside_a_union_operand_runs() {
     let graph = modern();
-    let text = error(
-        &graph,
-        "RETURN 1 AS x UNION ALL CALL { RETURN 2 AS y } RETURN y AS x",
-    );
-    assert!(
-        text.contains("CALL { } (a subquery) is not yet supported"),
-        "{text}"
+    assert_eq!(
+        multiset(
+            &graph,
+            "RETURN 1 AS x UNION ALL CALL { RETURN 2 AS y } RETURN y AS x",
+            "x"
+        ),
+        ints(&[1, 2])
     );
     let text = error(&graph, "RETURN 1 AS x UNION ALL RETURN 2 AS y");
     assert!(text.contains("42002"), "{text}");
+}
+
+// ----- CALL { } (stage 2d.T5) -----
+
+/// `"a|b"` of the columns `a` and `b` of every row of `query`, sorted (a multiset).
+fn pairs(graph: &Arc<Graph>, query: &str, a: &str, b: &str) -> Vec<String> {
+    let result = rows(graph, query);
+    let mut out: Vec<String> = column(&result, a)
+        .into_iter()
+        .zip(column(&result, b))
+        .map(|(a, b)| format!("{a}|{b}"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn sorted(items: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+    out.sort();
+    out
+}
+
+#[cfg(feature = "script")]
+mod call_twins {
+    use super::{modern, twins_values};
+
+    /// The `x` column of the GQL query `gql` against each Gremlin twin (the `flat_map(..)` and
+    /// the `local(..)` form), as multisets.
+    fn twin(gql: &str, gremlins: &[&str]) {
+        let graph = modern();
+        let left = twins_values(&graph, &format!("g.gql({gql:?}).select(\"x\")"));
+        assert!(!left.is_empty(), "{gql}: no rows to compare");
+        for gremlin in gremlins {
+            let right = twins_values(&graph, gremlin);
+            assert_eq!(left, right, "\nGQL:  {gql}\ntwin: {gremlin}");
+        }
+    }
+
+    /// An aggregation in the body runs per incoming row; a row whose body matches nothing still
+    /// counts 0 (an aggregation without grouping keys gives one record).
+    #[test]
+    fn a_counting_body_is_flat_map_and_local_count() {
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN count(f) AS c } RETURN c AS x",
+            &[
+                r#"g.V().hasLabel("person").flatMap(__.out().count())"#,
+                r#"g.V().hasLabel("person").local(__.out().count())"#,
+            ],
+        );
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN sum(s.weight) AS w, \
+             count(*) AS c } RETURN c AS x",
+            &[r#"g.V().hasLabel("person").local(__.out("created").count())"#],
+        );
+    }
+
+    /// Top-k per row: `ORDER BY` and `LIMIT` in the body run per incoming row.
+    #[test]
+    fn top_k_per_row_is_flat_map_and_local_order_limit() {
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.name DESC LIMIT 2 } \
+             RETURN f.name AS x",
+            &[
+                r#"g.V().hasLabel("person").flatMap(__.out().order().by("name", Order.desc).limit(2)).values("name")"#,
+                r#"g.V().hasLabel("person").local(__.out().order().by("name", Order.desc).limit(2)).values("name")"#,
+            ],
+        );
+        twin(
+            "MATCH (s:software) CALL (s) { MATCH (s)<-[:created]-(c) RETURN c.age AS x \
+             ORDER BY x LIMIT 1 } RETURN x",
+            &[
+                r#"g.V().hasLabel("software").flatMap(__.in("created").values("age").order().limit(1))"#,
+                r#"g.V().hasLabel("software").local(__.in("created").values("age").order().limit(1))"#,
+            ],
+        );
+    }
+
+    /// Imports read where they are: the current element, a path label after the outer pattern
+    /// moved on, a column of a `WITH` row; a body without imports (E16) runs per row too.
+    #[test]
+    fn imports_from_the_current_element_labels_and_columns() {
+        // The current element.
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS x } RETURN x",
+            &[r#"g.V().hasLabel("person").flatMap(__.out("knows").values("name"))"#],
+        );
+        // A label: the outer pattern stands on `s`.
+        twin(
+            "MATCH (p:person)-[:created]->(s) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS x } \
+             RETURN x",
+            &[
+                r#"g.V().hasLabel("person").as("p").out("created").flatMap(__.select("p").out("knows").values("name"))"#,
+            ],
+        );
+        // Both, joined in the body.
+        twin(
+            "MATCH (p:person)-[:created]->(s) CALL (p, s) { MATCH (s)<-[:created]-(o) WHERE o <> p \
+             RETURN o.name AS x } RETURN x",
+            &[
+                r#"g.V().hasLabel("person").as("p").out("created").flatMap(__.in("created").where(P.neq("p")).values("name"))"#,
+            ],
+        );
+        // A column of a materializing WITH row.
+        twin(
+            "MATCH (p:person) WITH p ORDER BY p.age LIMIT 2 CALL (p) { MATCH (p)-[:knows]->(f) \
+             RETURN f.name AS x } RETURN x",
+            &[
+                r#"g.V().hasLabel("person").order().by("age").limit(2).flatMap(__.out("knows").values("name"))"#,
+            ],
+        );
+        // Uncorrelated (E16): per incoming row.
+        twin(
+            "MATCH (p:person) CALL { MATCH (s:software) RETURN s.name AS x } RETURN x",
+            &[r#"g.V().hasLabel("person").flatMap(__.V().hasLabel("software").values("name"))"#],
+        );
+    }
+
+    /// A `UNION` in the body is a mid-traversal `union()` per incoming row (`UNION` removes the
+    /// duplicates of that row only); nested `CALL` and `NEXT` in a body.
+    #[test]
+    fn union_next_and_nested_calls_in_a_body() {
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.lang AS x \
+             UNION MATCH (p)-[:knows]->(f)-[:created]->(s) RETURN s.lang AS x } RETURN x",
+            &[
+                r#"g.V().hasLabel("person").flatMap(__.union(__.out("created").values("lang"), __.out("knows").out("created").values("lang")).dedup())"#,
+            ],
+        );
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.lang AS x \
+             UNION ALL MATCH (p)-[:knows]->(f)-[:created]->(s) RETURN s.lang AS x } RETURN x",
+            &[
+                r#"g.V().hasLabel("person").flatMap(__.union(__.out("created").values("lang"), __.out("knows").out("created").values("lang")))"#,
+            ],
+        );
+        twin(
+            "MATCH (p:person) CALL (p) { CALL (p) { MATCH (p)-->(f) RETURN f } RETURN count(f) AS x } \
+             RETURN x",
+            &[r#"g.V().hasLabel("person").local(__.out().count())"#],
+        );
+        twin(
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f.name AS n NEXT RETURN count(n) AS x } \
+             RETURN x",
+            &[r#"g.V().hasLabel("person").local(__.out().values("name").count())"#],
+        );
+    }
+}
+
+/// The values of a Rhai script, for the `CALL` twins (the `twins` module's helper).
+#[cfg(feature = "script")]
+fn twins_values(graph: &Arc<Graph>, script: &str) -> Vec<String> {
+    let engine = crate::script_host::engine();
+    let mut scope = crate::script_host::graph_scope(graph.clone());
+    let gts = engine
+        .eval_with_scope::<crate::script_host::ScriptGraphTraversalSource>(&mut scope, script)
+        .unwrap_or_else(|e| panic!("`{script}` failed to evaluate: {e}"));
+    let lock = graph.read();
+    let mut out: Vec<String> = gts
+        .ast_convert_to_gts(&*lock)
+        .to_list()
+        .unwrap_or_else(|e| panic!("{script}: {e}"))
+        .iter()
+        .map(norm)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Per-row aggregation keeps every incoming row (count 0 included) and pairs it with its own
+/// result; top-k per group keeps the group's own top rows.
+#[test]
+fn call_aggregates_and_ranks_per_incoming_row() {
+    let graph = modern();
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN count(f) AS c } RETURN p.name AS n, c",
+            "n",
+            "c"
+        ),
+        sorted(&["'josh'|i:2", "'marko'|i:3", "'peter'|i:1", "'vadas'|i:0"])
+    );
+    // Top-k per group: the two oldest people who created each software.
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (s:software) CALL (s) { MATCH (s)<-[:created]-(c) RETURN c \
+             ORDER BY c.age DESC LIMIT 2 } RETURN s.name AS s, c.name AS c",
+            "s",
+            "c"
+        ),
+        sorted(&["'lop'|'peter'", "'lop'|'josh'", "'ripple'|'josh'"])
+    );
+    // DISTINCT and an aggregation in the body are per row.
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN DISTINCT f.lang AS l } \
+             RETURN p.name AS n, l",
+            "n",
+            "l"
+        ),
+        sorted(&[
+            "'marko'|null",
+            "'marko'|'java'",
+            "'josh'|'java'",
+            "'peter'|'java'"
+        ])
+    );
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) CALL { WITH p MATCH (p)-->(f) RETURN count(*) AS c } \
+             RETURN p.name AS n, c ORDER BY c",
+            "n",
+            "c"
+        ),
+        sorted(&["'josh'|i:2", "'marko'|i:3", "'peter'|i:1", "'vadas'|i:0"])
+    );
+    // Every incoming row runs the body, duplicates too.
+    assert_eq!(
+        pairs(
+            &graph,
+            "UNWIND [1, 2, 2] AS i CALL (i) { RETURN i * 10 AS j } RETURN i, j",
+            "i",
+            "j"
+        ),
+        sorted(&["i:1|i:10", "i:2|i:20", "i:2|i:20"])
+    );
+}
+
+/// An empty body result drops the row; `OPTIONAL CALL` keeps it with the returned names `NULL`,
+/// also when a later stage reads them after leaving the row.
+#[test]
+fn optional_call_keeps_rows_without_records_with_nulls() {
+    let graph = modern();
+    let body = "(p) { MATCH (p)-[:created]->(s) RETURN s.name AS sn }";
+    assert_eq!(
+        pairs(
+            &graph,
+            &format!("MATCH (p:person) CALL {body} RETURN p.name AS n, sn"),
+            "n",
+            "sn"
+        ),
+        sorted(&[
+            "'marko'|'lop'",
+            "'josh'|'ripple'",
+            "'josh'|'lop'",
+            "'peter'|'lop'"
+        ])
+    );
+    assert_eq!(
+        pairs(
+            &graph,
+            &format!("MATCH (p:person) OPTIONAL CALL {body} RETURN p.name AS n, sn"),
+            "n",
+            "sn"
+        ),
+        sorted(&[
+            "'marko'|'lop'",
+            "'vadas'|null",
+            "'josh'|'ripple'",
+            "'josh'|'lop'",
+            "'peter'|'lop'"
+        ])
+    );
+    // An element column read after a later MATCH left the row.
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s } \
+             MATCH (q:person) WHERE q.age > 34 RETURN p.name AS n, s.name AS sn",
+            "n",
+            "sn"
+        ),
+        sorted(&[
+            "'marko'|'lop'",
+            "'vadas'|null",
+            "'josh'|'ripple'",
+            "'josh'|'lop'",
+            "'peter'|'lop'"
+        ])
+    );
+    // A body that never matches: every row kept with NULL.
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:nothing]->(s) RETURN s.name AS sn } \
+             RETURN sn",
+            "sn"
+        ),
+        ["null", "null", "null", "null"]
+    );
+}
+
+/// `CALL` after `OPTIONAL MATCH` (an absent import reads `NULL` in the body), a pattern
+/// continuing from an element column the body returns, a `CALL` starting the query, and an
+/// outer `WITH` column read in the body after it moved on.
+#[test]
+fn call_flows_with_optional_match_patterns_and_rows() {
+    let graph = modern();
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) CALL (p, s) { RETURN s.name AS sn } \
+             RETURN p.name AS n, sn",
+            "n",
+            "sn"
+        ),
+        sorted(&[
+            "'marko'|'lop'",
+            "'vadas'|null",
+            "'josh'|'ripple'",
+            "'josh'|'lop'",
+            "'peter'|'lop'"
+        ])
+    );
+    // A pattern continues from the returned element (`gql:bind`).
+    assert_eq!(
+        pairs(
+            &graph,
+            "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f } MATCH (f)-->(g) \
+             RETURN f.name AS f, g.name AS g",
+            "f",
+            "g"
+        ),
+        sorted(&["'josh'|'ripple'", "'josh'|'lop'"])
+    );
+    // A query starting with CALL starts from the unit row.
+    assert_eq!(
+        multiset(
+            &graph,
+            "CALL { MATCH (s:software) RETURN s.name AS sn } RETURN sn",
+            "sn"
+        ),
+        texts(&["lop", "ripple"])
+    );
+    // A WITH column read in the body after it walked away from the row.
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WITH p.name AS n, p CALL (p, n) { MATCH (p)-[:created]->(f) \
+             RETURN n || '>' || f.name AS x } RETURN x",
+            "x"
+        ),
+        texts(&["josh>lop", "josh>ripple", "marko>lop", "peter>lop"])
+    );
+    // A body reading nothing of the row: one record per incoming row.
+    assert_eq!(
+        ordered(
+            &graph,
+            "MATCH (p:person) CALL (p) { RETURN 1 AS one } RETURN count(*) AS c",
+            "c"
+        ),
+        ints(&[4])
+    );
+}
+
+/// Bulk: merged incoming rows (a body run once per merged traverser, its records multiplied by
+/// the bulk) give the same rows as the unmerged run, for aggregation, top-k and `UNION` bodies.
+#[test]
+fn call_keeps_bulk_semantics() {
+    let graph = modern();
+    for query in [
+        "MATCH ()<-[:knows]-()-[:created]->(s) CALL (s) { MATCH (s)<-[:created]-(c) RETURN count(c) AS x } \
+         RETURN s.name AS n, x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) CALL (s) { MATCH (s)<-[:created]-(c) RETURN c.name AS x \
+         ORDER BY x LIMIT 1 } RETURN s.name AS n, x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) CALL (s) { MATCH (s)<-[:created]-(c) RETURN c.name AS x \
+         UNION RETURN s.lang AS x } RETURN s.name AS n, x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) OPTIONAL CALL (s) { MATCH (s)-->(c) RETURN c.name AS x } \
+         RETURN s.name AS n, x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) CALL { MATCH (p:person) RETURN p.age AS x } RETURN s.name AS n, x",
+    ] {
+        let run = |merge: bool| {
+            let result = graph
+                .read()
+                .traversal()
+                .with("bulk.merge", merge)
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let mut out: Vec<String> = column(&result, "n")
+                .into_iter()
+                .zip(column(&result, "x"))
+                .map(|(n, x)| format!("{n}|{x}"))
+                .collect();
+            out.sort();
+            out
+        };
+        let merged = run(true);
+        assert!(!merged.is_empty(), "{query}");
+        assert_eq!(merged, run(false), "{query}");
+    }
+    // The prefix merges marko's two `knows` rows into one traverser of bulk 2 before the CALL.
+    let text = graph
+        .read()
+        .traversal()
+        .with("bulk.merge", true)
+        .gql("MATCH ()<-[:knows]-()-[:created]->(s) CALL (s) { RETURN 1 AS x } RETURN s.name AS n, x")
+        .profile()
+        .unwrap()
+        .to_string();
+    let flat_map = text
+        .lines()
+        .find(|line| line.starts_with("flat_map("))
+        .unwrap_or_else(|| panic!("{text}"));
+    let counts: Vec<&str> = flat_map
+        .split("]")
+        .last()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    // Call, In (traversers), Out (traversers), Bulk out.
+    assert_eq!(&counts[..4], ["1", "1", "1", "2"], "{text}");
+}
+
+/// The plan: `flat_map(__.<body>)` with the body's steps as profile children, `as("#c<k>")`
+/// only when a column is read after leaving the row, `OPTIONAL CALL` as
+/// `optional(__.flat_map(..).as("#c<k>"))`, the body's root scan keeps the source pushdown.
+#[test]
+fn call_is_flat_map_of_the_body() {
+    let graph = modern();
+    let text = profile(
+        &graph,
+        "MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f.name AS x } RETURN p.name AS n, x",
+    );
+    assert_eq!(
+        steps(&text),
+        [
+            r#"v(labels: ["person"])"#,
+            r#"as("p") [path: labels(p)]"#,
+            r#"flat_map(__.out("knows").gql:project("x")) [path: labels(p)]"#,
+            r#"\> out("knows")"#,
+            r#"\> gql:project("x")"#,
+            r#"gql:project("n", "x")"#,
+        ],
+        "{text}"
+    );
+    // A column read after a later stage left the row: the row label.
+    let text = profile(
+        &graph,
+        "MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f } MATCH (f)-->(g) \
+         RETURN f.name AS a, g.name AS b",
+    );
+    assert_eq!(text.matches("as(\"#c").count(), 1, "{text}");
+    assert!(text.contains("gql:bind(\"f\")"), "{text}");
+    // OPTIONAL CALL: the row label inside the optional part.
+    let text = profile(
+        &graph,
+        "MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS m } \
+         RETURN p.name AS n, m",
+    );
+    let all = steps(&text);
+    assert!(
+        all.iter()
+            .any(|s| s.starts_with("optional(__.flat_map(") && s.contains(".as(\"#c")),
+        "{text}"
+    );
+    // An uncorrelated body keeps its source pushdown inside the child.
+    let text = profile(
+        &graph,
+        "MATCH (p:person) CALL { MATCH (s:software) RETURN s.name AS x } RETURN x",
+    );
+    assert!(
+        steps(&text).contains(&r#"\> v(labels: ["software"])"#.to_string()),
+        "{text}"
+    );
+}
+
+/// The body's first component is served by the property index through `gql:lookup` when its
+/// equality reads an import (design M3, E5), and a constant equality keeps the child-leading
+/// indexed scan.
+#[test]
+fn a_call_body_uses_the_property_index() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    graph
+        .traversal_mut()
+        .create_index(
+            "person_age",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+        )
+        .unwrap();
+    let graph = Arc::new(Graph::new(graph));
+    let query = "MATCH (p:person) CALL (p) { MATCH (q:person) WHERE q.age = p.age + 3 \
+                 RETURN q.name AS x } RETURN p.name AS n, x";
+    let text = profile(&graph, query);
+    assert!(text.contains("gql:lookup("), "{text}");
+    assert!(text.contains("[index: vertex person.age]"), "{text}");
+    assert_eq!(
+        pairs(&graph, query, "n", "x"),
+        sorted(&["'marko'|'josh'", "'josh'|'peter'"])
+    );
+    let query = "MATCH (s:software) CALL { MATCH (q:person) WHERE q.age = 32 RETURN q.name AS x } \
+                 RETURN x";
+    let text = profile(&graph, query);
+    assert!(
+        steps(&text)
+            .iter()
+            .any(|s| s.starts_with(r#"\> v(labels: ["person"])"#) && s.contains("[index:")),
+        "{text}"
+    );
+    assert_eq!(multiset(&graph, query, "x"), texts(&["josh", "josh"]));
+}
+
+/// Stack headroom (2d P0 rule): the deepest accepted `CALL` nesting (`bind::MAX_BODY_DEPTH`,
+/// 16), each level a `UNION ALL` body or a correlated body importing the row, the tallest
+/// expression innermost, parses, binds, plans, lowers and runs on the default test thread
+/// (2 MiB; measured minimum 1.76 MB debug, see `ai/gql/reports-2d/T5.md`).
+#[test]
+fn the_deepest_calls_run_within_the_stack() {
+    let graph = modern();
+    let ors = (0..500)
+        .map(|i| format!("x = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut query = format!("WITH 1 AS x RETURN {ors} AS y");
+    for _ in 0..16 {
+        query = format!("CALL {{ {query} UNION ALL RETURN 2 AS y }} RETURN y");
+    }
+    assert_eq!(rows(&graph, &query).len(), 17);
+    // Correlated levels, each importing the row and matching from it.
+    let mut query = format!("MATCH (p:person) WITH p, 1 AS x RETURN {ors} AS y");
+    for _ in 0..16 {
+        query = format!("MATCH (p:person) CALL (p) {{ {query} }} RETURN y");
+    }
+    assert_eq!(rows(&graph, &query).len(), 4);
 }

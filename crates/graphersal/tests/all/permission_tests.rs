@@ -2545,4 +2545,51 @@ mod gql {
             )
         );
     }
+    /// Stage 2d.T5: a `CALL { }` body is the child of `flat_map(__..)` (`OPTIONAL CALL` inside
+    /// `optional(__..)`), and the authorization walk visits it: an edge read reached only in the
+    /// body (the query's own pattern reads vertices only) is refused before the run, at the
+    /// body's step, also when no row reaches the `CALL`, nested, in a `UNION` operand of the
+    /// body, like the Gremlin `flatMap(__.out(..))`; a vertex read only in an uncorrelated body
+    /// likewise; allowed, it asks what the twin asks.
+    #[test]
+    fn a_denied_read_inside_a_call_body_refuses_gql_like_flat_map() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").flatMap(__.out("created")).toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) OPTIONAL CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS c } RETURN c").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { RETURN 1 AS x UNION ALL MATCH (p)-[:created]->(s) RETURN 2 AS x } RETURN x").toList()"#,
+            r#"g.gql("MATCH (p:person) CALL (p) { CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s } RETURN s.name").toList()"#,
+            r#"g.gql("MATCH (p:nobody) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s").toList()"#,
+            r#"g.gql("CALL { MATCH (p:person)-[:created]->(s) RETURN s } RETURN s").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        for script in [
+            r#"g.gql("FOR x IN [1] CALL { MATCH (p:person) RETURN p.name AS n } RETURN n").toList()"#,
+            r#"g.gql("FOR x IN [1] OPTIONAL CALL (x) { MATCH (p:person) WHERE p.age = x RETURN p } RETURN p").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the body the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) CALL (p) { RETURN p.name AS n } RETURN n").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s } RETURN s.name").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").flatMap(__.out("created")).values("name").toList()"#
+            )
+        );
+    }
 }

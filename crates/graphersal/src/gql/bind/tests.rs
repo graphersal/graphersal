@@ -2202,25 +2202,17 @@ fn a_projection_beside_an_aggregate_reads_only_grouping_keys() {
 #[test]
 fn stage_2d_constructs_parse_and_are_not_yet_bound() {
     // Stage 2d.T2: they bind; `refuse_not_yet` refuses them before planning. Stage 2d.T4:
-    // `UNION` and `NEXT` lower and pass it.
+    // `UNION` and `NEXT` lower and pass it; stage 2d.T5: `[OPTIONAL] CALL { }` too.
     for query in [
         "MATCH (a) RETURN a.x AS x UNION ALL MATCH (b) RETURN b.x AS x",
         "MATCH (a) RETURN a NEXT MATCH (a)-->(b) RETURN b",
+        "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b",
+        "MATCH (a) OPTIONAL CALL { WITH a RETURN a AS b } RETURN b",
     ] {
         let parsed = parse(query).unwrap();
         assert!(bind_then_refuse(&parsed).is_ok(), "{query}");
     }
     for (query, text, what) in [
-        (
-            "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b",
-            "CALL (a) { MATCH (a)-->(b) RETURN b }",
-            "CALL { }",
-        ),
-        (
-            "MATCH (a) OPTIONAL CALL { WITH a RETURN a AS b } RETURN b",
-            "OPTIONAL CALL { WITH a RETURN a AS b }",
-            "OPTIONAL CALL { }",
-        ),
         (
             "MATCH (a) WHERE COUNT { (a)-->() } > 1 RETURN a",
             "COUNT { (a)-->() }",
@@ -2775,10 +2767,17 @@ fn the_not_yet_guard_names_the_first_construct_in_text_order() {
             .unwrap();
     let f = failure(&parsed.source, bind_then_refuse(&parsed));
     assert_eq!(f.text, "COUNT { (a)-->() }");
+    // Stage 2d.T5: CALL passes the guard; the COUNT after it is named.
     let parsed =
         parse("MATCH (a) CALL (a) { RETURN 1 AS x } RETURN x, COUNT { (a)-->() } AS c").unwrap();
     let f = failure(&parsed.source, bind_then_refuse(&parsed));
-    assert!(f.text.starts_with("CALL (a)"), "{}", f.text);
+    assert_eq!(f.text, "COUNT { (a)-->() }");
+    let parsed = parse(
+        "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS l, COUNT { (a)-->() } AS c",
+    )
+    .unwrap();
+    let f = failure(&parsed.source, bind_then_refuse(&parsed));
+    assert!(f.text.starts_with("COLLECT {"), "{}", f.text);
     // A linear query of the stages before passes it.
     let parsed = parse("MATCH (a) WHERE EXISTS { (a)-->() } RETURN a").unwrap();
     assert!(bind_then_refuse(&parsed).is_ok());
