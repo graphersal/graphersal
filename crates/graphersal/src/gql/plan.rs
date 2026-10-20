@@ -57,7 +57,8 @@
 //! matters ([`SubqueryPlan`], in [`LogicalPlan::subqueries`]): its imports are bound before it,
 //! so its components start at an import ([`Op::Resume`], from the host's current element when it
 //! is an import), reach imports through [`Op::Join`] / [`Expand::edge_join`], or start as a
-//! child-leading [`Op::Scan`] (a later unanchored component may be an [`Op::Lookup`]). A
+//! correlated [`Op::Lookup`] or a child-leading [`Op::Scan`] (a later unanchored component may
+//! be an [`Op::Lookup`]). A
 //! conjunct that is a top-level `EXISTS` or `NOT EXISTS` ([`SubqueryUse::Exists`], the fast
 //! path) runs last at its site (design E11): on an element in [`ElementFilters::exists`] after
 //! the pushed and residual conjuncts, in an [`Op::Filter`] after the other conjuncts there;
@@ -77,9 +78,9 @@
 //! row); its returned columns are read from its row (`#c<k>` when read after a later stage
 //! left it; always through the label after an `OPTIONAL CALL`), and after it there is no
 //! current element. A whole-query subquery body is a [`SubqueryPlan::query`], planned per start
-//! like a `MATCH`-only body. The first component of a `CALL` body or a whole-query body may be a
-//! correlated [`Op::Lookup`] when its equality reads a binding (the body runs per row); in a
-//! `MATCH`-only body (stage 2b) it stays a child-leading scan.
+//! like a `MATCH`-only body. The first component of any body (a `CALL` body, a whole-query body,
+//! since stage 2d.T5c a body of `MATCH` clauses too) may be a correlated [`Op::Lookup`] when
+//! its equality reads a binding (the body runs per row).
 //!
 //! **Phase 2 seam.** The planner takes an optional anchor binding (always `None` in stage 1a):
 //! the component holding it starts with [`Op::Anchor`] (the incoming traverser) instead of a

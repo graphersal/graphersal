@@ -719,8 +719,9 @@ pub(crate) const MAX_HOSTED_SUBQUERIES: usize = 64;
 pub(crate) struct SubqueryAnswers<S: GraphStorage> {
     known: u64,
     found: u64,
-    /// The lists of the pattern comprehensions the row ran, by hosted index.
-    lists: Vec<(usize, RowValue<S>)>,
+    /// The values of the pattern comprehensions, `COLLECT { }` and `COUNT { }` subqueries the
+    /// row ran, by hosted index.
+    values: Vec<(usize, RowValue<S>)>,
 }
 
 impl<S: GraphStorage> Default for SubqueryAnswers<S> {
@@ -728,7 +729,7 @@ impl<S: GraphStorage> Default for SubqueryAnswers<S> {
         Self {
             known: 0,
             found: 0,
-            lists: Vec::new(),
+            values: Vec::new(),
         }
     }
 }
@@ -740,7 +741,7 @@ impl<S: GraphStorage> SubqueryAnswers<S> {
         if self.known & bit == 0 {
             return None;
         }
-        match self.lists.iter().find(|(i, _)| *i == index) {
+        match self.values.iter().find(|(i, _)| *i == index) {
             Some((_, list)) => Some(list.clone()),
             None => Some(Value::Scalar(ElementProperty::Boolean(
                 self.found & bit != 0,
@@ -748,13 +749,13 @@ impl<S: GraphStorage> SubqueryAnswers<S> {
         }
     }
 
-    /// Records the list of pattern comprehension `index`; `false` past
+    /// Records the value (a list, a count) of subquery `index`; `false` past
     /// [`MAX_HOSTED_SUBQUERIES`] (which the lowering never builds).
-    fn set_list(&mut self, index: usize, list: RowValue<S>) -> bool {
+    fn set_value(&mut self, index: usize, value: RowValue<S>) -> bool {
         if !self.set(index, true) {
             return false;
         }
-        self.lists.push((index, list));
+        self.values.push((index, value));
         true
     }
 
@@ -779,7 +780,8 @@ impl<S: GraphStorage> SubqueryAnswers<S> {
 
 /// The subqueries (`EXISTS` anywhere in an expression but a top-level conjunct: under `OR`,
 /// `CASE`, in a `RETURN` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list;
-/// design M2, the 2b hook; every pattern comprehension, stage 2c) a `gql:*` step hosts: one
+/// design M2, the 2b hook; every pattern comprehension, stage 2c; every `COUNT { }` and
+/// `COLLECT { }` and whole-query bodies, stage 2d) a `gql:*` step hosts: one
 /// child traversal each, lowered from the
 /// step's site (the body's plan for its current element). The step embeds it and hands its
 /// children to every walker: `child_traversals_mut` (optimizer, step numbering, authorization,
@@ -794,6 +796,11 @@ impl<S: GraphStorage> SubqueryAnswers<S> {
 /// `filter(__..)`), and the row is evaluated again. The children run on the same execution
 /// context, so every traversal limit, the deadline and cancellation apply inside them.
 ///
+/// A `COUNT { }` child ends with `count()` (bulk counted): it runs on one unit of the input
+/// traverser and its one result is the count, `0` when the body matches nothing
+/// ([`counted_run`]). A `COLLECT { }` child ends with `gql:value` of its one returned column
+/// and collects like a pattern comprehension.
+///
 /// A pattern comprehension's child ends with `gql:value(expr)` (its `|` part): it runs to the
 /// end on one unit of the input traverser, and its results, in arrival order (the child's
 /// order, unspecified across plans, D18), become the list, each bulk expanded. The list is
@@ -802,15 +809,27 @@ impl<S: GraphStorage> SubqueryAnswers<S> {
 /// import that is `NULL` (absent) matches nothing: the list is empty.
 pub(crate) struct SubqueryHost<'g, S: GraphStorage + 'g> {
     children: Vec<AnonymousTraversal<'g, S>>,
-    /// Per child: a pattern comprehension (collects a list) rather than `EXISTS`.
-    collects: Vec<bool>,
+    /// Per child: what it answers.
+    modes: Vec<ChildMode>,
+}
+
+/// What a hosted child answers ([`SubqueryHost::new`] reads it from the child's last step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildMode {
+    /// `EXISTS`: whether it gives a result (short-circuiting at the first one).
+    Exists,
+    /// `COUNT { }`: the one value its closing `count()` gives (stage 2d).
+    Count,
+    /// A pattern comprehension or `COLLECT { }`: the list of the values its closing
+    /// `gql:value` gives.
+    Collect,
 }
 
 impl<'g, S: GraphStorage + 'g> Clone for SubqueryHost<'g, S> {
     fn clone(&self) -> Self {
         Self {
             children: self.children.clone(),
-            collects: self.collects.clone(),
+            modes: self.modes.clone(),
         }
     }
 }
@@ -819,26 +838,28 @@ impl<'g, S: GraphStorage + 'g> Default for SubqueryHost<'g, S> {
     fn default() -> Self {
         Self {
             children: Vec::new(),
-            collects: Vec::new(),
+            modes: Vec::new(),
         }
     }
 }
 
 impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
     /// The host of `children`; child `i` answers [`Env::subquery`]`(i)`. A child ending with
-    /// `gql:value` (only the lowering of a pattern comprehension emits it, always last) collects
-    /// a list; every other child answers `EXISTS`.
+    /// `gql:value` (only the lowering of a pattern comprehension or a `COLLECT { }` emits it,
+    /// always last) collects a list; a child ending with `count()` (only the lowering of a
+    /// `COUNT { }` closes a body with it) answers that count; every other child answers
+    /// `EXISTS`. The mode is read here, before the optimizer may fuse the closing `count()`.
     pub(crate) fn new(children: Vec<AnonymousTraversal<'g, S>>) -> Self {
-        let collects = children
+        use crate::traversal::step::GraphStep;
+        let modes = children
             .iter()
-            .map(|child| {
-                matches!(
-                    child.steps.last(),
-                    Some(crate::traversal::step::GraphStep::Map(GQL_VALUE, _))
-                )
+            .map(|child| match child.steps.last() {
+                Some(GraphStep::Map(GQL_VALUE, _)) => ChildMode::Collect,
+                Some(GraphStep::Count(..)) => ChildMode::Count,
+                _ => ChildMode::Exists,
             })
             .collect();
-        Self { children, collects }
+        Self { children, modes }
     }
 
     /// Whether it hosts no subquery.
@@ -890,12 +911,20 @@ impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
                 result,
             ) {
                 (Some((index, child)), Err(error)) => {
-                    let recorded = if self.collects.get(index).copied().unwrap_or(false) {
-                        let list = collect_list(context, child, source, bindings)?;
-                        answers.set_list(index, list)
-                    } else {
-                        let found = child.exists(context, source)?;
-                        answers.set(index, found)
+                    let mode = self.modes.get(index).copied().unwrap_or(ChildMode::Exists);
+                    let recorded = match mode {
+                        ChildMode::Collect => {
+                            let list = collect_list(context, child, source, bindings)?;
+                            answers.set_value(index, list)
+                        }
+                        ChildMode::Count => {
+                            let count = counted_run(context, child, source)?;
+                            answers.set_value(index, count)
+                        }
+                        ChildMode::Exists => {
+                            let found = child.exists(context, source)?;
+                            answers.set(index, found)
+                        }
                     };
                     if !recorded {
                         return Ok(Err(error));
@@ -909,6 +938,29 @@ impl<'g, S: GraphStorage + 'g> SubqueryHost<'g, S> {
 
 /// The step name of a pattern comprehension's `|` part (the last step of its child).
 pub(crate) const GQL_VALUE: &str = "gql:value";
+
+/// The count a `COUNT { }` subquery's `child` (its body closed by `count()`, bulk counted) gives
+/// for the row of `source`: the child runs on one unit of `source` (the count is per row, not
+/// multiplied by the row's bulk); its one result is the count (`0` when the body matches
+/// nothing).
+fn counted_run<S: GraphStorage>(
+    context: &mut TraverserContext<'_, S>,
+    child: &AnonymousTraversal<'_, S>,
+    source: &Traverser<S>,
+) -> TraverserResult<RowValue<S>> {
+    let unit;
+    let source_unit = if source.bulk == 1 {
+        source
+    } else {
+        unit = Traverser::with_parts(source.value.clone(), source.path, 1, source.sack);
+        &unit
+    };
+    let produced = child.apply_to(context, source_unit)?;
+    Ok(match produced.into_iter().next().map(|item| item.value) {
+        Some(TraverserValue::Computed(count, _)) => Value::from_property(count),
+        _ => Value::Scalar(ElementProperty::from(0_i64)),
+    })
+}
 
 /// The list a pattern comprehension's `child` builds for the row of `source` ([`SubqueryHost`]):
 /// the child runs on one unit of `source`; its results, in arrival order, each repeated by its

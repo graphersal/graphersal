@@ -7,6 +7,9 @@
 //! `OR` / `CASE`, in `RETURN`, `ORDER BY`, an aggregate's argument, a `FOR` list) runs as a
 //! child of the `gql:*` step evaluating it (stage 2b.T5, the hook): hand-computed rows,
 //! three-valued logic around it, the profile children, and every walker visiting them.
+//! Stage 2d.T5c: `COUNT { }` of `MATCH` clauses on the hook (twins against `local(__..count())`
+//! and `OPTIONAL MATCH .. count()`), and the correlated `gql:lookup` starting a body's first
+//! component.
 #![cfg(feature = "gql")]
 
 use std::sync::Arc;
@@ -955,4 +958,355 @@ fn a_hooked_condition_on_an_element_reads_it_through_its_label() {
             "{hooked}: {plan:?}"
         );
     }
+}
+
+// ----- stage 2d.T5c: COUNT { } of MATCH clauses, the correlated lookup in a body -----
+
+/// `COUNT { }` over `MATCH` clauses (user decision D23) is a counted run on the 2b hook: the
+/// body closed by `count()` (bulk counted), `0` when nothing matches or an import is `NULL`;
+/// twins against Gremlin `local(__..count())` and the `OPTIONAL MATCH .. count()` form.
+#[cfg(feature = "script")]
+mod count_twins {
+    use super::{modern, norm, rows};
+
+    fn values(script: &str) -> Vec<String> {
+        let graph = modern();
+        let engine = crate::script_host::engine();
+        let mut scope = crate::script_host::graph_scope(graph.clone());
+        let gts = engine
+            .eval_with_scope::<crate::script_host::ScriptGraphTraversalSource>(&mut scope, script)
+            .unwrap_or_else(|e| panic!("`{script}` failed to evaluate: {e}"));
+        let lock = graph.read();
+        let mut out: Vec<String> = gts
+            .ast_convert_to_gts(&*lock)
+            .to_list()
+            .unwrap_or_else(|e| panic!("{script}: {e}"))
+            .iter()
+            .map(norm)
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn twin(gql: &str, gremlin: &str) {
+        let left = values(&format!("g.gql({gql:?}).select(\"x\")"));
+        assert!(!left.is_empty(), "{gql}: no rows to compare");
+        assert_eq!(left, values(gremlin), "\nGQL:  {gql}\ntwin: {gremlin}");
+    }
+
+    #[test]
+    fn count_is_local_count() {
+        for (gql, gremlin) in [
+            (
+                "MATCH (p:person) RETURN COUNT { (p)-->() } AS x",
+                r#"g.V().hasLabel("person").local(__.out().count())"#,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-[:knows]->(f)-[:created]->(s) } AS x",
+                r#"g.V().hasLabel("person").local(__.out("knows").out("created").count())"#,
+            ),
+            // Either direction: a self-loop would count once; trail within the clause.
+            (
+                "MATCH (p:person) RETURN COUNT { (p)-[]-() } AS x",
+                r#"g.V().hasLabel("person").local(__.both().count())"#,
+            ),
+            // A condition in the body; an inline property.
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-->(f) WHERE f.age > 26 } AS x",
+                r#"g.V().hasLabel("person").local(__.out().has("age", P.gt(26)).count())"#,
+            ),
+            (
+                "MATCH (s:software) RETURN COUNT { (s)<-[:created]-(:person {name: 'josh'}) } AS x",
+                r#"g.V().hasLabel("software").local(__.in("created").has("name", "josh").count())"#,
+            ),
+            // Uncorrelated: the whole graph per row.
+            (
+                "MATCH (s:software) RETURN COUNT { MATCH (a)-[:knows]->(b) } AS x",
+                r#"g.V().hasLabel("software").local(__.V().out("knows").count())"#,
+            ),
+            // In a condition (the hook in `gql:filter`).
+            (
+                "MATCH (p:person) WHERE COUNT { (p)-->() } >= 2 RETURN p.name AS x",
+                r#"g.V().hasLabel("person").where(__.out().count().is(P.gte(2))).values("name")"#,
+            ),
+        ] {
+            twin(gql, gremlin);
+        }
+    }
+
+    /// The `OPTIONAL MATCH .. count()` form (the advice before 2d.T5c) gives the same rows.
+    #[test]
+    fn count_is_the_optional_match_count_form() {
+        for (subquery, form) in [
+            (
+                "MATCH (p:person) RETURN p.name AS n, COUNT { (p)-[:created]->() } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, count(s) AS c",
+            ),
+            (
+                "MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (p)-[:knows]->(f) WHERE f.age > 30 } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:knows]->(f) WHERE f.age > 30 RETURN p.name AS n, count(f) AS c",
+            ),
+        ] {
+            let mut left: Vec<String> = rows(&modern(), subquery).iter().map(norm).collect();
+            let mut right: Vec<String> = rows(&modern(), form).iter().map(norm).collect();
+            left.sort();
+            right.sort();
+            assert_eq!(left, right, "{subquery}");
+        }
+    }
+}
+
+/// `COUNT { }` anywhere an expression stands: a `WHERE` condition, `ORDER BY`, an aggregate's
+/// argument, a `FOR` list, a `LET`, nested in another body; a `NULL` import counts `0`.
+#[test]
+fn count_runs_in_every_host_and_a_null_import_counts_zero() {
+    let graph = modern();
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COUNT { (p)-[:created]->() } AS c",
+            false
+        ),
+        strings(&[
+            "n='marko' c=i:1",
+            "n='vadas' c=i:0",
+            "n='josh' c=i:2",
+            "n='peter' c=i:1"
+        ])
+    );
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE COUNT { MATCH (p)-[:knows]->(f) } > 1 RETURN p.name AS n"
+        ),
+        sorted(&["marko"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n ORDER BY COUNT { (p)--() } DESC, n",
+            true
+        ),
+        ["n='josh'", "n='marko'", "n='peter'", "n='vadas'"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN sum(COUNT { (p)-->() }) AS t",
+            false
+        ),
+        ["t=i:6"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person {name: 'marko'}) FOR x IN [COUNT { (p)-->() }, 0] RETURN x",
+            false
+        ),
+        strings(&["x=i:0", "x=i:3"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) LET c = COUNT { (p)-->() } FILTER c > 0 RETURN p.name AS n, c",
+            false
+        ),
+        strings(&["n='marko' c=i:3", "n='josh' c=i:2", "n='peter' c=i:1"])
+    );
+    // Nested: a COUNT inside an EXISTS body, an EXISTS inside a COUNT body.
+    assert_eq!(
+        names(
+            &graph,
+            "MATCH (p:person) WHERE EXISTS { MATCH (p)-->(f) WHERE COUNT { (f)-->() } = 2 } \
+             RETURN p.name AS n"
+        ),
+        sorted(&["marko"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (p)-->(f) WHERE EXISTS { \
+             (f)-[:created]->() } } AS c",
+            false
+        ),
+        strings(&[
+            "n='marko' c=i:1",
+            "n='vadas' c=i:0",
+            "n='josh' c=i:0",
+            "n='peter' c=i:0"
+        ])
+    );
+    // A NULL import (an OPTIONAL MATCH that did not match) counts 0, never NULL.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WHERE s.lang = 'none' \
+             RETURN p.name AS n, COUNT { (s)<-[:created]-() } AS c",
+            false
+        ),
+        strings(&[
+            "n='marko' c=i:0",
+            "n='vadas' c=i:0",
+            "n='josh' c=i:0",
+            "n='peter' c=i:0"
+        ])
+    );
+}
+
+/// Bulk is counted: merged rows count like unmerged ones, and a body run on a merged row
+/// counts the row's own matches once (not multiplied by the row's bulk).
+#[test]
+fn count_counts_bulk_and_merged_rows_like_unmerged_ones() {
+    let graph = modern();
+    let graph = graph.read();
+    for query in [
+        "MATCH ()<-[:knows]-()-[:created]->(s) RETURN s.name AS n, COUNT { (s)<-[:created]-() } AS c",
+        "MATCH (a)-->(b) RETURN COUNT { (b)<-[]-() } AS c, count(*) AS k",
+        "MATCH (p:person) RETURN COUNT { MATCH (p)-->(a)-->(b) } AS c",
+        "MATCH ()-->(b) RETURN sum(COUNT { MATCH (b)<--()-->() }) AS c",
+    ] {
+        let run = |merge: bool| {
+            let mut out: Vec<String> = graph
+                .traversal()
+                .with("bulk.merge", merge)
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"))
+                .iter()
+                .map(norm)
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(run(true), run(false), "{query}");
+    }
+    // lop is reached twice through marko's two `knows` rows (merged into one traverser of
+    // bulk 2): each row counts lop's three creators.
+    let rows = graph
+        .traversal()
+        .with("bulk.merge", true)
+        .gql("MATCH ()<-[:knows]-()-[:created]->(s) RETURN s.name AS n, COUNT { (s)<-[:created]-() } AS c")
+        .to_list()
+        .unwrap();
+    let mut rows: Vec<String> = rows.iter().map(norm).collect();
+    rows.sort();
+    assert_eq!(rows, ["{c: i:3, n: 'lop'}", "{c: i:3, n: 'lop'}"]);
+}
+
+/// The plan: the body's child closes with `count()` under the hosting step; the optimizer may
+/// fuse it (`count_pushdown`: an uncorrelated labelled scan counts without walking).
+#[test]
+fn count_is_a_child_closed_by_count() {
+    let graph = modern();
+    let text = profile(
+        &graph,
+        "MATCH (p:person) RETURN p.name AS n, COUNT { (p)-[:created]->() } AS c",
+    );
+    assert_eq!(
+        steps(&text),
+        [
+            r#"v(labels: ["person"])"#,
+            r#"gql:project("n", "c")"#,
+            r#"\> out("created")"#,
+            r#"\> count()"#,
+        ],
+        "{text}"
+    );
+    let text = profile(
+        &graph,
+        "MATCH (p:person) RETURN COUNT { MATCH (s:software) } AS c",
+    );
+    assert!(
+        steps(&text).contains(&r#"\> v(labels: ["software"]).count()"#.to_string()),
+        "{text}"
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN COUNT { MATCH (s:software) } AS c",
+            false
+        ),
+        ["c=i:2"; 4]
+    );
+}
+
+/// Stage 2d.T5c (P0 "After T3"): the first component of a body of `MATCH` clauses (`EXISTS`,
+/// a pattern predicate, a pattern comprehension, `COUNT { }`) starts with the correlated
+/// `gql:lookup` when the id or a property index serves an equality reading an outer binding,
+/// as in a `CALL` body; without an index it stays the child-leading scan. Same rows either way.
+#[test]
+fn a_match_body_uses_the_correlated_lookup() {
+    use graphersal::catalog::PropertyIndexDefinition;
+    use graphersal::storage::ElementKind;
+
+    let mut indexed = TraversalGraph::tinkerpop_modern();
+    indexed
+        .traversal_mut()
+        .create_index(
+            "person_age",
+            PropertyIndexDefinition::new(ElementKind::Vertex, "person", "age"),
+        )
+        .unwrap();
+    let indexed = Arc::new(Graph::new(indexed));
+    let plain = modern();
+    for (query, expected) in [
+        (
+            "MATCH (p:person) WHERE EXISTS { MATCH (q:person) WHERE q.age = p.age + 3 } \
+             RETURN p.name AS n",
+            &["n='marko'", "n='josh'"][..],
+        ),
+        (
+            "MATCH (p:person) WHERE p.age > 100 OR EXISTS { MATCH (q:person) WHERE q.age = \
+             p.age + 3 } RETURN p.name AS n",
+            &["n='marko'", "n='josh'"][..],
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, [(q:person)-->() WHERE q.age = p.age + 3 | \
+             q.name] AS l",
+            &[
+                "n='marko' l=[\"josh\", \"josh\"]",
+                "n='vadas' l=[]",
+                "n='josh' l=[\"peter\"]",
+                "n='peter' l=[]",
+            ][..],
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (q:person) WHERE q.age = p.age \
+             + 3 } AS c",
+            &[
+                "n='marko' c=i:1",
+                "n='vadas' c=i:0",
+                "n='josh' c=i:1",
+                "n='peter' c=i:0",
+            ][..],
+        ),
+    ] {
+        let lookup = profile(&indexed, query);
+        assert!(lookup.contains("gql:lookup("), "{query}: {lookup}");
+        assert!(
+            lookup.contains("[index: vertex person.age]"),
+            "{query}: {lookup}"
+        );
+        let scan = profile(&plain, query);
+        assert!(!scan.contains("gql:lookup("), "{query}: {scan}");
+        assert!(scan.contains(r#"v(labels: ["person"])"#), "{query}: {scan}");
+        assert_eq!(table(&indexed, query, false), strings(expected), "{query}");
+        assert_eq!(table(&plain, query, false), strings(expected), "{query}");
+    }
+    // A constant equality keeps the child-leading indexed scan (the lookup serves only an
+    // equality reading the row).
+    let query = "MATCH (s:software) WHERE EXISTS { MATCH (q:person) WHERE q.age = 32 } \
+                 RETURN s.name AS n";
+    let text = profile(&indexed, query);
+    assert!(!text.contains("gql:lookup("), "{text}");
+    assert!(text.contains("[index:"), "{text}");
+    // An equality on the element id is served by the id.
+    let query = "MATCH (p:person)-[:knows]->(f) WITH p, element_id(f) AS i RETURN p.name AS n, \
+                 COUNT { MATCH (q) WHERE element_id(q) = i } AS c";
+    let text = profile(&plain, query);
+    assert!(text.contains("gql:lookup("), "{text}");
+    assert_eq!(
+        table(&plain, query, false),
+        strings(&["n='marko' c=i:1", "n='marko' c=i:1"])
+    );
 }

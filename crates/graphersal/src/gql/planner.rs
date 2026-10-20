@@ -111,8 +111,9 @@
 //! import starts there ([`Op::Resume`]: from the host's current element when the body imports
 //! it, else by moving to the earliest import, `select` or `gql:bind`), an expansion reaching an
 //! import is a join (an imported edge an edge join), a body's first component holding no import
-//! is a child-leading [`Op::Scan`] (its pushdown and index apply), a later one may be an
-//! [`Op::Lookup`]. Trail holds per body clause (design E8). A body is planned once per start
+//! is a correlated [`Op::Lookup`] when the id or an index serves an equality of it reading a
+//! binding (stage 2d.T5c), else a child-leading [`Op::Scan`] (its pushdown and index apply); a
+//! later one may be an [`Op::Lookup`]. Trail holds per body clause (design E8). A body is planned once per start
 //! (the host's current element when it is a node the body imports, else none); a subquery
 //! nested in a body is hosted in that body's plan the same way (a worklist, no recursion). The
 //! `|` part of a pattern comprehension reads at the end of its body (its reads and the hosts of
@@ -383,7 +384,7 @@ impl<'q> Planner<'q> {
                         anchor: anchor.filter(|_| i == 0),
                     },
                     Entry::Body { current } if k == 0 => PipelineStart {
-                        kind: SegmentKind::QueryBody,
+                        kind: SegmentKind::Body,
                         current,
                         anchor: None,
                     },
@@ -523,7 +524,7 @@ impl<'q> Planner<'q> {
     /// `kind`: the first segment of a top-level pipeline (its first component is the root scan,
     /// its conjuncts over no binding run after it, as in stage 1a), a body ([`SegmentKind`]: its
     /// conjuncts over bound bindings only run at its start, its first component when no import
-    /// starts it is a child-leading scan or, in a `CALL` body, a correlated lookup), or a later
+    /// starts it is a correlated lookup or a child-leading scan), or a later
     /// one.
     fn segment(
         &mut self,
@@ -534,7 +535,7 @@ impl<'q> Planner<'q> {
         kind: SegmentKind,
     ) -> Vec<Op> {
         let bound = self.bound;
-        let body = matches!(kind, SegmentKind::Body | SegmentKind::QueryBody);
+        let body = kind == SegmentKind::Body;
         self.pending = bound
             .cross
             .iter()
@@ -612,11 +613,12 @@ impl<'q> Planner<'q> {
         starts.sort_unstable_by_key(|(key, _, _)| *key);
         for (k, ((_, _, _, start), how, nodes)) in starts.into_iter().enumerate() {
             // Every component but the root scan may start with a correlated lookup (module
-            // docs); a body's first component is a child-leading scan.
+            // docs).
             let root = (first || body) && k == 0;
-            // The first component of a `CALL` body or a whole-query body runs per incoming
-            // row: a lookup serves it when its value reads that row (module docs).
-            let correlated = root && kind == SegmentKind::QueryBody;
+            // The first component of a body (a `CALL` body, a subquery body) runs per incoming
+            // row: a lookup serves it when its value reads that row (module docs), else it is
+            // a child-leading scan.
+            let correlated = root && body;
             let lookup = (how == Start::Scan && (!root || correlated))
                 .then(|| self.lookup(&nodes, correlated))
                 .flatten();
@@ -1840,15 +1842,13 @@ enum SegmentKind {
     /// The first segment of a top-level pipeline: its first component is the root scan, its
     /// conjuncts over no binding run after it (stage 1a).
     First,
-    /// The segment of a subquery body of `MATCH` clauses (stage 2b): its conjuncts over bound
-    /// bindings only run first, its first component not starting at an import is a
-    /// child-leading scan.
+    /// The segment of a subquery body of `MATCH` clauses (stage 2b), or the first segment of a
+    /// pipeline of the first block of a `CALL` body or a whole-query subquery body (stage 2d):
+    /// its conjuncts over bound bindings only run first; its first component not starting at
+    /// an import starts with a correlated lookup when an equality reading a binding is served
+    /// by the id or an index (the body runs per incoming row, stage 2d.T5c for the bodies of
+    /// `MATCH` clauses too), else it is a child-leading scan.
     Body,
-    /// The first segment of a pipeline of the first block of a `CALL` body or a whole-query
-    /// subquery body (stage 2d): as [`SegmentKind::Body`], but its first component may also
-    /// start with a correlated lookup (an equality reading a binding, served by the id or an
-    /// index), since the body runs per incoming row.
-    QueryBody,
     /// Any other segment.
     Later,
 }

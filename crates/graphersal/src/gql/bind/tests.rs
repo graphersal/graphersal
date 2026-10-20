@@ -48,13 +48,6 @@ fn failure(query: &str, result: Result<BoundQuery, TraverserError>) -> Failure {
     }
 }
 
-/// `bind`, then the stage 2d "not yet" guard the lowering runs before planning.
-fn bind_then_refuse(parsed: &Query) -> Result<BoundQuery, TraverserError> {
-    let bound = bind(parsed)?;
-    refuse_not_yet(parsed, &bound)?;
-    Ok(bound)
-}
-
 fn fail(query: &str) -> Failure {
     let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
     let f = failure(query, bind(&parsed));
@@ -2125,7 +2118,7 @@ fn a_comprehension_variable_inside_a_subquery_is_not_yet_read() {
         ("MATCH (n) RETURN [x IN [1] WHERE (n)-->(x)] AS l", "x"),
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind_then_refuse(&parsed));
+        let f = failure(query, bind(&parsed));
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
         assert_eq!(f.gqlstatus, "0A000", "{query}");
         assert_eq!(f.text, text, "{query}");
@@ -2197,46 +2190,21 @@ fn a_projection_beside_an_aggregate_reads_only_grouping_keys() {
 }
 
 /// Stage 2d.T1: the composite queries, `CALL { }`, `COUNT { }`, `COLLECT { }` and whole-query
-/// bodies parse; the binder refuses them "not yet" until they bind (2d.T2, 2d.T5c), at their
-/// keyword or their whole text.
+/// bodies parse; stage 2d.T2 binds them, and since stage 2d.T5c every one lowers (no "not yet"
+/// guard is left between planning and lowering).
 #[test]
-fn stage_2d_constructs_parse_and_are_not_yet_bound() {
-    // Stage 2d.T2: they bind; `refuse_not_yet` refuses them before planning. Stage 2d.T4:
-    // `UNION` and `NEXT` lower and pass it; stage 2d.T5: `[OPTIONAL] CALL { }` too.
+fn stage_2d_constructs_parse_and_bind() {
     for query in [
         "MATCH (a) RETURN a.x AS x UNION ALL MATCH (b) RETURN b.x AS x",
         "MATCH (a) RETURN a NEXT MATCH (a)-->(b) RETURN b",
         "MATCH (a) CALL (a) { MATCH (a)-->(b) RETURN b } RETURN b",
         "MATCH (a) OPTIONAL CALL { WITH a RETURN a AS b } RETURN b",
-    ] {
-        let parsed = parse(query).unwrap();
-        assert!(bind_then_refuse(&parsed).is_ok(), "{query}");
-    }
-    for (query, text, what) in [
-        (
-            "MATCH (a) WHERE COUNT { (a)-->() } > 1 RETURN a",
-            "COUNT { (a)-->() }",
-            "COUNT { }",
-        ),
-        (
-            "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS names",
-            "COLLECT { MATCH (a)-->(b) RETURN b.name }",
-            "COLLECT { }",
-        ),
-        (
-            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) RETURN b } RETURN a",
-            "EXISTS { MATCH (a)-->(b) RETURN b }",
-            "EXISTS { } body that is a whole query",
-        ),
+        "MATCH (a) WHERE COUNT { (a)-->() } > 1 RETURN a",
+        "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS names",
+        "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) RETURN b } RETURN a",
     ] {
         let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
-        let f = failure(query, bind_then_refuse(&parsed));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
-        assert_eq!(f.gqlstatus, "0A000", "{query}");
-        assert_eq!(f.text, text, "{query}");
-        assert!(f.message.contains(what), "{query}: {}", f.message);
-        assert!(f.message.contains("not yet supported"), "{}", f.message);
-        assert!(f.alternative.is_some(), "{query}");
+        assert!(bind(&parsed).is_ok(), "{query}");
     }
     // A pattern comprehension and EXISTS with a body of MATCH clauses bind as before.
     ok("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE b.x > 1 } RETURN [(a)-->(c) | c.x] AS l");
@@ -2760,25 +2728,16 @@ fn the_deepest_bodies_bind_within_the_stack() {
     ok(&format!("LET x = 1 RETURN {} AS y", ors(500)));
 }
 
+/// Stage 2d.T5c removed the "not yet" guard: the constructs it named first bind together.
 #[test]
-fn the_not_yet_guard_names_the_first_construct_in_text_order() {
-    let parsed =
-        parse("MATCH (a) WHERE COUNT { (a)-->() } > 1 CALL (a) { RETURN 1 AS x } RETURN x")
-            .unwrap();
-    let f = failure(&parsed.source, bind_then_refuse(&parsed));
-    assert_eq!(f.text, "COUNT { (a)-->() }");
-    // Stage 2d.T5: CALL passes the guard; the COUNT after it is named.
-    let parsed =
-        parse("MATCH (a) CALL (a) { RETURN 1 AS x } RETURN x, COUNT { (a)-->() } AS c").unwrap();
-    let f = failure(&parsed.source, bind_then_refuse(&parsed));
-    assert_eq!(f.text, "COUNT { (a)-->() }");
-    let parsed = parse(
+fn the_former_not_yet_constructs_bind_together() {
+    for query in [
+        "MATCH (a) WHERE COUNT { (a)-->() } > 1 CALL (a) { RETURN 1 AS x } RETURN x",
+        "MATCH (a) CALL (a) { RETURN 1 AS x } RETURN x, COUNT { (a)-->() } AS c",
         "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN b.name } AS l, COUNT { (a)-->() } AS c",
-    )
-    .unwrap();
-    let f = failure(&parsed.source, bind_then_refuse(&parsed));
-    assert!(f.text.starts_with("COLLECT {"), "{}", f.text);
-    // A linear query of the stages before passes it.
-    let parsed = parse("MATCH (a) WHERE EXISTS { (a)-->() } RETURN a").unwrap();
-    assert!(bind_then_refuse(&parsed).is_ok());
+        "MATCH (a) WHERE EXISTS { (a)-->() } RETURN a",
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        assert!(bind(&parsed).is_ok(), "{query}");
+    }
 }

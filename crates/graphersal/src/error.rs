@@ -7182,6 +7182,10 @@ enum GqlSubqueryPlace {
     Outside,
     Exists,
     Comprehension,
+    /// A `COUNT { }` subquery (a hosted child ending in `count()`, run to its end).
+    Count,
+    /// A `COLLECT { }` subquery (a hosted child ending in `gql:value` after its `RETURN`).
+    Collect,
 }
 
 #[cfg(feature = "gql")]
@@ -7192,6 +7196,8 @@ impl GqlSubqueryPlace {
             GqlSubqueryPlace::Outside => "",
             GqlSubqueryPlace::Exists => " inside an EXISTS subquery (or pattern predicate)",
             GqlSubqueryPlace::Comprehension => " inside a pattern comprehension [(a)-->(b) | ..]",
+            GqlSubqueryPlace::Count => " inside a COUNT { } subquery",
+            GqlSubqueryPlace::Collect => " inside a COLLECT { } subquery",
         }
     }
 
@@ -7206,6 +7212,14 @@ impl GqlSubqueryPlace {
             GqlSubqueryPlace::Comprehension => {
                 " A pattern comprehension collects every match of its pattern for each row, so \
                  its loop runs until the row's last match is found."
+            }
+            GqlSubqueryPlace::Count => {
+                " A COUNT { } subquery counts every match of its body for each row, so its loop \
+                 runs until the row's last match is found."
+            }
+            GqlSubqueryPlace::Collect => {
+                " A COLLECT { } subquery collects every row of its body for each row, so its \
+                 loop runs until the row's last match is found."
             }
         }
     }
@@ -7299,7 +7313,7 @@ fn gql_traverser_limit_help(
 
 /// Advice for `traversal.max_materialized_bytes` exceeded by an internal `gql:*` step: a
 /// function result that can outgrow its arguments, a `collect_list()` list or the list of a pattern
-/// comprehension, refused before it
+/// comprehension or a `COLLECT { }` subquery, refused before it
 /// was built (design F6). Names the GQL fixes and raising the limit for the `gql()` call.
 #[cfg(feature = "gql")]
 fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> String {
@@ -7310,12 +7324,15 @@ fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> Strin
          its arguments (range(), split(), replace(), || and toString() of a list or map) and \
          the list of collect_list() are checked before they are built, as is the list of a \
          pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out \
-         of memory; the result is never cut short. Build smaller \
+         of memory; the result is never cut short. The list of a COLLECT {{ .. RETURN x }} \
+         subquery is checked the same way. Build smaller \
          values: bound range() and replace() by the data, as in \
          g.gql(\"MATCH (p:person) RETURN range(1, p.age / 10) AS r\"), count the values \
          instead of collecting them, as in g.gql(\"MATCH (p:person) RETURN count(p.name) AS \
          n\") or, for the matches of a pattern, g.gql(\"MATCH (p:person) OPTIONAL MATCH \
-         (p)-->(f) RETURN p.name, count(f) AS n\"), or raise the limit for the query, \
+         (p)-->(f) RETURN p.name, count(f) AS n\") or its openCypher form \
+         g.gql(\"MATCH (p:person) RETURN p.name, COUNT {{ (p)-->() }} AS n\"), or raise the \
+         limit for the query, \
          g.with(\"traversal.max_materialized_bytes\", {raised}).gql(..), for example \
          g.with(\"traversal.max_materialized_bytes\", {raised}).gql(\"MATCH (p:person) RETURN \
          collect_list(p.name) AS names\"). A host can lock this option with \
@@ -7657,22 +7674,37 @@ impl TraverserError {
 
     /// Where the innermost failure ran: inside a GQL subquery child (see
     /// [`Self::gql_in_subquery`]) whose failing level ends in `gql:value` is a pattern
-    /// comprehension (only its lowering emits that step, always last); any other subquery
-    /// child is an `EXISTS` body or a pattern predicate.
+    /// comprehension (only its lowering and that of `COLLECT { }` emit that step, always last;
+    /// a `COLLECT { }` body has its `RETURN`, `gql:project` / `gql:aggregate`, or a `union()` of
+    /// operands on that level), one ending in `count()` a `COUNT { }` subquery (only its
+    /// lowering closes a child with it, possibly fused into the step before); any other subquery child is an `EXISTS` body or a
+    /// pattern predicate.
     #[cfg(feature = "gql")]
     fn gql_subquery_place(&self) -> GqlSubqueryPlace {
         if !self.gql_in_subquery() {
             return GqlSubqueryPlace::Outside;
         }
-        let collecting = self
-            .step_trace()
-            .last()
-            .and_then(|frame| frame.steps.last())
-            .is_some_and(|step| step.starts_with("gql:value("));
-        if collecting {
-            GqlSubqueryPlace::Comprehension
-        } else {
-            GqlSubqueryPlace::Exists
+        let trace = self.step_trace();
+        let level = trace.last().map_or(&[][..], |frame| frame.steps.as_slice());
+        match level.last() {
+            Some(step) if step.starts_with("gql:value(") => {
+                let returns = level.iter().any(|step| {
+                    step.starts_with("gql:project(")
+                        || step.starts_with("gql:aggregate(")
+                        || step.starts_with("union(")
+                });
+                if returns {
+                    GqlSubqueryPlace::Collect
+                } else {
+                    GqlSubqueryPlace::Comprehension
+                }
+            }
+            // The optimizer may fuse the closing `count()` into the step before it
+            // (`count_pushdown`: `v(labels: [..]).count()`).
+            Some(step) if step == "count()" || step.ends_with(".count()") => {
+                GqlSubqueryPlace::Count
+            }
+            _ => GqlSubqueryPlace::Exists,
         }
     }
 

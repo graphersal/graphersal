@@ -543,8 +543,9 @@ fn deeply_nested_gql_stays_within_the_wasm_stack() {
 
 /// Stage 2d: the deepest accepted nesting of `CALL { }` and whole-query subquery bodies
 /// (`bind::MAX_BODY_DEPTH`, 16), each with the tallest expression inside, stays within the 1 MB
-/// wasm32 stack; one level more is refused (54001). Until the lowering of these forms lands, the
-/// accepted ones answer "not yet supported" (0A000) after binding.
+/// wasm32 stack; one level more is refused (54001). Before their lowering landed (2d.T5 for
+/// `CALL`, 2d.T5c for whole-query bodies) the accepted ones answered "not yet supported"
+/// (0A000) after binding; both forms now run.
 #[wasm_bindgen_test]
 fn deeply_nested_gql_bodies_stay_within_the_wasm_stack() {
     let mut p = modern();
@@ -605,6 +606,32 @@ fn deeply_nested_calls_run_within_the_wasm_stack() {
         imports = format!("MATCH (p:person) CALL (p) {{ {imports} }} RETURN y");
     }
     for query in [unions, imports] {
+        let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
+        assert!(r["ok"] == true, "{}: {r}", &query[..60]);
+    }
+}
+
+/// Stage 2d.T5c: the deepest accepted whole-query subquery nesting (`bind::MAX_BODY_DEPTH`, 16
+/// levels of `EXISTS` bodies, or of `COLLECT` bodies around a `COUNT`), the tallest expression
+/// innermost, lowers and runs within the 1 MB wasm32 stack.
+#[wasm_bindgen_test]
+fn deeply_nested_whole_query_bodies_run_within_the_wasm_stack() {
+    let mut p = modern();
+    let ors = (0..440)
+        .map(|i| format!("x = {i}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut exists = format!("EXISTS {{ LET x = 1 FILTER {ors} RETURN x }}");
+    let mut collects = format!("COUNT {{ LET x = 1 FILTER {ors} RETURN x }}");
+    for _ in 1..16 {
+        exists = format!("EXISTS {{ MATCH (n) WITH n WHERE {exists} RETURN n }}");
+        collects =
+            format!("size(COLLECT {{ MATCH (n) WITH n WHERE {collects} > 0 RETURN n.name }})");
+    }
+    for query in [
+        format!("MATCH (n) WHERE {exists} RETURN n"),
+        format!("MATCH (n) RETURN {collects} AS c"),
+    ] {
         let r = json(&p.execute(&format!("g.gql(\"{query}\")"), "{}").unwrap());
         assert!(r["ok"] == true, "{}: {r}", &query[..60]);
     }

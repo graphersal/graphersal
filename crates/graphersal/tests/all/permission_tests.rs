@@ -2592,4 +2592,70 @@ mod gql {
             )
         );
     }
+
+    /// Stage 2d.T5c: a read only a `COUNT { }` or `COLLECT { }` body (or a whole-query
+    /// `EXISTS` body) makes is asked like the Gremlin `local(__..count())` / `fold()` twin:
+    /// the authorization walk visits the children of the hosting `gql:*` step (MATCH-only and
+    /// whole-query bodies, under every host, nested, uncorrelated).
+    #[test]
+    fn a_denied_read_inside_count_or_collect_refuses_gql_like_local() {
+        let graph = modern();
+        for script in [
+            r#"g.V().hasLabel("person").local(__.out("created").count()).toList()"#,
+            r#"g.V().hasLabel("person").local(__.out("created").values("name").fold()).toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COUNT { (p)-[:created]->() } AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 0 RETURN p.name").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY COUNT { (p)-[:created]->() }").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN sum(COUNT { (p)-[:created]->() }) AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) FOR x IN [COUNT { (p)-[:created]->() }] RETURN x").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COUNT { MATCH (p)-[:created]->(s) RETURN s.name AS x UNION RETURN 1 AS x } AS c").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) WITH s ORDER BY s.name RETURN s.name } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) RETURN COLLECT { RETURN COUNT { (p)-[:created]->() } AS c } AS l").toList()"#,
+            r#"g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN count(s) AS c } RETURN p.name").toList()"#,
+            r#"g.gql("RETURN COUNT { MATCH (p:person)-[:created]->(s) } AS c").toList()"#,
+            r#"g.gql("RETURN COLLECT { MATCH (p:person)-[:created]->(s) RETURN s } AS l").toList()"#,
+            r#"g.gql("MATCH (p:nobody) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s } AS l").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoEdges), "out", "Read Data(edge)");
+        }
+        // A vertex read only a body's child-leading scan makes (uncorrelated, or correlated by
+        // a condition no index serves).
+        for script in [
+            r#"g.gql("FOR x IN [1] RETURN COUNT { MATCH (p:person) } AS c").toList()"#,
+            r#"g.gql("FOR x IN [1] RETURN COLLECT { MATCH (p:person) RETURN p.name } AS l").toList()"#,
+            r#"g.gql("FOR x IN [29] RETURN COUNT { MATCH (p:person) WHERE p.age = x } AS c").toList()"#,
+        ] {
+            assert_denied(run(&graph, script, NoPersons), "v", "Read Data(vertex)");
+        }
+        // Without the body the query is allowed.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COLLECT { RETURN p.name AS n } AS l").toList()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COUNT { (p)-[:created]->() } AS c").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").local(__.out("created").count()).toList()"#
+            )
+        );
+        assert_eq!(
+            requests(
+                &graph,
+                r#"g.gql("MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } AS l").toList()"#
+            ),
+            requests(
+                &graph,
+                r#"g.V().hasLabel("person").local(__.out("created").values("name").fold()).toList()"#
+            )
+        );
+    }
 }

@@ -8205,41 +8205,46 @@ mod gql {
         }
     }
 
+    /// Stage 2d.T5c: `COUNT { }` and `COLLECT { }` run (they were refused "not yet" with the
+    /// `OPTIONAL MATCH` + `count()` / `collect_list()` forms as advice); each gives the rows of
+    /// that form.
     #[test]
-    fn gql_subqueries_name_the_optional_match_aggregate_form() {
-        let help = gql_help("MATCH (n) WHERE COUNT { (n)-->() } > 1 RETURN n");
-        assert!(
-            help.starts_with(
-                "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
-                 MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)."
-            ),
-            "{help}"
-        );
-        let help = gql_help("MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m }");
-        assert!(
-            help.starts_with(
-                "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), as \
-                 in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
-                 collect_list(s.name)."
-            ),
-            "{help}"
-        );
-        // The forms both advices name run.
+    fn gql_count_and_collect_subqueries_run_like_their_optional_match_forms() {
         let graph = GraphSource::tinkerpop_modern();
         let locked = graph.read();
-        for (query, rows) in [
+        for (subquery, form) in [
             (
-                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, count(s)",
-                4,
+                "MATCH (p:person) RETURN p.name AS n, COUNT { (p)-[:created]->() } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
+                 count(s) AS c",
             ),
             (
-                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
-                 collect_list(s.name)",
-                4,
+                "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-[:created]->(s) \
+                 RETURN s.name } AS c",
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS n, \
+                 collect_list(s.name) AS c",
             ),
-            ("MATCH (a)-[:knows]->{1,3}(b) RETURN b", 2),
         ] {
-            assert_eq!(locked.traversal().gql(query).to_list().unwrap().len(), rows);
+            let mut left: Vec<String> = locked
+                .traversal()
+                .gql(subquery)
+                .to_list()
+                .unwrap()
+                .iter()
+                .map(|row| format!("{row:?}"))
+                .collect();
+            let mut right: Vec<String> = locked
+                .traversal()
+                .gql(form)
+                .to_list()
+                .unwrap()
+                .iter()
+                .map(|row| format!("{row:?}"))
+                .collect();
+            left.sort();
+            right.sort();
+            assert_eq!(left.len(), 4, "{subquery}");
+            assert_eq!(left, right, "{subquery}");
         }
     }
 
@@ -8954,26 +8959,25 @@ mod gql {
         }
     }
 
-    /// `COUNT { }` stays "not yet" (P0); its help keeps the OPTIONAL MATCH form and names EXISTS
-    /// for the test of whether there is a match at all.
+    /// Stage 2d.T5c: `COUNT { } > 0` runs (it was refused "not yet" with EXISTS as advice) and
+    /// keeps the rows of `EXISTS`.
     #[test]
-    fn gql_count_subquery_names_exists() {
-        let help = gql_help("MATCH (n) WHERE COUNT { (n)-->() } > 0 RETURN n");
-        assert!(
-            help.contains(
-                "To test only whether the pattern matches (COUNT { .. } > 0), use EXISTS, as in \
-                 MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name."
-            ),
-            "{help}"
-        );
+    fn gql_count_subquery_above_zero_keeps_the_exists_rows() {
         let graph = GraphSource::tinkerpop_modern();
-        let rows = graph
-            .read()
-            .traversal()
-            .gql("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name")
-            .to_list()
-            .unwrap();
-        assert_eq!(rows.len(), 3);
+        let run = |query: &str| {
+            graph
+                .read()
+                .traversal()
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"))
+        };
+        let exists = run("MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN p.name");
+        assert_eq!(exists.len(), 3);
+        assert_eq!(
+            run("MATCH (p:person) WHERE COUNT { (p)-[:created]->() } > 0 RETURN p.name"),
+            exists
+        );
     }
 
     /// A loop limit or a traverser limit reached by a quantified edge inside a subquery names
@@ -9202,6 +9206,83 @@ mod gql {
 
     /// A variable bound inside a pattern comprehension and read after it names the
     /// comprehension (not EXISTS), with the comprehension advice; EXISTS keeps its text.
+    /// Stage 2d.T5c: a loop or traverser limit reached inside a `COUNT { }` or `COLLECT { }`
+    /// subquery names the construct (each runs its body to the end for every row, also when
+    /// the optimizer fuses the closing `count()`); the examples run.
+    #[test]
+    fn gql_limits_inside_count_and_collect_name_them() {
+        for (query, place, why) in [
+            (
+                "MATCH (p:person) RETURN p.name, COUNT { MATCH (p)-[]-{1,}(q) WHERE q.name = \
+                 'zzz' } AS c",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+            (
+                "MATCH (p:person) WHERE COUNT { (p)-[]-{1,}(q) } > 2 RETURN p.name",
+                "inside a COUNT { } subquery of the gql() query",
+                "A COUNT { } subquery counts every match of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) RETURN q.name } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,}(q) WITH q WHERE q.age > 1 \
+                 RETURN q.name ORDER BY q.name } AS l",
+                "inside a COLLECT { } subquery of the gql() query",
+                "A COLLECT { } subquery collects every row of its body for each row",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.with("repeat.max_loops", 2).gql(query).to_list());
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "The loop of the quantified edge -[]-{{1,}} {place} ran 2 iterations"
+                )),
+                "{query}: {help}"
+            );
+            assert!(help.contains(why), "{query}: {help}");
+            assert!(!help.contains("EXISTS"), "{query}: {help}");
+            assert!(!help.contains("pattern comprehension"), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // A traverser limit in an uncorrelated body (a child-leading scan).
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_traversers", 5)
+                .gql("MATCH (p:person) RETURN COUNT { MATCH (s)-[]-{1,}(q) } AS c")
+                .to_list()
+        });
+        let help = err.help().unwrap();
+        assert!(help.contains("inside a COUNT { } subquery"), "{help}");
+        assert_examples_run(&help);
+    }
+
+    /// Stage 2d.T5c: a `COLLECT { }` list over `traversal.max_materialized_bytes` is refused
+    /// before it is built; the advice names `COLLECT { }` and shows the `COUNT { }` form of
+    /// counting the matches instead.
+    #[test]
+    fn gql_collect_subquery_list_limit_names_it() {
+        let (err, _) = gql_failure(|g| {
+            g.with("traversal.max_materialized_bytes", 300)
+                .gql(
+                    "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,3}(f) RETURN f.name } \
+                     AS l",
+                )
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        for part in [
+            "The list of a COLLECT { .. RETURN x } subquery is checked the same way.",
+            "or its openCypher form g.gql(\"MATCH (p:person) RETURN p.name, COUNT { (p)-->() } \
+             AS n\")",
+        ] {
+            assert!(help.contains(part), "{help}");
+        }
+        assert_examples_run(&help);
+    }
+
     #[test]
     fn gql_pattern_comprehension_scope_errors_name_it() {
         for query in [

@@ -235,11 +235,9 @@
 //! quantified edge that reads another variable and a comprehension variable read inside a
 //! subquery (a pattern comprehension's body and `|` part included).
 //!
-//! Stage 2d binds and plans composite queries, `CALL` and whole-query subquery bodies ahead of
-//! their lowering; `UNION` and `NEXT` lower (2d.T4), `[OPTIONAL] CALL { }` (2d.T5), and
-//! [`refuse_not_yet`] (which the lowering calls between planning and lowering) refuses the rest
-//! with `NotYet`: the first in text order of a `COUNT { }`, `COLLECT { }` and a whole-query
-//! `EXISTS` body.
+//! Stage 2d binds composite queries, `CALL` and whole-query subquery bodies; every one of them
+//! lowers (`UNION` and `NEXT` since 2d.T4, `[OPTIONAL] CALL { }` since 2d.T5, `COUNT { }`,
+//! `COLLECT { }` and whole-query bodies since 2d.T5c).
 //!
 //! # Limits (kind `Limit`, `54001`)
 //!
@@ -964,58 +962,6 @@ fn too_many_subqueries(span: Span) -> Box<GqlErrorBuilder> {
         )
         .topic(GqlHelpTopic::Subquery),
     )
-}
-
-/// Refuses (kind `NotYet`, `0A000`) what stage 2d binds and plans but does not lower yet (the
-/// lowering follows in task 2d.T5c; `UNION` and `NEXT` lower since 2d.T4, `[OPTIONAL] CALL { }`
-/// since 2d.T5): the first in text order of a `COUNT { }`, a `COLLECT { }` and a whole-query
-/// `EXISTS { }` body. Called on a bound query
-/// after it is planned (so every bound query goes through the planner) and before it is
-/// lowered.
-pub(crate) fn refuse_not_yet(query: &Query, bound: &BoundQuery) -> Result<(), TraverserError> {
-    not_yet_in(bound).map_err(|e| e.into_error(&query.source))
-}
-
-fn not_yet_in(bound: &BoundQuery) -> BResult<()> {
-    let subqueries = bound
-        .subqueries
-        .iter()
-        .filter_map(|s| subquery_not_yet(s).map(|error| (s.span, error)));
-    match subqueries.min_by_key(|(span, _)| span.start) {
-        Some((_, error)) => Err(error),
-        None => Ok(()),
-    }
-}
-
-/// The "not yet" error of the stage 2d subquery forms that bind before they run: `COUNT { }`,
-/// `COLLECT { }` and a whole-query body (`EXISTS { MATCH .. RETURN .. }`); `None` for the
-/// others.
-fn subquery_not_yet(subquery: &BoundSubquery) -> Option<Box<GqlErrorBuilder>> {
-    const WHOLE_QUERY: &str = "write the body as MATCH clauses with a WHERE, as in \
-         MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WHERE s.lang = 'java' } \
-         RETURN p.name";
-    let (what, alternative) = match subquery.kind {
-        SubqueryKind::Count => (
-            "a COUNT { } subquery",
-            "count the matches of the pattern with OPTIONAL MATCH and count(), as in \
-             MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name, \
-             count(s). To test only whether the pattern matches (COUNT { .. } > 0), use \
-             EXISTS, as in MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } RETURN \
-             p.name",
-        ),
-        SubqueryKind::Collect if subquery.form != SubqueryForm::Comprehension => (
-            "a COLLECT { } subquery",
-            "collect the matches of the pattern with OPTIONAL MATCH and collect_list(), \
-             as in MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) \
-             RETURN p.name, collect_list(s.name)",
-        ),
-        SubqueryKind::Exists | SubqueryKind::Collect if subquery.query.is_some() => (
-            "an EXISTS { } body that is a whole query (clauses other than MATCH)",
-            WHOLE_QUERY,
-        ),
-        SubqueryKind::Exists | SubqueryKind::Collect => return None,
-    };
-    Some(not_yet(subquery.span, what, alternative))
 }
 
 fn not_yet(span: Span, what: &str, alternative: &str) -> Box<GqlErrorBuilder> {

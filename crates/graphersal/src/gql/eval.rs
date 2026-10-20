@@ -190,7 +190,8 @@ impl EvalError {
     pub(crate) fn subquery_pending(span: Span) -> Self {
         Self::new(
             status::NOT_SUPPORTED,
-            "a subquery (EXISTS or a pattern comprehension) cannot be evaluated here",
+            "a subquery (EXISTS, COUNT { }, COLLECT { } or a pattern comprehension) cannot be \
+             evaluated here",
             span,
         )
     }
@@ -418,7 +419,9 @@ pub(crate) trait Env {
         bytes <= crate::traversal::context::DEFAULT_MAX_MATERIALIZED_BYTES
     }
     /// The value of subquery `index` ([`Scope::subquery`]) for this row (`EXISTS`: TRUE or
-    /// FALSE, never `NULL`; a pattern comprehension: the list, never `NULL`), or `None` when the row has not run it yet: the evaluation then
+    /// FALSE, never `NULL`; `COUNT { }`: the integer count, never `NULL`; a pattern
+    /// comprehension or `COLLECT { }`: the list, never `NULL`), or `None` when the row has not
+    /// run it yet: the evaluation then
     /// stops with [`EvalError::subquery_pending`], and the step hosting the subquery
     /// (`runtime::SubqueryHost`) runs it and evaluates the row again. The default runs nothing.
     fn subquery(&self, index: usize) -> Option<Value<Self::Element>> {

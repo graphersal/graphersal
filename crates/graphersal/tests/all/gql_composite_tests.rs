@@ -11,6 +11,11 @@
 //! body lowered onto the child from the incoming row; twins against Gremlin `flat_map(..)` and
 //! `local(..)`, per-row aggregation and top-k, imports from labels / the current element / row
 //! columns, `OPTIONAL CALL` `NULL`s, bulk and the stack.
+//!
+//! Stage 2d.T5c (user decision D23): whole-query subquery bodies (`EXISTS { .. RETURN .. }`,
+//! `COUNT { }`, `COLLECT { .. RETURN x }`) lowered like a `CALL` body onto the subquery's child;
+//! twins against Gremlin `local(__..count())` / `local(__..fold())` and the pattern
+//! comprehension, per-row semantics, bulk, plans, list limits and the stack.
 #![cfg(feature = "gql")]
 
 use std::sync::Arc;
@@ -1157,4 +1162,529 @@ fn the_deepest_calls_run_within_the_stack() {
         query = format!("MATCH (p:person) CALL (p) {{ {query} }} RETURN y");
     }
     assert_eq!(rows(&graph, &query).len(), 4);
+}
+
+/// Stack headroom (2d P0 rule), stage 2d.T5c: the deepest accepted whole-query subquery
+/// nesting (`bind::MAX_BODY_DEPTH`, 16 levels of `EXISTS` / `COUNT` / `COLLECT` bodies), the
+/// tallest expression innermost, parses, binds, plans, lowers and runs on the default test
+/// thread (2 MiB; measured minimum in `ai/gql/reports-2d/T5c.md`).
+#[test]
+fn the_deepest_whole_query_bodies_run_within_the_stack() {
+    let graph = modern();
+    let ors = |n: usize| {
+        (0..n)
+            .map(|i| format!("x = {i}"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let mut bodies = format!("EXISTS {{ LET x = 1 FILTER {} RETURN x }}", ors(440));
+    for _ in 1..16 {
+        bodies = format!("EXISTS {{ MATCH (n) WITH n WHERE {bodies} RETURN n }}");
+    }
+    let query = format!("MATCH (n) WHERE {bodies} RETURN n.name AS n");
+    assert_eq!(rows(&graph, &query).len(), 6);
+    let mut bodies = format!("COUNT {{ LET x = 1 FILTER {} RETURN x }}", ors(440));
+    for _ in 1..16 {
+        bodies = format!("size(COLLECT {{ MATCH (n) WITH n WHERE {bodies} > 0 RETURN n.name }})");
+    }
+    let query = format!("MATCH (n) RETURN {bodies} AS c");
+    // Every level imports the outer `n`: one row each.
+    assert_eq!(column(&rows(&graph, &query), "c"), ints(&[1; 6]));
+}
+
+// ----- stage 2d.T5c: COUNT { }, COLLECT { } and whole-query subquery bodies -----
+
+/// The columns of every row as `name=value` texts in written key order (lists as their
+/// `norm`ed items), rows sorted (a multiset) unless `ordered`.
+fn table(graph: &Arc<Graph>, query: &str, ordered: bool) -> Vec<String> {
+    fn text(value: &ElementProperty) -> String {
+        match value {
+            ElementProperty::Array(items) => format!(
+                "[{}]",
+                items.iter().map(text).collect::<Vec<_>>().join(", ")
+            ),
+            other => norm(other),
+        }
+    }
+    let mut out: Vec<String> = rows(graph, query)
+        .iter()
+        .map(|row| match row {
+            ElementProperty::Object(map) => map
+                .iter()
+                .map(|(k, v)| format!("{k}={}", text(v)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            other => panic!("{query}: not a row map: {other:?}"),
+        })
+        .collect();
+    if !ordered {
+        out.sort();
+    }
+    out
+}
+
+/// Twins of the whole-query bodies (user decision D23) against Gremlin `local(..)`: `COUNT`
+/// of a body's rows is `local(__..count())`, `COLLECT { .. RETURN x }` is
+/// `local(__..fold())` (an `ORDER BY` in the body against `order()`, so the lists compare).
+#[cfg(feature = "script")]
+mod body_twins {
+    use super::{modern, twins_values};
+
+    fn twin(gql: &str, gremlin: &str) {
+        let graph = modern();
+        let left = twins_values(&graph, &format!("g.gql({gql:?}).select(\"x\")"));
+        assert!(!left.is_empty(), "{gql}: no rows to compare");
+        assert_eq!(
+            left,
+            twins_values(&graph, gremlin),
+            "\nGQL:  {gql}\ntwin: {gremlin}"
+        );
+    }
+
+    #[test]
+    fn count_of_a_whole_query_body_is_local_count() {
+        for (gql, gremlin) in [
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-->(f) WITH f WHERE f.age > 26 \
+                 RETURN f } AS x",
+                r#"g.V().hasLabel("person").local(__.out().has("age", P.gt(26)).count())"#,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-->()-->(g) RETURN DISTINCT g } AS x",
+                r#"g.V().hasLabel("person").local(__.out().out().dedup().count())"#,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-[:knows]->(f) RETURN f AS y UNION \
+                 MATCH (p)-[:created]->(f) RETURN f AS y } AS x",
+                r#"g.V().hasLabel("person").local(__.union(__.out("knows"), __.out("created")).dedup().count())"#,
+            ),
+            (
+                "MATCH (p:person) RETURN COUNT { MATCH (p)-->(f) RETURN f ORDER BY f.name \
+                 LIMIT 2 } AS x",
+                r#"g.V().hasLabel("person").local(__.out().limit(2).count())"#,
+            ),
+        ] {
+            twin(gql, gremlin);
+        }
+    }
+
+    #[test]
+    fn collect_is_local_fold() {
+        for (gql, gremlin) in [
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-->(f) RETURN f.name ORDER BY \
+                 f.name } AS x",
+                r#"g.V().hasLabel("person").local(__.out().values("name").order().fold())"#,
+            ),
+            (
+                "MATCH (s:software) RETURN COLLECT { MATCH (s)<-[:created]-(c) RETURN c.age \
+                 ORDER BY c.age DESC } AS x",
+                r#"g.V().hasLabel("software").local(__.in("created").values("age").order().by(Order.desc).fold())"#,
+            ),
+            (
+                "MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s } AS x",
+                r#"g.V().hasLabel("person").local(__.out("created").fold())"#,
+            ),
+        ] {
+            twin(gql, gremlin);
+        }
+    }
+}
+
+/// `COLLECT { .. RETURN x }` gives the list of a pattern comprehension `[pattern | x]` (same
+/// plan order) and the multiset of `OPTIONAL MATCH .. collect_list()`; `NULL` values stay in
+/// the list; a `NULL` import gives `[]`.
+#[test]
+fn collect_is_the_pattern_comprehension_and_keeps_nulls() {
+    let graph = modern();
+    for (subquery, comprehension) in [
+        (
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-[:knows]->(f) RETURN \
+             f.name } AS l",
+            "MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f.name] AS l",
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(f) WHERE f.age > 0 \
+             RETURN f.age * 2 } AS l",
+            "MATCH (p:person) RETURN p.name AS n, [(p)-->(f) WHERE f.age > 0 | f.age * 2] AS l",
+        ),
+        (
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(f) RETURN f.lang } AS l",
+            "MATCH (p:person) RETURN p.name AS n, [(p)-->(f) | f.lang] AS l",
+        ),
+    ] {
+        assert_eq!(
+            table(&graph, subquery, false),
+            table(&graph, comprehension, false),
+            "{subquery}"
+        );
+    }
+    // marko's out-neighbours: two persons (no lang) and lop.
+    let marko = table(
+        &graph,
+        "MATCH (p:person {name: 'marko'}) RETURN COLLECT { MATCH (p)-->(f) RETURN f.lang } AS l",
+        false,
+    );
+    assert_eq!(marko.len(), 1);
+    assert_eq!(marko[0].matches("null").count(), 2, "{marko:?}");
+    assert!(marko[0].contains("'java'"), "{marko:?}");
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WHERE s.lang = 'none' \
+             RETURN p.name AS n, COLLECT { MATCH (s)<--(c) RETURN c.name } AS l",
+            false
+        ),
+        strings(&[
+            "n='josh' l=[]",
+            "n='marko' l=[]",
+            "n='peter' l=[]",
+            "n='vadas' l=[]"
+        ])
+    );
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+    out.sort();
+    out
+}
+
+/// Whole-query bodies per row: `WITH` / `WHERE`, aggregation (one row even for no match, so
+/// `EXISTS` of it is TRUE and `COUNT` of it is 1, as in Neo4j), `ORDER BY` / `LIMIT`,
+/// `DISTINCT`, `UNION`, `NEXT`, `CALL` and nested subqueries inside, uncorrelated bodies, a
+/// query starting with one.
+#[test]
+fn whole_query_bodies_run_per_row() {
+    let graph = modern();
+    // EXISTS with clauses other than MATCH (the fast path and the hook).
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH s WHERE s.lang = \
+             'java' RETURN s } RETURN p.name AS n",
+            "n"
+        ),
+        texts(&["josh", "marko", "peter"])
+    );
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-->(f) WITH f ORDER BY f.name LIMIT 1 \
+             RETURN f } RETURN p.name AS n",
+            "n"
+        ),
+        texts(&["vadas"])
+    );
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WHERE p.age > 100 OR EXISTS { MATCH (p)-[:created]->(s) RETURN s \
+             UNION MATCH (p)<-[:knows]-(k) RETURN k AS s } RETURN p.name AS n",
+            "n"
+        ),
+        texts(&["josh", "marko", "peter", "vadas"])
+    );
+    // An aggregating body gives a row for every outer row.
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN count(s) AS c } \
+             RETURN p.name AS n",
+            "n"
+        ),
+        texts(&["josh", "marko", "peter", "vadas"])
+    );
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH count(s) AS c \
+             WHERE c > 1 RETURN c } RETURN p.name AS n",
+            "n"
+        ),
+        texts(&["josh"])
+    );
+    // COUNT of the body's rows.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (p)-[:created]->(s) RETURN \
+             count(*) AS k } AS a, COUNT { MATCH (p)-->(f) RETURN f.name AS x, f.age AS y } AS b",
+            false
+        ),
+        strings(&[
+            "n='josh' a=i:1 b=i:2",
+            "n='marko' a=i:1 b=i:3",
+            "n='peter' a=i:1 b=i:1",
+            "n='vadas' a=i:1 b=i:0"
+        ])
+    );
+    // marko: lop's language, and the names of vadas and josh (UNION removes nothing here).
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COUNT { MATCH (p)-[:created]->(s) RETURN \
+             s.lang AS l UNION MATCH (p)-[:knows]->(s) RETURN s.name AS l } AS c",
+            false
+        ),
+        strings(&[
+            "n='josh' c=i:1",
+            "n='marko' c=i:3",
+            "n='peter' c=i:1",
+            "n='vadas' c=i:0"
+        ])
+    );
+    // COLLECT: ORDER BY / LIMIT, DISTINCT, NEXT, CALL, a nested COUNT, an aggregate.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(f) RETURN f.name ORDER \
+             BY f.name DESC LIMIT 2 } AS l",
+            false
+        ),
+        strings(&[
+            "n='josh' l=['ripple', 'lop']",
+            "n='marko' l=['vadas', 'lop']",
+            "n='peter' l=['lop']",
+            "n='vadas' l=[]"
+        ])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (s:software) RETURN s.name AS n, COLLECT { MATCH (s)<-[:created]-(c) RETURN \
+             DISTINCT c.name IS NOT NULL } AS l",
+            false
+        ),
+        strings(&["n='lop' l=[true]", "n='ripple' l=[true]"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(f) RETURN f NEXT MATCH \
+             (f)-->(g) RETURN g.name AS x ORDER BY x } AS l",
+            false
+        ),
+        strings(&[
+            "n='josh' l=[]",
+            "n='marko' l=['lop', 'ripple']",
+            "n='peter' l=[]",
+            "n='vadas' l=[]"
+        ])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person {name: 'marko'}) RETURN COLLECT { MATCH (p)-->(f) CALL (f) { \
+             MATCH (f)-->(g) RETURN g } RETURN g.name ORDER BY g.name } AS l",
+            false
+        ),
+        ["l=['lop', 'ripple']"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person {name: 'marko'}) RETURN COLLECT { MATCH (p)-->(f) RETURN COUNT { \
+             (f)-->() } AS k ORDER BY k } AS l",
+            false
+        ),
+        ["l=[i:0, i:0, i:2]"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n, COLLECT { MATCH (p)-->(f) RETURN count(f) } AS l",
+            false
+        ),
+        strings(&[
+            "n='josh' l=[i:2]",
+            "n='marko' l=[i:3]",
+            "n='peter' l=[i:1]",
+            "n='vadas' l=[i:0]"
+        ])
+    );
+    // Uncorrelated bodies, a query starting with one.
+    assert_eq!(
+        table(
+            &graph,
+            "RETURN COUNT { MATCH (a)-->(b) } AS c, COLLECT { MATCH (s:software) RETURN s.name \
+             ORDER BY s.name } AS l",
+            false
+        ),
+        ["c=i:6 l=['lop', 'ripple']"]
+    );
+    // In ORDER BY, an aggregate's argument, a FOR list, a LET.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN p.name AS n ORDER BY size(COLLECT { MATCH (p)--(f) RETURN \
+             f }) DESC, n",
+            true
+        ),
+        ["n='josh'", "n='marko'", "n='peter'", "n='vadas'"]
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) RETURN sum(size(COLLECT { MATCH (p)-->(f) RETURN f })) AS t",
+            false
+        ),
+        ["t=i:6"]
+    );
+    assert_eq!(
+        multiset(
+            &graph,
+            "MATCH (p:person {name: 'josh'}) FOR x IN COLLECT { MATCH (p)-->(f) RETURN f.name } \
+             RETURN x",
+            "x"
+        ),
+        texts(&["lop", "ripple"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (p:person) LET l = COLLECT { MATCH (p)-[:created]->(s) RETURN s.name } \
+             FILTER size(l) > 1 RETURN p.name AS n, l",
+            false
+        ),
+        ["n='josh' l=['ripple', 'lop']"]
+    );
+}
+
+/// `COLLECT { }` needs exactly one returned column (42002, named in the error).
+#[test]
+fn collect_needs_one_column() {
+    let graph = modern();
+    let err = error(
+        &graph,
+        "MATCH (p:person) RETURN COLLECT { MATCH (p)-->(f) RETURN f.name, f.age } AS l",
+    );
+    assert!(err.contains("42002"), "{err}");
+    assert!(err.contains("exactly one column"), "{err}");
+}
+
+/// Bulk: merged incoming rows give the same `COUNT` / `COLLECT` / whole-query `EXISTS` results
+/// as unmerged ones (each row runs its body on one unit of itself).
+#[test]
+fn whole_query_bodies_keep_bulk_semantics() {
+    let graph = modern();
+    for query in [
+        "MATCH ()<-[:knows]-()-[:created]->(s) RETURN s.name AS n, COUNT { MATCH (s)<-[:created]-(c) \
+         RETURN c } AS x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) RETURN s.name AS n, COLLECT { MATCH (s)<-[:created]-(c) \
+         RETURN c.name ORDER BY c.name } AS x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) RETURN s.name AS n, COLLECT { MATCH (s)<-[:created]-(c) \
+         RETURN count(c) AS k } AS x",
+        "MATCH ()<-[:knows]-()-[:created]->(s) WHERE EXISTS { MATCH (s)<-[:created]-(c) WITH c \
+         WHERE c.age > 33 RETURN c } RETURN s.name AS n, 1 AS x",
+        "MATCH (a)-->(b) RETURN b.name AS n, COUNT { MATCH (b)<--(c) RETURN c UNION ALL \
+         MATCH (b)-->(c) RETURN c } AS x",
+    ] {
+        let run = |merge: bool| {
+            let result = graph
+                .read()
+                .traversal()
+                .with("bulk.merge", merge)
+                .gql(query)
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let mut out: Vec<String> = result.iter().map(|row| format!("{row:?}")).collect();
+            out.sort();
+            out
+        };
+        let merged = run(true);
+        assert!(!merged.is_empty(), "{query}");
+        assert_eq!(merged, run(false), "{query}");
+    }
+}
+
+/// The plan: a whole-query body is lowered from the host's site like a `CALL` body (no unit
+/// row, its `RETURN` a `gql:project` in the child); the top-level `[NOT] EXISTS` conjunct
+/// keeps the fast path (`filter()` / `not()`); `COLLECT` closes its child with `gql:value` of
+/// the returned column, `COUNT` with `count()`.
+#[test]
+fn whole_query_bodies_are_children_of_their_host() {
+    let graph = modern();
+    let text = profile(
+        &graph,
+        "MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH s WHERE s.lang = \
+         'java' RETURN s } RETURN p.name AS n",
+    );
+    assert_eq!(
+        steps(&text),
+        [
+            r#"v(labels: ["person"])"#,
+            r#"filter(__.out("created").has("lang", P.eq("java")).gql:project("s"))"#,
+            r#"\> out("created")"#,
+            r#"\> has("lang", P.eq("java"))"#,
+            r#"\> gql:project("s")"#,
+            r#"gql:project("n")"#,
+        ],
+        "{text}"
+    );
+    let text = profile(
+        &graph,
+        "MATCH (p:person) WHERE NOT EXISTS { MATCH (p)-->(f) RETURN f LIMIT 1 } RETURN p.name AS n",
+    );
+    assert!(
+        steps(&text).iter().any(|s| s.starts_with("not(__.out()")),
+        "{text}"
+    );
+    let text = profile(
+        &graph,
+        "MATCH (p:person) RETURN COLLECT { MATCH (p)-[:created]->(s) RETURN s.name ORDER BY \
+         s.name } AS l",
+    );
+    assert_eq!(
+        steps(&text),
+        [
+            r#"v(labels: ["person"])"#,
+            r#"gql:project("l")"#,
+            r#"\> out("created")"#,
+            r#"\> gql:project("s.name")"#,
+            r#"\> gql:order("s.name")"#,
+            r#"\> gql:value("s.name")"#,
+        ],
+        "{text}"
+    );
+    let text = profile(
+        &graph,
+        "MATCH (p:person) RETURN COUNT { MATCH (p)-[:created]->(s) RETURN DISTINCT s.lang } AS c",
+    );
+    let all = steps(&text);
+    assert_eq!(
+        all.last().map(String::as_str),
+        Some(r#"\> count()"#),
+        "{text}"
+    );
+    assert!(all.contains(&r#"\> gql:distinct()"#.to_string()), "{text}");
+}
+
+/// The list a `COLLECT { }` builds is checked against `traversal.max_materialized_bytes`
+/// before it is built, like a pattern comprehension's (an error, never a cut list, D14).
+#[test]
+fn collected_lists_obey_the_limits() {
+    let graph = modern();
+    let query = "MATCH (p:person) RETURN COLLECT { MATCH (p)-[]-{1,3}(f) RETURN f.name } AS l";
+    let err = graph
+        .read()
+        .traversal()
+        .with("traversal.max_materialized_bytes", 300)
+        .gql(query)
+        .to_list()
+        .expect_err(query);
+    let cause = err.root_cause().to_string();
+    assert!(
+        cause.contains("traversal.max_materialized_bytes"),
+        "{cause}"
+    );
+    assert!(
+        graph
+            .read()
+            .traversal()
+            .with("traversal.max_materialized_bytes", 100_000)
+            .gql(query)
+            .to_list()
+            .is_ok()
+    );
 }
