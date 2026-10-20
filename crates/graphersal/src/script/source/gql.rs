@@ -49,7 +49,7 @@ impl ScriptGraphTraversalSource {
             .map(|source| source.stamped(&ctx))
     }
 
-    fn gql_step(
+    pub(crate) fn gql_step(
         &mut self,
         query: String,
         params: Vec<(CompactString, ElementProperty)>,

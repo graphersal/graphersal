@@ -8,7 +8,8 @@ g.query("older_than", #{age: 30}).values("name").toList()
 // ["josh", "peter"]
 ```
 
-- The body is the text of ONE Rhai function; its parameters are named and typed.
+- The body is the text of ONE Rhai function, or ONE [GQL query](#saved-queries-in-gql); its
+  parameters are named and typed.
 - A call returns what the function returns: a **traversal** can be continued by the caller (like a
   SQL view), a **value** (a number, a list, a map) is a value (like a stored procedure).
 - A query **reads**, unless its body writes data: then it is saved as a query that **writes**,
@@ -47,7 +48,8 @@ name. The keys:
 | Key | Required | Meaning |
 |---|---|---|
 | `name` | yes | the query's name, also its Rhai function name: `[A-Za-z_][A-Za-z0-9_]*`, 1 to 128 bytes, not a Rhai keyword; case-sensitive, unique per database |
-| `body` | yes | the text of ONE Rhai function named like the query |
+| `body` | yes | the text of ONE Rhai function named like the query (with `language: "gql"`: one GQL query) |
+| `language` | no | `"rhai"` (the default) or `"gql"` (see [Saved queries in GQL](#saved-queries-in-gql)) |
 | `params` | when the function has parameters | parameter name -> its declaration (see [Parameters](#parameters)) |
 | `folder` | no | a `/`-separated path such as `"reports/sales"`; `""` or `()` is the root |
 | `description` | no | free text (at most 4 KiB); defaults to the function's doc comment |
@@ -346,7 +348,63 @@ or its dialect is one this version does not know. Such a query never blocks open
 
 A database written by this version keeps every read-only query in `graphersal-rhai/1`, so
 Graphersal 0.2.0 runs them; 0.2.0 lists a query that writes (`graphersal-rhai/2`) as not runnable
-("its dialect is 'graphersal-rhai/2', this version runs 'graphersal-rhai/1'").
+("its dialect is 'graphersal-rhai/2', this version runs 'graphersal-rhai/1'"). A version without
+saved queries in GQL (0.2.2 and older, or a build without the feature `gql`) lists a GQL query
+(`graphersal-gql/1`, `graphersal-gql/2`) the same way, keeps it unchanged and writes it back byte
+for byte; so does this version with a dialect of a newer one (`graphersal-gql/3`).
+
+## Saved queries in GQL
+
+With `language: "gql"` the body is one [GQL query](../gql/index.md), written as it is, with no
+`g.gql(..)` around it and no quotes to escape; `$name` reads the parameter `name`:
+
+```rhai
+g.define_query(#{
+    name: "older",
+    language: "gql",
+    params: #{min: #{schema: #{type: "integer"}, default: 30}},
+    body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age ORDER BY age"
+})
+g.query("older").toList()
+// [#{"age": 32, "name": "josh"}, #{"age": 35, "name": "peter"}]
+g.query("older", #{min: 26}).select("name").toList()
+// ["vadas", "marko", "josh", "peter"]
+```
+
+- **Defining** checks the query before anything is stored: it parses, binds and plans like a
+  `g.gql()` call (a GQL error keeps its GQLSTATUS, the caret under the offending text and its
+  `Help:`, with the line `in saved query: "name"`), every `$name` it reads is declared in
+  `params` and every declared parameter is read. The parameters are stored in the order the
+  query first reads them. The other keys (`folder`, `description`, `meta`) are those of a Rhai
+  query; a GQL body has no doc comment, so `description` has no default.
+- **Calling** is the same `g.query(name, #{..})` with the same argument checks; the call runs the
+  query like `g.gql(body, args)` (no Rhai is evaluated) and returns its rows, one map per row, a
+  traversal Gremlin steps may continue (`select("name")` above).
+- **Reads and writes**: the dialect comes from the query's plan, `graphersal-gql/1` when it
+  writes nothing and `graphersal-gql/2` when it writes (`INSERT` / `CREATE`); its effects are the
+  writes of the plan, exact per label. A call is authorized and limited exactly like a Rhai query
+  of the same kind: a read-only query (and any query called from one) cannot write, also not
+  through its result; a query that writes asks its whole effect set of the caller's authorizer
+  first and runs as ONE transaction whose commit names the query and its arguments, then
+  returns a read-only traversal over the rows it produced:
+
+```rhai
+g.define_query(#{
+    name: "hire",
+    language: "gql",
+    params: #{name: "string", company: "string"},
+    body: "MATCH (c:software {name: $company}) INSERT (p:person {name: $name})-[:created]->(c) RETURN p.name AS name"
+})
+g.get_query("hire")["effects"].map(|e| e.text)
+// ["Create Data(vertex \"person\")", "Create Data(edge \"created\")"]
+g.query("hire", #{name: "ann", company: "lop"}).toList()
+// [#{"name": "ann"}]
+```
+
+- A Rhai query may call a GQL query (`g.query("hire", #{..})` in its body); its effects then
+  include those of the GQL query, as with any called query.
+- `get_query` and `queries()` show `language: "gql"` and the dialect; the body is the query text.
+- `g.define_queries(folder, source)` stays Rhai only: define GQL queries one by one.
 
 ## Errors name the query
 
@@ -384,14 +442,14 @@ list in signature order: `#{name, schema, default?, required}`), `status`: `"ok"
 with `error`, the reason the query cannot run (see
 [Unavailable queries](#unavailable-queries-and-older-versions)), `writes` (a call may write),
 `effects` (what it may write) and `denied_writes` (the writes of a read-only query's body that a
-call denies), each effect `#{action, element, label, text}` (`element` / `label` `()` when open).
-`get_query` adds `body`, `dialect` and `meta`.
+call denies), each effect `#{action, element, label, text}` (`element` / `label` `()` when open),
+`language` (`"rhai"` or `"gql"`) and `dialect`. `get_query` adds `body` and `meta`.
 
 ```rhai
 g.define_query(#{name: "older_than", folder: "reports/people", params: #{age: #{schema: #{type: "integer"}, default: 30}},
                  body: "fn older_than(age) { g.v().has(\"age\", P.gt(age)) }"})
 g.queries("reports")
-// [#{"denied_writes": [], "description": (), "effects": [], "folder": "reports/people", "name": "older_than", "params": [#{"default": 30, "name": "age", "required": false, "schema": #{"type": "integer"}}], "status": "ok", "writes": false}]
+// [#{"denied_writes": [], "description": (), "dialect": "graphersal-rhai/1", "effects": [], "folder": "reports/people", "language": "rhai", "name": "older_than", "params": [#{"default": 30, "name": "age", "required": false, "schema": #{"type": "integer"}}], "status": "ok", "writes": false}]
 ```
 
 Moving a query or renaming a folder never breaks a caller: a call uses the name only. Dropping a
@@ -428,7 +486,8 @@ is denied before it writes anything. See [Permissions](permissions.md).
 The catalog is part of the database: a [Store](../persistence/overview.md) keeps it in its
 snapshots and journal, losslessly (every catalog change is a durable commit; recovery, rollback,
 forks and backups carry it), and a packed snapshot (`.gsnap`) carries it too. A query is stored as
-its source text, never as a compiled plan: every call plans anew. GraphML and GraphSON carry no
+its source text (the Rhai function or the GQL query), never as a compiled plan: every call plans
+anew. GraphML and GraphSON carry no
 saved queries, like they carry no schema. The byte layout is in the
 [format spec](../persistence/format.md) (sections 6.3, 9.3 and 16).
 

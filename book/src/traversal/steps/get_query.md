@@ -3,7 +3,7 @@
 
 `get_query` · `getQuery` · category: [Saved queries](../../traversal/step_reference.md#saved-queries)
 
-Returns a saved query as a map (name, folder, description, params, status, writes, effects, denied_writes, body, dialect, meta), unit when there is none.
+Returns a saved query as a map (name, folder, description, language, dialect, params, status, writes, effects, denied_writes, body, meta), unit when there is none.
 
 ## Forms
 

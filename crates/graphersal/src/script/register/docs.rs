@@ -333,7 +333,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Stores every function of a Rhai source as a saved query in a folder, described by its doc comment; params maps function name -> its parameter map (see the book page Saved Queries).",
         "{ g.define_queries(\"reports\", \"/** Persons. */ fn people() { g.v().has_label(\\\"person\\\") }\"); g.query(\"people\").count().next() }" => "4";
     "traversal" "define_query":
-        "Stores (or replaces) a saved query: #{name, body, folder, description, params}, the body being one Rhai function named like the query; a body that writes data saves a query that writes (see the book page Saved Queries).",
+        "Stores (or replaces) a saved query: #{name, body, language, folder, description, params}, the body being one Rhai function named like the query, or with language: \"gql\" one GQL query reading the declared $params; a body that writes data saves a query that writes (see the book page Saved Queries).",
         "{ g.define_query(#{name: \"older\", params: #{min: #{schema: #{type: \"integer\"}, default: 30}}, body: \"fn older(min) { g.v().has(\\\"age\\\", P.gt(min)) }\"}); g.query(\"older\").count().next() }" => "2";
     "traversal" "describe_query":
         "Sets the description of a saved query (\"\" or () removes it).",
@@ -414,7 +414,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Returns the graph's stored schema as a map (unit when none is stored).",
         "g.get_schema() == ()" => "true";
     "traversal" "get_query":
-        "Returns a saved query as a map (name, folder, description, params, status, writes, effects, denied_writes, body, dialect, meta), unit when there is none.",
+        "Returns a saved query as a map (name, folder, description, language, dialect, params, status, writes, effects, denied_writes, body, meta), unit when there is none.",
         "{ g.define_query(#{name: \"add\", body: \"fn add() { g.add_v(\\\"person\\\").next() }\"}); g.get_query(\"add\")[\"effects\"].map(|e| e.text) }" => "[\"Create Data(vertex \\\"person\\\")\"]";
     "traversal" "glob_path":
         "Walks the tree below each vertex along a glob pattern of edge names, like a file path (Graphersal extension, see the book page Step - glob_path).",
@@ -622,7 +622,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Sets every key of the given map (or JSON object) as a property of the incoming vertex (Graphersal extension); a key id or label makes an ordinary property, never the element's id or label.",
         "g.v(1).property_json(#{age: 30, tags: [\"a\", \"b\"]}).values(\"tags\").next()" => "[\"a\", \"b\"]";
     "traversal" "queries":
-        "Lists the saved queries (of a folder and its subfolders) as maps: name, folder, description, params, status, writes and the effects a call may write.",
+        "Lists the saved queries (of a folder and its subfolders) as maps: name, folder, description, language, dialect, params, status, writes and the effects a call may write.",
         "{ g.define_query(#{name: \"n\", folder: \"a/b\", body: \"fn n() { 1 }\"}); g.queries(\"a\").map(|q| q.name) }" => "[\"n\"]";
     "traversal" "query":
         "Calls a saved query by name with named arguments (start of a traversal only); a query that writes writes in the call, and a traversal result can be continued, read-only (see the book page Saved Queries).",

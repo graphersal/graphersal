@@ -3,7 +3,7 @@
 
 `define_query` · `defineQuery` · category: [Saved queries](../../traversal/step_reference.md#saved-queries)
 
-Stores (or replaces) a saved query: #{name, body, folder, description, params}, the body being one Rhai function named like the query; a body that writes data saves a query that writes (see the book page Saved Queries).
+Stores (or replaces) a saved query: #{name, body, language, folder, description, params}, the body being one Rhai function named like the query, or with language: "gql" one GQL query reading the declared $params; a body that writes data saves a query that writes (see the book page Saved Queries).
 
 ## Forms
 

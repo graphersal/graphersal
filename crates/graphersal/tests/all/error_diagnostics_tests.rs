@@ -6320,6 +6320,88 @@ fn saved_query_errors_carry_their_help() {
     );
 }
 
+/// Saved queries written in GQL (`language: "gql"`): a GQL error at define keeps its diagnostic
+/// and names the query; undeclared and unused `$parameters`, an unknown language and a stored
+/// GQL body this version refuses carry their help.
+#[cfg(all(feature = "script", feature = "gql"))]
+#[test]
+fn gql_saved_query_errors_carry_their_help() {
+    use crate::script_host::eval_value;
+
+    let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    let fail = |script: &str| -> String {
+        eval_value(graph.clone(), script)
+            .expect_err(script)
+            .to_string()
+    };
+    graph
+        .write()
+        .traversal_mut()
+        .define_query(
+            "broken",
+            graphersal::catalog::QueryDefinition::new("MATCH (p) RETRUN p")
+                .with_dialect(graphersal::catalog::GQL_QUERY_DIALECT),
+        )
+        .unwrap();
+    let cases: [(&str, &[&str]); 6] = [
+        (
+            r#"g.define_query(#{name: "bad", language: "gql", body: "MATCH (p:person) RETRUN p"})"#,
+            &[
+                "GQL syntax error at line 1, column 18: unexpected `RETRUN`",
+                "GQLSTATUS:    42001",
+                "  in saved query: \"bad\"\nHelp: Did you mean RETURN?",
+            ],
+        ),
+        (
+            r#"g.define_query(#{name: "u", language: "gql", body: "MATCH (p:person {name: $who}) RETURN p.age AS age"})"#,
+            &[
+                "Saved query 'u' reads the parameter $who, which its params do not declare",
+                r#"Help: Declare every $name the GQL query reads in params"#,
+                r#"g.define_query(#{name: "u", language: "gql", params: #{who: "string"}, body: ..}); it declares none."#,
+            ],
+        ),
+        (
+            r#"g.define_query(#{name: "x", language: "gql", params: #{who: "string", extra: "integer"},
+                   body: "MATCH (p:person {name: $who}) RETURN p.age AS age"})"#,
+            &[
+                "Saved query 'x' declares the parameter 'extra', which its GQL query never reads",
+                "Help: Every declared parameter is read by the GQL query as $extra",
+            ],
+        ),
+        (
+            r#"g.define_query(#{name: "x", language: "sql", body: "SELECT 1"})"#,
+            &[
+                r#"expected language "rhai" (the default) or "gql", got the language 'sql'"#,
+                r#"A query written in GQL takes language: "gql" and the query text as its body"#,
+            ],
+        ),
+        (
+            r#"g.query("broken")"#,
+            &[
+                "Invalid body of saved query 'broken': it is not a valid GQL query: GQL syntax error",
+                r#"A query written in GQL is saved with language: "gql""#,
+            ],
+        ),
+        (
+            r#"g.define_query(#{name: "ro", language: "gql", body: "MATCH (p:person) RETURN p"});
+               g.query("ro").select("p").drop().iterate()"#,
+            &[
+                "a saved query is read-only",
+                "Help: A read-only saved query (dialect graphersal-rhai/1 or graphersal-gql/1",
+            ],
+        ),
+    ];
+    for (script, expected) in cases {
+        let report = fail(script);
+        for part in expected {
+            assert!(
+                report.contains(part),
+                "expected `{part}` for {script} in:\n{report}"
+            );
+        }
+    }
+}
+
 /// Ids are strings: an order predicate on a number in `has_id(P)` is a plan-time error located
 /// on the step, whose help shows the string form and the string order; equality keeps numbers.
 #[test]

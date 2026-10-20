@@ -2617,6 +2617,32 @@ pub enum ScriptError {
         reason: String,
     },
 
+    /// A saved query written in GQL reads a `$name` that its `params` do not declare.
+    #[error(
+        "Saved query '{query}' reads the parameter ${parameter}, which its params do not declare"
+    )]
+    #[non_exhaustive]
+    UndeclaredQueryParameter {
+        /// The saved query.
+        query: String,
+        /// The parameter the query reads (without `$`).
+        parameter: String,
+        /// The declared parameters.
+        declared: Vec<String>,
+    },
+
+    /// A saved query written in GQL declares a parameter that its query never reads.
+    #[error(
+        "Saved query '{query}' declares the parameter '{parameter}', which its GQL query never reads"
+    )]
+    #[non_exhaustive]
+    UnusedQueryParameter {
+        /// The saved query.
+        query: String,
+        /// The declared parameter.
+        parameter: String,
+    },
+
     /// A saved query returned a traversal with a writing step that it cannot run: a read-only
     /// query returned one, or any query returned an anonymous one (`__.add_v(..)`). A query
     /// that writes runs a returned writing traversal of the graph inside its call.
@@ -2902,8 +2928,11 @@ impl DiagnosticError for ScriptError {
                      g.define_queries(\"reports\", source, #{top: #{limit: \"integer\"}}), \
                      g.query(\"top\", #{limit: 5}) (named arguments in a map), \
                      g.move_query(\"top\", \"archive\") and g.describe_query(\"top\", \"..\") \
-                     (\"\" or () for the root or no description). See the book page \"Saved \
-                     queries\"."
+                     (\"\" or () for the root or no description). A query written in GQL takes \
+                     language: \"gql\" and the query text as its body, as in \
+                     g.define_query(#{name: \"older\", language: \"gql\", params: #{min: \
+                     \"integer\"}, body: \"MATCH (p:person) WHERE p.age > $min RETURN p.name AS \
+                     name\"}). See the book page \"Saved queries\"."
                         .to_string(),
                 )
             }
@@ -2981,7 +3010,31 @@ impl DiagnosticError for ScriptError {
                  call, curry, eval, import or a query name computed at run time, and writes data \
                  only: never the schema, saved queries, indexes or files. A stored body that no \
                  longer compiles is listed by g.queries() with status \"error\"; redefine it \
-                 to fix it."
+                 to fix it. A query written in GQL is saved with language: \"gql\" and its body \
+                 is the plain query text, for example g.define_query(#{{name: \"{query}\", \
+                 language: \"gql\", params: #{{min: \"integer\"}}, body: \"MATCH (p:person) \
+                 WHERE p.age > $min RETURN p.name AS name\"}})."
+            )),
+            ScriptError::UndeclaredQueryParameter {
+                query,
+                parameter,
+                declared,
+            } => Some(format!(
+                "Declare every $name the GQL query reads in params (parameter name -> a type \
+                 name such as \"string\" or \"integer\", or #{{schema: .., default: ..}}), for \
+                 example g.define_query(#{{name: \"{query}\", language: \"gql\", params: \
+                 #{{{parameter}: \"string\"}}, body: ..}}); {}. A value that never changes can \
+                 be written into the query as a literal instead.",
+                if declared.is_empty() {
+                    "it declares none".to_string()
+                } else {
+                    format!("it declares {}", declared.join(", "))
+                }
+            )),
+            ScriptError::UnusedQueryParameter { parameter, .. } => Some(format!(
+                "Every declared parameter is read by the GQL query as ${parameter}: read it, for \
+                 example MATCH (p:person) WHERE p.name = ${parameter} RETURN p.age AS age, or \
+                 remove '{parameter}' from params. Names are case-sensitive."
             )),
             ScriptError::QueryReturnedWrite { query, .. } => Some(format!(
                 "A read-only saved query cannot write, also not through a traversal it returns, \
@@ -3392,8 +3445,12 @@ impl DiagnosticError for DefinitionError {
                         .join(", ")
                 ),
                 "dialect" => format!(
-                    "The dialect names the language of the source; this version writes \"{}\".",
-                    d::QUERY_DIALECT
+                    "The dialect names the language of the source; this version writes \"{}\" \
+                     and \"{}\" (Rhai) and \"{}\" and \"{}\" (GQL).",
+                    d::QUERY_DIALECT,
+                    d::WRITING_QUERY_DIALECT,
+                    d::GQL_QUERY_DIALECT,
+                    d::GQL_WRITING_QUERY_DIALECT
                 ),
                 _ => "Check the field against the limits of the catalog (book page \"Saved \
                       queries\")."
@@ -4726,8 +4783,8 @@ impl TraverserError {
                 if reason.starts_with(SAVED_QUERY_READ_ONLY) =>
             {
                 Some(
-                    "A read-only saved query (dialect graphersal-rhai/1, or any query called from \
-                     one) never writes: not the data, the schema, the saved queries or files, also \
+                    "A read-only saved query (dialect graphersal-rhai/1 or graphersal-gql/1, or any \
+                     query called from one) never writes: not the data, the schema, the saved queries or files, also \
                      not through a query it calls or a traversal it returns (a g.query(..) result \
                      cannot be continued with a writing step). A query whose body writes data \
                      becomes a query that writes when it is saved again: define it once more \

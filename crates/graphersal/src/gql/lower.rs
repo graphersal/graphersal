@@ -1496,7 +1496,6 @@ pub(crate) fn planned_writes(
     Vec<crate::graph::AccessRequestBuf>,
     crate::traversal::step::AccessFlow,
 )> {
-    use crate::graph::TraversalGraph;
     let nothing = || Some((Vec::new(), Default::default()));
     let Ok(parsed) = parse(query) else {
         return nothing();
@@ -1504,7 +1503,27 @@ pub(crate) fn planned_writes(
     let Ok(bound) = super::bind::bind(&parsed) else {
         return nothing();
     };
+    lower_with_placeholders(query, &bound).ok()
+}
+
+/// `query` (bound as `bound`) lowered on an empty scratch graph with each parameter it reads
+/// standing for a placeholder value (first `1`, then `NULL`): the data writes its plan asks the
+/// authorization check for and the flow after its last step ([`planned_writes`]), or the error
+/// of the first placeholder when none lowers.
+#[cfg(feature = "script")]
+fn lower_with_placeholders(
+    query: &str,
+    bound: &super::bind::BoundQuery,
+) -> Result<
+    (
+        Vec<crate::graph::AccessRequestBuf>,
+        crate::traversal::step::AccessFlow,
+    ),
+    TraverserError,
+> {
+    use crate::graph::TraversalGraph;
     let scratch = TraversalGraph::new();
+    let mut first_error = None;
     for placeholder in [ElementProperty::from(1), ElementProperty::Null] {
         let params: Vec<(CompactString, ElementProperty)> = bound
             .parameters
@@ -1516,15 +1535,52 @@ pub(crate) fn planned_writes(
             let facts = StorageFacts::from_storage(&source.storage);
             prepare::<&TraversalGraph>(query, &params, &facts)
         };
-        if let Ok(lowered) = lowered {
-            let mut steps = lowered.emit(source).steps;
-            let mut writes = Vec::new();
-            let flow =
-                crate::traversal::permission_check::plan_write_requests(&mut steps, &mut writes);
-            return Some((writes, flow));
+        match lowered {
+            Ok(lowered) => {
+                let mut steps = lowered.emit(source).steps;
+                let mut writes = Vec::new();
+                let flow = crate::traversal::permission_check::plan_write_requests(
+                    &mut steps,
+                    &mut writes,
+                );
+                return Ok((writes, flow));
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    None
+    Err(first_error.unwrap_or_else(|| {
+        GqlErrorBuilder::new(
+            GqlErrorKind::Semantic,
+            0..query.len(),
+            "the query does not lower",
+        )
+        .into_error(query)
+    }))
+}
+
+/// What the script layer checks when a saved query written in GQL is stored or called
+/// (`script/saved_query_gql.rs`): the parameters the query reads (each once, in the order of
+/// their first `$name`) and the data writes its plan asks for ([`planned_writes`], exact per
+/// label). `query` is parsed, bound and lowered as `gql()` lowers it, on an empty scratch graph
+/// with placeholder parameter values; `Err` is the first error (parse, bind or lowering) with
+/// its GQLSTATUS and caret.
+#[cfg(feature = "script")]
+pub(crate) fn saved_query_plan(
+    query: &str,
+) -> Result<(Vec<String>, Vec<crate::graph::AccessRequestBuf>), TraverserError> {
+    let parsed = parse(query)?;
+    let bound = super::bind::bind(&parsed)?;
+    let mut parameters: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for parameter in &bound.parameters {
+        if seen.insert(parameter.name.as_str()) {
+            parameters.push(parameter.name.clone());
+        }
+    }
+    let (writes, _) = lower_with_placeholders(query, &bound)?;
+    Ok((parameters, writes))
 }
 
 /// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a

@@ -245,6 +245,82 @@ fn a_saved_query_with_parameters_of_a_newer_version_is_kept_and_refused_to_run()
     assert!(err.contains("xFutureKeyword"), "{err}");
 }
 
+/// A saved query of a GQL dialect this version does not run (a newer Graphersal wrote it) is
+/// listed as unavailable (`status: "error"`, its reason naming the dialects this version runs),
+/// refused at a call, and kept byte for byte: its payload, the journal, a checkpoint, a fork and
+/// a backup carry it unchanged.
+#[test]
+fn a_saved_query_of_a_newer_gql_dialect_is_kept_listed_and_refused_to_run() {
+    let pairs = [
+        text("dialect", "graphersal-gql/3"),
+        text("source", "MATCH (p:person) RETURN p FUTURE CLAUSE"),
+        text("params", "{}"),
+        text("xFutureKey", "kept"),
+    ];
+    let query = QueryDefinition::from_payload(&payload(&pairs)).unwrap();
+    assert_eq!(query.language(), "gql");
+    assert_eq!(query.to_payload(), payload(&pairs));
+    let bytes = encode_payload(&query.to_payload()).unwrap();
+
+    let dir = MemDir::new();
+    let main = shared(&dir);
+    let store = Store::create_with(&main, docs(), options()).unwrap();
+    store
+        .graph()
+        .write()
+        .set_definition(Definition::query("future", query.clone()))
+        .unwrap();
+    let listed = eval_value(
+        store.graph().clone(),
+        r#"let q = g.get_query("future"); [q.status, q.language, q.dialect, q.writes, q.error]"#,
+    )
+    .unwrap()
+    .cast::<rhai::Array>();
+    assert_eq!(listed[0].to_string(), "error");
+    assert_eq!(listed[1].to_string(), "gql");
+    assert_eq!(listed[2].to_string(), "graphersal-gql/3");
+    assert!(!listed[3].as_bool().unwrap());
+    let reason = listed[4].to_string();
+    assert!(
+        reason.contains("its dialect is 'graphersal-gql/3', this version runs"),
+        "{reason}"
+    );
+    let err = eval_value(store.graph().clone(), r#"g.query("future")"#)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Invalid body of saved query 'future'"),
+        "{err}"
+    );
+    store.close().unwrap();
+
+    let kept = |store: &Store| {
+        let graph = store.graph().read();
+        let definition = graph
+            .definition(DefinitionKind::QUERY, "future")
+            .expect("kept");
+        let stored = definition.as_query().expect("a query").clone();
+        assert_eq!(stored, query);
+        assert_eq!(encode_payload(&stored.to_payload()).unwrap(), bytes);
+    };
+    let store = Store::open(&main, options()).unwrap();
+    kept(&store);
+    store.checkpoint(None).unwrap();
+    store.close().unwrap();
+    let store = Store::open(&main, options()).unwrap();
+    kept(&store);
+    let fork = MemDir::new();
+    store.fork(RecoveryTarget::Latest, &fork).unwrap();
+    let backup = MemDir::new();
+    store.backup(&backup).unwrap();
+    store.close().unwrap();
+    let forked = Store::open(shared(&fork), options()).unwrap();
+    kept(&forked);
+    forked.close().unwrap();
+    let opened = Store::open_backup(shared(&backup), options()).unwrap();
+    kept(&opened);
+}
+
 /// Every store path keeps the definitions of a newer version as they were: the WAL, a
 /// checkpoint, a fork, a backup; the store opens normally (nothing critical is unknown).
 #[test]

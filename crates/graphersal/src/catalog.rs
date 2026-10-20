@@ -89,11 +89,12 @@ pub use crate::graph::compression_estimate::{
     DEFAULT_ESTIMATE_MAX_VALUES, DEFAULT_ESTIMATE_THRESHOLDS, EstimateWarning, SizeBucket,
 };
 pub use crate::graph::definition::{
-    Definition, DefinitionBody, DefinitionFlags, DefinitionKind, MAX_DEFINITION_NAME_BYTES,
-    MAX_DEFINITIONS, MAX_DESCRIPTION_BYTES, MAX_DIALECT_BYTES, MAX_FOLDER_BYTES,
-    MAX_FOLDER_SEGMENTS, MAX_META_BYTES, MAX_OPAQUE_PAYLOAD_BYTES, MAX_PARAMETERS,
-    MAX_QUERY_NAME_BYTES, MAX_SOURCE_BYTES, QUERY_DIALECT, QueryDefinition, QueryParam,
-    RESERVED_PAYLOAD_KEYS, WRITING_QUERY_DIALECT, catalog_from_json, catalog_to_json,
+    Definition, DefinitionBody, DefinitionFlags, DefinitionKind, GQL_QUERY_DIALECT,
+    GQL_WRITING_QUERY_DIALECT, MAX_DEFINITION_NAME_BYTES, MAX_DEFINITIONS, MAX_DESCRIPTION_BYTES,
+    MAX_DIALECT_BYTES, MAX_FOLDER_BYTES, MAX_FOLDER_SEGMENTS, MAX_META_BYTES,
+    MAX_OPAQUE_PAYLOAD_BYTES, MAX_PARAMETERS, MAX_QUERY_NAME_BYTES, MAX_SOURCE_BYTES,
+    QUERY_DIALECT, QueryDefinition, QueryParam, RESERVED_PAYLOAD_KEYS, WRITING_QUERY_DIALECT,
+    catalog_from_json, catalog_to_json,
 };
 #[cfg(feature = "persist")]
 pub use crate::graph::definition::{decode_payload, encode_payload};

@@ -3,7 +3,7 @@
 
 `queries` · category: [Saved queries](../../traversal/step_reference.md#saved-queries)
 
-Lists the saved queries (of a folder and its subfolders) as maps: name, folder, description, params, status, writes and the effects a call may write.
+Lists the saved queries (of a folder and its subfolders) as maps: name, folder, description, language, dialect, params, status, writes and the effects a call may write.
 
 ## Forms
 

@@ -181,9 +181,21 @@ state) refuses a GQL write before it runs.
 
 ## Saved queries and the DSL
 
-A [saved query](../users_guide/saved_queries.md) whose body runs `g.gql("INSERT ...")` with a
-literal query text is a writing query: its `effects` name the labels it creates. A computed query
-text claims every write; pass values as `$parameters` instead.
+A saved query may be written in GQL itself ([Saved queries in
+GQL](../users_guide/saved_queries.md#saved-queries-in-gql)): the body is the plain query text,
+its `$parameters` are the declared ones, and an `INSERT` makes it a query that writes, whose
+`effects` name the labels its plan creates. A call writes in one unit and returns the rows:
+
+```rhai,graph=modern,script
+g.define_query(#{name: "hire", language: "gql", params: #{name: "string", company: "string"},
+    body: "MATCH (c:software {name: $company}) INSERT (p:person {name: $name})-[:created]->(c) RETURN p.name AS name"});
+g.get_query("hire")["effects"].map(|e| e.text);   // ["Create Data(vertex \"person\")", "Create Data(edge \"created\")"]
+g.query("hire", #{name: "ann", company: "lop"}).select("name").to_list()   // "ann"
+```
+
+A [saved query](../users_guide/saved_queries.md) in Rhai whose body runs `g.gql("INSERT ...")`
+with a literal query text is a writing query too: its `effects` name the labels it creates. A
+computed query text claims every write; pass values as `$parameters` instead.
 
 In a script, a writing `gql()` takes the write lock like a Gremlin write (`is_mutating()` is
 true), and the playground asks before running it again. Gremlin steps may follow:

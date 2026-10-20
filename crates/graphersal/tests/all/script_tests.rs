@@ -689,6 +689,40 @@ mod tests {
         assert_eq!(graph.read().edge_count(), 3);
     }
 
+    /// Rule 3: a saved query written in GQL mutates through the DSL in both spellings: defined
+    /// with `defineQuery` / `define_query`, called with `query` (bare as the last statement too,
+    /// rendered by the visualizer), returning what it wrote, persisting across evaluations.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_script_eval_gql_saved_query_mutations() {
+        let graph = Arc::new(GraphSource::empty());
+        let script = r#"
+            g.defineQuery(#{name: "add", language: "gql", params: #{n: "string"},
+                body: "INSERT (p:person {name: $n}) RETURN p.name AS name"});
+            g.define_query(#{name: "link", language: "gql", params: #{a: "string", b: "string"},
+                body: "MATCH (x:person {name: $a}), (y:person {name: $b}) INSERT (x)-[:knows]->(y)"});
+            let names = g.query("add", #{n: "ann"}).select("name").toList();
+            g.query("add", #{n: "bob"}).iterate();
+            g.query("link", #{a: "ann", b: "bob"}).iterate();
+            g.V().count().next() * 100 + g.E().count().next() * 10 + names.len()
+        "#;
+        assert_eq!(
+            eval_value(graph.clone(), script).unwrap().as_int().ok(),
+            Some(211)
+        );
+        eval(graph.clone(), r#"g.query("add", #{n: "cy"})"#).expect("bare saved GQL write");
+        assert_eq!(
+            eval_value(
+                graph.clone(),
+                r#"g.V().hasLabel("person").values("name").order().toList()"#
+            )
+            .unwrap()
+            .to_string(),
+            r#"["ann", "bob", "cy"]"#
+        );
+        assert_eq!(graph.read().edge_count(), 1);
+    }
+
     /// A mutating `by()` child traversal makes the plan mutating (behaviour change: it used to
     /// fail with "Cannot mutate immutable graph reference"): the child's writes reach the graph,
     /// once per evaluated traverser, also when nested deeper than one level.

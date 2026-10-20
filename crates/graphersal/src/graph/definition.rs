@@ -19,6 +19,16 @@ pub const QUERY_DIALECT: &str = "graphersal-rhai/1";
 /// [`QUERY_DIALECT`] otherwise (book `users_guide/saved_queries.md`). A version that runs only
 /// [`QUERY_DIALECT`] lists such a query as not runnable.
 pub const WRITING_QUERY_DIALECT: &str = "graphersal-rhai/2";
+/// The dialect of a saved query written in GQL that only reads: the source is one GQL query
+/// (`MATCH ... RETURN ...`), `$name` reads a declared parameter. The script layer saves a GQL
+/// query in it when the plan of the query writes nothing, and in [`GQL_WRITING_QUERY_DIALECT`]
+/// otherwise (book `users_guide/saved_queries.md`, "Saved queries in GQL"). A version without
+/// GQL saved queries lists such a query as not runnable and keeps it unchanged.
+pub const GQL_QUERY_DIALECT: &str = "graphersal-gql/1";
+/// The dialect of a saved query written in GQL whose plan writes data (`INSERT ...`): a call
+/// may write what the plan writes, within the caller's rights, like a query of
+/// [`WRITING_QUERY_DIALECT`].
+pub const GQL_WRITING_QUERY_DIALECT: &str = "graphersal-gql/2";
 /// Keys a definition's payload map never has (format spec 6.3): `kind`, `name` and `flags` are
 /// the envelope keys of the exchange form ([`Definition::to_json`]), which puts the payload
 /// keys beside them. A stored payload with one of them is invalid.
@@ -800,17 +810,20 @@ pub fn decode_payload(bytes: &[u8]) -> Result<PropertyMap, DefinitionError> {
 // Saved queries
 // ---------------------------------------------------------------------------------------------
 
-/// A saved query: one Rhai function in the database, called by name with named, typed
-/// parameters (`book/src/users_guide/saved_queries.md`). Built with [`Self::new`] and the `with_*` methods;
-/// stored as a [`Definition::query`].
+/// A saved query: one Rhai function (or one GQL query) in the database, called by name with
+/// named, typed parameters (`book/src/users_guide/saved_queries.md`). Built with [`Self::new`]
+/// and the `with_*` methods; stored as a [`Definition::query`].
 ///
-/// The source is the text of one Rhai function named like the query whose parameters are
-/// [`Self::params`] in that order; that is checked by the script layer (when defined through
-/// the DSL and when called), not by [`Definition::validate`].
+/// The [dialect](Self::dialect) names the language of the source ([`Self::language`]): for
+/// [`QUERY_DIALECT`] and [`WRITING_QUERY_DIALECT`] the source is the text of one Rhai function
+/// named like the query whose parameters are [`Self::params`] in that order; for
+/// [`GQL_QUERY_DIALECT`] and [`GQL_WRITING_QUERY_DIALECT`] it is one GQL query whose `$name`
+/// references are exactly [`Self::params`]. That is checked by the script layer (when defined
+/// through the DSL and when called), not by [`Definition::validate`].
 ///
-/// A saved query is read-only, always: a call runs under a read-only authorizer (enforced by
-/// the script layer), so there is no `writes` field. A writing kind of definition (a
-/// procedure) may come later as a kind of its own.
+/// What a call may write is derived from the source and the dialect by the script layer, never
+/// stored (there is no `writes` field): a query of a read-only dialect runs under a read-only
+/// authorizer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryDefinition {
     folder: Option<String>,
@@ -905,7 +918,19 @@ impl QueryDefinition {
         &self.dialect
     }
 
-    /// The source: the text of one Rhai function.
+    /// The language of the source, from the [dialect](Self::dialect): its name before the
+    /// version, without the `graphersal-` prefix (`"rhai"` for [`QUERY_DIALECT`] and
+    /// [`WRITING_QUERY_DIALECT`], `"gql"` for [`GQL_QUERY_DIALECT`] and
+    /// [`GQL_WRITING_QUERY_DIALECT`]; an unknown dialect gives its own name).
+    pub fn language(&self) -> &str {
+        let name = self
+            .dialect
+            .split_once('/')
+            .map_or(self.dialect.as_str(), |(name, _)| name);
+        name.strip_prefix("graphersal-").unwrap_or(name)
+    }
+
+    /// The source: the text of one Rhai function, or one GQL query (see [`Self::language`]).
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -951,8 +976,8 @@ impl QueryDefinition {
     /// |---|---|
     /// | `folder` | string, absent = root |
     /// | `description` | string, absent = none |
-    /// | `dialect` | string ([`QUERY_DIALECT`]) |
-    /// | `source` | string: the Rhai function text |
+    /// | `dialect` | string ([`QUERY_DIALECT`], [`WRITING_QUERY_DIALECT`], [`GQL_QUERY_DIALECT`], [`GQL_WRITING_QUERY_DIALECT`]) |
+    /// | `source` | string: the Rhai function text, or the GQL query text |
     /// | `params` | string: canonical JSON, name -> `{schema, default?}` ([`Self::params_to_json`]) |
     /// | `meta` | string, absent = none |
     ///

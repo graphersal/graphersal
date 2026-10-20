@@ -1540,6 +1540,121 @@ mod saved_queries {
         let _ = run(&graph, r#"g.query("renew")"#, AllowAll).unwrap();
         assert_eq!(count(&graph), 7);
     }
+
+    /// Denies creating edges, allows everything else.
+    #[cfg(feature = "gql")]
+    struct NoEdgeCreation;
+
+    #[cfg(feature = "gql")]
+    impl Authorizer for NoEdgeCreation {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (
+                    Action::Create,
+                    Resource::Data {
+                        element: Some(ElementKind::Edge),
+                        ..
+                    },
+                ) => Err(Denied::new("no new edges")),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// A saved query written in GQL is authorized like a Rhai one of the same dialect class:
+    /// `Execute` first, a read-only one runs with the host's reads and never writes, one that
+    /// writes asks its whole effect set (the plan's writes, per label) before anything runs and
+    /// is bounded by the caller's rights.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn a_gql_query_is_authorized_like_a_rhai_query_of_its_dialect() {
+        let graph = modern();
+        let _ = run(
+            &graph,
+            r#"g.define_query(#{name: "people", language: "gql",
+                   body: "MATCH (p:person) RETURN p.name AS name"});
+               g.define_query(#{name: "adopt", language: "gql", params: #{owner: "string"},
+                   body: "MATCH (p:person {name: $owner}) INSERT (p)-[:OWNS]->(:Pet {owner: $owner})"})"#,
+            AllowAll,
+        )
+        .unwrap();
+        // Execute on the query first.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.query("people").to_list()"#,
+                AccessPolicy::allow_all().deny(ActionKind::Execute, ResourceKind::Definition),
+            ),
+            "query",
+            r#"Execute Definition(query "people")"#,
+        );
+        // A read-only query reads with the host's rights and never writes.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.query("people").to_list()"#,
+                AccessPolicy::allow_all().deny(ActionKind::Read, ResourceKind::Data),
+            ),
+            "v",
+            "Read Data",
+        );
+        let err = run(&graph, r#"g.query("people").drop().iterate()"#, AllowAll).unwrap_err();
+        assert!(err.contains("a saved query is read-only"), "{err}");
+        assert_eq!(count(&graph), 6);
+        // A query that writes: the effect set is asked before the body runs.
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(
+            &graph,
+            r#"g.query("adopt", #{owner: "marko"})"#,
+            recorder.clone(),
+        )
+        .unwrap();
+        let seen = recorder.seen();
+        assert_eq!(
+            seen[..3],
+            [
+                r#"Execute Definition(query "adopt")"#.to_string(),
+                r#"Create Data(vertex "Pet")"#.to_string(),
+                r#"Create Data(edge "OWNS")"#.to_string(),
+            ],
+            "{seen:?}"
+        );
+        assert_eq!(count(&graph), 7);
+        // The caller may not create edges: denied before the first write.
+        let err = run(
+            &graph,
+            r#"g.query("adopt", #{owner: "josh"})"#,
+            NoEdgeCreation,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(r#"Permission denied for 'query("adopt")' (Create Data(edge "OWNS"))"#),
+            "{err}"
+        );
+        assert_eq!(count(&graph), 7);
+        // A read-only host: denied, nothing written.
+        let err = run(
+            &graph,
+            r#"g.query("adopt", #{owner: "josh"})"#,
+            AccessPolicy::read_only(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(r#"Permission denied for 'query("adopt")'"#),
+            "{err}"
+        );
+        assert_eq!(count(&graph), 7);
+        // Defining asks Create on the query.
+        assert_denied(
+            run(
+                &graph,
+                r#"g.define_query(#{name: "x", language: "gql", body: "MATCH (n) RETURN n"})"#,
+                AccessPolicy::read_only(),
+            ),
+            "define_query",
+            r#"Create Definition(query "x")"#,
+        );
+    }
 }
 
 /// Denies reading vertices, allows everything else.

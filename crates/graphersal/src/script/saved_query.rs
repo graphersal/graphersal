@@ -4,7 +4,9 @@
 //! `g.drop_query(name)`, `g.move_query(name, folder)`, `g.describe_query(name, text)`).
 //!
 //! A saved query is stored in the graph's catalog of definitions
-//! ([`crate::catalog`]) as the text of ONE Rhai function. A call:
+//! ([`crate::catalog`]) as the text of ONE Rhai function, or (feature `gql`, `language: "gql"`,
+//! `saved_query_gql.rs`) of one GQL query, which a call runs as `g.gql(body, args)` without
+//! evaluating Rhai, under the same rules. A call:
 //!
 //! 1. asks the caller's authorizer for `Execute` on the query (before anything runs);
 //! 2. binds the named arguments against the parameter schemas (unknown, missing, wrong type or
@@ -39,12 +41,15 @@
 //! nested call), so the origin is named.
 
 use super::effects::{self, BodyEffects};
+#[cfg(feature = "gql")]
+use super::saved_query_gql;
 use super::*;
 use crate::error::{
     SAVED_QUERY_DATA_ONLY, SAVED_QUERY_OUTSIDE_EFFECTS, SAVED_QUERY_READ_ONLY, ScriptError,
 };
 use crate::graph::definition::{
-    Definition, DefinitionKind, QUERY_DIALECT, QueryDefinition, QueryParam, WRITING_QUERY_DIALECT,
+    Definition, DefinitionKind, GQL_QUERY_DIALECT, GQL_WRITING_QUERY_DIALECT, QUERY_DIALECT,
+    QueryDefinition, QueryParam, WRITING_QUERY_DIALECT,
 };
 use crate::graph::{
     AccessRequest, AccessRequestBuf, Action, Authorizer, CommitMetadata, Denied, Resource,
@@ -149,12 +154,43 @@ fn effects_text(effects: &[AccessRequestBuf]) -> String {
     texts.join(", ")
 }
 
-/// A compiled body: the AST holding the function, its signature and its own effects (`Err`:
-/// why the body cannot be a query that writes, [`effects::analyze`]).
+/// A compiled body: the body to run, its signature (the parameters in stored order) and its own
+/// effects (`Err`: why the body cannot be a query that writes, [`effects::analyze`]).
 struct Compiled {
-    ast: rhai::AST,
+    body: Body,
     signature: Vec<String>,
     effects: Result<BodyEffects, String>,
+}
+
+/// What a call runs.
+enum Body {
+    /// The AST holding the one Rhai function.
+    Rhai(rhai::AST),
+    /// The query text of the definition, checked (`saved_query_gql.rs`); a call runs it as
+    /// `g.gql(text, params)`.
+    #[cfg(feature = "gql")]
+    Gql,
+}
+
+/// Whether a query of `dialect` may write (its effects are asked and allowed at a call).
+fn is_writing(dialect: &str) -> bool {
+    dialect == WRITING_QUERY_DIALECT || dialect == GQL_WRITING_QUERY_DIALECT
+}
+
+/// Whether `dialect` names the GQL language (any version, also one this version does not run):
+/// [`with_inferred_dialect`] keeps the language of the definition it is given.
+fn is_gql_language(dialect: &str) -> bool {
+    dialect.starts_with("graphersal-gql/")
+}
+
+/// The dialects this version runs, as the text of an unknown dialect's reason.
+fn served_dialects() -> String {
+    let rhai = format!("'{QUERY_DIALECT}' and '{WRITING_QUERY_DIALECT}'");
+    if cfg!(feature = "gql") {
+        format!("{rhai}, and for GQL '{GQL_QUERY_DIALECT}' and '{GQL_WRITING_QUERY_DIALECT}'")
+    } else {
+        rhai
+    }
 }
 
 /// What [`compile`] yields: the compiled body or why it is not a valid body.
@@ -253,7 +289,7 @@ pub fn saved_query_effects(
         return Ok(SavedQueryEffects::default());
     };
     let (effects, _) = resolve_effects(engine, catalog, name, own);
-    Ok(if query.dialect() == WRITING_QUERY_DIALECT {
+    Ok(if is_writing(query.dialect()) {
         SavedQueryEffects {
             writes: !effects.is_empty(),
             effects,
@@ -271,11 +307,15 @@ pub fn saved_query_effects(
 /// `query` (the definition of the saved query `name`) checked like
 /// [`ScriptGraphTraversalSource::define_query`] checks a body, with the dialect its inferred
 /// effects give: [`WRITING_QUERY_DIALECT`] when they are not empty, [`QUERY_DIALECT`]
-/// otherwise (also lowering a query that no longer writes). The queries it calls are resolved
-/// through `catalog`. `Err` is why it cannot be stored: the body does not compile, is not one
-/// function named `name` with the declared parameters, writes the schema, the catalog or files,
-/// or writes data while hiding what it calls (`Fn`, `call`, `eval`, `import`, a computed query
-/// name). Front ends that build definitions themselves (the playground's editor) store what it
+/// otherwise (also lowering a query that no longer writes). A definition whose dialect names GQL
+/// (`graphersal-gql/..`, for example [`GQL_QUERY_DIALECT`]) is a GQL query and gets
+/// [`GQL_WRITING_QUERY_DIALECT`] or [`GQL_QUERY_DIALECT`] the same way (its effects are the
+/// writes of its plan). The queries it calls are resolved through `catalog`. `Err` is why it
+/// cannot be stored: the body does not compile, is not one function named `name` with the
+/// declared parameters, writes the schema, the catalog or files, or writes data while hiding
+/// what it calls (`Fn`, `call`, `eval`, `import`, a computed query name); a GQL body does not
+/// parse, bind or lower, or reads a parameter it does not declare (or declares one it does not
+/// read). Front ends that build definitions themselves (the playground's editor) store what it
 /// returns.
 pub fn with_inferred_dialect(
     engine: &Engine,
@@ -283,20 +323,28 @@ pub fn with_inferred_dialect(
     name: &str,
     query: QueryDefinition,
 ) -> Result<QueryDefinition, String> {
-    let query = query.with_dialect(QUERY_DIALECT);
+    let gql = is_gql_language(query.dialect());
+    let query = query.with_dialect(if gql {
+        GQL_QUERY_DIALECT
+    } else {
+        QUERY_DIALECT
+    });
     let compiled = compile_uncached(engine, name, &query)?;
     let own = compiled.effects?;
     let (effects, dynamic) = resolve_effects(engine, catalog, name, &own);
-    dialect_for(&effects, dynamic.as_deref()).map(|dialect| query.with_dialect(dialect))
+    dialect_for(gql, &effects, dynamic.as_deref()).map(|dialect| query.with_dialect(dialect))
 }
 
-/// The dialect of a query with the inferred `effects` whose body (or a called query) uses the
-/// `dynamic` construct; `Err` for a dynamic body that writes.
+/// The dialect of a query (written in GQL when `gql`) with the inferred `effects` whose body
+/// (or a called query) uses the `dynamic` construct; `Err` for a dynamic body that writes.
 fn dialect_for(
+    gql: bool,
     effects: &[AccessRequestBuf],
     dynamic: Option<&str>,
 ) -> Result<&'static str, String> {
     match (effects.is_empty(), dynamic) {
+        (true, _) if gql => Ok(GQL_QUERY_DIALECT),
+        (false, None) if gql => Ok(GQL_WRITING_QUERY_DIALECT),
         (true, _) => Ok(QUERY_DIALECT),
         (false, None) => Ok(WRITING_QUERY_DIALECT),
         (false, Some(construct)) => Err(format!(
@@ -334,24 +382,40 @@ fn node_of(engine: &Engine, name: &str, query: &QueryDefinition) -> Option<effec
     let compiled = compiled.as_ref().as_ref().ok()?;
     Some(effects::Node {
         effects: compiled.effects.as_ref().ok()?.clone(),
-        counts: query.dialect() == WRITING_QUERY_DIALECT,
+        counts: is_writing(query.dialect()),
     })
 }
 
 /// Compiles a body and checks it: the dialect is one this version runs, the text is exactly one
 /// function named `name` (no statements beside it) whose parameters are the declared ones, and
-/// a query that writes has a body whose effects can be inferred.
+/// a query that writes has a body whose effects can be inferred. A GQL body is checked by
+/// [`saved_query_gql::check`].
 fn compile_uncached(
     engine: &Engine,
     name: &str,
     query: &QueryDefinition,
 ) -> Result<Compiled, String> {
+    #[cfg(feature = "gql")]
+    if query.dialect() == GQL_QUERY_DIALECT || query.dialect() == GQL_WRITING_QUERY_DIALECT {
+        let declared: Vec<&str> = query.params().iter().map(|(p, _)| p.as_str()).collect();
+        let checked = saved_query_gql::check(name, query.source(), &declared)
+            .map_err(|error| error.reason())?;
+        return Ok(Compiled {
+            body: Body::Gql,
+            signature: declared.iter().map(ToString::to_string).collect(),
+            effects: Ok(BodyEffects {
+                writes: checked.writes,
+                calls: Vec::new(),
+                dynamic: None,
+            }),
+        });
+    }
     let writing = query.dialect() == WRITING_QUERY_DIALECT;
     if query.dialect() != QUERY_DIALECT && !writing {
         return Err(format!(
-            "its dialect is '{}', this version runs '{QUERY_DIALECT}' and \
-             '{WRITING_QUERY_DIALECT}'",
-            query.dialect()
+            "its dialect is '{}', this version runs {}",
+            query.dialect(),
+            served_dialects()
         ));
     }
     let ast = engine
@@ -382,7 +446,7 @@ fn compile_uncached(
         }
     }
     Ok(Compiled {
-        ast,
+        body: Body::Rhai(ast),
         signature,
         effects,
     })
@@ -769,6 +833,35 @@ fn params_of(
     Ok(params)
 }
 
+/// The definition of the saved query `name` written in GQL (`language: "gql"`): `body` checked
+/// by [`saved_query_gql::check`] against the parameters declared in `declared` (as in
+/// [`params_of`]), stored in the order the query first reads them, in the dialect
+/// [`GQL_QUERY_DIALECT`] ([`with_inferred_dialect`] sets the one its plan gives). A GQL error
+/// keeps its diagnostic (GQLSTATUS, caret, help) and gains the line `in saved query: "name"`.
+#[cfg(feature = "gql")]
+fn gql_definition(
+    ctx: &NativeCallContext,
+    name: &str,
+    body: String,
+    declared: Option<rhai::Map>,
+) -> Result<QueryDefinition, Box<EvalAltResult>> {
+    let names: Vec<String> = declared
+        .as_ref()
+        .map(|map| map.keys().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let checked = saved_query_gql::check(name, &body, &names).map_err(|error| match error {
+        saved_query_gql::GqlBodyError::Gql(error) => in_saved_query(*script_error(error), name),
+        saved_query_gql::GqlBodyError::Parameters(error) => fail(error),
+    })?;
+    let params = params_of(ctx, name, &checked.parameters, declared)?;
+    let mut query = QueryDefinition::new(body).with_dialect(GQL_QUERY_DIALECT);
+    for (parameter, param) in params {
+        query = query.with_param(parameter, param);
+    }
+    Ok(query)
+}
+
 /// A map argument (or `()` for none), for `operation`.
 pub(super) fn optional_map(
     operation: &str,
@@ -814,10 +907,11 @@ fn effect_entry(effect: &AccessRequestBuf) -> Dynamic {
 }
 
 /// The entry of `queries()` / `get_query()` for a saved query: name, folder, description,
-/// params (in signature order: `#{name, schema, default?, required}`), status (`"ok"` or
-/// `"error"` with `error`, the reason it cannot run: it is unavailable), `writes`, `effects`
-/// and `denied_writes` ([`SavedQueryEffects`], each effect `#{action, element, label, text}`);
-/// with `full` also body, dialect and meta. `catalog` resolves the queries it calls.
+/// language and dialect ([`QueryDefinition::language`]: `"rhai"` or `"gql"`), params (in
+/// signature order: `#{name, schema, default?, required}`), status (`"ok"` or `"error"` with
+/// `error`, the reason it cannot run: it is unavailable), `writes`, `effects` and
+/// `denied_writes` ([`SavedQueryEffects`], each effect `#{action, element, label, text}`); with
+/// `full` also body and meta. `catalog` resolves the queries it calls.
 fn query_entry(
     engine: &Engine,
     catalog: &dyn Fn(&str) -> Option<QueryDefinition>,
@@ -830,6 +924,11 @@ fn query_entry(
     map.insert("name".into(), Dynamic::from(name.to_string()));
     map.insert("folder".into(), text(query.folder()));
     map.insert("description".into(), text(query.description()));
+    map.insert(
+        "language".into(),
+        Dynamic::from(query.language().to_string()),
+    );
+    map.insert("dialect".into(), Dynamic::from(query.dialect().to_string()));
     let params: rhai::Array = query
         .params()
         .iter()
@@ -870,7 +969,6 @@ fn query_entry(
     map.insert("denied_writes".into(), list(&effects.denied_writes));
     if full {
         map.insert("body".into(), Dynamic::from(query.source().to_string()));
-        map.insert("dialect".into(), Dynamic::from(query.dialect().to_string()));
         map.insert("meta".into(), text(query.meta()));
     }
     map
@@ -955,27 +1053,39 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `g.define_query(#{name, body, folder?, description?, params?, meta?})` /
-    /// `g.defineQuery(..)`: stores (or replaces) a saved query. `body` is the text of one Rhai
-    /// function named `name` whose parameters are declared in `params` (parameter name -> a type
-    /// name such as `"integer"`, or `#{schema: <schema node>, default: <value>}`); `description`
-    /// defaults to the function's doc comment. Checked before anything is stored: the body
-    /// compiles and is exactly that function, the parameters match its signature, and
-    /// everything the catalog validates (name, folder, sizes, schemas, defaults). A unit of its
-    /// own (a savepoint inside a whole-script unit). Asks for `Create` on the query (`Update`
-    /// when it replaces one).
+    /// `g.define_query(#{name, body, language?, folder?, description?, params?, meta?})` /
+    /// `g.defineQuery(..)`: stores (or replaces) a saved query. With `language` `"rhai"` (the
+    /// default) `body` is the text of one Rhai function named `name` whose parameters are
+    /// declared in `params` (parameter name -> a type name such as `"integer"`, or
+    /// `#{schema: <schema node>, default: <value>}`); `description` defaults to the function's
+    /// doc comment. With `language: "gql"` (feature `gql`) `body` is one GQL query whose
+    /// `$name` references are exactly the declared parameters (stored in the order of their
+    /// first use). Checked before anything is stored: the body compiles and is exactly that
+    /// function (a GQL body parses, binds and lowers), the parameters match its signature (the
+    /// parameters the GQL query reads), and everything the catalog validates (name, folder,
+    /// sizes, schemas, defaults). A unit of its own (a savepoint inside a whole-script unit).
+    /// Asks for `Create` on the query (`Update` when it replaces one).
     pub fn define_query(
         ctx: NativeCallContext,
         this: &mut Self,
         spec: Dynamic,
     ) -> Result<(), Box<EvalAltResult>> {
-        const KEYS: [&str; 6] = ["name", "body", "folder", "description", "params", "meta"];
+        const KEYS: [&str; 7] = [
+            "name",
+            "body",
+            "language",
+            "folder",
+            "description",
+            "params",
+            "meta",
+        ];
         let operation = "define_query";
         let actual = type_name_of(&spec);
         let Some(mut spec) = spec.try_cast::<rhai::Map>() else {
             return Err(fail(ScriptError::ArgumentMismatch {
                 step_name: operation.to_string(),
-                expected: "a map #{name, body, folder?, description?, params?, meta?}".to_string(),
+                expected: "a map #{name, body, language?, folder?, description?, params?, meta?}"
+                    .to_string(),
                 actual,
             }));
         };
@@ -994,10 +1104,29 @@ impl ScriptGraphTraversalSource {
                 actual: "no name".to_string(),
             })
         })?;
+        let gql = match optional_text(operation, "language", take("language"))?.as_deref() {
+            None | Some("rhai") => false,
+            Some("gql") if cfg!(feature = "gql") => true,
+            Some(other) => {
+                return Err(fail(ScriptError::ArgumentMismatch {
+                    step_name: operation.to_string(),
+                    expected: if cfg!(feature = "gql") {
+                        "language \"rhai\" (the default) or \"gql\"".to_string()
+                    } else {
+                        "language \"rhai\" (this build has no GQL: feature gql)".to_string()
+                    },
+                    actual: format!("the language '{other}'"),
+                }));
+            }
+        };
         let body = optional_text(operation, "body", take("body"))?.ok_or_else(|| {
             fail(ScriptError::ArgumentMismatch {
                 step_name: operation.to_string(),
-                expected: "the key body (the text of one Rhai function)".to_string(),
+                expected: if gql {
+                    "the key body (the text of one GQL query)".to_string()
+                } else {
+                    "the key body (the text of one Rhai function)".to_string()
+                },
                 actual: "no body".to_string(),
             })
         })?;
@@ -1014,6 +1143,31 @@ impl ScriptGraphTraversalSource {
         Definition::query(name.as_str(), QueryDefinition::new("fn"))
             .validate()
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
+        #[cfg(feature = "gql")]
+        if gql {
+            let query = gql_definition(&ctx, &name, body, declared)?;
+            let query = match folder {
+                Some(folder) => query.with_folder(folder),
+                None => query,
+            };
+            let query = match description {
+                Some(description) => query.with_description(description),
+                None => query,
+            };
+            let query = match meta {
+                Some(meta) => query.with_meta(meta),
+                None => query,
+            };
+            let graph = this.catalog_graph(operation)?.clone();
+            let query = with_inferred_dialect(ctx.engine(), &stored_queries(&graph), &name, query)
+                .map_err(|reason| {
+                    fail(ScriptError::InvalidQueryBody {
+                        query: name.clone(),
+                        reason,
+                    })
+                })?;
+            return this.store_queries(operation, vec![(name, query)]);
+        }
         let ast = ctx.engine().compile(&body).map_err(|err| {
             fail(ScriptError::InvalidQueryBody {
                 query: name.clone(),
@@ -1175,7 +1329,9 @@ impl ScriptGraphTraversalSource {
                 }),
                 None => node_of(ctx.engine(), next, &stored(next)?),
             });
-            dialects.push(dialect_for(&effects, dynamic.as_deref()).map_err(|r| invalid(name, r))?);
+            dialects.push(
+                dialect_for(false, &effects, dynamic.as_deref()).map_err(|r| invalid(name, r))?,
+            );
         }
         let names: rhai::Array = queries
             .iter()
@@ -1332,7 +1488,7 @@ impl ScriptGraphTraversalSource {
         // What the call may write: the inferred effects of a query that writes (with those of
         // the queries it calls), none when it is read-only or called from a read-only body.
         let effects = match &compiled.effects {
-            Ok(own) if query.dialect() == WRITING_QUERY_DIALECT && !self.access.read_only => {
+            Ok(own) if is_writing(query.dialect()) && !self.access.read_only => {
                 resolve_effects(ctx.engine(), &stored_queries(graph), name, own).0
             }
             _ => Vec::new(),
@@ -1353,7 +1509,16 @@ impl ScriptGraphTraversalSource {
             embedders: self.access.embedders.clone(),
         });
         if effects.is_empty() {
-            let result = self.run_body(ctx, compiled, name, graph, read_only, values)?;
+            let result =
+                self.run_body(ctx, compiled, query, name, graph, read_only, values, &bound)?;
+            // A GQL query whose plan writes runs now, so its writes meet the read-only
+            // authorizer like those of a Rhai body (denied before anything is written).
+            #[cfg(feature = "gql")]
+            let result = match compiled.body {
+                Body::Gql => run_returned_writes(ctx, result, depth)
+                    .map_err(|err| in_saved_query(*err, name))?,
+                Body::Rhai(_) => result,
+            };
             if let Some(location) = returned_write(&result, "the result", depth) {
                 return Err(fail(ScriptError::QueryReturnedWrite {
                     query: name.to_string(),
@@ -1391,8 +1556,8 @@ impl ScriptGraphTraversalSource {
             embedders: self.access.embedders.clone(),
         });
         let mut arguments = crate::value::ValueMap::new();
-        for (parameter, value) in bound {
-            arguments.insert(ElementProperty::from(parameter), value);
+        for (parameter, value) in &bound {
+            arguments.insert(ElementProperty::from(parameter.as_str()), value.clone());
         }
         let metadata = CommitMetadata::new()
             .with_attribute("saved_query", name)
@@ -1411,19 +1576,27 @@ impl ScriptGraphTraversalSource {
                 })));
             };
             plan::UnitBody(
-                self.run_body(ctx, compiled, name, private, writing.clone(), values)
-                    .and_then(|value| {
-                        run_returned_writes(ctx, value, depth)
-                            .map_err(|err| in_saved_query(*err, name))
-                    })
-                    .and_then(|value| match returned_write(&value, "the result", depth) {
-                        Some(location) => Err(fail(ScriptError::QueryReturnedWrite {
-                            query: name.to_string(),
-                            location,
-                        })),
-                        None => Ok(value),
-                    })
-                    .map(|value| seal_returned(value, private, graph, &read_only, depth)),
+                self.run_body(
+                    ctx,
+                    compiled,
+                    query,
+                    name,
+                    private,
+                    writing.clone(),
+                    values,
+                    &bound,
+                )
+                .and_then(|value| {
+                    run_returned_writes(ctx, value, depth).map_err(|err| in_saved_query(*err, name))
+                })
+                .and_then(|value| match returned_write(&value, "the result", depth) {
+                    Some(location) => Err(fail(ScriptError::QueryReturnedWrite {
+                        query: name.to_string(),
+                        location,
+                    })),
+                    None => Ok(value),
+                })
+                .map(|value| seal_returned(value, private, graph, &read_only, depth)),
             )
         };
         graph
@@ -1432,16 +1605,22 @@ impl ScriptGraphTraversalSource {
             .map(|(value, _)| value)
     }
 
-    /// Runs the compiled body of the saved query `name` with the argument `values` on `graph`
-    /// under `access`; its result as it is.
+    /// Runs the compiled body of the saved query `name` (definition `query`) with the argument
+    /// `values` (in signature order; `bound` the same as data values) on `graph` under
+    /// `access`; its result as it is. A GQL body
+    /// runs no Rhai: its result is the traversal `g.gql(body, params)` of `graph` under
+    /// `access`, not run yet.
+    #[allow(clippy::too_many_arguments)]
     fn run_body(
         &self,
         ctx: &NativeCallContext,
         compiled: &Compiled,
+        query: &QueryDefinition,
         name: &str,
         graph: &Arc<dyn AnyGraph>,
         access: Arc<access::ScriptAccess>,
         values: Vec<Dynamic>,
+        bound: &[(String, ElementProperty)],
     ) -> Result<Dynamic, Box<EvalAltResult>> {
         let g = ScriptGraphTraversalSource {
             g: Some(graph.clone()),
@@ -1452,6 +1631,23 @@ impl ScriptGraphTraversalSource {
             anonymous: false,
             now: None,
         };
+        let ast = match &compiled.body {
+            Body::Rhai(ast) => ast,
+            #[cfg(feature = "gql")]
+            Body::Gql => {
+                let params = bound
+                    .iter()
+                    .map(|(parameter, value)| (CompactString::new(parameter), value.clone()))
+                    .collect();
+                let mut g = g;
+                return g
+                    .gql_step(query.source().to_string(), params)
+                    .map(|source| Dynamic::from(source.stamped(ctx)))
+                    .map_err(|err| in_saved_query(*err, name));
+            }
+        };
+        #[cfg(not(feature = "gql"))]
+        let _ = (query, bound);
         let mut scope = eval::scope_with_access(g, access);
         // The body sees the caller's `now()` (one value per evaluation, `access.rs`).
         let tag = access::nested_tag(ctx, access::ScriptAccess::of_context(ctx));
@@ -1462,7 +1658,7 @@ impl ScriptGraphTraversalSource {
                     .rewind_scope(true)
                     .with_tag(tag),
                 &mut scope,
-                &compiled.ast,
+                ast,
                 name,
                 values,
             )

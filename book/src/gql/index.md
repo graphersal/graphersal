@@ -93,6 +93,7 @@ the walk from it.
 | Command line | `graphersal -e 'g.gql("MATCH (p:person) RETURN p.name AS name")'`, or in the REPL |
 | Python | through a script: `graph.query('g.gql("...", #{...})', params={...})` |
 | Playground | type `g.gql("...")` in the query editor; the examples list has a GQL group |
+| Saved queries | `g.define_query(#{name: "older", language: "gql", params: #{min: "integer"}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name"})`, then `g.query("older", #{min: 30})` from any front end ([Saved queries in GQL](../users_guide/saved_queries.md#saved-queries-in-gql)) |
 | MCP (dev server) | the tool `gql` {`query`, `params`, `profile`, `max_rows`}: the query as plain text, no Rhai string around it; it writes like the `query` tool, and a server started with `--mcp-read-only` refuses its writes |
 
 In Rust:

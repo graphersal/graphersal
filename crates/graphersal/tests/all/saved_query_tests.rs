@@ -858,3 +858,477 @@ fn a_query_defined_on_a_store_survives_a_reopen() {
     );
     store.close().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Saved queries written in GQL (`language: "gql"`, book "Saved queries in GQL")
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(feature = "gql")]
+mod gql {
+    use super::*;
+    use graphersal::catalog::{GQL_QUERY_DIALECT, GQL_WRITING_QUERY_DIALECT, QUERY_DIALECT};
+
+    fn field(graph: &Arc<Graph>, name: &str, key: &str) -> String {
+        text(ok(graph, &format!(r#"g.get_query("{name}")["{key}"]"#)))
+    }
+
+    fn effects(graph: &Arc<Graph>, name: &str) -> String {
+        text(ok(
+            graph,
+            &format!(r#"g.get_query("{name}")["effects"].map(|e| e.text)"#),
+        ))
+    }
+
+    /// The modern graph with `older(min = 30)` in GQL and `add(name)`, a GQL insert returning
+    /// what it created.
+    fn with_gql() -> Arc<Graph> {
+        let graph = modern();
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "older", language: "gql", folder: "reports",
+                   description: "Persons older than min.",
+                   params: #{min: #{schema: #{type: "integer"}, default: 30}},
+                   body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name"});
+               g.define_query(#{name: "add", language: "gql", params: #{name: "string"},
+                   body: "INSERT (p:person {name: $name}) RETURN p.name AS name"})"#,
+        );
+        graph
+    }
+
+    #[test]
+    fn a_gql_query_is_stored_as_written_with_its_language_and_dialect() {
+        let graph = with_gql();
+        assert_eq!(
+            field(&graph, "older", "body"),
+            "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name"
+        );
+        assert_eq!(field(&graph, "older", "language"), "gql");
+        assert_eq!(field(&graph, "older", "dialect"), GQL_QUERY_DIALECT);
+        assert_eq!(field(&graph, "older", "writes"), "false");
+        assert_eq!(field(&graph, "older", "folder"), "reports");
+        assert_eq!(field(&graph, "add", "dialect"), GQL_WRITING_QUERY_DIALECT);
+        assert_eq!(field(&graph, "add", "writes"), "true");
+        // The listing shows the language and the dialect too, Rhai queries as "rhai".
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "n", body: "fn n() { 1 }"})"#,
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.queries().map(|q| q.name + ":" + q.language + ":" + q.dialect)"#
+            )),
+            format!(
+                r#"["add:gql:{GQL_WRITING_QUERY_DIALECT}", "n:rhai:{QUERY_DIALECT}", "older:gql:{GQL_QUERY_DIALECT}"]"#
+            )
+        );
+        // An explicit "rhai" is the default.
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "m", language: "rhai", body: "fn m() { 2 }"})"#,
+        );
+        assert_eq!(field(&graph, "m", "language"), "rhai");
+        // The Rust API reads the same.
+        let definition = graph
+            .read()
+            .traversal()
+            .get_definition(DefinitionKind::QUERY, "older")
+            .unwrap()
+            .unwrap();
+        let query = definition.as_query().unwrap();
+        assert_eq!(query.language(), "gql");
+        assert_eq!(query.dialect(), GQL_QUERY_DIALECT);
+    }
+
+    #[test]
+    fn a_call_returns_rows_like_gql_and_gremlin_may_continue() {
+        let graph = with_gql();
+        assert_eq!(
+            text(ok(&graph, r#"g.query("older").to_list()"#)),
+            r#"[#{"name": "josh"}, #{"name": "peter"}]"#
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.query("older", #{min: 31}).select("name").to_list()"#
+            )),
+            r#"["josh", "peter"]"#
+        );
+        // Equal to the same g.gql() call.
+        assert_eq!(
+            text(ok(&graph, r#"g.query("older", #{min: 26}).to_list()"#)),
+            text(ok(
+                &graph,
+                r#"g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name", #{min: 26}).to_list()"#
+            ))
+        );
+        // A parameter the plan needs (LIMIT $k).
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "top", language: "gql", params: #{k: "integer"},
+                   body: "MATCH (p:person) RETURN p.name AS n ORDER BY n LIMIT $k"})"#,
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.query("top", #{k: 2}).select("n").to_list()"#
+            )),
+            r#"["josh", "marko"]"#
+        );
+        assert_eq!(field(&graph, "top", "writes"), "false");
+    }
+
+    #[test]
+    fn parameters_are_stored_in_the_order_the_query_reads_them_and_checked_at_a_call() {
+        let graph = modern();
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "between", language: "gql",
+                   params: #{a: "integer", b: "integer"},
+                   body: "MATCH (p:person) WHERE p.age > $b AND p.age < $a RETURN p.name AS n"})"#,
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.get_query("between")["params"].map(|p| p.name)"#
+            )),
+            r#"["b", "a"]"#
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.query("between", #{a: 33, b: 28}).select("n").to_list()"#
+            )),
+            r#"["marko", "josh"]"#
+        );
+        // The arguments are checked like those of a Rhai query.
+        assert_contains(
+            &err(&graph, r#"g.query("between", #{a: 1})"#),
+            "Saved query 'between' needs the argument 'b' (int64), it has no default",
+        );
+        assert_contains(
+            &err(&graph, r#"g.query("between", #{a: 1, b: 2, c: 3})"#),
+            "Saved query 'between' has no parameter 'c'",
+        );
+        assert_contains(
+            &err(&graph, r#"g.query("between", #{a: "x", b: 2})"#),
+            "Invalid argument 'a' for saved query 'between'",
+        );
+        assert_contains(
+            &err(&graph, r#"g.v().query("between", #{a: 1, b: 2})"#),
+            "can only start a traversal",
+        );
+    }
+
+    #[test]
+    fn a_gql_insert_writes_in_one_unit_and_returns_a_reading_traversal() {
+        let graph = with_gql();
+        assert_eq!(
+            effects(&graph, "add"),
+            r#"["Create Data(vertex \"person\")"]"#
+        );
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.query("add", #{name: "zed"}).select("name").to_list()"#
+            )),
+            r#"["zed"]"#
+        );
+        assert_eq!(
+            text(ok(&graph, r#"g.v().has("name", "zed").count().next()"#)),
+            "1"
+        );
+        // Effects are exact per label, edges included.
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "adopt", language: "gql", params: #{owner: "string"},
+                   body: "MATCH (p:person {name: $owner}) INSERT (p)-[:OWNS]->(:Pet&Cat {owner: $owner})"})"#,
+        );
+        assert_eq!(
+            effects(&graph, "adopt"),
+            r#"["Create Data(vertex \"Pet\")", "Create Data(vertex \"Cat\")", "Create Data(edge \"OWNS\")"]"#
+        );
+        let _ = ok(&graph, r#"g.query("adopt", #{owner: "marko"})"#);
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.v().has_label("Cat").in("OWNS").values("name").to_list()"#
+            )),
+            r#"["marko"]"#
+        );
+        // A failing row rolls back everything the call wrote.
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "many", language: "gql", params: #{xs: #{schema: #{type: "array"}}},
+                   body: "FOR x IN $xs INSERT (:B {v: 1 / x})"})"#,
+        );
+        let failed = err(&graph, r#"g.query("many", #{xs: [1, 2, 0]})"#);
+        assert_contains(&failed, "division by zero");
+        assert_contains(&failed, "in saved query: \"many\"");
+        assert_eq!(
+            text(ok(&graph, r#"g.v().has_label("B").count().next()"#)),
+            "0"
+        );
+        let _ = ok(&graph, r#"g.query("many", #{xs: [1, 2]})"#);
+        assert_eq!(
+            text(ok(&graph, r#"g.v().has_label("B").count().next()"#)),
+            "2"
+        );
+    }
+
+    #[test]
+    fn a_read_only_gql_query_cannot_write_through_its_result() {
+        let graph = with_gql();
+        let failed = err(
+            &graph,
+            r#"g.query("older").select("name").drop().iterate()"#,
+        );
+        assert_contains(&failed, "a saved query is read-only");
+        assert_eq!(graph.read().vertex_count(), 6);
+        // A GQL insert stored with the read-only dialect (Rust API, which keeps the dialect):
+        // its writes are denied before anything is written.
+        graph
+            .write()
+            .traversal_mut()
+            .define_query(
+                "sneak",
+                QueryDefinition::new("INSERT (:Sneak)").with_dialect(GQL_QUERY_DIALECT),
+            )
+            .unwrap();
+        assert_eq!(field(&graph, "sneak", "writes"), "false");
+        assert_eq!(
+            text(ok(
+                &graph,
+                r#"g.get_query("sneak")["denied_writes"].map(|e| e.text)"#
+            )),
+            r#"["Create Data(vertex \"Sneak\")"]"#
+        );
+        let failed = err(&graph, r#"g.query("sneak")"#);
+        assert_contains(
+            &failed,
+            r#"Permission denied for 'gql:insert_node' (Create Data(vertex "Sneak"))"#,
+        );
+        assert_contains(&failed, "in saved query: \"sneak\"");
+        assert_eq!(graph.read().vertex_count(), 6);
+    }
+
+    #[test]
+    fn rhai_queries_calling_gql_queries_carry_their_effects() {
+        let graph = with_gql();
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "outer", body: "fn outer() { g.query(\"add\", #{name: \"o\"}).to_list() }"})"#,
+        );
+        assert_eq!(field(&graph, "outer", "dialect"), "graphersal-rhai/2");
+        assert_eq!(
+            effects(&graph, "outer"),
+            r#"["Create Data(vertex \"person\")"]"#
+        );
+        assert_eq!(
+            text(ok(&graph, r#"g.query("outer")"#)),
+            r#"[#{"name": "o"}]"#
+        );
+        // A read-only body calling it: denied, nothing written.
+        graph
+            .write()
+            .traversal_mut()
+            .define_query(
+                "reader",
+                QueryDefinition::new(r#"fn reader() { g.query("add", #{name: "r"}).to_list() }"#),
+            )
+            .unwrap();
+        let failed = err(&graph, r#"g.query("reader")"#);
+        assert_contains(&failed, "a saved query is read-only");
+        assert_eq!(
+            text(ok(&graph, r#"g.v().has("name", "r").count().next()"#)),
+            "0"
+        );
+        // A read-only GQL query called from a Rhai body.
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "names", body: "fn names() { g.query(\"older\").select(\"name\").to_list() }"})"#,
+        );
+        assert_eq!(field(&graph, "names", "dialect"), QUERY_DIALECT);
+        assert_eq!(
+            text(ok(&graph, r#"g.query("names")"#)),
+            r#"["josh", "peter"]"#
+        );
+    }
+
+    #[test]
+    fn an_invalid_body_is_refused_before_anything_is_stored() {
+        let graph = modern();
+        for (script, expected) in [
+            (
+                r#"g.define_query(#{name: "bad", language: "gql", body: "MATCH (p) RETRUN p"})"#,
+                "unexpected `RETRUN`",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "gql", body: "MATCH (p) RETURN q"})"#,
+                "GQL semantic error",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "gql", body: "MATCH (p) RETURN p.name AS n LIMIT $k"})"#,
+                "reads the parameter $k, which its params do not declare",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "gql", params: #{k: "integer"}, body: "MATCH (p) RETURN p"})"#,
+                "declares the parameter 'k', which its GQL query never reads",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "gql", body: "fn bad() { g.v() }"})"#,
+                "GQL syntax error",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", body: "MATCH (p) RETURN p"})"#,
+                "Invalid body of saved query 'bad': it does not compile",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "cypher", body: "MATCH (p) RETURN p"})"#,
+                "got the language 'cypher'",
+            ),
+            (
+                r#"g.define_query(#{name: "bad", language: "gql"})"#,
+                "the key body (the text of one GQL query)",
+            ),
+        ] {
+            assert_contains(&err(&graph, script), expected);
+        }
+        assert_eq!(text(ok(&graph, "g.queries().len()")), "0");
+        // define_queries stays Rhai: a GQL text does not compile there.
+        assert_contains(
+            &err(&graph, r#"g.define_queries("", "MATCH (p) RETURN p")"#),
+            "the source does not compile",
+        );
+    }
+
+    #[test]
+    fn redefining_replaces_the_language_and_the_cached_form() {
+        let graph = with_gql();
+        assert_eq!(text(ok(&graph, r#"g.query("older").count().next()"#)), "2");
+        // The same name in Rhai, then in GQL again: every call sees the latest definition.
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "older", body: "fn older() { g.v().has_label(\"person\") }"})"#,
+        );
+        assert_eq!(field(&graph, "older", "language"), "rhai");
+        assert_eq!(text(ok(&graph, r#"g.query("older").count().next()"#)), "4");
+        let _ = ok(
+            &graph,
+            r#"g.define_query(#{name: "older", language: "gql", body: "MATCH (s:software) RETURN s"})"#,
+        );
+        assert_eq!(text(ok(&graph, r#"g.query("older").count().next()"#)), "2");
+        // A rollback restores the earlier body, and the call follows it.
+        let failed = eval_value_atomic(
+            graph.clone(),
+            r#"g.define_query(#{name: "older", language: "gql", body: "MATCH (p) RETURN p"});
+               if g.query("older").count().next() != 6 { throw "wrong" }
+               throw "roll back""#,
+            Default::default(),
+            &ScriptLimits::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_contains(&failed, "roll back");
+        assert_eq!(text(ok(&graph, r#"g.query("older").count().next()"#)), "2");
+    }
+
+    #[test]
+    fn the_rust_api_keeps_the_gql_language_when_it_infers_the_dialect() {
+        let graph = modern();
+        let engine = graphersal::script::engine();
+        let catalog = |_: &str| None;
+        let inferred = graphersal::script::with_inferred_dialect(
+            &engine,
+            &catalog,
+            "add",
+            QueryDefinition::new("INSERT (:person {name: $n})")
+                .with_dialect(GQL_QUERY_DIALECT)
+                .with_param("n", QueryParam::from_value("n", &"string".into()).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(inferred.dialect(), GQL_WRITING_QUERY_DIALECT);
+        let effects =
+            graphersal::script::saved_query_effects(&engine, &catalog, "add", &inferred).unwrap();
+        assert!(effects.writes);
+        assert_eq!(effects.effects.len(), 1);
+        // A read-only body back to the read-only dialect.
+        let read = graphersal::script::with_inferred_dialect(
+            &engine,
+            &catalog,
+            "all",
+            QueryDefinition::new("MATCH (n) RETURN n").with_dialect(GQL_WRITING_QUERY_DIALECT),
+        )
+        .unwrap();
+        assert_eq!(read.dialect(), GQL_QUERY_DIALECT);
+        // Errors are reasons.
+        let refused = graphersal::script::with_inferred_dialect(
+            &engine,
+            &catalog,
+            "bad",
+            QueryDefinition::new("MATCH (n) RETURN $x").with_dialect(GQL_QUERY_DIALECT),
+        )
+        .unwrap_err();
+        assert_contains(&refused, "it reads the parameter $x");
+        drop(graph);
+    }
+
+    /// A GQL query defined on a Store survives the journal, a checkpoint, a fork and a backup
+    /// unchanged, and runs after each.
+    #[cfg(feature = "persist")]
+    #[test]
+    fn a_gql_query_survives_every_store_path() {
+        use graphersal::persist::{MemDir, RecoveryTarget, Store, StoreDir, StoreOptions};
+
+        let definition = |graph: &Arc<Graph>| {
+            graph
+                .read()
+                .traversal()
+                .get_definition(DefinitionKind::QUERY, "add")
+                .unwrap()
+                .unwrap()
+        };
+        let dir: Arc<dyn StoreDir> = Arc::new(MemDir::named("gql-saved-query"));
+        let store = Store::create(&dir, StoreOptions::new()).unwrap();
+        let _ = ok(
+            store.graph(),
+            r#"g.define_query(#{name: "add", language: "gql", params: #{name: "string"},
+                   body: "INSERT (p:person {name: $name}) RETURN p.name AS name"})"#,
+        );
+        let expected = definition(store.graph());
+        assert_eq!(
+            expected.as_query().unwrap().dialect(),
+            GQL_WRITING_QUERY_DIALECT
+        );
+        store.close().unwrap();
+        let check = |graph: &Arc<Graph>, name: &str| {
+            assert_eq!(definition(graph), expected);
+            assert_eq!(
+                text(ok(
+                    graph,
+                    &format!(r#"g.query("add", #{{name: "{name}"}}).select("name").to_list()"#)
+                )),
+                format!(r#"["{name}"]"#)
+            );
+        };
+        // The journal.
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        check(store.graph(), "wal");
+        // A checkpoint.
+        store.checkpoint(None).unwrap();
+        store.close().unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        check(store.graph(), "snapshot");
+        // A fork and a backup.
+        let fork: Arc<dyn StoreDir> = Arc::new(MemDir::named("gql-saved-query-fork"));
+        store.fork(RecoveryTarget::Latest, &fork).unwrap();
+        let backup: Arc<dyn StoreDir> = Arc::new(MemDir::named("gql-saved-query-backup"));
+        store.backup(&backup).unwrap();
+        store.close().unwrap();
+        let forked = Store::open(&fork, StoreOptions::new()).unwrap();
+        check(forked.graph(), "fork");
+        forked.close().unwrap();
+        let opened = Store::open_backup(&backup, StoreOptions::new()).unwrap();
+        assert_eq!(definition(opened.graph()), expected);
+    }
+}

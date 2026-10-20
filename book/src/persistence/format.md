@@ -427,7 +427,8 @@ payload     = property map (3) with inline keys (as in a WAL record)
 | 4..127 | unassigned (assigned only by this format) |
 | 128..255 | host kinds: reserved for applications built on the library, never assigned by this format (16 rule 8) |
 
-A **saved query** (kind 1) is one Rhai function stored as text and called by name; its name is
+A **saved query** (kind 1) is one Rhai function (or one GQL query) stored as text and called by
+name; its name is
 an identifier (`[A-Za-z_][A-Za-z0-9_]*`, at most 128 bytes). Its payload keys, written in this
 order, followed by the keys the writer does not know in the order it read them:
 
@@ -435,8 +436,8 @@ order, followed by the keys the writer does not know in the order it read them:
 |---|---|
 | `folder` | string: a `/`-separated folder path; absent = the root |
 | `description` | string; absent = none |
-| `dialect` | string: the content version of `source`, `"graphersal-rhai/1"` |
-| `source` | string: the Rhai function text |
+| `dialect` | string: the language and content version of `source`: `"graphersal-rhai/1"` (a Rhai function that reads), `"graphersal-rhai/2"` (a Rhai function that may write), `"graphersal-gql/1"` (a GQL query that reads), `"graphersal-gql/2"` (a GQL query that writes); a reader that does not run a dialect keeps the query unchanged and lists it as not runnable |
+| `source` | string: the Rhai function text, or the GQL query text |
 | `params` | string: canonical compact JSON of an object, parameter name -> `{"schema": <schema node>, "default": <value>}` (`default` absent when the parameter has none), in declaration order |
 | `meta` | string, free, never interpreted; absent = none |
 

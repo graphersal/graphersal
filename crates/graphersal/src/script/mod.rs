@@ -66,6 +66,8 @@ mod property_index;
 mod register;
 mod render;
 mod saved_query;
+#[cfg(feature = "gql")]
+mod saved_query_gql;
 mod source;
 mod step;
 #[cfg(all(test, feature = "io", feature = "serde"))]
