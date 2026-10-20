@@ -951,6 +951,27 @@ table.data-table {
 .data-table .cell-vector summary { cursor: pointer; font-family: var(--font-mono); }
 .data-table .cell-vector .mono { color: var(--text-muted); white-space: normal; }
 .data-table .cell-str { color: var(--syn-string); }
+/* Collapsed long values (components/value-text.js): the inspector and the result table. */
+.inspector .value-text, .value-text.collapsible .value-body { white-space: pre-wrap; }
+.value-tools { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; vertical-align: middle; white-space: nowrap; }
+.value-toggle {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 0 5px;
+  cursor: pointer;
+}
+.value-toggle:hover { background: var(--surface-3); }
+.value-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.value-tools .icon-btn.value-copy { width: 20px; height: 20px; }
+.value-tools .icon-btn.value-copy svg { width: 13px; height: 13px; }
+.data-table .value-text.collapsible:not(.expanded) { display: inline-flex; align-items: baseline; max-width: 400px; }
+.data-table .value-text.collapsible:not(.expanded) .value-body { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.data-table .value-text.collapsible.expanded { display: block; white-space: pre-wrap; word-break: break-word; min-width: 260px; }
 .data-table .cell-bool { color: var(--syn-keyword); font-family: var(--font-mono); }
 
 pre.code-view {
