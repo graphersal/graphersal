@@ -39,6 +39,8 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:for("x IN <list>")` | `FOR` / `UNWIND`: one row per item of the list (`unfold()` with GQL's `NULL` rule); with an ordinal the row is the record of item and position |
 | `gql:lookup("(n:label)", "<equality>")` | starts a pattern at the vertices an equality with a value of the row finds, by id (`[id]`) or through a property index (`[index: vertex label.key]`) |
 | `gql:value("<expression>")` | the last step of a pattern comprehension's child: the value of its `\|` part for one match, which the host step collects into the list |
+| `gql:insert_node(["label", ...], "{props}")` | `INSERT` of one node: creates it per row, with all its properties in one storage call, and makes it the current element ([Writes](#writes)) |
+| `gql:insert_edge("label", "from", "to", "{props}")` | `INSERT` of one edge between the nodes of the row named `from` and `to` (`(#n)` for an unnamed node of the pattern) |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 `gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
@@ -747,12 +749,56 @@ does not shorten a call that has started ([Semantics](semantics.md#call-subqueri
 that imports nothing still runs once per row. A `UNION` or `NEXT` inside a body is a `union()`
 or the next steps inside the `flat_map` child, run per row.
 
+## Writes
+
+An `INSERT` becomes one `gql:insert_node` per new node and then one `gql:insert_edge` per new
+edge, in text order; a query that ends in a write ends with `discard()`, which drops the rows.
+A leading `INSERT` starts from one empty row, `inject(0)`:
+
+```rhai,graph=modern
+g.gql("INSERT (:city {name: 'Berlin'})").profile()
+```
+
+```text
+Step                                                         Call      In     Out
+==================================================================================
+inject(0)                                                       1       0       1
+gql:insert_node(["city"], "{name: 'Berlin'}")                   1       1       1
+discard()                                                       1       1       0
+```
+
+After a `MATCH`, the variables the insert reads are labelled with `as()`:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes]->(f:fruit {name: 'apple'})").profile()
+```
+
+```text
+Step                                                            Call      In     Out
+=====================================================================================
+v(labels: ["person"])                                              1       0       4
+has("name", P.eq("marko"))                                         1       4       1
+as("p") [path: labels(p)]                                          1       1       1
+gql:insert_node(["fruit"], "{name: 'apple'}") [path: labels(p)]    1       1       1
+gql:insert_edge("likes", "p", "f")                                 1       1       1
+discard()                                                          1       1       0
+Optimizer rules applied: source_filter_pushdown
+```
+
+A plan that writes never merges traversers, so the lowering places no merge points in it; a
+`lazy_barrier()` the optimizer adds between two hops passes every traverser on unmerged
+(`In` = `Out`). The write steps run only after the steps before them consumed their whole
+input, which is what makes the visibility rule of [Semantics](semantics.md#writes) hold. A
+`CALL` body that ends in a write is `optional(__.<body>.discard())`: it runs per row and keeps
+the row.
+
 ## Limits, cancellation, permissions
 
 A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 [resource limits](../users_guide/resource_limits.md) and [query limits](../users_guide/query_limits.md),
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
-which sees the reads of the lowered plan: reading a denied label through `gql()` is refused as
+which sees the reads and writes of the lowered plan (an `INSERT` asks `Create` per new label,
+like `add_v()` and `add_e()`; [Writing with GQL](writes.md#permissions)): reading a denied label through `gql()` is refused as
 the equivalent Gremlin is (also a label reached only through a quantified edge, the body of a
 quantified path pattern or an optional
 part, or only inside an `EXISTS`, `COUNT` or `COLLECT` body, a pattern comprehension, a `CALL`

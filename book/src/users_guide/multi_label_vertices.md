@@ -8,8 +8,9 @@ vertex's labels as an ordered, deduplicated set — zero, one, or many — so th
 `(n:A:B)`) tests a vertex's label set.
 
 **This page documents storage and Gremlin-facing behavior.** [`g.gql()`](../gql/index.md) reads
-label sets with GQL label expressions; it is read-only, so labels are changed with the Gremlin
-steps below (there is no `SET n:Admin`).
+label sets with GQL label expressions and creates multi-label nodes with `INSERT (n:A&B)`
+(Cypher `CREATE (n:A:B)`); `SET n:Admin` and `REMOVE n:Admin` are not supported yet, so the labels
+of an existing vertex are changed with the Gremlin steps below.
 
 ## Creating a multi-label vertex
 

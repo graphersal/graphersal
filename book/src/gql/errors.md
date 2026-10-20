@@ -357,7 +357,7 @@ not supported, and `IN TRANSACTIONS` is [refused](refused.md):
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
 g.gql("MATCH (p:person) CALL { WITH p AS q MATCH (q)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body: its first WITH is not an importing WITH
 g.gql("MATCH (p:person) CALL { WITH p WHERE p.age > 30 MATCH (p)-->(s) RETURN s.name AS sw } RETURN sw")   // error: the variable `p` is not imported into the CALL body: its first WITH is not an importing WITH
-g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN (a unit subquery) only makes sense for writes
+g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN (a unit subquery) only makes sense for writes, and this body writes nothing
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(s) RETURN s.name AS sw } IN TRANSACTIONS RETURN sw")   // refused: CALL { } IN TRANSACTIONS commits writes in batches
 ```
 
@@ -365,7 +365,7 @@ g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(s) RETURN s.name AS sw } IN TRAN
 Help: rename the column inside the body, as in RETURN ... AS p2. A CALL subquery, CALL (a, b) { <query ending in RETURN> }, runs its query once for each incoming row: the body reads only the variables its scope clause names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } those of its first WITH), and passes on only the columns of its RETURN, which must be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as in g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made"). A row whose body returns no record is dropped; OPTIONAL CALL keeps it with NULL columns.
 Help: import `p` with a variable scope clause, as in CALL (p) { MATCH ... WHERE ... }, or in Cypher with a WITH of plain variables first and the rest of the body after it, as in CALL { WITH p MATCH ... WHERE ... }. A CALL subquery, ...
 Help: end the body with RETURN and the columns the query reads after it, for example MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made. A CALL subquery, ...
-Help: remove IN TRANSACTIONS: a read-only subquery needs no batches. A CALL subquery, ...
+Help: remove IN TRANSACTIONS: the whole query commits at once, and a query that fails changes nothing. A CALL subquery, ...
 ```
 
 `CALL` bodies and whole-query subquery bodies (`EXISTS`, `COUNT` or `COLLECT` with `WITH`,
@@ -433,18 +433,73 @@ of the fixes:
 Help: split the pattern into several MATCH clauses that share a variable, for example MATCH (a)-->(b)-->(c) MATCH (c)-->(d)-->(e) RETURN e (edge uniqueness then holds within each clause only), repeat a chain as a quantified path pattern, whose body edges count once however often it repeats, for example MATCH (a) (()-->()){65} (z) RETURN z, or walk a long path with Gremlin repeat(), for example g.v().repeat(__.out()).times(100). The query is larger than gql() accepts.
 ```
 
+## INSERT
+
+An `INSERT` pattern that cannot create what it says fails before the run; its help shows the
+accepted form and ends with one shared paragraph on `INSERT`:
+
+```rhai,graph=modern
+g.gql("INSERT (a:x)-[:r]-(b:y)")   // error: INSERT needs a direction; write -[e:T]-> or <-[e:T]-
+g.gql("INSERT (:a)-[:r|s]->(:b)")   // error: an edge in INSERT has exactly one label
+g.gql("MATCH (p:person) INSERT (p:admin)")   // error: the variable `p` is already bound
+g.gql("INSERT (:x {a: 1, a: 2})")   // error: the key `a` appears twice in this map
+g.gql("MATCH (p:person) INSERT (:x {n: count(p)})")   // error: the aggregate function count() cannot be used in INSERT
+g.gql("MATCH (p:person) WHERE EXISTS { INSERT (:a) } RETURN p")   // error: INSERT inside EXISTS { }: a subquery expression or a comprehension cannot write
+```
+
+```text
+Error: GQL syntax error at line 1, column 13: INSERT needs a direction; write -[e:T]-> or <-[e:T]- (step #1 'gql:error("42001")' refused the query before the traversal ran)
+  at #1: v().gql:error("42001")
+             ^^^^^^^^^^^^^^^^^^
+  query:     INSERT (a:x)-[:r]-(b:y)
+                         ^^^^^^
+  GQLSTATUS: 42001
+Help: give the new edge its direction, from the node before it (-[:r]->) or to it (<-[:r]-); for example g.gql("INSERT (a:person {name: 'ann'})-[:knows]->(b:person:admin)"). INSERT (Cypher CREATE) creates its pattern once for each row: a new node with the labels written, joined by & or :, and a property map; a new edge with a direction and exactly one label; and a variable bound before, written alone as (p), connects the existing node, as in g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes]->(f:fruit&food {name: 'apple'}) RETURN f.name"). A query may end with the INSERT (it then returns no rows), and FOR gives it one row per item, as in g.gql("FOR n IN ['ann', 'bob'] INSERT (:person {name: n})").
+```
+
+While the query runs, a row whose endpoint is `NULL` (`22004`) or no node (`22G03`), or whose
+property value is a node, an edge or a path (`22G03`), fails the query, and it changes nothing:
+
+```rhai,graph=modern
+g.gql("OPTIONAL MATCH (p:person {name: 'nobody'}) INSERT (p)-[:knows]->(:person)")   // error: the source node `p` of the inserted `:knows` edge is NULL
+g.gql("MATCH (p:person) INSERT (:x {v: p})")   // error: the value of property `v` is a node
+```
+
+```text
+Caused by: GQL data exception at line 1, column 51: the source node `p` of the inserted `:knows` edge is NULL
+  query:     …person {name: 'nobody'}) INSERT (p)-[:knows]->(:person)
+                                              ^^^
+  GQLSTATUS: 22004
+Help: keep only the rows where it is bound before the INSERT: FILTER p IS NOT NULL. A row of the data gave the marked endpoint of the new edge no node: an edge connects two nodes, so a variable that OPTIONAL MATCH may leave NULL is filtered first, as in g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) FILTER s IS NOT NULL INSERT (p)-[:made]->(s)"), and a value that is no node is turned into one by a MATCH, as in g.gql("FOR n IN ['lop'] MATCH (s:software {name: n}) INSERT (:review {stars: 5})-[:about]->(s)").
+```
+
+A schema violation of an `INSERT` is the schema's error, with a help line written for GQL: a
+missing `required` property names the `INSERT` map and `coalesce()`, a type mismatch the
+conversion function (`toInteger()`, ...) with a `$parameter` example
+([Writing with GQL](writes.md#schema)). The write clauses that are not supported yet (`SET`,
+`REMOVE`, `DELETE`, `MERGE`, `FOREACH`) are `0A000` with a help line naming the Gremlin step:
+
+```rhai,graph=modern
+g.gql("MATCH (p) SET p.x = 1")   // error: SET is not yet supported in this version
+```
+
+```text
+Help: write the update as Gremlin steps: property() sets a property and add_label() adds a label, for example g.v().has_label("person").property("x", 1). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN`, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND`; an `INSERT` edge without a direction or with a label expression, an `INSERT` node label other than a conjunction, `WHERE` or a quantifier in an `INSERT` pattern, a write inside `EXISTS` / `COUNT` / `COLLECT` or a comprehension, a write clause after `RETURN` |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice; in `INSERT`, a bound variable with labels or properties, a bound edge variable, a duplicate key in a property map, an aggregate in a property value |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN` that writes nothing, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; the write clauses `SET`, `REMOVE`, `DELETE`, `MERGE`, `FOREACH`, an `INSERT` in a `UNION` operand or with a path variable; `LOAD CSV`, `CREATE INDEX` / `CONSTRAINT` / `GRAPH`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths; a quantified body's edges count once); split it into several MATCH clauses that share a variable, repeat a chain as a quantified path pattern, or use Gremlin `repeat()` |
+| `22004` | data | an endpoint of an `INSERT` edge is `NULL` (from an `OPTIONAL MATCH`) |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`) |
+| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` property value |
 | `22012` | data | division or `%` by zero, also `mod(a, 0)` |
 | `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |

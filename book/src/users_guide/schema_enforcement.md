@@ -232,7 +232,7 @@ g.V().valueMap("name", "active").toList()   // [#{"active": [true], "name": ["al
 ```
 
 - **Only on create**: `addV()`/`addE()` (also with their folded `property()` steps),
-  `mergeV()`/`mergeE()` when they create (never on a match), the playground's create dialog, and
+  `mergeV()`/`mergeE()` when they create (never on a match), GQL's `INSERT` (Cypher `CREATE`), the playground's create dialog, and
   `GraphStorage::add_vertex`/`add_edge` in Rust (and their `_with` forms). The default is filled in **before** the
   new element is coerced and validated, so a `required` property with a default is satisfied, and
   a canonical string default of a `uuid` property is stored as a `uuid`.
@@ -620,6 +620,22 @@ supported either. The top level of the model must be an object (`"type": "object
 A field's non-null `default` (`active: bool = True`) becomes a [default on
 create](#defaults-on-create) in mode `open`/`closed`; the `"default": null` Pydantic writes on every
 optional field stores nothing.
+
+## GQL writes
+
+A [GQL `INSERT`](../gql/writes.md#schema) creates each element in one storage call with every
+property of its map, so defaults, `required`, coercion and the mode apply to the whole element,
+as for a folded `addV(..).property(..)`. A `NULL` value is not stored, so it does not satisfy
+`required`. A violation fails the query, and its help line is written for GQL (`toInteger()`
+for a type mismatch, the `INSERT` map and `coalesce()` for a missing property):
+
+```rhai,graph=empty,script
+g.set_schema(#{mode: "closed", vertices: #{person: #{schema: #{type: "object", properties: #{
+    name: #{type: "string"}, active: #{type: "boolean", default: true}}, required: ["name"]}}}});
+g.gql("INSERT (:person {name: 'alice'})").iterate();
+let refused = g.gql("INSERT (:robot {name: 'r2'})").execute();   // fails: the closed schema has no label robot
+g.gql("MATCH (n) RETURN labels(n) AS labels, n.active AS active").to_list()   // #{"active": true, "labels": ["person"]}
+```
 
 ## A failing query changes nothing
 

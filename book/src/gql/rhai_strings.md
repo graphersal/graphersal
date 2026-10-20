@@ -150,7 +150,8 @@ quoting above applies:
 ```
 
 It runs the same `g.gql(..)` call with the parameters as values and returns the rows like the
-`query` tool, in written column order. It is a reading tool, also offered on a read-only
-server. Prefer it whenever an agent writes GQL: there is no Rhai string to escape and no
+`query` tool, in written column order. Like the `query` tool it may write (`INSERT`; the
+answer says that it changed the graph, with a one-line summary such as `+3 vertices, +2 edges`), and a
+server started with `--mcp-read-only` still offers it but refuses its writes. Prefer it whenever an agent writes GQL: there is no Rhai string to escape and no
 interpolation to get wrong. To continue a GQL result with Gremlin steps, use the `query` tool
 with `g.gql(..)` in the script.

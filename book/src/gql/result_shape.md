@@ -4,8 +4,9 @@
 
 Every result row of `gql()` is a **map** from column name to value, whatever the plan behind it
 (the planner may start a pattern at any of its nodes; the row looks the same). `RETURN` is
-mandatory, as in GQL and Cypher: a query without it is a syntax error whose help suggests
-`RETURN *` or `RETURN a, b`.
+mandatory in a query that only reads, as in GQL and Cypher: such a query without it is a
+syntax error whose help suggests `RETURN *` or `RETURN a, b`. A query whose last clause writes
+(or that ends with `FINISH`) returns no rows ([Writing with GQL](writes.md)).
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) RETURN p.name AS name, p.age AS age ORDER BY age").to_list()

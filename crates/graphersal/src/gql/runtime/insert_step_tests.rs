@@ -1,5 +1,5 @@
 //! The stage 3a write steps `gql:insert_node` and `gql:insert_edge` on hand-built pipelines
-//! (the lowering that builds them is 3a.T4): one element per row, bulk expansion (W15), `NULL`
+//! (the lowering's own tests are `tests/all/gql_write_tests.rs`): one element per row, bulk expansion (W15), `NULL`
 //! values skipped (W20), value kinds (W21), schema defaults and enforcement (W38), the pinned
 //! create time, endpoints from a label, the current object and a row column, endpoint errors,
 //! access requests, path requirements and the profile text.

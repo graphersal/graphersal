@@ -16,8 +16,11 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
   UNWIND <list> AS <name>                     -- Cypher spelling of FOR
   WITH [DISTINCT] <item> [AS <name>], ...     -- or WITH *; Cypher
        [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>]
-  [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row ]
-RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *, mandatory; items may aggregate
+  [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row
+  INSERT <pattern> [, <pattern> ...]          -- Cypher spelling: CREATE; creates per row ]
+RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *; items may aggregate
+                                              -- (mandatory unless the last clause writes;
+                                              -- FINISH ends a query without a result)
 [ORDER BY <expr> [ASC | DESC], ...]
 [OFFSET <n>]                                  -- Cypher alias: SKIP
 [LIMIT <n>]
@@ -32,7 +35,9 @@ carry a quantifier (`-[:knows]->{1,3}`), and so may a parenthesized part of the 
 with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-without-match)).
 Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
 ([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
-query of that shape for each row ([CALL subqueries](#call-subqueries)).
+query of that shape for each row ([CALL subqueries](#call-subqueries)). `INSERT` creates nodes
+and edges once per row; a query whose last clause writes may end there and returns no rows
+([Writing with GQL](writes.md)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
 are case-sensitive. Line breaks are whitespace, so a query may span lines. Comments are `// ...`,
@@ -536,7 +541,9 @@ g.gql("LET k = 30 MATCH (p:person) FILTER p.age > k RETURN p.name AS name ORDER 
 
 ## RETURN
 
-`RETURN` is mandatory and builds one map per row: `RETURN expr AS name, ...`, `RETURN *` (every
+`RETURN` is mandatory in a query that only reads (a query whose last clause writes may end
+there, and `FINISH` ends any query without a result; [Writing with GQL](writes.md)). It builds
+one map per row: `RETURN expr AS name, ...`, `RETURN *` (every
 named variable) and `RETURN DISTINCT` (duplicate rows removed, with GQL's equality:
 `1` and `1.0` are one value, [Semantics](semantics.md#distinct-and-grouping-equality)).
 [Result Shape](result_shape.md) covers names and column order.
@@ -697,7 +704,8 @@ g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:created]->(s) RETURN s.name AS
 The body reads only the variables it imports: in `CALL { MATCH (p)-->(s) .. }` without a scope
 clause, `p` is a new variable of the body, not the outer one. A body that imports nothing still
 runs once per row ([Semantics](semantics.md#call-subqueries)). The returned names must be new,
-and a body without `RETURN` (a unit subquery, which only a write could use) is not supported;
+and a body without `RETURN` (a unit subquery) must end in a write
+([Inside `CALL`](writes.md#once-per-row)): a body that only reads must return something;
 `IN TRANSACTIONS` is [refused](refused.md). A later clause continues from a returned element as
 from a `WITH` column:
 
@@ -705,6 +713,18 @@ from a `WITH` column:
 g.gql("CALL { MATCH (s:software) RETURN s } MATCH (s)<-[:created]-(p) RETURN s.name AS sw, count(p) AS n ORDER BY sw").to_list()   // lop 3, ripple 1
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN only makes sense for writes
+```
+
+## INSERT
+
+`INSERT <pattern>, ...` (Cypher `CREATE`) creates the pattern's new nodes and edges once for
+each row that reaches it; a variable bound before connects an existing node. Edges need a
+direction and one label, node labels are a conjunction (`:A&B`, Cypher `:A:B`). The full rules
+are on [Writing with GQL](writes.md).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes]->(f:fruit {name: 'apple'}) RETURN f.name AS fruit").to_list()   // #{"fruit": "apple"}
+g.gql("FOR n IN ['ann', 'bob'] CREATE (:person {name: n})").to_list()   // no rows
 ```
 
 ## Expressions
@@ -1105,6 +1125,8 @@ construct and the alternative.
 
 | Construct | Until then |
 |---|---|
+| the write clauses `SET`, `REMOVE`, `DELETE` / `DETACH DELETE` / `NODETACH DELETE`, `MERGE`, Cypher's `FOREACH` | Gremlin `property()`, `add_label()`, `remove_property()`, `drop_label()`, `drop()`, `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
+| `INSERT` in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |

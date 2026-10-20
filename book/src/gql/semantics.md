@@ -400,6 +400,47 @@ against the [resource limits](../users_guide/resource_limits.md) like any other 
 **Labels in the body stay in the body.** Variables the body binds and does not return are gone
 after it; reading one is an error, as for a subquery. Returned names must be new names.
 
+## Writes
+
+**What a row sees.** Each clause sees every write of the clauses before it, for all rows; within
+one clause the rows are processed in order and each row sees the writes of the rows before it.
+This is Neo4j's behaviour for every case the openCypher tests check. It follows from the
+executor, which runs a plan **step at a time**: a write step starts only after the read steps
+before it consumed their whole input. So a query never matches what it is creating (the
+"Halloween problem"): `MATCH (n) INSERT (:X)` creates exactly one node per node that existed
+before, `MATCH (a)-[e]->(b) INSERT (a)-[:copy]->(b)` exactly one edge per existing edge, and
+`FOR i IN range(1, 3) MATCH (n) INSERT (:Y)` three per node, because each row's `MATCH` ran
+before any `INSERT`. No barrier step is added to the plan for this.
+
+```rhai,graph=modern,script
+g.gql("MATCH (a)-[e]->(b) INSERT (a)-[:copy]->(b)").iterate();
+g.e().has_label("copy").count().next()   // 6
+```
+
+**One element per row.** A plan that writes never merges traversers into one with a higher bulk,
+and a write step treats a traverser of bulk n as n rows: each row creates its own elements.
+
+**Values are read before the write.** A value a row carries (`WITH n.age AS a`, `LET`, a
+`RETURN` column, an aggregate) is computed when the row is built; elements stay live, so
+`RETURN n.k` after a write reads the new state, as in Neo4j.
+
+**`NULL` is never stored.** `INSERT ({k: NULL})` stores no `k`; reading it gives `NULL` again.
+A `null` stored by Gremlin (`property("k", ())`) also reads as `NULL` in GQL.
+
+**Permissions.** `INSERT` asks `Create` on the labels it creates, exactly like `add_v(labels)` /
+`add_e(label)`, and nothing for the properties of the new element. Gremlin's
+`add_v(..).property(..)` asks `Create` and `Update` (the check runs on the plan as written,
+before the optimizer folds the property into the creation), so a policy that denies only
+`Update` allows the `INSERT` and refuses its Gremlin twin
+([Writing with GQL](writes.md#permissions)).
+
+**Where writes differ from Neo4j:**
+
+| Neo4j | `gql()` | Why |
+|---|---|---|
+| a property value must be a scalar or a list of scalars of one kind; a map, a list of mixed kinds, a nested list or a `NULL` inside a list is a type error | stored as given: maps, mixed and nested lists (a `NULL` inside a list stays in the list) | Graphersal's data model stores JSON-like values ([jpath keys](../users_guide/jpath_keys.md)); a [schema](../users_guide/schema_enforcement.md) restricts a property's type where wanted |
+| `CREATE` requires `WITH` between a write and a following `MATCH` (Cypher 5) | `MATCH` may follow `INSERT` directly | GQL's linear statements allow it, as Neo4j's Cypher 25 does |
+
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,

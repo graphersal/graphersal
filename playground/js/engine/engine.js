@@ -139,6 +139,9 @@
  * @property {{data:boolean, schema:boolean, definitions:boolean}} changes  What the committed run
  *   changed: the data, the stored schema (`set_schema`, `patch_schema`) and/or the catalog of
  *   saved queries (`define_query`, `drop_query`, ...); all false when nothing was kept.
+ * @property {{vertices:number, edges:number, text:string}} [change_summary]  Only when the
+ *   committed run changed the data: the net vertex and edge count changes (after minus before)
+ *   and both as one line (`+3 vertices, +2 edges`; empty when neither count moved).
  * @property {Execution} execution
  * @property {{table:TableData, json:string, raw:string, notice:?string, total_rows:?number}|null} display
  *   `execution.results` rendered within the display limits (null when the script failed). `raw`

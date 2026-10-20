@@ -68,6 +68,7 @@
   - [The Supported Subset](gql/subset.md)
   - [Semantics](gql/semantics.md)
   - [Result Shape](gql/result_shape.md)
+  - [Writing with GQL](gql/writes.md)
   - [Writing GQL in Rhai Strings](gql/rhai_strings.md)
   - [Cypher Aliases](gql/aliases.md)
   - [Refused Constructs](gql/refused.md)

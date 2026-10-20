@@ -1,9 +1,10 @@
 //! The GQL query language (ISO/IEC 39075), feature `gql`.
 //!
-//! A GQL read query (`MATCH ... WHERE ... RETURN ...`) is turned into an ordinary traversal plan:
+//! A GQL query (`MATCH ... WHERE ... RETURN ...`, and since stage 3a the write clause `INSERT` /
+//! Cypher `CREATE`) is turned into an ordinary traversal plan:
 //! it runs through the same optimizer, profile, limits, permissions and storages as a Gremlin
 //! traversal. ISO GQL is the normative spelling; common Cypher spellings are accepted as aliases.
-//! Version 1 is read-only.
+//! `SET`, `REMOVE`, `DELETE` and `MERGE` are refused as not yet supported.
 //!
 //! The entry points are [`GraphTraversalSource::gql`](crate::GraphTraversalSource::gql) and
 //! [`GraphTraversalSource::gql_with`](crate::GraphTraversalSource::gql_with) (in `lower.rs`).

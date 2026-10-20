@@ -444,8 +444,9 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
 const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
-traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL read queries (experimental; MATCH \
-... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects; see its description), `get_schema`/`statistics`/`graph_info` \
+traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries (experimental; MATCH \
+... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE writes; \
+see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
 stored in the graph; run one with `run_saved_query` {name, params} instead of writing it again. \
@@ -590,15 +591,18 @@ fn no_args() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
-const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like) read query \
-against the shared graph and return its rows as JSON: one JSON object per row, its keys the \
-RETURN columns in the order written (bounded like query's: at most max_rows rows, default 100; \
-a note says when something was cut). It runs the script g.gql(query, params) and never changes \
-the graph. No Rhai escaping is needed: pass the GQL text as it is. GQL support is \
-experimental (its subset and answers may still change between versions); the query tool with \
-Gremlin stays the complete interface.
+const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like) query against \
+the shared graph and return its rows as JSON: one JSON object per row, its keys the RETURN \
+columns in the order written (bounded like query's: at most max_rows rows, default 100; a note \
+says when something was cut). It runs the script g.gql(query, params). A query may write \
+(INSERT, Cypher CREATE): it is ONE transaction, a failing query changes nothing, and the answer \
+says whether it changed the graph (with the net vertex and edge count changes) and the new \
+commit number; run writes only when the user asked for that change (a read-only server refuses \
+them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is experimental (its \
+subset and answers may still change between versions); the query tool with Gremlin stays the \
+complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d and 2e): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e and 3a): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -655,20 +659,28 @@ sign, sqrt, exp, ln, log, log10, power, mod; lists head, last, tail, range, size
 elements keys, properties, labels, type, element_id, startNode(e) and endNode(e) (the edge's \
 stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; RETURN (mandatory; expressions \
 with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
-SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text). \
+SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text); \
+writes: INSERT (Cypher alias CREATE) of node patterns (n:Label&Other {key: expr}) and directed \
+edge patterns (a)-[:LABEL {key: expr}]->(b) (exactly one edge label; a bound variable stands \
+for an existing node), once per incoming row, e.g. MATCH (p:person {name: 'marko'}) INSERT \
+(p)-[:likes]->(f:fruit {name: 'apple'}) RETURN f.name AS fruit; a NULL property value stores \
+nothing; each clause sees every write of the clauses before it; a query may end with its write \
+clause or FINISH (no rows), or RETURN what it wrote. \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
 (trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
-procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and writes (INSERT, SET, DELETE, CREATE, MERGE): use the query tool \
-with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the writes SET, REMOVE, DELETE, \
+MERGE and FOREACH (property(), remove_property(), drop(), merge_v()): use the query tool with \
+Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
 f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
 OPTIONAL MATCH (p)-[:created]->(s) RETURN p.name AS who, count(s) AS projects ORDER BY \
-projects DESC, who; more in the group \
+projects DESC, who; FOR name IN $names INSERT (:tag {name: name}) with params {\"names\": \
+[\"a\", \"b\"]}; more in the group \
 \"GQL\" of the resource graphersal://examples (scripts g.gql(\"...\")).";
 
 fn all_tools() -> Vec<Tool> {
@@ -698,12 +710,12 @@ fn all_tools() -> Vec<Tool> {
         tool(
             "gql",
             "Run a GQL query",
-            Kind::Read,
+            Kind::Destructive,
             GQL_DESCRIPTION,
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The GQL read query (MATCH ... RETURN ...), as plain text."},
+                    "query": {"type": "string", "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ...), as plain text."},
                     "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
                     "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
                     "max_rows": {"type": "integer", "minimum": 1, "description": "Most rows returned (default 100)."},
@@ -999,13 +1011,16 @@ fn all_tools() -> Vec<Tool> {
     ]
 }
 
-/// The tools offered: all of them, only the reading ones (and `query`, `run_saved_query`) when
-/// `read_only` (`--mcp-read-only`, an `--ai` file's `read_only`).
+/// The tools offered: all of them, only the reading ones (and `query`, `gql`,
+/// `run_saved_query`, which run under the read-only authorizer there) when `read_only`
+/// (`--mcp-read-only`, an `--ai` file's `read_only`).
 fn tools(read_only: bool) -> Vec<Tool> {
     all_tools()
         .into_iter()
         .filter(|t| {
-            !read_only || t.kind == Kind::Read || t.name == "query" || t.name == "run_saved_query"
+            !read_only
+                || t.kind == Kind::Read
+                || matches!(t.name, "query" | "gql" | "run_saved_query")
         })
         .collect()
 }
@@ -1585,8 +1600,8 @@ fn query_tool_listings(context: &Context, read_only: bool) -> Result<Vec<Value>,
 }
 
 /// The `gql` tool: the call text `g.gql(query, #{params})` (the query one Rhai string literal,
-/// the parameters Rhai literals) run like the `query` tool; read-only by construction, and under
-/// the read-only authorizer for a read-only caller like every script.
+/// the parameters Rhai literals) run like the `query` tool: a GQL write commits like a script,
+/// and a read-only caller runs it under the read-only authorizer, which refuses the write.
 fn gql(context: &Context, caller: &ToolCaller, args: &Value) -> Result<String, String> {
     let text = str_arg(args, "query").ok_or("missing argument \"query\" (the GQL query to run)")?;
     let params = match args.get("params") {
@@ -1703,6 +1718,12 @@ fn query_text(response: &Value, commit_seq: u64, profile: bool) -> (bool, String
                 changed
             };
             status.push_str(&format!("; {what}, committed as commit {commit_seq}"));
+            if let Some(summary) = response["change_summary"]["text"]
+                .as_str()
+                .filter(|text| !text.is_empty())
+            {
+                status.push_str(&format!(" ({summary})"));
+            }
         }
         out.push(status);
         let shown = if response["preferred_view"] == "raw" || response["terminal"] == "profile" {
@@ -2179,17 +2200,30 @@ fn examples_text(examples: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// The gql tool writes like `query` (W41): offered with `query`'s annotations, and as a
+    /// reading tool under `--mcp-read-only`, where the read-only authorizer refuses writes.
     #[test]
-    fn gql_is_a_reading_tool_offered_read_only() {
+    fn gql_writes_unless_read_only() {
+        let query = all_tools().into_iter().find(|t| t.name == "query").unwrap();
         for read_only in [false, true] {
             let tool = tools(read_only)
                 .into_iter()
                 .find(|t| t.name == "gql")
                 .expect("gql listed");
             let listing = tool.listing(read_only);
-            assert_eq!(listing["annotations"]["readOnlyHint"], true, "{listing}");
+            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint"] {
+                assert_eq!(
+                    listing["annotations"][hint],
+                    query.listing(read_only)["annotations"][hint],
+                    "{hint}"
+                );
+            }
             assert_eq!(
-                listing["annotations"]["destructiveHint"], false,
+                listing["annotations"]["readOnlyHint"], read_only,
+                "{listing}"
+            );
+            assert_eq!(
+                listing["annotations"]["destructiveHint"], !read_only,
                 "{listing}"
             );
             assert_eq!(listing["inputSchema"]["required"], json!(["query"]));
@@ -2212,7 +2246,8 @@ mod tests {
     }
 
     /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
-    /// calls GQL experimental and still names what is refused; it stays a read-only tool.
+    /// and the 3a writes (INSERT, CREATE) as supported, calls GQL experimental and still names
+    /// what is refused.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
         let (supported, refused) = GQL_DESCRIPTION
@@ -2273,6 +2308,10 @@ mod tests {
             "one per iteration",
             "NULL when ? matched nothing",
             "MATCH (a:person) ((x)-[:created]->(s)<-[:created]-(y)){1,2} (b)",
+            "INSERT",
+            "CREATE",
+            "FINISH",
+            "INSERT (p)-[:likes]->(f:fruit {name: 'apple'})",
         ] {
             assert!(supported.contains(named), "{named}");
         }
@@ -2281,7 +2320,10 @@ mod tests {
             "EXCEPT and INTERSECT",
             "IN TRANSACTIONS",
             "randomUUID",
-            "INSERT",
+            "SET",
+            "REMOVE",
+            "DELETE",
+            "MERGE",
             "use the query tool",
         ] {
             assert!(refused.contains(named), "{named}");
@@ -2301,7 +2343,8 @@ mod tests {
         ] {
             assert!(!refused.contains(gone), "{gone}");
         }
-        assert!(GQL_DESCRIPTION.contains("never changes"));
+        assert!(GQL_DESCRIPTION.contains("a failing query changes nothing"));
+        assert!(GQL_DESCRIPTION.contains("run writes only when the user asked"));
         assert!(GQL_DESCRIPTION.contains("experimental"));
     }
 

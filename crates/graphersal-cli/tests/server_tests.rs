@@ -4939,3 +4939,72 @@ fn mcp_gql_tool_rows_params_errors_and_read_only() {
     let examples = answer["result"]["contents"][0]["text"].as_str().unwrap();
     assert!(examples.contains("g.gql("), "{examples}");
 }
+
+/// The gql tool writes by default (W41): an INSERT commits, the answer names the commit and the
+/// change summary, and a failing write changes nothing; under `--mcp-read-only` the same write
+/// is refused before it runs.
+#[test]
+fn mcp_gql_tool_writes_unless_read_only() {
+    let server = start(&["--graph", "modern", "--mcp"]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let tools = mcp.rpc("tools/list", serde_json::json!({}));
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "gql")
+        .cloned()
+        .expect("listed");
+    assert_eq!(tool["annotations"]["readOnlyHint"], false, "{tool}");
+    assert_eq!(tool["annotations"]["destructiveHint"], true, "{tool}");
+
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({
+            "query": "MATCH (p:person {name: $who}) INSERT (p)-[:likes]->(f:fruit {name: 'apple'}) RETURN f.name AS fruit",
+            "params": {"who": "marko"},
+        }),
+    );
+    assert!(!error, "{text}");
+    assert!(
+        text.starts_with("ok: 1 result")
+            && text.contains("changed the data, committed as commit 1 (+1 vertex, +1 edge)")
+            && text.contains("apple"),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "INSERT (:tag {n: 1}), (:tag {n: 2})"}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("(+2 vertices)"), "{text}");
+    // The last row fails: nothing of the query is kept.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "FOR x IN [1, 0] INSERT (:tag {n: 1 / x})"}),
+    );
+    assert!(error && text.contains("the graph is unchanged"), "{text}");
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (t:tag) RETURN count(t) AS tags"}),
+    );
+    assert!(!error && text.contains("2"), "{text}");
+    assert_eq!(changes(port)["version"], 2, "two commits");
+    drop(server);
+
+    let server = start(&["--graph", "modern", "--mcp", "--mcp-read-only"]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call("gql", serde_json::json!({"query": "INSERT (:tag {n: 1})"}));
+    assert!(
+        error && text.contains("Permission denied for 'gql:insert_node'"),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (t:tag) RETURN count(t) AS tags"}),
+    );
+    assert!(!error && text.contains("\"tags\": 0"), "{text}");
+    assert_eq!(changes(port)["version"], 0, "nothing was committed");
+}

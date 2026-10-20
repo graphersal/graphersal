@@ -146,7 +146,7 @@ use crate::{
 };
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
-    /// Runs a GQL read query (ISO/IEC 39075, feature `gql`): `MATCH` and `OPTIONAL MATCH`
+    /// Runs a GQL query (ISO/IEC 39075, feature `gql`): `MATCH` and `OPTIONAL MATCH`
     /// patterns, `WHERE`, the linear pipeline `LET`, `FILTER`, `WITH` (Cypher) and `FOR x IN
     /// list [WITH ORDINALITY i]` (Cypher `UNWIND list AS x`), a query that starts without
     /// `MATCH` (`RETURN 1 + 2 AS x`, `FOR id IN $ids MATCH ..`), `RETURN`
@@ -156,8 +156,15 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// (NULL skipped except by `count(*)`), and quantified edges (`-[e:knows]->{1,3}`, `*`, `+`,
     /// Cypher `[e:knows*1..3]`) with trail semantics (no edge twice in one match; the edge
     /// variable is the list of the edges), and path variables (`MATCH p = (a)-->(b) RETURN p`,
-    /// `path_length(p)`, Cypher `length(p)`; a path is the Gremlin path value). Use
-    /// [`Self::gql_with`] for a query with `$parameters`.
+    /// `path_length(p)`, Cypher `length(p)`; a path is the Gremlin path value), and the write
+    /// clause `INSERT` (Cypher `CREATE`) of node and directed edge patterns, once per incoming
+    /// row; a query may end with its write clause or `FINISH` (no rows) or `RETURN` what it
+    /// wrote. Use [`Self::gql_with`] for a query with `$parameters`.
+    ///
+    /// A writing query runs on a writable source (`graph.traversal_mut()`), as one unit like
+    /// any traversal: a failing row leaves nothing. On a read source (`graph.traversal()`) it
+    /// fails exactly like a Gremlin write does there. It asks `Create` on the labels it inserts,
+    /// like `add_v()` / `add_e()`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a
@@ -191,6 +198,21 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// let empty = TraversalGraph::new();
     /// let error = empty.traversal().gql("MATCH (p) RETRUN p").to_list().unwrap_err();
     /// assert!(matches!(error.root_cause(), TraverserError::Gql { .. }));
+    ///
+    /// // A write: one fruit per matched person, then read back.
+    /// let mut graph = TraversalGraph::tinkerpop_modern();
+    /// graph
+    ///     .traversal_mut()
+    ///     .gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes]->(:fruit {name: 'apple'})")
+    ///     .iterate()
+    ///     .unwrap();
+    /// let liked = graph
+    ///     .traversal()
+    ///     .gql("MATCH (:person)-[:likes]->(f:fruit) RETURN f.name AS fruit")
+    ///     .select("fruit")
+    ///     .to_list()
+    ///     .unwrap();
+    /// assert_eq!(liked, ["apple".into()]);
     /// ```
     pub fn gql(self, query: &str) -> Self {
         self.gql_with(
@@ -199,7 +221,7 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
         )
     }
 
-    /// Runs a GQL read query with parameter values: `$name` in the query reads the value given
+    /// Runs a GQL query with parameter values: `$name` in the query reads the value given
     /// for `name` (a value, never query text). A parameter the query reads but `params` lacks
     /// fails the traversal before it runs; unused parameters are ignored. Otherwise as
     /// [`Self::gql`].

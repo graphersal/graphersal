@@ -46,6 +46,7 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | every other step (`has()`, `values()`, `limit()`, `count()`, `inject()` of plain values, `constant()`, `math()`, `as()`, `by()`, ...) | nothing |
 | `addV("person")`, `addV(["a", "b"])` | `Create` on `Data(vertex "person")`, one request per label (`Data(vertex)` without a static label) |
 | `addE("knows")` | `Create` on `Data(edge "knows")` |
+| `g.gql("INSERT (:person {name: 'ann'})-[:knows]->(:person)")` | `Create` on `Data(vertex "person")` per new node and label, `Create` on `Data(edge "knows")` per new edge, and nothing for the properties (`addV("person").property(..)` also asks `Update`, see [Writing with GQL](../gql/writes.md#permissions)); the `MATCH` before an `INSERT` asks its reads like its Gremlin twin |
 | `mergeV(..)` / `mergeE(..)` | `Create` and `Update` on `Data(vertex)` / `Data(edge)` |
 | `property(..)`, `removeProperty(..)` | `Update` on the `Data` the steps before it state (see below), `Data` when they state nothing |
 | `addLabel(..)`, `dropLabel(..)` / `setLabel(..)` | `Update` on `Data(vertex)` / `Data(edge)`, with the edge label the steps before it state |
@@ -370,4 +371,7 @@ traversal instead.
 Element- and label-level read security (a `Filtered<S, Policy>` storage decorator) and a
 `ReadOnly<S>` decorator are additive follow-ups. [`g.gql()`](../gql/index.md) uses the same
 authorizer: a GQL query is lowered into ordinary steps before the check, so it is allowed or
-denied exactly like its Gremlin equivalent.
+denied like its Gremlin equivalent. Its writes (`INSERT`) ask `Create` like `addV()` /
+`addE()`, but nothing for the new element's properties, where `addV(..).property(..)` also asks
+`Update` ([Writing with GQL](../gql/writes.md#permissions)); a read-only policy refuses them
+before anything runs.

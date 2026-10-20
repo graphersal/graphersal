@@ -227,6 +227,42 @@ struct Changes {
     definitions: bool,
 }
 
+/// `change_summary` of a response: the net vertex and edge count changes of a committed run that
+/// changed the data, from the graph's exact counts before and after the run (no commit hook,
+/// so a write pays nothing for it).
+#[derive(Serialize)]
+struct ChangeSummary {
+    /// After minus before.
+    vertices: i64,
+    /// After minus before.
+    edges: i64,
+    /// Both as one line (`+3 vertices, +2 edges`, `-1 vertex`); empty when neither count moved
+    /// (a run that only set properties). The MCP answers and the playground's result footer
+    /// show it after "changed the graph".
+    text: String,
+}
+
+impl ChangeSummary {
+    fn of(vertices: i64, edges: i64) -> Self {
+        let part = |n: i64, one: &str, many: &str| {
+            (n != 0).then(|| format!("{n:+} {}", if n.abs() == 1 { one } else { many }))
+        };
+        let text = [
+            part(vertices, "vertex", "vertices"),
+            part(edges, "edge", "edges"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        Self {
+            vertices,
+            edges,
+            text,
+        }
+    }
+}
+
 /// The answer to [`Session::execute`] (`ExecuteResponse` in engine.js).
 #[derive(Serialize)]
 struct Response {
@@ -239,6 +275,9 @@ struct Response {
     /// What the run changed and kept: `{data, schema}` (a schema change is a change too; the
     /// playground refreshes its schema panel on `schema: true`).
     changes: Changes,
+    /// Present only when the run committed a data change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change_summary: Option<ChangeSummary>,
     execution: Box<RawValue>,
     display: Option<Display>,
     subgraph: Option<CompactGraph>,
@@ -821,6 +860,7 @@ impl Session {
         graphersal::script::set_scope_embedders(&mut scope, self.presets.embedders.clone());
         let hint = trailing_terminal(script);
         let seq_before = self.graph.last_commit_seq();
+        let counts_before = (self.graph.vertex_count(), self.graph.edge_count());
         // The whole run is one unit (the host option of `book/src/users_guide/transactions.md`):
         // every statement and the implicit execution of a trailing traversal are savepoints of
         // it, and it commits only when the run is reported as `ok`, so a run that shows an
@@ -839,6 +879,7 @@ impl Session {
         };
         drop(scope);
         let mut changes = Changes::default();
+        let mut change_summary = None;
         if out.ok {
             let unit = self.graph.run_changes(mark);
             changes = Changes {
@@ -850,6 +891,12 @@ impl Session {
                 changes = Changes::default();
                 let diagnostic = format_diagnostic(&TraverserError::from(err));
                 out = Outcome::failed(out.terminal, &error_of_diagnostic(&diagnostic));
+            } else if changes.data {
+                let delta = |after: usize, before: usize| after as i64 - before as i64;
+                change_summary = Some(ChangeSummary::of(
+                    delta(self.graph.vertex_count(), counts_before.0),
+                    delta(self.graph.edge_count(), counts_before.1),
+                ));
             }
         } else {
             self.graph
@@ -867,6 +914,7 @@ impl Session {
             implicit: out.implicit,
             mutated: self.graph.last_commit_seq() > seq_before,
             changes,
+            change_summary,
             execution: RawValue::from_string(out.execution).unwrap_or_else(|_| null_raw()),
             display: out.display,
             subgraph,
@@ -2757,6 +2805,48 @@ mod tests {
             run(&mut s, "g.V().count().next()")["execution"]["results"],
             json!([10])
         );
+    }
+
+    /// A committed data change carries the one-line summary of the net vertex and edge count
+    /// changes (W40); a read, a failed run and a schema-only change carry none.
+    #[test]
+    fn a_data_change_carries_its_change_summary() {
+        let mut s = modern();
+        let inserted = run(
+            &mut s,
+            r#"g.gql("MATCH (p:person) INSERT (p)-[:owns]->(:pet)")"#,
+        );
+        assert_eq!(
+            inserted["change_summary"],
+            json!({"vertices": 4, "edges": 4, "text": "+4 vertices, +4 edges"}),
+            "{inserted}"
+        );
+        let dropped = run(
+            &mut s,
+            r#"g.v().has_label("pet").limit(1).drop().iterate()"#,
+        );
+        assert_eq!(
+            dropped["change_summary"],
+            json!({"vertices": -1, "edges": -1, "text": "-1 vertex, -1 edge"}),
+            "{dropped}"
+        );
+        let set = run(
+            &mut s,
+            r#"g.v().has_label("pet").property("x", 1).iterate()"#,
+        );
+        assert_eq!(
+            set["change_summary"],
+            json!({"vertices": 0, "edges": 0, "text": ""}),
+            "{set}"
+        );
+        for script in [
+            "g.V().count().next()",
+            r#"g.gql("FOR x IN [1, 0] INSERT (:n {v: 1 / x})")"#,
+            r#"g.patch_schema(#{mode: "open"})"#,
+        ] {
+            let answer = run(&mut s, script);
+            assert!(answer.get("change_summary").is_none(), "{answer}");
+        }
     }
 
     #[test]

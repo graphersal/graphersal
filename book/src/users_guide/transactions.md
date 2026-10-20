@@ -44,6 +44,14 @@ g.V("2").property("checked", true).values("name").asNumber(GType.LONG).toList();
 
 A host can make the whole script one unit instead (see below); the script itself cannot.
 
+A [GQL](../gql/writes.md) query is one traversal, so one unit too: when its last row fails, the
+elements its earlier rows created are rolled back with it.
+
+```rhai,graph=modern,script
+let run = g.gql("FOR x IN [1, 0] INSERT (:n {v: 1 / x})").execute();   // fails on the second row
+g.v().has_label("n").count().next()   // 0: the node of the first row is gone too
+```
+
 `execute()` never throws: on failure its `error` and the partial `profile` are kept, its `results`
 are empty, and none of the traversal's changes are applied.
 

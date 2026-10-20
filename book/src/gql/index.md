@@ -1,7 +1,7 @@
 # GQL Queries
 
-> **Experimental.** GQL support is new in Graphersal 0.2.2 and marked experimental: it reads
-> only, its [subset](subset.md) grows from version to version, and the answers of a construct
+> **Experimental.** GQL support is new in Graphersal 0.2.2 and marked experimental: its
+> [subset](subset.md) grows from version to version, and the answers of a construct
 > (its rows, errors and plans) may still change in a later version. Gremlin stays the complete,
 > stable interface: a `gql()` query runs as ordinary Gremlin steps, and this chapter shows the
 > Gremlin twin of each construct.
@@ -32,19 +32,20 @@ its real output (a list is shown as its items, comma-separated, or one per line)
   same (`SKIP` for `OFFSET`, `!=` for `<>`, `toUpper()` for `upper()`, `-->` for `->`, ...);
   [Cypher Aliases](aliases.md) lists every one. There is no Graphersal-only syntax: an accepted
   query means the same in a GQL or Cypher 25 database (modulo the listed aliases).
-- **Read-only.** `gql()` reads the graph; every write clause (`INSERT`, `CREATE`, `SET`,
-  `DELETE`, `MERGE`, ...) is refused. Change the graph with the
-  [Gremlin mutation steps](../dsl/changing_the_graph.md).
+- **Reads and writes.** `INSERT` (Cypher `CREATE`) creates nodes and edges once per row
+  ([Writing with GQL](writes.md)); `SET`, `REMOVE`, `DELETE` and `MERGE` are not supported yet:
+  change existing elements with the [Gremlin mutation steps](../dsl/changing_the_graph.md). A
+  query is one unit: a query that fails changes nothing.
 - **A start step.** `gql()` starts a traversal: `g.gql(..)`, never `g.v().gql(..)` or
   `__.gql(..)`.
 - **Rows are maps.** Each result row is a map from column name to value
-  ([Result Shape](result_shape.md)). `RETURN` is mandatory.
+  ([Result Shape](result_shape.md)). `RETURN` is mandatory unless the query ends in a write.
 - **One engine.** The query is compiled into an ordinary traversal plan: the same optimizer,
   property indexes, `profile()`, limits, cancellation, permissions and storages as Gremlin
   ([Plans and Performance](plans.md)). A query that does not parse fails before anything runs,
   with a caret under the offending text ([Errors](errors.md)).
 
-This version supports GQL read queries: `MATCH` and `OPTIONAL MATCH`, `WHERE`, `LET`, `FILTER`,
+This version supports `INSERT` and GQL read queries: `MATCH` and `OPTIONAL MATCH`, `WHERE`, `LET`, `FILTER`,
 Cypher's `WITH`, `RETURN` with aggregation (`count`, `sum`, `avg`, `min`, `max`, `collect_list`),
 `ORDER BY`, `OFFSET`, `LIMIT`, `FOR` (Cypher `UNWIND`) with a direct lookup per item where an
 id or index serves it, queries that start without `MATCH` (`RETURN 1 + 2 AS x`), `EXISTS`
@@ -92,7 +93,7 @@ the walk from it.
 | Command line | `graphersal -e 'g.gql("MATCH (p:person) RETURN p.name AS name")'`, or in the REPL |
 | Python | through a script: `graph.query('g.gql("...", #{...})', params={...})` |
 | Playground | type `g.gql("...")` in the query editor; the examples list has a GQL group |
-| MCP (dev server) | the tool `gql` {`query`, `params`, `profile`, `max_rows`}: the query as plain text, no Rhai string around it |
+| MCP (dev server) | the tool `gql` {`query`, `params`, `profile`, `max_rows`}: the query as plain text, no Rhai string around it; it writes like the `query` tool, and a server started with `--mcp-read-only` refuses its writes |
 
 In Rust:
 
@@ -111,6 +112,8 @@ let ages = graph
     .unwrap();
 assert_eq!(ages, [ElementProperty::from(29)]);
 ```
+
+A writing query runs on the writing source, `traversal_mut()` ([In Rust](writes.md#in-rust)).
 
 The feature `gql` is off by default in the `graphersal` crate ([Library Features](../users_guide/installation.md));
 the command line, the playground, the dev server and the Python package have it on.
@@ -134,6 +137,8 @@ graph.query('g.gql("MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p
   rules of the functions (strict `CAST`, lenient `toInteger`, rounding, where they differ from
   Neo4j), ids.
 - [Result Shape](result_shape.md): row maps, column names and their order, path values.
+- [Writing with GQL](writes.md): `INSERT` (Cypher `CREATE`), what a row sees, units, schema,
+  permissions, and the write clauses that come later.
 - [Writing GQL in Rhai Strings](rhai_strings.md): quotes, multi-line queries, comments,
   parameters, and when the MCP tool is easier.
 - [Cypher Aliases](aliases.md): every accepted Cypher spelling and its GQL form.

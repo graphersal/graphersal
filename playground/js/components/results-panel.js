@@ -35,7 +35,10 @@ export const ResultsPanel = {
       if (total !== undefined && total !== null) parts.push(`${total} result${total === 1 ? '' : 's'}`);
       parts.push(formatMs(r.elapsed_ms));
       if (r.selection) parts.push(`ran the ${selectionText(r.selection.lines)}`);
-      if (r.mutated) parts.push('changed the graph');
+      if (r.mutated) {
+        const summary = r.change_summary && r.change_summary.text;
+        parts.push(summary ? `changed the graph (${summary})` : 'changed the graph');
+      }
       return parts.join(' · ');
     });
 

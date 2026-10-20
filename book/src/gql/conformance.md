@@ -16,13 +16,13 @@ Status: **supported**, **partial** (what is missing is named), **not yet** (plan
 
 ## Core language
 
-The mandatory core of a GQL read query, by construct.
+The mandatory core of a GQL query, by construct.
 
 | Construct | Status | Notes |
 |---|---|---|
 | `MATCH` with node and edge patterns, comma-separated patterns, several `MATCH` clauses | supported | trail (`DIFFERENT EDGES`) match mode per clause |
 | `WHERE` after `MATCH`, inline `WHERE` and property maps in element patterns | supported | |
-| `RETURN`, `RETURN *`, `RETURN DISTINCT`, `AS` | supported | `RETURN` is mandatory |
+| `RETURN`, `RETURN *`, `RETURN DISTINCT`, `AS` | supported | `RETURN` is mandatory unless the last clause writes; `FINISH` ends a query without a result |
 | `ORDER BY ... ASC / DESC` | supported | `NULL` last ascending, first descending |
 | label expressions `&`, `\|`, `!`, `( )` | supported | |
 | property reference `x.key` | supported | |
@@ -41,7 +41,8 @@ The mandatory core of a GQL read query, by construct.
 | Cypher map projections `p {.k, .*, x, k: expr}`, list comprehensions `[x IN l WHERE c \| e]`, pattern comprehensions `[(a)-->(b) WHERE c \| e]` | supported | not GQL; accepted as compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#map-projections-and-comprehensions)); a pattern comprehension is a subquery; `all()` / `any()` / `none()` / `single()` / `reduce()` likewise, three-valued as the openCypher TCK ([Cypher Aliases](aliases.md#list-predicates-and-reduce)) |
 | Cypher `COUNT { }` and `COLLECT { }` subqueries | supported | not GQL; compatibility forms with Cypher's meaning ([Cypher Aliases](aliases.md#count-and-collect)); bodies as for `EXISTS`, `COLLECT` returns one item; one deviation below |
 | a query without `MATCH` (`RETURN 1`) | supported | a query may start with `FOR`, `LET`, `WITH`, `FILTER` or `RETURN`; it starts from one empty row |
-| data-modifying statements (`INSERT`, `SET`, `REMOVE`, `DELETE`) | no | `gql()` is read-only |
+| data-modifying statements: `INSERT` | supported | nodes with label conjunctions and properties, directed edges with one label, once per row; Cypher `CREATE` as an [alias](aliases.md) ([Writing with GQL](writes.md)) |
+| data-modifying statements: `SET`, `REMOVE`, `DELETE` | not yet | the Gremlin steps `property()`, `remove_property()`, `drop()` ([Writing with GQL](writes.md#not-yet)) |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
 | value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); path values; no byte strings |
 
@@ -81,6 +82,7 @@ The mandatory core of a GQL read query, by construct.
 | GA07 | ordering by discarded binding variables *(provisional)* | supported | `ORDER BY` may read variables that `RETURN` does not return (not after `RETURN DISTINCT`) |
 | GB02 | double minus sign comments | supported | `-- ...`, with the edge rule of [Writing GQL in Rhai Strings](rhai_strings.md#comments) |
 | GB03 | double solidus comments | supported | `// ...` |
+| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`); `SET`, `REMOVE`, `DELETE` and Cypher's `MERGE` not yet ([Writing with GQL](writes.md)) |
 | GE07 | Boolean `XOR` | supported | |
 | GF01 | enhanced numeric functions | supported | `ABS`, `FLOOR`, `CEIL` / `CEILING`, `SQRT`, `MOD`; an integer argument keeps its type |
 | GF02 | trigonometric functions *(provisional)* | not yet | Gremlin `math()` after `gql()` |
@@ -111,7 +113,7 @@ The mandatory core of a GQL read query, by construct.
 | GQ18 | scalar subqueries *(provisional)* | not yet | |
 | GQ20 | advanced linear composition with `NEXT` | partial | `RETURN .. NEXT ..`, also after a `UNION` and inside subquery bodies; `NEXT YIELD` not yet |
 | GQ21 | `OPTIONAL`: multiple `MATCH` statements *(provisional)* | not yet | one `OPTIONAL MATCH` per optional part is supported; the block form `OPTIONAL { MATCH ... MATCH ... }` is not |
-| GP01 | inline procedure *(provisional)* | supported | `[OPTIONAL] CALL { <query> }`, run once per incoming row, the body ending in `RETURN` ([CALL subqueries](subset.md#call-subqueries)); a body without `RETURN` (a unit subquery) not yet, `IN TRANSACTIONS` refused |
+| GP01 | inline procedure *(provisional)* | supported | `[OPTIONAL] CALL { <query> }`, run once per incoming row, the body ending in `RETURN` ([CALL subqueries](subset.md#call-subqueries)) or, as a unit subquery, in a write ([Writing with GQL](writes.md#once-per-row)); `IN TRANSACTIONS` refused |
 | GP02 | inline procedure with implicit nested variable scope *(provisional)* | partial | `CALL { }` without a scope clause is accepted but imports **nothing** (Neo4j Cypher 25's reading; the ISO scoping is still to be checked); import with `CALL (*)` or Cypher's importing `WITH` |
 | GP03 | inline procedure with explicit nested variable scope *(provisional)* | supported | `CALL (a, b) { }`, `CALL (*) { }`, `CALL () { }` |
 | GP04 | named procedure calls *(provisional)* | no | vendor procedures (`CALL db.*`, `apoc.*`) are refused |
@@ -158,3 +160,5 @@ where it has one):
 | functions and `NULL` | a `NULL` argument gives `NULL`, before the kinds are checked |
 | strings in functions | positions and lengths count characters (Unicode scalar values) |
 | GQLSTATUS codes | `42001` for syntax errors; the others provisional ([Errors](errors.md)) |
+| order of the writes of one `INSERT` | per row: its nodes in text order, then its edges in text order |
+| property values of `INSERT` | `NULL` is not stored; maps and lists of any kinds are stored as given (a [difference from Neo4j](semantics.md#writes)) |

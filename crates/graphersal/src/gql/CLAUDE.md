@@ -1,6 +1,7 @@
 # GQL (`src/gql/`, feature `gql`)
 
-The ISO GQL read query language on top of the traversal pipeline. A GQL query is parsed, bound,
+The ISO GQL query language (reads, and since stage 3a `INSERT` / `CREATE` writes) on top of the
+traversal pipeline. A GQL query is parsed, bound,
 planned and lowered into an ordinary `Vec<GraphStep>`, which then goes through the optimizer, path
 analysis, profile, limits, permissions and every storage exactly like a Gremlin traversal. The
 feature is off by default, strictly additive, has no dependencies, does not need `script`, and

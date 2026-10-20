@@ -35,6 +35,7 @@ spelling is either not supported yet or [refused](refused.md).
 | `-[e:T*m..]->` | `-[e:T]->{m,}` | |
 | `WHERE (a)-[:T]->(b)`, a pattern predicate | `WHERE EXISTS { (a)-[:T]->(b) }` | anywhere an expression stands; it may name only variables bound before it ([EXISTS](subset.md#exists-and-pattern-predicates)) |
 | `UNWIND list AS x` | `FOR x IN list` | one row per item; `WITH ORDINALITY` / `WITH OFFSET` only after `FOR` |
+| `CREATE <pattern>` | `INSERT <pattern>` | the same clause: once per row, nodes with label conjunctions (`:A:B` as `:A&B`), directed edges with one label ([Writing with GQL](writes.md)); `CREATE INDEX` / `CONSTRAINT` / `GRAPH` are [refused](refused.md) catalog commands |
 | `CALL { WITH a, b ... }`, the importing `WITH` | `CALL (a, b) { ... }` | the first `WITH` of the body, when it lists plain variables only, is the variable scope clause ([CALL subqueries](subset.md#call-subqueries)) |
 
 Each pair below returns the same rows:
@@ -68,6 +69,8 @@ g.gql("MATCH (p:person {name: 'marko'}) UNWIND [p.age, p.age + 1] AS a RETURN a 
 g.gql("MATCH (p:person {name: 'marko'}) FOR a IN [p.age, p.age + 1] RETURN a ORDER BY a").to_list()   // #{"a": 29}, #{"a": 30}
 g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:knows]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 0, marko 2, peter 0, vadas 0
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 0, marko 2, peter 0, vadas 0
+g.gql("CREATE (c:city:capital {name: 'Rome'}) RETURN labels(c) AS l").to_list()   // #{"l": ["city", "capital"]}
+g.gql("INSERT (c:city&capital {name: 'Rome'}) RETURN labels(c) AS l").to_list()   // #{"l": ["city", "capital"]}
 ```
 
 The importing `WITH` passes the variables on unchanged; a first `WITH` that renames, computes or
@@ -251,6 +254,6 @@ without evaluating its items ([Semantics](semantics.md#count-and-collect)).
 | `CALL { } IN TRANSACTIONS` | [refused](refused.md): a write form; the `CALL` itself is supported |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
-| `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE` | refused: `gql()` is read-only |
+| `MERGE`, `SET`, `DELETE`, `REMOVE`, `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT` |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |
 | `a--1` (minus minus one) | a comment starts at `--` (GQL wins): `RETURN n.age--1 AS x` returns the column `n.age`; write `n.age - -1` |

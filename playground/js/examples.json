@@ -386,6 +386,25 @@
   {
     "group": "GQL",
     "graph": "modern",
+    "title": "INSERT: new nodes and an edge to a matched node",
+    "script": "// A write: INSERT (Cypher alias CREATE) runs once per row of the MATCH. The query ends with its\n// write clause (no rows); the result footer shows what changed. Run it again: it adds again.\ng.gql(\"MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes {since: 2024}]->(:fruit {name: 'apple'})\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "INSERT ... RETURN: read what was just written",
+    "script": "// Variables of an INSERT are bound afterwards: RETURN reads the new elements.\ng.gql(\"FOR name IN ['kiwi', 'plum'] INSERT (f:fruit {name: name, added: true}) RETURN f.name AS fruit, labels(f) AS labels ORDER BY fruit\")"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
+    "title": "A failing write changes nothing",
+    "script": "// One query is one transaction: the second row fails (division by zero), so the first row's\n// node is not kept either.\ng.gql(\"FOR x IN [1, 0] INSERT (:n {v: 1 / x})\")",
+    "expect": "error"
+  },
+  {
+    "group": "GQL",
+    "graph": "modern",
     "title": "A GQL syntax error (see the help text)",
     "script": "g.gql(\"MATCH (p:person) RETRUN p.name\")",
     "expect": "error"

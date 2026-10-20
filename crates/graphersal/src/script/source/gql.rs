@@ -9,14 +9,15 @@ use crate::error::{GqlErrorBuilder, GqlErrorKind, ScriptError, TraverserError};
 use crate::script::*;
 
 impl ScriptGraphTraversalSource {
-    /// Runs a GQL read query (`MATCH ... RETURN ...`) at the start of a traversal; every result
+    /// Runs a GQL query (`MATCH ... RETURN ...`, or a write such as `INSERT ...`) at the start of
+    /// a traversal; every result
     /// is one map per row (column name -> value), see [`crate::GraphTraversalSource::gql`]. Rhai
     /// binding of `gql()`, the overload without parameters.
     pub fn gql(&mut self, query: String) -> Result<Self, Box<rhai::EvalAltResult>> {
         self.gql_step(query, Vec::new())
     }
 
-    /// Runs a GQL read query whose `$name` references read the values of `params`
+    /// Runs a GQL query whose `$name` references read the values of `params`
     /// (`#{name: value, ..}`; `()` for none). Rhai binding of `gql()`, the overload with
     /// parameters.
     pub fn gql_with(
