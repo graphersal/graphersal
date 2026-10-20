@@ -41,6 +41,7 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:value("<expression>")` | the last step of a pattern comprehension's child: the value of its `\|` part for one match, which the host step collects into the list |
 | `gql:insert_node(["label", ...], "{props}")` | `INSERT` of one node: creates it per row, with all its properties in one storage call, and makes it the current element ([Writes](#writes)) |
 | `gql:insert_edge("label", "from", "to", "{props}")` | `INSERT` of one edge between the nodes of the row named `from` and `to` (`(#n)` for an unnamed node of the pattern) |
+| `gql:set("<items>")`, `gql:remove("<items>")` | one `SET` / `REMOVE` clause: applies its items per row to the elements the row's variables hold and passes the row on unchanged |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 `gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
@@ -785,6 +786,13 @@ discard()                                                          1       1    
 Optimizer rules applied: source_filter_pushdown
 ```
 
+A `SET` or `REMOVE` clause becomes one `gql:set` / `gql:remove` step with its items as written;
+the variables it changes are labelled with `as()` before it, like those an insert reads:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin").profile()
+```
+
 A plan that writes never merges traversers, so the lowering places no merge points in it; a
 `lazy_barrier()` the optimizer adds between two hops passes every traverser on unmerged
 (`In` = `Out`). The write steps run only after the steps before them consumed their whole
@@ -798,7 +806,8 @@ A GQL query is a traversal, so everything that bounds a traversal bounds it too:
 [resource limits](../users_guide/resource_limits.md) and [query limits](../users_guide/query_limits.md),
 cancellation, the memory budget, and the [permission](../users_guide/permissions.md) check,
 which sees the reads and writes of the lowered plan (an `INSERT` asks `Create` per new label,
-like `add_v()` and `add_e()`; [Writing with GQL](writes.md#permissions)): reading a denied label through `gql()` is refused as
+like `add_v()` and `add_e()`, a `SET` or `REMOVE` `Update` like `property()`; [Writing with
+GQL](writes.md#permissions)): reading a denied label through `gql()` is refused as
 the equivalent Gremlin is (also a label reached only through a quantified edge, the body of a
 quantified path pattern or an optional
 part, or only inside an `EXISTS`, `COUNT` or `COLLECT` body, a pattern comprehension, a `CALL`

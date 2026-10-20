@@ -37,6 +37,8 @@ spelling is either not supported yet or [refused](refused.md).
 | `UNWIND list AS x` | `FOR x IN list` | one row per item; `WITH ORDINALITY` / `WITH OFFSET` only after `FOR` |
 | `CREATE <pattern>` | `INSERT <pattern>` | the same clause: once per row, nodes with label conjunctions (`:A:B` as `:A&B`), directed edges with one label ([Writing with GQL](writes.md)); `CREATE INDEX` / `CONSTRAINT` / `GRAPH` are [refused](refused.md) catalog commands |
 | `CALL { WITH a, b ... }`, the importing `WITH` | `CALL (a, b) { ... }` | the first `WITH` of the body, when it lists plain variables only, is the variable scope clause ([CALL subqueries](subset.md#call-subqueries)) |
+| `SET n:A:B`, `REMOVE n:A:B` | `SET n:A, n:B`, `REMOVE n:A, n:B` | the labels in order; `SET n IS A & B` likewise ([Writing with GQL](writes.md#set)) |
+| `SET (n).k = v`, `REMOVE (n).k` | `SET n.k = v`, `REMOVE n.k` | a parenthesized variable as the target |
 
 Each pair below returns the same rows:
 
@@ -71,6 +73,8 @@ g.gql("MATCH (p:person) CALL { WITH p MATCH (p)-[:knows]->(f) RETURN count(f) AS
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN count(f) AS n } RETURN p.name AS name, n ORDER BY name").to_list()   // josh 0, marko 2, peter 0, vadas 0
 g.gql("CREATE (c:city:capital {name: 'Rome'}) RETURN labels(c) AS l").to_list()   // #{"l": ["city", "capital"]}
 g.gql("INSERT (c:city&capital {name: 'Rome'}) RETURN labels(c) AS l").to_list()   // #{"l": ["city", "capital"]}
+g.gql("MATCH (p:person {name: 'marko'}) SET p:admin:staff RETURN labels(p) AS l").to_list()   // #{"l": ["person", "admin", "staff"]}
+g.gql("MATCH (p:person {name: 'marko'}) SET p:admin, p:staff RETURN labels(p) AS l").to_list()   // #{"l": ["person", "admin", "staff"]}
 ```
 
 The importing `WITH` passes the variables on unchanged; a first `WITH` that renames, computes or
@@ -240,6 +244,30 @@ g.gql("MATCH (p:person) CALL (p) { OPTIONAL MATCH (p)-[:created]->(s) WITH s ORD
 One difference from Neo4j: a `COUNT { }` body whose final `RETURN` only projects is counted
 without evaluating its items ([Semantics](semantics.md#count-and-collect)).
 
+## SET and REMOVE
+
+GQL's `SET` items are a property (`SET n.k = v`), all properties from a braced map
+(`SET n = {k: v}`) and a label (`SET n:A` / `SET n IS A`); `REMOVE` takes a property or a label.
+Two Cypher forms have no GQL counterpart and are accepted as **compatibility forms** with
+Cypher's meaning:
+
+- **`SET n += map`** merges the map into the properties: the keys of the map are set (a `NULL`
+  value removes its key), the other properties stay.
+- **`SET n = expr`** with an expression that is not a braced map: a `$parameter` or any map
+  value replaces every property, and a node or an edge stands for its properties, so `SET n = m`
+  copies them (`SET n = n` changes nothing). Write `SET n = properties(m)` for the same as a
+  plain map.
+
+A `NULL` on the right of `=` or `+=` is an error (`22004`) rather than an empty map; write
+`coalesce($map, {})` ([Semantics](semantics.md#set-and-remove)).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p += {city: 'Rome'} RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 29, "city": "Rome", "name": "marko"}}
+g.gql("MATCH (p:person {name: 'marko'}) SET p = $props RETURN properties(p) AS props", #{props: #{name: "marko", city: "Rome"}}).to_list()   // #{"props": #{"city": "Rome", "name": "marko"}}
+g.gql("MATCH (p:person {name: 'marko'}), (q:person {name: 'josh'}) SET p = q RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 32, "name": "josh"}}
+g.gql("MATCH (p:person {name: 'marko'}) SET p += $more", #{more: ()})   // error: the right side of SET p += .. is NULL, not a map
+```
+
 ## Cypher spellings that are not aliases
 
 | Cypher | In `gql()` |
@@ -254,6 +282,7 @@ without evaluating its items ([Semantics](semantics.md#count-and-collect)).
 | `CALL { } IN TRANSACTIONS` | [refused](refused.md): a write form; the `CALL` itself is supported |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
-| `MERGE`, `SET`, `DELETE`, `REMOVE`, `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT` |
+| `MERGE`, `DELETE`, `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT`; `SET` and `REMOVE` are supported, `+=` as a [compatibility form](#set-and-remove) |
+| `SET n[key] = v`, `SET n:$(expr)` (Cypher 25 dynamic keys and labels) | not supported; name the key and the label in the query |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |
 | `a--1` (minus minus one) | a comment starts at `--` (GQL wins): `RETURN n.age--1 AS x` returns the column `n.age`; write `n.age - -1` |

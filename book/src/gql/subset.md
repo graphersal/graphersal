@@ -727,6 +727,19 @@ g.gql("MATCH (p:person {name: 'marko'}) INSERT (p)-[:likes]->(f:fruit {name: 'ap
 g.gql("FOR n IN ['ann', 'bob'] CREATE (:person {name: n})").to_list()   // no rows
 ```
 
+## SET and REMOVE
+
+`SET <item>, ...` changes the elements of each row that reaches it, items left to right: a
+property (`SET n.k = expr`), all properties (`SET n = {..}`; Cypher's merge `SET n += {..}`) or
+labels of a node (`SET n:A`, `SET n IS A`). `REMOVE <item>, ...` removes a property
+(`REMOVE n.k`) or labels (`REMOVE n:A`). A `NULL` value removes the property, a `NULL` target
+is skipped. The full rules are on [Writing with GQL](writes.md#set).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin RETURN p.age AS age, labels(p) AS labels").to_list()   // #{"age": 30, "labels": ["person", "admin"]}
+g.gql("MATCH (p:person {name: 'marko'}) REMOVE p.age RETURN keys(p) AS keys").to_list()   // #{"keys": ["name"]}
+```
+
 ## Expressions
 
 | Kind | Forms |
@@ -1125,8 +1138,9 @@ construct and the alternative.
 
 | Construct | Until then |
 |---|---|
-| the write clauses `SET`, `REMOVE`, `DELETE` / `DETACH DELETE` / `NODETACH DELETE`, `MERGE`, Cypher's `FOREACH` | Gremlin `property()`, `add_label()`, `remove_property()`, `drop_label()`, `drop()`, `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
-| `INSERT` in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
+| the write clauses `DELETE` / `DETACH DELETE` / `NODETACH DELETE`, `MERGE`, Cypher's `FOREACH` | Gremlin `drop()`, `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` (or `SET ..`) for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
+| a write in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
+| a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |

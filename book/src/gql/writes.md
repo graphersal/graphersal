@@ -1,10 +1,10 @@
 # Writing with GQL
 
 `gql()` writes too. This version supports **`INSERT`** (Cypher `CREATE` is its
-[alias](aliases.md)): it creates nodes and edges, once for each row that reaches it. `SET`,
-`REMOVE`, `DELETE` and `MERGE` come in later versions; until then they fail before the run with
-GQLSTATUS `0A000` and a help line naming the Gremlin step that does the same
-([Not yet](#not-yet)).
+[alias](aliases.md)), which creates nodes and edges, and **`SET`** and **`REMOVE`**, which change
+the properties and labels of existing ones; each runs once for each row that reaches it.
+`DELETE` and `MERGE` come in later versions; until then they fail before the run with GQLSTATUS
+`0A000` and a help line naming the Gremlin step that does the same ([Not yet](#not-yet)).
 
 A writing query is one unit, like every traversal: it commits when it succeeds, and a query that
 fails, on any row, changes nothing ([Units](#one-query-is-one-unit)).
@@ -50,8 +50,8 @@ g.gql("INSERT (n:x {k: NULL, tags: ['a', 1], address: {city: 'Rome'}}) RETURN ke
 ```
 
 **Pattern rules.** A variable bound before the `INSERT` is written alone, `(p)`: it connects the
-existing node and may not carry labels or properties (`42002`; change an existing node with the
-Gremlin steps `add_label()` and `property()` for now). An edge without a direction, an edge with
+existing node and may not carry labels or properties (`42002`; change an existing node with
+[`SET`](#set), as in `MATCH (p:person) SET p:admin`). An edge without a direction, an edge with
 a label expression (`:r|s`), a node label expression other than a conjunction, a path variable
 (`p = ...`) and `WHERE` or a quantifier inside the pattern are errors before the run; the help
 shows the accepted form.
@@ -61,10 +61,94 @@ g.gql("INSERT (a:x)-[:r]-(b:y)")   // error: INSERT needs a direction
 g.gql("MATCH (p:person) INSERT (p:admin)")   // error: the variable `p` is already bound
 ```
 
+## SET
+
+`SET` takes one or more comma-separated items and applies them to the elements of each row that
+reaches it, left to right, so a later item sees the earlier ones:
+
+| Item | Effect |
+|---|---|
+| `SET n.k = expr` (also `SET (n).k = expr`) | sets one property of the node or edge `n` |
+| `SET n = {k: expr, ...}` | replaces every property: the keys missing from the map are removed |
+| `SET n += {k: expr, ...}` | merges the map in (a Cypher [compatibility form](aliases.md#set-and-remove)): other keys stay |
+| `SET n:A` / `SET n IS A` | adds the label `A` to the node `n`; `SET n:A:B` and `SET n IS A & B` add both |
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p.checked = true RETURN p.age AS age, p.checked AS checked").to_list()   // #{"age": 30, "checked": true}
+g.gql("MATCH (p:person {name: 'marko'}) SET p:admin:staff RETURN labels(p) AS labels").to_list()   // #{"labels": ["person", "admin", "staff"]}
+g.gql("MATCH (p:person {name: 'marko'}) SET p += {city: 'Rome'} RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 29, "city": "Rome", "name": "marko"}}
+g.gql("MATCH (p:person {name: 'marko'}) SET p = {name: 'marko', city: 'Rome'} RETURN properties(p) AS props").to_list()   // #{"props": #{"city": "Rome", "name": "marko"}}
+g.gql("MATCH (a {name: 'marko'})-[e:knows]->(b) SET e.checked = true RETURN b.name AS b, e.checked AS checked ORDER BY b").to_list()   // josh true, vadas true
+```
+
+**`NULL` removes.** GQL stores no `NULL`, so `SET n.k = NULL` removes the property, and a `NULL`
+value in the map of `SET n = {..}` or `SET n += {..}` removes its key. A `NULL` **target** (a
+variable an `OPTIONAL MATCH` left `NULL`) is skipped: the item does nothing for that row. A
+`NULL` map on the right of `=` or `+=` is an error (`22004`): write `SET n = {}` to remove every
+property, or `coalesce($map, {})` for a parameter that may be `NULL`.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.age = NULL RETURN keys(p) AS keys").to_list()   // #{"keys": ["name"]}
+g.gql("MATCH (p:person {name: 'marko'}) SET p += {age: NULL, city: 'Rome'} RETURN properties(p) AS props").to_list()   // #{"props": #{"city": "Rome", "name": "marko"}}
+g.gql("OPTIONAL MATCH (p:person {name: 'nobody'}) SET p.seen = true RETURN p").to_list()   // #{"p": ()}
+g.gql("MATCH (p:person {name: 'marko'}) SET p = $props", #{props: ()})   // error: the right side of SET p = .. is NULL, not a map
+```
+
+**Values** follow the rules of `INSERT`: literals, `$parameters`, functions and the row's
+variables; lists and maps are stored as they are; a node, an edge or a path cannot be a property
+value (`22G03`). Every value of a map is checked before the item writes anything. On the right of
+`=` and `+=` a node or an edge stands for its properties (`SET n = m` copies them, `SET n = n`
+changes nothing); any other value that is not a map is an error (`22G03`). An aggregate cannot be
+a value: aggregate in a `WITH` first.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}), (q:person {name: 'josh'}) SET p = q RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 32, "name": "josh"}}
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) WITH p, count(s) AS n SET p.projects = n RETURN p.name AS name, p.projects AS n ORDER BY name").to_list()
+// josh 2, marko 1, peter 1, vadas 0
+g.gql("MATCH (p:person {name: 'marko'}) SET p.self = p")   // error: a property cannot hold a graph element
+```
+
+**Labels.** A label item changes a node's label set: adding a label it has, like removing one it
+lacks, is no change. An edge has exactly one label, its type, so a label item on an edge is an
+error: `42002` before the run when the variable is an edge of a pattern, `22G03` when a row
+holds an edge (Gremlin's `set_label()` changes an edge's label). The item names labels joined by
+`:` or `&`; `|`, `!` and `%` are syntax errors.
+
+```rhai,graph=modern
+g.gql("MATCH (a)-[e:knows]->(b) SET e:friend")   // error: an edge has exactly one label
+```
+
+**Targets.** The target of an item is a variable of the row: `n.k`, `(n).k` or `n`. A deeper
+target (`n.address.city = ..`, `head(list).k = ..`) is not supported yet (`0A000`); name the
+element first, as in `WITH head(list) AS x SET x.k = ..`. The variable must be bound before the
+`SET` (`42002`).
+
+## REMOVE
+
+`REMOVE` takes comma-separated items like `SET`: `REMOVE n.k` removes a property of a node or an
+edge, `REMOVE n:A` (also `REMOVE n IS A`, `REMOVE n:A:B`) removes labels from a node, and the
+last label may go too. Removing what is not there changes nothing, and a `NULL` target is
+skipped.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) REMOVE p.age RETURN keys(p) AS keys").to_list()   // #{"keys": ["name"]}
+g.gql("MATCH (s:software {name: 'ripple'}) SET s:product REMOVE s:software RETURN labels(s) AS labels").to_list()   // #{"labels": ["product"]}
+g.gql("MATCH (p:person {name: 'marko'}) REMOVE p.nothing, p:nothing RETURN labels(p) AS labels, keys(p) AS keys").to_list()   // #{"keys": ["name", "age"], "labels": ["person"]}
+```
+
+The same in Gremlin:
+
+```rhai,graph=modern
+g.v().has("name", "marko").property("age", 30).add_label("admin").values("age").next()   // 30
+g.v().has("name", "marko").remove_property("age").properties().key().to_list()   // "name"
+g.v().has("name", "ripple").add_label("product").drop_label("software").label().next()   // "product"
+```
+
 ## Once per row
 
-An `INSERT` runs once for each row that reaches it, so the clauses before it decide how many
-elements it creates. A `MATCH` gives one row per match, `FOR` (Cypher `UNWIND`) one per list
+A write clause runs once for each row that reaches it, so the clauses before it decide how many
+elements an `INSERT` creates and how often a `SET` applies (`SET n.c = n.c + 1` over two rows of
+the same node adds 2). A `MATCH` gives one row per match, `FOR` (Cypher `UNWIND`) one per list
 item, and a variable of the row connects the new elements to what it matched:
 
 ```rhai,graph=modern,script
@@ -73,9 +157,9 @@ g.gql("FOR n IN $names INSERT (:person {name: n, born: $year})", #{names: ["ann"
 g.gql("MATCH (p:person) WHERE p.born = 1990 RETURN p.name AS name ORDER BY name").to_list()   // #{"name": "ann"}, #{"name": "bob"}
 ```
 
-It may stand after `MATCH`, `OPTIONAL MATCH`, `FOR`, `WITH`, `LET` and `FILTER`, and further
-clauses may follow it: a `MATCH` after the `INSERT` sees the new elements, and a new node can be
-connected to every row a later `MATCH` finds:
+A write clause may stand after `MATCH`, `OPTIONAL MATCH`, `FOR`, `WITH`, `LET`, `FILTER` and
+another write clause, and further clauses may follow it: a `MATCH` after the `INSERT` sees the new
+elements, and a new node can be connected to every row a later `MATCH` finds:
 
 ```rhai,graph=modern
 g.gql("INSERT (c:city {name: 'Berlin'}) MATCH (p:person) INSERT (p)-[:lives_in]->(c) RETURN count(*) AS n").to_list()   // #{"n": 4}
@@ -99,7 +183,7 @@ g.gql("MATCH (p:person) CALL (p) { INSERT (p)-[:likes]->(:fruit {name: p.name}) 
 ```
 
 A subquery expression (`EXISTS { }`, `COUNT { }`, `COLLECT { }`) and a comprehension cannot
-write (`42001`), and an `INSERT` in an operand of `UNION` is not supported yet.
+write (`42001`), and a write in an operand of `UNION` is not supported yet.
 
 ## What a row sees
 
@@ -118,6 +202,13 @@ g.v().has_label("X").count().next()   // 6
 g.gql("FOR i IN range(1, 3) INSERT (:n {i: i}) WITH count(*) AS made MATCH (m:n) RETURN made, count(m) AS seen").to_list()   // #{"made": 3, "seen": 3}
 ```
 
+A value a row carried before a `SET` keeps the value it had: `WITH p.age AS old SET p.age = 0`
+still returns the old age in `old`, while `p.age` reads the new one.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) WITH p, p.age AS old SET p.age = 0 RETURN old, p.age AS now").to_list()   // #{"now": 0, "old": 29}
+```
+
 The details, and how this follows from the executor, are on
 [Semantics](semantics.md#writes).
 
@@ -134,6 +225,13 @@ let run = g.gql("FOR x IN [1, 0] INSERT (:n {v: 1 / x})").execute();   // fails:
 g.v().has_label("n").count().next()   // 0
 ```
 
+A `SET` that fails on one row leaves the rows before it unchanged too:
+
+```rhai,graph=modern,script
+let set = g.gql("MATCH (p:person) SET p.score = 100 / (p.age - 27)").execute();   // fails on vadas (27)
+g.v().has("score").count().next()   // 0
+```
+
 Commit hooks see the query's `ChangeSet` and may veto it, a dry run shows its changes without
 keeping them, and a Store's journal records it like any Gremlin write
 ([Change capture](../users_guide/transactions.md#change-capture-changeset)).
@@ -143,8 +241,11 @@ keeping them, and a Store's journal records it like any Gremlin write
 An `INSERT` creates each element in one storage call with all its properties, so a schema sees
 the whole element ([Schemas](../users_guide/schema_enforcement.md)): defaults on create are
 filled in, a `required` property is satisfied by the map, write-time coercion applies, and a
-closed schema refuses undeclared labels and properties. A violation fails the query (and
-changes nothing), with a help line written for GQL:
+closed schema refuses undeclared labels and properties. `SET` and `REMOVE` are checked like the
+Gremlin steps that do the same: a value of the wrong type, removing a `required` property (also
+with `SET n.k = NULL` or a `SET n = {..}` without it) and a label the schema does not allow fail
+the query. A violation fails the query (and changes nothing), with a help line written for
+GQL:
 
 ```rhai,graph=empty,script
 g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", properties: #{
@@ -172,7 +273,11 @@ Help: Convert the value to the type 'int64' where the INSERT writes it, with toI
 The [permission](../users_guide/permissions.md) check sees the lowered plan before anything
 runs: an `INSERT` asks `Create` on `Data(vertex "label")` per label of each new node and `Create`
 on `Data(edge "label")` per new edge, exactly as `add_v(labels)` and `add_e(label)` do, plus
-the reads of its `MATCH` clauses. It asks nothing for the properties: they are part of creating
+the reads of its `MATCH` clauses. `SET` and `REMOVE` ask `Update`, as `property()`,
+`remove_property()`, `add_label()` and `drop_label()` do: on `Data(vertex)` for a node (any
+label, since a node's label set is not fixed by the pattern), on `Data(edge "label")` for an
+edge whose pattern names its labels, and on any element when the kind is not known before the
+run (an item of a `FOR` list). It asks nothing for the properties: they are part of creating
 the element. (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
 runs before the optimizer folds the property into the creation; a policy that denies only
 `Update` allows the `INSERT` and refuses its Gremlin twin.) A read-only host
@@ -183,8 +288,9 @@ state) refuses a GQL write before it runs.
 
 A saved query may be written in GQL itself ([Saved queries in
 GQL](../users_guide/saved_queries.md#saved-queries-in-gql)): the body is the plain query text,
-its `$parameters` are the declared ones, and an `INSERT` makes it a query that writes, whose
-`effects` name the labels its plan creates. A call writes in one unit and returns the rows:
+its `$parameters` are the declared ones, and an `INSERT`, `SET` or `REMOVE` makes it a query
+that writes, whose `effects` name what its plan creates and changes. A call writes in one unit
+and returns the rows:
 
 ```rhai,graph=modern,script
 g.define_query(#{name: "hire", language: "gql", params: #{name: "string", company: "string"},
@@ -193,9 +299,16 @@ g.get_query("hire")["effects"].map(|e| e.text);   // ["Create Data(vertex \"pers
 g.query("hire", #{name: "ann", company: "lop"}).select("name").to_list()   // "ann"
 ```
 
+```rhai,graph=modern,script
+g.define_query(#{name: "birthday", language: "gql", params: #{name: "string"},
+    body: "MATCH (p:person {name: $name}) SET p.age = p.age + 1 RETURN p.age AS age"});
+g.get_query("birthday")["effects"].map(|e| e.text);   // ["Update Data(vertex)"]
+g.query("birthday", #{name: "vadas"}).select("age").to_list()   // 28
+```
+
 A [saved query](../users_guide/saved_queries.md) in Rhai whose body runs `g.gql("INSERT ...")`
-with a literal query text is a writing query too: its `effects` name the labels it creates. A
-computed query text claims every write; pass values as `$parameters` instead.
+with a literal query text is a writing query too: its `effects` name what it creates and
+changes. A computed query text claims every write; pass values as `$parameters` instead.
 
 In a script, a writing `gql()` takes the write lock like a Gremlin write (`is_mutating()` is
 true), and the playground asks before running it again. Gremlin steps may follow:
@@ -230,9 +343,14 @@ assert_eq!(
 ## The plan
 
 An `INSERT` lowers to the internal steps `gql:insert_node` and `gql:insert_edge`, one per
-element of the pattern, in text order ([Plans and Performance](plans.md#writes)). Because the
-plan writes, its traversers are never merged into one with a higher bulk: each row creates its
-own elements.
+element of the pattern, in text order ([Plans and Performance](plans.md#writes)); a `SET` clause
+to one `gql:set` step and a `REMOVE` clause to one `gql:remove` step with its items, which pass
+the row on unchanged. Because the plan writes, its traversers are never merged into one with a
+higher bulk: each row creates its own elements and applies its own changes.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) SET p.age = 1 RETURN p").profile()
+```
 
 ## Not yet
 
@@ -241,10 +359,11 @@ own elements.
 | `DELETE n`, `DETACH DELETE n`, `NODETACH DELETE n` | Gremlin `drop()` |
 | `MERGE` | Gremlin `merge_v()`, `merge_e()` |
 | `FOREACH (x IN list \| ...)` | `FOR x IN list INSERT ...` |
-| `INSERT` in a `UNION` operand, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
+| a write in a `UNION` operand, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
+| a deeper `SET` / `REMOVE` target (`n.a.b`, `head(l).k`), Cypher's dynamic `n[key]` | name the element with `WITH .. AS x` and write the item on `x`; for a nested value Gremlin `property()` with a [jpath key](../users_guide/jpath_keys.md) |
 
 ```rhai,graph=modern
 g.gql("MATCH (n) DETACH DELETE n")   // error: DETACH DELETE is not yet supported in this version
 g.gql("MERGE (n:person {name: 'ann'})")   // error: MERGE is not yet supported in this version
-g.gql("MATCH (p:person) RETURN p").select("p").property("checked", true).count().next()   // 4
+g.gql("MATCH (p:person {name: 'marko'}) SET p.address.city = 'Rome'")   // error: `p.address.city` as a SET target is not yet supported
 ```
