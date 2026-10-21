@@ -155,18 +155,6 @@ reason = "expected SyntaxError at runtime, got 22G03 at compile time: GQL semant
 class = "unexpected_error"
 reason = "GQL semantic error at line 2, column 14: LIMIT must be a non-negative integer or a parameter, not an expression"
 
-["clauses/return/Return2.feature::[15] Fail when returning properties of deleted nodes"]
-class = "wrong_side_effects"
-reason = "the failed query changed the graph: +nodes 1, -nodes 1, +properties 1, -properties 1"
-
-["clauses/return/Return2.feature::[16] Fail when returning labels of deleted nodes"]
-class = "wrong_side_effects"
-reason = "the failed query changed the graph: +nodes 1, -nodes 1"
-
-["clauses/return/Return2.feature::[17] Fail when returning properties of deleted relationships"]
-class = "wrong_side_effects"
-reason = "the failed query changed the graph: +relationships 1, -relationships 1, +properties 1, -properties 1"
-
 ["clauses/return/Return2.feature::[1] Arithmetic expressions should propagate null values"]
 class = "missing"
 reason = "not yet: the exponentiation operator `^`"
