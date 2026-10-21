@@ -35,14 +35,6 @@ reason = "not yet: a quantified edge over a list of edges bound before"
 class = "missing"
 reason = "not yet: a quantified edge over a list of edges bound before"
 
-["clauses/return-orderby/ReturnOrderBy1.feature::[11] ORDER BY should order distinct types in the expected order"]
-class = "unexpected_error"
-reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
-
-["clauses/return-orderby/ReturnOrderBy1.feature::[12] ORDER BY DESC should order distinct types in the expected order"]
-class = "unexpected_error"
-reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
-
 ["clauses/return-skip-limit/ReturnSkipLimit1.feature::[3] SKIP with an expression that does not depend on variables"]
 class = "missing"
 reason = "refused: rand()"
@@ -134,14 +126,6 @@ reason = "not yet: datetime()"
 ["clauses/with-orderBy/WithOrderBy1.feature::[20] Sort date times in descending order"]
 class = "missing"
 reason = "not yet: datetime()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[21] Sort distinct types in ascending order"]
-class = "unexpected_error"
-reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[22] Sort distinct types in descending order"]
-class = "unexpected_error"
-reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[33] Sort by a date variable projected from a node property in ascending order::1"]
 class = "setup"
@@ -246,10 +230,6 @@ reason = "having executed: not yet: datetime()"
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::10"]
 class = "missing"
 reason = "not yet: datetime()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::5"]
-class = "wrong_result"
-reason = "expected row 1 | true | has no partner (in any order) among: | | false |"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::6"]
 class = "missing"
@@ -471,62 +451,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
 
-["expressions/comparison/Comparison1.feature::[6] Comparing lists to lists::3"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison1.feature::[8] Equality and inequality of NaN::1"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"isEqual\", \"isNotEqual\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison1.feature::[8] Equality and inequality of NaN::2"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"isEqual\", \"isNotEqual\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison1.feature::[8] Equality and inequality of NaN::3"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"isEqual\", \"isNotEqual\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison1.feature::[8] Equality and inequality of NaN::4"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"isEqual\", \"isNotEqual\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison1.feature::[9] Equality between strings and numbers::3"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison1.feature::[9] Equality between strings and numbers::4"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison2.feature::[4] Comparing lists::1"]
-class = "wrong_result"
-reason = "expected row 1 | true | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison2.feature::[4] Comparing lists::2"]
-class = "wrong_result"
-reason = "expected row 1 | true | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison2.feature::[4] Comparing lists::5"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison2.feature::[5] Comparing NaN::1"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"gt\", \"gtE\", \"lt\", \"ltE\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison2.feature::[5] Comparing NaN::2"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"gt\", \"gtE\", \"lt\", \"ltE\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison2.feature::[5] Comparing NaN::3"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"gt\", \"gtE\", \"lt\", \"ltE\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
-["expressions/comparison/Comparison2.feature::[5] Comparing NaN::4"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"gt\", \"gtE\", \"lt\", \"ltE\")' execution failed: GQL data exception at line 1, column 8: division by zero"
-
 ["expressions/comparison/Comparison3.feature::[1] Handling numerical ranges 1"]
 class = "unexpected_error"
 reason = "GQL syntax error at line 2, column 17: comparisons cannot be chained"
@@ -571,57 +495,9 @@ reason = "GQL syntax error at line 2, column 25: comparisons cannot be chained"
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["expressions/list/List3.feature::[1] Equality between list and literal should return false"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List3.feature::[3] Equality between different lists with null should return false"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List3.feature::[6] Equality between different nested lists with null should return false"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
 ["expressions/list/List4.feature::[2] Concatenating a list with a scalar of same type"]
 class = "unexpected_error"
 reason = "Step #1 'gql:project(\"foo\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list and a b…"
-
-["expressions/list/List5.feature::[11] IN should return false when order of elements in LHS list and RHS list don't match"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[12] IN with different length lists should return false"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[13] IN should return false when matching a list with a nested list with same elements"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[18] IN should return false when LHS contains a nested list and type mismatch on RHS - singleton version"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[19] IN should return false when LHS contains a nested list and type mismatch on RHS"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[28] IN should return false if no match can be found, despite nulls"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[30] IN should return false if different length lists compared, even if the extra element is null"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[33] IN should return false if different length lists with nested elements compared, even if the extra element is null"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[38] IN should work with an empty list in the presence of other list elements: not matching"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
 
 ["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::1"]
 class = "wrong_error"
@@ -642,22 +518,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s
 ["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::5"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[5] IN should return false when matching a number with a string"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[6] IN should return false when matching a number with a string - list version"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[7] IN should return false when types of LHS and RHS don't match - singleton list"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[8] IN should return false when types of LHS and RHS don't match - list"]
-class = "wrong_result"
-reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
 
 ["expressions/list/List6.feature::[5] Fail for `size()` on paths"]
 class = "wrong_error"
@@ -756,32 +616,8 @@ class = "unexpected_error"
 reason = "Step #1 'gql:project(\"a\", \"b\", \"c\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list…"
 
 ["expressions/precedence/Precedence3.feature::[5] List concatenation takes precedence over list element containment"]
-class = "wrong_result"
-reason = "expected row 1 | false | false | [false, 4] | [1, false, 4] | has no partner (in any order) among: | | null | null | null | null |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::1"]
-class = "wrong_result"
-reason = "expected row 1 | false | false | true | has no partner (in any order) among: | | null | null | true |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::2"]
-class = "wrong_result"
-reason = "expected row 1 | true | true | false | has no partner (in any order) among: | | null | null | null |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::3"]
-class = "wrong_result"
-reason = "expected row 1 | null | null | false | has no partner (in any order) among: | | null | null | null |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::4"]
-class = "wrong_result"
-reason = "expected row 1 | null | null | true | has no partner (in any order) among: | | null | null | null |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::5"]
-class = "wrong_result"
-reason = "expected row 1 | null | null | false | has no partner (in any order) among: | | null | null | null |"
-
-["expressions/precedence/Precedence3.feature::[6] List element containment takes precedence over comparison operator::6"]
-class = "wrong_result"
-reason = "expected row 1 | null | null | true | has no partner (in any order) among: | | null | null | null |"
+class = "unexpected_error"
+reason = "Step #1 'gql:project(\"a\", \"b\", \"c\", \"d\")' execution failed: GQL data exception at line 3, column 8: + adds two numbers or joins two strings or two lists, not a…"
 
 ["expressions/quantifier/Quantifier1.feature::[8] None quantifier on list containing nodes"]
 class = "unexpected_error"

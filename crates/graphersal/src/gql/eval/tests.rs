@@ -235,32 +235,41 @@ fn comparisons_across_numeric_kinds() {
 
 #[test]
 fn incomparable_kinds_and_null_give_null() {
+    // Stage 3f (U1): `=` / `<>` of different kinds give FALSE / TRUE, the orderings `NULL`.
+    let kinds = [("1", "'1'"), ("true", "1"), ("'a'", "[1]"), ("n", "1")];
+    let nulls = [
+        ("null", "1"),
+        ("1", "null"),
+        ("null", "null"),
+        ("n.missing", "n.missing"),
+    ];
     for op in ["=", "<>", "<", "<=", ">", ">="] {
-        for (a, b) in [
-            ("1", "'1'"),
-            ("true", "1"),
-            ("'a'", "[1]"),
-            ("n", "1"),
-            ("null", "1"),
-            ("1", "null"),
-            ("null", "null"),
-            ("n.missing", "n.missing"),
-        ] {
+        for (a, b) in kinds {
+            let expr = format!("{a} {op} {b}");
+            let expected = match op {
+                "=" => F,
+                "<>" => T,
+                _ => U,
+            };
+            assert_eq!(truth(&expr), expected, "{expr}");
+        }
+        for (a, b) in nulls {
             let expr = format!("{a} {op} {b}");
             assert_eq!(truth(&expr), U, "{expr}");
         }
     }
-    // Lists, maps and elements are not ordered.
-    assert_eq!(truth("[1] < [2]"), U);
+    // Lists are ordered lexicographically (U2); maps and elements are not ordered.
+    assert_eq!(truth("[1] < [2]"), T);
     assert_eq!(truth("n < m"), U);
 }
 
 #[test]
 fn nan_is_incomparable() {
-    // 0.0 / 0.0 is a division by zero, so NaN comes from a stored value only.
+    // Stage 3f (U3): IEEE 754, as the openCypher TCK: NaN is never equal, never ordered.
     let nan: Value<El> = float(f64::NAN);
-    assert_eq!(equals(&nan, &nan), U);
-    assert_eq!(order(&nan, &float(1.0)), None);
+    assert_eq!(equals(&nan, &nan), F);
+    assert_eq!(order(&nan, &float(1.0)), Order::Unordered);
+    assert_eq!(order(&nan, &Value::string("a")), Order::Unknown);
 }
 
 #[test]
@@ -296,7 +305,7 @@ fn in_follows_gql_null_semantics() {
     assert_eq!(truth("1 IN []"), F);
     assert_eq!(truth("1 IN null"), U);
     assert_eq!(truth("1 IN 1"), U);
-    assert_eq!(truth("'1' IN [1]"), U);
+    assert_eq!(truth("'1' IN [1]"), F);
     assert_eq!(truth("[1] IN [[1], [2]]"), T);
     assert_eq!(truth("2 IN $list"), T);
     assert_eq!(truth("'a' IN n.tags"), T);
@@ -401,15 +410,22 @@ fn overflow_and_division_by_zero_are_data_exceptions() {
     ] {
         assert_eq!(status_of(expr), "22003", "{expr}");
     }
-    for expr in [
-        "1 / 0",
-        "1 % 0",
-        "1.5 / 0",
-        "1 / 0.0",
-        "1.0 % 0.0",
-        "n.age / (n.age - 29)",
-    ] {
+    for expr in ["1 / 0", "1 % 0", "n.age / (n.age - 29)"] {
         assert_eq!(status_of(expr), "22012", "{expr}");
+    }
+    // Stage 3f (U3): a float divided by zero follows IEEE 754 (the openCypher TCK).
+    for (expr, expected) in [
+        ("1.5 / 0", f64::INFINITY),
+        ("1 / 0.0", f64::INFINITY),
+        ("-1 / 0.0", f64::NEG_INFINITY),
+    ] {
+        assert_eq!(eval(expr).ok(), Some(float(expected)), "{expr}");
+    }
+    for expr in ["1.0 % 0.0", "0.0 / 0.0"] {
+        match eval(expr) {
+            Ok(Value::Scalar(ElementProperty::Number(n))) => assert!(super::float(&n).is_nan()),
+            other => panic!("{expr}: {other:?}"),
+        }
     }
     for expr in ["'a' - 1", "true * 2", "[1] / 1", "-'a'", "n - 1"] {
         assert_eq!(status_of(expr), "22G03", "{expr}");

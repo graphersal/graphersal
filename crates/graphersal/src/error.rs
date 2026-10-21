@@ -7022,6 +7022,14 @@ fn gql_help(
                 help.push(' ');
             }
             help.push_str(GQL_DATA_ADVICE);
+            if gqlstatus == crate::gql::eval::status::DIVISION_BY_ZERO {
+                // Stage 3f: only an integer division fails on a zero divisor.
+                help.push_str(
+                    " Only an integer division (/ or %) fails on a zero divisor: a float one \
+                     gives Infinity or NaN (IEEE 754), as in \
+                     g.gql(\"MATCH (p:person) RETURN 100 / toFloat(p.age) AS r\").",
+                );
+            }
         }
     }
     help

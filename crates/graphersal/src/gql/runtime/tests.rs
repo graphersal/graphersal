@@ -120,10 +120,10 @@ fn filter_passes_only_on_true() {
         passing("MATCH (n) RETURN NOT (n.age > 30)"),
         ["marko", "vadas"]
     );
-    // Cross-type `<>` is NULL, so the string age passes neither `=` nor `<>`.
+    // Stage 3f (U1): cross-type `<>` is TRUE, so the string age passes `<>`, not `=`.
     assert_eq!(
         passing("MATCH (n) RETURN n.age <> 29"),
-        ["josh", "peter", "vadas"]
+        ["josh", "peter", "strage", "vadas"]
     );
     assert_eq!(passing("MATCH (n) RETURN n.age = 'x'"), ["strage"]);
     // Missing and stored null both read as NULL.

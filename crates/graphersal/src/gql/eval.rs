@@ -21,19 +21,32 @@
 //!   TRUE, FALSE and UNKNOWN (`NULL`); `AND` / `OR` skip the right operand once the left decides.
 //!   A filter row passes only on TRUE. A non-boolean operand is an error (22G03).
 //! - **Comparisons** `= <> < <= > >=` use `compare_scalars`: numbers by value across integer and
-//!   float, strings, booleans, uuids, one temporal type. Values of incomparable kinds, `NaN` and
-//!   any `NULL` operand give `NULL`, never an error. `=` / `<>` also compare lists (same length,
-//!   element-wise, three-valued), maps (same keys, value-wise) and elements (the same vertex or
-//!   edge); a vertex never equals an edge.
+//!   float, strings, booleans, uuids, one temporal type. Any `NULL` operand gives `NULL`, never
+//!   an error. **`=` / `<>` of two non-`NULL` values of different kinds** give FALSE / TRUE
+//!   (`1 = '1'` is FALSE, `[1] = 1` is FALSE; stage 3f, the openCypher TCK, where ISO GQL calls
+//!   them not comparable); `=` / `<>` also compare lists (same length, element-wise,
+//!   three-valued: `[1, 2] = [null, 'foo']` is FALSE, `[1, 2] = [null, 2]` is `NULL`), maps
+//!   (same keys, value-wise) and elements (the same vertex or edge); a vertex never equals an
+//!   edge. **The ordering operators** `< <= > >=` give `NULL` across kinds (`1 < 'a'`) and order
+//!   lists lexicographically, three-valued ([`order`]): the first pair of items that is not
+//!   equal decides (`[1, 2] < [1, 3]` TRUE, `[1, 2] >= [3, null]` FALSE), a `NULL` or
+//!   incomparable pair reached first gives `NULL` (`[1, 2] >= [1, null]`), a prefix sorts first
+//!   (`[1, null] >= [1]` TRUE). Maps, elements and paths are not ordered (`NULL`).
+//! - **`NaN`** (IEEE 754, the openCypher TCK): `NaN = x` is FALSE and `NaN <> x` TRUE for every
+//!   non-`NULL` `x`, `NaN` itself included; `NaN < 1`, `NaN >= NaN` and the other orderings
+//!   against a number are FALSE; against another kind they are `NULL` (`NaN > 'a'`).
 //! - **`IN`:** TRUE when an item equals the value; else `NULL` when some comparison was `NULL`
-//!   (`2 IN [1, NULL]`, `NULL IN [1]`); else FALSE (`NULL IN []` is FALSE). A right operand that
-//!   is `NULL` or not a list gives `NULL`.
+//!   (`2 IN [1, NULL]`, `NULL IN [1]`); else FALSE (`NULL IN []` is FALSE, `1 IN ['1']` is FALSE).
+//!   A right operand that is `NULL` or not a list gives `NULL`.
 //! - **`STARTS WITH` / `ENDS WITH` / `CONTAINS`:** strings only; a `NULL` or non-string operand
 //!   gives `NULL`.
 //! - **Arithmetic** `+ - * / %`: integer with integer stays integer (division truncates toward
 //!   zero, `%` takes the dividend's sign); any float operand makes it float. Overflow is error
 //!   22003 (numeric value out of range), never a wrap; a float result that is not finite from
-//!   finite operands is 22003 too. Division or `%` by zero (integer or float) is error 22012.
+//!   finite operands is 22003 too. Integer division or `%` by zero is error 22012; a float one
+//!   follows IEEE 754 (stage 3f, the openCypher TCK, where ISO GQL raises 22012 for every
+//!   numeric type): `1.0 / 0.0` is `Infinity`, `-1 / 0.0` `-Infinity`, `0.0 / 0.0` and
+//!   `1.0 % 0.0` `NaN`.
 //!   `NULL` propagates. Any other operand kind is error 22G03.
 //! - **Concatenation:** `||` joins two strings or two lists. Cypher `+` is its alias on two
 //!   strings and two lists. **`+` of a string and a number is refused** (22G03): there is no
@@ -73,7 +86,7 @@
 //!   ask [`Env::reserve`] first (design F6), `||` / `+` of two strings or lists included.
 //! - **Paths:** a [`Value::Path`] is the elements of a matched path in text order (vertex, edge,
 //!   vertex, ...). Two paths are equal when they hold the same elements in the same order; a
-//!   path compared with a value of another kind gives `NULL`, like any two incomparable kinds.
+//!   path never equals a value of another kind, and is not ordered (`NULL`).
 //! - **Map projections** (stage 2c, Cypher) `v {.key, .*, x, key: expr}`: a `NULL` target gives
 //!   `NULL` (where the record constructor `{key: v.key}` gives `{key: null}`); from a node or an
 //!   edge `.key` reads its property (missing: `NULL`, the key kept) and `.*` every stored
@@ -1987,7 +2000,8 @@ pub(crate) fn equals<E: PartialEq>(a: &Value<E>, b: &Value<E>) -> Truth {
                 | (ElementProperty::Map(_), ElementProperty::Map(_))
                 | (ElementProperty::Vertex(_), ElementProperty::Vertex(_))
                 | (ElementProperty::Edge(_), ElementProperty::Edge(_)) => Truth::of(a == b),
-                _ => Truth::Unknown,
+                // Different kinds, or a `NaN`: never equal (the openCypher TCK, IEEE 754).
+                _ => Truth::False,
             },
         },
         (Value::List(a), Value::List(b)) => {
@@ -2013,16 +2027,48 @@ pub(crate) fn equals<E: PartialEq>(a: &Value<E>, b: &Value<E>) -> Truth {
         }
         (Value::Element(a), Value::Element(b)) => Truth::of(a == b),
         (Value::Path(a), Value::Path(b)) => Truth::of(a == b),
-        _ => Truth::Unknown,
+        // Two non-NULL values of different kinds are never equal (the openCypher TCK).
+        _ => Truth::False,
     }
 }
 
-/// The order of two values for `< <= > >=`: `None` when incomparable or `NULL`.
-fn order<E>(a: &Value<E>, b: &Value<E>) -> Option<Ordering> {
+/// The outcome of an ordering comparison `< <= > >=` of two values ([`order`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Order {
+    /// The values are ordered: the operator tests this ordering.
+    Is(Ordering),
+    /// Numbers that IEEE 754 leaves unordered (a `NaN` operand): every operator is FALSE.
+    Unordered,
+    /// A `NULL` operand, or kinds that are not ordered against each other: `NULL`.
+    Unknown,
+}
+
+/// The order of two values for `< <= > >=` (see the module docs): scalars of one comparable
+/// kind by value, lists lexicographically (the first pair of items that is not equal decides,
+/// a list that is a prefix of the other sorts first), everything else [`Order::Unknown`].
+pub(crate) fn order<E>(a: &Value<E>, b: &Value<E>) -> Order {
     match (a, b) {
-        (Value::Scalar(a), Value::Scalar(b)) => compare_scalars(a, b),
-        _ => None,
+        (Value::Scalar(a), Value::Scalar(b)) => match compare_scalars(a, b) {
+            Some(ordering) => Order::Is(ordering),
+            None => match (a, b) {
+                (ElementProperty::Number(_), ElementProperty::Number(_)) => Order::Unordered,
+                _ => Order::Unknown,
+            },
+        },
+        (Value::List(a), Value::List(b)) => order_lists(a, b),
+        _ => Order::Unknown,
     }
+}
+
+/// Lexicographic order of two lists; it recurses along nested lists like [`equals`].
+fn order_lists<E>(a: &[Value<E>], b: &[Value<E>]) -> Order {
+    for (a, b) in a.iter().zip(b) {
+        match order(a, b) {
+            Order::Is(Ordering::Equal) => {}
+            decided => return decided,
+        }
+    }
+    Order::Is(a.len().cmp(&b.len()))
 }
 
 #[inline(never)]
@@ -2057,8 +2103,9 @@ fn binary<E: Clone + PartialEq>(
     span: Span,
 ) -> Result<Value<E>, EvalError> {
     let compared = |test: fn(Ordering) -> bool| match order(left, right) {
-        Some(order) => Truth::of(test(order)).into_value(),
-        None => Value::Null,
+        Order::Is(order) => Truth::of(test(order)).into_value(),
+        Order::Unordered => Truth::False.into_value(),
+        Order::Unknown => Value::Null,
     };
     Ok(match op {
         BinaryOp::And => truth_of(left, span)?
@@ -2237,13 +2284,13 @@ fn arithmetic<E>(op: BinaryOp, a: &Number, b: &Number, span: Span) -> Result<Val
                 BinaryOp::Add => a + b,
                 BinaryOp::Sub => a - b,
                 BinaryOp::Mul => a * b,
-                BinaryOp::Div if b == 0.0 => return Err(EvalError::division_by_zero(span)),
+                // IEEE 754: a float divided by zero is `NaN` or an infinity (the openCypher TCK).
                 BinaryOp::Div => a / b,
-                BinaryOp::Mod if b == 0.0 => return Err(EvalError::division_by_zero(span)),
                 BinaryOp::Mod => a % b,
                 _ => f64::NAN,
             };
-            if result.is_infinite() && a.is_finite() && b.is_finite() {
+            let by_zero = op == BinaryOp::Div && b == 0.0;
+            if result.is_infinite() && a.is_finite() && b.is_finite() && !by_zero {
                 return Err(EvalError::out_of_range(span));
             }
             Ok(Value::Scalar(ElementProperty::Number(Number::from_f64(

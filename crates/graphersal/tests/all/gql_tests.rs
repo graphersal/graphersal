@@ -214,9 +214,10 @@ fn where_follows_three_valued_logic() {
     check("p.age = 32", &["floatage", "josh"]);
     check("p.age = 32.0", &["floatage", "josh"]);
     check("NOT (p.age > 30)", &["marko", "vadas"]);
+    // Stage 3f (U1): a string age is not equal to a number, so `<>` keeps it.
     check(
         "p.age <> 29",
-        &["emma", "floatage", "josh", "peter", "vadas"],
+        &["emma", "floatage", "josh", "peter", "strage", "vadas"],
     );
     check("p.age = 'x'", &["strage"]);
     check("p.age IS NULL", &["noage", "nullage"]);
@@ -716,8 +717,9 @@ mod differential {
                 format!(r#"{persons}.has("age", P.eq(32)).{NAME}"#),
             ),
             (
+                // Stage 3f (U1): the string age is not equal to 29, the stored null is NULL.
                 "MATCH (p:person) WHERE p.age <> 29 RETURN p.name AS n".into(),
-                format!(r#"{persons}.has("age", P.lt(29).or(P.gt(29))).{NAME}"#),
+                format!(r#"{persons}.has("age", P.neq(29)).has("age", P.neq(())).{NAME}"#),
             ),
             (
                 "MATCH (p:person) WHERE NOT (p.age > 30) RETURN p.name AS n".into(),

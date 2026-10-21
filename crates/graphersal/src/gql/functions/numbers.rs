@@ -316,8 +316,8 @@ fn finite_result<E>(result: f64, inputs: &[f64], span: Span) -> Result<Value<E>,
     Ok(Value::float(result))
 }
 
-/// `mod(a, b)`: exactly `a % b` (an integer pair stays integer; `b = 0` is 22012 at `span`, the
-/// divisor).
+/// `mod(a, b)`: `a % b` (an integer pair stays integer; `b = 0` is 22012 at `span`, the
+/// divisor, also for floats: ISO GQL's `MOD`, where the Cypher operator `%` follows IEEE 754).
 fn modulo<E>(a: &Number, b: &Number, span: Span) -> Result<Value<E>, EvalError> {
     match (&a.n, &b.n) {
         (N::NegInt(_), N::NegInt(0)) => Err(EvalError::division_by_zero(span)),

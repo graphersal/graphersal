@@ -620,15 +620,46 @@ row (syntax, unknown variables, misplaced aggregates) are raised before the run,
 ## Comparisons across types
 
 Numbers compare by value across integers and floats (`1 = 1.0` is TRUE). Strings, booleans,
-UUIDs and dates compare within their own kind. Comparing values of different kinds (a number
-with a string) is `NULL`, never an error and never a conversion:
+UUIDs and dates compare within their own kind. Comparing values of different kinds is never an
+error and never a conversion: `=` is FALSE and `<>` TRUE (a number is not equal to a string),
+while the orderings `<`, `<=`, `>`, `>=` are `NULL` (a number is neither smaller nor larger
+than a string). A `NULL` operand gives `NULL` for every operator:
 
 ```rhai,graph=modern
 g.gql("MATCH (n) RETURN n.name AS n, n.age > 'a' AS cmp ORDER BY n LIMIT 2").to_list()   // #{"cmp": (), "n": "josh"}, #{"cmp": (), "n": "lop"}
+g.gql("RETURN 1 = '1' AS a, [1] <> 1 AS b, 1 IN ['1'] AS c, 1 < 'a' AS d").to_list()   // #{"a": false, "b": true, "c": false, "d": ()}
 ```
 
-`=` and `<>` also compare lists (item by item), maps (key by key) and elements (the same vertex
-or edge). No value is ever turned into text implicitly: `'a' + 1` is an error, not `'a1'`
+`=` and `<>` also compare lists (item by item, three-valued: `[1, 2] = [null, 'foo']` is FALSE
+because `2` and `'foo'` differ, `[1, 2] = [null, 2]` is `NULL`), maps (key by key) and elements
+(the same vertex or edge). Lists are also **ordered**, lexicographically: the first pair of
+items that is not equal decides, a `NULL` (or incomparable) pair reached first makes the
+result `NULL`, and a list that is a prefix of the other is the smaller one:
+
+```rhai,graph=empty
+g.gql("RETURN [1, 2] < [1, 3] AS a, [1, null] >= [1] AS b, [1, 2] >= [1, null] AS c, [1, 2] >= [3, null] AS d").to_list()   // #{"a": true, "b": true, "c": (), "d": false}
+```
+
+Maps, elements and paths are not ordered (`NULL`); `ORDER BY` still sorts them
+([Ordering](#ordering)).
+
+**Floats follow IEEE 754.** A float divided by zero is not an error: `1.0 / 0.0` is `Infinity`,
+`-1 / 0.0` is `-Infinity`, `0.0 / 0.0` and `1.0 % 0.0` are `NaN`; an integer divided by zero
+stays error `22012`, and a float result that overflows from finite operands (`1.0e308 * 10`)
+stays error `22003`. `NaN` equals nothing, itself included (`NaN = NaN` is FALSE, `NaN <> 1`
+TRUE), and every ordering of `NaN` against a number is FALSE (`NaN > 1`, `NaN <= NaN`); against
+another kind it is `NULL` (`NaN > 'a'`):
+
+```rhai,graph=empty
+g.gql("WITH 0.0 / 0.0 AS n RETURN n = n AS a, n <> n AS b, n > 1 AS c, n > 'a' AS d, 1.0 / 0.0 AS e").to_list()   // #{"a": false, "b": true, "c": false, "d": (), "e": inf}
+g.gql("RETURN 1 / 0 AS x").to_list()   // error: division by zero (22012)
+```
+
+These rules follow Neo4j and the openCypher TCK, where ISO GQL calls a comparison of different
+kinds "not comparable" and raises `22012` for a division by zero of every numeric type
+([differences from the standard](conformance.md#differences-from-the-standard)).
+
+No value is ever turned into text implicitly: `'a' + 1` is an error, not `'a1'`
 (Neo4j converts here; Graphersal does not). Convert explicitly: `'a' || toString(1)` or
 `'a' || CAST(1 AS STRING)` ([Conversions](#conversions-strict-cast-lenient-tox)).
 
@@ -815,13 +846,15 @@ follow these rules:
   an integer (`left`, `substring`, `range`, the precision of `round`, the `n` of the list
   `trim`) does not take a float.
 - **No `NaN` or infinity from finite numbers.** `sqrt(-1)` (`2201F`), `ln(0)` (`2201E`) and an
-  `exp()` or `power()` that overflows (`22003`) are errors, like the arithmetic operators. A `NaN`
+  `exp()` or `power()` that overflows (`22003`) are errors, like the arithmetic operators (whose
+  one exception is a float divided by zero, IEEE 754: [Comparisons across
+  types](#comparisons-across-types)). A `NaN`
   that is already stored passes through `abs`, `floor`, `ceil` and `round` unchanged, and
   `sign(NaN)` is 0. Conversions are not arithmetic: `toFloat('NaN')` and `toFloat('Infinity')`
   give the float values, as in Neo4j.
 - **Result types.** The GQL functions keep the argument's type: `abs`, `floor` and `ceil` of an
   integer are integers. `round` (Cypher) is always a float, `sign` always an integer; `sqrt`,
-  `exp`, `ln`, `log`, `log10` and `power` are floats; `mod(a, b)` is exactly `a % b`.
+  `exp`, `ln`, `log`, `log10` and `power` are floats; `mod(a, b)` is `a % b`, except that a float `b = 0` is error 22012 (ISO `MOD`) where `%` gives `NaN`.
 - **Bounded results.** A function whose result can be larger than its arguments (`range`,
   `split`, `replace`, `toString` of a list or map, and the operator `||`) computes the size of the
   result first and asks for it against `traversal.max_materialized_bytes` and the memory budget,

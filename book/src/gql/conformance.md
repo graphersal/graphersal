@@ -170,3 +170,15 @@ where it has one):
 | GQLSTATUS codes | `42001` for syntax errors; the others provisional ([Errors](errors.md)) |
 | order of the writes of one `INSERT` | per row: its nodes in text order, then its edges in text order |
 | property values of `INSERT` | `NULL` is not stored; maps and lists of any kinds are stored as given (a [difference from Neo4j](semantics.md#writes)) |
+
+## Differences from the standard
+
+Where ISO GQL and Neo4j disagree and the openCypher TCK measures the Neo4j behaviour, `gql()`
+follows Neo4j in these places (user decision, stage 3f):
+
+| Topic | ISO GQL | `gql()` |
+|---|---|---|
+| `=` / `<>` / `IN` / simple `CASE` between values of different kinds | not comparable | `=` FALSE, `<>` TRUE (`1 = '1'`, `[1] = 1`, `1 IN ['1']`); the orderings `<` .. `>=` stay `NULL` ([Semantics](semantics.md#comparisons-across-types)) |
+| `<` `<=` `>` `>=` on two lists | not comparable | lexicographic, three-valued |
+| a float divided by zero | `22012` | IEEE 754: `Infinity`, `-Infinity` or `NaN`; an integer divided by zero stays `22012` |
+| `NaN` in a comparison | (no `NaN` arises: every division by zero is `22012`) | never equal (`NaN = NaN` FALSE), every ordering against a number FALSE |

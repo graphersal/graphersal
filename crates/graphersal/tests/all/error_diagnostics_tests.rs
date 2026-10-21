@@ -7737,6 +7737,32 @@ mod gql {
     }
 
     #[test]
+    fn gql_integer_division_by_zero_help_names_the_float_division() {
+        // Stage 3f: a float divided by zero is IEEE 754, so the help names that form too.
+        let (err, report) =
+            gql_failure(|g| g.gql("MATCH (p:person) RETURN 1 % (p.age - 29)").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22012".to_string())
+        );
+        assert!(
+            report.contains(
+                "Only an integer division (/ or %) fails on a zero divisor: a float one gives \
+                 Infinity or NaN (IEEE 754), as in \
+                 g.gql(\"MATCH (p:person) RETURN 100 / toFloat(p.age) AS r\")."
+            ),
+            "{report}"
+        );
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql("MATCH (p:person) RETURN 100 / toFloat(p.age) AS r")
+            .to_list();
+        assert_eq!(rows.map(|rows| rows.len()).ok(), Some(4));
+    }
+
+    #[test]
     fn gql_bad_limit_parameter_names_a_runnable_value() {
         let (err, report) = gql_failure(|g| {
             g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])
