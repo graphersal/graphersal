@@ -5292,3 +5292,333 @@ fn random_gql_3d_delete_never_panics_equals_its_twins_and_fails_without_trace() 
     }
     fatal.assert_empty("GQL 3d DELETE");
 }
+
+// ----- stage 3e: GQL MERGE -----
+
+/// A random `MERGE` query of stage 3e with its pure-GQL twin: the rows (a unit row, `FOR x IN
+/// [..]`, `MATCH (p:person)` or both), then `MERGE` of a path of one to three nodes, each new
+/// (named `n<i>`, labels from a pool without `person`, so the rows of `MATCH (p:person)` never
+/// grow, and a constant or row-dependent property map) or the bound `p`, joined by edges
+/// (named `e<i>`) of either direction or undirected, optionally followed by `ON CREATE SET`
+/// items. No `ON MATCH SET`: a second run would apply it to every match (also an undirected
+/// edge matched both ways, or older elements a created edge now connects), and its twin (a
+/// second unit `CALL`) runs step-at-a-time, all rows before the inserting `CALL`. The twin is
+/// the conditional INSERT form: per row, a unit `CALL` that inserts the pattern (an undirected
+/// edge from left to right) and sets the items only when `NOT EXISTS` finds no match. With
+/// `fail`, the rows are `FOR x IN [1, .., 0]` and the first new node stores `1 / x`, so the
+/// last row fails (its check, before the match).
+#[cfg(feature = "gql")]
+fn random_gql_3e_merge(rng: &mut Rng, fail: bool) -> (String, String) {
+    let source = if fail { 1 } else { rng.below(4) };
+    let rows = match source {
+        0 => String::new(),
+        1 if fail => format!("FOR x IN {} ", rng.pick(&["[0]", "[1, 0]", "[2, 1, 0]"])),
+        1 => format!(
+            "FOR x IN {} ",
+            rng.pick(&["[1]", "[1, 1, 2]", "[2, 1, 2, 1]", "[3, 2, 1]"])
+        ),
+        2 => "MATCH (p:person) ".to_string(),
+        _ => "MATCH (p:person) FOR x IN [1, 2, 1] ".to_string(),
+    };
+    let (has_x, has_p) = (source == 1 || source == 3, source >= 2);
+    let imports = match (has_p, has_x) {
+        (true, true) => "p, x",
+        (true, false) => "p",
+        (false, true) => "x",
+        (false, false) => "",
+    };
+    let len = 1 + rng.below(3);
+    let mut nodes: Vec<Option<String>> = Vec::new();
+    for i in 0..len {
+        // A lone bound node merges nothing (E2): a one-node pattern is always new.
+        if has_p && len > 1 && rng.chance(40) {
+            nodes.push(None);
+            continue;
+        }
+        let labels = *rng.pick(&["", ":A", ":B", ":A&B", ":software"]);
+        let mut props: Vec<&str> = Vec::new();
+        if fail && nodes.iter().all(Option::is_none) {
+            props.push("v: 1 / x");
+        }
+        match rng.below(6) {
+            0 => props.push("k: 1"),
+            1 if has_x => props.push("k: x"),
+            2 if has_p => props.push("name: p.name"),
+            3 if labels == ":software" => props.push("name: 'lop'"),
+            _ => {}
+        }
+        let map = if props.is_empty() {
+            String::new()
+        } else {
+            format!(" {{{}}}", props.join(", "))
+        };
+        nodes.push(Some(format!("n{i}{labels}{map}")));
+    }
+    if nodes.iter().all(Option::is_none) {
+        nodes[0] = Some("n0:A".to_string());
+    }
+    let node = |n: &Option<String>| match n {
+        Some(text) => format!("({text})"),
+        None => "(p)".to_string(),
+    };
+    let (mut merge_pattern, mut insert_pattern) = (node(&nodes[0]), node(&nodes[0]));
+    let mut names: Vec<String> = Vec::new();
+    if nodes[0].is_some() {
+        names.push("n0".to_string());
+    }
+    for (i, next) in nodes.iter().enumerate().skip(1) {
+        let label = *rng.pick(&["knows", "created", "r"]);
+        let props = *rng.pick(&["", "", " {w: 1}", " {weight: 0.5}"]);
+        let edge = format!("e{i}:{label}{props}");
+        let (merged, inserted) = match rng.below(3) {
+            0 => (format!("-[{edge}]->"), format!("-[{edge}]->")),
+            1 => (format!("<-[{edge}]-"), format!("<-[{edge}]-")),
+            // Undirected: matched either way, created from left to right (W33).
+            _ => (format!("-[{edge}]-"), format!("-[{edge}]->")),
+        };
+        merge_pattern.push_str(&format!("{merged}{}", node(next)));
+        insert_pattern.push_str(&format!("{inserted}{}", node(next)));
+        names.push(format!("e{i}"));
+        if next.is_some() {
+            names.push(format!("n{i}"));
+        }
+    }
+    let items = if rng.chance(50) {
+        let target = rng.pick(&names).clone();
+        let value = *rng.pick(&["1", "'on'", "[1, 2]"]);
+        let mut items = format!("{target}.c = {value}");
+        if rng.chance(30) && target.starts_with('n') {
+            items.push_str(&format!(", {target}:Seen"));
+        }
+        Some(items)
+    } else {
+        None
+    };
+    let mut merge = format!("{rows}MERGE {merge_pattern}");
+    // The matching pattern of the twin: the MERGE pattern without its variables' names would
+    // be as good; the names are local to the EXISTS body.
+    let mut twin = rows.clone();
+    if let Some(items) = &items {
+        merge.push_str(&format!(" ON CREATE SET {items}"));
+    }
+    twin.push_str(&format!(
+        "CALL ({imports}) {{ FILTER NOT EXISTS {{ MATCH {merge_pattern} }} INSERT \
+         {insert_pattern}{} }}",
+        items
+            .as_ref()
+            .map(|items| format!(" SET {items}"))
+            .unwrap_or_default()
+    ));
+    (merge, twin)
+}
+
+/// Adversarial and refused MERGE queries of stage 3e: every refused form (W30, W36, E2),
+/// NULL values and ends (E1), ON items reading and failing, MERGE in subqueries and bodies,
+/// large row counts, saved-query parameters.
+#[cfg(feature = "gql")]
+const GQL_3E_CORPUS: &[&str] = &[
+    "MERGE (n:A {k: 1}) ON CREATE SET n.c = 1 ON MATCH SET n.m = true RETURN n.c, n.m",
+    "FOR x IN [1, 1, 2] MERGE (n:A {k: x}) RETURN count(*) AS c",
+    "MATCH (p:person) MERGE (p)-[:likes]->(f:fruit {of: p.name}) RETURN f.of",
+    "MATCH (a:person), (b:person) MERGE (a)-[:knows]-(b) RETURN count(*) AS c",
+    "MATCH (p:person) MERGE (p)-[:self]->(p)",
+    "MERGE p = (:a)-[:r]->(:b) RETURN length(p) AS l, nodes(p) AS ns",
+    "MERGE (n) RETURN count(*) AS c",
+    "MERGE (n:A:B {k: 1}) MERGE (n)-[:r]->(m:C) RETURN m",
+    "MATCH (a) MERGE (a)",
+    "MERGE (a:A) MERGE (a)",
+    "MATCH (a:person) MERGE (a:extra)-[:r]->(:B)",
+    "MATCH (a:person) MERGE (a {k: 1})-[:r]->(:B)",
+    "MATCH (a)-[e]->(b) MERGE (a)-[e:knows]->(b)",
+    "MERGE (a:A), (b:B)",
+    "MERGE (a:A) WHERE a.k = 1",
+    "MERGE (a:A)-[:r*1..2]->(b)",
+    "MERGE (a:A)-[:r|s]->(b)",
+    "MERGE (a:A)-[]->(b)",
+    "MERGE (a:A|B)",
+    "MERGE (a:!A)",
+    "MERGE ((a)-[:r]->(b)){2}",
+    "MERGE (a:A {k: NULL})",
+    "FOR x IN [1, NULL] MERGE (:A {k: x})",
+    "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) MERGE (p)-[:made]->(s)",
+    "FOR x IN [1] MATCH (p:person) WITH p, x MERGE (p)-[:k]->(x)",
+    "MATCH (p:person) MERGE (q:A {k: p})",
+    "MERGE (a:A {k: 1}) ON CREATE SET a.k = a",
+    "MERGE (a:A {k: 1}) ON CREATE SET b.k = 1",
+    "MERGE (a:A {k: 1}) ON DELETE SET a.k = 1",
+    "MERGE (a:A {k: 1}) ON CREATE SET a = {k: 2} ON MATCH SET a += {m: 1}",
+    "FOR x IN [1, 0] MERGE (a:A {k: 1}) ON MATCH SET a.v = 1 / x",
+    "FOR x IN [1, 0] MERGE (a:A {k: 1 / x})",
+    "MERGE (a:A {k: COUNT { MATCH (n) }})",
+    "MERGE (a:A {k: [(n)-->(m) | m.name]})",
+    "MATCH (p) WHERE EXISTS { MERGE (:x) } RETURN p",
+    "MATCH (p) RETURN COUNT { MERGE (:x) } AS c",
+    "MATCH (p:person) CALL (p) { MERGE (p)-[:tag]->(:T {v: p.age % 2}) } RETURN count(*) AS c",
+    "MATCH (p:person) OPTIONAL CALL (p) { MERGE (p)-[:tag]->(t:T) RETURN t } RETURN count(t)",
+    "MERGE (n:A) RETURN n NEXT MERGE (n)-[:r]->(:B) RETURN count(*) AS c",
+    "MATCH (n:software) DETACH DELETE n MERGE (:software {name: 'lop'})",
+    "MERGE (n:A {k: 1}) SET n.k = 2 MERGE (m:A {k: 1}) RETURN count(*) AS c",
+    "FOR i IN range(1, 300) MERGE (:Many {i: i % 7})",
+    "MATCH (a), (b) MERGE (a)-[:all]->(b)",
+    "MERGE (n:A {k: $n, name: $name})",
+    "MERGE (n:A {k: $missing})",
+    "MERGE",
+    "MERGE (",
+    "MERGE (n) ON",
+    "MERGE (n) ON CREATE",
+    "MERGE (n) ON MATCH SET",
+    "merge (n:a) on create set n.k = 1",
+];
+
+/// Tokens of stage 3e for the token soup (a new list: the existing ones stay as they are).
+#[cfg(feature = "gql")]
+const GQL_3E_TOKENS: &[&str] = &[
+    "MERGE",
+    "ON",
+    "CREATE",
+    "MATCH",
+    "SET",
+    "(n)",
+    "(n:A {k: 1})",
+    "(p)",
+    "(:B)",
+    "-[:r]->",
+    "<-[e:r]-",
+    "-[:r]-",
+    "p =",
+    "n.k = 1",
+    "n:Seen",
+    "n += {m: 1}",
+    ",",
+    "NULL",
+    "FOR x IN [1, 0]",
+    "1 / x",
+    "x",
+    "RETURN",
+    "count(*)",
+    "WITH",
+    "CALL",
+    "{",
+    "}",
+    "OPTIONAL",
+    "DETACH DELETE n",
+    "INSERT (m)",
+];
+
+/// The canonical state of the modern graph after `queries` ran on it one after the other
+/// (each its own unit), or the diagnostic of the first that failed.
+#[cfg(feature = "gql")]
+fn gql_3e_state(queries: &[&str]) -> Result<Vec<String>, String> {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    for query in queries {
+        graph
+            .traversal_mut()
+            .gql(query)
+            .to_list()
+            .map_err(|e| format_diagnostic(&e))?;
+    }
+    Ok(gql_3a_dump(&graph))
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_3e_merge_never_panics_is_idempotent_equals_its_twin_and_fails_without_trace() {
+    let mut fatal = Fatal::default();
+    let mut differences = Vec::new();
+    let mut traces = Vec::new();
+    let mut rng = Rng::new(0x3E_3E26_E000);
+    let modern = gql_3a_dump(&TraversalGraph::tinkerpop_modern());
+    let mut texts: Vec<String> = GQL_3E_CORPUS.iter().map(|s| s.to_string()).collect();
+    let mut generated = Vec::new();
+    for _ in 0..budget(30) {
+        for fail in [false, false, true] {
+            generated.push((random_gql_3e_merge(&mut rng, fail), fail));
+        }
+    }
+    let (mut twins, mut changed) = (0usize, 0usize);
+    for ((merge, twin), fail) in generated {
+        texts.push(merge.clone());
+        texts.push(twin.clone());
+        let label = merge.clone();
+        // A fresh modern graph for every run.
+        let outcome = guarded(WATCHDOG, move || {
+            let once = gql_3e_state(&[&merge]);
+            let rhai = gql_3a_script_state(&format!(
+                "g.gql({}).iterate()",
+                graphersal_rhai_string(&merge)
+            ));
+            let (twice, twin_state) = if fail {
+                (Ok(Vec::new()), Ok(Vec::new()))
+            } else {
+                (gql_3e_state(&[&merge, &merge]), gql_3e_state(&[&twin]))
+            };
+            (merge, twin, once, rhai, twice, twin_state)
+        });
+        let Ok((merge, twin, once, rhai, twice, twin_state)) = outcome else {
+            fatal.check(&label, outcome.map(|_| ()));
+            continue;
+        };
+        if fail {
+            // The last row fails: an error, and nothing an earlier row wrote stays.
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            let failed = graph.traversal_mut().gql(&merge).to_list().is_err();
+            if !failed || once.is_ok() || rhai.is_ok() || gql_3a_dump(&graph) != modern {
+                traces.push(format!("{merge}\n  {once:?}\n  rhai: {rhai:?}"));
+            }
+            continue;
+        }
+        twins += 1;
+        let Ok(once) = once else {
+            differences.push(format!("{merge}\n  failed: {once:?}"));
+            continue;
+        };
+        if once != modern {
+            changed += 1;
+        }
+        let same = twice.as_ref() == Ok(&once)
+            && twin_state.as_ref() == Ok(&once)
+            && rhai.as_ref() == Ok(&once);
+        if !same {
+            differences.push(format!(
+                "{merge}\n  once:  {once:?}\n  twice: {twice:?}\n  Rhai:  {rhai:?}\n  {twin}\n  \
+                 twin:  {twin_state:?}"
+            ));
+        }
+    }
+    assert!(twins >= 2 * budget(30) as usize, "only {twins} twins ran");
+    assert!(
+        changed * 2 > twins,
+        "only {changed} of {twins} MERGE queries changed the graph"
+    );
+    assert!(
+        differences.is_empty(),
+        "{} MERGE queries differ from a second run or their twin:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    assert!(
+        traces.is_empty(),
+        "{} failing MERGE queries left a trace:\n{}",
+        traces.len(),
+        traces.join("\n")
+    );
+    for _ in 0..budget(30) {
+        let base = rng.pick(GQL_3E_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(30) {
+        let len = 1 + rng.below(16);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_3E_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (p:person) MERGE");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql_write(text.clone()));
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 3e MERGE");
+}

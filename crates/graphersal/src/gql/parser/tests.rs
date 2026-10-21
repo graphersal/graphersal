@@ -5848,7 +5848,7 @@ fn merge_form_errors() {
     );
     let alternative = f.alternative.unwrap_or_default();
     assert!(
-        alternative.contains("MERGE (a:A) MERGE (b:Label)"),
+        alternative.contains("g.gql(\"MERGE (a:A) MERGE (b:B)\")"),
         "{alternative}"
     );
     assert!(help_of(query).contains("MERGE looks for"));

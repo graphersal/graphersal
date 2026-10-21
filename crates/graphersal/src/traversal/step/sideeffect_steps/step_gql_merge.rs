@@ -186,6 +186,26 @@ impl<'g, S: GraphStorage + 'g> StepGqlMerge<'g, S> {
         let span = check.value.span();
         let text = self.query.get(span.start..span.end).unwrap_or("x");
         let fixed = rewritten(&self.query, span, &format!("coalesce({text}, 0)"));
+        let key = crate::error::gql_key(&check.key);
+        let alternative = if text.eq_ignore_ascii_case("null") {
+            // A NULL literal: no filter or default can help, the property has to go.
+            format!(
+                "MERGE matches and creates only property values that are not NULL: leave \
+                 `{key}` out of the pattern, and find the elements that lack it with a MATCH, \
+                 as in g.gql(\"MATCH (n) FILTER n.{key} IS NULL RETURN n\")"
+            )
+        } else {
+            match fixed {
+                Some(fixed) => format!(
+                    "keep only the rows where it has a value with FILTER {text} IS NOT NULL \
+                     before the MERGE, or give it a default with coalesce(), as in {fixed}"
+                ),
+                None => format!(
+                    "keep only the rows where it has a value with FILTER {text} IS NOT NULL \
+                     before the MERGE, or give it a default with coalesce({text}, ..)"
+                ),
+            }
+        };
         GqlErrorBuilder::new(
             GqlErrorKind::Data,
             span.start..span.end,
@@ -195,18 +215,69 @@ impl<'g, S: GraphStorage + 'g> StepGqlMerge<'g, S> {
             ),
         )
         .gqlstatus(status::NULL_VALUE)
-        .alternative(match fixed {
-            Some(fixed) => format!(
-                "keep only the rows where it has a value with FILTER {text} IS NOT NULL before \
-                 the MERGE, or give it a default with coalesce(), as in {fixed}"
-            ),
-            None => format!(
-                "keep only the rows where it has a value with FILTER {text} IS NOT NULL before \
-                 the MERGE, or give it a default with coalesce({text}, ..)"
-            ),
-        })
+        .alternative(alternative)
         .topic(GqlHelpTopic::Merge)
         .into_error(&self.query)
+    }
+
+    /// An error of the creator in MERGE terms (rule 6): the creator is the INSERT routine of
+    /// stage 3a, whose data errors (an edge endpoint, a node bound before, that is NULL or no
+    /// node; a property value that is a graph element) speak of an INSERT. The message names
+    /// the MERGE, the topic is the MERGE's, and a NULL endpoint gets the failing query with the
+    /// filter before the MERGE as its fix.
+    #[inline(never)]
+    fn creator_error(&self, mut error: Box<TraverserError>) -> Box<TraverserError> {
+        let mut current: &mut TraverserError = &mut error;
+        while let TraverserError::StepFailed { source, .. } = current {
+            current = source;
+        }
+        let TraverserError::Gql {
+            kind: GqlErrorKind::Data,
+            message,
+            gqlstatus,
+            context,
+            ..
+        } = current
+        else {
+            return error;
+        };
+        if !matches!(context.topic, GqlHelpTopic::Insert | GqlHelpTopic::Kind) {
+            return error;
+        }
+        *message = message.replace(" of the inserted `", " of the merged `");
+        context.topic = GqlHelpTopic::Merge;
+        let name = context
+            .alternative
+            .as_deref()
+            .and_then(|a| a.rsplit_once(": FILTER "))
+            .and_then(|(_, rest)| rest.strip_suffix(" IS NOT NULL"))
+            .map(str::to_string);
+        if let (true, Some(name)) = (gqlstatus.as_str() == status::NULL_VALUE, name) {
+            let filter = format!("FILTER {name} IS NOT NULL");
+            let fixed = self.keyword_start().and_then(|at| {
+                let at = Span {
+                    start: at,
+                    end: at,
+                    ..self.pattern
+                };
+                rewritten(&self.query, at, &format!("{filter} "))
+            });
+            context.alternative = Some(match fixed {
+                Some(fixed) => format!(
+                    "keep only the rows where it is bound before the MERGE: {filter}, as in \
+                     {fixed}"
+                ),
+                None => format!("keep only the rows where it is bound before the MERGE: {filter}"),
+            });
+        }
+        error
+    }
+
+    /// Where the `MERGE` keyword of the clause starts in the query: the last `MERGE` before
+    /// the pattern (only a path variable `p =` stands between them).
+    fn keyword_start(&self) -> Option<usize> {
+        let before = self.query.get(..self.pattern.start)?;
+        before.to_ascii_uppercase().rfind("MERGE")
     }
 
     /// The records `child` gives for `row`, as derived traversers of the row of bulk 1 each
@@ -300,7 +371,10 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlMerge<'g
                 self.records(context, &row, matched, self.on_create..all, &mut output)?;
                 continue;
             }
-            let created = self.creator.apply_to(context, &row)?;
+            let created = self
+                .creator
+                .apply_to(context, &row)
+                .map_err(|error| self.creator_error(error))?;
             self.records(context, &row, created, 0..self.on_create, &mut output)?;
         }
         Ok(output)

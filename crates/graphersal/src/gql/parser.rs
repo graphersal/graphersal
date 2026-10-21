@@ -2560,10 +2560,16 @@ impl<'a> Parser<'a> {
             comma,
             "MERGE takes exactly one pattern: a second pattern after `,` cannot stand here",
         )
-        .alternative(format!(
-            "write one MERGE for each pattern, as in MERGE {first} MERGE (b:Label), or connect \
-             the patterns with an edge into one"
-        ))
+        .alternative(match self.rewritten(comma, " MERGE") {
+            Some(fixed) => format!(
+                "write one MERGE for each pattern, as in {fixed}, or connect the patterns with \
+                 an edge into one"
+            ),
+            None => format!(
+                "write one MERGE for each pattern, as in MERGE {first} MERGE (b:Label), or \
+                 connect the patterns with an edge into one"
+            ),
+        })
         .topic(GqlHelpTopic::Merge);
         Box::new(b)
     }

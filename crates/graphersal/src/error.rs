@@ -4757,7 +4757,8 @@ impl TraverserError {
                     body,
                     self.outermost_steps(),
                 )),
-                // A schema violation of a GQL INSERT: the fix is GQL text, not Gremlin steps.
+                // A schema violation of a GQL INSERT, or of the create of a MERGE (stage 3e:
+                // its creator is the INSERT routine): the fix is GQL text, not Gremlin steps.
                 #[cfg(feature = "gql")]
                 TraverserError::Schema(schema)
                 | TraverserError::Graph(GraphError::Schema(schema))
@@ -4765,7 +4766,8 @@ impl TraverserError {
                         .innermost_failed_step()
                         .is_some_and(|step| step.starts_with("gql:insert_")) =>
                 {
-                    gql_schema_help(schema).or_else(|| schema.help())
+                    let merge = self.gql_merge_pattern();
+                    gql_schema_help(schema, merge.as_deref()).or_else(|| schema.help())
                 }
                 // A schema violation of a GQL SET / REMOVE (stage 3c): the fix is GQL text too.
                 #[cfg(feature = "gql")]
@@ -4775,7 +4777,18 @@ impl TraverserError {
                         step.starts_with("gql:set(") || step.starts_with("gql:remove(")
                     }) =>
                 {
-                    gql_set_schema_help(schema).or_else(|| schema.help())
+                    gql_set_schema_help(schema, false).or_else(|| schema.help())
+                }
+                // A schema violation of the ON CREATE / ON MATCH items of a MERGE (stage 3e):
+                // SET items, so the SET fix in MERGE form.
+                #[cfg(feature = "gql")]
+                TraverserError::Schema(schema)
+                | TraverserError::Graph(GraphError::Schema(schema))
+                    if self
+                        .innermost_failed_step()
+                        .is_some_and(|step| step.starts_with("gql:merge(")) =>
+                {
+                    gql_set_schema_help(schema, true).or_else(|| schema.help())
                 }
                 // A GQL read, write or `RETURN` of an element a `DELETE` removed earlier (W27,
                 // W28): the fix is GQL text, not the Gremlin `element_map()` advice.
@@ -6979,6 +6992,18 @@ fn gql_help(
             help.truncate(help.trim_end().len())
         }
         GqlErrorKind::Data if topic == GqlHelpTopic::Delete => help.push_str(GQL_DELETE_ADVICE),
+        // E1 of stage 3e (a NULL property value) and a NULL bound node of the pattern.
+        GqlErrorKind::Data if topic == GqlHelpTopic::Merge => {
+            help.push_str(
+                "A row of the data gave the marked part of the MERGE pattern a value it can \
+                 neither match nor create: a property value that is NULL or a graph element, \
+                 or a node bound before that is NULL or no node. A variable that OPTIONAL \
+                 MATCH may leave NULL is filtered first, and a value that is no node is turned \
+                 into one by a MATCH, as in g.gql(\"FOR n IN ['lop'] MATCH (s:software {name: \
+                 n}) MERGE (:review {stars: 5})-[:about]->(s)\"). ",
+            );
+            help.push_str(GQL_MERGE_ADVICE);
+        }
         GqlErrorKind::Data => {
             if topic == GqlHelpTopic::TextAndNumber {
                 help.push_str(
@@ -7007,7 +7032,9 @@ const GQL_INSERT_ADVICE: &str = "INSERT (Cypher CREATE) creates its pattern once
      as (p), connects the existing node, as in g.gql(\"MATCH (p:person {name: 'marko'}) \
      INSERT (p)-[:likes]->(f:fruit&food {name: 'apple'}) RETURN f.name\"). A query may end \
      with the INSERT (it then returns no rows), and FOR gives it one row per item, as \
-     in g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\").";
+     in g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\"). To create a pattern \
+     only where it is missing, MERGE finds it or creates it, as in \
+     g.gql(\"FOR n IN ['ann', 'marko'] MERGE (:person {name: n})\").";
 
 /// The general advice of an error about a `SET` / `REMOVE` clause ([`GqlHelpTopic::Set`],
 /// stage 3c): the item forms.
@@ -7080,7 +7107,15 @@ fn gql_element_removed_help(kind: GraphNodeType) -> String {
 /// required property, setting it before the label that requires it. `None` for the violations
 /// whose own help fits (labels, connections, undeclared keys).
 #[cfg(feature = "gql")]
-fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
+///
+/// `merge`: the violation came from an `ON CREATE SET` / `ON MATCH SET` item of a `MERGE`
+/// (stage 3e): the examples are `MERGE .. ON MATCH SET` items.
+fn gql_set_schema_help(error: &SchemaError, merge: bool) -> Option<String> {
+    let set = if merge {
+        "the ON CREATE SET or ON MATCH SET item"
+    } else {
+        "the SET"
+    };
     match error {
         SchemaError::TypeMismatch {
             element_type,
@@ -7094,9 +7129,10 @@ fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
                 element_type,
                 label,
                 &format!("{{v}}.{} = {function}($v)", gql_key(property_name)),
+                merge,
             );
             Some(format!(
-                "Convert the value to the type '{expected_type}' where the SET writes it, with \
+                "Convert the value to the type '{expected_type}' where {set} writes it, with \
                  {function}(), as in g.gql(\"{example}\", #{{v: {sample}}}). {function}() gives \
                  NULL for a value it cannot convert, and SET of a NULL value removes the \
                  property; CAST(x AS ..) fails the query for it instead."
@@ -7112,9 +7148,14 @@ fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
                 element_type,
                 label,
                 &format!("{{v}} = {{{key}: {{v}}.{key}}}"),
+                merge,
             );
-            let merge =
-                gql_set_example(element_type, label, &format!("{{v}} += {{{key}: 'value'}}"));
+            let merge = gql_set_example(
+                element_type,
+                label,
+                &format!("{{v}} += {{{key}: 'value'}}"),
+                merge,
+            );
             Some(format!(
                 "'{property_name}' is in \"required\" of {element_type} label '{label}': SET \
                  n.{key} = NULL and REMOVE n.{key} remove it, and SET n = {{map}} removes every \
@@ -7132,10 +7173,21 @@ fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
         } if *element_type == "vertex" && !is_nested_schema_path(property_name) => {
             let key = gql_key(property_name);
             let text = gql_key(label);
+            let (example, same) = if merge {
+                (
+                    format!("MERGE (n {{name: 'marko'}}) ON MATCH SET n.{key} = 'value', n:{text}"),
+                    "the same ON CREATE SET or ON MATCH SET",
+                )
+            } else {
+                (
+                    format!("MATCH (n) SET n.{key} = 'value', n:{text}"),
+                    "the same SET",
+                )
+            };
             Some(format!(
                 "The label '{label}' requires '{property_name}': set it before the label in \
-                 the same SET (the items apply from left to right), as in \
-                 g.gql(\"MATCH (n) SET n.{key} = 'value', n:{text}\"). Or remove it from the \
+                 {same} (the items apply from left to right), as in \
+                 g.gql(\"{example}\"). Or remove it from the \
                  label's \"required\" in the schema (a \"default\" fills only elements \
                  created without the property, not a label added later)."
             ))
@@ -7145,14 +7197,19 @@ fn gql_set_schema_help(error: &SchemaError) -> Option<String> {
 }
 
 /// A runnable `MATCH .. SET` on the modern graph changing the elements of `label`, `item`
-/// with `{v}` for the variable.
+/// with `{v}` for the variable; with `merge` a `MERGE .. ON MATCH SET` (stage 3e).
 #[cfg(feature = "gql")]
-fn gql_set_example(element_type: &str, label: &str, item: &str) -> String {
+fn gql_set_example(element_type: &str, label: &str, item: &str, merge: bool) -> String {
     let text = gql_key(label);
+    let clause = if merge { "MERGE" } else { "MATCH" };
+    let set = if merge { "ON MATCH SET" } else { "SET" };
     if element_type == "edge" {
-        format!("MATCH ()-[e:{text}]->() SET {}", item.replace("{v}", "e"))
+        format!(
+            "{clause} ()-[e:{text}]->() {set} {}",
+            item.replace("{v}", "e")
+        )
     } else {
-        format!("MATCH (n:{text}) SET {}", item.replace("{v}", "n"))
+        format!("{clause} (n:{text}) {set} {}", item.replace("{v}", "n"))
     }
 }
 
@@ -7168,12 +7225,52 @@ fn gql_conversion(expected_type: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// The Rhai string literal `text` starts with, unquoted (`"a\"b" ..` gives `a"b`).
+#[cfg(feature = "gql")]
+fn rhai_string_prefix(text: &str) -> Option<String> {
+    let mut chars = text.strip_prefix('"')?.chars();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => out.push(chars.next()?),
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The variable written for the first node of `label` in the MERGE `pattern` (`(p:person
+/// {..})` gives `p`); empty for an anonymous node or when there is none.
+#[cfg(feature = "gql")]
+fn merge_node_variable<'p>(pattern: &'p str, label: &str) -> &'p str {
+    for (at, _) in pattern.match_indices('(') {
+        let rest = &pattern[at + 1..];
+        let end = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let (variable, after) = rest.split_at(end);
+        let labelled = after
+            .strip_prefix(':')
+            .and_then(|a| a.strip_prefix(label))
+            .is_some_and(|a| !a.starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+        if labelled {
+            return variable;
+        }
+    }
+    ""
+}
+
 /// The advice of a schema violation a GQL `INSERT` raised (stage 3a), with a runnable
 /// `INSERT` of the failing label and key: the conversion of a value of the wrong type, the
 /// value of a missing required property. `None` for the violations whose advice names no
-/// Gremlin step (labels, connections, undeclared keys): their own help fits.
+/// Gremlin step (labels, connections, undeclared keys): their own help fits. `merge` is the
+/// pattern of the `MERGE` whose create raised it (stage 3e: the create is the INSERT routine),
+/// whose node variable the examples keep.
 #[cfg(feature = "gql")]
-fn gql_schema_help(error: &SchemaError) -> Option<String> {
+fn gql_schema_help(error: &SchemaError, merge: Option<&str>) -> Option<String> {
+    let word = if merge.is_some() { "MERGE" } else { "INSERT" };
+    let variable = |label: &str| merge.map_or("", |pattern| merge_node_variable(pattern, label));
     match error {
         SchemaError::TypeMismatch {
             element_type,
@@ -7187,9 +7284,11 @@ fn gql_schema_help(error: &SchemaError) -> Option<String> {
                 element_type,
                 label,
                 &format!("{}: {function}($v)", gql_key(property_name)),
+                word,
+                variable(label),
             );
             Some(format!(
-                "Convert the value to the type '{expected_type}' where the INSERT writes it, \
+                "Convert the value to the type '{expected_type}' where the {word} writes it, \
                  with {function}(), as in g.gql(\"{example}\", #{{v: {sample}}}). {function}() \
                  gives NULL for a value it cannot convert, and a NULL value is not stored; \
                  CAST(x AS ..) fails the query for it instead."
@@ -7201,9 +7300,22 @@ fn gql_schema_help(error: &SchemaError) -> Option<String> {
             property_name,
         } if !is_nested_schema_path(property_name) => {
             let key = gql_key(property_name);
-            let example = gql_insert_example(element_type, label, &format!("{key}: 'value'"));
+            let example = gql_insert_example(
+                element_type,
+                label,
+                &format!("{key}: 'value'"),
+                word,
+                variable(label),
+            );
+            // C8 of stage 3e: the ON CREATE items run after the create.
+            let after = if word == "MERGE" {
+                " pattern (the ON CREATE SET items run after the create, so they cannot give \
+                 it; to match on other keys only, give it a \"default\" in the schema)"
+            } else {
+                ""
+            };
             Some(format!(
-                "Give '{property_name}' a value in the property map of the INSERT, as in \
+                "Give '{property_name}' a value in the property map of the {word}{after}, as in \
                  g.gql(\"{example}\"); a NULL value (such as a property the matched element \
                  lacks) is not stored and so is missing too: give it a fallback, as in \
                  {{{key}: coalesce(n.{key}, 'unknown')}}. Or remove it from the label's \
@@ -7215,18 +7327,25 @@ fn gql_schema_help(error: &SchemaError) -> Option<String> {
     }
 }
 
-/// A runnable `INSERT` on the modern graph of one element of `label` with the property map
-/// `entries` (a node, or an edge between two of its people).
+/// A runnable `INSERT` (or, `word`, `MERGE`) on the modern graph of one element of `label`
+/// with the property map `entries` (a node, or an edge between two of its people).
 #[cfg(feature = "gql")]
-fn gql_insert_example(element_type: &str, label: &str, entries: &str) -> String {
+/// `variable` names the node.
+fn gql_insert_example(
+    element_type: &str,
+    label: &str,
+    entries: &str,
+    word: &str,
+    variable: &str,
+) -> String {
     let label = gql_key(label);
     if element_type == "edge" {
         format!(
-            "MATCH (a {{name: 'marko'}}), (b {{name: 'josh'}}) INSERT (a)-[:{label} \
+            "MATCH (a {{name: 'marko'}}), (b {{name: 'josh'}}) {word} (a)-[:{label} \
              {{{entries}}}]->(b)"
         )
     } else {
-        format!("INSERT (:{label} {{{entries}}})")
+        format!("{word} ({variable}:{label} {{{entries}}})")
     }
 }
 
@@ -7401,7 +7520,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         }
         GqlHelpTopic::Call => {
             "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT, SET, \
-             REMOVE, DELETE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
+             REMOVE, DELETE, MERGE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
              (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which \
              must be new names; its aggregates, ORDER BY and LIMIT apply to each row's \
@@ -8263,6 +8382,24 @@ impl TraverserError {
             current = source;
         }
         name
+    }
+
+    /// When the innermost failure is a step of the create child of a GQL `MERGE` (stage 3e),
+    /// the failing step right outside the innermost one being `gql:merge("<pattern>", ..)`: the
+    /// pattern as written (`""` when its text cannot be read back).
+    #[cfg(feature = "gql")]
+    fn gql_merge_pattern(&self) -> Option<String> {
+        let mut names: [Option<&str>; 2] = [None, None];
+        let mut current = self;
+        while let TraverserError::StepFailed {
+            step_name, source, ..
+        } = current
+        {
+            names = [names[1], Some(step_name.as_str())];
+            current = source;
+        }
+        let outer = names[0]?.strip_prefix("gql:merge(")?;
+        Some(rhai_string_prefix(outer).unwrap_or_default())
     }
 
     /// Where the innermost failure ran (feature `gql`): walking the failing levels from the

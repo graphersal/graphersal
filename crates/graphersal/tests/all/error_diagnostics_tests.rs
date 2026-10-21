@@ -9698,7 +9698,7 @@ mod gql {
     #[test]
     fn gql_call_errors_explain_imports_and_returned_columns() {
         let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write \
-             (INSERT, SET, REMOVE, DELETE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
+             (INSERT, SET, REMOVE, DELETE, MERGE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
              names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which must \
              be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
@@ -10115,7 +10115,9 @@ mod gql {
          (p), connects the existing node, as in g.gql(\"MATCH (p:person {name: 'marko'}) INSERT \
          (p)-[:likes]->(f:fruit&food {name: 'apple'}) RETURN f.name\"). A query may end with the \
          INSERT (it then returns no rows), and FOR gives it one row per item, as in \
-         g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\").";
+         g.gql(\"FOR n IN ['ann', 'bob'] INSERT (:person {name: n})\"). To create a pattern \
+         only where it is missing, MERGE finds it or creates it, as in \
+         g.gql(\"FOR n IN ['ann', 'marko'] MERGE (:person {name: n})\").";
 
     /// The example of a correct INSERT in the errors of a wrong pattern.
     const INSERT_EXAMPLE: &str =
@@ -11119,5 +11121,208 @@ mod gql {
             .to_list()
             .expect("the FOREACH alternative runs");
         assert_eq!(counts(&graph), (3, 1));
+    }
+
+    // ----- stage 3e: help sweep for MERGE (rule 6) -----
+
+    /// The general advice of an error about a `MERGE` clause (stage 3e).
+    const MERGE_ADVICE: &str = "MERGE looks for its whole pattern for each row: every match is \
+         a row, and when nothing matches the whole pattern is created, reusing the nodes bound \
+         before. Its one pattern has nodes with the labels written, joined by & or :, and a \
+         property map, edges with exactly one label (an edge without a direction matches either \
+         direction and is created from left to right), and a node bound before written alone, \
+         as (p); ON CREATE SET and ON MATCH SET items change what was created or matched, as in \
+         g.gql(\"MERGE (p:person {name: 'ann'}) ON CREATE SET p.new = true ON MATCH SET p.new \
+         = false RETURN p.new\"). Each row sees what the rows before it created, so FOR creates \
+         a repeated item once, as in g.gql(\"FOR n IN ['ann', 'ann'] MERGE (:person {name: \
+         n})\").";
+
+    /// The sentence a run-time data error of a `MERGE` pattern adds before the advice.
+    const MERGE_DATA: &str = "A row of the data gave the marked part of the MERGE pattern a \
+         value it can neither match nor create: a property value that is NULL or a graph \
+         element, or a node bound before that is NULL or no node. A variable that OPTIONAL \
+         MATCH may leave NULL is filtered first, and a value that is no node is turned into one \
+         by a MATCH, as in g.gql(\"FOR n IN ['lop'] MATCH (s:software {name: n}) MERGE \
+         (:review {stars: 5})-[:about]->(s)\"). ";
+
+    /// E1 (a NULL property value, literal or computed) and a NULL or non-node bound end of a
+    /// MERGE edge: MERGE wording (not the INSERT's, the creator being the INSERT routine), the
+    /// fix built from the failing query, the MERGE advice; the fixes run, the failure (after
+    /// earlier rows wrote) changes nothing.
+    #[test]
+    fn gql_merge_data_errors_name_the_merge_fix_built_from_the_failing_query() {
+        for (query, status, message, fix) in [
+            (
+                "MERGE (p:person {name: NULL})",
+                "22004",
+                "MERGE cannot match or create `{name: NULL}`: a property value is NULL",
+                "MERGE matches and creates only property values that are not NULL: leave `name` \
+                 out of the pattern, and find the elements that lack it with a MATCH, as in \
+                 g.gql(\"MATCH (n) FILTER n.name IS NULL RETURN n\"). ",
+            ),
+            (
+                "FOR x IN [1, NULL] MERGE (:n {k: x})",
+                "22004",
+                "MERGE cannot match or create `{k: NULL}`: a property value is NULL",
+                "keep only the rows where it has a value with FILTER x IS NOT NULL before the \
+                 MERGE, or give it a default with coalesce(), as in g.gql(\"FOR x IN [1, NULL] \
+                 MERGE (:n {k: coalesce(x, 0)})\"). ",
+            ),
+            (
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) MERGE (p)-[:made]->(s)",
+                "22004",
+                "the destination node `s` of the merged `:made` edge is NULL",
+                "keep only the rows where it is bound before the MERGE: FILTER s IS NOT NULL, as \
+                 in g.gql(\"MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) FILTER s IS NOT \
+                 NULL MERGE (p)-[:made]->(s)\"). ",
+            ),
+            (
+                "FOR x IN [1] MATCH (p:person) WITH p, x MERGE (p)-[:k]->(x)",
+                "22G03",
+                "the destination node `x` of the merged `:k` edge is not a node",
+                "",
+            ),
+            (
+                "MATCH (p:person) MERGE (q:x {k: p})",
+                "22G03",
+                "the value of property `k` is a node",
+                "store a value of it instead, such as {k: element_id(..)} or {k: \
+                 properties(..)}. ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}"
+            );
+            let report = format_diagnostic(&err);
+            assert!(report.contains(message), "{query}: {report}");
+            assert!(!report.contains("INSERT"), "{query}: {report}");
+            let help = err.help().expect("help");
+            assert_eq!(help, format!("{fix}{MERGE_DATA}{MERGE_ADVICE}"), "{query}");
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6), "{query}");
+        }
+    }
+
+    /// E2 (a lone bound node) and W30 (a second pattern): the fixes are the failing query with
+    /// the pattern replaced, and they run.
+    #[test]
+    fn gql_merge_pattern_errors_build_the_fix_from_the_failing_query() {
+        for (query, status, fix) in [
+            (
+                "MATCH (a) MERGE (a)",
+                "42002",
+                "to find or create a connection, give the pattern an edge, as in \
+                 g.gql(\"MATCH (a) MERGE (a)-[:T]->(:Label)\"); to find or create another node, \
+                 give it its own name, as in g.gql(\"MATCH (a) MERGE (a2:Label)\"). ",
+            ),
+            (
+                "MERGE (a:x), (b:y)",
+                "42001",
+                "write one MERGE for each pattern, as in g.gql(\"MERGE (a:x) MERGE (b:y)\"), or \
+                 connect the patterns with an edge into one. ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(kind_and_status(&err).1, status, "{query}");
+            let help = err.help().expect("help");
+            assert_eq!(help, format!("{fix}{MERGE_ADVICE}"), "{query}");
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6), "{query}");
+        }
+    }
+
+    /// A schema violation of the create of a MERGE names the MERGE (with the node variable of
+    /// the failing pattern), a `required` property only ON CREATE SET gives explains C8 (the
+    /// items run after the create); one of an ON item gives the SET fix in MERGE form. The
+    /// suggested forms run; the failure changes nothing.
+    #[test]
+    fn gql_schema_violation_of_a_merge_names_the_merge_fix() {
+        let schema = GraphSchema::from_json(
+            r#"{"mode": "closed",
+              "vertices": {"person": {"schema": {"type": "object", "properties": {
+                  "name": {"type": "string"}, "age": {"type": "integer"}},
+                "required": ["name"]}}}}"#,
+        )
+        .expect("schema");
+        let graph_with_schema = || {
+            let mut graph = TraversalGraph::new();
+            graph.set_schema(schema.clone()).expect("set");
+            graph
+                .traversal_mut()
+                .gql("INSERT (:person {name: 'marko'})")
+                .to_list()
+                .expect("people");
+            graph
+        };
+        let failure = |query: &str| {
+            let mut graph = graph_with_schema();
+            let err = graph
+                .traversal_mut()
+                .gql(query)
+                .to_list()
+                .expect_err("a schema violation");
+            assert_eq!(counts(&graph), (1, 0), "{query}");
+            err.help().expect("help")
+        };
+        let help = failure("FOR k IN [1, 2] MERGE (p:person {age: k}) ON CREATE SET p.name = 'x'");
+        assert!(
+            help.starts_with(
+                "Give 'name' a value in the property map of the MERGE pattern (the ON CREATE SET \
+                 items run after the create, so they cannot give it; to match on other keys \
+                 only, give it a \"default\" in the schema), as in g.gql(\"MERGE (p:person \
+                 {name: 'value'})\"); "
+            ),
+            "{help}"
+        );
+        let help = failure("MERGE (q:person {name: 'ann', age: 'x'})");
+        assert!(
+            help.starts_with(
+                "Convert the value to the type 'int64' where the MERGE writes it, with \
+                 toInteger(), as in g.gql(\"MERGE (q:person {age: toInteger($v)})\", #{v: \
+                 \"29\"})."
+            ),
+            "{help}"
+        );
+        let help = failure("MERGE (p:person {name: 'ann'}) ON CREATE SET p.age = 'x'");
+        assert!(
+            help.starts_with(
+                "Convert the value to the type 'int64' where the ON CREATE SET or ON MATCH SET \
+                 item writes it, with toInteger(), as in g.gql(\"MERGE (n:person) ON MATCH SET \
+                 n.age = toInteger($v)\", #{v: \"29\"})."
+            ),
+            "{help}"
+        );
+        let help = failure("MERGE (p:person {name: 'marko'}) ON MATCH SET p.name = NULL");
+        assert!(
+            help.contains(
+                "Keep it in the map, as in g.gql(\"MERGE (n:person) ON MATCH SET n = {name: \
+                 n.name}\"), or merge with +=, which keeps the keys the map lacks, as in \
+                 g.gql(\"MERGE (n:person) ON MATCH SET n += {name: 'value'}\")"
+            ),
+            "{help}"
+        );
+        // The suggested forms run on the same graph.
+        let mut graph = graph_with_schema();
+        for (query, value) in [
+            ("MERGE (p:person {name: 'value'})", "x"),
+            ("MERGE (q:person {name: 'ann', age: toInteger($v)})", "29"),
+            ("MERGE (n:person) ON MATCH SET n.age = toInteger($v)", "29"),
+            ("MERGE (n:person) ON MATCH SET n = {name: n.name}", "x"),
+        ] {
+            graph
+                .traversal_mut()
+                .gql_with(query, [("v", ElementProperty::from(value))])
+                .to_list()
+                .unwrap_or_else(|e| panic!("{query}: {}", format_diagnostic(&e)));
+        }
+        assert_eq!(counts(&graph), (3, 0));
+        // An INSERT keeps the INSERT wording.
+        assert!(failure("INSERT (:person {age: 3})").starts_with(
+            "Give 'name' a value in the property map of the INSERT, as in \
+             g.gql(\"INSERT (:person {name: 'value'})\")"
+        ));
     }
 }

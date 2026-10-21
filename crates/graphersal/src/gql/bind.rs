@@ -4220,7 +4220,12 @@ impl<'q> Binder<'q> {
         let (start, created) =
             self.insert_node(WORD, clause.keyword, first, &path.start, &mut nodes)?;
         if path.steps.is_empty() && !created {
-            return Err(merges_nothing(&path.start, self.query.text(path.span)));
+            return Err(merges_nothing(
+                &path.start,
+                self.query.text(path.span),
+                &self.query.source,
+                path.span,
+            ));
         }
         elements.push(start);
         if created {
@@ -7120,10 +7125,32 @@ fn check_merge_values(map: Option<&MapLiteral>) -> BResult<()> {
 }
 
 /// The error of a `MERGE` pattern that is a lone node bound before (P0 E2, 42002, TCK Merge1
-/// [15]): there is nothing to find or create.
-fn merges_nothing(node: &NodePattern, text: &str) -> Box<GqlErrorBuilder> {
+/// [15]): there is nothing to find or create. The fixes are the failing query (`source`) with
+/// the pattern at `span` replaced (rule 6).
+fn merges_nothing(
+    node: &NodePattern,
+    text: &str,
+    source: &str,
+    span: Span,
+) -> Box<GqlErrorBuilder> {
+    use crate::traversal::step::sideeffect_steps::step_gql_set::rewritten;
     let name = node.variable.as_ref().map_or("n", |v| v.name.as_str());
     let key = crate::error::gql_key(name);
+    let edge = format!("({key})-[:T]->(:Label)");
+    let other = format!("({key}2:Label)");
+    let alternative = match (
+        rewritten(source, span, &edge),
+        rewritten(source, span, &other),
+    ) {
+        (Some(edge), Some(other)) => format!(
+            "to find or create a connection, give the pattern an edge, as in {edge}; to find or \
+             create another node, give it its own name, as in {other}"
+        ),
+        _ => format!(
+            "to find or create a connection, give the pattern an edge, as in MERGE {edge}; to \
+             find or create another node, give it its own name, as in MERGE {other}"
+        ),
+    };
     Box::new(
         semantic(
             node.span,
@@ -7132,11 +7159,7 @@ fn merges_nothing(node: &NodePattern, text: &str) -> Box<GqlErrorBuilder> {
                  node exists already"
             ),
         )
-        .alternative(format!(
-            "to find or create a connection, give the pattern an edge, as in MERGE \
-             ({key})-[:T]->(:Label); to find or create another node, give it its own name, as \
-             in MERGE ({key}2:Label)"
-        ))
+        .alternative(alternative)
         .topic(GqlHelpTopic::Merge),
     )
 }

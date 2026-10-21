@@ -998,6 +998,128 @@ fn curated_gql_3d_scripts_give_the_same_result_on_both_storages() {
     assert_eq!(outcome.state, modern);
 }
 
+/// Stage 3e (GQL MERGE) scripts for the storage differential: match or create of nodes,
+/// edges (directed, undirected, between bound nodes), paths, ON CREATE / ON MATCH items, rows
+/// seeing earlier rows' creations (W34), label conjunctions, CALL bodies, an index, a saved
+/// query, each script ending in [`DUMP_3A`] on a fresh modern graph. Errors (nothing of the
+/// query stays): a NULL property on the last row (E1), a NULL bound end, a failing ON MATCH
+/// item after a create, a lone bound node (E2), an atomic script that throws.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3E: &[(Mode, &str)] = &[
+    (
+        Mode::Plain,
+        r#"g.gql("MERGE (p:person {name: 'ann'}) ON CREATE SET p.new = true ON MATCH SET p.new = false RETURN p.new").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("FOR n IN ['ann', 'ann', 'marko'] MERGE (p:person {name: n}) ON CREATE SET p.c = 1 ON MATCH SET p.m = coalesce(p.m, 0) + 1 RETURN n, p.c, p.m").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[k:knows]->(b) ON MATCH SET k.seen = true RETURN k.weight").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a:person {name: 'vadas'}), (b:person {name: 'peter'}) MERGE (a)-[:knows]-(b) RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) MERGE (p)-[:lives]->(c:city {name: 'x'}) RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MERGE p = (:a {k: 1})-[:r]->(:b) RETURN length(p) AS l").toList(); g.gql("MERGE p = (:a {k: 1})-[:r]->(:b) RETURN length(p) AS l").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) CALL (p) { MERGE (p)-[:tag]->(:tag {v: p.age % 2}) } RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.create_index(#{label: "person", key: "name"}); g.gql("FOR n IN ['josh', 'zed'] MERGE (:person {name: n})").toList(); g.V().has_label("person").has("name", "zed").count().next()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.define_query(#{name: "up", language: "gql", params: #{n: "string"}, body: "MERGE (p:person {name: $n}) ON MATCH SET p.hits = coalesce(p.hits, 0) + 1"}); g.query("up", #{n: "zed"}).iterate(); g.query("up", #{n: "zed"}).iterate()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MERGE (s:software&tool {name: 'lop'}) RETURN labels(s) AS l").toList()"#,
+    ),
+    // Errors: nothing of the query stays.
+    (
+        Mode::Plain,
+        r#"g.gql("FOR x IN [1, NULL] MERGE (:n {k: x})").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) MERGE (p)-[:made]->(s)").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("FOR x IN [1, 0] MERGE (p:person {name: 'q'}) ON MATCH SET p.v = 1 / x").toList()"#,
+    ),
+    (Mode::Plain, r#"g.gql("MATCH (a) MERGE (a)").toList()"#),
+    (
+        Mode::Atomic,
+        r#"g.gql("MERGE (:z)").toList(); throw "boom""#,
+    ),
+    // Whole-script units and dry runs.
+    (
+        Mode::Atomic,
+        r#"g.gql("MERGE (:z {k: 1})").toList(); g.gql("MERGE (:z {k: 1})").toList(); g.V().has_label("z").count().next()"#,
+    ),
+    (
+        Mode::DryRun,
+        r#"g.gql("MERGE (:person {name: 'dry'})").toList(); g.V().count().next()"#,
+    ),
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3e_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = Vec::new();
+    for (mode, script) in GQL_CURATED_3E {
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), *mode, &script);
+        let actual = run_curated(forwarded(), *mode, &script);
+        if expected.result.is_err() {
+            failing.push(script.clone());
+        }
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 3e, not fail on the way: only the five error cases fail.
+    assert_eq!(failing.len(), 5, "{failing:#?}");
+    // A failed write leaves the modern graph as it was.
+    let modern = run_curated(reference(), Mode::Plain, &format!("1; {DUMP_3A}")).state;
+    for (mode, script) in &GQL_CURATED_3E[10..15] {
+        let outcome = run_curated(reference(), *mode, &format!("{script}; {DUMP_3A}"));
+        assert!(outcome.result.is_err(), "{script}");
+        assert_eq!(outcome.state, modern, "{script}");
+    }
+    // The scripts that succeed change the graph.
+    for (mode, script) in &GQL_CURATED_3E[..10] {
+        let outcome = run_curated(reference(), *mode, &format!("{script}; {DUMP_3A}"));
+        assert_ne!(outcome.state, modern, "{script}");
+    }
+    // A dry run reports the change set and keeps nothing.
+    let (mode, script) = GQL_CURATED_3E[GQL_CURATED_3E.len() - 1];
+    let outcome = run_curated(reference(), mode, script);
+    assert!(outcome.changes.is_some_and(|changes| !changes.is_empty()));
+    assert_eq!(outcome.state, modern);
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2e_scripts_give_the_same_result_on_both_storages() {
