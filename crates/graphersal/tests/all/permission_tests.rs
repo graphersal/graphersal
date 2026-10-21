@@ -390,6 +390,7 @@ mod request_mapping {
             recorder.seen(),
             [
                 "Update Option(\"repeat.max_loops\")",
+                "Read Data(vertex)",
                 "Create Data(vertex)",
                 "Update Data(vertex)",
                 "Read Data(vertex)",
@@ -3452,5 +3453,153 @@ mod gql {
             .is_ok()
         );
         assert_eq!(graph.read().edge_count(), 4);
+    }
+}
+
+/// A merge searches before it writes: `merge_v` / `merge_e` ask `Read` on what they look up, so
+/// a policy denying reads cannot probe existence through them.
+mod merge_reads {
+    use super::*;
+
+    fn no_reads() -> AccessPolicy {
+        AccessPolicy::allow_all().deny(ActionKind::Read, ResourceKind::Data)
+    }
+
+    /// Allows everything except `Read` on vertices.
+    struct DenyVertexReads;
+
+    impl Authorizer for DenyVertexReads {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (
+                    Action::Read,
+                    Resource::Data {
+                        element: Some(ElementKind::Vertex),
+                        ..
+                    },
+                ) => Err(Denied::new("no vertex reads")),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn merge_v_asks_read_create_update_on_vertices() {
+        let graph = modern();
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(
+            &graph,
+            r#"g.mergeV(#{name: "marko"}).toList()"#,
+            recorder.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorder.seen(),
+            [
+                "Read Data(vertex)",
+                "Create Data(vertex)",
+                "Update Data(vertex)"
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_e_asks_read_on_edges_and_vertices() {
+        let graph = modern();
+        let recorder = Arc::new(Recorder::default());
+        let _ = run(
+            &graph,
+            r#"g.mergeE(#{"T.label": "knows", "Direction.OUT": "1", "Direction.IN": "2"}).toList()"#,
+            recorder.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorder.seen(),
+            [
+                "Read Data(edge)",
+                "Read Data(vertex)",
+                "Create Data(edge)",
+                "Update Data(edge)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_read_denying_policy_refuses_merge_v() {
+        let graph = modern();
+        assert_denied(
+            run(&graph, r#"g.mergeV(#{name: "marko"}).toList()"#, no_reads()),
+            "merge_v",
+            "Read Data(vertex)",
+        );
+        assert_denied(
+            run(
+                &graph,
+                r#"g.merge_v(#{name: "nobody"}).to_list()"#,
+                no_reads(),
+            ),
+            "merge_v",
+            "Read Data(vertex)",
+        );
+        assert_eq!(count(&graph), 6, "a denied merge creates nothing");
+    }
+
+    #[test]
+    fn a_read_denying_policy_refuses_merge_e() {
+        let graph = modern();
+        assert_denied(
+            run(
+                &graph,
+                r#"g.mergeE(#{"T.label": "knows", "Direction.OUT": "1", "Direction.IN": "2"}).toList()"#,
+                no_reads(),
+            ),
+            "merge_e",
+            "Read Data(edge)",
+        );
+        let edge_reads_only = DenyVertexReads;
+        assert_denied(
+            run(
+                &graph,
+                r#"g.mergeE(#{"T.label": "knows", "Direction.OUT": "1", "Direction.IN": "2"}).toList()"#,
+                edge_reads_only,
+            ),
+            "merge_e",
+            "Read Data(vertex)",
+        );
+        assert_eq!(
+            graph.read().edge_count(),
+            6,
+            "a denied merge creates nothing"
+        );
+    }
+
+    #[test]
+    fn allowed_reads_still_merge() {
+        let graph = modern();
+        let policy = AccessPolicy::allow_all();
+        let found = run(
+            &graph,
+            r#"g.mergeV(#{name: "marko"}).count().next()"#,
+            policy.clone(),
+        )
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_eq!(found, 1);
+        assert_eq!(count(&graph), 6, "marko matched, nothing created");
+        let _ = run(
+            &graph,
+            r#"g.mergeV(#{name: "zed"}).toList()"#,
+            policy.clone(),
+        )
+        .unwrap();
+        assert_eq!(count(&graph), 7);
+        let _ = run(
+            &graph,
+            r#"g.mergeE(#{"T.label": "knows", "Direction.OUT": "1", "Direction.IN": "3"}).toList()"#,
+            policy,
+        )
+        .unwrap();
+        assert_eq!(graph.read().edge_count(), 7);
     }
 }
