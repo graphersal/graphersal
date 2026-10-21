@@ -6918,7 +6918,10 @@ fn gql_help(
         GqlErrorKind::Semantic if gqlstatus.starts_with("22") => help.push_str(
             "OFFSET and LIMIT take a non-negative integer: a literal, or a $parameter given \
              such a value in the parameters of gql(), for example \
-             g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2}).",
+             g.gql(\"MATCH (p:person) RETURN p.name ORDER BY p.name LIMIT $n\", #{n: 2}). \
+             An expression without variables is evaluated once, as in \
+             g.gql(\"MATCH (p:person) RETURN p.name LIMIT toInteger(ceil(1.7))\"); one that \
+             reads the row (LIMIT p.age) is refused.",
         ),
         GqlErrorKind::Semantic => help.push_str(gql_semantic_advice(topic)),
         GqlErrorKind::Refused if topic == GqlHelpTopic::Call => {

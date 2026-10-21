@@ -7737,6 +7737,33 @@ mod gql {
     }
 
     #[test]
+    fn gql_limit_reading_the_row_names_a_constant_expression() {
+        let report = gql_report("MATCH (p:person) RETURN p.name LIMIT p.age");
+        assert!(
+            report.contains(
+                "LIMIT must be a non-negative integer, a parameter or a constant expression, \
+                 not an expression that reads the row"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "Help: LIMIT 10, LIMIT $n or an expression without variables, for example \
+                 LIMIT toInteger(ceil(1.7))."
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "An expression without variables is evaluated once, as in \
+                 g.gql(\"MATCH (p:person) RETURN p.name LIMIT toInteger(ceil(1.7))\"); one \
+                 that reads the row (LIMIT p.age) is refused."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
     fn gql_bad_limit_parameter_names_a_runnable_value() {
         let (err, report) = gql_failure(|g| {
             g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])

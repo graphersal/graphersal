@@ -39,18 +39,18 @@ checked by every test run (see [Running and regenerating](#running-and-regenerat
 edit it by hand.
 
 <!-- opencypher:begin scope -->
-3712 in-scope test cases; 185 excluded (procedures 52, upstream-ignore 1, type-error-at-evaluation 131, w21-property-kinds 1).
+3706 in-scope test cases; 191 excluded (procedures 52, upstream-ignore 1, type-error-at-evaluation 131, w21-property-kinds 1, parameter-at-compile-time 6).
 <!-- opencypher:end scope -->
 
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2440** / 3712 | **65.7 %** |
-| Unsupported (not yet or refused) | 1161 / 3712 | 31.3 % |
-| **Wrong behaviour of supported constructs** | **111** / 3712 | **3.0 %** |
-| Passed without `expressions/temporal` | 2440 / 2708 | 90.1 % |
+| **Passed** | **2454** / 3706 | **66.2 %** |
+| Unsupported (not yet or refused) | 1161 / 3706 | 31.3 % |
+| **Wrong behaviour of supported constructs** | **91** / 3706 | **2.5 %** |
+| Passed without `expressions/temporal` | 2454 / 2702 | 90.8 % |
 
-Unsupported = missing 1074, setup 87. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 37, timeout 0, panic 0.
+Unsupported = missing 1074, setup 87. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 33, unexpected_error 23, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -66,13 +66,13 @@ Per sub-directory of the kit:
 |---|---:|---:|---:|---:|---:|
 | `clauses/create` | 98.7 % | 77 | 78 | · | 1 |
 | `clauses/delete` | 100.0 % | 41 | 41 | · | · |
-| `clauses/match` | 98.4 % | 375 | 381 | 3 | 3 |
+| `clauses/match` | 99.2 % | 378 | 381 | 3 | · |
 | `clauses/match-where` | 97.1 % | 33 | 34 | · | 1 |
 | `clauses/merge` | 100.0 % | 75 | 75 | · | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
 | `clauses/return` | 93.7 % | 59 | 63 | 2 | 2 |
 | `clauses/return-orderby` | 94.3 % | 33 | 35 | · | 2 |
-| `clauses/return-skip-limit` | 74.2 % | 23 | 31 | 1 | 7 |
+| `clauses/return-skip-limit` | 96.0 % | 24 | 25 | 1 | · |
 | `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 92.9 % | 13 | 14 | · | 1 |
@@ -82,7 +82,7 @@ Per sub-directory of the kit:
 | `clauses/with-where` | 100.0 % | 19 | 19 | · | · |
 | `expressions/aggregation` | 62.9 % | 22 | 35 | 13 | · |
 | `expressions/boolean` | 85.1 % | 40 | 47 | · | 7 |
-| `expressions/comparison` | 66.7 % | 48 | 72 | · | 24 |
+| `expressions/comparison` | 80.6 % | 58 | 72 | · | 14 |
 | `expressions/conditional` | 100.0 % | 13 | 13 | · | · |
 | `expressions/existentialSubqueries` | 100.0 % | 10 | 10 | · | · |
 | `expressions/graph` | 98.0 % | 49 | 50 | · | 1 |
@@ -100,7 +100,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **65.7 %** | **2440** | **3712** | 1161 | 111 |
+| **all** | **66.2 %** | **2454** | **3706** | 1161 | 91 |
 <!-- opencypher:end directories -->
 
 ## Out of scope
@@ -118,7 +118,8 @@ excluded: they stay `missing`, the backlog.
 | `upstream-ignore` | marked @ignore by the TCK itself ("does not work in Cypher") | [gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope) | 1 |
 | `type-error-at-evaluation` | the TCK expects a type error at compile time; GQL runs inside a Gremlin step: type errors surface at evaluation time (22G03 when a row reaches the expression) (deliberate deviation) | [gql/semantics.md#type-errors-surface-at-evaluation-time](../gql/semantics.md#type-errors-surface-at-evaluation-time) | 131 |
 | `w21-property-kinds` | a list of maps is a valid property value (maps and lists of any kinds are stored as given); Neo4j raises a TypeError (deliberate deviation) | [gql/semantics.md#writes](../gql/semantics.md#writes) | 1 |
-| **all** | | | **185** |
+| `parameter-at-compile-time` | parameters are bound when the query is compiled: a negative or non-integer SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime (deliberate deviation) | [gql/semantics.md#parameters-are-bound-when-the-query-is-compiled](../gql/semantics.md#parameters-are-bound-when-the-query-is-compiled) | 6 |
+| **all** | | | **191** |
 <!-- opencypher:end excluded -->
 
 - **`procedures`:** the `clauses/call` scenarios register test procedures and call them.
@@ -135,6 +136,11 @@ excluded: they stay `missing`, the backlog.
 - **`w21-property-kinds`** (a deliberate deviation, user decision): a list of maps is a valid
   property value in Graphersal, where Neo4j raises a `TypeError`
   ([Semantics](semantics.md#writes)).
+- **`parameter-at-compile-time`** (a deliberate deviation, user decision): a negative or
+  non-integer `$parameter` of `SKIP` / `LIMIT` is refused when the query is compiled (`22G02` /
+  `22G03`), where the kit expects a `SyntaxError` at runtime; parameters are bound when the
+  query is compiled ([Semantics](semantics.md#parameters-are-bound-when-the-query-is-compiled)).
+  A guard test checks that each case still gets its error at compile time.
 
 The deliberate deviations run in a guard test (`deviation_cases_still_deviate`): it fails when
 one of them passes, so it moves back into scope. `id()` (an integer in Neo4j, a string id here)

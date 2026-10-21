@@ -423,13 +423,17 @@ fn offset_and_limit_take_non_negative_integers_or_parameters() {
     assert_eq!(q.limit, Some(Count::Literal(i64::MAX as u64)));
     let q = ok("MATCH (a) RETURN a");
     assert_eq!((q.offset.clone(), q.limit.clone()), (None, None));
+    // A constant expression is evaluated once (P0 B12, approved).
+    let q = ok("MATCH (a) RETURN a LIMIT 1 + 1");
+    assert_eq!(q.limit, Some(Count::Literal(2)));
     for (src, text, status) in [
         ("MATCH (a) RETURN a LIMIT -1", "-1", "22G02"),
         ("MATCH (a) RETURN a OFFSET -5", "-5", "22G02"),
         ("MATCH (a) RETURN a LIMIT 1.5", "1.5", "22G03"),
         ("MATCH (a) RETURN a LIMIT 'x'", "'x'", "22G03"),
         ("MATCH (a) RETURN a LIMIT NULL", "NULL", "22G03"),
-        ("MATCH (a) RETURN a LIMIT 1 + 1", "1 + 1", "22G03"),
+        ("MATCH (a) RETURN a LIMIT 1 - 2", "1 - 2", "22G02"),
+        ("MATCH (a) RETURN a LIMIT 1 / 2.0", "1 / 2.0", "22G03"),
         ("MATCH (a) RETURN a LIMIT a.k", "a.k", "22G03"),
     ] {
         let f = fail(src);
@@ -440,6 +444,9 @@ fn offset_and_limit_take_non_negative_integers_or_parameters() {
         );
         assert!(f.message.contains("non-negative integer"), "{}", f.message);
     }
+    // A parameter inside an expression is no constant.
+    let f = fail("MATCH (a) RETURN a LIMIT $n + 1");
+    assert_eq!(f.gqlstatus, "22G03");
 }
 
 // ----- maps -----
