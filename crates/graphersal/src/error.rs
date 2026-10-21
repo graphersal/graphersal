@@ -4415,6 +4415,8 @@ pub(crate) enum GqlHelpTopic {
     AggregateValue,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
     TextAndNumber,
+    /// A subscript `x[i]` / `x[a..b]` of the wrong kind of value or index (22G03, stage 3f).
+    Subscript,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -7013,6 +7015,8 @@ fn gql_help(
                      or compute with numbers only, converting text with toInteger(x) or \
                      toFloat(x). ",
                 );
+            } else if topic == GqlHelpTopic::Subscript {
+                help.push_str(GQL_SUBSCRIPT_ADVICE);
             } else if let Some(advice) = gql_data_status_advice(gqlstatus) {
                 help.push_str(advice);
                 help.push(' ');
@@ -7022,6 +7026,19 @@ fn gql_help(
     }
     help
 }
+
+/// The advice of a subscript of the wrong kind ([`GqlHelpTopic::Subscript`], stage 3f): what
+/// `x[i]`, `m[k]` and `x[a..b]` read, and the conversions that fix the index.
+#[cfg(feature = "gql")]
+const GQL_SUBSCRIPT_ADVICE: &str = "x[i] reads the item i of a list, with an integer i \
+     counted from 0 (negative from the end: x[-1] is the last item; out of range gives NULL); \
+     convert another number or a text first with toInteger(i), as in \
+     g.gql(\"RETURN [10, 20, 30][toInteger('1')] AS x\"). m[k] reads an entry of a map, or a \
+     property of a node or an edge, by a string key, as in \
+     g.gql(\"MATCH (p:person) RETURN p['na' || 'me'] AS name\"), converting a key with \
+     toString(k). x[a..b] takes the items from a up to b (excluded) of a list, as in \
+     g.gql(\"RETURN [1, 2, 3, 4][1..3] AS xs\"); a text is no list: use substring(s, start, \
+     length) for a part of it. ";
 
 /// The general advice of an error about an `INSERT` / `CREATE` pattern
 /// ([`GqlHelpTopic::Insert`], stage 3a): what each part of the pattern may carry.
@@ -7532,7 +7549,10 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::Set => GQL_SET_ADVICE,
         GqlHelpTopic::Delete => GQL_DELETE_ADVICE,
         GqlHelpTopic::Merge => GQL_MERGE_ADVICE,
-        GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
+        GqlHelpTopic::Kind
+        | GqlHelpTopic::AggregateValue
+        | GqlHelpTopic::TextAndNumber
+        | GqlHelpTopic::Subscript => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \

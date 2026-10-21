@@ -46,6 +46,19 @@
 //!   label; `NULL` gives `NULL`; a non-element is error 22G03.
 //! - **Property access:** on `NULL` gives `NULL`; on an element reads the property (missing:
 //!   `NULL`); on a map reads the key (missing: `NULL`); on anything else error 22G03.
+//! - **Indexing and slicing** (stage 3f, Cypher compatibility forms, the openCypher TCK
+//!   `List1` / `List2` / `Map2` semantics): `x[i]` on a list takes the item `i` (an integer
+//!   counted from 0, negative from the end: `x[-1]` is the last), out of range `NULL`; on a
+//!   map the entry of a string key (missing: `NULL`), on a node or an edge the property of a
+//!   string key (missing: `NULL`); the parser writes `x['key']` with a string literal as
+//!   `x.key`. `x[a..b]` on a list takes the items from `a` up to `b` (excluded), each bound
+//!   negative from the end and clamped to the list, an omitted one the start / the end; `a >=
+//!   b` gives `[]`. A `NULL` target, index or bound gives `NULL`. A target of another kind (a
+//!   string, a number, a boolean, a path) is error 22G03, and so is an index or bound of the
+//!   wrong kind (a float index is not truncated, a map key is a string); these errors carry
+//!   [`GqlHelpTopic::Subscript`]. Both are links of a [`Node::Chain`] (`a[0][1]` is a loop);
+//!   an owned list gives its item up or is cut in place, a constant one is copied (the slice
+//!   after [`Env::reserve`]).
 //! - **Functions** (`parser::FUNCTIONS`, scalar ones): `element_id` (the id as a string),
 //!   `labels` (a vertex's labels in stored order, primary first; an edge's one label as a
 //!   one-item list), `type` (the edge label; **a vertex is error 22G03**, as Neo4j refuses a
@@ -101,7 +114,7 @@ use std::cmp::Ordering;
 use super::ast::{
     BinaryOp, CallArgs, CaseExpr, CastTarget, ComprehensionForm, Endpoint, Expr, ExprKind,
     LabelExpr, LabelExprKind, ListComprehension, ListPredicate, Literal, MapLiteral, MapProjection,
-    ProjectionItem, TrimSide, UnaryOp,
+    ProjectionItem, Subscript, TrimSide, UnaryOp,
 };
 use super::functions::{self, Arg, Family};
 use super::lexer::Span;
@@ -710,7 +723,14 @@ enum LinkOp<E> {
     IsLabeled(Labels, bool),
     /// `IS [NOT] SOURCE OF edge` / `IS [NOT] DESTINATION OF edge`.
     IsEndpoint(Endpoint, bool, Compiled<E>),
+    /// `[i]`: a list item, a map entry, an element property.
+    Index(Compiled<E>),
+    /// `[from..to]`, each bound optional.
+    Slice(Box<SliceBounds<E>>),
 }
+
+/// The bounds of a [`LinkOp::Slice`], each optional.
+type SliceBounds<E> = (Option<Compiled<E>>, Option<Compiled<E>>);
 
 #[derive(Debug, Clone)]
 struct Case<E> {
@@ -774,7 +794,8 @@ pub(crate) fn compile<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Compi
         | ExprKind::Property { .. }
         | ExprKind::IsNull { .. }
         | ExprKind::IsLabeled { .. }
-        | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
+        | ExprKind::IsEndpoint { .. }
+        | ExprKind::Index(_) => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
         _ => compile_other(expr, scope)?,
     };
@@ -789,6 +810,7 @@ fn chain_left(expr: &Expr) -> Option<&Expr> {
     match &expr.kind {
         ExprKind::Binary { left, .. } => Some(left),
         ExprKind::Property { target, .. } => Some(target),
+        ExprKind::Index(index) => Some(&index.target),
         ExprKind::IsNull { operand, .. }
         | ExprKind::IsLabeled { operand, .. }
         | ExprKind::IsEndpoint { operand, .. } => Some(operand),
@@ -819,6 +841,7 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 ExprKind::IsEndpoint {
                     edge, end, negated, ..
                 } => LinkOp::IsEndpoint(*end, *negated, compile(edge, scope)?),
+                ExprKind::Index(index) => compile_subscript(&index.subscript, scope)?,
                 // `chain_left` admits only the kinds above.
                 _ => LinkOp::IsNull(false),
             };
@@ -829,6 +852,22 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         })
         .collect::<Result<Vec<_>, EvalError>>()?;
     Ok(Node::Chain(Box::new(first), links))
+}
+
+/// The link of `[i]` or `[a..b]`.
+#[inline(never)]
+fn compile_subscript<E: Clone>(
+    subscript: &Subscript,
+    scope: &impl Scope,
+) -> Result<LinkOp<E>, EvalError> {
+    Ok(match subscript {
+        Subscript::At(index) => LinkOp::Index(compile(index, scope)?),
+        Subscript::Slice { from, to } => {
+            let bound =
+                |bound: &Option<Expr>| bound.as_ref().map(|b| compile(b, scope)).transpose();
+            LinkOp::Slice(Box::new((bound(from)?, bound(to)?)))
+        }
+    })
 }
 
 #[inline(never)]
@@ -868,7 +907,8 @@ fn compile_other<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         | ExprKind::Property { .. }
         | ExprKind::IsNull { .. }
         | ExprKind::IsLabeled { .. }
-        | ExprKind::IsEndpoint { .. } => compile_chain(expr, scope)?,
+        | ExprKind::IsEndpoint { .. }
+        | ExprKind::Index(_) => compile_chain(expr, scope)?,
         ExprKind::Unary { op, operand } => compile_unary(*op, operand, scope)?,
         // Answered by the step hosting the expression (`runtime::SubqueryHost`); a scope
         // without hosts (the lookup value, which the planner never gives a subquery) refuses it.
@@ -1270,8 +1310,13 @@ impl<E> Compiled<E> {
                 first.variables(slots);
                 for link in links {
                     match &link.op {
-                        LinkOp::Binary(_, right) | LinkOp::IsEndpoint(_, _, right) => {
-                            right.variables(slots)
+                        LinkOp::Binary(_, right)
+                        | LinkOp::IsEndpoint(_, _, right)
+                        | LinkOp::Index(right) => right.variables(slots),
+                        LinkOp::Slice(bounds) => {
+                            for bound in [&bounds.0, &bounds.1].into_iter().flatten() {
+                                bound.variables(slots);
+                            }
                         }
                         LinkOp::Property(_) | LinkOp::IsNull(_) | LinkOp::IsLabeled(_, _) => {}
                     }
@@ -1623,6 +1668,11 @@ fn eval_chain<'a, En: Env>(
                 let edge = edge.eval_cow(env)?;
                 functions::is_endpoint(&value, &edge, *end, *negated, env, link.span)?
             }
+            LinkOp::Index(index) => {
+                let at = index.eval_cow(env)?;
+                subscript(value, &at, index.span, env, link.span)?
+            }
+            LinkOp::Slice(bounds) => slice(value, bounds, env, link.span)?,
         };
         value = Cow::Owned(next);
         left_span = link.span;
@@ -1750,6 +1800,179 @@ fn property<En: Env>(
             format!("cannot read the property {key} of {}", other.kind_name()),
             span,
         )),
+    }
+}
+
+/// The integer of a list index or slice bound: `Ok(None)` for `NULL`, 22G03 for any other
+/// kind (a float is not truncated: `x[1.0]` is an error, as in Neo4j).
+fn integer_index<E>(value: &Value<E>, what: &str, span: Span) -> Result<Option<i64>, EvalError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Scalar(ElementProperty::Number(number)) => match number.n {
+            N::NegInt(index) => Ok(Some(index)),
+            N::Float(_) => Err(not_an_integer(what, value, span)),
+        },
+        other => Err(not_an_integer(what, other, span)),
+    }
+}
+
+fn not_an_integer<E>(what: &str, value: &Value<E>, span: Span) -> EvalError {
+    let kind = match value {
+        Value::Scalar(ElementProperty::Number(_)) => "a float",
+        other => other.kind_name(),
+    };
+    EvalError::invalid_type(format!("{what} is an integer, not {kind}"), span)
+        .with_topic(GqlHelpTopic::Subscript)
+}
+
+/// `index` counted from the end when negative (`-1` is the last of `len` items), clamped to
+/// `0..=len` (a slice bound).
+fn clamp_index(index: i64, len: usize) -> usize {
+    let len_i = i64::try_from(len).unwrap_or(i64::MAX);
+    let from_start = if index < 0 {
+        len_i.saturating_add(index)
+    } else {
+        index
+    };
+    usize::try_from(from_start.clamp(0, len_i)).unwrap_or(0)
+}
+
+/// `target[at]` (stage 3f, module docs "Indexing and slicing"): a list item by an integer
+/// (negative from the end, out of range `NULL`), a map entry or an element property by a
+/// string; a `NULL` target or index gives `NULL`; any other kind of target or index is 22G03.
+/// An owned list gives its item up without a copy.
+#[inline(never)]
+fn subscript<En: Env>(
+    target: Cow<'_, Value<En::Element>>,
+    at: &Value<En::Element>,
+    at_span: Span,
+    env: &En,
+    span: Span,
+) -> Result<Value<En::Element>, EvalError> {
+    let key = |what: &str| -> Result<Option<&str>, EvalError> {
+        match at {
+            Value::Null => Ok(None),
+            other => match other.as_str() {
+                Some(key) => Ok(Some(key)),
+                None => Err(EvalError::invalid_type(
+                    format!(
+                        "{what} is read with a string key, not {}",
+                        other.kind_name()
+                    ),
+                    at_span,
+                )
+                .with_topic(GqlHelpTopic::Subscript)),
+            },
+        }
+    };
+    match &*target {
+        Value::Null => Ok(Value::Null),
+        Value::List(items) => {
+            let Some(index) = integer_index(at, "a list index", at_span)? else {
+                return Ok(Value::Null);
+            };
+            let len = items.len();
+            let position = if index < 0 {
+                i64::try_from(len)
+                    .ok()
+                    .and_then(|len| len.checked_add(index))
+            } else {
+                Some(index)
+            };
+            let Some(position) = position
+                .and_then(|p| usize::try_from(p).ok())
+                .filter(|p| *p < len)
+            else {
+                return Ok(Value::Null);
+            };
+            Ok(match target {
+                Cow::Owned(Value::List(mut items)) => items.swap_remove(position),
+                _ => items.get(position).cloned().unwrap_or(Value::Null),
+            })
+        }
+        Value::Map(entries) => {
+            let Some(key) = key("a map")? else {
+                return Ok(Value::Null);
+            };
+            Ok(entries
+                .iter()
+                .find(|(name, _)| name.as_str() == key)
+                .map(|(_, value)| value.clone())
+                .unwrap_or(Value::Null))
+        }
+        Value::Element(element) => {
+            let Some(key) = key("a property of a node or an edge")? else {
+                return Ok(Value::Null);
+            };
+            Ok(env
+                .property(element, key)
+                .map(Value::from_property)
+                .unwrap_or(Value::Null))
+        }
+        other => Err(EvalError::invalid_type(
+            format!(
+                "cannot index {}: [ ] reads an item of a list, an entry of a map or a \
+                 property of a node or an edge",
+                other.kind_name()
+            ),
+            span,
+        )
+        .with_topic(GqlHelpTopic::Subscript)),
+    }
+}
+
+/// `target[from..to]` (stage 3f, module docs "Indexing and slicing"): the items from `from`
+/// up to `to` (excluded), each bound negative from the end and clamped to the list, an omitted
+/// one the start / the end; `from >= to` gives `[]`. A `NULL` target or bound gives `NULL`,
+/// a target that is no list or a bound that is no integer 22G03. An owned list is cut in
+/// place; a borrowed one (a constant) is copied after [`Env::reserve`].
+#[inline(never)]
+fn slice<En: Env>(
+    target: Cow<'_, Value<En::Element>>,
+    bounds: &SliceBounds<En::Element>,
+    env: &En,
+    span: Span,
+) -> Result<Value<En::Element>, EvalError> {
+    let mut ends = [None, None];
+    let mut null = false;
+    for (end, bound) in ends.iter_mut().zip([&bounds.0, &bounds.1]) {
+        if let Some(bound) = bound {
+            match integer_index(&*bound.eval_cow(env)?, "a slice bound", bound.span)? {
+                Some(index) => *end = Some(index),
+                None => null = true,
+            }
+        }
+    }
+    let len = match &*target {
+        Value::Null => return Ok(Value::Null),
+        Value::List(items) => items.len(),
+        other => {
+            return Err(EvalError::invalid_type(
+                format!("a slice [a..b] reads a list, not {}", other.kind_name()),
+                span,
+            )
+            .with_topic(GqlHelpTopic::Subscript));
+        }
+    };
+    if null {
+        return Ok(Value::Null);
+    }
+    let from = ends[0].map_or(0, |index| clamp_index(index, len));
+    let to = ends[1].map_or(len, |index| clamp_index(index, len));
+    if from >= to {
+        return Ok(Value::List(Vec::new()));
+    }
+    match target {
+        Cow::Owned(Value::List(mut items)) => {
+            items.truncate(to);
+            items.drain(..from);
+            Ok(Value::List(items))
+        }
+        Cow::Borrowed(Value::List(items)) => {
+            functions::reserve(env, functions::list_bytes((to - from) as u64), span)?;
+            Ok(Value::List(items.get(from..to).unwrap_or(&[]).to_vec()))
+        }
+        _ => Ok(Value::Null),
     }
 }
 

@@ -691,3 +691,187 @@ fn deep_expressions_evaluate_without_overflow() {
         assert_eq!(&result, expected, "{}", &expr[..20]);
     }
 }
+
+// ----- indexing and slicing (stage 3f) -----
+
+fn ints(values: &[i64]) -> Value<El> {
+    Value::List(values.iter().map(|v| int(*v)).collect())
+}
+
+/// The message of a failing subscript (with its help topic).
+fn subscript_message(expr: &str) -> String {
+    match eval(expr) {
+        Ok(value) => panic!("{expr:?} gave {value:?}"),
+        Err(e) => {
+            assert_eq!(e.topic, GqlHelpTopic::Subscript, "{expr}");
+            e.message
+        }
+    }
+}
+
+#[test]
+fn list_indexing_counts_from_zero_and_from_the_end() {
+    assert_eq!(value("[1, 2, 3][0]"), int(1));
+    assert_eq!(value("[1, 2, 3][2]"), int(3));
+    assert_eq!(value("[1, 2, 3][-1]"), int(3));
+    assert_eq!(value("[1, 2, 3][-3]"), int(1));
+    assert_eq!(value("[1, 2, 3][3]"), Value::Null);
+    assert_eq!(value("[1, 2, 3][-4]"), Value::Null);
+    assert_eq!(value("[1, 2, 3][-9223372036854775808]"), Value::Null);
+    assert_eq!(value("[1, 2, 3][9223372036854775807]"), Value::Null);
+    assert_eq!(value("[][0]"), Value::Null);
+    assert_eq!(value("[[1], [2, 3]][1][0]"), int(2));
+    assert_eq!(value("$list[1]"), int(2));
+    assert_eq!(value("[1, 2, 3][$list[0]]"), int(2));
+    assert_eq!(value("n.tags[1]"), string("b"));
+    // NULL target or index.
+    assert_eq!(value("x[0]"), Value::Null);
+    assert_eq!(value("[1][null]"), Value::Null);
+    assert_eq!(value("[1][$nothing]"), Value::Null);
+    assert_eq!(value("null[0]"), Value::Null);
+    // Precedence: binds like `.`, tighter than unary minus and `+`.
+    assert_eq!(value("[1, 2][0] + 1"), int(2));
+    assert_eq!(value("-[1, 2][1]"), int(-2));
+    assert_eq!(value("[{a: 5}][0].a"), int(5));
+    assert_eq!(value("{a: [7, 8]}.a[1]"), int(8));
+    assert_eq!(value("size([[1, 2]][0])"), int(2));
+}
+
+#[test]
+fn map_and_element_subscripts_read_by_a_string_key() {
+    assert_eq!(value("{name: 'x', Name: 'y'}['Name']"), string("y"));
+    assert_eq!(value("{name: 'x'}['na' || 'me']"), string("x"));
+    assert_eq!(value("{name: 'x'}['nAMe']"), Value::Null);
+    assert_eq!(value("{a: 1}[$s]"), Value::Null);
+    assert_eq!(value("{a: 1}[null]"), Value::Null);
+    assert_eq!(value("n['na' || 'me']"), string("marko"));
+    assert_eq!(value("n['missing' || '']"), Value::Null);
+    assert_eq!(value("e['weight' || '']"), float(0.5));
+    assert_eq!(value("n['address']['city']"), string("Berlin"));
+    assert_eq!(value("n[null]"), Value::Null);
+    // A string literal key is the property access.
+    assert_eq!(value("n['name']"), string("marko"));
+}
+
+#[test]
+fn list_slices_clamp_their_bounds() {
+    assert_eq!(value("[1, 2, 3, 4, 5][1..3]"), ints(&[2, 3]));
+    assert_eq!(value("[1, 2, 3][1..]"), ints(&[2, 3]));
+    assert_eq!(value("[1, 2, 3][..2]"), ints(&[1, 2]));
+    assert_eq!(value("[1, 2, 3][..]"), ints(&[1, 2, 3]));
+    assert_eq!(value("[1, 2, 3][0..1]"), ints(&[1]));
+    assert_eq!(value("[1, 2, 3][0..0]"), ints(&[]));
+    assert_eq!(value("[1, 2, 3][-3..-1]"), ints(&[1, 2]));
+    assert_eq!(value("[1, 2, 3][3..1]"), ints(&[]));
+    assert_eq!(value("[1, 2, 3][-5..5]"), ints(&[1, 2, 3]));
+    assert_eq!(
+        value("[1, 2, 3][-9223372036854775808..9223372036854775807]"),
+        ints(&[1, 2, 3])
+    );
+    assert_eq!(value("$list[1..]"), ints(&[2]));
+    // A list built per row is cut in place; the result is the same.
+    assert_eq!(value("[n.age, 1, 2][1..]"), ints(&[1, 2]));
+    assert_eq!(value("[n.age, 1, 2][-1]"), int(2));
+    for null in [
+        "[1, 2, 3][null..null]",
+        "[1, 2, 3][1..null]",
+        "[1, 2, 3][null..3]",
+        "[1, 2, 3][..null]",
+        "[1, 2, 3][null..]",
+        "x[1..2]",
+        "null[..]",
+    ] {
+        assert_eq!(value(null), Value::Null, "{null}");
+    }
+}
+
+#[test]
+fn subscripts_of_the_wrong_kind_are_data_exceptions() {
+    let any_target = "[ ] reads an item of a list, an entry of a map or a property of a node or \
+                      an edge";
+    for (expr, message) in [
+        (
+            "[1, 2][1.0]",
+            "a list index is an integer, not a float".to_string(),
+        ),
+        (
+            "[1, 2][true]",
+            "a list index is an integer, not a boolean".into(),
+        ),
+        (
+            "[1, 2]['1' || '']",
+            "a list index is an integer, not a string".into(),
+        ),
+        (
+            "[1, 2][[1]]",
+            "a list index is an integer, not a list".into(),
+        ),
+        (
+            "[1, 2][{x: 3}]",
+            "a list index is an integer, not a map".into(),
+        ),
+        (
+            "{a: 1}[0]",
+            "a map is read with a string key, not a number".into(),
+        ),
+        (
+            "{a: 1}[12.3]",
+            "a map is read with a string key, not a number".into(),
+        ),
+        (
+            "n[1]",
+            "a property of a node or an edge is read with a string key, not a number".into(),
+        ),
+        ("'abc'[0]", format!("cannot index a string: {any_target}")),
+        ("123[0]", format!("cannot index a number: {any_target}")),
+        (
+            "true[null]",
+            format!("cannot index a boolean: {any_target}"),
+        ),
+        (
+            "[1, 2][0.5..]",
+            "a slice bound is an integer, not a float".into(),
+        ),
+        (
+            "[1, 2][..'a']",
+            "a slice bound is an integer, not a string".into(),
+        ),
+        (
+            "'abc'[0..1]",
+            "a slice [a..b] reads a list, not a string".into(),
+        ),
+        (
+            "{a: 1}[..1]",
+            "a slice [a..b] reads a list, not a map".into(),
+        ),
+        (
+            "n[0..1]",
+            "a slice [a..b] reads a list, not an element".into(),
+        ),
+    ] {
+        assert_eq!(status_of(expr), "22G03", "{expr}");
+        assert_eq!(subscript_message(expr), message, "{expr}");
+    }
+    // The error points at the index (a kind of index) or the whole subscript (a kind of target).
+    let query = "MATCH (n) RETURN [1][true]";
+    let e = compiled("[1][true]")
+        .and_then(|c| c.eval(&Row))
+        .unwrap_err();
+    assert_eq!(&query[e.span.start..e.span.end], "true");
+    let query = "MATCH (n) RETURN 'abc'[0]";
+    let e = compiled("'abc'[0]").and_then(|c| c.eval(&Row)).unwrap_err();
+    assert_eq!(&query[e.span.start..e.span.end], "'abc'[0]");
+}
+
+#[test]
+fn a_long_subscript_chain_evaluates_as_a_loop() {
+    // `[[[...1...]]][0][0]...`: the subscripts are links of one chain.
+    let depth = 60;
+    let expr = format!(
+        "{}1{}{}",
+        "[".repeat(depth),
+        "]".repeat(depth),
+        "[0]".repeat(depth)
+    );
+    assert_eq!(value(&expr), int(1));
+}

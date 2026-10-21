@@ -351,6 +351,10 @@ pub(crate) fn subqueries_in(expr: &Expr, mut f: impl FnMut(Span)) {
             ExprKind::List(items) => stack.extend(items),
             ExprKind::Map(map) => stack.extend(map.entries.iter().map(|e| &e.value)),
             ExprKind::Property { target, .. } => stack.push(target),
+            ExprKind::Index(index) => {
+                stack.push(&index.target);
+                stack.extend(index.bounds());
+            }
             ExprKind::Unary { operand, .. }
             | ExprKind::IsNull { operand, .. }
             | ExprKind::IsLabeled { operand, .. } => stack.push(operand),
@@ -1148,6 +1152,10 @@ pub(crate) fn mentions(expr: &Expr, key: &str) -> bool {
             ExprKind::List(items) => stack.extend(items),
             ExprKind::Map(map) => stack.extend(map.entries.iter().map(|e| &e.value)),
             ExprKind::Property { target, .. } => stack.push(target),
+            ExprKind::Index(index) => {
+                stack.push(&index.target);
+                stack.extend(index.bounds());
+            }
             ExprKind::Unary { operand, .. }
             | ExprKind::IsNull { operand, .. }
             | ExprKind::IsLabeled { operand, .. } => stack.push(operand),

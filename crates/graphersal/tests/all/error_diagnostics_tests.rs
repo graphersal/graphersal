@@ -8574,6 +8574,55 @@ mod gql {
         }
     }
 
+    /// A subscript of the wrong kind (stage 3f: `x[i]`, `m[k]`, `x[a..b]`) names what each form
+    /// reads and the conversions that fix the index (rule 6), with runnable examples; the
+    /// caret marks the index or the whole subscript.
+    #[test]
+    fn gql_subscript_errors_name_to_integer_and_the_forms() {
+        for (query, marked) in [
+            ("WITH [1, 2] AS xs RETURN xs[1.5] AS x", "1.5"),
+            ("MATCH (p:person) RETURN p[1] AS x", "1"),
+            ("WITH {a: 1} AS m RETURN m[0] AS x", "0"),
+            ("WITH 'abc' AS s RETURN s[0] AS x", "s[0]"),
+            ("WITH 'abc' AS s RETURN s[0..1] AS x", "s[0..1]"),
+            ("WITH [1] AS xs RETURN xs[..'a'] AS x", "'a'"),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string()),
+                "{report}"
+            );
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.trim_start().starts_with("query:"))
+                .nth(1)
+                .unwrap_or("");
+            assert_eq!(
+                caret_line.trim().len(),
+                marked.chars().count(),
+                "{query}: {report}"
+            );
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "x[i] reads the item i of a list, with an integer i counted from 0 (negative \
+                     from the end: x[-1] is the last item; out of range gives NULL); convert \
+                     another number or a text first with toInteger(i), as in \
+                     g.gql(\"RETURN [10, 20, 30][toInteger('1')] AS x\"). m[k] reads an entry of \
+                     a map, or a property of a node or an edge, by a string key"
+                ),
+                "{query}: {help}"
+            );
+            assert!(help.contains("substring(s, start, length)"), "{help}");
+            assert!(
+                help.contains("A row of the data made the marked expression fail."),
+                "{help}"
+            );
+            assert_examples_run(&help);
+        }
+    }
+
     /// `+` / `||` of text and a number or a boolean names the conversions to text (rule 6:
     /// stage 1c functions fix it); other kinds keep the general advice.
     #[test]

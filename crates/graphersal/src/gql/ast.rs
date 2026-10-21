@@ -817,6 +817,10 @@ pub(crate) enum ExprKind {
         /// The property key.
         key: Identifier,
     },
+    /// `target[index]` or a slice `target[from..to]` (stage 3f, Cypher list indexing): an item
+    /// of a list, an entry of a map, a property of an element read by a computed key. The
+    /// parser writes `target['key']` with a string literal as [`ExprKind::Property`].
+    Index(Box<IndexExpr>),
     /// A prefix operator.
     Unary {
         /// The operator.
@@ -881,6 +885,51 @@ pub(crate) enum ExprKind {
     ListComprehension(Box<ListComprehension>),
     /// `[(a)-[:T]->(b) WHERE cond | expr]`: a Cypher pattern comprehension (stage 2c).
     PatternComprehension(Box<PatternComprehension>),
+}
+
+/// `target[index]` or `target[from..to]` ([`ExprKind::Index`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct IndexExpr {
+    /// The list, map or element subscripted.
+    pub(crate) target: Expr,
+    /// What is read from it.
+    pub(crate) subscript: Subscript,
+    /// From `[` to `]`.
+    pub(crate) brackets: Span,
+}
+
+/// The part between the brackets of an [`IndexExpr`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Subscript {
+    /// `[i]`: a list item (negative from the end), a map entry, an element property.
+    At(Expr),
+    /// `[from..to]`, `[from..]`, `[..to]`: a sub-list; an omitted bound is the start / the end.
+    Slice {
+        /// The first index taken.
+        from: Option<Expr>,
+        /// The first index no longer taken.
+        to: Option<Expr>,
+    },
+}
+
+impl IndexExpr {
+    /// The sub-expressions after the target, left to right.
+    pub(crate) fn bounds(&self) -> impl Iterator<Item = &Expr> {
+        let (a, b) = match &self.subscript {
+            Subscript::At(index) => (Some(index), None),
+            Subscript::Slice { from, to } => (from.as_ref(), to.as_ref()),
+        };
+        a.into_iter().chain(b)
+    }
+
+    /// The sub-expressions after the target, mutable.
+    pub(crate) fn bounds_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        let (a, b) = match &mut self.subscript {
+            Subscript::At(index) => (Some(index), None),
+            Subscript::Slice { from, to } => (from.as_mut(), to.as_mut()),
+        };
+        a.into_iter().chain(b)
+    }
 }
 
 /// A map projection `target {items}` (stage 2c, design item 7): a map built from the

@@ -780,6 +780,7 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | literals | integers (`42`, `1_000`, `0x1F`, `0o17`, `0b101`), floats (`1.5`, `.5`, `1.5e3`), strings (`'...'` or `"..."`), `TRUE`, `FALSE`, `NULL`, lists `[1, 2]`, maps (records) `{k: v}`, also written `RECORD {k: v}` |
 | parameters | `$name` ([Parameters](#parameters)) |
 | property access | `n.name`, `m.key` on a map |
+| indexing and slicing | `x[0]`, `x[-1]`, `x[1..3]`, `x[..2]`, `x[1..]`, `m['key']`, `n[k]` (Cypher, [below](#indexing-and-slicing)) |
 | comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; not chainable (`a < b < c` is an error) |
 | logic | `AND`, `OR`, `XOR`, `NOT` |
 | predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
@@ -793,7 +794,8 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | pattern comprehension | `[(p)-[:knows]->(f) WHERE cond \| expr]` (Cypher) |
 
 Precedence, loosest first: `OR`, `XOR`, `AND`, `NOT`, comparison, the predicates (`IS NULL`,
-`IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, unary minus, property access.
+`IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, unary minus, property access and subscripts
+(`x[i]`, `x[a..b]`, left to right: `[1, 2][0] + 1` is `2`).
 
 ```rhai,graph=modern
 g.gql("MATCH (n:person) WHERE n.age IN [27, 35] RETURN n.name AS name ORDER BY name").to_list()   // #{"name": "peter"}, #{"name": "vadas"}
@@ -820,6 +822,35 @@ starts with a `key: expr` item is back-quoted: `` `record` {k: 1} ``.
 Integer arithmetic stays integer (`/` truncates toward zero, `%` takes the sign of the
 dividend); a float operand makes the result a float. An overflow or a division by zero is an
 error, never a wrapped or infinite value ([Errors](errors.md#errors-while-the-query-runs)).
+
+### Indexing and slicing
+
+`x[i]` reads the item `i` of a list, counted from 0; a negative index counts from the end
+(`x[-1]` is the last item), and an index out of range gives `NULL`. `x[a..b]` is the sub-list
+from `a` up to `b` (excluded); either bound may be left out (`x[..2]`, `x[1..]`), a negative
+one counts from the end, bounds beyond the list are clamped, and `a >= b` gives `[]`. On a map
+`m[k]` reads the entry of the string key `k`, and on a node or an edge `n[k]` reads the
+property `k`; a missing key gives `NULL`. `n['name']` with a string literal is the property
+access `n.name` (the same plan, so a property index serves it); a computed key (`n[$key]`,
+`n['na' || 'me']`) is read per row. A `NULL` list, map, index or bound gives `NULL`. These are
+Cypher forms with their Neo4j meaning, measured against the openCypher TCK
+([Semantics](semantics.md#indexing-and-slicing)).
+
+```rhai,graph=modern
+g.gql("RETURN [10, 20, 30][0] AS a, [10, 20, 30][-1] AS b, [10, 20, 30][5] AS c, [10, 20, 30][1..] AS d, [10, 20, 30][..-1] AS e").to_list()
+// #{"a": 10, "b": 30, "c": (), "d": [20, 30], "e": [10, 20]}
+g.gql("MATCH (p:person) WITH p ORDER BY p.age RETURN collect(p.name)[0] AS youngest, collect(p.name)[-2..] AS oldest").to_list()
+// #{"oldest": ["josh", "peter"], "youngest": "vadas"}
+g.gql("MATCH (p:person {name: 'marko'}) RETURN p['na' || 'me'] AS name, {lang: 'java'}['lang'] AS lang").to_list()
+// #{"lang": "java", "name": "marko"}
+g.gql("MATCH (p:person {name: 'josh'}) RETURN p[$key] AS v", #{key: "age"}).to_list()   // #{"v": 32}
+g.gql("RETURN 'abc'[0] AS c")   // error: cannot index a string
+```
+
+The index of a list is an integer (`x[1.0]` and `x['1']` are errors, GQLSTATUS `22G03`; convert
+with `toInteger(i)`), the key of a map or an element a string; a text is no list (use
+`substring(s, start, length)`). These errors arise when a row reaches the expression, as for
+every other operand of the wrong kind ([Errors](errors.md#errors-while-the-query-runs)).
 
 ## Map projections and comprehensions
 
@@ -1173,13 +1204,12 @@ construct and the alternative.
 |---|---|
 | Cypher's `FOREACH` | `FOR x IN list INSERT ..` (or `SET ..`, `DELETE ..`, `MERGE ..`) ([Writing with GQL](writes.md#not-yet)) |
 | a write in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
-| a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`) | `WITH head(l) AS x SET x.k = ..` |
+| a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`, a computed key `n[k] = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
 | `EXCEPT`, `INTERSECT`, `OTHERWISE` | `NOT EXISTS { }` / `EXISTS { }` on the rows of the first query, or `NEXT` |
-| list indexing and slicing `x[0]`, `x[1..2]` | Gremlin after `gql()` |
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |

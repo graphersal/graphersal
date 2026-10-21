@@ -90,6 +90,18 @@ fn sexp(e: &Expr) -> String {
         ExprKind::Parameter(name) => format!("${name}"),
         ExprKind::Variable(name) => name.name.clone(),
         ExprKind::Property { target, key } => format!("{}.{}", sexp(target), key.name),
+        ExprKind::Index(index) => match &index.subscript {
+            Subscript::At(at) => format!("(at {} {})", sexp(&index.target), sexp(at)),
+            Subscript::Slice { from, to } => {
+                let bound = |b: &Option<Expr>| b.as_ref().map_or("_".to_string(), sexp);
+                format!(
+                    "(slice {} {} {})",
+                    sexp(&index.target),
+                    bound(from),
+                    bound(to)
+                )
+            }
+        },
         ExprKind::Unary { op, operand } => {
             let op = match op {
                 UnaryOp::Not => "not",
@@ -897,7 +909,6 @@ fn not_yet_supported_constructs() {
             None,
         ),
         ("MATCH TRAIL (a)-->(b) RETURN a", "TRAIL (", None),
-        ("MATCH (n) RETURN n.list[0]", "[", None),
         ("MATCH (n) RETURN n ORDER BY n.x NULLS FIRST", "NULLS", None),
         ("MATCH (n) WHERE n.x IS TRUE RETURN n", "TRUE", None),
         ("CYPHER 25 MATCH (n) RETURN n", "CYPHER", None),
@@ -5312,10 +5323,10 @@ fn set_and_remove_errors() {
         );
         assert!(f.alternative.unwrap_or_default().contains("AS x"));
     }
-    // A dynamic key `n[k]`: not yet, as indexing anywhere.
+    // A dynamic key `n[k]`: not yet, as a target that is no variable.
     let f = fail("MATCH (n) SET n['k'] = 1");
     assert_eq!(f.kind, GqlErrorKind::NotYet);
-    assert_eq!(f.text, "[");
+    assert_eq!(f.text, "n['k']");
     // Missing or wrong operators: the expected tokens.
     for (query, text, expected) in [
         (
@@ -5897,4 +5908,71 @@ fn merge_form_errors() {
     let f = fail("MERGE RETURN 1");
     assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
     assert_eq!(f.text, "RETURN");
+}
+
+// ----- indexing and slicing (stage 3f) -----
+
+#[test]
+fn subscripts_bind_like_property_access() {
+    for (src, tree) in [
+        ("x[0]", "(at x 0)"),
+        ("x[-1]", "(at x -1)"),
+        ("x[i + 1]", "(at x (+ i 1))"),
+        ("x[1..3]", "(slice x 1 3)"),
+        ("x[1..]", "(slice x 1 _)"),
+        ("x[..3]", "(slice x _ 3)"),
+        ("x[..]", "(slice x _ _)"),
+        ("x[$a..$b]", "(slice x $a $b)"),
+        ("x[-3..-1]", "(slice x -3 -1)"),
+        ("x[null..]", "(slice x null _)"),
+        ("[[1]][0][0]", "(at (at [[1]] 0) 0)"),
+        ("[1, 2][0] + 3", "(+ (at [1 2] 0) 3)"),
+        ("[1] + [2, 3][1..]", "(+ [1] (slice [2 3] 1 _))"),
+        ("-x[0]", "(- (at x 0))"),
+        ("x[0].name", "(at x 0).name"),
+        ("x.list[0]", "(at x.list 0)"),
+        ("x[0] IN y[1..]", "(in (at x 0) (slice y 1 _))"),
+        ("n[k]", "(at n k)"),
+        ("n['na' + 'me']", "(at n (+ 'na' 'me'))"),
+        ("m[$key]", "(at m $key)"),
+        // A string literal key is the property access (one plan with `n.name`).
+        ("n['name']", "n.name"),
+        ("{null: 1}['null']", "{null: 1}.null"),
+        ("x[0]['a']", "(at x 0).a"),
+    ] {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    // The span covers the whole subscript (the default column name).
+    let q = ok("MATCH (n) RETURN [1, 2][0..1], n['name']");
+    assert_eq!(q.text(q.ret.items[0].expr.span), "[1, 2][0..1]");
+    assert_eq!(q.text(q.ret.items[1].expr.span), "n['name']");
+}
+
+#[test]
+fn malformed_subscripts_are_syntax_errors() {
+    for (query, text) in [
+        ("RETURN [1][]", "]"),
+        ("RETURN [1][0", ""),
+        ("RETURN [1][0..1..2]", ".."),
+        ("RETURN [1][0, 1]", ","),
+        // TCK Literals7 [21]: a nested list with missing commas.
+        ("RETURN [[','[]',']]", "]"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001", "{query}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    // Each subscript is one level of the expression tree: a long chain reaches MAX_HEIGHT.
+    let f = fail(&format!("MATCH (n) RETURN n{}", "[0]".repeat(50_000)));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
+    assert!(f.message.contains("too large"), "{}", f.message);
+    // Nested inside its brackets, the depth bound holds.
+    let n = 50_000;
+    let f = fail(&format!(
+        "MATCH (n) RETURN {}0{}",
+        "n[".repeat(n),
+        "]".repeat(n)
+    ));
+    assert_eq!(f.kind, GqlErrorKind::Limit);
 }

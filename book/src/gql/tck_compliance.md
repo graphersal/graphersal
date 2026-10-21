@@ -45,21 +45,19 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2309** / 3712 | **62.2 %** |
-| Unsupported (not yet or refused) | 1252 / 3712 | 33.7 % |
-| **Wrong behaviour of supported constructs** | **151** / 3712 | **4.1 %** |
-| Passed without `expressions/temporal` | 2309 / 2708 | 85.3 % |
+| **Passed** | **2397** / 3712 | **64.6 %** |
+| Unsupported (not yet or refused) | 1159 / 3712 | 31.2 % |
+| **Wrong behaviour of supported constructs** | **156** / 3712 | **4.2 %** |
+| Passed without `expressions/temporal` | 2397 / 2708 | 88.5 % |
 
-Unsupported = missing 1164, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 77, timeout 0, panic 0.
+Unsupported = missing 1071, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 82, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
 are not yet supported in GQL, and `expressions/temporal` is about a quarter of the kit, so the
-headline also shows the share without it. The other large block is list indexing (`x[0]`,
-`x[1..2]`): the `DELETE` cases left in `clauses/delete` and the `MERGE` cases left in
-`clauses/merge` read their results through it; otherwise the write clauses (`CREATE`, `SET`,
-`REMOVE`, `DELETE`, `MERGE`) pass; `rand()` is refused by design
-([Refused Constructs](refused.md)). The ranking with counts is in the report.
+headline also shows the share without it. The write clauses (`CREATE`, `SET`, `REMOVE`,
+`DELETE`, `MERGE`) pass; `rand()` is refused by design ([Refused Constructs](refused.md)). The
+ranking with counts is in the report.
 
 Per sub-directory of the kit:
 
@@ -67,42 +65,42 @@ Per sub-directory of the kit:
 | Directory | Pass % | Passed | Total | Unsupported | Wrong |
 |---|---:|---:|---:|---:|---:|
 | `clauses/create` | 96.2 % | 75 | 78 | · | 3 |
-| `clauses/delete` | 87.8 % | 36 | 41 | 5 | · |
+| `clauses/delete` | 100.0 % | 41 | 41 | · | · |
 | `clauses/match` | 97.6 % | 372 | 381 | 1 | 8 |
 | `clauses/match-where` | 97.1 % | 33 | 34 | · | 1 |
-| `clauses/merge` | 92.0 % | 69 | 75 | 6 | · |
+| `clauses/merge` | 100.0 % | 75 | 75 | · | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
 | `clauses/return` | 93.7 % | 59 | 63 | 2 | 2 |
-| `clauses/return-orderby` | 82.9 % | 29 | 35 | 1 | 5 |
+| `clauses/return-orderby` | 85.7 % | 30 | 35 | · | 5 |
 | `clauses/return-skip-limit` | 74.2 % | 23 | 31 | 1 | 7 |
 | `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 85.7 % | 12 | 14 | · | 2 |
 | `clauses/with` | 89.7 % | 26 | 29 | 1 | 2 |
-| `clauses/with-orderBy` | 73.3 % | 214 | 292 | 70 | 8 |
+| `clauses/with-orderBy` | 75.0 % | 219 | 292 | 65 | 8 |
 | `clauses/with-skip-limit` | 66.7 % | 6 | 9 | 2 | 1 |
 | `clauses/with-where` | 73.7 % | 14 | 19 | · | 5 |
 | `expressions/aggregation` | 62.9 % | 22 | 35 | 13 | · |
 | `expressions/boolean` | 85.1 % | 40 | 47 | · | 7 |
-| `expressions/comparison` | 56.9 % | 41 | 72 | 7 | 24 |
+| `expressions/comparison` | 61.1 % | 44 | 72 | · | 28 |
 | `expressions/conditional` | 100.0 % | 13 | 13 | · | · |
 | `expressions/existentialSubqueries` | 100.0 % | 10 | 10 | · | · |
-| `expressions/graph` | 82.0 % | 41 | 50 | 8 | 1 |
-| `expressions/list` | 60.5 % | 112 | 185 | 42 | 31 |
-| `expressions/literals` | 99.2 % | 130 | 131 | 1 | · |
-| `expressions/map` | 60.5 % | 23 | 38 | 15 | · |
+| `expressions/graph` | 98.0 % | 49 | 50 | · | 1 |
+| `expressions/list` | 83.2 % | 154 | 185 | · | 31 |
+| `expressions/literals` | 100.0 % | 131 | 131 | · | · |
+| `expressions/map` | 100.0 % | 38 | 38 | · | · |
 | `expressions/mathematical` | 100.0 % | 6 | 6 | · | · |
 | `expressions/null` | 100.0 % | 44 | 44 | · | · |
 | `expressions/path` | 42.9 % | 3 | 7 | · | 4 |
 | `expressions/pattern` | 90.0 % | 45 | 50 | 1 | 4 |
-| `expressions/precedence` | 86.0 % | 104 | 121 | 9 | 8 |
+| `expressions/precedence` | 87.6 % | 106 | 121 | 6 | 9 |
 | `expressions/quantifier` | 88.0 % | 521 | 592 | 63 | 8 |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
 | `expressions/temporal` | 0.0 % | 0 | 1004 | 1004 | · |
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 5.3 % | 1 | 19 | · | 18 |
-| **all** | **62.2 %** | **2309** | **3712** | 1252 | 151 |
+| **all** | **64.6 %** | **2397** | **3712** | 1159 | 156 |
 <!-- opencypher:end directories -->
 
 ## Out of scope

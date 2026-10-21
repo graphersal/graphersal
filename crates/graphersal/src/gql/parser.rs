@@ -67,6 +67,8 @@
 //! proj_item  := '.' name | '.' '*' | var | name ':' expr
 //! list_comp  := '[' var IN expr (WHERE expr)? ('|' expr)? ']'
 //! pattern_comp := '[' path (WHERE expr)? '|' expr ']'      -- path with an edge, `p =` allowed
+//! subscript  := postfix_target '[' expr ']'                -- Cypher indexing (stage 3f)
+//!             | postfix_target '[' expr? '..' expr? ']'    -- Cypher slicing
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
@@ -76,7 +78,8 @@
 //! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
 //! `a = b IS NULL` is `a = (b IS NULL)`) < additive (`+ - ||`) < multiplicative (`* / %`) <
 //! unary (`- +`) < postfix (`.key`, Cypher `v:Label`, an alias of `v IS LABELED Label`, a map
-//! projection `v {..}`) < primary (literals, `[list]`, `{map}`, `$param`, variables, function
+//! projection `v {..}`, a subscript `x[i]` / `x[a..b]`, left to right; `x['key']` with a
+//! string literal is parsed as `x.key`) < primary (literals, `[list]`, `{map}`, `$param`, variables, function
 //! calls, `CASE`, `( )`, `EXISTS { }` / `EXISTS ( )`, pattern predicates, list and pattern
 //! comprehensions).
 //! A minus directly before an integer or float literal is folded into the literal, so
@@ -310,14 +313,15 @@ use super::ast::BinaryOp;
 use super::ast::{
     CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CastTarget, CompositeQuery,
     ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Endpoint, Expr,
-    ExprKind, FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
-    LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery, ListComprehension,
-    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, MergeAction,
-    MergeClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind, ParenthesizedPath,
-    PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock,
-    QueryEnd, ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind, ReturnClause,
-    ReturnItem, SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
+    ExprKind, FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, IndexExpr,
+    InsertClause, LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery,
+    ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause,
+    MergeAction, MergeClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind,
+    ParenthesizedPath, PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier,
+    Query, QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind,
+    ReturnClause, ReturnItem, SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage,
+    SubqueryExpr, SubqueryForm, SubqueryKind, Subscript, TrimSide, UnaryOp, UnionKind,
+    UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
@@ -4305,19 +4309,71 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 }
-                TokenKind::LBracket => {
-                    return Err(self.not_yet(
-                        self.peek().span,
-                        "list indexing and slicing (x[0], x[1..2])",
-                        "",
-                    ));
-                }
+                TokenKind::LBracket => (expr, height) = self.subscript(expr, height)?,
                 TokenKind::LBrace if matches!(expr.kind, ExprKind::Variable(_)) => {
                     (expr, height) = self.map_projection(expr, height)?;
                 }
                 _ => return Ok((expr, height)),
             }
         }
+    }
+
+    /// `[i]`, `[a..b]`, `[a..]` or `[..b]` after `target`, at the `[` (stage 3f): an
+    /// [`ExprKind::Index`]; `target['key']` with a string literal is the property access
+    /// `target.key` (one meaning, the same plan: property pushdown and indexes serve it).
+    #[inline(never)]
+    fn subscript(&mut self, target: Expr, height: usize) -> PResult<(Expr, usize)> {
+        self.enter()?;
+        let result = self.subscript_parts();
+        self.leave();
+        let (subscript, brackets, inner) = result?;
+        let span = target.span.to(brackets);
+        let height = self.height(height.max(inner), span)?;
+        let kind = match subscript {
+            Subscript::At(Expr {
+                kind: ExprKind::Literal(Literal::String(name)),
+                span: key_span,
+            }) => ExprKind::Property {
+                target: Box::new(target),
+                key: Identifier {
+                    name,
+                    span: key_span,
+                },
+            },
+            subscript => ExprKind::Index(Box::new(IndexExpr {
+                target,
+                subscript,
+                brackets,
+            })),
+        };
+        Ok((Expr { kind, span }, height))
+    }
+
+    /// The part of a subscript from its `[` through its `]`, the span of the brackets and the
+    /// greatest height of its expressions.
+    fn subscript_parts(&mut self) -> PResult<(Subscript, Span, usize)> {
+        let open = self.advance().span;
+        let mut height = 0;
+        let mut bound = |this: &mut Self| -> PResult<Option<Expr>> {
+            if matches!(this.peek().kind, TokenKind::DotDot | TokenKind::RBracket) {
+                return Ok(None);
+            }
+            let (expr, h) = this.expr_bp(0)?;
+            height = height.max(h);
+            Ok(Some(expr))
+        };
+        let from = bound(self)?;
+        let subscript = if self.eat(&TokenKind::DotDot).is_some() {
+            let to = bound(self)?;
+            Subscript::Slice { from, to }
+        } else {
+            match from {
+                Some(index) => Subscript::At(index),
+                None => return Err(self.unexpected(&["an expression", "`..`"])),
+            }
+        };
+        self.expect(&TokenKind::RBracket, &["`]`"])?;
+        Ok((subscript, open.to(self.last), height))
     }
 
     /// The error for `a.b.c(...)`: a vendor function or procedure.

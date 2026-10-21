@@ -680,6 +680,33 @@ g.v().has_label("person").map(__.choose(__.has("age", P.gt(30)), __.constant(1),
 g.gql("MATCH (n) RETURN n.lang AS lang, count(*) AS c ORDER BY lang").to_list()   // #{"c": 2, "lang": "java"}, #{"c": 4, "lang": ()}
 ```
 
+## Indexing and slicing
+
+`x[i]`, `x[a..b]`, `m[k]` and `n[k]` are Cypher forms with their Neo4j meaning (the openCypher
+TCK `List1`, `List2`, `Map2` and `Graph7` cases pass):
+
+- **A list index** is an integer counted from 0; a negative one counts from the end (`-1` is the
+  last item). An index outside the list gives `NULL`, never an error. A float index is an error
+  even when it is whole (`x[1.0]`), and so is a string, a boolean, a list or a map: convert with
+  `toInteger(i)`.
+- **A slice** `x[a..b]` takes the items from `a` up to `b`, `b` excluded. A bound left out is the
+  start (`x[..b]`) or the end (`x[a..]`); a negative bound counts from the end; bounds are
+  clamped to the list, so `[1, 2, 3][-5..5]` is the whole list; `a >= b` gives `[]`. A bound
+  written as `NULL` (or a parameter that is `NULL`) makes the slice `NULL`.
+- **A map** is read with a string key (case-sensitive; missing: `NULL`); **a node or an edge**
+  with a string property key (missing: `NULL`). `n['name']` with a string literal is exactly
+  `n.name`.
+- **`NULL`** as the list, map, element, index or bound gives `NULL`.
+- **Other kinds** of value are not indexable: a string, a number, a boolean or a path gives
+  `22G03` (a string is no list in GQL; use `substring()`). These errors arise when a row
+  reaches the expression ([Type errors surface at evaluation time](#type-errors-surface-at-evaluation-time)).
+
+```rhai,graph=modern
+g.gql("RETURN [1, 2, 3][-5..5] AS a, [1, 2, 3][3..1] AS b, [1, 2, 3][1..NULL] AS c, {Name: 1}['name'] AS d").to_list()
+// #{"a": [1, 2, 3], "b": [], "c": (), "d": ()}
+g.gql("RETURN [1, 2, 3][1.0] AS x")   // error: a list index is an integer, not a float
+```
+
 ## FOR: NULL and values that are not lists
 
 `FOR x IN list` (and `UNWIND list AS x`, one meaning for both spellings) gives one row per item

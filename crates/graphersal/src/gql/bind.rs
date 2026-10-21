@@ -385,12 +385,13 @@ use std::rc::Rc;
 use super::ast::{
     BinaryOp, CallArgs, CallClause, CallScope, CaseExpr, CaseWhen, CompositeQuery,
     ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Expr, ExprKind,
-    ForClause, GroupBy, Identifier, InsertClause, LabelExpr, LabelExprKind, LabelItem, LetClause,
-    LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral, MapProjection,
-    MatchClause, MergeClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern,
-    PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator,
-    RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem, SetItemKind,
-    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    ForClause, GroupBy, Identifier, IndexExpr, InsertClause, LabelExpr, LabelExprKind, LabelItem,
+    LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral,
+    MapProjection, MatchClause, MergeClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath,
+    PathPattern, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
+    ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem,
+    SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, Subscript,
+    UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -1626,6 +1627,10 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
         ExprKind::List(items) => items.iter().for_each(f),
         ExprKind::Map(map) => map.entries.iter().for_each(|e| f(&e.value)),
         ExprKind::Property { target, .. } => f(target),
+        ExprKind::Index(index) => {
+            f(&index.target);
+            index.bounds().for_each(f);
+        }
         ExprKind::Unary { operand, .. }
         | ExprKind::IsNull { operand, .. }
         | ExprKind::IsLabeled { operand, .. } => f(operand),
@@ -3967,6 +3972,8 @@ impl<'q> Binder<'q> {
             | ExprKind::Property { .. }
             | ExprKind::FunctionCall { .. }
             | ExprKind::Case(_) => Ok(DeleteKind::Unknown),
+            // `friends[$i]`, `list[1..]`: known only at run time.
+            ExprKind::Index(_) => Ok(DeleteKind::Unknown),
             ExprKind::Binary {
                 op: BinaryOp::Add | BinaryOp::Concat,
                 ..
@@ -4852,6 +4859,7 @@ impl<'q> Binder<'q> {
             ExprKind::List(_)
             | ExprKind::Map(_)
             | ExprKind::Case(_)
+            | ExprKind::Index(_)
             | ExprKind::Subquery(_)
             | ExprKind::MapProjection(_)
             | ExprKind::ListComprehension(_)
@@ -4908,6 +4916,12 @@ impl<'q> Binder<'q> {
                 }
                 if let Some(else_result) = &case.else_result {
                     self.resolve(ctx, else_result, refs)?;
+                }
+            }
+            ExprKind::Index(index) => {
+                self.resolve(ctx, &index.target, refs)?;
+                for bound in index.bounds() {
+                    self.resolve(ctx, bound, refs)?;
                 }
             }
             ExprKind::Subquery(subquery) => {
@@ -5389,7 +5403,55 @@ impl<'q> Binder<'q> {
             ExprKind::FunctionCall { .. } => self.substitute_call(aliases, expr),
             ExprKind::MapProjection(_) => self.substitute_projection(aliases, expr),
             ExprKind::ListComprehension(_) => self.substitute_comprehension(aliases, expr),
+            ExprKind::Index(_) => self.substitute_index(aliases, expr),
         }
+    }
+
+    /// `target[i]` and `target[a..b]`: the target is a link of the spine, the bounds nest.
+    #[inline(never)]
+    fn substitute_index(
+        &mut self,
+        aliases: &[(String, usize)],
+        expr: &Expr,
+    ) -> BResult<(Expr, Shape)> {
+        let ExprKind::Index(index) = &expr.kind else {
+            return Err(not_dispatched());
+        };
+        let (target, ts) = self.substitute(aliases, &index.target)?;
+        let mut children = vec![(ts, false)];
+        let mut one = |this: &mut Self, e: &Option<Expr>| -> BResult<Option<Expr>> {
+            match e {
+                Some(e) => {
+                    let (e, s) = this.substitute(aliases, e)?;
+                    children.push((s, true));
+                    Ok(Some(e))
+                }
+                None => Ok(None),
+            }
+        };
+        let subscript = match &index.subscript {
+            Subscript::At(at) => {
+                let (at, s) = self.substitute(aliases, at)?;
+                children.push((s, true));
+                Subscript::At(at)
+            }
+            Subscript::Slice { from, to } => Subscript::Slice {
+                from: one(self, from)?,
+                to: one(self, to)?,
+            },
+        };
+        let kind = ExprKind::Index(Box::new(IndexExpr {
+            target,
+            subscript,
+            brackets: index.brackets,
+        }));
+        Ok((
+            Expr {
+                kind,
+                span: expr.span,
+            },
+            combine(&children),
+        ))
     }
 
     #[inline(never)]
@@ -5489,6 +5551,7 @@ impl<'q> Binder<'q> {
             | ExprKind::Subquery(_)
             | ExprKind::MapProjection(_)
             | ExprKind::ListComprehension(_)
+            | ExprKind::Index(_)
             | ExprKind::PatternComprehension(_) => return Err(not_dispatched()),
         };
         Ok((
@@ -5573,6 +5636,7 @@ impl<'q> Binder<'q> {
             | ExprKind::Subquery(_)
             | ExprKind::MapProjection(_)
             | ExprKind::ListComprehension(_)
+            | ExprKind::Index(_)
             | ExprKind::PatternComprehension(_) => return Err(not_dispatched()),
         };
         Ok((
@@ -7655,11 +7719,11 @@ fn shape_of(expr: &Expr) -> Shape {
     );
     let mut first = true;
     for_each_child(expr, &mut |child| {
-        // The left operand of a binary operator (or of `IS SOURCE OF`) is a link of the spine,
-        // the right one nests.
+        // The left operand of a binary operator (or of `IS SOURCE OF`, the target of a
+        // subscript) is a link of the spine, the right one nests.
         let binary_left = matches!(
             expr.kind,
-            ExprKind::Binary { .. } | ExprKind::IsEndpoint { .. }
+            ExprKind::Binary { .. } | ExprKind::IsEndpoint { .. } | ExprKind::Index(_)
         ) && first;
         first = false;
         children.push((shape_of(child), nests && !binary_left));

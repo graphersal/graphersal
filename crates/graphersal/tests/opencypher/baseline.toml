@@ -15,26 +15,6 @@ reason = "GQL semantic error at line 3, column 6: WITH * needs at least one name
 class = "wrong_columns"
 reason = "control query: columns differ: expected [\"a\", \"b\", \"c\", \"r1\", \"r2\"], actual [\"a\", \"r1\", \"b\", \"r2\", \"c\"]"
 
-["clauses/delete/Delete5.feature::[1] Delete node from a list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/delete/Delete5.feature::[2] Delete relationship from a list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/delete/Delete5.feature::[5] Detach delete nodes from nested map/list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/delete/Delete5.feature::[6] Delete relationships from nested map/list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/delete/Delete5.feature::[7] Delete paths from nested map/list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["clauses/match-where/MatchWhere1.feature::[14] Fail when filtering path with property predicate"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
@@ -45,7 +25,7 @@ reason = "GQL syntax error at line 1, column 15: unexpected `:`"
 
 ["clauses/match/Match4.feature::[4] Matching longer variable length paths"]
 class = "setup"
-reason = "having executed: not yet: list indexing and slicing (x[0], x[1..2])"
+reason = "having executed: having executed: GQL semantic error at line 8, column 9: the variable `n1` is used as a node here but holds a value computed by WITH, not a no…"
 
 ["clauses/match/Match4.feature::[8] Matching relationships into a list and matching variable length using the list"]
 class = "unexpected_error"
@@ -75,30 +55,6 @@ reason = "GQL syntax error at line 4, column 8: unexpected keyword first"
 class = "unexpected_error"
 reason = "GQL syntax error at line 4, column 8: unexpected keyword first"
 
-["clauses/merge/Merge6.feature::[3] Updating one property with ON CREATE"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/merge/Merge6.feature::[4] Null-setting one property with ON CREATE"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/merge/Merge6.feature::[6] Copying properties from node with ON CREATE"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/merge/Merge6.feature::[7] Copying properties from literal map with ON CREATE"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/merge/Merge7.feature::[4] Copying properties from node with ON MATCH"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/merge/Merge7.feature::[5] Copying properties from literal map with ON MATCH"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["clauses/return-orderby/ReturnOrderBy1.feature::[11] ORDER BY should order distinct types in the expected order"]
 class = "unexpected_error"
 reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
@@ -106,10 +62,6 @@ reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, fal
 ["clauses/return-orderby/ReturnOrderBy1.feature::[12] ORDER BY DESC should order distinct types in the expected order"]
 class = "unexpected_error"
 reason = "Step #6 'gql:for(\"types IN [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0…\" (77 chars))' execution failed: GQL data exception at line 2, column 54: di…"
-
-["clauses/return-orderby/ReturnOrderBy4.feature::[1] ORDER BY of a column introduced in RETURN should return salient results in ascending order"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/return-orderby/ReturnOrderBy6.feature::[1] Handle constants and parameters inside an order by item which contains an aggregation expression"]
 class = "unexpected_error"
@@ -351,14 +303,6 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: localdatetime()"
 
-["clauses/with-orderBy/WithOrderBy2.feature::[10] Sort by a list expression in descending order::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[10] Sort by a list expression in descending order::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::1"]
 class = "setup"
 reason = "having executed: not yet: date()"
@@ -466,18 +410,6 @@ reason = "GQL semantic error at line 3, column 12: after an aggregation, ORDER B
 ["clauses/with-orderBy/WithOrderBy2.feature::[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key::2"]
 class = "unexpected_error"
 reason = "GQL semantic error at line 3, column 12: after an aggregation, ORDER BY can only use the returned columns, and `a` is not one of them"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[9] Sort by a list expression in ascending order::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[9] Sort by a list expression in ascending order::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[9] Sort by a list expression in ascending order::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["clauses/with-orderBy/WithOrderBy4.feature::[16] Handle constants and parameters inside an order by item which contains an aggregation expression"]
 class = "unexpected_error"
@@ -615,18 +547,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
 
-["expressions/comparison/Comparison1.feature::[1] Number-typed integer comparison"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/comparison/Comparison1.feature::[2] Number-typed float comparison"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/comparison/Comparison1.feature::[3] Any-typed string comparison"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["expressions/comparison/Comparison1.feature::[6] Comparing lists to lists::3"]
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
@@ -656,20 +576,20 @@ class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
 
 ["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
+class = "unexpected_error"
+reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
 
 ["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
+class = "unexpected_error"
+reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
 
 ["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
+class = "unexpected_error"
+reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
 
 ["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
+class = "unexpected_error"
+reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
 
 ["expressions/comparison/Comparison2.feature::[4] Comparing lists::1"]
 class = "wrong_result"
@@ -739,193 +659,9 @@ reason = "GQL syntax error at line 2, column 18: comparisons cannot be chained"
 class = "unexpected_error"
 reason = "GQL syntax error at line 2, column 25: comparisons cannot be chained"
 
-["expressions/graph/Graph3.feature::[6] `labels()` should accept type Any"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph3.feature::[9] `labels()` failing on invalid arguments"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph4.feature::[5] `type()` handling Any type"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["expressions/graph/Graph4.feature::[7] Failing when using `type()` on a node"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/graph/Graph6.feature::[4] Statically access a property of a node resulting from an expression"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph6.feature::[8] Statically access a property of a relationship resulting from an expression"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph7.feature::[1] Execute n['name'] in read queries"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph7.feature::[2] Execute n['name'] in update queries"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/graph/Graph7.feature::[3] Use dynamic property lookup based on parameters when there is lhs type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[1] Indexing into literal list"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[2] Indexing into nested literal lists"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[3] Use list lookup based on parameters when there is no type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[4] Use list lookup based on parameters when there is lhs type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[5] Use list lookup based on parameters when there is rhs type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[6] Fail when indexing a non-list #Example: <exampleName>::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[6] Fail when indexing a non-list #Example: <exampleName>::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[6] Fail when indexing a non-list #Example: <exampleName>::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[6] Fail when indexing a non-list #Example: <exampleName>::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[7] Fail when indexing a non-list given by a parameter #Example: <exampleName>::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[7] Fail when indexing a non-list given by a parameter #Example: <exampleName>::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[7] Fail when indexing a non-list given by a parameter #Example: <exampleName>::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[7] Fail when indexing a non-list given by a parameter #Example: <exampleName>::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[8] Fail when indexing with a non-integer #Example: <exampleName>::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[8] Fail when indexing with a non-integer #Example: <exampleName>::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[8] Fail when indexing with a non-integer #Example: <exampleName>::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[8] Fail when indexing with a non-integer #Example: <exampleName>::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[8] Fail when indexing with a non-integer #Example: <exampleName>::5"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[9] Fail when indexing with a non-integer given by a parameter #Example: <exampleName>::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[9] Fail when indexing with a non-integer given by a parameter #Example: <exampleName>::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[9] Fail when indexing with a non-integer given by a parameter #Example: <exampleName>::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[9] Fail when indexing with a non-integer given by a parameter #Example: <exampleName>::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List1.feature::[9] Fail when indexing with a non-integer given by a parameter #Example: <exampleName>::5"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[10] List slice with parameterised range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[11] List slice with parameterised invalid range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[1] List slice"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[2] List slice with implicit end"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[3] List slice with implicit start"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[4] List slice with singleton range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[5] List slice with empty range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[6] List slice with negative range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[7] List slice with invalid range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[8] List slice with exceeding range"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[9] List slice with null range::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[9] List slice with null range::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[9] List slice with null range::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[9] List slice with null range::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/list/List2.feature::[9] List slice with null range::5"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["expressions/list/List3.feature::[1] Equality between list and literal should return false"]
 class = "wrong_result"
@@ -963,17 +699,9 @@ reason = "expected row 1 | false | has no partner (in any order) among: | | null
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
 
-["expressions/list/List5.feature::[1] IN should work with nested list subscripting"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
 ["expressions/list/List5.feature::[28] IN should return false if no match can be found, despite nulls"]
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[2] IN should work with nested literal list subscripting"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["expressions/list/List5.feature::[30] IN should return false if different length lists compared, even if the extra element is null"]
 class = "wrong_result"
@@ -986,10 +714,6 @@ reason = "expected row 1 | false | has no partner (in any order) among: | | null
 ["expressions/list/List5.feature::[38] IN should work with an empty list in the presence of other list elements: not matching"]
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/list/List5.feature::[3] IN should work with list slices"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::1"]
 class = "wrong_error"
@@ -1010,10 +734,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s
 ["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::5"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[4] IN should work with literal list slices"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["expressions/list/List5.feature::[5] IN should return false when matching a number with a string"]
 class = "wrong_result"
@@ -1066,70 +786,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 ["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::8"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/literals/Literals7.feature::[21] Fail on a nested list with missing commas"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map1.feature::[3] Statically access a field of a map resulting from an expression"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[1] Dynamically access a field based on parameters when there is no type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[2] Dynamically access a field based on parameters when there is rhs type information"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[3] Dynamically access a field on null results in null"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[4] Dynamically access a field with null results in null"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::1"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::2"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::3"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::4"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::5"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::6"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[5] Dynamically access a field is case-sensitive::7"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[6] Fail at runtime when attempting to index with an Int into a Map"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[7] Fail at runtime when trying to index into a map with a non-string"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/map/Map2.feature::[8] Fail at runtime when trying to index something which is not a map"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
 
 ["expressions/path/Path1.feature::[1] `nodes()` on null path"]
 class = "unexpected_error"
@@ -1192,16 +848,8 @@ class = "missing"
 reason = "not yet: the exponentiation operator `^`"
 
 ["expressions/precedence/Precedence3.feature::[1] List element access takes precedence over list appending"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/precedence/Precedence3.feature::[2] List element access takes precedence over list concatenation"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
-
-["expressions/precedence/Precedence3.feature::[3] List slicing takes precedence over list concatenation"]
-class = "missing"
-reason = "not yet: list indexing and slicing (x[0], x[1..2])"
+class = "unexpected_error"
+reason = "Step #1 'gql:project(\"a\", \"b\", \"c\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list…"
 
 ["expressions/precedence/Precedence3.feature::[4] List appending takes precedence over list element containment"]
 class = "unexpected_error"

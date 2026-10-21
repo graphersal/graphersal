@@ -4721,6 +4721,12 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
             }
         }
         ExprKind::Property { target, .. } => rename_aliases(target, within, renames),
+        ExprKind::Index(index) => {
+            rename_aliases(&mut index.target, within, renames);
+            for bound in index.bounds_mut() {
+                rename_aliases(bound, within, renames);
+            }
+        }
         ExprKind::Unary { operand, .. }
         | ExprKind::IsNull { operand, .. }
         | ExprKind::IsLabeled { operand, .. } => rename_aliases(operand, within, renames),
