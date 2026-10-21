@@ -45,7 +45,7 @@
 //! | `FOR x IN list WITH ORDINALITY i` / `WITH OFFSET i` | `gql:for(".. WITH ORDINALITY i")`: the record `{x, i}`, read like a materializing `WITH` row (`Binding::Column`, `Binding::RowColumn` through `as("#f<k>")` only when read after leaving it) |
 //! | a later `MATCH` continuing from a `FOR` item (design E3) | `gql:bind("x")` (an item that is not an element of the pattern's kind, `NULL` included: no row; never a bare `out()` on the item); a join or trail check against it is `gql:filter` as for a `WITH` column |
 //! | a component that is not the root scan, with an equality an id or index serves (design M3, E5: `FOR id IN $ids MATCH (n) WHERE element_id(n) = id`, `MATCH (n:person {name: x})` with an index on `person.name`, a second component `(b:person) WHERE b.name = a.boss`) | `gql:lookup("(n:person)", "name: x") [index: vertex person.name]` (`[id]` for `element_id`) in place of the mid-traversal `v()`: per row the other side of the equality is evaluated where the row stands (no label for it), then the vertex of that id, or the index slice of every scan label, each kept when GQL `=` holds (`1 = 1.0`); a value no index serves, or a storage answering no index, scans the scan labels with the same check. Then `has_label(..)` of the scan labels, the node's other conjuncts and `as()` as after a scan; the equality is not repeated as `gql:filter` |
-//! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one). The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
+//! | quantified edge `-[e:T]->{m,n}` (also `{m,}`, `{,n}`, `{n}`, `*`, `+`, Cypher `[e*m..n]`; plan mechanism 5) | `repeat(B)` with the bounds as modulators: `{m,n}` `repeat(B).emit(__.loops().is(P.gte(m))).times(n)` (`emit()` for `m = 1`), `{n}` `repeat(B).times(n)`, `{0,n}` `emit().repeat(B).times(n)` (the zero-length match first), no upper bound: no `times()` (trail ends the loop; `repeat.max_loops` and `traversal.max_traversers` are errors, never a cut result, design D14); an upper bound beyond `u32::MAX` is no bound; `{0}` emits no step (the far node is the near one); Cypher's empty interval `[e*2..1]` / `[e*..0]` (P0 U7) is `{0}` followed by `discard()`: no row. The body `B` is the edge hop above (`out_e(T)`, the pushed `has()`, the inline `WHERE` as `gql:filter`, either direction as the `union`) with `gql:trail([e, ..])` before `as("e")`: the edge differs from every earlier iteration and every earlier edge of the clause |
 //! | top-level `[NOT] EXISTS { .. }` / `EXISTS ( .. )` conjunct, a Cypher pattern predicate `(a)-[:T]->()` (design M2, the 2b fast path) | `filter(__.<body>)` / `not(__.<body>)` where the planner placed the conjunct, after the element's pushed `has()`, `gql:filter` residuals and `as()` (E11); the body is the subquery's plan for the host's current element lowered onto the child from the host's site: a start at the current element needs no step (`MATCH (p:person) WHERE NOT (p)-[:created]->()` is `v(labels: ["person"]).not(__.out("created"))`, no label), a start at another import `select("a")` / `gql:bind`, a join to an import `where(P.eq("a"))`, an unanchored first component a child-leading `v()`, or `gql:lookup` when the id or an index serves an equality of it reading an import (stage 2d.T5c, as in a `CALL` body); no merge point of the lowering inside a child; an absent (`NULL`) import matches nothing (E9). At most `MAX_LOWERED_SUBQUERIES` bodies per query (a `LET` holding one is copied into every reader) |
 //! | `EXISTS` / a pattern predicate anywhere else in an expression: under `OR` / `XOR` / `CASE`, in a `RETURN` / `WITH` column, an `ORDER BY` key, an aggregate's argument, a `FOR` list (design M2, the 2b hook) | no step of its own: the evaluator node `Subquery(i)` reads `Env::subquery(i)`, answered by the `gql:*` step evaluating the expression (`gql:filter`, `gql:project`, `gql:order`, `gql:aggregate`, `gql:for`), which holds the body as its child `i` (`runtime::SubqueryHost`; the profile lists it under the step as `\>` lines). A `gql:filter` hosting one on an element runs after the element's `as()` and its plain residuals (E11), so a body reading the element through its label finds it. The body is lowered from the step's site as for the fast path (an `ORDER BY` key from the row map: imports through `select()`; after an aggregation an import a column holds through `gql:bind` from the row, `Site::ordered`). A row runs a child only when its evaluation reaches it (`a OR EXISTS {..}` runs nothing when `a` is TRUE), at most once per row, on one unit of the row (short-circuiting at the first match); `EXISTS` is TRUE or FALSE, never `NULL`, and composes three-valued like any boolean |
 //! | pattern comprehension `[q = (a)-->(b) WHERE cond \| expr]` (stage 2c, design M2, E13) | a hosted subquery like `EXISTS` anywhere in an expression (same hosts, same site rules, `MAX_LOWERED_SUBQUERIES`), whose body ends with `gql:value(expr)` (the `|` part evaluated where the body ends: `Instr::Value`, hosting its own nested subqueries); the host runs the child to its end on one unit of the row and collects the values in arrival order, bulk expanded, checked against `bulk.max_expansion`, `traversal.max_materialized_bytes` and the memory budget before the list is built (`runtime::SubqueryHost`); an absent (`NULL`) import gives `[]`. `MATCH (p:person) RETURN [(p)-[:knows]->(f) \| f.name] AS l` is `v(labels: ["person"]).gql:project("l")` with the child `out("knows").gql:value("f.name")` |
@@ -606,7 +606,8 @@ enum Instr<S: GraphStorage> {
     /// `gql:merge(..)` (stage 3e): one `MERGE` clause ([`Upsert`]).
     Upsert(Box<Upsert<S>>),
     /// `discard()`: the end of a pipeline ending in `FINISH` or a write clause (stage 3a, design
-    /// W2): every row has done its work, none is returned.
+    /// W2): every row has done its work, none is returned. Also the edge of Cypher's empty
+    /// interval `*2..1` (P0 U7): no row passes.
     Discard,
 }
 
@@ -2785,6 +2786,10 @@ impl<'q> Lowering<'q> {
                     if !zero_only {
                         instrs.push(Instr::Hop(self.hop(expand)?));
                     }
+                    // Cypher's empty interval `*2..1` (P0 U7): no path matches, no row passes.
+                    if expand.quantifier.is_some_and(|q| q.empty) {
+                        instrs.push(Instr::Discard);
+                    }
                     // After a quantified edge every traverser carries its own edges' labels,
                     // so a merge point there would never merge.
                     if let Some(next) = next_hop(ops, at)
@@ -3851,8 +3856,11 @@ impl<'q> Lowering<'q> {
         self.compile_in(&expr, None, &aliases, Some(hooks))
     }
 
-    /// The value of `OFFSET` / `LIMIT`: a literal, or a parameter whose value must be a
-    /// non-negative integer (GQLSTATUS `22G02` negative, `22G03` not an integer).
+    /// The value of `OFFSET` / `LIMIT`: a literal (also a constant expression, evaluated by
+    /// the binder), or a parameter whose value must be a non-negative integer (GQLSTATUS
+    /// `22G02` negative, `22G03` not an integer). Parameters are bound here, when the query is
+    /// compiled: a deliberate deviation from the TCK's run-time error (3f.P0 U8,
+    /// `book/src/gql/semantics.md` "Parameters are bound when the query is compiled").
     fn count(&self, count: &Count, keyword: &str) -> Result<usize, TraverserError> {
         let (name, span) = match count {
             Count::Literal(n) => return Ok(usize::try_from(*n).unwrap_or(usize::MAX)),

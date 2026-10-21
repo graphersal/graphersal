@@ -78,8 +78,11 @@
 //!   as in Neo4j) or read any variable in scope; a key whose text equals a column's expression
 //!   text is that column. After `DISTINCT` or an aggregation a key may only read returned
 //!   columns (Neo4j's rule), and an aggregate in a key must be a whole column.
-//! - **`OFFSET` / `LIMIT`** are a non-negative integer literal or a parameter (Neo4j's rule); the
-//!   lowering checks a parameter's value.
+//! - **`OFFSET` / `LIMIT`** are a non-negative integer literal, a parameter (Neo4j's rule; the
+//!   lowering checks its value, when the query is compiled: the TCK's run-time error is a
+//!   deliberate deviation, `book/src/gql/semantics.md`), or a constant expression (stage 3f,
+//!   P0 B12): one reading no variable, parameter, aggregate or subquery, evaluated once here
+//!   by the evaluator on an empty row (`constant_value`) and stored as the literal.
 //! - **Parameters:** every `$name` reference with its span, in text order.
 //! - **Subqueries (stage 2b, design M2):** `EXISTS { .. }`, `EXISTS ( .. )` and Cypher pattern
 //!   predicates; see "Subqueries".
@@ -336,8 +339,9 @@
 //! before `NEXT` does not return, an outer name a `CALL` body does not import, a variable a
 //! `CALL` scope clause (or importing `WITH`) does not know or names twice, a `CALL` column whose
 //! name is in scope, a `CALL` body name read after it, a `COLLECT { }` without exactly one
-//! returned column. `22G02` for a negative `OFFSET` / `LIMIT` literal,
-//! `22G03` for one that is not an integer. Kind `NotYet` (`0A000`) for a condition inside a
+//! returned column. `22G02` for a negative `OFFSET` / `LIMIT` literal or constant,
+//! `22G03` for one that is not an integer (or reads the row), the evaluator's own code for a
+//! constant whose evaluation fails (`LIMIT 1 / 0`: `22012`). Kind `NotYet` (`0A000`) for a condition inside a
 //! quantified edge that reads another variable and a comprehension variable read inside a
 //! subquery (a pattern comprehension's body and `|` part included); stage 2e: a condition
 //! inside a parenthesized path pattern reading a variable declared outside it, a subquery
@@ -1336,7 +1340,7 @@ pub(crate) struct SortKey {
 /// The value of `OFFSET` / `LIMIT`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Count {
-    /// A non-negative integer literal.
+    /// A non-negative integer literal, or the value of a constant expression.
     Literal(u64),
     /// `$name`: the lowering checks the supplied value.
     Parameter {
@@ -1530,6 +1534,91 @@ fn collect_needs_one_column(span: Span) -> Box<GqlErrorBuilder> {
 }
 
 type BResult<T> = Result<T, Box<GqlErrorBuilder>>;
+
+/// The value of a constant `OFFSET` / `LIMIT` expression ([`constant_value`]).
+enum ConstantCount {
+    /// A non-negative integer.
+    Count(u64),
+    /// A negative integer.
+    Negative,
+    /// Another value: what it is (`a float`, `null`, `a string`, ...).
+    Other(&'static str),
+}
+
+/// What a constant expression resolves names against: nothing (a variable, a parameter, an
+/// aggregate or a subquery makes it no constant).
+struct NoNames;
+
+impl super::eval::Scope for NoNames {
+    fn variable(&self, _: &str) -> Option<usize> {
+        None
+    }
+
+    fn parameter(&self, _: &str) -> Option<crate::ElementProperty> {
+        None
+    }
+}
+
+/// The row of a constant expression: it has no variable and no element.
+struct NoRow;
+
+impl super::eval::Env for NoRow {
+    type Element = ();
+
+    fn variable(&self, _: usize) -> super::eval::Value<()> {
+        super::eval::Value::Null
+    }
+
+    fn kind(&self, _: &()) -> crate::ElementKind {
+        crate::ElementKind::Vertex
+    }
+
+    fn element_id(&self, _: &()) -> crate::CompactString {
+        crate::CompactString::default()
+    }
+
+    fn property(&self, _: &(), _: &str) -> Option<crate::ElementProperty> {
+        None
+    }
+
+    fn has_label(&self, _: &(), _: &str) -> bool {
+        false
+    }
+
+    fn has_any_label(&self, _: &()) -> bool {
+        false
+    }
+
+    fn labels(&self, _: &()) -> Vec<crate::CompactString> {
+        Vec::new()
+    }
+}
+
+/// `expr` evaluated once when it reads nothing of a row (no variable, parameter, aggregate or
+/// subquery; every function is pure): `Ok(None)` when it does, the evaluator's error (`1 / 0`:
+/// `22012`) when the evaluation fails.
+fn constant_value(expr: &Expr) -> Result<Option<ConstantCount>, super::eval::EvalError> {
+    use super::eval::{Value, compile, status};
+    let compiled = match compile::<()>(expr, &NoNames) {
+        Ok(compiled) => compiled,
+        Err(error) if matches!(error.gqlstatus, status::SEMANTIC | status::NOT_SUPPORTED) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let value = compiled.eval(&NoRow)?;
+    Ok(Some(match &value {
+        Value::Scalar(crate::ElementProperty::Number(number)) => match number.as_i64() {
+            Some(n) => match u64::try_from(n) {
+                Ok(n) => ConstantCount::Count(n),
+                Err(_) => ConstantCount::Negative,
+            },
+            None => ConstantCount::Other("a float"),
+        },
+        Value::Null => ConstantCount::Other("null"),
+        other => ConstantCount::Other(other.kind_name()),
+    }))
+}
 
 fn semantic(span: Span, message: impl Into<String>) -> GqlErrorBuilder {
     GqlErrorBuilder::new(GqlErrorKind::Semantic, span.start..span.end, message)
@@ -7126,10 +7215,16 @@ impl<'q> Binder<'q> {
         let refused = |code: &'static str, what: &str| {
             Err(semantic(
                 value.span,
-                format!("{keyword} must be a non-negative integer or a parameter, not {what}"),
+                format!(
+                    "{keyword} must be a non-negative integer, a parameter or a constant \
+                     expression, not {what}"
+                ),
             )
             .gqlstatus(code)
-            .alternative(format!("{keyword} 10 or {keyword} $n"))
+            .alternative(format!(
+                "{keyword} 10, {keyword} $n or an expression without variables, for example \
+                 {keyword} toInteger(ceil(1.7))"
+            ))
             .into())
         };
         let count = match &value.kind {
@@ -7149,7 +7244,27 @@ impl<'q> Binder<'q> {
             }
             ExprKind::Literal(Literal::Float(_)) => return refused("22G03", "a float"),
             ExprKind::Literal(_) => return refused("22G03", "this literal"),
-            _ => return refused("22G03", "an expression"),
+            _ => match constant_value(value) {
+                // A constant expression (P0 B12, TCK ReturnSkipLimit2 [6]): evaluated once here.
+                Ok(Some(ConstantCount::Count(n))) => Count::Literal(n),
+                Ok(Some(ConstantCount::Negative)) => return refused("22G02", "a negative number"),
+                Ok(Some(ConstantCount::Other(what))) => return refused("22G03", what),
+                Ok(None) => return refused("22G03", "an expression that reads the row"),
+                Err(error) => {
+                    let kind = match error.gqlstatus {
+                        super::eval::status::LIMIT => GqlErrorKind::Limit,
+                        _ => GqlErrorKind::Data,
+                    };
+                    return Err(GqlErrorBuilder::new(
+                        kind,
+                        error.span.start..error.span.end,
+                        error.message,
+                    )
+                    .gqlstatus(error.gqlstatus)
+                    .topic(error.topic)
+                    .into());
+                }
+            },
         };
         Ok(Some(count))
     }

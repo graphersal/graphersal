@@ -21,6 +21,11 @@
 //!      `deviation_cases_still_deviate` test checks that each still expects that and still gets it.
 //!    - `w21-property-kinds` (user decision 4, design W21): a list of maps (and any map or mixed
 //!      list) is a valid property value in Graphersal; Neo4j raises a `TypeError`.
+//!    - `parameter-at-compile-time` (user decision 2026-10-21, 3f.P0 U8): a negative or
+//!      non-integer `$parameter` of `SKIP` / `LIMIT` is refused when the query is compiled
+//!      (`22G02` / `22G03` before any row), since parameters are bound then; the TCK expects the
+//!      `SyntaxError` at runtime. The user sees the same thing: an error before any row. The
+//!      guard test checks that each case still gets its error at compile time.
 //!
 //!    D15 (`id()`) and W26 / W28 have no case in the pinned tree: `id()` does not occur, no case
 //!    sets a label on a relationship, and no case returns a deleted element itself.
@@ -82,6 +87,24 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         deviation: true,
         ids: &["clauses/set/Set1.feature::[10] Failing when setting a list of maps as a property"],
     },
+    Exclusion {
+        code: "parameter-at-compile-time",
+        reason: "parameters are bound when the query is compiled: a negative or non-integer \
+                 SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime",
+        docs: "gql/semantics.md#parameters-are-bound-when-the-query-is-compiled",
+        deviation: true,
+        ids: PARAMETER_AT_COMPILE_TIME,
+    },
+];
+
+/// The `SKIP` / `LIMIT` cases with an invalid parameter (3f.P0 U8).
+const PARAMETER_AT_COMPILE_TIME: &[&str] = &[
+    "clauses/return-skip-limit/ReturnSkipLimit1.feature::[6] Negative parameter for SKIP should fail",
+    "clauses/return-skip-limit/ReturnSkipLimit1.feature::[8] Floating point parameter for SKIP should fail",
+    "clauses/return-skip-limit/ReturnSkipLimit2.feature::[10] Negative parameter for LIMIT should fail",
+    "clauses/return-skip-limit/ReturnSkipLimit2.feature::[11] Negative parameter for LIMIT with ORDER BY should fail",
+    "clauses/return-skip-limit/ReturnSkipLimit2.feature::[14] Floating point parameter for LIMIT should fail",
+    "clauses/return-skip-limit/ReturnSkipLimit2.feature::[15] Floating point parameter for LIMIT with ORDER BY should fail",
 ];
 
 /// The exclusion that covers the case `id`, if any.

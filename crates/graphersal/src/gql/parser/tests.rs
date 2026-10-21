@@ -775,9 +775,8 @@ fn expected_tokens_and_did_you_mean() {
         f.expected,
         ["NOT", "NULL", "LABELED", "SOURCE", "DESTINATION"]
     );
-    let f = fail("MATCH (a) WHERE a < b < c RETURN a");
-    assert_eq!(f.message, "comparisons cannot be chained");
-    assert_eq!(f.text, "<");
+    // A chained comparison is the Cypher compatibility form of `a < b AND b < c` (P0 U5).
+    ok("MATCH (a) WHERE a < b < c RETURN a");
     let f = fail("MATCH (a) WHERE a = NOT b RETURN a");
     assert_eq!(f.text, "NOT");
     assert!(f.alternative.unwrap().contains("(NOT x)"));
@@ -1588,9 +1587,10 @@ fn quantifier_errors() {
     assert_eq!(f.text, "{3,1}");
     assert!(f.message.contains("greater than"), "{}", f.message);
     assert!(f.alternative.unwrap().contains("{1,3}"));
-    let f = fail("MATCH (a)-[*3..1]->(b) RETURN a");
-    assert_eq!(f.text, "*3..1");
-    assert!(f.alternative.unwrap().contains("*1..3"));
+    // The Cypher form is the empty interval instead (P0 U7): it matches nothing.
+    let q = ok("MATCH (a)-[*3..1]->(b) RETURN a");
+    let quantifier = q.matches[0].patterns[0].steps[0].edge.quantifier;
+    assert!(quantifier.is_some_and(|q| q.empty && q.min == 0 && q.max == Some(0)));
     // A quantifier on a node.
     for (query, text) in [
         ("MATCH (a){1,2}-->(b) RETURN a", "{"),

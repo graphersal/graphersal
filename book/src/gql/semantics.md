@@ -39,6 +39,9 @@ quantified edge may walk around a cycle, but never over the same edge twice.
 
 - The zero-length match of a lower bound 0 (`{0,n}`, `*`) binds the far node to the near one;
   the group variable is then `[]`. `{0}` matches only that.
+- Cypher's empty interval (`[*2..1]`, `[*..0]`: the lower bound above the upper one) matches
+  nothing, as in Neo4j: no row, and an `OPTIONAL MATCH` part gets its `NULL` row. The GQL form
+  `{2,1}` is a syntax error (ISO).
 - An upper bound larger than any trail can be (beyond about four billion) means "no bound";
   such a quantifier behaves like `{m,}`.
 - **Unbounded quantifiers** (`{m,}`, `*`, `+`, Cypher `[*]`) have no limit of their own: trail
@@ -616,6 +619,24 @@ is known statically. The TCK cases that expect this are excluded from the measur
 this reason ([TCK Compliance](tck_compliance.md#out-of-scope)). Errors that do not depend on a
 row (syntax, unknown variables, misplaced aggregates) are raised before the run, as always
 ([Errors](errors.md#errors-before-the-run)).
+
+## Parameters are bound when the query is compiled
+
+The parameters of `gql_with()` are bound when the query is compiled into its traversal, before
+any row exists. So a `$parameter` of `OFFSET` / `SKIP` / `LIMIT` whose value is negative
+(`22G02`) or not an integer (`22G03`) is refused before the run, also on a graph whose query
+would return no row:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person) RETURN n.name AS name LIMIT $n", #{n: -1}).to_list()   // error: LIMIT must be a non-negative integer, but $n is negative (22G02)
+g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY name LIMIT $n", #{n: 2}).to_list()   // #{"name": "josh"}, #{"name": "marko"}
+```
+
+**A deliberate deviation from Neo4j:** the openCypher TCK expects this `SyntaxError` at runtime.
+The user sees the same thing, an error before any row; the six TCK cases are excluded from the
+measured scope with this reason ([TCK Compliance](tck_compliance.md#out-of-scope)). A constant
+expression in their place (`LIMIT 1 + 1`) is evaluated at the same time
+([ORDER BY, OFFSET, LIMIT](subset.md#order-by-offset-limit)).
 
 ## Comparisons across types
 

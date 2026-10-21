@@ -144,6 +144,10 @@ abbreviated edges (`->{2}`) in every direction.
 | `*` | 0 or more times, `{0,}` | |
 | `+` | 1 or more times, `{1,}` | `[*]` (Cypher's lower bound is 1) |
 | | 1 to `n` times, `{1,n}` | `[*..n]` |
+| | never: no match | `[*m..n]` with `m > n`, `[*..0]` |
+
+A GQL lower bound above the upper bound (`{3,1}`) is a syntax error; the Cypher spelling of the
+same interval (`[*3..1]`) is empty and matches nothing, as in Neo4j.
 
 A lower bound of 0 includes the zero-length match, where `b` is `a` itself. The edges of one match
 are all different (trail), so an unbounded quantifier ends on every finite graph
@@ -660,13 +664,18 @@ g.gql("MATCH (p:person)-[:created]->(s) RETURN count(s) AS n ORDER BY p.age + co
 `ORDER BY` takes expressions (a column name, a property, a function call) with `ASC` /
 `ASCENDING` (the default) or `DESC` / `DESCENDING`; it may read variables that are not returned
 (except after `RETURN DISTINCT`). `OFFSET n` (Cypher `SKIP n`) skips rows, `LIMIT n` keeps at
-most `n`. They come in this order, each at most once; `n` is a non-negative integer literal or a
-parameter.
+most `n`. They come in this order, each at most once; `n` is a non-negative integer literal, a
+parameter, or a constant expression: one without variables, aggregates or subqueries, evaluated
+once before the run (`LIMIT 1 + 1`, `SKIP toInteger(ceil(1.7))`; a negative result is an error
+`22G02`, a non-integer one `22G03`). An expression with a parameter in it (`LIMIT $n + 1`) is
+refused: pass the computed value as the parameter.
 
 ```rhai,graph=modern
 g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY n.age DESC").to_list()   // peter, josh, marko, vadas
 g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY name OFFSET 1 LIMIT 2").to_list()   // #{"name": "marko"}, #{"name": "peter"}
 g.v().has_label("person").values("name").order().range(1, 3).to_list()   // "marko", "peter"
+g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY name OFFSET 2 - 1 LIMIT toInteger(ceil(1.7))").to_list()   // #{"name": "marko"}, #{"name": "peter"}
+g.gql("MATCH (n:person) RETURN n.name AS name LIMIT n.age").to_list()   // error: LIMIT ... not an expression that reads the row (22G03)
 ```
 
 Without `ORDER BY` the row order is unspecified; [Semantics](semantics.md#ordering) gives the
@@ -816,7 +825,7 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | parameters | `$name` ([Parameters](#parameters)) |
 | property access | `n.name`, `m.key` on a map |
 | indexing and slicing | `x[0]`, `x[-1]`, `x[1..3]`, `x[..2]`, `x[1..]`, `m['key']`, `n[k]` (Cypher, [below](#indexing-and-slicing)) |
-| comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; not chainable (`a < b < c` is an error) |
+| comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; a chain `a < b <= c` is the Cypher compatibility form of `a < b AND b <= c` ([alias](aliases.md)) |
 | logic | `AND`, `OR`, `XOR`, `NOT` |
 | predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
 | arithmetic | `+`, `-`, `*`, `/`, `%`, `^` (Cypher power, always a float: `2 ^ 10` is `1024.0`), unary `-` and `+` |

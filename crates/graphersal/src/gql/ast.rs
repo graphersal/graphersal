@@ -717,7 +717,8 @@ pub(crate) struct EdgePattern {
 
 /// How often a quantified edge (or a parenthesized path pattern) repeats: `min..=max` times
 /// (`max` `None`: unbounded). The parser normalizes every spelling (module docs of `parser.rs`)
-/// and guarantees `min <= max`.
+/// and guarantees `min <= max`: Cypher's empty interval (`*2..1`, `*..0`) is `{0}` with
+/// [`Self::empty`] set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Quantifier {
     /// The fewest repetitions (0 allows the zero-length match).
@@ -726,6 +727,9 @@ pub(crate) struct Quantifier {
     pub(crate) max: Option<u64>,
     /// Written in Cypher's bracket form (`[e*m..n]`, lower bound 1 by default), not GQL's.
     pub(crate) cypher: bool,
+    /// Cypher's empty interval `*m..n` with `m > n` (also `*..0`; P0 U7): the edge matches
+    /// nothing (no row; `min` and `max` are 0, so every bound-reading part sees a valid `{0}`).
+    pub(crate) empty: bool,
     /// The quantifier text (`{1,3}`, `*`, `+`, `?` after a parenthesized path pattern, or
     /// `*1..3` inside the brackets).
     pub(crate) span: Span,

@@ -536,6 +536,17 @@ fn deviation_cases_still_deviate() {
                 outcome.class.name(),
                 outcome.detail
             ));
+        } else if code == "parameter-at-compile-time"
+            && !(outcome.class == Class::WrongError
+                && (outcome.detail.contains("got 22G02 at compile time")
+                    || outcome.detail.contains("got 22G03 at compile time")))
+        {
+            problems.push(format!(
+                "{} ({code}) no longer raises 22G02 / 22G03 at compile time: {} {}",
+                case.id,
+                outcome.class.name(),
+                outcome.detail
+            ));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));

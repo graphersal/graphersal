@@ -72,7 +72,8 @@
 //! ```
 //!
 //! Expressions, loosest first: `OR` < `XOR` < `AND` < `NOT` < comparison (`= <> != < <= > >=`,
-//! not chainable: `a < b < c` is an error) < predicates (`IS [NOT] NULL`, `IS [NOT] LABELED`,
+//! a chain `a < b <= c` is the Cypher compatibility form of `a < b AND b <= c`, any mix of the
+//! six operators, the middle operand copied into both comparisons) < predicates (`IS [NOT] NULL`, `IS [NOT] LABELED`,
 //! `IS [NOT] SOURCE OF` / `DESTINATION OF` (GQL G112; the right operand binds like the one of
 //! `IN`),
 //! `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`; tighter than comparison as in openCypher, so
@@ -184,8 +185,9 @@
 //!   `{0,n}`, `{m,}` and `{,}` unbounded, `*` = `{0,}`, `+` = `{1,}`; Cypher `[e*]` = `{1,}`,
 //!   `[e*n]` = `{n}`, `[e*m..n]` = `{m,n}`, `[e*..n]` = `{1,n}`, `[e*m..]` = `{m,}` (Cypher's
 //!   lower bound defaults to 1, GQL's postfix `*` to 0). Bounds are unsigned integer literals; a
-//!   lower bound above the upper bound, a quantifier after a node, and both forms on one edge
-//!   are syntax errors; Memgraph's `*BFS`, `*WSHORTEST`, ... stay refused. A GQL quantifier is
+//!   GQL lower bound above the upper bound (`{3,1}`, ISO), a quantifier after a node, and both
+//!   forms on one edge are syntax errors; a Cypher one (`*2..1`, also `*..0`) is the empty
+//!   interval, which matches nothing (Neo4j: no rows; `Quantifier::empty`); Memgraph's `*BFS`, `*WSHORTEST`, ... stay refused. A GQL quantifier is
 //!   not part of the edge's span; a Cypher one is.
 //! - **Parenthesized path patterns** (stage 2e, design item 9, [`ParenthesizedPath`]; GQL G035
 //!   quantified paths, G037 questioned paths, G050 parenthesized path patterns with `WHERE`):
@@ -3442,7 +3444,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The quantifier `min..=max` written at `span`; an error when `min > max`.
+    /// The quantifier `min..=max` written at `span`; when `min > max` a syntax error for the GQL
+    /// form (ISO), the empty interval for the Cypher form (`*2..1` matches nothing, P0 U7).
     fn quantifier(
         &self,
         min: u64,
@@ -3453,22 +3456,30 @@ impl<'a> Parser<'a> {
         if let Some(max) = max
             && min > max
         {
+            if cypher {
+                return Ok(Quantifier {
+                    min: 0,
+                    max: Some(0),
+                    cypher,
+                    empty: true,
+                    span,
+                });
+            }
             let b = err(
                 GqlErrorKind::Syntax,
                 span,
                 format!("the quantifier's lower bound {min} is greater than its upper bound {max}"),
             )
-            .alternative(if cypher {
-                format!("write the smaller bound first, for example *{max}..{min}")
-            } else {
-                format!("write the smaller bound first, for example {{{max},{min}}}")
-            });
+            .alternative(format!(
+                "write the smaller bound first, for example {{{max},{min}}}"
+            ));
             return Err(Box::new(b));
         }
         Ok(Quantifier {
             min,
             max,
             cypher,
+            empty: false,
             span,
         })
     }
@@ -4005,15 +4016,19 @@ impl<'a> Parser<'a> {
 
     fn expr_bp_inner(&mut self, min_bp: u8) -> PResult<(Expr, usize)> {
         let mut acc = self.prefix(min_bp)?;
-        let mut compared = false;
+        // Whether the last operator was a comparison, and whether `acc` is a chain of them.
+        let (mut compared, mut chained) = (false, false);
         while let Some((infix, bp)) = self.infix() {
             if bp < min_bp {
                 break;
             }
             if bp == BP_COMPARE && compared {
-                return Err(self.chained_comparison());
+                acc = self.chained_comparison(acc, chained, infix)?;
+                chained = true;
+                continue;
             }
             compared = bp == BP_COMPARE;
+            chained = false;
             acc = match infix {
                 Infix::Binary(op, bp) => self.binary_rhs(acc, op, bp + 1)?,
                 Infix::LtMinus => self.lt_minus_rhs(acc)?,
@@ -4025,14 +4040,33 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn chained_comparison(&self) -> Box<GqlErrorBuilder> {
-        let b = err(
-            GqlErrorKind::Syntax,
-            self.peek().span,
-            "comparisons cannot be chained",
-        )
-        .alternative("join two comparisons with AND, for example a < b AND b < c");
-        Box::new(b)
+    /// A chained comparison `a < b < c` (Cypher compatibility form, P0 U5): `a < b AND b < c`,
+    /// the middle operand copied into the next comparison (evaluated once per comparison;
+    /// every expression is pure). `acc` is the comparison before, or the chain so far
+    /// (`chained`: an `AND` whose right operand is its last comparison). Out of line, so the
+    /// recursive frame of [`Self::expr_bp_inner`] stays small.
+    #[inline(never)]
+    fn chained_comparison(
+        &mut self,
+        acc: (Expr, usize),
+        chained: bool,
+        infix: Infix,
+    ) -> PResult<(Expr, usize)> {
+        let last = match &acc.0.kind {
+            ExprKind::Binary { right, .. } if chained => &**right,
+            _ => &acc.0,
+        };
+        let middle = match &last.kind {
+            ExprKind::Binary { right, .. } => ((**right).clone(), acc.1),
+            _ => return Err(self.unexpected(&[])),
+        };
+        let comparison = match infix {
+            Infix::Binary(op, bp) => self.binary_rhs(middle, op, bp + 1)?,
+            Infix::LtMinus => self.lt_minus_rhs(middle)?,
+            // Only comparisons have `BP_COMPARE`.
+            Infix::StartsWith | Infix::EndsWith | Infix::Is => return Err(self.unexpected(&[])),
+        };
+        self.binary(BinaryOp::And, acc, comparison)
     }
 
     /// The operator token, then its right operand at `rbp`.

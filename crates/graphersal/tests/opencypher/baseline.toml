@@ -15,18 +15,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 class = "missing"
 reason = "not yet: a quantified edge over a list of edges bound before"
 
-["clauses/match/Match5.feature::[11] Handling upper and lower bounded variable length match, empty interval 1"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: the quantifier's lower bound 2 is greater than its upper bound 1"
-
-["clauses/match/Match5.feature::[12] Handling upper and lower bounded variable length match, empty interval 2"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: the quantifier's lower bound 1 is greater than its upper bound 0"
-
-["clauses/match/Match5.feature::[13] Handling upper bounded variable length match, empty interval"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: the quantifier's lower bound 1 is greater than its upper bound 0"
-
 ["clauses/match/Match9.feature::[6] Matching relationships into a list and matching variable length using the list, with bound nodes"]
 class = "missing"
 reason = "not yet: a quantified edge over a list of edges bound before"
@@ -38,34 +26,6 @@ reason = "not yet: a quantified edge over a list of edges bound before"
 ["clauses/return-skip-limit/ReturnSkipLimit1.feature::[3] SKIP with an expression that does not depend on variables"]
 class = "missing"
 reason = "refused: rand()"
-
-["clauses/return-skip-limit/ReturnSkipLimit1.feature::[6] Negative parameter for SKIP should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G02 at compile time: GQL semantic error at line 3, column 6: OFFSET must be a non-negative integer, but $_skip is negati…"
-
-["clauses/return-skip-limit/ReturnSkipLimit1.feature::[8] Floating point parameter for SKIP should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G03 at compile time: GQL semantic error at line 3, column 6: OFFSET must be a non-negative integer, but $_limit is a flo…"
-
-["clauses/return-skip-limit/ReturnSkipLimit2.feature::[10] Negative parameter for LIMIT should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G02 at compile time: GQL semantic error at line 3, column 7: LIMIT must be a non-negative integer, but $_limit is negati…"
-
-["clauses/return-skip-limit/ReturnSkipLimit2.feature::[11] Negative parameter for LIMIT with ORDER BY should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G02 at compile time: GQL semantic error at line 3, column 21: LIMIT must be a non-negative integer, but $_limit is negat…"
-
-["clauses/return-skip-limit/ReturnSkipLimit2.feature::[14] Floating point parameter for LIMIT should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G03 at compile time: GQL semantic error at line 3, column 7: LIMIT must be a non-negative integer, but $_limit is a float"
-
-["clauses/return-skip-limit/ReturnSkipLimit2.feature::[15] Floating point parameter for LIMIT with ORDER BY should fail"]
-class = "wrong_error"
-reason = "expected SyntaxError at runtime, got 22G03 at compile time: GQL semantic error at line 3, column 21: LIMIT must be a non-negative integer, but $_limit is a flo…"
-
-["clauses/return-skip-limit/ReturnSkipLimit2.feature::[6] LIMIT with an expression that does not depend on variables"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 2, column 14: LIMIT must be a non-negative integer or a parameter, not an expression"
 
 ["clauses/return/Return6.feature::[15] Using `rand()` in aggregations"]
 class = "missing"
@@ -394,46 +354,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s
 ["expressions/boolean/Boolean2.feature::[8] Fail on disjunction of at least one non-booleans::15"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/comparison/Comparison3.feature::[1] Handling numerical ranges 1"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 17: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[2] Handling numerical ranges 2"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 17: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[3] Handling numerical ranges 3"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[4] Handling numerical ranges 4"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[5] Handling string ranges 1"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 20: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[6] Handling string ranges 2"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 20: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[7] Handling string ranges 3"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 21: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[8] Handling string ranges 4"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 21: comparisons cannot be chained"
-
-["expressions/comparison/Comparison3.feature::[9] Handling empty range"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 18: comparisons cannot be chained"
-
-["expressions/comparison/Comparison4.feature::[1] Handling long chains of operators"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 25: comparisons cannot be chained"
 
 ["expressions/graph/Graph4.feature::[7] Failing when using `type()` on a node"]
 class = "wrong_error"

@@ -36,6 +36,8 @@ spelling is either not supported yet or [refused](refused.md).
 | `-[e:T*m..n]->` | `-[e:T]->{m,n}` | |
 | `-[e:T*..n]->` | `-[e:T]->{1,n}` | lower bound 1 again |
 | `-[e:T*m..]->` | `-[e:T]->{m,}` | |
+| `-[e:T*m..n]->` with `m > n`, `-[e:T*..0]->` | no match | the empty interval matches nothing (no row; `OPTIONAL MATCH` gives its `NULL` row); the GQL `{3,1}` is a syntax error |
+| `a < b <= c`, a chained comparison | `a < b AND b <= c` | any mix of `=`, `<>`, `<`, `<=`, `>`, `>=`; the middle operand is evaluated once per comparison |
 | `WHERE (a)-[:T]->(b)`, a pattern predicate | `WHERE EXISTS { (a)-[:T]->(b) }` | anywhere an expression stands; it may name only variables bound before it ([EXISTS](subset.md#exists-and-pattern-predicates)) |
 | `UNWIND list AS x` | `FOR x IN list` | one row per item; `WITH ORDINALITY` / `WITH OFFSET` only after `FOR` |
 | `CREATE <pattern>` | `INSERT <pattern>` | the same clause: once per row, nodes with label conjunctions (`:A:B` as `:A&B`), directed edges with one label ([Writing with GQL](writes.md)); `CREATE INDEX` / `CONSTRAINT` / `GRAPH` are [refused](refused.md) catalog commands |
@@ -78,6 +80,9 @@ g.gql("CREATE (c:city:capital {name: 'Rome'}) RETURN labels(c) AS l").to_list() 
 g.gql("INSERT (c:city&capital {name: 'Rome'}) RETURN labels(c) AS l").to_list()   // #{"l": ["city", "capital"]}
 g.gql("MATCH (p:person {name: 'marko'}) SET p:admin:staff RETURN labels(p) AS l").to_list()   // #{"l": ["person", "admin", "staff"]}
 g.gql("MATCH (p:person {name: 'marko'}) SET p:admin, p:staff RETURN labels(p) AS l").to_list()   // #{"l": ["person", "admin", "staff"]}
+g.gql("MATCH (n:person) WHERE 27 <= n.age < 32 RETURN n.name AS name ORDER BY name").to_list()   // marko, vadas
+g.gql("MATCH (n:person) WHERE 27 <= n.age AND n.age < 32 RETURN n.name AS name ORDER BY name").to_list()   // marko, vadas
+g.gql("MATCH (a {name: 'marko'})-[*2..1]->(b) RETURN b.name AS b").to_list()   // [] (the empty interval)
 ```
 
 The importing `WITH` passes the variables on unchanged; a first `WITH` that renames, computes or
