@@ -439,11 +439,9 @@ fn run_and_classify(cases: &[&gherkin::Case]) -> Vec<harness::classify::Outcome>
 }
 
 /// The scope table (`harness::scope`) names existing cases only, covers every procedure and
-/// `@ignore` case, links existing book pages, and its type-error deviation lists only cases
-/// that expect a compile-time `InvalidArgumentType` error.
+/// `@ignore` case and links existing book pages.
 #[test]
 fn scope_table_is_consistent() {
-    use gherkin::{ErrorPhase, ErrorType};
     use harness::scope;
 
     let features =
@@ -482,28 +480,11 @@ fn scope_table_is_consistent() {
             problems.push(format!("{}: @ignore, not in `upstream-ignore`", case.id));
         }
     }
-    let deviation = scope::by_code("type-error-at-evaluation")
-        .unwrap_or_else(|| panic!("the type-error deviation is missing"));
-    for id in deviation.ids {
-        let Some(case) = by_id.get(id) else { continue };
-        let expects = case.steps.iter().any(|s| {
-            matches!(
-                &s.step,
-                Step::Error { kind: ErrorType::SyntaxError | ErrorType::TypeError, phase: ErrorPhase::CompileTime, detail }
-                    if detail == "InvalidArgumentType"
-            )
-        });
-        if !expects {
-            problems.push(format!(
-                "{id}: does not expect a compile-time InvalidArgumentType error"
-            ));
-        }
-    }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 /// The deliberate deviations of the scope still deviate: run, no case of them passes (then it
-/// belongs back in scope), and every type-error case still raises `22G03` at runtime (the
+/// belongs back in scope), and every parameter case still fails at compile time (the
 /// documented reason).
 #[test]
 fn deviation_cases_still_deviate() {
@@ -525,16 +506,6 @@ fn deviation_cases_still_deviate() {
             problems.push(format!(
                 "{} ({code}) passes now: remove it from harness/scope.rs",
                 case.id
-            ));
-        } else if code == "type-error-at-evaluation"
-            && !(outcome.class == Class::WrongError
-                && outcome.detail.contains("got 22G03 at runtime"))
-        {
-            problems.push(format!(
-                "{} ({code}) no longer raises 22G03 at runtime: {} {}",
-                case.id,
-                outcome.class.name(),
-                outcome.detail
             ));
         } else if code == "parameter-at-compile-time"
             && !(outcome.class == Class::WrongError

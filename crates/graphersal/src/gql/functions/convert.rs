@@ -14,7 +14,9 @@
 //! |---|---|---|---|
 //! | a string that is no text of the target (`'abc'` to INTEGER) | 22018 | `NULL` | `NULL` |
 //! | a value of the wrong kind (22G03) or out of range (22003) | error | error | `NULL` |
-//! | an element or a path to STRING (22G03), a refused result size (54001) | error | error | error |
+//! | a list or a map to STRING (22G03) | text | error | `NULL` |
+//! | an element or a path to STRING (22G03) | error | error | `NULL` |
+//! | a refused result size (54001) | error | error | error |
 //!
 //! Texts per target (`trim` below: `CAST` strips the space U+0020 only, `toX` strips the
 //! characters <= U+0020 as Java `String.trim`, `toBoolean` the Java whitespace):
@@ -33,9 +35,12 @@
 //! - **STRING**: a string stays; an integer, a uuid, a temporal, a vector: the engine text
 //!   (`ElementProperty::cast`); a float: the Java `Double.toString` form (design F10: `"1.0"`,
 //!   `"1.5E20"`, `"1.0E-4"`, `"NaN"`, `"Infinity"`); a boolean: `"true"` / `"false"`; a list or a
-//!   map: the Neo4j text form (`"[1, a, true]"`, `"{a: 1, b: hi}"`, strings unquoted, `NULL` as
-//!   `null`), its size reserved first ([`Env::reserve`], F6); an element or a path, also inside a
-//!   list or a map: 22G03 in every mode, naming `element_id(x)` / `properties(x)` / `RETURN p`.
+//!   map: for `CAST` the Neo4j text form (`"[1, a, true]"`, `"{a: 1, b: hi}"`, strings
+//!   unquoted, `NULL` as `null`), its size reserved first ([`Env::reserve`], F6); for
+//!   `toString` 22G03 and for `toStringOrNull` `NULL` (stage 3f, user decision U11: the
+//!   openCypher TCK `TypeConversion4`); an element or a path, also inside a list or a map:
+//!   22G03 (`toStringOrNull`: `NULL` for the element or path itself), naming `element_id(x)` /
+//!   `properties(x)` / `RETURN p`.
 
 use super::super::ast::CastTarget;
 use super::super::eval::{Env, EvalError, Value, status};
@@ -461,6 +466,24 @@ fn to_string<En: Env>(
 ) -> Result<Value<En::Element>, Failure> {
     if let Some(text) = arg.value.as_str() {
         return Ok(Value::string(text));
+    }
+    // Cypher `toString` takes scalars only (stage 3f, the openCypher TCK): a list or a map is
+    // 22G03 (`toStringOrNull`: `NULL`), an element or a path too; `CAST` writes lists and maps.
+    if conversion.mode != Mode::Cast {
+        match &arg.value {
+            Value::List(_) | Value::Map(_) => {
+                return Err(wrong_kind(
+                    conversion,
+                    "a number, a boolean, a string or another scalar (CAST(x AS STRING) writes \
+                     a list or a map as text)",
+                    arg,
+                ));
+            }
+            Value::Element(_) | Value::Path(_) if conversion.mode == Mode::OrNull => {
+                return Ok(Value::Null);
+            }
+            Value::Null | Value::Scalar(_) | Value::Element(_) | Value::Path(_) => {}
+        }
     }
     // First the size (nothing built), then the reservation (design F6), then the text.
     let mut size = Counter(0);
@@ -981,45 +1004,28 @@ mod tests {
                 ("11.5", [s("11.5"), s("11.5"), s("11.5")]),
                 ("TRUE", [s("true"), s("true"), s("true")]),
                 ("FALSE", [s("false"), s("false"), s("false")]),
-                ("[]", [s("[]"), s("[]"), s("[]")]),
-                ("{}", [s("{}"), s("{}"), s("{}")]),
+                ("[]", [s("[]"), KIND, nul()]),
+                ("{}", [s("{}"), KIND, nul()]),
                 (
                     "[1, 'a', TRUE, NULL, 2.0]",
-                    [
-                        s("[1, a, true, null, 2.0]"),
-                        s("[1, a, true, null, 2.0]"),
-                        s("[1, a, true, null, 2.0]"),
-                    ],
+                    [s("[1, a, true, null, 2.0]"), KIND, nul()],
                 ),
-                (
-                    "{a: 1, b: 'hi'}",
-                    [s("{a: 1, b: hi}"), s("{a: 1, b: hi}"), s("{a: 1, b: hi}")],
-                ),
+                ("{a: 1, b: 'hi'}", [s("{a: 1, b: hi}"), KIND, nul()]),
                 (
                     "{l: [1, [2]], m: {k: NULL}}",
-                    [
-                        s("{l: [1, [2]], m: {k: null}}"),
-                        s("{l: [1, [2]], m: {k: null}}"),
-                        s("{l: [1, [2]], m: {k: null}}"),
-                    ],
+                    [s("{l: [1, [2]], m: {k: null}}"), KIND, nul()],
                 ),
-                ("$list", [s("[1, 2]"), s("[1, 2]"), s("[1, 2]")]),
-                ("n.tags", [s("[a, b]"), s("[a, b]"), s("[a, b]")]),
-                (
-                    "n.address",
-                    [
-                        s("{city: Berlin}"),
-                        s("{city: Berlin}"),
-                        s("{city: Berlin}"),
-                    ],
-                ),
-                // Elements and paths: 22G03 in every mode (design F10), also nested.
-                ("n", [KIND, KIND, KIND]),
-                ("e", [KIND, KIND, KIND]),
-                ("p", [KIND, KIND, KIND]),
-                ("z", [KIND, KIND, KIND]),
-                ("[1, n]", [KIND, KIND, KIND]),
-                ("{a: [e]}", [KIND, KIND, KIND]),
+                ("$list", [s("[1, 2]"), KIND, nul()]),
+                ("n.tags", [s("[a, b]"), KIND, nul()]),
+                ("n.address", [s("{city: Berlin}"), KIND, nul()]),
+                // Elements and paths: 22G03 (design F10), also nested; `toStringOrNull` gives
+                // NULL for an element, a path, a list and a map (stage 3f, U11).
+                ("n", [KIND, KIND, nul()]),
+                ("e", [KIND, KIND, nul()]),
+                ("p", [KIND, KIND, nul()]),
+                ("z", [KIND, KIND, nul()]),
+                ("[1, n]", [KIND, KIND, nul()]),
+                ("{a: [e]}", [KIND, KIND, nul()]),
             ],
         );
     }
@@ -1118,7 +1124,7 @@ mod tests {
             "{error:?}"
         );
 
-        let error = eval("toStringOrNull(n)").unwrap_err();
+        let error = eval("toString(n)").unwrap_err();
         assert_eq!(error.gqlstatus, INVALID_VALUE_TYPE);
         for advice in ["element_id(x)", "properties(x)", "RETURN p"] {
             assert!(error.message.contains(advice), "{error:?}");
@@ -1138,20 +1144,20 @@ mod tests {
     fn list_and_map_texts_reserve_their_size() {
         // "[1, 2, 3]" is 9 bytes.
         assert_eq!(
-            eval_in(&TestRow::with_limit(9), "toString(l)"),
+            eval_in(&TestRow::with_limit(9), "CAST(l AS STRING)"),
             Ok(string("[1, 2, 3]"))
         );
-        for text in ["toString(l)", "toStringOrNull(l)", "CAST(l AS STRING)"] {
+        for text in ["CAST(l AS STRING)", "CAST([l] AS STRING)"] {
             let error = eval_in(&TestRow::with_limit(8), text).unwrap_err();
             assert_eq!(error.gqlstatus, LIMIT, "{text}");
         }
         // "{a: 1, b: hi}" is 13 bytes.
         assert_eq!(
-            eval_in(&TestRow::with_limit(13), "toString(mp)"),
+            eval_in(&TestRow::with_limit(13), "CAST(mp AS STRING)"),
             Ok(string("{a: 1, b: hi}"))
         );
         assert_eq!(
-            eval_in(&TestRow::with_limit(12), "toString(mp)")
+            eval_in(&TestRow::with_limit(12), "CAST(mp AS STRING)")
                 .unwrap_err()
                 .gqlstatus,
             LIMIT

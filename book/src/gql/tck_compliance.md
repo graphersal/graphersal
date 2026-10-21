@@ -39,18 +39,18 @@ checked by every test run (see [Running and regenerating](#running-and-regenerat
 edit it by hand.
 
 <!-- opencypher:begin scope -->
-3706 in-scope test cases; 191 excluded (procedures 52, upstream-ignore 1, type-error-at-evaluation 131, w21-property-kinds 1, parameter-at-compile-time 6).
+3837 in-scope test cases; 60 excluded (procedures 52, upstream-ignore 1, w21-property-kinds 1, parameter-at-compile-time 6).
 <!-- opencypher:end scope -->
 
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2519** / 3706 | **68.0 %** |
-| Unsupported (not yet or refused) | 1141 / 3706 | 30.8 % |
-| **Wrong behaviour of supported constructs** | **46** / 3706 | **1.2 %** |
-| Passed without `expressions/temporal` | 2519 / 2702 | 93.2 % |
+| **Passed** | **2694** / 3837 | **70.2 %** |
+| Unsupported (not yet or refused) | 1141 / 3837 | 29.7 % |
+| **Wrong behaviour of supported constructs** | **2** / 3837 | **0.1 %** |
+| Passed without `expressions/temporal` | 2694 / 2833 | 95.1 % |
 
-Unsupported = missing 1054, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 5, wrong_side_effects 0, wrong_error 33, unexpected_error 8, timeout 0, panic 0.
+Unsupported = missing 1054, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 2, unexpected_error 0, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -64,43 +64,43 @@ Per sub-directory of the kit:
 <!-- opencypher:begin directories -->
 | Directory | Pass % | Passed | Total | Unsupported | Wrong |
 |---|---:|---:|---:|---:|---:|
-| `clauses/create` | 98.7 % | 77 | 78 | · | 1 |
+| `clauses/create` | 100.0 % | 78 | 78 | · | · |
 | `clauses/delete` | 100.0 % | 41 | 41 | · | · |
 | `clauses/match` | 99.2 % | 378 | 381 | 3 | · |
-| `clauses/match-where` | 97.1 % | 33 | 34 | · | 1 |
+| `clauses/match-where` | 100.0 % | 34 | 34 | · | · |
 | `clauses/merge` | 100.0 % | 75 | 75 | · | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
-| `clauses/return` | 95.2 % | 60 | 63 | 1 | 2 |
+| `clauses/return` | 96.8 % | 61 | 63 | 1 | 1 |
 | `clauses/return-orderby` | 100.0 % | 35 | 35 | · | · |
 | `clauses/return-skip-limit` | 96.0 % | 24 | 25 | 1 | · |
 | `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
-| `clauses/unwind` | 92.9 % | 13 | 14 | · | 1 |
-| `clauses/with` | 89.7 % | 26 | 29 | 1 | 2 |
+| `clauses/unwind` | 100.0 % | 14 | 14 | · | · |
+| `clauses/with` | 93.1 % | 27 | 29 | 1 | 1 |
 | `clauses/with-orderBy` | 77.7 % | 227 | 292 | 65 | · |
-| `clauses/with-skip-limit` | 66.7 % | 6 | 9 | 2 | 1 |
+| `clauses/with-skip-limit` | 77.8 % | 7 | 9 | 2 | · |
 | `clauses/with-where` | 100.0 % | 19 | 19 | · | · |
 | `expressions/aggregation` | 100.0 % | 35 | 35 | · | · |
-| `expressions/boolean` | 85.1 % | 40 | 47 | · | 7 |
+| `expressions/boolean` | 100.0 % | 150 | 150 | · | · |
 | `expressions/comparison` | 100.0 % | 72 | 72 | · | · |
 | `expressions/conditional` | 100.0 % | 13 | 13 | · | · |
 | `expressions/existentialSubqueries` | 100.0 % | 10 | 10 | · | · |
-| `expressions/graph` | 98.0 % | 49 | 50 | · | 1 |
-| `expressions/list` | 92.4 % | 171 | 185 | · | 14 |
+| `expressions/graph` | 100.0 % | 60 | 60 | · | · |
+| `expressions/list` | 100.0 % | 185 | 185 | · | · |
 | `expressions/literals` | 100.0 % | 131 | 131 | · | · |
-| `expressions/map` | 100.0 % | 38 | 38 | · | · |
+| `expressions/map` | 100.0 % | 44 | 44 | · | · |
 | `expressions/mathematical` | 100.0 % | 6 | 6 | · | · |
 | `expressions/null` | 100.0 % | 44 | 44 | · | · |
-| `expressions/path` | 71.4 % | 5 | 7 | · | 2 |
-| `expressions/pattern` | 90.0 % | 45 | 50 | 1 | 4 |
+| `expressions/path` | 100.0 % | 7 | 7 | · | · |
+| `expressions/pattern` | 98.0 % | 49 | 50 | 1 | · |
 | `expressions/precedence` | 100.0 % | 121 | 121 | · | · |
-| `expressions/quantifier` | 88.0 % | 521 | 592 | 63 | 8 |
+| `expressions/quantifier` | 89.6 % | 541 | 604 | 63 | · |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
 | `expressions/temporal` | 0.0 % | 0 | 1004 | 1004 | · |
-| `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
+| `expressions/typeConversion` | 100.0 % | 47 | 47 | · | · |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **68.0 %** | **2519** | **3706** | 1141 | 46 |
+| **all** | **70.2 %** | **2694** | **3837** | 1141 | 2 |
 <!-- opencypher:end directories -->
 
 ## Out of scope
@@ -116,23 +116,14 @@ excluded: they stay `missing`, the backlog.
 |---|---|---|---:|
 | `procedures` | vendor procedures: the scenarios register test procedures and CALL them; procedure calls are vendor extensions, not GQL, and refused for good | [gql/refused.md](../gql/refused.md) | 52 |
 | `upstream-ignore` | marked @ignore by the TCK itself ("does not work in Cypher") | [gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope) | 1 |
-| `type-error-at-evaluation` | the TCK expects a type error at compile time; GQL runs inside a Gremlin step: type errors surface at evaluation time (22G03 when a row reaches the expression) (deliberate deviation) | [gql/semantics.md#type-errors-surface-at-evaluation-time](../gql/semantics.md#type-errors-surface-at-evaluation-time) | 131 |
 | `w21-property-kinds` | a list of maps is a valid property value (maps and lists of any kinds are stored as given); Neo4j raises a TypeError (deliberate deviation) | [gql/semantics.md#writes](../gql/semantics.md#writes) | 1 |
 | `parameter-at-compile-time` | parameters are bound when the query is compiled: a negative or non-integer SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime (deliberate deviation) | [gql/semantics.md#parameters-are-bound-when-the-query-is-compiled](../gql/semantics.md#parameters-are-bound-when-the-query-is-compiled) | 6 |
-| **all** | | | **191** |
+| **all** | | | **60** |
 <!-- opencypher:end excluded -->
 
 - **`procedures`:** the `clauses/call` scenarios register test procedures and call them.
   Procedure calls are vendor extensions, not part of GQL, and refused for good.
 - **`upstream-ignore`:** the one scenario that the kit itself marks `@ignore`.
-- **`type-error-at-evaluation`** (a deliberate deviation, user decision): the kit expects a
-  `SyntaxError` or `TypeError` *at compile time* (detail `InvalidArgumentType`) when an operand's
-  kind is already known from the query text, as in `RETURN 123 AND true` or
-  `WITH 123 AS x RETURN x.num`. Graphersal's GQL runs inside a Gremlin step, so type errors
-  surface at evaluation time: the query is accepted and raises `22G03` when a row reaches the
-  expression ([Semantics](semantics.md#type-errors-surface-at-evaluation-time)). The ids were
-  generated once from a run and reviewed; a guard test checks that each of these cases still
-  expects that error and still gets `22G03` at runtime.
 - **`w21-property-kinds`** (a deliberate deviation, user decision): a list of maps is a valid
   property value in Graphersal, where Neo4j raises a `TypeError`
   ([Semantics](semantics.md#writes)).

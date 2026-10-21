@@ -24,7 +24,7 @@
     reason = "shared by the family test modules; some helpers serve later tasks"
 )]
 
-use super::super::eval::{Compiled, Env, EvalError, Scope, Value, compile};
+use super::super::eval::{Compiled, Env, EvalError, Scope, Value, compile_unchecked};
 use super::super::parser::parse;
 use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
 
@@ -184,7 +184,7 @@ pub(crate) fn compiled(expr: &str) -> Result<Compiled<El>, EvalError> {
         Ok(parsed) => parsed,
         Err(e) => panic!("{query:?} does not parse: {e}"),
     };
-    compile(&parsed.ret.items[0].expr, &TestScope)
+    compile_unchecked(&parsed.ret.items[0].expr, &TestScope)
 }
 
 /// `expr` evaluated on `row`.

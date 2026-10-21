@@ -91,8 +91,8 @@ pub(crate) enum Mode {
     Cast,
     /// Cypher `toX`: an unconvertible string is `NULL`, a wrong kind 22G03.
     Lenient,
-    /// Cypher `toXOrNull`: every failure is `NULL` (except an element or a path given to
-    /// `toStringOrNull`, design F10).
+    /// Cypher `toXOrNull`: every failure is `NULL` (a list, a map, an element or a path given
+    /// to `toStringOrNull` too, stage 3f).
     OrNull,
 }
 

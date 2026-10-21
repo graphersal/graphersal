@@ -457,14 +457,15 @@ fn let_and_pattern_predicates_substitute_into_fast_path_conjuncts() {
     assert_eq!(
         names(
             &graph,
-            "MATCH (p:person) LET x = (p)-[:created]->() FILTER x RETURN p.name AS n"
+            "MATCH (p:person) LET x = EXISTS { (p)-[:created]->() } FILTER x RETURN p.name AS n"
         ),
         sorted(&["marko", "josh", "peter"])
     );
     assert!(
         rows(
             &graph,
-            "MATCH (p:person) LET x = (p)-[:created]->() FILTER x AND NOT x RETURN p.name AS n"
+            "MATCH (p:person) LET x = EXISTS { (p)-[:created]->() } FILTER x AND NOT x RETURN \
+             p.name AS n"
         )
         .is_empty()
     );
@@ -665,7 +666,7 @@ fn exists_runs_in_return_order_by_aggregates_and_for_lists() {
     assert_eq!(
         table(
             &graph,
-            "MATCH (p:person) RETURN p.name AS n ORDER BY (p)-[:knows]->() DESC, p.age",
+            "MATCH (p:person) RETURN p.name AS n ORDER BY EXISTS { (p)-[:knows]->() } DESC, p.age",
             true
         ),
         vec!["n='marko'", "n='vadas'", "n='josh'", "n='peter'"]
@@ -692,7 +693,7 @@ fn exists_runs_in_return_order_by_aggregates_and_for_lists() {
     assert_eq!(
         table(
             &graph,
-            "MATCH (p:person) FOR x IN [EXISTS { (p)-[:created]->() }, (p)-[:knows]->()] \
+            "MATCH (p:person) FOR x IN [EXISTS { (p)-[:created]->() }, EXISTS { (p)-[:knows]->() }] \
              RETURN p.name AS n, x",
             false
         ),
@@ -787,7 +788,7 @@ fn exists_composes_three_valued_and_a_null_import_is_false() {
             &graph,
             "MATCH (p:person) OPTIONAL MATCH (p)-[:knows]->(f) RETURN p.name AS n, \
              EXISTS { (f)-->() } AS e, NOT EXISTS { (f)-->() } AS ne, \
-             f.age > 28 OR EXISTS { (f)-->() } AS o, f.age > 28 AND NOT (f)-->() AS a, \
+             f.age > 28 OR EXISTS { (f)-->() } AS o, f.age > 28 AND NOT EXISTS { (f)-->() } AS a, \
              EXISTS { (f)-->() } IS NULL AS z",
             false
         ),

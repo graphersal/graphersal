@@ -173,6 +173,10 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
         self.inner.variable(name)
     }
 
+    fn kind(&self, name: &str) -> super::eval::Kind {
+        self.inner.kind(name)
+    }
+
     fn parameter(&self, name: &str) -> Option<ElementProperty> {
         self.inner.parameter(name)
     }
@@ -223,6 +227,10 @@ struct Nested<'s, Sc> {
 impl<Sc: Scope> Scope for Nested<'_, Sc> {
     fn variable(&self, name: &str) -> Option<usize> {
         self.inner.variable(name)
+    }
+
+    fn kind(&self, name: &str) -> super::eval::Kind {
+        self.inner.kind(name)
     }
 
     fn parameter(&self, name: &str) -> Option<ElementProperty> {

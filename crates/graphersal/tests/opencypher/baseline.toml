@@ -3,14 +3,6 @@
 #   OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
 # Review diffs like code. Removing an entry means "this case passes now".
 
-["clauses/create/Create5.feature::[5] Create a pattern with multiple hops and varying directions"]
-class = "wrong_columns"
-reason = "control query: columns differ: expected [\"a\", \"b\", \"c\", \"r1\", \"r2\"], actual [\"a\", \"r1\", \"b\", \"r2\", \"c\"]"
-
-["clauses/match-where/MatchWhere1.feature::[14] Fail when filtering path with property predicate"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
 ["clauses/match/Match4.feature::[8] Matching relationships into a list and matching variable length using the list"]
 class = "missing"
 reason = "not yet: a quantified edge over a list of edges bound before"
@@ -34,14 +26,6 @@ reason = "refused: rand()"
 ["clauses/return/Return6.feature::[21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["clauses/return/Return7.feature::[1] Return all variables"]
-class = "wrong_columns"
-reason = "columns differ: expected [\"a\", \"b\", \"p\"], actual [\"p\", \"a\", \"b\"]"
-
-["clauses/unwind/Unwind1.feature::[13] Multiple unwinds after each other"]
-class = "wrong_columns"
-reason = "columns differ: expected [\"x\", \"xs\", \"y\", \"ys\", \"z\", \"zs\"], actual [\"xs\", \"ys\", \"zs\", \"x\", \"y\", \"z\"]"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[11] Sort dates in ascending order"]
 class = "missing"
@@ -311,14 +295,6 @@ reason = "having executed: not yet: reading an element that the same CREATE crea
 class = "setup"
 reason = "having executed: not yet: reading an element that the same CREATE creates"
 
-["clauses/with-skip-limit/WithSkipLimit2.feature::[3] Connected components succeeding WITH with LIMIT"]
-class = "wrong_columns"
-reason = "columns differ: expected [\"m\", \"n\", \"x\"], actual [\"n\", \"m\", \"x\"]"
-
-["clauses/with/With1.feature::[2] Forwarind a node variable 2"]
-class = "wrong_columns"
-reason = "columns differ: expected [\"a\", \"b\", \"x\"], actual [\"a\", \"x\", \"b\"]"
-
 ["clauses/with/With2.feature::[1] Forwarding a property to express a join"]
 class = "setup"
 reason = "having executed: not yet: reading an element that the same CREATE creates"
@@ -327,129 +303,9 @@ reason = "having executed: not yet: reading an element that the same CREATE crea
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["expressions/boolean/Boolean1.feature::[8] Fail on conjunction of at least one non-booleans::10"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean1.feature::[8] Fail on conjunction of at least one non-booleans::12"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean1.feature::[8] Fail on conjunction of at least one non-booleans::17"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean1.feature::[8] Fail on conjunction of at least one non-booleans::18"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean2.feature::[8] Fail on disjunction of at least one non-booleans::11"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean2.feature::[8] Fail on disjunction of at least one non-booleans::14"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/boolean/Boolean2.feature::[8] Fail on disjunction of at least one non-booleans::15"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/graph/Graph4.feature::[7] Failing when using `type()` on a node"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::1"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::2"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::3"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::4"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::5"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
-
-["expressions/list/List6.feature::[5] Fail for `size()` on paths"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::1"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::2"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::3"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::4"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::5"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::6"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::7"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::8"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/path/Path3.feature::[2] Failing when using `length()` on a node"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/path/Path3.feature::[3] Failing when using `length()` on a relationship"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/pattern/Pattern1.feature::[11] Fail on checking self pattern"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/pattern/Pattern1.feature::[22] Fail on using pattern in RETURN projection"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/pattern/Pattern1.feature::[23] Fail on using pattern in WITH projection"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/pattern/Pattern1.feature::[24] Fail on using pattern in right-hand side of SET"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
 ["expressions/pattern/Pattern2.feature::[7] Use a pattern comprehension inside a list comprehension"]
 class = "missing"
 reason = "not yet: reading the comprehension variable `x` inside a subquery"
-
-["expressions/quantifier/Quantifier1.feature::[8] None quantifier on list containing nodes"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 20: the variable `x` of none() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier1.feature::[9] None quantifier on list containing relationships"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 28: the variable `x` of none() is a name this query already uses; it must be a new name"
 
 ["expressions/quantifier/Quantifier10.feature::[1] Single quantifier is always false if the predicate is statically false and the list is not empty"]
 class = "missing"
@@ -634,30 +490,6 @@ reason = "refused: rand()"
 ["expressions/quantifier/Quantifier12.feature::[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list::5"]
 class = "missing"
 reason = "refused: rand()"
-
-["expressions/quantifier/Quantifier2.feature::[8] Single quantifier on list containing nodes"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 22: the variable `x` of single() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier2.feature::[9] Single quantifier on list containing relationships"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 30: the variable `x` of single() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier3.feature::[8] Any quantifier on list containing nodes"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 19: the variable `x` of any() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier3.feature::[9] Any quantifier on list containing relationships"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 27: the variable `x` of any() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier4.feature::[8] All quantifier on list containing nodes"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 19: the variable `x` of all() is a name this query already uses; it must be a new name"
-
-["expressions/quantifier/Quantifier4.feature::[9] All quantifier on list containing relationships"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 27: the variable `x` of all() is a name this query already uses; it must be a new name"
 
 ["expressions/quantifier/Quantifier9.feature::[1] None quantifier is always true if the predicate is statically false and the list is not empty"]
 class = "missing"
@@ -4742,11 +4574,3 @@ reason = "refused: time.truncate()"
 ["expressions/temporal/Temporal9.feature::[5] Should truncate time::9"]
 class = "missing"
 reason = "refused: time.truncate()"
-
-["expressions/typeConversion/TypeConversion4.feature::[10] Fail `toString()` on invalid types #Example: <exampleName>::1"]
-class = "wrong_error"
-reason = "expected TypeError at runtime, the query succeeded with 1 row(s)"
-
-["expressions/typeConversion/TypeConversion4.feature::[10] Fail `toString()` on invalid types #Example: <exampleName>::2"]
-class = "wrong_error"
-reason = "expected TypeError at runtime, the query succeeded with 1 row(s)"

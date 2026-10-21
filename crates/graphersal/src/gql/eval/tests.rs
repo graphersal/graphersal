@@ -98,7 +98,7 @@ fn compiled(expr: &str) -> Result<Compiled<El>, EvalError> {
         Ok(parsed) => parsed,
         Err(e) => panic!("{query:?} does not parse: {e}"),
     };
-    compile(&parsed.ret.items[0].expr, &Names)
+    compile_unchecked(&parsed.ret.items[0].expr, &Names)
 }
 
 fn eval(expr: &str) -> Result<Value<El>, EvalError> {
@@ -304,7 +304,7 @@ fn in_follows_gql_null_semantics() {
     assert_eq!(truth("null IN []"), F);
     assert_eq!(truth("1 IN []"), F);
     assert_eq!(truth("1 IN null"), U);
-    assert_eq!(truth("1 IN 1"), U);
+    assert_eq!(status_of("1 IN 1"), status::INVALID_VALUE_TYPE);
     assert_eq!(truth("'1' IN [1]"), F);
     assert_eq!(truth("[1] IN [[1], [2]]"), T);
     assert_eq!(truth("2 IN $list"), T);
@@ -437,7 +437,8 @@ fn overflow_and_division_by_zero_are_data_exceptions() {
 fn error_spans_point_at_the_expression() {
     let query = "MATCH (n) RETURN 1 + (2 / 0)";
     let parsed = parse(query).expect("parses");
-    let compiled: Compiled<El> = compile(&parsed.ret.items[0].expr, &Names).expect("compiles");
+    let compiled: Compiled<El> =
+        compile_unchecked(&parsed.ret.items[0].expr, &Names).expect("compiles");
     let error = compiled.eval(&Row).expect_err("fails");
     assert_eq!(&query[error.span.start..error.span.end], "(2 / 0)");
     assert_eq!(
@@ -696,7 +697,7 @@ fn deep_expressions_evaluate_without_overflow() {
                 .iter()
                 .map(|query| {
                     let compiled: Compiled<El> =
-                        compile(&query.ret.items[0].expr, &Names).expect("compiles");
+                        compile_unchecked(&query.ret.items[0].expr, &Names).expect("compiles");
                     compiled.eval(&Row).expect("evaluates")
                 })
                 .collect::<Vec<_>>()

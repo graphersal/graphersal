@@ -8241,9 +8241,10 @@ mod gql {
     fn gql_comprehension_variable_errors_explain_new_names() {
         let advice = "A list comprehension, [x IN <list> WHERE <condition> | <expression>], \
                       binds its variable x to each item of the list, inside the comprehension \
-                      only; x must be a new name, used nowhere else in the query: not a \
-                      variable or column in scope, not the variable of a comprehension around \
-                      it, and not a name that an earlier clause bound and dropped, as in \
+                      only; x must not hide a name in scope: not a variable or column in \
+                      scope, not the variable of a comprehension around it, and not a name that \
+                      the value of a LET or WITH variable in scope reads (a name an earlier \
+                      clause dropped may be used again), as in \
                       g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, p.age + 1] WHERE a \
                       > 30 | a * 2] AS l\"). The same holds for the variable of all(), any(), \
                       none() and single() and for both variables of reduce(), as in \
@@ -8742,6 +8743,149 @@ mod gql {
         }
     }
 
+    /// A static kind error (stage 3f, U9) is refused before the run with the advice of what
+    /// each place takes (rule 6), with runnable examples.
+    #[test]
+    fn gql_static_kind_errors_name_what_each_place_takes() {
+        let advice = "The kind of the marked operand is certain from the query text (a \
+                      literal, a node, edge or path variable, or a value computed from them) \
+                      and its place never takes it, so gql() refuses the query before it runs. \
+                      A condition (WHERE, FILTER, AND, OR, XOR, NOT) takes a boolean: compare a \
+                      value to get one, as in g.gql(\"MATCH (p:person) WHERE p.age > 30 AND \
+                      p.name STARTS WITH 'j' RETURN p.name\"); IN takes a list, as in \
+                      g.gql(\"MATCH (p:person) WHERE p.name IN ['marko', 'josh'] RETURN \
+                      p.age\"); type() takes an edge, labels() a node or an edge, length() and \
+                      nodes() a path and size() a string or a list, as in g.gql(\"MATCH p = \
+                      (a:person)-[e:knows]->(b) RETURN type(e), labels(a), length(p), \
+                      size(nodes(p))\"); a property is read from a node, an edge or a map, \
+                      never from a path, a list or a number. The check never looks at the \
+                      value of a $parameter.";
+        for (query, message, marked) in [
+            (
+                "RETURN false AND 123 AS x",
+                "AND takes booleans, not an integer",
+                "123",
+            ),
+            (
+                "RETURN 1 IN true AS x",
+                "IN tests a value against a list, not a boolean",
+                "true",
+            ),
+            (
+                "MATCH (n) RETURN type(n) AS t",
+                "type() takes an edge, not a node; use labels(v) for a node's labels",
+                "n",
+            ),
+            (
+                "MATCH (n) WHERE (n) RETURN n",
+                "a condition must be a boolean, not a node",
+                "(n)",
+            ),
+            (
+                "WITH 123 AS x RETURN x.num AS y",
+                "cannot read the property `num` of an integer",
+                "123",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string()),
+                "{report}"
+            );
+            assert!(report.contains(message), "{query}: {report}");
+            assert!(
+                report.contains("refused the query before the traversal ran"),
+                "{report}"
+            );
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.trim_start().starts_with("query:"))
+                .nth(1)
+                .unwrap_or("");
+            assert_eq!(caret_line.trim().len(), marked.len(), "{query}: {report}");
+            assert_eq!(err.help().expect("help"), advice, "{query}");
+        }
+    }
+
+    /// A pattern predicate in a value position (stage 3f, U10) names EXISTS { }, COUNT { } and
+    /// a pattern comprehension, built from the pattern, with a runnable example.
+    #[test]
+    fn gql_pattern_in_a_value_position_names_its_value_forms() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) RETURN (p)-[:knows]->() AS k")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Syntax, "42001".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains("the pattern (p)-[:knows]->() stands where a value is expected"),
+            "{report}"
+        );
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with(
+                "write EXISTS { (p)-[:knows]->() } for whether it has a match, COUNT { \
+                 (p)-[:knows]->() } for the number of matches, or a pattern comprehension such \
+                 as [(n)-->(m) | m] for the list of what it matches, as in g.gql(\"MATCH \
+                 (p:person) RETURN p.name, COUNT { (p)-[:knows]->() } AS friends, \
+                 [(p)-[:created]->(s) | s.name] AS made\")."
+            ),
+            "{help}"
+        );
+        // The general subquery advice follows.
+        assert!(
+            help.contains("A pattern predicate binds no new variable"),
+            "{help}"
+        );
+        // The runnable example of the advice runs.
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql(
+                "MATCH (p:person) RETURN p.name, COUNT { (p)-[:knows]->() } AS friends, \
+                 [(p)-[:created]->(s) | s.name] AS made",
+            )
+            .to_list()
+            .unwrap();
+        assert_eq!(rows.len(), 4);
+    }
+
+    /// `IN` with a right operand that is no list (stage 3f) and `toString()` of a list name the
+    /// fix in the message.
+    #[test]
+    fn gql_in_and_to_string_of_a_list_name_the_fix() {
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person {name: 'marko'}) RETURN 1 IN p.age AS x")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report
+                .contains("IN tests a value against a list, not a number; write x IN [y] or x = y"),
+            "{report}"
+        );
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person {name: 'marko'}) RETURN toString([p.age]) AS x")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report.contains("(CAST(x AS STRING) writes a list or a map as text), not a list"),
+            "{report}"
+        );
+    }
+
     /// A subscript of the wrong kind (stage 3f: `x[i]`, `m[k]`, `x[a..b]`) names what each form
     /// reads and the conversions that fix the index (rule 6), with runnable examples; the
     /// caret marks the index or the whole subscript.
@@ -8898,7 +9042,7 @@ mod gql {
             assert!(
                 help.contains(
                     "A function whose result can be larger than its arguments (range(), \
-                     split(), replace(), || and toString() of a list or map) and the list of \
+                     split(), replace(), || and CAST(x AS STRING) of a list or map) and the list of \
                      collect_list() are checked before they are built"
                 ),
                 "{help}"
@@ -9455,7 +9599,10 @@ mod gql {
                 "MATCH (p:person) WHERE EXISTS { (p)-[:created]->() } OR p.age > 30 RETURN p",
                 3,
             ),
-            ("MATCH (p:person) RETURN p.name, (p)-[:knows]->() AS k", 4),
+            (
+                "MATCH (p:person) RETURN p.name, EXISTS { (p)-[:knows]->() } AS k",
+                4,
+            ),
             (
                 "MATCH (p:person) RETURN p.name ORDER BY EXISTS ((p)-->()) DESC",
                 4,
@@ -9509,7 +9656,8 @@ mod gql {
             ),
             (
                 "MATCH (p:person) WITH p.name AS n RETURN any(p IN [1] WHERE p > 0) AS a",
-                "the variable `p` of any() is a name this query already uses",
+                "the variable `p` of any() is a name that a LET or WITH value in scope still \
+                 reads",
                 "give any() a variable of its own, as in any(p2 IN list WHERE p2 > 0).",
             ),
         ] {

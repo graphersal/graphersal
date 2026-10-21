@@ -190,8 +190,21 @@ it, three-valued logic works as usual: `NULL OR EXISTS {..}` is TRUE when the bo
 ```rhai,graph=modern
 g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s WHERE s.name = 'ripple') RETURN p.name AS name, EXISTS { (s)<-[:created]-() } AS made, NOT EXISTS { (s)<-[:created]-() } AS not_made ORDER BY name").to_list()
 // josh: made true, not_made false; marko, peter, vadas (s is NULL): made false, not_made true
-g.gql("MATCH (p:person) RETURN p.name AS name, p.lang = 'x' OR (p)-[:knows]->() AS a ORDER BY name").to_list()
+g.gql("MATCH (p:person) RETURN p.name AS name, p.lang = 'x' OR EXISTS { (p)-[:knows]->() } AS a ORDER BY name").to_list()
 // josh (), marko true, peter (), vadas ()
+```
+
+**A pattern alone is a condition, not a value.** A pattern predicate such as `(p)-[:knows]->()`
+stands only where `WHERE` (or `FILTER`, a comprehension's `WHERE`, a `WHEN` of a searched
+`CASE`) expects a condition, also under `NOT`, `AND`, `OR` and `XOR` there. Anywhere else (a
+`RETURN` or `WITH` item, a function argument, a `SET` value) it is a syntax error (`42001`), as
+in Neo4j: write `EXISTS { .. }` for whether it matches, `COUNT { .. }` for how often, or a
+pattern comprehension for what it matches (stage 3f, the openCypher TCK `Pattern1`, `List6`):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->() AS k")   // error: the pattern stands where a value is expected (42001)
+g.gql("MATCH (p:person) RETURN p.name AS name, EXISTS { (p)-[:knows]->() } AS k, COUNT { (p)-[:knows]->() } AS n, [(p)-[:knows]->(f) | f.name] AS fs ORDER BY name").to_list()
+// josh: false, 0, []; marko: true, 2, ["vadas", "josh"]; ...
 ```
 
 **Trail per body clause.** Each `MATCH` clause inside a body is its own clause for the trail rule
@@ -272,14 +285,18 @@ g.gql("RETURN reduce(s = 0, x IN [1, NULL] | s + x) AS a, reduce(s = 0, x IN [] 
 // #{"a": (), "b": 0, "c": ()}
 ```
 
-**A comprehension variable is a new name.** It may not shadow a variable in scope, and `gql()`
-also refuses a name the query uses for another variable anywhere else: one a `WITH` dropped or
-renamed, one bound inside a subquery, one a later `LET` defines. This is stricter than Neo4j:
-`MATCH (n) WITH n AS m RETURN [n IN [1] | n]` runs there and is an error here; pick another name
-(`[x IN [1] | x]`). The variable exists only inside its brackets.
+**A comprehension variable hides no name in scope.** It may not shadow a variable or column in
+scope, nor the variable of a comprehension around it. A name that is no longer in scope (one a
+`WITH` dropped, one bound inside a subquery) may be used again, as in Neo4j (stage 3f, the
+openCypher TCK `Quantifier1`..`4`). One exception keeps a `LET` / `WITH` value right: a name
+that the expression of such a value in scope reads is refused too, since `gql()` substitutes
+the value by its expression, which still refers to the dropped variable by that name. So
+`MATCH (n) WITH n AS m RETURN [n IN [1] | n]`, which runs in Neo4j, is an error here; pick
+another name (`[x IN [1] | x]`). The variable exists only inside its brackets.
 
 ```rhai,graph=modern
-g.gql("MATCH (n:person) WITH n AS m RETURN [n IN [1] | n] AS l")   // error: the comprehension variable `n` is a name this query already uses
+g.gql("MATCH (n:person) WITH n AS m RETURN [n IN [1] | n] AS l")   // error: the comprehension variable `n` is a name that a LET or WITH value in scope still reads
+g.gql("MATCH (n:person) WITH collect(n) AS ns RETURN [n IN ns | n.name] AS names").to_list()   // #{"names": ["marko", "vadas", "josh", "peter"]}
 g.gql("MATCH (n:person) WITH n AS m RETURN [x IN [1] | x] AS l ORDER BY l LIMIT 1").to_list()   // #{"l": [1]}
 ```
 
@@ -600,25 +617,65 @@ write-time coercion, exactly as an `INSERT` of the pattern.
 | two concurrent `MERGE`s of the same pattern may both create, unless a uniqueness constraint holds | never: a query writes under the write lock, and each row sees the rows before it | one query is one unit; Graphersal has no concurrent writers |
 | no permission model on the clause | asks `Create` per label it can create and `Update` for its `ON` items before it runs, also when every row would only find; then the `Read`s of its search | the check sees the plan before anything runs ([Writing with GQL](writes.md#permissions)) |
 
-## Type errors surface at evaluation time
+## Static kind checks
 
-An operand of the wrong kind (`123 AND true`, a property read of a number, `'a' + 1`) is a
-type error (`22G03`) when a row reaches the expression, never before the run, even when the
-kind is already clear from the query text. `gql()` compiles into a Gremlin traversal and its
-expressions are evaluated per row inside the traversal's steps, like every Gremlin step's
-arguments; so a query whose rows never reach the expression raises nothing:
+When the kind of an operand is certain from the query text and its place never takes that
+kind, `gql()` refuses the query before it runs, with error `22G03`, also on an empty graph and
+behind a short-circuit `AND` / `OR`, as Neo4j does (stage 3f, the openCypher TCK). The kind is
+certain for a literal (and a list or map of literals), a node, edge or path variable of a
+pattern (or a `WITH` column holding one), a `LET` / `WITH` value computed from those, a
+comprehension variable over such a list (its items' kind), and the results of operators and of
+functions with a fixed result kind (`size()` is an integer, `labels()` a list of strings,
+`nodes()` a list of nodes). The checked places:
+
+- a condition (`WHERE`, `FILTER`, `AND`, `OR`, `XOR`, `NOT`, a comprehension's `WHERE`, a
+  `WHEN` of a searched `CASE`) takes a boolean: `false AND 123`, `NOT 'x'`, `WHERE (n)`;
+- `IN` takes a list on its right: `1 IN true`;
+- arithmetic (`- * / % ^`, a sign) takes numbers: `'a' % 2` (a `NULL` operand makes it `NULL`
+  first);
+- a property is read from a node, an edge or a map: `p.name` of a path, `x.num` of
+  `WITH 123 AS x`;
+- `type()` takes an edge, `labels()` / `element_id()` a node or an edge, `length()` a path,
+  `size()` a string or a list, `keys()` / `properties()` a node, an edge or a map, `upper()` /
+  `lower()` / `char_length()` a string; a label test a node or an edge; a map projection a
+  node, an edge or a map.
+
+A `$parameter` is never looked at: its kind counts as unknown, so a query is accepted or
+refused whatever the parameter values are (a wrong one fails when a row reaches it). A `NULL`
+literal is never refused (`NULL AND TRUE` is `NULL`).
 
 ```rhai,graph=empty
-g.gql("RETURN 123 AND true AS x").to_list()   // error: a condition must be a boolean, not a number (22G03)
-g.gql("MATCH (n) RETURN n.k AND 123 AS x").to_list()   // [] on the empty graph: no row reaches the expression
+g.gql("RETURN false AND 123 AS x").to_list()   // error: AND takes booleans, not an integer (22G03), before the run
+g.gql("MATCH (n) RETURN type(n) AS t").to_list()   // error: type() takes an edge, not a node, also on the empty graph
+g.gql("MATCH p = (a)-->(b) RETURN size(p) AS s").to_list()   // error: size() takes a string or a list, not a path; length(p) counts its edges
+g.gql("WITH 123 AS x RETURN x.num AS y").to_list()   // error: cannot read the property `num` of an integer
+g.gql("RETURN none(x IN ['a'] WHERE x % 2 = 0) AS r").to_list()   // error: arithmetic needs numbers, not a string
+g.gql("RETURN 1 IN [1, 2] AS a, NULL AND TRUE AS b").to_list()   // #{"a": true, "b": ()}
 ```
 
-**A deliberate deviation from Neo4j:** Neo4j (and the openCypher TCK) rejects such a query at
-compile time with a `SyntaxError` or `TypeError` (`InvalidArgumentType`) when the operand's kind
-is known statically. The TCK cases that expect this are excluded from the measured scope with
-this reason ([TCK Compliance](tck_compliance.md#out-of-scope)). Errors that do not depend on a
-row (syntax, unknown variables, misplaced aggregates) are raised before the run, as always
-([Errors](errors.md#errors-before-the-run)).
+## Type errors surface at evaluation time
+
+Where the kind of an operand is not certain from the query text (a property value, a
+`$parameter`, an item of a list of mixed kinds, a `FOR` item), an operand of the wrong kind
+is a type error (`22G03`) when a row reaches the expression, and a query whose rows never reach
+it raises nothing. `IN` with a right operand that is not a list (nor `NULL`) is such an error
+too (`1 IN $p` with `$p = 3`):
+
+```rhai,graph=empty
+g.gql("MATCH (n) RETURN n.k AND true AS x").to_list()   // [] on the empty graph: no row reaches the expression
+```
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN p.name AND true AS x").to_list()   // error: AND takes booleans, not a string (22G03), when the first row reaches it
+```
+
+**A deliberate deviation from Neo4j:** Neo4j may reject more queries at compile time with a
+`SyntaxError` or `TypeError` (`InvalidArgumentType`), from the static types of its own type
+system. Graphersal checks only the kinds that are certain from the query text
+([Static kind checks](#static-kind-checks)), which covers every such case of the openCypher
+TCK; any other wrong kind fails when a row reaches it. Errors that do not depend on a row
+(syntax, unknown variables, misplaced aggregates, the static kind checks) are raised before the
+run, as always ([Errors](errors.md#errors-before-the-run)).
 
 ## Parameters are bound when the query is compiled
 
@@ -880,7 +937,7 @@ follow these rules:
   integer are integers. `round` (Cypher) is always a float, `sign` always an integer; `sqrt`,
   `exp`, `ln`, `log`, `log10` and `power` are floats; `mod(a, b)` is `a % b`, except that a float `b = 0` is error 22012 (ISO `MOD`) where `%` gives `NaN`.
 - **Bounded results.** A function whose result can be larger than its arguments (`range`,
-  `split`, `replace`, `toString` of a list or map, and the operator `||`) computes the size of the
+  `split`, `replace`, `CAST(x AS STRING)` of a list or map, and the operator `||`) computes the size of the
   result first and asks for it against `traversal.max_materialized_bytes` and the memory budget,
   like `collect_list()`. A result that is too large fails the query with the limit error; it is
   never cut short and never runs the process out of memory ([Errors](errors.md#scope-grouping-and-limits)).
@@ -903,7 +960,8 @@ conversion rules and differ in what an unconvertible value gives:
 | a text that is no value of the type (`'abc'` to INTEGER) | error `22018` | `NULL` | `NULL` |
 | a value of a kind the type does not take (`true` to FLOAT) | error `22G03` | error `22G03` | `NULL` |
 | a number out of range (`1.0e19` to INTEGER) | error `22003` | error `22003` | `NULL` |
-| a vertex, edge or path to STRING | error `22G03` | error `22G03` | error `22G03` |
+| a list or a map to STRING | its text | error `22G03` | `NULL` |
+| a vertex, edge or path to STRING | error `22G03` | error `22G03` | `NULL` |
 
 - **To INTEGER:** a float is truncated toward zero (`1.9` is 1, `-1.9` is -1); a text is a
   decimal number, also with a fraction or an exponent, truncated the same way (`'1.9'` is 1,
@@ -917,8 +975,10 @@ conversion rules and differ in what an unconvertible value gives:
 - **To STRING:** an integer, UUID or date gives the same text as Gremlin's `as_string()`; a float
   always shows a decimal point or an exponent, in Neo4j's (Java's) form: `'1.0'`, `'3.2'`,
   `'1.0E7'`, `'1.0E-4'`, `'1.5E20'` (plain decimal from 0.001 up to 10 000 000); booleans give
-  `'true'` / `'false'`; a list or map gives Neo4j's text (`'[1, a, true, null]'`,
-  `'{a: 1, b: hi}'`, strings unquoted).
+  `'true'` / `'false'`; `CAST` of a list or map gives Neo4j's text (`'[1, a, true, null]'`,
+  `'{a: 1, b: hi}'`, strings unquoted), while `toString` takes scalars only, as in Neo4j (a
+  list or map is `22G03`, `toStringOrNull` gives `NULL`; stage 3f, the openCypher TCK
+  `TypeConversion4`).
 - **Surrounding blanks:** `CAST` skips spaces around the text; the Cypher forms skip every
   character up to U+0020 (spaces, tabs, line breaks), as Java's `String.trim()` does, and
   `toBoolean` any Java whitespace.

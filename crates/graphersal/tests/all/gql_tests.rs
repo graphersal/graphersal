@@ -150,14 +150,14 @@ fn columns_keep_written_order_and_null_columns() {
 }
 
 #[test]
-fn return_star_lists_variables_in_first_appearance_order() {
+fn return_star_lists_variables_in_name_order() {
     let graph = TraversalGraph::tinkerpop_modern();
     let result = rows(
         &graph,
         "MATCH (s:software {name: 'lop'}), (p:person {name: 'marko'}) RETURN *",
     );
     assert_eq!(result.len(), 1);
-    assert_eq!(keys(&result[0]), ["s", "p"]);
+    assert_eq!(keys(&result[0]), ["p", "s"]);
     assert!(matches!(
         column(&result[0], "p"),
         ElementProperty::Vertex(_)

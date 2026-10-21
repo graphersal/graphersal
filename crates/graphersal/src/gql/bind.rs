@@ -395,7 +395,7 @@ use super::ast::{
     PathPattern, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
     ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem,
     SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, Subscript,
-    UnionKind, WithClause,
+    UnaryOp, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -1773,6 +1773,113 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
         // own, not a child expression of this scope.
         ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
     }
+}
+
+/// The first Cypher pattern predicate of `expr` that stands where no condition is expected
+/// (stage 3f, user decision U10, as Neo4j and the openCypher TCK `Pattern1` [22]-[24], `List6`
+/// [6]): a pattern alone is a condition only as a `WHERE` / `FILTER` conjunct (`predicate`),
+/// under `NOT` / `AND` / `OR` / `XOR` there, as the `WHERE` of a comprehension or list
+/// predicate and as a `WHEN` of a searched `CASE`. A subquery body is checked when it is bound.
+/// Recursion bounded by the expression's height (`MAX_HEIGHT`).
+fn misplaced_pattern(expr: &Expr, predicate: bool) -> Option<Span> {
+    match &expr.kind {
+        ExprKind::Subquery(sub) => {
+            return (sub.form == SubqueryForm::PatternPredicate && !predicate).then_some(sub.span);
+        }
+        ExprKind::PatternComprehension(_) => return None,
+        ExprKind::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => return misplaced_pattern(operand, predicate),
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or | BinaryOp::Xor,
+            left,
+            right,
+        } => {
+            return misplaced_pattern(left, predicate)
+                .or_else(|| misplaced_pattern(right, predicate));
+        }
+        ExprKind::ListComprehension(comprehension) => {
+            return comprehension
+                .init()
+                .and_then(|init| misplaced_pattern(init, false))
+                .or_else(|| misplaced_pattern(&comprehension.list, false))
+                .or_else(|| {
+                    comprehension
+                        .filter
+                        .as_ref()
+                        .and_then(|filter| misplaced_pattern(filter, true))
+                })
+                .or_else(|| {
+                    comprehension
+                        .map
+                        .as_ref()
+                        .and_then(|map| misplaced_pattern(map, false))
+                });
+        }
+        ExprKind::Case(case) if case.operand.is_none() => {
+            for arm in &case.whens {
+                if let Some(span) = misplaced_pattern(&arm.when, true)
+                    .or_else(|| misplaced_pattern(&arm.then, false))
+                {
+                    return Some(span);
+                }
+            }
+            return case
+                .else_result
+                .as_ref()
+                .and_then(|result| misplaced_pattern(result, false));
+        }
+        _ => {}
+    }
+    let mut found = None;
+    for_each_child(expr, &mut |child| {
+        if found.is_none() {
+            found = misplaced_pattern(child, false);
+        }
+    });
+    found
+}
+
+/// The error of a pattern predicate in a value position ([`misplaced_pattern`]).
+fn pattern_as_value(text: &str, span: Span) -> Box<GqlErrorBuilder> {
+    Box::new(
+        GqlErrorBuilder::new(
+            GqlErrorKind::Syntax,
+            span.start..span.end,
+            format!(
+                "the pattern {text} stands where a value is expected: a pattern alone is a \
+                 condition only in WHERE (also under NOT, AND, OR and XOR there)"
+            ),
+        )
+        .alternative(format!(
+            "write EXISTS {{ {text} }} for whether it has a match, COUNT {{ {text} }} for the \
+             number of matches, or a pattern comprehension such as [(n)-->(m) | m] for the list \
+             of what it matches, as in g.gql(\"MATCH (p:person) RETURN p.name, COUNT {{ \
+             (p)-[:knows]->() }} AS friends, [(p)-[:created]->(s) | s.name] AS made\")"
+        ))
+        .topic(GqlHelpTopic::Subquery),
+    )
+}
+
+/// Whether `expr` reads a variable (or a comprehension variable) named `name` outside a
+/// subquery body. Recursion bounded by the expression's height (`MAX_HEIGHT`).
+fn mentions(expr: &Expr, name: &str) -> bool {
+    match &expr.kind {
+        ExprKind::Variable(var) => return var.name == name,
+        ExprKind::MapProjection(projection)
+            if projection
+                .items
+                .iter()
+                .any(|item| matches!(item, ProjectionItem::Variable(var) if var.name == name)) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let mut found = false;
+    for_each_child(expr, &mut |child| found = found || mentions(child, name));
+    found
 }
 
 /// Whether `expr` certainly gives no node or edge by its form alone: a literal other than
@@ -3725,7 +3832,7 @@ impl<'q> Binder<'q> {
         segment: usize,
     ) -> BResult<()> {
         for conjunct in split_and(expr) {
-            let resolved = self.expression(ctx, conjunct)?;
+            let resolved = self.expression_in(ctx, conjunct, true)?;
             self.push_conjunct(Conjunct {
                 predicate: Predicate::Expr(resolved.expr),
                 bindings: resolved.refs.bindings,
@@ -4998,7 +5105,9 @@ impl<'q> Binder<'q> {
 
     /// A `WITH`, or a `RETURN` before `NEXT` read as one (design E19).
     fn with_clause(&mut self, with: &WithParts<'_>) -> BResult<()> {
-        let (columns, names) = self.projection_named(with.star, with.items, with.clause)?;
+        // A `WITH *` the binder adds (W10, a value written as a node) keeps the scope order.
+        let (columns, names) =
+            self.projection_named(with.star, with.items, with.clause, !with.materialize)?;
         let distinct = with.distinct || self.group_by(with.group_by, &columns)?;
         let aggregated = columns.iter().any(|c| c.aggregate);
         let materializing = with.materialize
@@ -5252,6 +5361,16 @@ impl<'q> Binder<'q> {
 
     /// Resolves `expr` and substitutes its `LET` / `WITH` names (module docs, "Limits").
     fn expression(&mut self, ctx: Ctx<'_>, expr: &Expr) -> BResult<Resolved> {
+        self.expression_in(ctx, expr, false)
+    }
+
+    /// [`Self::expression`] of an expression that is a condition (`predicate`: a conjunct of a
+    /// `WHERE` or `FILTER`), where a Cypher pattern predicate may stand (stage 3f, user
+    /// decision U10): elsewhere one is a syntax error ([`misplaced_pattern`]).
+    fn expression_in(&mut self, ctx: Ctx<'_>, expr: &Expr, predicate: bool) -> BResult<Resolved> {
+        if let Some(span) = misplaced_pattern(expr, predicate) {
+            return Err(pattern_as_value(self.query.text(span), span));
+        }
         let mut refs = Refs::default();
         self.resolve(ctx, expr, &mut refs)?;
         let refs = refs.finish();
@@ -5489,10 +5608,14 @@ impl<'q> Binder<'q> {
     }
 
     /// A comprehension variable may not shadow a name (design E14, 42002): a variable or an
-    /// alias in scope, another comprehension variable around it, or any name a binding of the
-    /// query has or had (a substituted expression refers to bindings by those names, so a
-    /// local of the same name would capture them). The same holds for the variables of the
-    /// list predicates and of `reduce` (`within`, for the message).
+    /// alias in scope, another comprehension variable around it, a name of the `LET` being
+    /// bound, or a name that the expression of a `LET` / projecting-`WITH` value in scope
+    /// reads or that a renamed variable in scope is read by (`WITH n AS m` reads `m` as `n`):
+    /// a substituted expression refers to bindings by their keys, so a local of the same name
+    /// would capture them. A name that is no longer in scope may be reused (stage
+    /// 3f, user decision U12, as the openCypher TCK `Quantifier1`..`4` expect: `MATCH (x) WITH
+    /// collect(x) AS xs RETURN none(x IN xs WHERE ..)`). The same holds for the variables of
+    /// the list predicates and of `reduce` (`within`, for the message).
     fn check_local(
         &self,
         ctx: Ctx<'_>,
@@ -5507,10 +5630,15 @@ impl<'q> Binder<'q> {
                 .shelved_locals
                 .iter()
                 .any(|local| local.var.name == *name);
-        let used = self.taken.contains(name.as_str())
-            || self.dropped.contains_key(name)
-            || self.hidden.contains_key(name)
-            || self.pending_let.iter().any(|n| n == name);
+        let used = self.pending_let.iter().any(|n| n == name)
+            || self.scope.entries.iter().any(|(_, symbol)| match symbol {
+                Symbol::Value(substitution) => mentions(&substitution.expr, name),
+                // A renamed variable (`WITH n AS m`) is read by its binding's key (`n`).
+                Symbol::Binding(id) => self
+                    .bindings
+                    .get(id.0)
+                    .is_some_and(|b| b.key.as_deref() == Some(name.as_str())),
+            });
         if !in_scope && !used {
             return Ok(());
         }
@@ -5556,7 +5684,10 @@ impl<'q> Binder<'q> {
         let message = if in_scope {
             format!("{what} shadows the variable `{name}` in scope; {rule}")
         } else {
-            format!("{what} is a name this query already uses; {rule}")
+            format!(
+                "{what} is a name that a LET or WITH value in scope still reads (or the LET \
+                 being defined); {rule}"
+            )
         };
         Err(semantic(var.span, message)
             .alternative(alternative)
@@ -6645,16 +6776,19 @@ impl<'q> Binder<'q> {
         items: &[ReturnItem],
         clause: &'static str,
     ) -> BResult<Vec<Column>> {
-        self.projection_named(star, items, clause)
+        self.projection_named(star, items, clause, true)
             .map(|(columns, _)| columns)
     }
 
-    /// The columns of `RETURN` / `WITH` with the identifier each name comes from.
+    /// The columns of `RETURN` / `WITH` with the identifier each name comes from; `sorted`:
+    /// the columns of a star in name order (a written star; a `WITH *` the binder adds keeps
+    /// the scope order).
     fn projection_named(
         &mut self,
         star: Option<Span>,
         items: &[ReturnItem],
         clause: &'static str,
+        sorted: bool,
     ) -> BResult<(Vec<Column>, Vec<Identifier>)> {
         let mut columns = Vec::new();
         let mut names = Vec::new();
@@ -6720,6 +6854,18 @@ impl<'q> Binder<'q> {
                 };
                 columns.push(column);
                 names.push(name.clone());
+            }
+            // The star's columns in name order (code point order, as the openCypher TCK
+            // expects: `RETURN *` of `p, a, b` returns `a, b, p`; stage 3f, user decision U4);
+            // explicit items follow. A `WITH *` the binder adds keeps the scope order.
+            if sorted {
+                let mut star_columns: Vec<(Column, Identifier)> =
+                    columns.drain(..).zip(names.drain(..)).collect();
+                star_columns.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+                for (column, name) in star_columns {
+                    columns.push(column);
+                    names.push(name);
+                }
             }
         }
         for item in items {

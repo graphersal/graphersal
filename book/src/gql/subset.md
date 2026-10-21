@@ -336,13 +336,17 @@ match for the row and FALSE otherwise, never `NULL`. Three forms mean the same:
 EXISTS { MATCH <pattern> [, <pattern> ...] [WHERE <condition>] [MATCH ...] }
 EXISTS { <pattern> [, <pattern> ...] [WHERE <condition>] }
 EXISTS ( ... )                                -- either body in parentheses
-(a)-[:knows]->(b)                             -- Cypher pattern predicate: a pattern where an expression stands
+(a)-[:knows]->(b)                             -- Cypher pattern predicate: a pattern where a condition stands
 ```
 
 The body reads the variables bound before it (they are **imported**: `p` inside is the row's
 `p`), and the variables it binds itself stay inside it. A pattern predicate is
-`EXISTS { <pattern> }` written without the keyword; since it stands where any expression may, it
-must not name a new variable (write `EXISTS { MATCH .. }` to name one). The Gremlin twins are
+`EXISTS { <pattern> }` written without the keyword; it must not name a new variable (write
+`EXISTS { MATCH .. }` to name one), and it stands only where a condition does: a `WHERE` or
+`FILTER` condition (also under `NOT`, `AND`, `OR`, `XOR`), the `WHERE` of a comprehension and a
+`WHEN` of a searched `CASE`. Anywhere else (a `RETURN` column, a function argument, a `LET`
+value) it is a syntax error (`42001`), as in Neo4j: write `EXISTS { .. }`, `COUNT { .. }` or a
+pattern comprehension there. The Gremlin twins are
 `where(__..)` and `not(__..)`, and the "who has no ..." question runs exactly as its twin:
 
 ```rhai,graph=modern
@@ -381,7 +385,8 @@ included ([Errors](errors.md#subqueries)).
 ```rhai,graph=modern
 g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) WITH count(s) AS c WHERE c > 1 RETURN c } RETURN p.name AS name").to_list()   // #{"name": "josh"}
 g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) RETURN s UNION MATCH (p)-[:knows]->(s) RETURN s } RETURN p.name AS name ORDER BY name").to_list()   // josh, marko, peter
-g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->(q) AS k")   // error: the pattern predicate introduces the new variable `q`
+g.gql("MATCH (p:person) WHERE (p)-[:knows]->(q) RETURN p.name AS name")   // error: the pattern predicate introduces the new variable `q`
+g.gql("MATCH (p:person) RETURN p.name AS name, (p)-[:knows]->() AS k")   // error: a pattern alone is a condition only in WHERE (42001)
 g.gql("MATCH (p:person) WHERE EXISTS { MATCH (p)-[:created]->(s) } RETURN s.name AS s")   // error: `s` is bound inside a subquery
 ```
 
@@ -1066,8 +1071,8 @@ text, and their `...OrNull` forms give `NULL` for a value of any unsupported kin
 | `toInteger(x)` | as `CAST`, also `true` / `false` (1 / 0) and Cypher literals (`'0x1F'`, `'0o17'`, `'1_000'`) | `NULL` | error `22G03` |
 | `toFloat(x)` | as `CAST`, also Cypher literals | `NULL` | error `22G03` |
 | `toBoolean(x)` | as `CAST`, also integers (0 is FALSE, any other TRUE) | `NULL` | error `22G03` |
-| `toString(x)` | as `CAST(x AS STRING)` | - | error `22G03` |
-| `toIntegerOrNull(x)`, `toFloatOrNull(x)`, `toBooleanOrNull(x)`, `toStringOrNull(x)` | as their `toX` | `NULL` | `NULL` (a vertex, edge or path: still an error for `toStringOrNull`) |
+| `toString(x)` | as `CAST(x AS STRING)`, scalars only | - | error `22G03` (a list or a map too) |
+| `toIntegerOrNull(x)`, `toFloatOrNull(x)`, `toBooleanOrNull(x)`, `toStringOrNull(x)` | as their `toX` | `NULL` | `NULL` (for `toStringOrNull` a list, map, vertex, edge or path too) |
 
 A float's text always shows that it is a float (`toString(1.0)` is `'1.0'`, Neo4j's form), while
 Gremlin's `as_string()` gives `"1"`; integers and booleans give the same text as `as_string()`.
@@ -1085,8 +1090,10 @@ g.gql("MATCH (n:person {name: 'marko'}) RETURN toInteger(' 42 ') AS a, toInteger
 // #{"a": 42, "b": 1, "c": 31, "d": (), "e": 1}
 g.gql("MATCH (n:person {name: 'marko'}) RETURN toBoolean(1) AS a, toBooleanOrNull(1.5) AS b, toFloat('1e3') AS c, toFloatOrNull([1]) AS d").to_list()
 // #{"a": true, "b": (), "c": 1000.0, "d": ()}
-g.gql("MATCH (n:person {name: 'marko'}) RETURN toString([n.age, n.name, 1.0, NULL]) AS l, toString({a: 1, b: n.name}) AS m").to_list()
+g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST([n.age, n.name, 1.0, NULL] AS STRING) AS l, CAST({a: 1, b: n.name} AS STRING) AS m").to_list()
 // #{"l": "[29, marko, 1.0, null]", "m": "{a: 1, b: marko}"}
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toString([n.age])")   // error: toString() takes a number, a boolean, a string or another scalar, not a list (22G03)
+g.gql("MATCH (n:person {name: 'marko'}) RETURN toStringOrNull([n.age]) AS s").to_list()   // #{"s": ()}
 g.gql("MATCH (n:person) RETURN n.name || ' is ' || toString(n.age) AS s ORDER BY s LIMIT 2").to_list()
 // #{"s": "josh is 32"}, #{"s": "marko is 29"}
 g.gql("MATCH (n:person {name: 'marko'}) RETURN CAST('abc' AS INTEGER) AS x")   // error: invalid character value for cast (22018)

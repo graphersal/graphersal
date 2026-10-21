@@ -321,11 +321,11 @@ fn a_long_and_chain_splits_without_deep_recursion() {
 // ----- RETURN -----
 
 #[test]
-fn return_star_expands_named_variables_in_order_of_first_appearance() {
+fn return_star_expands_named_variables_in_name_order() {
     let q = ok("MATCH (b)-[:x]->(a), (c)-[e]->(b) RETURN *");
-    assert_eq!(column_names(&q), vec!["b", "a", "c", "e"]);
+    assert_eq!(column_names(&q), vec!["a", "b", "c", "e"]);
     assert!(q.columns.iter().all(|c| c.variable.is_some() && !c.aliased));
-    assert_eq!(q.columns[0].variable, Some(id(&q, "b")));
+    assert_eq!(q.columns[1].variable, Some(id(&q, "b")));
     let q = ok("MATCH (a)-->(b) RETURN *, a.name AS n");
     assert_eq!(column_names(&q), vec!["a", "b", "n"]);
     let f = fail("MATCH ()-->() RETURN *");
@@ -783,9 +783,9 @@ fn let_and_projecting_with_are_substitutions() {
     // Projecting WITH: renames, narrows the scope, its WHERE is a conjunct.
     let q = ok("MATCH (a)-->(b) WITH a AS p, b.name AS n WHERE n <> 'x' RETURN *");
     assert_eq!(segment_shapes(&q), ["match[0]"]);
-    assert_eq!(column_names(&q), ["p", "n"]);
-    assert_eq!(show(&q.columns[0].expr), "a");
-    assert_eq!(show(&q.columns[1].expr), "b.name");
+    assert_eq!(column_names(&q), ["n", "p"]);
+    assert_eq!(show(&q.columns[1].expr), "a");
+    assert_eq!(show(&q.columns[0].expr), "b.name");
     assert_eq!(conjunct_exprs(&q), ["(b.name Ne 'x')"]);
     assert_eq!(q.conjuncts[0].origin, ConjunctOrigin::Filter);
     let f = fail("MATCH (a)-->(b) WITH a RETURN b");
@@ -1193,8 +1193,8 @@ fn for_ordinals_are_a_second_column() {
                 column: FOR_ORDINAL
             })
         );
-        // `RETURN *` lists the item, then the ordinal.
-        assert_eq!(column_names(&q), ["x", "i"], "{query}");
+        // `RETURN *` lists the item and the ordinal in name order.
+        assert_eq!(column_names(&q), ["i", "x"], "{query}");
     }
     // A position variable named `ordinality` is an ordinary name.
     let q = ok("FOR x IN [1] WITH ORDINALITY ordinality RETURN ordinality");
@@ -1366,7 +1366,7 @@ fn queries_without_match_start_from_a_unit_row() {
         (
             "FOR x IN [1] MATCH (a) RETURN *",
             &["for1", "match[0]"],
-            &["x", "a"],
+            &["a", "x"],
         ),
     ] {
         let q = ok(query);
@@ -1472,7 +1472,10 @@ fn subqueries_bind_in_every_position() {
             "MATCH (n) RETURN CASE WHEN EXISTS ((n)-->()) THEN 1 END AS x",
             "EXISTS ((n)-->())",
         ),
-        ("MATCH (n) LET x = (n)-->() RETURN x", "(n)-->()"),
+        (
+            "MATCH (n) LET x = EXISTS { (n)-->() } RETURN x",
+            "EXISTS { (n)-->() }",
+        ),
         (
             "FOR x IN [EXISTS { (a)-->() }] RETURN x",
             "EXISTS { (a)-->() }",
@@ -1664,7 +1667,7 @@ fn pattern_predicates_introduce_no_variable() {
     for (query, text) in [
         ("MATCH (a) WHERE (a)-->(b) RETURN a", "b"),
         ("MATCH (a) WHERE NOT (a)-[r:T]->() RETURN a", "r"),
-        ("MATCH (a) RETURN (x)-->(a) AS y", "x"),
+        ("MATCH (a) WHERE a.k = 1 OR (x)-->(a) RETURN a", "x"),
     ] {
         let f = fail(query);
         assert_eq!(
@@ -1689,6 +1692,59 @@ fn pattern_predicates_introduce_no_variable() {
     ok("MATCH (a), (b) WHERE (a)-[:T]->(b) AND NOT (b {x: 1})-->(:L) RETURN a");
     ok("MATCH (a) WHERE EXISTS { (a)-->(b) WHERE b.x = 1 } RETURN a");
     ok("FOR x IN [1] RETURN EXISTS { (a)-->() } AS e");
+}
+
+#[test]
+fn patterns_stand_only_where_a_condition_does() {
+    // Stage 3f (user decision U10): a pattern predicate outside a condition is 42001 naming
+    // EXISTS { }, COUNT { } and a pattern comprehension.
+    for (query, text) in [
+        ("MATCH (n) RETURN (n)-->() AS x", "(n)-->()"),
+        ("MATCH (n) WITH (n)-->() AS x RETURN x", "(n)-->()"),
+        ("MATCH (a) RETURN size((a)-->()) AS s", "(a)-->()"),
+        ("MATCH (n) LET x = (n)-->() RETURN x", "(n)-->()"),
+        ("MATCH (n) RETURN NOT (n)-->() AS x", "(n)-->()"),
+        (
+            "MATCH (n) SET n.p = head(nodes(head((n)-[:R]->()))).foo",
+            "(n)-[:R]->()",
+        ),
+        (
+            "MATCH (n) WHERE [x IN [1] | (n)-->()] = [true] RETURN n",
+            "(n)-->()",
+        ),
+        (
+            "MATCH (n) WHERE coalesce((n)-->(), false) RETURN n",
+            "(n)-->()",
+        ),
+    ] {
+        let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(
+            (f.text.as_str(), f.gqlstatus.as_str()),
+            (text, "42001"),
+            "{query}"
+        );
+        let alternative = f.alternative.unwrap_or_default();
+        for form in ["EXISTS {", "COUNT {", "[(n)-->(m) | m]"] {
+            assert!(alternative.contains(form), "{query}: {alternative}");
+        }
+    }
+    // Conditions: WHERE / FILTER conjuncts, under NOT / AND / OR / XOR, a comprehension's or a
+    // list predicate's WHERE, a WHEN of a searched CASE.
+    for query in [
+        "MATCH (n) WHERE (n)-->() RETURN n",
+        "MATCH (n) WHERE NOT (n)-->() AND (n.x = 1 OR (n)<--() XOR false) RETURN n",
+        "MATCH (n) FILTER (n)-->() RETURN n",
+        "MATCH (n) WITH n WHERE (n)-->() RETURN n",
+        "MATCH (n) RETURN [x IN [1] WHERE (n)-->()] AS l",
+        "MATCH (n) RETURN any(x IN [1] WHERE (n)-->()) AS l",
+        "MATCH (n) RETURN CASE WHEN (n)-->() THEN 1 ELSE 0 END AS c",
+        "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WHERE (m)-->() } RETURN n",
+        "MATCH (n) RETURN [(n)-->(m) WHERE (m)-->() | m] AS ms",
+    ] {
+        ok(query);
+    }
 }
 
 #[test]
@@ -1733,7 +1789,7 @@ fn subqueries_read_let_values_and_stand_anywhere_an_expression_does() {
     assert_eq!(names(&q, &subquery(&q, 0).imports), ["n"]);
     assert_eq!(conjunct_exprs(&q)[0], "(m.age Gt n.age)");
     // A LET holding a subquery: the substituted host keeps naming the same subquery.
-    let q = ok("MATCH (n) LET has = (n)-->() FILTER has OR n.x = 1 RETURN n, has AS h");
+    let q = ok("MATCH (n) LET has = EXISTS { (n)-->() } FILTER has OR n.x = 1 RETURN n, has AS h");
     assert_eq!(q.subqueries.len(), 1);
     let Predicate::Expr(filter) = &q.conjuncts[0].predicate else {
         panic!("not an expression")
@@ -2056,16 +2112,12 @@ fn a_comprehension_variable_shadows_nothing() {
             "a",
             "the comprehension variable `a` shadows the variable `a` in scope",
         ),
-        // A name the query used before: a substituted expression refers to bindings by it.
+        // A name a substituted expression in scope reads (it refers to bindings by it).
         (
             "MATCH (n) WITH n AS m RETURN [n IN [1] | m]",
             "n",
-            "the comprehension variable `n` is a name this query already uses",
-        ),
-        (
-            "MATCH (p) WHERE EXISTS { MATCH (p)-->(q) } RETURN [q IN [1] | q]",
-            "q",
-            "the comprehension variable `q` is a name this query already uses",
+            "the comprehension variable `n` is a name that a LET or WITH value in scope still \
+             reads",
         ),
     ] {
         let f = fail(query);
@@ -2078,6 +2130,15 @@ fn a_comprehension_variable_shadows_nothing() {
             "{query}: {alternative}"
         );
     }
+}
+
+#[test]
+fn a_comprehension_variable_may_reuse_a_name_out_of_scope() {
+    // Stage 3f (user decision U12): only names in scope and names a substituted value in
+    // scope reads are refused.
+    ok("MATCH (p) WHERE EXISTS { MATCH (p)-->(q) } RETURN [q IN [1] | q]");
+    ok("MATCH (x) WITH collect(x) AS xs RETURN none(x IN xs WHERE x.age > 1) AS r");
+    ok("MATCH (x)-->(y) WITH y RETURN [x IN [1, 2] | x + 1] AS l");
 }
 
 #[test]
@@ -3496,9 +3557,9 @@ fn insert_refers_to_bound_nodes_and_cuts_the_pipeline() {
     assert_eq!(segment_shapes(&q), ["match[0]", "insert1+1", "match[1]"]);
     let q = ok("INSERT (a:X) FILTER a.k IS NULL RETURN a");
     assert_eq!(segment_shapes(&q), ["insert1+0", "match[]"]);
-    // RETURN * lists the named variables of the INSERT in the order they entered the scope.
+    // RETURN * lists the named variables of the INSERT in name order.
     let q = ok("MATCH (n) INSERT (n)-[e:T]->(m), (:X) RETURN *");
-    assert_eq!(column_names(&q), ["n", "e", "m"]);
+    assert_eq!(column_names(&q), ["e", "m", "n"]);
     // A FOR item may be an end (design E3: it must hold a node when the edge is created).
     let q = ok("MATCH p = (a)-->(b) FOR x IN nodes(p) INSERT (x)-[:T]->(:Y)");
     assert_eq!(q.binding(id(&q, "x")).unwrap().kind, BindingKind::Node);

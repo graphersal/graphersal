@@ -37,7 +37,9 @@
 //!   against a number are FALSE; against another kind they are `NULL` (`NaN > 'a'`).
 //! - **`IN`:** TRUE when an item equals the value; else `NULL` when some comparison was `NULL`
 //!   (`2 IN [1, NULL]`, `NULL IN [1]`); else FALSE (`NULL IN []` is FALSE, `1 IN ['1']` is FALSE).
-//!   A right operand that is `NULL` or not a list gives `NULL`.
+//!   A right operand that is `NULL` gives `NULL`; one that is not a list is error 22G03 (stage
+//!   3f, the openCypher TCK; a literal one is refused when the query is compiled, see
+//!   "Static kinds").
 //! - **`STARTS WITH` / `ENDS WITH` / `CONTAINS`:** strings only; a `NULL` or non-string operand
 //!   gives `NULL`.
 //! - **Power** `x ^ y` (Cypher, stage 3f): always a float, left-associative (`2 ^ 3 ^ 2` is
@@ -125,6 +127,11 @@
 //!   the [`Scope`] admits them ([`Scope::aggregate`], the aggregating stage `aggregate.rs`); the
 //!   compiled call reads its result through [`Env::aggregate`]. Elsewhere they are error 0A000.
 //!
+//! - **Static kinds** (stage 3f, user decision U9, [`kinds`]): before an expression compiles,
+//!   an operand whose kind is certain from the query text and that its place never takes
+//!   (`false AND 123`, `1 IN true`, `type(n)` of a node variable, `p.name` of a path) is refused
+//!   with 22G03, before any row; everything else keeps the run-time checks above.
+//!
 //! Errors are [`EvalError`]s carrying a GQLSTATUS ([`status`]), a message and the span of the
 //! offending expression; the step that runs the evaluator maps them into a `TraverserError`.
 
@@ -149,6 +156,10 @@ mod tests;
 
 #[cfg(test)]
 mod local_tests;
+
+mod kinds;
+
+pub(crate) use kinds::{Kind, check_condition};
 
 /// The GQLSTATUS codes the evaluator raises.
 pub(crate) mod status {
@@ -610,6 +621,13 @@ pub(crate) trait Scope {
     fn locals(&self) -> usize {
         0
     }
+    /// The kinds the variable `name` may hold, as far as they are certain (stage 3f, the
+    /// static kind check [`kinds::check`]): a node, an edge or a path variable of a pattern;
+    /// [`Kind::ANY`] (the default) for every other name.
+    fn kind(&self, name: &str) -> Kind {
+        let _ = name;
+        Kind::ANY
+    }
 }
 
 /// The scope of a comprehension's `WHERE` and `|` parts: its variable, then `parent` (a trait
@@ -647,6 +665,10 @@ impl Scope for LocalScope<'_> {
 
     fn locals(&self) -> usize {
         self.index.saturating_add(1)
+    }
+
+    fn kind(&self, name: &str) -> Kind {
+        self.parent.kind(name)
     }
 }
 
@@ -808,7 +830,26 @@ impl Labels {
 /// parser's nesting bound (`parser::MAX_DEPTH`), become one `Node::Chain` built without
 /// recursion along the spine; everything else recurses, so neither compiling nor evaluating
 /// goes deeper than about `MAX_DEPTH` levels, even in unoptimized builds with large frames.
+///
+/// First the static kinds are checked ([`kinds::check`], stage 3f): an operand whose kind is
+/// certain from the query text and wrong for its place is refused here, before any row.
 pub(crate) fn compile<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Compiled<E>, EvalError> {
+    kinds::check(expr, scope)?;
+    compile_expr(expr, scope)
+}
+
+/// [`compile`] without the static kind check, for the unit tests of the evaluator itself (the
+/// run-time checks behind the static ones; `eval/kinds.rs` has the tests of the static ones).
+#[cfg(test)]
+pub(crate) fn compile_unchecked<E: Clone>(
+    expr: &Expr,
+    scope: &impl Scope,
+) -> Result<Compiled<E>, EvalError> {
+    compile_expr(expr, scope)
+}
+
+/// [`compile`] without the static kind check: the recursion over the parts.
+fn compile_expr<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Compiled<E>, EvalError> {
     let node = match &expr.kind {
         ExprKind::Binary { .. }
         | ExprKind::Property { .. }
@@ -846,13 +887,15 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
         spine.push(bottom);
         bottom = left;
     }
-    let first = compile(bottom, scope)?;
+    let first = compile_expr(bottom, scope)?;
     let links = spine
         .iter()
         .rev()
         .map(|link| {
             let op = match &link.kind {
-                ExprKind::Binary { op, right, .. } => LinkOp::Binary(*op, compile(right, scope)?),
+                ExprKind::Binary { op, right, .. } => {
+                    LinkOp::Binary(*op, compile_expr(right, scope)?)
+                }
                 ExprKind::Property { key, .. } => LinkOp::Property(key.name.as_str().into()),
                 ExprKind::IsNull { negated, .. } => LinkOp::IsNull(*negated),
                 ExprKind::IsLabeled {
@@ -860,7 +903,7 @@ fn compile_chain<E: Clone>(expr: &Expr, scope: &impl Scope) -> Result<Node<E>, E
                 } => LinkOp::IsLabeled(Labels::compile(labels), *negated),
                 ExprKind::IsEndpoint {
                     edge, end, negated, ..
-                } => LinkOp::IsEndpoint(*end, *negated, compile(edge, scope)?),
+                } => LinkOp::IsEndpoint(*end, *negated, compile_expr(edge, scope)?),
                 ExprKind::Index(index) => compile_subscript(&index.subscript, scope)?,
                 // `chain_left` admits only the kinds above.
                 _ => LinkOp::IsNull(false),
@@ -881,10 +924,10 @@ fn compile_subscript<E: Clone>(
     scope: &impl Scope,
 ) -> Result<LinkOp<E>, EvalError> {
     Ok(match subscript {
-        Subscript::At(index) => LinkOp::Index(compile(index, scope)?),
+        Subscript::At(index) => LinkOp::Index(compile_expr(index, scope)?),
         Subscript::Slice { from, to } => {
             let bound =
-                |bound: &Option<Expr>| bound.as_ref().map(|b| compile(b, scope)).transpose();
+                |bound: &Option<Expr>| bound.as_ref().map(|b| compile_expr(b, scope)).transpose();
             LinkOp::Slice(Box::new((bound(from)?, bound(to)?)))
         }
     })
@@ -896,7 +939,7 @@ fn compile_unary<E: Clone>(
     operand: &Expr,
     scope: &impl Scope,
 ) -> Result<Node<E>, EvalError> {
-    Ok(Node::Unary(op, Box::new(compile(operand, scope)?)))
+    Ok(Node::Unary(op, Box::new(compile_expr(operand, scope)?)))
 }
 
 #[inline(never)]
@@ -981,7 +1024,7 @@ fn compile_projection<E: Clone>(
     projection: &MapProjection,
     scope: &impl Scope,
 ) -> Result<Node<E>, EvalError> {
-    let target = compile(&projection.target, scope)?;
+    let target = compile_expr(&projection.target, scope)?;
     let mut items = Vec::with_capacity(projection.items.len());
     for item in &projection.items {
         items.push(match item {
@@ -996,7 +1039,7 @@ fn compile_projection<E: Clone>(
             ),
             ProjectionItem::Entry(entry) => ProjectionPart::Entry(
                 entry.key.name.as_str().into(),
-                compile(&entry.value, scope)?,
+                compile_expr(&entry.value, scope)?,
             ),
         });
     }
@@ -1008,14 +1051,14 @@ fn compile_comprehension<E: Clone>(
     comprehension: &ListComprehension,
     scope: &impl Scope,
 ) -> Result<Node<E>, EvalError> {
-    let list = compile(&comprehension.list, scope)?;
+    let list = compile_expr(&comprehension.list, scope)?;
     // `reduce`: its initial value outside the locals, its accumulator the local before the
     // item variable (the item variable's scope is nested in the accumulator's).
     let (form, accumulator) = match &comprehension.form {
         ComprehensionForm::List => (Form::List, None),
         ComprehensionForm::Predicate(predicate) => (Form::Predicate(*predicate), None),
         ComprehensionForm::Reduce(accumulator) => (
-            Form::Reduce(Box::new(compile(&accumulator.init, scope)?)),
+            Form::Reduce(Box::new(compile_expr(&accumulator.init, scope)?)),
             Some(LocalScope {
                 parent: scope,
                 name: &accumulator.variable.name,
@@ -1036,12 +1079,12 @@ fn compile_comprehension<E: Clone>(
     let filter = comprehension
         .filter
         .as_ref()
-        .map(|filter| compile(filter, &local))
+        .map(|filter| compile_expr(filter, &local))
         .transpose()?;
     let map = comprehension
         .map
         .as_ref()
-        .map(|map| compile(map, &local))
+        .map(|map| compile_expr(map, &local))
         .transpose()?;
     Ok(Node::Comprehension(Box::new(Comprehension {
         form,
@@ -1056,7 +1099,7 @@ fn compile_comprehension<E: Clone>(
 fn compile_list<E: Clone>(items: &[Expr], scope: &impl Scope) -> Result<Node<E>, EvalError> {
     let items = items
         .iter()
-        .map(|item| compile(item, scope))
+        .map(|item| compile_expr(item, scope))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(if items.iter().all(Compiled::is_const) {
         Node::Const(Value::List(
@@ -1071,7 +1114,7 @@ fn compile_list<E: Clone>(items: &[Expr], scope: &impl Scope) -> Result<Node<E>,
 fn compile_map<E: Clone>(map: &MapLiteral, scope: &impl Scope) -> Result<Node<E>, EvalError> {
     let mut entries: Vec<(CompactString, Compiled<E>)> = Vec::with_capacity(map.entries.len());
     for entry in &map.entries {
-        let value = compile(&entry.value, scope)?;
+        let value = compile_expr(&entry.value, scope)?;
         // A repeated key keeps its first position and its last value.
         match entries
             .iter_mut()
@@ -1098,17 +1141,22 @@ fn compile_case<E: Clone>(case: &CaseExpr, scope: &impl Scope) -> Result<Node<E>
     let operand = case
         .operand
         .as_ref()
-        .map(|operand| compile(operand, scope))
+        .map(|operand| compile_expr(operand, scope))
         .transpose()?;
     let whens = case
         .whens
         .iter()
-        .map(|arm| Ok((compile(&arm.when, scope)?, compile(&arm.then, scope)?)))
+        .map(|arm| {
+            Ok((
+                compile_expr(&arm.when, scope)?,
+                compile_expr(&arm.then, scope)?,
+            ))
+        })
         .collect::<Result<Vec<_>, EvalError>>()?;
     let else_result = case
         .else_result
         .as_ref()
-        .map(|result| compile(result, scope))
+        .map(|result| compile_expr(result, scope))
         .transpose()?;
     Ok(Node::Case(Box::new(Case {
         operand,
@@ -1139,7 +1187,7 @@ fn compile_call<E: Clone>(
         CallArgs::Cast {
             operand, target, ..
         } if spec.function == Function::Cast => {
-            return Ok(Node::Cast(*target, Box::new(compile(operand, scope)?)));
+            return Ok(Node::Cast(*target, Box::new(compile_expr(operand, scope)?)));
         }
         CallArgs::Trim {
             side,
@@ -1147,13 +1195,13 @@ fn compile_call<E: Clone>(
             source,
         } if spec.function == Function::Trim => {
             let character = match character {
-                Some(character) => Some(Box::new(compile(character, scope)?)),
+                Some(character) => Some(Box::new(compile_expr(character, scope)?)),
                 None => None,
             };
             return Ok(Node::Trim(
                 *side,
                 character,
-                Box::new(compile(source, scope)?),
+                Box::new(compile_expr(source, scope)?),
             ));
         }
         CallArgs::Star(_) => {
@@ -1180,7 +1228,7 @@ fn compile_call<E: Clone>(
     }
     let args = exprs
         .iter()
-        .map(|arg| compile(arg, scope))
+        .map(|arg| compile_expr(arg, scope))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Node::Call(spec.function, args))
 }
@@ -2134,7 +2182,7 @@ fn binary<E: Clone + PartialEq>(
         BinaryOp::Le => compared(Ordering::is_le),
         BinaryOp::Gt => compared(Ordering::is_gt),
         BinaryOp::Ge => compared(Ordering::is_ge),
-        BinaryOp::In => contains(right, left).into_value(),
+        BinaryOp::In => contains(right, left, span)?.into_value(),
         BinaryOp::StartsWith => text_test(left, right, |a, b| a.starts_with(b)),
         BinaryOp::EndsWith => text_test(left, right, |a, b| a.ends_with(b)),
         BinaryOp::Contains => text_test(left, right, |a, b| a.contains(b)),
@@ -2224,19 +2272,33 @@ fn text_and_scalar<E>(left: &Value<E>, right: &Value<E>) -> bool {
 }
 
 /// `needle IN haystack` (see the module docs).
-fn contains<E: PartialEq>(haystack: &Value<E>, needle: &Value<E>) -> Truth {
-    let Value::List(items) = haystack else {
-        return Truth::Unknown;
+fn contains<E: PartialEq>(
+    haystack: &Value<E>,
+    needle: &Value<E>,
+    span: Span,
+) -> Result<Truth, EvalError> {
+    let items = match haystack {
+        Value::List(items) => items,
+        Value::Null => return Ok(Truth::Unknown),
+        other => {
+            return Err(EvalError::invalid_type(
+                format!(
+                    "IN tests a value against a list, not {}; write x IN [y] or x = y",
+                    other.kind_name()
+                ),
+                span,
+            ));
+        }
     };
     let mut result = Truth::False;
     for item in items {
         match equals(needle, item) {
-            Truth::True => return Truth::True,
+            Truth::True => return Ok(Truth::True),
             Truth::Unknown => result = Truth::Unknown,
             Truth::False => {}
         }
     }
-    result
+    Ok(result)
 }
 
 fn text_test<E>(left: &Value<E>, right: &Value<E>, test: fn(&str, &str) -> bool) -> Value<E> {

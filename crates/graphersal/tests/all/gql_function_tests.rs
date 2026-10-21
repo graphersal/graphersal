@@ -420,10 +420,11 @@ fn conversions_strict_cast_and_lenient_to_x() {
             ("toString(1.5e20)", "'1.5E20'"),
             ("toString(true)", "'true'"),
             (
-                "toString([1, 'a', true, null, 2.0])",
+                "CAST([1, 'a', true, null, 2.0] AS STRING)",
                 "'[1, a, true, null, 2.0]'",
             ),
-            ("toString({a: 1, b: 'hi'})", "'{a: 1, b: hi}'"),
+            ("CAST({a: 1, b: 'hi'} AS STRING)", "'{a: 1, b: hi}'"),
+            ("toStringOrNull([1])", "null"),
             ("toString(n.age)", "'29'"),
             // OrNull: wrong kinds become NULL instead of 22G03.
             ("toFloatOrNull(true)", "null"),
@@ -456,7 +457,7 @@ fn conversions_strict_cast_and_lenient_to_x() {
             ("toFloat(true)", "22G03"),
             ("toBoolean(1.5)", "22G03"),
             ("toString(n)", "22G03"),
-            ("toStringOrNull(n)", "22G03"),
+            ("toString([1])", "22G03"),
         ],
     );
     // Gremlin's as_number(GType.LONG) refuses "1.9"; GQL toInteger truncates (K5).

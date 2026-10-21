@@ -199,7 +199,7 @@ fn return_after_insert_reads_the_new_elements() {
         ElementProperty::Object(map) => map.keys().map(|k| k.to_string()).collect(),
         other => panic!("{other:?}"),
     };
-    assert_eq!(keys, ["p", "e", "q"]);
+    assert_eq!(keys, ["e", "p", "q"]);
     // A returned new element is live: Gremlin steps may follow.
     let mut graph = TraversalGraph::tinkerpop_modern();
     let names = graph

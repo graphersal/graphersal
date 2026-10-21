@@ -119,7 +119,7 @@ use super::bind::{
     Conjunct, Count, DeleteKind, InsertProperty, Predicate, Segment, SortKey, TargetKind,
     WriteTarget, bind_with_parameters,
 };
-use super::eval::{Scope, Value, compile};
+use super::eval::{Kind, Scope, Value, check_condition, compile};
 use super::lexer::Span;
 use super::parser::parse;
 use super::plan::{
@@ -1994,6 +1994,40 @@ impl Scope for LowerScope<'_> {
     fn parameter(&self, name: &str) -> Option<ElementProperty> {
         parameter(self.params, name).cloned()
     }
+
+    fn kind(&self, name: &str) -> Kind {
+        if name.is_empty() || self.aliases.iter().any(|(alias, _)| alias == name) {
+            return Kind::ANY;
+        }
+        self.names
+            .iter()
+            .position(|n| n.as_deref() == Some(name))
+            .and_then(|slot| self.bound.bindings.get(slot))
+            .map_or(Kind::ANY, |binding| {
+                binding_kind(binding, &self.bound.segments)
+            })
+    }
+}
+
+/// The kinds a binding certainly holds for the static kind check (stage 3f): a node, edge or
+/// path variable of a pattern or of a `WITH` column holding one; any kind for a value, a group
+/// variable (inside a quantified body it is one element, outside it the list), a `FOR` item
+/// or a `CALL` / `MERGE` column, and a value written as a node that is checked at run time.
+fn binding_kind(binding: &super::bind::Binding, segments: &[Segment]) -> Kind {
+    if binding.group || binding.checked {
+        return Kind::ANY;
+    }
+    if let Some(column) = binding.column
+        && !matches!(segments.get(column.segment), Some(Segment::With(_)))
+    {
+        return Kind::ANY;
+    }
+    match binding.kind {
+        BindingKind::Node => Kind::NODE,
+        BindingKind::Edge => Kind::EDGE,
+        BindingKind::Path => Kind::PATH,
+        BindingKind::Value => Kind::ANY,
+    }
 }
 
 /// The value given for `$name` (the last one when given twice).
@@ -3366,6 +3400,9 @@ impl<'q> Lowering<'q> {
         let (expr, this) = self.condition(conjunct);
         let hooks = Hooks::default();
         let condition: RowExpr<S> = self.compile_in(&expr, this, &[], Some(&hooks))?;
+        // A condition must be able to be a boolean (`WHERE (n)`, `WHERE 1`; stage 3f).
+        check_condition(&expr, &self.scope(this, &[], None))
+            .map_err(|error| eval_error(self.query, error))?;
         if matches!(
             condition.as_const(),
             Some(Value::Scalar(ElementProperty::Boolean(true)))

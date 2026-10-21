@@ -31,7 +31,7 @@ g.gql("MATCH (s:software) RETURN s ORDER BY s.name").select("s").in("created").v
 | `expr AS name` | `name` |
 | `n.name` without `AS` | the expression text as written: `n.name` |
 | `count(*)` without `AS` | the same rule: `count(*)` |
-| `RETURN *` | every named variable, in the order of its first appearance in the query |
+| `RETURN *` | every named variable, in name order (code point order, as Neo4j: `a, b, p`; `WITH *` too) |
 | `RETURN *, expr AS x` | the variables first, then `x` |
 
 A name used twice is an error. Give every computed column an `AS` name: it is easier to read

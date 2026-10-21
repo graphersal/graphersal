@@ -2550,13 +2550,15 @@ const GQL_2B_TOKENS: &[&str] = &[
 
 /// A random subquery over the node variables `nodes` (the first is the main import): one of
 /// the four forms, sometimes negated, sometimes nested, sometimes joined with a plain
-/// condition.
+/// condition. A pattern predicate in a `value` position is written `EXISTS { .. }` (stage 3f:
+/// a pattern alone is a condition only where `WHERE` expects one).
 #[cfg(feature = "gql")]
 fn random_gql_2b_predicate(
     rng: &mut Rng,
     nodes: &[String],
     edge: Option<&str>,
     depth: usize,
+    value: bool,
 ) -> String {
     let x = nodes.first().cloned().unwrap_or_else(|| "x".into());
     let y = nodes.get(1).cloned();
@@ -2584,11 +2586,14 @@ fn random_gql_2b_predicate(
         format!("q = ({x})-->() WHERE length(q) = 1"),
     ]);
     if depth < 2 && rng.chance(25) {
-        let inner = random_gql_2b_predicate(rng, &["o".to_string(), x.clone()], None, depth + 1);
+        let inner =
+            random_gql_2b_predicate(rng, &["o".to_string(), x.clone()], None, depth + 1, false);
         bodies.push(format!("({x})-->(o) WHERE {inner}"));
     }
     let form = rng.below(4);
-    let core = if form == 0 {
+    let core = if form == 0 && value {
+        format!("EXISTS {{ {} }}", rng.pick(&plain))
+    } else if form == 0 {
         rng.pick(&plain).clone()
     } else {
         let body = rng.pick(&bodies).clone();
@@ -2631,9 +2636,9 @@ fn random_gql_2b_queries(rng: &mut Rng) -> [String; 4] {
         _ => ("MATCH (a:software), (b:person)", &["a", "b"], None),
     };
     let nodes: Vec<String> = nodes.iter().map(|n| n.to_string()).collect();
-    let pred = random_gql_2b_predicate(rng, &nodes, edge, 0);
+    let pred = random_gql_2b_predicate(rng, &nodes, edge, 0, false);
     let x = &nodes[0];
-    let other = random_gql_2b_predicate(rng, &nodes, None, 1);
+    let other = random_gql_2b_predicate(rng, &nodes, None, 1, true);
     let ret = match rng.below(6) {
         0 => "RETURN count(*) AS c".to_string(),
         1 => format!("RETURN {x}.name AS n"),
@@ -2648,7 +2653,8 @@ fn random_gql_2b_queries(rng: &mut Rng) -> [String; 4] {
         format!("{head} WHERE {pred} {ret}"),
         format!("{head} WHERE CASE WHEN {pred} THEN true ELSE false END {ret}"),
         format!("{head} FILTER {pred} {ret}"),
-        format!("{head} FOR t IN [{pred}] FILTER t {ret}"),
+        // The list item is a value: the condition under a searched CASE (stage 3f).
+        format!("{head} FOR t IN [CASE WHEN {pred} THEN true ELSE false END] FILTER t {ret}"),
     ]
 }
 

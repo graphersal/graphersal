@@ -4420,6 +4420,9 @@ pub(crate) enum GqlHelpTopic {
     TextAndNumber,
     /// A subscript `x[i]` / `x[a..b]` of the wrong kind of value or index (22G03, stage 3f).
     Subscript,
+    /// An operand whose kind is certain from the query text and that its operator or function
+    /// never takes, refused before the query runs (22G03, stage 3f, `gql::eval::kinds`).
+    StaticKind,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -6902,6 +6905,11 @@ fn gql_help(
                 help.push_str(GQL_MERGE_ADVICE);
                 return help;
             }
+            // A pattern predicate in a value position (stage 3f).
+            if topic == GqlHelpTopic::Subquery {
+                help.push_str(gql_semantic_advice(topic));
+                return help;
+            }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
                  [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
@@ -7021,6 +7029,9 @@ fn gql_help(
             );
             help.push_str(GQL_MERGE_ADVICE);
         }
+        GqlErrorKind::Data if topic == GqlHelpTopic::StaticKind => {
+            help.push_str(GQL_STATIC_KIND_ADVICE)
+        }
         GqlErrorKind::Data => {
             if topic == GqlHelpTopic::TextAndNumber {
                 help.push_str(
@@ -7049,6 +7060,21 @@ fn gql_help(
     }
     help
 }
+
+/// The advice of an operand of a kind its place never takes, known from the query text
+/// ([`GqlHelpTopic::StaticKind`], stage 3f): what each place takes, with runnable examples.
+#[cfg(feature = "gql")]
+const GQL_STATIC_KIND_ADVICE: &str = "The kind of the marked operand is certain from the query \
+     text (a literal, a node, edge or path variable, or a value computed from them) and its \
+     place never takes it, so gql() refuses the query before it runs. A condition (WHERE, \
+     FILTER, AND, OR, XOR, NOT) takes a boolean: compare a value to get one, as in \
+     g.gql(\"MATCH (p:person) WHERE p.age > 30 AND p.name STARTS WITH 'j' RETURN p.name\"); \
+     IN takes a list, as in g.gql(\"MATCH (p:person) WHERE p.name IN ['marko', 'josh'] \
+     RETURN p.age\"); type() takes an edge, labels() a node or an edge, length() and nodes() \
+     a path and size() a string or a list, as in g.gql(\"MATCH p = (a:person)-[e:knows]->(b) \
+     RETURN type(e), labels(a), length(p), size(nodes(p))\"); a property is read from a node, \
+     an edge or a map, never from a path, a list or a number. The check never looks at the \
+     value of a $parameter.";
 
 /// The advice of a subscript of the wrong kind ([`GqlHelpTopic::Subscript`], stage 3f): what
 /// `x[i]`, `m[k]` and `x[a..b]` read, and the conversions that fix the index.
@@ -7545,10 +7571,10 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         }
         GqlHelpTopic::ComprehensionVariable => {
             "A list comprehension, [x IN <list> WHERE <condition> | <expression>], binds its \
-             variable x to each item of the list, inside the comprehension only; x must be a \
-             new name, used nowhere else in the query: not a variable or column in scope, not \
-             the variable of a comprehension around it, and not a name that an earlier clause \
-             bound and dropped, as in g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, \
+             variable x to each item of the list, inside the comprehension only; x must not \
+             hide a name in scope: not a variable or column in scope, not the variable of a \
+             comprehension around it, and not a name that the value of a LET or WITH variable \
+             in scope reads (a name an earlier clause dropped may be used again), as in g.gql(\"MATCH (p:person) RETURN p.name, [a IN [p.age, \
              p.age + 1] WHERE a > 30 | a * 2] AS l\"). The same holds for the variable of \
              all(), any(), none() and single() and for both variables of reduce(), as in \
              g.gql(\"MATCH (p:person) RETURN p.name, all(a IN [p.age] WHERE a > 30) AS old, \
@@ -7582,7 +7608,8 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         | GqlHelpTopic::AggregateValue
         | GqlHelpTopic::Percentile
         | GqlHelpTopic::TextAndNumber
-        | GqlHelpTopic::Subscript => {
+        | GqlHelpTopic::Subscript
+        | GqlHelpTopic::StaticKind => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \
@@ -8083,7 +8110,7 @@ fn gql_materialized_limit_help(max: Option<u64>, observed: Option<u64>) -> Strin
     format!(
         "The gql() query built a value larger than 'traversal.max_materialized_bytes' \
          allows{}{}, by the engine's size estimate. A function whose result can be larger than \
-         its arguments (range(), split(), replace(), || and toString() of a list or map) and \
+         its arguments (range(), split(), replace(), || and CAST(x AS STRING) of a list or map) and \
          the list of collect_list() are checked before they are built, as is the list of a \
          pattern comprehension [(a)-->(b) | b.name], so the query stops instead of running out \
          of memory; the result is never cut short. The list of a COLLECT {{ .. RETURN x }} \
