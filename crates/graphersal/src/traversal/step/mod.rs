@@ -363,7 +363,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   request per statically known label (`None` when the label comes from a traversal or is
     ///   absent); the GQL `INSERT` steps `gql:insert_node(labels, ..)` /
     ///   `gql:insert_edge(label, ..)` ask exactly the same;
-    /// - `merge_v` / `merge_e`: `Create` and `Update` on `Data { Vertex | Edge, None }`;
+    /// - `merge_v`: `Read`, `Create` and `Update` on `Data { Vertex, None }` (it searches the
+    ///   vertices before it writes); `merge_e`: `Read` on `Data { Edge, None }` and on
+    ///   `Data { Vertex, None }` (it searches the edges and resolves its endpoint ids), then
+    ///   `Create` and `Update` on `Data { Edge, None }`;
     /// - `property`, `property_json`, `remove_property`: `Update` on `Data` of the elements the
     ///   step receives as far as the plan states them (`flow`, [`AccessFlow`]): one request per
     ///   known label, `Data { None, None }` when nothing is known;
@@ -474,7 +477,15 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                         }
                         Ok(())
                     }
+                    // A merge searches before it writes: `Read` on what it looks up (the
+                    // vertices of `merge_v`; the edges of `merge_e` and the vertices its
+                    // `Direction.out` / `Direction.in` ids name), so a policy denying reads
+                    // cannot probe existence through a merge.
                     "merge_v" | "merge_e" => {
+                        visit(read(element))?;
+                        if element == edge {
+                            visit(read(vertex))?;
+                        }
                         visit(AccessRequest::new(
                             Action::Create,
                             Resource::data(element, None),

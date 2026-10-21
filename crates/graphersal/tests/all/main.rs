@@ -220,6 +220,7 @@ mod vector_tests;
 mod verified_backup_tests;
 mod vertex_multi_label_tests;
 mod where_by_tests;
+mod where_label_equality_tests;
 mod where_scope_tests;
 mod where_unnest_optimization_tests;
 mod wrong_results_step1_tests;

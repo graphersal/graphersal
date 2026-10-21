@@ -643,6 +643,19 @@ export function draftFromScript(script, folder = '') {
 }
 
 /**
+ * The draft "Save as query" starts from a GQL query tab: its query text and its `$name`s as
+ * parameters, typed and defaulted by the tab's Parameters values (`args` in the form
+ * `parseGqlCall` gives them, js/gql-tab.js `paramArgs`).
+ */
+export function draftFromGql(query, args = {}, folder = '') {
+  return {
+    ...newDraft(folder, 'gql'),
+    body: storedGqlText(query),
+    params: gqlParamNames(query).map((name) => paramFromArg(name, args[name])),
+  };
+}
+
+/**
  * The spec `defineQuery` takes, from a draft: `{spec}`, or `{errors}` (field errors found
  * before the engine is asked: a parameter field that does not parse, a missing name).
  */

@@ -36,8 +36,9 @@ import {
   CODECS, ESTIMATE_CODECS, withCodec,
 } from '../compression.js';
 import {
-  queryTree, signatureText, errorsByField, accessBadge, languageBadge, draftFromScript,
+  queryTree, signatureText, errorsByField, accessBadge, languageBadge, draftFromScript, draftFromGql,
 } from '../saved-queries.js';
+import { paramArgs } from '../gql-tab.js';
 import {
   catalogMenuItems, indexRow, indexTotals, newTransformIndexDraft, indexDraftToSpec, defaultIndexName,
   INDEX_TYPES, INDEX_TRANSFORMS, indexTypeOf, indexTransformOf, indexNotServedReason,
@@ -109,7 +110,11 @@ export const SavedQueriesManager = {
     async function openFromScript(script) {
       await refreshSavedQueries();
       close();
-      await editor.value.openDraft(draftFromScript(script), { back: open });
+      // A GQL query tab hands `{language: 'gql', query, params}` (store.js saveTabAsQuery).
+      const draft = script && typeof script === 'object' && script.language === 'gql'
+        ? draftFromGql(script.query, paramArgs(script.params))
+        : draftFromScript(script);
+      await editor.value.openDraft(draft, { back: open });
     }
     async function remove(q) {
       if (!window.confirm(`Delete the saved query "${q.name}"? Scripts that call it fail afterwards.`)) return;

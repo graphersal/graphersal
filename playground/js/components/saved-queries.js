@@ -23,7 +23,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { bracketMatching, indentOnInput } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import {
-  state, toast, defineSavedQuery, dropSavedQuery, runSavedQuery, previewSavedQuery,
+  state, toast, defineSavedQuery, dropSavedQuery, runSavedQuery, previewSavedQuery, gqlVocabulary,
 } from '../store.js';
 import { storage } from '../util.js';
 import {
@@ -34,6 +34,8 @@ import {
 import { dslLanguage, dslHighlight } from '../editor/dsl-language.js';
 import { gqlLanguage } from '../editor/gql-language.js';
 import { dslCompletionSource } from '../editor/completion.js';
+import { gqlCompletionSource } from '../editor/gql-completion.js';
+import { declaredParams, rhaiParamSource } from '../editor/param-completion.js';
 import { loadCompletionData } from '../editor/completion-data.js';
 import { floatingTooltips } from '../editor/tooltips.js';
 import { editorTheme } from './query-editor.js';
@@ -74,13 +76,25 @@ export const SavedQueryDialog = {
       if (!host.value || !d.draft) return;
       const gql = d.draft.language === 'gql';
       if (!gql && !completionData) completionData = markRaw(await loadCompletionData(state.engine));
-      // The language: Rhai with the DSL completion, or GQL (highlighting only).
+      // The language: Rhai with the DSL completion, or GQL with the GQL completion. Both offer
+      // the declared parameters (read from the table on every request, so they follow its edits):
+      // a Rhai body their names (the function's arguments), a GQL body `$name` after `$`.
+      const params = () => declaredParams(d.draft ? d.draft.params : []);
+      if (gql) gqlVocabulary();
       const language = gql
-        ? [gqlLanguage]
+        ? [
+          gqlLanguage,
+          floatingTooltips(host.value),
+          autocompletion({
+            override: [gqlCompletionSource(gqlVocabulary, params)],
+            activateOnTyping: true,
+            icons: true,
+          }),
+        ]
         : [
           floatingTooltips(host.value),
           autocompletion({
-            override: [dslCompletionSource(() => completionData, () => state.savedQueries)],
+            override: [rhaiParamSource(() => (d.draft ? d.draft.params : [])), dslCompletionSource(() => completionData, () => state.savedQueries)],
             activateOnTyping: true,
             icons: true,
           }),

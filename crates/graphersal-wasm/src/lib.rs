@@ -934,6 +934,18 @@ mod tests {
         assert_eq!(deleted["edges"], 1, "{deleted}");
     }
 
+    /// The script an example of the Examples menu runs: its `script`, or for a GQL example
+    /// (`lang: "gql"`, opened in a GQL tab) the call the playground runs for it,
+    /// `g.gql("<script>", #{<params>})` (`graphersal_session::queries::gql_call_text`).
+    fn example_script(ex: &Value) -> String {
+        let script = ex["script"].as_str().expect("script");
+        if ex["lang"].as_str() == Some("gql") {
+            graphersal_session::queries::gql_call_text(script, &ex["params"]).expect("params")
+        } else {
+            script.to_string()
+        }
+    }
+
     /// Every example of the playground's Examples menu (`playground/js/examples.json`) runs on
     /// its sample graph; the ones marked `expect: "error"` fail, all others succeed.
     #[test]
@@ -948,7 +960,7 @@ mod tests {
         };
         for ex in &examples {
             let title = ex["title"].as_str().expect("title");
-            let script = ex["script"].as_str().expect("script");
+            let script = &example_script(ex);
             let graph = match ex["graph"].as_str().expect("graph") {
                 "any" => "modern",
                 kind => kind,
@@ -970,10 +982,10 @@ mod tests {
         let examples: Vec<Value> =
             serde_json::from_str(include_str!("../../../playground/js/examples.json"))
                 .expect("examples.json");
-        let gql: Vec<&str> = examples
+        let gql: Vec<String> = examples
             .iter()
             .filter(|ex| ex["group"] == "GQL")
-            .map(|ex| ex["script"].as_str().expect("script"))
+            .map(example_script)
             .collect();
         for construct in [
             "count(",
@@ -999,7 +1011,7 @@ mod tests {
         }
         let options = RunOptions::default();
         let mut tables = 0;
-        for script in gql {
+        for script in &gql {
             let mut session = Session::new();
             session.load_sample("modern").expect("sample graph");
             let r: Value =

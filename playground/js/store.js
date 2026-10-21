@@ -19,6 +19,11 @@ import { runText, mapErrorPosition } from './editor/run-selection.js';
 import { taskStartText, taskEndText } from './store-model.js';
 import { VALUE_MAX_CHARS } from './value-view.js';
 import { PUBLIC_PLAYGROUND, MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
+import {
+  GQL_TAB_TEMPLATE, gqlCallText, gqlErrorSpan, switchTabLanguage, withQueryParams, tabLanguage,
+} from './gql-tab.js';
+import { mapPosition } from './editor/run-selection.js';
+import { keysBySchema } from './editor/gql-complete.js';
 
 const HISTORY_MAX = 100;
 
@@ -72,7 +77,9 @@ export const state = reactive({
   theme: storage.get('theme', 'system'),
   systemDark: media ? media.matches : false,
   settings: { ...DEFAULT_SETTINGS, ...storage.get('settings', {}) },
-  history: storage.get('history', []), // [{script, ok, at, tab}], newest first, shared by all tabs
+  // [{script, ok, at, tab, language?, params?}], newest first, shared by all tabs (`language`
+  // 'gql' with the Parameters text for a run of a GQL tab)
+  history: storage.get('history', []),
   // Query tabs (tabs.js): `tabs` and `activeId`. Each tab owns its script, its run options (the
   // Query toolbar's Profile/Memory toggles), its last result and profile, and a stale flag.
   ...restoredTabs(),
@@ -118,6 +125,9 @@ export const state = reactive({
   focusPanel: null, // {panel, tab, n}: a request to reveal a panel/tab
   graphRequest: null, // {source, ids, n}: a request to the Graph panel (showNeighbourhood)
   jumpTo: null, // {line, column, n}: a request to move the editor cursor
+  // The graph's vocabulary for the GQL completion (`gqlVocabulary`): {vertexLabels, edgeLabels,
+  // keys} of the data version `version`; not reactive (markRaw), read by the completion source.
+  gqlVocab: null,
   toasts: [],
 });
 
@@ -295,12 +305,57 @@ export function closeOtherTabs(id = state.activeId) {
  * is empty or still holds an unmodified example (or history entry), otherwise a new tab opens.
  * `title` names a tab the user did not rename. Returns the tab, or null at the tab limit.
  */
-export function openScript({ title = '', script }) {
-  const { tab, reused } = tabs.openExample(state, { title, script });
+export function openScript({ title = '', script, language = 'rhai', params = '' }) {
+  const { tab, reused } = tabs.openExample(state, { title, script, language, params });
   if (!tab) tabLimitToast();
   else if (!reused) toast(`Opened in a new tab, "${tab.name}": the current tab holds your own text.`, 'info', 3500);
   persistTabs();
   return tab;
+}
+
+/** A new GQL query tab (the "+" menu's "GQL query"), with a starting query. */
+export function newGqlTab() {
+  return newTab({ language: 'gql', script: GQL_TAB_TEMPLATE });
+}
+
+/** The Parameters field of a GQL tab changed. */
+export function saveParams(params, tabId = state.activeId) {
+  tabs.setParams(state, tabId, params);
+  persistTabsSoon();
+}
+
+/**
+ * The editor's Rhai / GQL switch: the tab's text is rewritten like the saved-query editor's switch
+ * (js/gql-tab.js `switchTabLanguage`). Returns false (with a toast) when it cannot switch: GQL ->
+ * Rhai with a Parameters field that is not a JSON map.
+ */
+export function setTabLanguage(language, tabId = state.activeId) {
+  const tab = tabs.findTab(state, tabId);
+  if (!tab || tab.kind === 'ai' || tab.language === tabLanguage(language)) return false;
+  const next = switchTabLanguage({ script: tab.script, params: tab.params }, language);
+  if (next.error) {
+    toast(`${next.error}. Fix the Parameters field to switch to Rhai.`, 'error', 7000);
+    return false;
+  }
+  tabs.setLanguage(state, tab.id, language, next);
+  persistTabs();
+  return true;
+}
+
+/** "+ Add $parameters": an entry for every `$name` the GQL tab's query reads that its field lacks. */
+export function addQueryParams(tabId = state.activeId) {
+  const tab = tabs.findTab(state, tabId);
+  if (!tab || tab.language !== 'gql') return;
+  const next = withQueryParams(tab.params, tab.script);
+  if (next.error) {
+    toast(`${next.error}.`, 'error', 7000);
+    return;
+  }
+  if (!next.added.length) {
+    toast('Every $parameter of the query is in the Parameters field already.', 'info', 3500);
+    return;
+  }
+  saveParams(next.text, tab.id);
 }
 
 /** A Query toolbar toggle (Profile, Memory) of the active tab. */
@@ -365,6 +420,24 @@ export async function run(script, tabId = state.activeId, { selection = null } =
   const text = source.trim();
   const offset = selection ? selection.offset : runText(source).offset;
   if (!text || state.running || !state.engine) return null;
+  // A GQL tab runs `g.gql("<text>", #{params})` (js/gql-tab.js); its error positions are those
+  // of the GQL text, never of that wrapper.
+  const gql = tab.language === 'gql';
+  let engineScript = text;
+  if (gql) {
+    const call = gqlCallText(text, tab.params);
+    if (call.error) {
+      tabs.recordRun(state, tab.id, {
+        result: markRaw(failedResult({ message: call.error, help: 'The Parameters field under the editor holds a JSON map, for example {"min": 30, "names": ["josh", "vadas"]}; $min and $names read its values.' }, selection, ++state.runCount)),
+        profile: null,
+        script: text,
+        mutated: false,
+      });
+      reveal('results');
+      return tab.result;
+    }
+    engineScript = call.script;
+  }
   state.running = true;
   state.runningTabId = tab.id;
   state.runningElapsedMs = 0;
@@ -376,7 +449,7 @@ export async function run(script, tabId = state.activeId, { selection = null } =
   try {
     const { maxRows, maxItems, noLimit, spelling, graphResultMax } = state.settings;
     const { profile, memory } = tab.runOptions;
-    const res = await state.engine.execute(text, {
+    const res = await state.engine.execute(engineScript, {
       profile,
       profile_types: memory ? ['memory'] : [],
       max_rows: maxRows,
@@ -388,7 +461,7 @@ export async function run(script, tabId = state.activeId, { selection = null } =
     const runId = ++state.runCount;
     res.run_id = runId;
     const ex = res.execution;
-    if (ex.error) ex.error = mapErrorPosition(ex.error, offset);
+    if (ex.error) ex.error = gql ? gqlError(ex.error, offset) : mapErrorPosition(ex.error, offset);
     if (selection) res.selection = { lines: selection.lines, offset: selection.offset };
     tabs.recordRun(state, tab.id, {
       result: markRaw(res),
@@ -410,7 +483,7 @@ export async function run(script, tabId = state.activeId, { selection = null } =
     // Schema panels.
     if (res.mutated) state.graphVersion++;
     if (changedData(res)) state.dataVersion++;
-    addHistory(text, res.ok, tab.name);
+    addHistory(text, res.ok, tab.name, gql ? { language: 'gql', params: tab.params } : null);
     return res;
   } catch (err) {
     const stopped = err instanceof StoppedError;
@@ -440,6 +513,38 @@ export async function run(script, tabId = state.activeId, { selection = null } =
     state.runningTabId = null;
     state.runningElapsedMs = 0;
   }
+}
+
+/**
+ * The error of a GQL tab's run with the editor position of its span: `position` (the Go to line
+ * button) and `span` `{line, column, width, gqlstatus, offset}` for the underline, both in the
+ * editor's text (moved by `offset`, where the text that ran starts). An error without a GQL span
+ * loses the position of the `g.gql(..)` wrapper it was reported for.
+ */
+function gqlError(error, offset) {
+  const out = { ...error };
+  delete out.position;
+  const span = gqlErrorSpan(error);
+  if (span) {
+    out.position = mapPosition({ line: span.line, column: span.column }, offset);
+    out.span = { ...span, offset };
+  }
+  return out;
+}
+
+/** A failed result built in the page (no engine call): an error shown in Results. */
+function failedResult(error, selection, runId) {
+  return {
+    ok: false,
+    terminal: 'unknown',
+    mutated: false,
+    execution: { results: [], profile: null, error },
+    display: null,
+    subgraph: null,
+    elapsed_ms: 0,
+    run_id: runId,
+    ...(selection ? { selection: { lines: selection.lines, offset: selection.offset } } : {}),
+  };
 }
 
 /**
@@ -587,8 +692,9 @@ export async function makeShareLink({ run = true } = {}) {
       store = null;
     }
   }
+  const gql = tab.kind !== 'ai' && tab.language === 'gql' ? { language: 'gql', params: tab.params } : {};
   if (isUnchangedSample(graph, store, !!state.storeView)) {
-    const link = shareLink(base, { graph: graph.kind, script, title, run: run && script !== '' });
+    const link = shareLink(base, { graph: graph.kind, script, title, run: run && script !== '', ...gql });
     return { ...link, ...counts, sample: graph.kind, schema: false, tooMany: false };
   }
   if (graph.vertexCount + graph.edgeCount > MAX_SHARE_ELEMENTS) {
@@ -597,7 +703,7 @@ export async function makeShareLink({ run = true } = {}) {
   const saved = await state.engine.saveGraph('graphson');
   const data = await encodeLinkData(saved.text);
   const schema = saved.schema ? await encodeLinkData(saved.schema) : null;
-  const link = shareLink(base, { data, schema, script, title, run: run && script !== '' });
+  const link = shareLink(base, { data, schema, script, title, run: run && script !== '', ...gql });
   return { ...link, ...counts, sample: null, schema: !!saved.schema, tooMany: false };
 }
 
@@ -1128,7 +1234,10 @@ export function openCatalog(id) {
 export function saveTabAsQuery() {
   const tab = state.tab;
   if (!tab || tab.kind === 'ai') return;
-  state.catalogDialogScript = tab.script;
+  // A GQL tab hands its query and parameters directly (saved as `language: "gql"`).
+  state.catalogDialogScript = tab.language === 'gql'
+    ? { language: 'gql', query: tab.script, params: tab.params }
+    : tab.script;
   openCatalog('save-as-query');
 }
 
@@ -1263,9 +1372,47 @@ export function openQueryTab({ title, script, execute = false }) {
   return tab;
 }
 
-function addHistory(script, ok, tab) {
+let vocabLoading = null;
+
+/**
+ * The graph's vocabulary for the GQL completion (js/editor/gql-completion.js): `{vertexLabels,
+ * edgeLabels, keys}` (labels from `statistics()`, property keys by label from the stored schema
+ * or, without one, the inferred schema). It returns what is loaded (possibly of an older version)
+ * and starts loading the current version in the background; before the first load it returns
+ * the promise of that load.
+ */
+export function gqlVocabulary() {
+  const version = `${state.graphEpoch}:${state.graphVersion}:${state.dataVersion}`;
+  const have = state.gqlVocab;
+  if ((!have || have.version !== version) && !vocabLoading && state.engine && state.graph) {
+    vocabLoading = loadGqlVocabulary(version).catch(() => {}).finally(() => { vocabLoading = null; });
+  }
+  if (!have && vocabLoading) return vocabLoading.then(() => state.gqlVocab);
+  return have;
+}
+
+async function loadGqlVocabulary(version) {
+  const engine = state.engine;
+  const [stats, stored] = await Promise.all([
+    engine.statistics().catch(() => null),
+    engine.getSchema().catch(() => null),
+  ]);
+  const declares = (schema) => !!schema && ['vertices', 'edges'].some((k) => schema[k] && Object.keys(schema[k]).length);
+  const schema = declares(stored) ? stored : await engine.inferSchema().catch(() => null);
+  const s = stats && stats.statistics;
+  const labels = (rows) => [...new Set((rows || []).map((r) => r.label).filter((l) => typeof l === 'string' && l))].sort();
+  const keys = keysBySchema(schema);
+  state.gqlVocab = markRaw({
+    version,
+    vertexLabels: [...new Set([...labels(s && s.vertex_labels), ...Object.keys(keys.vertex)])].sort(),
+    edgeLabels: [...new Set([...labels(s && s.edge_labels), ...Object.keys(keys.edge)])].sort(),
+    keys,
+  });
+}
+
+function addHistory(script, ok, tab, gql = null) {
   const history = state.history.filter((h) => h.script !== script);
-  history.unshift({ script, ok, at: Date.now(), tab });
+  history.unshift({ script, ok, at: Date.now(), tab, ...(gql || {}) });
   state.history = history.slice(0, HISTORY_MAX);
   storage.set('history', state.history);
 }

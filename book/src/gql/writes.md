@@ -488,7 +488,8 @@ of every element the pattern can create (as the `INSERT` of it), and, only when 
 `ON CREATE SET` / `ON MATCH SET` items, their `Update`s (as `SET`). The step's own `Create` and
 `Update` requests are checked first, then the `Read`s of its search; a policy that denies
 `Create` refuses a `MERGE` even where every row would only find. `merge_v()` and `merge_e()`
-always ask `Create` and `Update` on any vertex or edge instead. (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
+ask `Read` on what they search first, then `Create` and `Update` on any vertex or edge (no
+labels, and `Update` even without `on_create` / `on_match` options). (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
 runs before the optimizer folds the property into the creation; a policy that denies only
 `Update` allows the `INSERT` and refuses its Gremlin twin.) A read-only host
 (`AccessPolicy::read_only()`, the MCP server's `--mcp-read-only`, a read-only view of a past

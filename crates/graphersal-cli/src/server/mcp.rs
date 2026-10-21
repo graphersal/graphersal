@@ -2214,10 +2214,18 @@ fn examples_text(examples: &Value) -> String {
             let graph = example["graph"].as_str().unwrap_or("");
             out.push_str(&format!("\n## {group} (graph: {graph})\n"));
         }
+        let script = example["script"].as_str().unwrap_or("");
+        // A GQL example (`lang: "gql"`, a plain GQL query with its `params`) as the call the
+        // `query` tool runs, `g.gql("..", #{..})`.
+        let script = match example["lang"].as_str() {
+            Some("gql") => graphersal_session::queries::gql_call_text(script, &example["params"])
+                .unwrap_or_else(|_| script.to_string()),
+            _ => script.to_string(),
+        };
         out.push_str(&format!(
             "\n{}:\n```\n{}\n```\n",
             example["title"].as_str().unwrap_or(""),
-            example["script"].as_str().unwrap_or("")
+            script
         ));
     }
     out
@@ -2226,6 +2234,25 @@ fn examples_text(examples: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GQL example of the playground (`lang: "gql"`, plain GQL with its `params`) is listed as
+    /// the `g.gql(..)` call the `query` tool runs; a Rhai example as it is.
+    #[test]
+    fn examples_list_a_gql_example_as_its_call() {
+        let examples = serde_json::json!([
+            {"group": "GQL", "graph": "modern", "title": "Older", "lang": "gql",
+             "script": "MATCH (p:person) WHERE p.age > $min\nRETURN p.name AS name", "params": {"min": 30}},
+            {"group": "GQL", "graph": "modern", "title": "Count", "script": "g.v().count()"},
+        ]);
+        let text = examples_text(&examples);
+        assert!(
+            text.contains(
+                "```\ng.gql(\"MATCH (p:person) WHERE p.age > $min\\nRETURN p.name AS name\", #{min: 30})\n```"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("```\ng.v().count()\n```"), "{text}");
+    }
 
     /// The gql tool writes like `query` (W41): offered with `query`'s annotations, and as a
     /// reading tool under `--mcp-read-only`, where the read-only authorizer refuses writes.
