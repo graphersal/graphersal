@@ -47,6 +47,7 @@ pub(crate) mod eval;
 pub(crate) mod functions;
 pub(crate) mod lexer;
 pub(crate) mod lower;
+pub(crate) mod merge_stand_in;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod planner;

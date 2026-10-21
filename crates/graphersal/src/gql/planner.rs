@@ -46,6 +46,18 @@
 //! reads each inserted element's values where its insert step runs and hosts the subqueries
 //! they hold there.
 //!
+//! Stage 3e: a `MERGE` is a [`Stage::Write`] carrying the plan of its match child
+//! ([`WriteStage::merge`]): the synthesized body `MATCH <pattern> RETURN <outputs>` planned
+//! like a `CALL` body on the incoming row (its imports bound, `Op::Resume` from the current
+//! element or an import, joins to the other bound ends, a correlated `Op::Lookup`, the
+//! clause's trail); its record columns are bound after it and there is no current element
+//! after it (its rows are the records, `#m<k>` when read after leaving them). The position pass
+//! reads the pattern's values and the create template's ends on the incoming row (the
+//! create template's later elements where its insert chain runs), the match child as a body
+//! there, then the `ON` items on the record, where it hosts their subqueries. Every element of
+//! the pattern is labelled when it has a path variable (the created path is assembled from
+//! them).
+//!
 //! A query that does not start with `MATCH` starts from one unit row (design M1): the first
 //! segment's operations are then empty (or only the conjuncts of a leading `LET` / `FILTER`
 //! pipeline), and the lowering emits `inject(0)` first.
@@ -184,8 +196,8 @@
 use super::ast::QueryEnd;
 use super::ast::{EdgeDirection, Quantifier};
 use super::bind::{
-    BindingId, BindingKind, BoundCall, BoundComposite, BoundLinear, BoundQuery, BoundWith,
-    BoundWrite, Count, InsertProperty, Predicate, Segment,
+    BindingId, BindingKind, BoundCall, BoundComposite, BoundLinear, BoundMerge, BoundQuery,
+    BoundWith, BoundWrite, Count, InsertProperty, Predicate, Segment,
 };
 use std::collections::BTreeSet;
 
@@ -587,6 +599,12 @@ impl<'q> Planner<'q> {
                     current = None;
                 }
                 Segment::Write(write) => {
+                    if let BoundWrite::Merge(merge) = &**write {
+                        // `MERGE` (stage 3e): its rows are its records, no current element.
+                        stages.push(self.merge(index, merge, current));
+                        current = None;
+                        continue;
+                    }
                     // The elements it creates are bound after it; the last one is the current
                     // element (the lowering's insert chain ends on it).
                     let created = write_created(write);
@@ -596,7 +614,11 @@ impl<'q> Planner<'q> {
                     if let Some(&last) = created.last() {
                         current = Some(last);
                     }
-                    stages.push(Stage::Write(WriteStage { segment: index }));
+                    stages.push(Stage::Write(WriteStage {
+                        segment: index,
+                        merge: None,
+                        labelled: false,
+                    }));
                 }
             }
         }
@@ -633,6 +655,25 @@ impl<'q> Planner<'q> {
             plan: Box::new(plan),
             optional: call.optional,
             imports: call.imports.clone(),
+            labelled: false,
+        })
+    }
+
+    /// The stage of a `MERGE` (stage 3e, module docs "Writes"): its match child planned like a
+    /// `CALL` body, with every binding before it bound and the current element `current` as its
+    /// start (`Op::Resume` from it or another import, joins to the other bound ends, a
+    /// correlated `Op::Lookup` for an id or index equality reading the row, the clause's
+    /// trail); its record columns are bound after it. A thin frame: it recurses through
+    /// [`Self::composite`].
+    #[inline(never)]
+    fn merge(&mut self, index: usize, merge: &BoundMerge, current: Option<BindingId>) -> Stage {
+        let plan = self.composite(&merge.body, Entry::Body { current });
+        for &output in &merge.outputs {
+            self.bind(output);
+        }
+        Stage::Write(WriteStage {
+            segment: index,
+            merge: Some(Box::new(plan)),
             labelled: false,
         })
     }
@@ -1471,6 +1512,24 @@ impl<'q> Planner<'q> {
                 }
             }
         }
+        // A `MERGE` path variable (stage 3e): the created path is assembled from the labels
+        // of every element of the pattern (the matched one from the match child's own path).
+        for segment in &bound.segments {
+            let Segment::Write(write) = segment else {
+                continue;
+            };
+            let BoundWrite::Merge(merge) = &**write else {
+                continue;
+            };
+            if merge.path.is_none() {
+                continue;
+            }
+            for id in &merge.elements {
+                if let Some(l) = self.labelling.get_mut(id.0) {
+                    l.path = true;
+                }
+            }
+        }
     }
 
     /// The labelling reasons that depend on where a read runs (module docs, "Labelling"): a
@@ -1605,7 +1664,22 @@ impl<'q> Planner<'q> {
                 }
                 Stage::Write(w) => {
                     if let Some(Segment::Write(write)) = bound.segments.get(w.segment) {
-                        self.write_positions(write, &mut current, at, &mut reads, hosts, body);
+                        match (&**write, w.merge.as_deref()) {
+                            (BoundWrite::Merge(merge), Some(plan)) => {
+                                let site = (w.segment, plan);
+                                self.merge_positions(site, merge, &mut current, at, hosts, body);
+                            }
+                            _ => {
+                                self.write_positions(
+                                    write,
+                                    &mut current,
+                                    at,
+                                    &mut reads,
+                                    hosts,
+                                    body,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1688,13 +1762,86 @@ impl<'q> Planner<'q> {
                 }
                 self.read_all(reads, at);
             }
-            // `MERGE` (stage 3e): planned from 3e.T3 on; `lower::prepare` refuses a bound
-            // MERGE before planning, so this arm only keeps the pass total.
+            // `MERGE` (stage 3e): its stage carries the match child's plan, so the pass runs
+            // [`Self::merge_positions`]; without one (never planned so) its reads only.
             BoundWrite::Merge(merge) => {
                 reads.extend_from_slice(&merge.reads);
                 self.read_all(reads, at);
             }
         }
+    }
+
+    /// The position pass over a `MERGE` (stage 3e), `(segment, plan)` its segment and its
+    /// match child's plan, run on `current`: the pattern's values (checked by `gql:merge`
+    /// before matching) and the bound elements the create template and the created path read
+    /// are read on the row before the clause; the match child is a body on that row; the
+    /// create template's insert chain reads each later element's values on the element created
+    /// just before (as an `INSERT`); the `ON` items read their targets and values on the record
+    /// and host their subqueries there. Leaves the row on the record, no current element.
+    /// A thin frame: it recurses through [`Self::composite_positions`].
+    #[inline(never)]
+    fn merge_positions(
+        &mut self,
+        (segment, plan): (usize, &CompositePlan),
+        merge: &BoundMerge,
+        current: &mut Option<BindingId>,
+        at: &mut Position,
+        hosts: &mut Vec<(usize, Host)>,
+        body: Option<usize>,
+    ) {
+        let created = |id: &BindingId| merge.outputs.contains(id);
+        let create = &merge.create;
+        let mut reads = Vec::new();
+        // On the row before the clause: every value (the checks) and the bound elements.
+        let values = create
+            .nodes
+            .iter()
+            .flat_map(|n| &n.properties)
+            .chain(create.edges.iter().flat_map(|e| &e.properties));
+        for property in values {
+            self.body_reads_away(body, &property.bindings, *current);
+            reads.extend_from_slice(&property.bindings);
+        }
+        let bound_elements: Vec<BindingId> = merge
+            .elements
+            .iter()
+            .copied()
+            .filter(|id| !created(id))
+            .collect();
+        self.body_reads_away(body, &bound_elements, *current);
+        reads.extend_from_slice(&bound_elements);
+        self.read_all(&mut reads, at);
+        // The match child: a body on the row before the clause.
+        self.composite_positions(plan, &merge.body, *current, at, hosts, body);
+        // The create template's insert chain (its values hold no subquery: no host).
+        let mut on = *current;
+        for node in &create.nodes {
+            self.insert_reads(&node.properties, &[], on, at, &mut reads, hosts, body);
+            on = Some(node.binding);
+        }
+        for edge in &create.edges {
+            let ends: Vec<BindingId> = [edge.source, edge.target]
+                .into_iter()
+                .filter(|id| !created(id))
+                .collect();
+            self.insert_reads(&edge.properties, &ends, on, at, &mut reads, hosts, body);
+            on = Some(edge.binding);
+        }
+        // The `ON` items on the record.
+        at.row = Some(segment);
+        *current = None;
+        let here = at.host(None);
+        for item in merge.on_create.iter().chain(&merge.on_match) {
+            let target = [item.target.binding];
+            self.body_reads_away(body, &target, None);
+            reads.extend_from_slice(&target);
+            if let Some(value) = item.kind.value() {
+                self.body_reads_away(body, &value.bindings, None);
+                reads.extend_from_slice(&value.bindings);
+                self.expr_hosts(&value.expr, here, hosts);
+            }
+        }
+        self.read_all(&mut reads, at);
     }
 
     /// The reads of one insert step at `current` (see [`Self::write_positions`]): its
@@ -1786,10 +1933,23 @@ impl<'q> Planner<'q> {
                         let w = *w;
                         self.mark(w, |l| l.optional = true);
                     }
-                    Stage::Optional { .. } | Stage::Match { .. } | Stage::Write(_) => {}
+                    Stage::Write(w) => {
+                        w.labelled = at.rows.contains(&w.segment);
+                        if let Some(merge) = w.merge.as_deref_mut() {
+                            self.finish_merge(merge, at);
+                        }
+                    }
+                    Stage::Optional { .. } | Stage::Match { .. } => {}
                 }
             }
         }
+    }
+
+    /// [`Self::finish_composite`] of a `MERGE`'s match child (stage 3e). A thin frame for the
+    /// recursion.
+    #[inline(never)]
+    fn finish_merge(&mut self, plan: &mut CompositePlan, at: &Position) {
+        self.finish_composite(plan, at);
     }
 
     /// [`Self::finish_composite`] of a `CALL` body. A thin frame for the recursion.
@@ -2221,8 +2381,21 @@ fn body_segments(bound: &BoundQuery, composite: &BoundComposite, out: &mut Vec<u
     for linear in composite.linears() {
         for &index in &linear.pipeline {
             out.push(index);
-            if let Some(Segment::Call(call)) = bound.segments.get(index) {
-                body_segments(bound, &call.body, out);
+            match bound.segments.get(index) {
+                Some(Segment::Call(call)) => body_segments(bound, &call.body, out),
+                Some(Segment::Write(write)) => {
+                    if let BoundWrite::Merge(merge) = &**write {
+                        body_segments(bound, &merge.body, out);
+                    }
+                }
+                Some(
+                    Segment::Match(_)
+                    | Segment::Optional(_)
+                    | Segment::With(_)
+                    | Segment::For(_)
+                    | Segment::Rows(_),
+                )
+                | None => {}
             }
         }
     }

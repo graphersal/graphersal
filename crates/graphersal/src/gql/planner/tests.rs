@@ -2548,3 +2548,169 @@ fn check_group_plan(q: &str, b: &BoundQuery, p: &LogicalPlan) {
         "{q}: a conjunct not placed"
     );
 }
+
+// ----- stage 3e: MERGE -----
+
+/// The `MERGE` stages of the first pipeline.
+fn merges(p: &LogicalPlan) -> Vec<&WriteStage> {
+    p.stages
+        .iter()
+        .filter_map(|stage| match stage {
+            Stage::Write(write) if write.merge.is_some() => Some(write),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The match child of every `MERGE` of the first pipeline, as [`tree`].
+fn merge_trees(q: &str, facts: &dyn PlannerFacts) -> Vec<Vec<String>> {
+    let (b, p) = plan_with(q, facts);
+    merges(&p)
+        .into_iter()
+        .filter_map(|w| w.merge.as_deref().map(|plan| tree(&b, &p, plan)))
+        .collect()
+}
+
+#[test]
+fn merge_match_child_resumes_at_a_bound_end_and_joins_the_other() {
+    // Planned like a `CALL` body on the incoming row: from the current element (the node the
+    // MATCH ended on), the edge walked from there, the other bound end joined.
+    assert_eq!(
+        merge_trees(
+            "MATCH (a:person {name: 'marko'}), (b:software {name: 'lop'}) \
+             MERGE (a)-[r:likes]->(b) RETURN r",
+            &NoFacts,
+        ),
+        [["resume b; b<-[r]-a; join a => [Project]"]]
+    );
+    // A new node between two bound ends: walked from one, joined at the other.
+    assert_eq!(
+        merge_trees(
+            "MATCH (a), (b) WHERE a.name = 'marko' AND b.name = 'josh' \
+             MERGE (a)-[:x]->(m:mid)<-[:y]-(b) RETURN m",
+            &NoFacts,
+        ),
+        [["resume b; b-[#m3]->m; m<-[#m1]-a; join a => [Project]"]]
+    );
+    // Inside a `CALL` body the MERGE continues from the imported current element.
+    let (b, p) = plan_with(
+        "MATCH (p:person) CALL (p) { MERGE (p)-[:likes]->(:fruit) } RETURN count(*)",
+        &NoFacts,
+    );
+    let call = calls(&p)[0];
+    let body = &call.plan.first.first;
+    let Some(Stage::Write(write)) = body.stages.first() else {
+        panic!("a MERGE stage: {:?}", body.stages)
+    };
+    let plan = write.merge.as_deref().expect("the match child's plan");
+    assert_eq!(tree(&b, &p, plan), ["resume p; p-[#m1]->#m2 => [Project]"]);
+    // The other write clauses carry no plan of their own.
+    let (_, p) = plan_with("MATCH (a) INSERT (a)-[:t]->(:n)", &NoFacts);
+    let Some(Stage::Write(write)) = p.stages.first() else {
+        panic!("a write stage")
+    };
+    assert!(write.merge.is_none() && !write.labelled);
+}
+
+#[test]
+fn merge_match_child_is_served_by_an_index_through_a_lookup() {
+    // An equality reading the row on an indexed key: a correlated lookup per row (E5).
+    assert_eq!(
+        merge_trees(
+            "FOR x IN ['a'] MERGE (n:person {name: x}) RETURN n",
+            &name_indexes()
+        ),
+        [["lookup n => [Project]"]]
+    );
+    // Without an index a child-leading scan, the equality a filter on the row; on a constant
+    // a scan with the pushed filter.
+    assert_eq!(
+        merge_trees(
+            "FOR x IN ['a'] MERGE (n:person {name: x}) RETURN n",
+            &NoFacts
+        ),
+        [["scan n; filter [0] => [Project]"]]
+    );
+    let (b, p) = plan_with("MERGE (n:person {name: 'ann'})", &name_indexes());
+    let plan = merges(&p)[0]
+        .merge
+        .as_deref()
+        .expect("the match child's plan");
+    let Some(Op::Scan(scan)) = plan.first.first.ops.first() else {
+        panic!("a scan: {:?}", plan.first.first.ops)
+    };
+    assert_eq!(name(&b, scan.binding), "n");
+    assert_eq!(scan.filters.pushed.len(), 1);
+}
+
+#[test]
+fn merge_undirected_edges_and_trail_are_planned_as_in_match() {
+    assert_eq!(
+        merge_trees(
+            "MATCH (a:person), (b:software) MERGE (a)-[r:t]-(b) RETURN r",
+            &NoFacts
+        ),
+        [["resume b; b-[r]-a; join a => [Project]"]]
+    );
+    // The clause's edges are one trail (W30: one path pattern).
+    assert_eq!(
+        merge_trees("MERGE (a:x)-[e:t]->(b:x)-[f:t]->(c:x)", &NoFacts),
+        [["scan a; a-[e]->b; b-[f]->c trail!=e => [Project]"]]
+    );
+}
+
+#[test]
+fn merge_path_variable_labels_every_element_of_the_pattern() {
+    let q = "MATCH (a:person) MERGE p = (a)-[:k]->(b:z) RETURN p, b";
+    let (b, p) = plan_with(q, &NoFacts);
+    let Some(Segment::Write(write)) = b.segments.get(merges(&p)[0].segment) else {
+        panic!("a write segment")
+    };
+    let BoundWrite::Merge(merge) = &**write else {
+        panic!("a MERGE")
+    };
+    // The create template's elements (the created path is assembled from their labels) and
+    // the bound end, whatever the binder says about reads.
+    assert_eq!(merge.elements.len(), 3);
+    for &id in &merge.elements {
+        assert!(reasons(&p, id).path, "{}", name(&b, id));
+    }
+    // The match child's own path variable labels its elements as in MATCH.
+    let body = &b.matches.last().expect("the match child's MATCH").paths[0];
+    for id in body.elements() {
+        assert!(reasons(&p, id).path, "{}", name(&b, id));
+    }
+    // Without a path variable no element gets the reason.
+    let (b, p) = plan_with("MATCH (a:person) MERGE (a)-[:k]->(b:z) RETURN b", &NoFacts);
+    let a = named(&b, "a")[0];
+    assert!(!reasons(&p, a).path);
+}
+
+#[test]
+fn merge_on_items_read_the_record_and_earlier_bindings() {
+    // `a` (before the clause) is read on the record, away from any element: it keeps its label;
+    // the record columns read there need no row label.
+    let q = "MATCH (a:person) MERGE (a)-[:k]->(b:z) ON CREATE SET b.from = a.name \
+             ON MATCH SET b.seen = true RETURN b.from";
+    let (b, p) = plan_with(q, &NoFacts);
+    let merge = merges(&p)[0];
+    assert!(!merge.labelled);
+    let a = named(&b, "a")[0];
+    assert!(reasons(&p, a).read);
+    // A record column read after a later stage left the record: the row label `#m<k>`.
+    let q = "MATCH (a:person) MERGE (a)-[:k]->(b:z) ON MATCH SET b.seen = true \
+             MATCH (c:software) RETURN b.seen, c";
+    let (_, p) = plan_with(q, &NoFacts);
+    assert!(merges(&p)[0].labelled);
+    // A subquery in an `ON` value is hosted on the record (no current element there).
+    let q = "MATCH (a:person) MERGE (a)-[:k]->(b:z) \
+             ON CREATE SET b.n = COUNT { MATCH (a)-->(x) } RETURN b";
+    let (_, p) = plan_with(q, &NoFacts);
+    assert_eq!(p.subqueries.len(), 1);
+    assert_eq!(p.subqueries[0].current, None);
+    // After the clause there is no current element: a later MATCH from a record column moves
+    // to it.
+    let q = "MERGE (n:x) MATCH (n)-->(m) RETURN m";
+    let (b, p) = plan_with(q, &NoFacts);
+    assert_eq!(stages(&b, &p), ["write", "match: resume ^n; n-[_2]->m"]);
+}

@@ -438,10 +438,24 @@ pub(crate) enum Stage {
 /// the last element created is the current element (a row passes on with every element the
 /// clause created bound). A query that writes has no merge point of the lowering (design W15;
 /// the optimizer's general `lazy_barrier` rule may still place a pass-through one).
+///
+/// A `MERGE` (stage 3e) carries the plan of its match child ([`WriteStage::merge`]): per
+/// incoming row the records of the match child, or the one record the create template gives;
+/// after it there is no current element (its rows are these records, read like the row of a
+/// `CALL`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WriteStage {
     /// The segment (index into [`BoundQuery::segments`], a `Segment::Write`).
     pub(crate) segment: usize,
+    /// `MERGE` (stage 3e): the plan of the match child (the synthesized body `MATCH <pattern>
+    /// RETURN <outputs>`, planned like a `CALL` body on the incoming row: `Op::Resume` from
+    /// the current element or an import, joins to the other bound ends, `Op::Lookup` for an id
+    /// or index equality reading the row, the clause's trail). `None` for the other write
+    /// clauses.
+    pub(crate) merge: Option<Box<CompositePlan>>,
+    /// `MERGE`: whether its record row needs the row label `#m<k>` (a record column read after
+    /// a later stage left the row), as [`CallStage::labelled`]. `false` for the others.
+    pub(crate) labelled: bool,
 }
 
 /// `[OPTIONAL] CALL (..) { body }` (stage 2d): per incoming row the records of the body (a

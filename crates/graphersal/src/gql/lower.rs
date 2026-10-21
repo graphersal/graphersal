@@ -114,12 +114,14 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemoveKind,
-    BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count, DeleteKind,
-    InsertProperty, Predicate, Segment, SortKey, TargetKind, WriteTarget, bind_with_parameters,
+    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundMerge, BoundQuery,
+    BoundRemoveKind, BoundSetItem, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef,
+    Conjunct, Count, DeleteKind, InsertProperty, Predicate, Segment, SortKey, TargetKind,
+    WriteTarget, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
+use super::merge_stand_in::GqlMergeSpec;
 use super::parser::parse;
 use super::plan::{
     CallStage, CompositePlan, ElementFilters, Expand, ForStage, GroupExpand, LogicalPlan, Lookup,
@@ -127,7 +129,9 @@ use super::plan::{
     SubqueryUse, UnionPlan, WriteStage, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
-use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
+use super::runtime::{
+    Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, SubqueryHost, eval_error,
+};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
@@ -337,6 +341,11 @@ struct Site {
     /// element there (this iteration's, `Binding::Label` of its latest occurrence), not the
     /// list it is outside the body.
     body: bool,
+    /// Inside the create child of the `MERGE` of this segment (stage 3e): the clause's record
+    /// columns are the elements its insert chain creates, read through their own path labels
+    /// (the one the traverser stands on `Binding::Current`), its path variable assembled from
+    /// the labels of the pattern's elements ([`Lowered::created_paths`]).
+    creating: Option<usize>,
 }
 
 impl Site {
@@ -348,6 +357,7 @@ impl Site {
             part: None,
             ordered: None,
             body: false,
+            creating: None,
         }
     }
 
@@ -368,6 +378,7 @@ impl Site {
             part: None,
             ordered: None,
             body: false,
+            creating: None,
         }
     }
 
@@ -380,6 +391,7 @@ impl Site {
             part: None,
             ordered: Some(result),
             body: false,
+            creating: None,
         }
     }
 
@@ -389,6 +401,15 @@ impl Site {
         Site {
             ordered: site.ordered,
             ..Site::default()
+        }
+    }
+
+    /// On the element of binding `id` inside the create child of a `MERGE` (`creating`, see
+    /// [`Site::creating`]); [`Site::on`] outside one.
+    fn created(id: BindingId, creating: Option<usize>) -> Self {
+        Site {
+            creating,
+            ..Site::on(id)
         }
     }
 }
@@ -575,9 +596,46 @@ enum Instr<S: GraphStorage> {
         site: Site,
         subqueries: Bodies<S>,
     },
+    /// `gql:merge(..)` (stage 3e): one `MERGE` clause ([`Upsert`]).
+    Upsert(Box<Upsert<S>>),
     /// `discard()`: the end of a pipeline ending in `FINISH` or a write clause (stage 3a, design
     /// W2): every row has done its work, none is returned.
     Discard,
+}
+
+/// A lowered `MERGE` ([`Instr::Upsert`], stage 3e, design W30-W37): per incoming row the
+/// records of the match child, else the one record of the create child, then the `ON MATCH` /
+/// `ON CREATE` items on each record; the rows after it are the records.
+struct Upsert<S: GraphStorage> {
+    /// The match child: the synthesized body lowered from [`Upsert::site`], ending in the
+    /// `gql:project` of the record.
+    matcher: Vec<Instr<S>>,
+    /// The create child: the create template's insert chain from [`Upsert::site`], ending in a
+    /// `gql:project` of the same columns.
+    creator: Vec<Instr<S>>,
+    /// Every value of the pattern (nodes, then edges, in create order), checked on the
+    /// incoming row before matching (P0 E1: a `NULL` value is 22004).
+    checks: Vec<GqlInsertProperty<S>>,
+    /// Where the clause runs (the incoming row): the checks read there.
+    site: Site,
+    /// The `ON CREATE` items in written order.
+    on_create: Vec<GqlSetItem<S>>,
+    /// Their targets in item order (their row bindings are set at emission).
+    on_create_targets: Vec<BindingId>,
+    /// The `ON MATCH` items in written order.
+    on_match: Vec<GqlSetItem<S>>,
+    /// Their targets in item order.
+    on_match_targets: Vec<BindingId>,
+    /// The record (the row of the clause's segment): the `ON` items read there.
+    record: Site,
+    /// The bodies of the subqueries the `ON` items' values hold, lowered from the record.
+    subqueries: Bodies<S>,
+    /// The `MERGE` keyword as written.
+    keyword: Span,
+    /// The path pattern as written.
+    pattern: Span,
+    /// Every element the create child can make, as an access request names it (P0 C7).
+    create_labels: Vec<(ElementKind, Option<CompactString>)>,
 }
 
 /// One end of an edge an `INSERT` creates ([`Instr::InsertEdge`]): the node binding, its
@@ -657,6 +715,10 @@ struct Lowered<S: GraphStorage> {
     inner_labels: Vec<CompactString>,
     /// Per binding: how a path variable is assembled (`None`: not a path variable).
     paths: Vec<Option<PathRead>>,
+    /// Per binding: the path variable of a `MERGE` as its create child assembles it, from the
+    /// labels of the pattern's elements in path order (stage 3e, [`Site::creating`]); `None`
+    /// for the others. Outside the create child it is a record column like the others.
+    created_paths: Vec<Option<Vec<PathPart>>>,
     /// The query writes (stage 3a): no merge point of the lowering (design W15; the executor
     /// never merges a mutating plan, so its `lazy_barrier()` would be a no-op in the profile).
     /// The optimizer's general `lazy_barrier` rule may still place its pass-through
@@ -704,6 +766,20 @@ struct GroupRead {
 impl<S: GraphStorage> Lowered<S> {
     /// Where variable `slot` reads from at `site` (see [`Site`]).
     fn binding(&self, slot: usize, site: Site) -> Binding {
+        if let Some(segment) = site.creating
+            && let Some(Some(column)) = self.columns.get(slot)
+            && column.segment == segment
+        {
+            // A record column of the `MERGE` whose create child this is: the element it
+            // creates (or the path over the pattern's elements).
+            if let Some(Some(parts)) = self.created_paths.get(slot) {
+                return Binding::Path(Arc::from(parts.as_slice()));
+            }
+            if site.current == Some(BindingId(slot)) {
+                return Binding::Current;
+            }
+            return Binding::Label(self.labels.get(slot).cloned().unwrap_or_default());
+        }
         if let Some(column) = ordered_column(&self.ordered, site, slot) {
             return match site.ordered {
                 Some(result) if site.row != Some(result) => Binding::RowColumn {
@@ -1027,15 +1103,7 @@ impl<S: GraphStorage> Lowered<S> {
                     site,
                     subqueries,
                 } => {
-                    for (item, id) in items.iter_mut().zip(&targets) {
-                        let binding = self.binding(id.0, site);
-                        match item {
-                            GqlSetItem::Property { target, .. }
-                            | GqlSetItem::Replace { target, .. }
-                            | GqlSetItem::Merge { target, .. }
-                            | GqlSetItem::Labels { target, .. } => target.binding = binding,
-                        }
-                    }
+                    self.set_targets(&mut items, &targets, site);
                     g.gql_set(
                         Arc::clone(&self.query),
                         items,
@@ -1071,10 +1139,60 @@ impl<S: GraphStorage> Lowered<S> {
                     self.bindings(site),
                     self.children(subqueries),
                 ),
+                Instr::Upsert(upsert) => self.upsert(g, *upsert),
                 Instr::Discard => g.discard(),
             };
         }
         g
+    }
+
+    /// Emits a `MERGE` ([`Upsert`]) through the `gql:merge` builder.
+    fn upsert<'g, T: Sink<'g, S>>(&self, g: T, upsert: Upsert<S>) -> T
+    where
+        S: 'g,
+    {
+        let Upsert {
+            matcher,
+            creator,
+            checks,
+            site,
+            mut on_create,
+            on_create_targets,
+            mut on_match,
+            on_match_targets,
+            record,
+            subqueries,
+            keyword,
+            pattern,
+            create_labels,
+        } = upsert;
+        self.set_targets(&mut on_create, &on_create_targets, record);
+        self.set_targets(&mut on_match, &on_match_targets, record);
+        let matcher = self.emit_into(AnonymousTraversal::new(), matcher);
+        let creator = self.emit_into(AnonymousTraversal::new(), creator);
+        let spec = GqlMergeSpec {
+            query: Arc::clone(&self.query),
+            keyword,
+            pattern,
+            create_labels,
+            check_bindings: self.bindings(site),
+            bindings: self.bindings(record),
+            hosts: SubqueryHost::new(self.children(subqueries)),
+        };
+        g.gql_merge(matcher, creator, checks, on_create, on_match, spec)
+    }
+
+    /// Sets the row binding of every item's target (`targets`, item order) read at `site`.
+    fn set_targets(&self, items: &mut [GqlSetItem<S>], targets: &[BindingId], site: Site) {
+        for (item, id) in items.iter_mut().zip(targets) {
+            let binding = self.binding(id.0, site);
+            match item {
+                GqlSetItem::Property { target, .. }
+                | GqlSetItem::Replace { target, .. }
+                | GqlSetItem::Merge { target, .. }
+                | GqlSetItem::Labels { target, .. } => target.binding = binding,
+            }
+        }
     }
 
     /// The child traversals of hosted subquery bodies (see [`Bodies`]).
@@ -1299,6 +1417,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Set { .. }
             | Instr::Remove { .. }
             | Instr::Delete { .. }
+            | Instr::Upsert(_)
             | Instr::Discard => t,
         }
     }
@@ -1396,6 +1515,17 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         targets: Vec<GqlDeleteTarget<S>>,
         bindings: Arc<[Binding]>,
         children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self;
+    /// `gql:merge(..)`: one `MERGE` clause (stage 3e; the stand-in until 3e.T4, see
+    /// `gql::merge_stand_in`).
+    fn gql_merge(
+        self,
+        matcher: AnonymousTraversal<'g, S>,
+        creator: AnonymousTraversal<'g, S>,
+        checks: Vec<GqlInsertProperty<S>>,
+        on_create: Vec<GqlSetItem<S>>,
+        on_match: Vec<GqlSetItem<S>>,
+        spec: GqlMergeSpec<'g, S>,
     ) -> Self;
     /// `gql:project(columns)` as the `RETURN` that ends the query: a column holding an element
     /// a `DELETE` removed earlier is the W28 error (stage 3d).
@@ -1570,6 +1700,18 @@ macro_rules! sink {
             ) -> Self {
                 self.gql_delete(query, keyword, detach, targets, bindings, children)
             }
+            fn gql_merge(
+                self,
+                matcher: AnonymousTraversal<'g, S>,
+                creator: AnonymousTraversal<'g, S>,
+                checks: Vec<GqlInsertProperty<S>>,
+                on_create: Vec<GqlSetItem<S>>,
+                on_match: Vec<GqlSetItem<S>>,
+                spec: GqlMergeSpec<'g, S>,
+            ) -> Self {
+                // TEMPORARY (3e.T3): the stand-in until the step lands (3e.T4: `gql_merge`).
+                self.gql_merge_stand_in(matcher, creator, checks, on_create, on_match, spec)
+            }
             fn gql_project_returning(
                 self,
                 query: Arc<str>,
@@ -1679,45 +1821,8 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    if let Some(error) = merge_not_yet(query, &bound) {
-        return Err(error);
-    }
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
-}
-
-/// The error of the first bound `MERGE` of `query` (stage 3e: bound since 3e.T2, planned and
-/// lowered from 3e.T3 on), at its keyword; `None` without one. Checked before the planner.
-fn merge_not_yet(query: &str, bound: &BoundQuery) -> Option<TraverserError> {
-    bound.segments.iter().find_map(|segment| match segment {
-        Segment::Write(write) => match &**write {
-            BoundWrite::Merge(merge) => Some(merge_not_yet_error(query, merge.keyword)),
-            BoundWrite::Insert(_)
-            | BoundWrite::Set(_)
-            | BoundWrite::Remove(_)
-            | BoundWrite::Delete(_) => None,
-        },
-        Segment::Match(_)
-        | Segment::Optional(_)
-        | Segment::With(_)
-        | Segment::For(_)
-        | Segment::Call(_)
-        | Segment::Rows(_) => None,
-    })
-}
-
-/// The "not yet" error of a bound `MERGE` at `keyword`: the Gremlin steps that do it.
-fn merge_not_yet_error(query: &str, keyword: Span) -> TraverserError {
-    GqlErrorBuilder::new(
-        GqlErrorKind::NotYet,
-        keyword.start..keyword.end,
-        "MERGE is not yet supported in this version",
-    )
-    .alternative(
-        "find or create the element with the Gremlin steps merge_v() and merge_e(), for \
-         example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})",
-    )
-    .into_error(query)
 }
 
 /// The data writes the plan of `query` asks the authorization check for (each once, in plan
@@ -1974,8 +2079,14 @@ impl<'q> Lowering<'q> {
             for pipeline in composite.blocks().flat_map(UnionPlan::operands) {
                 pipelines.push(pipeline);
                 for stage in &pipeline.stages {
-                    if let Stage::Call(call) = stage {
-                        work.push(&call.plan);
+                    match stage {
+                        Stage::Call(call) => work.push(&call.plan),
+                        Stage::Write(write) => work.extend(write.merge.as_deref()),
+                        Stage::Match { .. }
+                        | Stage::Optional { .. }
+                        | Stage::Materialize(_)
+                        | Stage::For(_)
+                        | Stage::Rows(_) => {}
                     }
                 }
             }
@@ -2072,6 +2183,7 @@ impl<'q> Lowering<'q> {
         } = self.groups(&labels, &mut labelled);
         let inner_labels = self.inner_labels(&labels);
         let paths = self.paths(&labels, &inner_labels, &reversed, &anchors);
+        let created_paths = self.created_paths(&labels);
         Ok(Lowered {
             query: self.shared,
             instrs,
@@ -2086,6 +2198,7 @@ impl<'q> Lowering<'q> {
             part_labels,
             inner_labels,
             paths,
+            created_paths,
             writes: bound.writes(),
         })
     }
@@ -2221,71 +2334,11 @@ impl<'q> Lowering<'q> {
             return Err(self.unlowered());
         };
         match &**write {
-            BoundWrite::Insert(insert) => {
-                for node in &insert.nodes {
-                    let hooks = Hooks::default();
-                    let properties = self.insert_properties(&node.properties, &hooks)?;
-                    instrs.push(Instr::InsertNode {
-                        labels: node
-                            .labels
-                            .iter()
-                            .map(|l| CompactString::from(l.name.as_str()))
-                            .collect(),
-                        properties,
-                        site,
-                        subqueries: self.bodies(hooks, site)?,
-                    });
-                    instrs.push(Instr::Label(node.binding));
-                    site = Site::on(node.binding);
-                }
-                for edge in &insert.edges {
-                    let hooks = Hooks::default();
-                    let properties = self.insert_properties(&edge.properties, &hooks)?;
-                    instrs.push(Instr::InsertEdge {
-                        label: CompactString::from(edge.label.name.as_str()),
-                        from: self.insert_end(insert, edge.source, edge.span),
-                        to: self.insert_end(insert, edge.target, edge.span),
-                        properties,
-                        site,
-                        subqueries: self.bodies(hooks, site)?,
-                    });
-                    instrs.push(Instr::Label(edge.binding));
-                    site = Site::on(edge.binding);
-                }
-            }
+            BoundWrite::Insert(insert) => site = self.insert_chain(insert, site, None, instrs)?,
             // `SET` (stage 3c): one step on the row; it emits the row unchanged, the site stays.
             BoundWrite::Set(set) => {
                 let hooks = Hooks::default();
-                let mut items = Vec::with_capacity(set.items.len());
-                let mut targets = Vec::with_capacity(set.items.len());
-                for item in &set.items {
-                    let target = self.write_target(&item.target);
-                    let span = item.span;
-                    items.push(match &item.kind {
-                        BoundSetKind::Property { key, value } => GqlSetItem::Property {
-                            target,
-                            key: CompactString::from(key.name.as_str()),
-                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
-                            span,
-                        },
-                        BoundSetKind::Replace(value) => GqlSetItem::Replace {
-                            target,
-                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
-                            span,
-                        },
-                        BoundSetKind::Merge(value) => GqlSetItem::Merge {
-                            target,
-                            value: self.compile_in(&value.expr, None, &[], Some(&hooks))?,
-                            span,
-                        },
-                        BoundSetKind::Labels(labels) => GqlSetItem::Labels {
-                            target,
-                            labels: label_names(labels),
-                            span,
-                        },
-                    });
-                    targets.push(item.target.binding);
-                }
+                let (items, targets) = self.set_items(&set.items, &hooks)?;
                 instrs.push(Instr::Set {
                     items,
                     targets,
@@ -2320,8 +2373,8 @@ impl<'q> Lowering<'q> {
                     site,
                 });
             }
-            // `MERGE` (stage 3e): refused before planning (`merge_not_yet`) until 3e.T3.
-            BoundWrite::Merge(merge) => return Err(merge_not_yet_error(self.query, merge.keyword)),
+            // `MERGE` (stage 3e): one `gql:merge` step; its rows are its records.
+            BoundWrite::Merge(merge) => return self.merge(stage, merge, site, instrs),
             // `DELETE` (stage 3d): one step on all rows at once (it collects every target, checks
             // `NODETACH`, then removes); it emits the rows unchanged, the site stays.
             BoundWrite::Delete(delete) => {
@@ -2355,6 +2408,219 @@ impl<'q> Lowering<'q> {
             }
         }
         Ok(site)
+    }
+
+    /// The insert chain of `insert` from `site` (stage 3a, see [`Self::write`]); `creating`:
+    /// inside the create child of the `MERGE` of that segment ([`Site::creating`]). Returns
+    /// the site on the last element created.
+    fn insert_chain<S: GraphStorage>(
+        &self,
+        insert: &BoundInsert,
+        mut site: Site,
+        creating: Option<usize>,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        for node in &insert.nodes {
+            let hooks = Hooks::default();
+            let properties = self.insert_properties(&node.properties, &hooks)?;
+            instrs.push(Instr::InsertNode {
+                labels: node
+                    .labels
+                    .iter()
+                    .map(|l| CompactString::from(l.name.as_str()))
+                    .collect(),
+                properties,
+                site,
+                subqueries: self.bodies(hooks, site)?,
+            });
+            instrs.push(Instr::Label(node.binding));
+            site = Site::created(node.binding, creating);
+        }
+        for edge in &insert.edges {
+            let hooks = Hooks::default();
+            let properties = self.insert_properties(&edge.properties, &hooks)?;
+            instrs.push(Instr::InsertEdge {
+                label: CompactString::from(edge.label.name.as_str()),
+                from: self.insert_end(insert, edge.source, edge.span),
+                to: self.insert_end(insert, edge.target, edge.span),
+                properties,
+                site,
+                subqueries: self.bodies(hooks, site)?,
+            });
+            instrs.push(Instr::Label(edge.binding));
+            site = Site::created(edge.binding, creating);
+        }
+        Ok(site)
+    }
+
+    /// The items of a `SET` clause or of the `ON` parts of a `MERGE`, compiled for a step
+    /// hosting the subqueries their values hold (`hooks`), and their targets in item order
+    /// (their row bindings are set at emission, [`Instr::Set`]).
+    fn set_items<S: GraphStorage>(
+        &self,
+        items: &[BoundSetItem],
+        hooks: &Hooks,
+    ) -> Result<(Vec<GqlSetItem<S>>, Vec<BindingId>), TraverserError> {
+        let mut compiled = Vec::with_capacity(items.len());
+        let mut targets = Vec::with_capacity(items.len());
+        for item in items {
+            let target = self.write_target(&item.target);
+            let span = item.span;
+            compiled.push(match &item.kind {
+                BoundSetKind::Property { key, value } => GqlSetItem::Property {
+                    target,
+                    key: CompactString::from(key.name.as_str()),
+                    value: self.compile_in(&value.expr, None, &[], Some(hooks))?,
+                    span,
+                },
+                BoundSetKind::Replace(value) => GqlSetItem::Replace {
+                    target,
+                    value: self.compile_in(&value.expr, None, &[], Some(hooks))?,
+                    span,
+                },
+                BoundSetKind::Merge(value) => GqlSetItem::Merge {
+                    target,
+                    value: self.compile_in(&value.expr, None, &[], Some(hooks))?,
+                    span,
+                },
+                BoundSetKind::Labels(labels) => GqlSetItem::Labels {
+                    target,
+                    labels: label_names(labels),
+                    span,
+                },
+            });
+            targets.push(item.target.binding);
+        }
+        Ok((compiled, targets))
+    }
+
+    /// Lowers a `MERGE` at `site` (stage 3e, [`WriteStage::merge`], [`Upsert`]): the match
+    /// child is its synthesized body lowered from `site` like a `CALL` body (ending in the
+    /// `gql:project` of the record); the create child is the 3a insert chain of the create
+    /// template from `site` (an element bound before the clause that the created path holds
+    /// and that has no label of its own, a `WITH` column, is moved to first and labelled),
+    /// ending in a `gql:project` of the same columns, where the created elements are read
+    /// through their own labels ([`Site::creating`]); the checks are the pattern's values on
+    /// `site`; the `ON` items run on the record. Then the row label `#m<k>` (emitted only when
+    /// read later). Returns the site on the record. A thin frame: it recurses through
+    /// [`Self::composite`].
+    #[inline(never)]
+    fn merge<S: GraphStorage>(
+        &self,
+        stage: &'q WriteStage,
+        merge: &'q BoundMerge,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(plan) = stage.merge.as_deref() else {
+            return Err(self.unlowered());
+        };
+        let segment = stage.segment;
+        let create = &merge.create;
+        // The checks (P0 E1): every value of the pattern, read on the incoming row.
+        let checks = create
+            .nodes
+            .iter()
+            .flat_map(|n| &n.properties)
+            .chain(create.edges.iter().flat_map(|e| &e.properties))
+            .map(|p| {
+                Ok(GqlInsertProperty {
+                    key: CompactString::from(p.key.name.as_str()),
+                    value: self.compile(&p.value, None, &[])?,
+                })
+            })
+            .collect::<Result<Vec<_>, TraverserError>>()?;
+        // The match child.
+        let mut matcher = Vec::new();
+        self.composite(plan, &merge.body, Start::At(site), false, &mut matcher)?;
+        // The create child.
+        let mut creator = Vec::new();
+        let creating = Some(segment);
+        let mut at = Site { creating, ..site };
+        if merge.path.is_some() {
+            for &id in &merge.elements {
+                if !merge.outputs.contains(&id) && self.is_column(id) {
+                    creator.push(self.bind(id, at)?);
+                    creator.push(Instr::Label(id));
+                    at = Site::created(id, creating);
+                }
+            }
+        }
+        let at = self.insert_chain(create, at, creating, &mut creator)?;
+        let names = merge
+            .body
+            .last()
+            .first
+            .columns
+            .iter()
+            .map(|c| c.name.as_str());
+        let reserved = Expr {
+            kind: ExprKind::Variable(Identifier {
+                name: String::new(),
+                span: merge.span,
+            }),
+            span: merge.span,
+        };
+        let mut columns = Vec::with_capacity(merge.outputs.len());
+        for (&output, name) in merge.outputs.iter().zip(names) {
+            columns.push(GqlColumn {
+                name: CompactString::from(name),
+                expr: self.compile(&reserved, Some(output.0), &[])?,
+            });
+        }
+        if columns.len() != merge.outputs.len() {
+            return Err(self.unlowered());
+        }
+        creator.push(Instr::Project {
+            columns,
+            site: at,
+            subqueries: Vec::new(),
+            returning: false,
+        });
+        // The `ON` items, on the record.
+        let record = Site::row(segment);
+        let hooks = Hooks::default();
+        let (on_create, on_create_targets) = self.set_items(&merge.on_create, &hooks)?;
+        let (on_match, on_match_targets) = self.set_items(&merge.on_match, &hooks)?;
+        let create_labels = create
+            .nodes
+            .iter()
+            .flat_map(|n| {
+                let labels: Vec<Option<CompactString>> = if n.labels.is_empty() {
+                    vec![None]
+                } else {
+                    n.labels
+                        .iter()
+                        .map(|l| Some(CompactString::from(l.name.as_str())))
+                        .collect()
+                };
+                labels.into_iter().map(|l| (ElementKind::Vertex, l))
+            })
+            .chain(create.edges.iter().map(|e| {
+                (
+                    ElementKind::Edge,
+                    Some(CompactString::from(e.label.name.as_str())),
+                )
+            }))
+            .collect();
+        instrs.push(Instr::Upsert(Box::new(Upsert {
+            matcher,
+            creator,
+            checks,
+            site,
+            on_create,
+            on_create_targets,
+            on_match,
+            on_match_targets,
+            record,
+            subqueries: self.bodies(hooks, record)?,
+            keyword: merge.keyword,
+            // The synthesized body's span is the pattern's.
+            pattern: merge.body.first.first.span,
+            create_labels,
+        })));
+        instrs.push(Instr::RowLabel(segment));
+        Ok(record)
     }
 
     /// The target of a `SET` / `REMOVE` item with the static facts the access requests are
@@ -3448,6 +3714,15 @@ impl<'q> Lowering<'q> {
                 | Instr::Bind { site, .. }
                 | Instr::Remove { site, .. }
                 | Instr::RowCheck(_, site) => site.ordered = Some(result),
+                Instr::Upsert(upsert) => {
+                    upsert.site.ordered = Some(result);
+                    upsert.record.ordered = Some(result);
+                    self.in_order(&mut upsert.matcher, result)?;
+                    self.in_order(&mut upsert.creator, result)?;
+                    for nested in upsert.subqueries.iter_mut() {
+                        self.in_order(nested, result)?;
+                    }
+                }
                 Instr::Hop(hop) => self.in_order(&mut hop.steps, result)?,
                 Instr::Optional(part)
                 | Instr::Exists { body: part, .. }
@@ -3630,7 +3905,8 @@ impl<'q> Lowering<'q> {
                 Stage::For(f) => (f.segment, f.labelled),
                 Stage::Call(c) => (c.segment, c.labelled),
                 Stage::Rows(r) => (r.segment, r.labelled),
-                Stage::Match { .. } | Stage::Optional { .. } | Stage::Write(_) => continue,
+                Stage::Write(w) => (w.segment, w.labelled),
+                Stage::Match { .. } | Stage::Optional { .. } => continue,
             };
             if labelled && let Some(flag) = rows.get_mut(segment) {
                 *flag = true;
@@ -3836,6 +4112,31 @@ impl<'q> Lowering<'q> {
         paths
     }
 
+    /// Per binding: the path variable of a `MERGE` as its create child assembles it (see
+    /// [`Lowered::created_paths`]): the labels of the pattern's elements in path order.
+    fn created_paths(&self, labels: &[CompactString]) -> Vec<Option<Vec<PathPart>>> {
+        let mut paths = vec![None; self.bound.bindings.len()];
+        for segment in &self.bound.segments {
+            let Segment::Write(write) = segment else {
+                continue;
+            };
+            let BoundWrite::Merge(merge) = &**write else {
+                continue;
+            };
+            let Some(slot) = merge.path.and_then(|p| paths.get_mut(p.0)) else {
+                continue;
+            };
+            *slot = Some(
+                merge
+                    .elements
+                    .iter()
+                    .map(|id| PathPart::Element(labels.get(id.0).cloned().unwrap_or_default()))
+                    .collect(),
+            );
+        }
+        paths
+    }
+
     /// The path label of each binding: its key (the variable name, or `#<id>` for a name bound
     /// again after a `WITH` dropped it, decision C14); an anonymous binding `#<id>`
     /// (no plain identifier starts with `#`), with more `#` in front while it collides with a
@@ -3879,6 +4180,7 @@ impl<'q> Lowering<'q> {
                     Segment::For(_) => 'f',
                     Segment::Call(_) => 'c',
                     Segment::Rows(_) => 'n',
+                    Segment::Write(write) if matches!(**write, BoundWrite::Merge(_)) => 'm',
                     Segment::Match(_) | Segment::Optional(_) | Segment::Write(_) => {
                         return CompactString::default();
                     }
@@ -3907,17 +4209,24 @@ impl<'q> Lowering<'q> {
 }
 
 /// Every linear query of `bound` ([`Lowering::linears`]): the top-level ones in text order,
-/// then those of each `CALL` body (every `Segment::Call`, nested ones included, since their
-/// segments are in the one table), then those of whole-query subquery bodies.
+/// then those of each `CALL` body and `MERGE` match child (every `Segment::Call`, nested ones
+/// included, since their segments are in the one table), then those of whole-query subquery
+/// bodies.
 fn linears(bound: &BoundQuery) -> Vec<&BoundLinear> {
     let calls = bound.segments.iter().filter_map(|segment| match segment {
         Segment::Call(call) => Some(&*call.body),
+        Segment::Write(write) => match &**write {
+            BoundWrite::Merge(merge) => Some(&*merge.body),
+            BoundWrite::Insert(_)
+            | BoundWrite::Set(_)
+            | BoundWrite::Remove(_)
+            | BoundWrite::Delete(_) => None,
+        },
         Segment::Match(_)
         | Segment::Optional(_)
         | Segment::With(_)
         | Segment::For(_)
-        | Segment::Rows(_)
-        | Segment::Write(_) => None,
+        | Segment::Rows(_) => None,
     });
     let bodies = bound.subqueries.iter().filter_map(|s| s.query.as_deref());
     std::iter::once(&bound.body)
@@ -4054,6 +4363,13 @@ impl Marks<'_> {
                 continue;
             }
             match self.columns.get(slot) {
+                // A record column of the `MERGE` whose create child this is: read through its
+                // own label there (stage 3e).
+                Some(Some(column)) if site.creating == Some(column.segment) => {
+                    if let Some(flag) = self.labelled.get_mut(slot) {
+                        *flag = true;
+                    }
+                }
                 Some(Some(column)) => {
                     if site.row != Some(column.segment)
                         && let Some(flag) = self.rows.get_mut(column.segment)
@@ -4219,6 +4535,32 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 marks.read(&mut slots, *site);
                 subqueries.iter().for_each(|body| mark_reads(body, marks));
             }
+            Instr::Upsert(upsert) => {
+                for check in &upsert.checks {
+                    check.value.variables(&mut slots);
+                }
+                marks.read(&mut slots, upsert.site);
+                mark_reads(&upsert.matcher, marks);
+                mark_reads(&upsert.creator, marks);
+                for item in upsert.on_create.iter().chain(&upsert.on_match) {
+                    match item {
+                        GqlSetItem::Property { value, .. }
+                        | GqlSetItem::Replace { value, .. }
+                        | GqlSetItem::Merge { value, .. } => value.variables(&mut slots),
+                        GqlSetItem::Labels { .. } => {}
+                    }
+                }
+                let targets = upsert
+                    .on_create_targets
+                    .iter()
+                    .chain(&upsert.on_match_targets);
+                slots.extend(targets.map(|id| id.0));
+                marks.read(&mut slots, upsert.record);
+                upsert
+                    .subqueries
+                    .iter()
+                    .for_each(|body| mark_reads(body, marks));
+            }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part)
             | Instr::Exists { body: part, .. }
@@ -4291,6 +4633,16 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 .for_each(|body| in_part(body, segment)),
             Instr::Lookup { site, .. } | Instr::Bind { site, .. } | Instr::Remove { site, .. } => {
                 site.part = Some(segment)
+            }
+            Instr::Upsert(upsert) => {
+                upsert.site.part = Some(segment);
+                upsert.record.part = Some(segment);
+                in_part(&mut upsert.matcher, segment);
+                in_part(&mut upsert.creator, segment);
+                upsert
+                    .subqueries
+                    .iter_mut()
+                    .for_each(|body| in_part(body, segment));
             }
             Instr::Hop(hop) => in_part(&mut hop.steps, segment),
             Instr::Optional(part)
@@ -4474,4 +4826,73 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
         // it.
         ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
     }
+}
+
+#[cfg(test)]
+mod merge_tests;
+
+/// One lowered `MERGE` as text (stage 3e, for the tests until the step runs).
+#[cfg(test)]
+struct MergeText {
+    /// The match child.
+    matcher: String,
+    /// The create child.
+    creator: String,
+    /// The keys of the checks, in order.
+    checks: Vec<String>,
+    /// The number of `ON CREATE` and of `ON MATCH` items.
+    items: (usize, usize),
+    /// The elements the create child can make.
+    create_labels: Vec<(ElementKind, Option<CompactString>)>,
+}
+
+/// The lowering of `query` on `graph` (stage 3e, for the tests until the step runs): the
+/// whole traversal as text (the stand-in shows as the `gql:error` marker), and every `MERGE`
+/// (text order, `CALL` bodies included) as [`MergeText`].
+#[cfg(test)]
+fn merge_lowering(
+    query: &str,
+    graph: &crate::TraversalGraph,
+) -> Result<(String, Vec<MergeText>), TraverserError> {
+    type G = crate::TraversalGraph;
+    fn collect(instrs: &mut [Instr<G>], out: &mut Vec<(Vec<Instr<G>>, Vec<Instr<G>>, MergeText)>) {
+        for instr in instrs {
+            match instr {
+                Instr::Upsert(upsert) => {
+                    let text = MergeText {
+                        matcher: String::new(),
+                        creator: String::new(),
+                        checks: upsert.checks.iter().map(|c| c.key.to_string()).collect(),
+                        items: (upsert.on_create.len(), upsert.on_match.len()),
+                        create_labels: upsert.create_labels.clone(),
+                    };
+                    let matcher = std::mem::take(&mut upsert.matcher);
+                    let creator = std::mem::take(&mut upsert.creator);
+                    out.push((matcher, creator, text));
+                }
+                Instr::Optional(part) | Instr::Call(part) => collect(part, out),
+                _ => {}
+            }
+        }
+    }
+    let source = GraphTraversalSource::new(graph);
+    let facts = StorageFacts::from_storage(&source.storage);
+    let mut lowered = prepare::<G>(query, &[], &facts)?;
+    let mut instrs = std::mem::take(&mut lowered.instrs);
+    let mut found = Vec::new();
+    collect(&mut instrs, &mut found);
+    let merges = found
+        .into_iter()
+        .map(|(matcher, creator, text)| MergeText {
+            matcher: lowered
+                .emit_into(AnonymousTraversal::new(), matcher)
+                .to_string(),
+            creator: lowered
+                .emit_into(AnonymousTraversal::new(), creator)
+                .to_string(),
+            ..text
+        })
+        .collect();
+    let outer = lowered.emit_into(AnonymousTraversal::new(), instrs);
+    Ok((outer.to_string(), merges))
 }
