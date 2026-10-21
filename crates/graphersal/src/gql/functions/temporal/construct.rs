@@ -33,7 +33,7 @@ use super::super::super::eval::{Env, EvalError, Value, function_name, status};
 use super::super::super::lexer::Span;
 use super::super::super::parser::{Clock, Function, TemporalFunction, TemporalType};
 use super::super::{Arg, any_null, integer_arg, wrong_kind};
-use super::{kind_name, not_yet};
+use super::{kind_name, sub_micro};
 use crate::ElementProperty;
 use crate::value::number::N;
 use crate::value::temporal::arith::{Amount, DurationParts, cascade};
@@ -43,14 +43,6 @@ use crate::value::temporal::zone::Zone;
 use crate::value::temporal::{
     Date, DateTime, LocalDateTime, Temporal, TemporalError, TemporalKind, Time,
 };
-
-/// The 0A000 error of a value with a part below the microsecond (U1).
-fn sub_micro(span: Span) -> EvalError {
-    not_yet(
-        "a temporal value with a part below the microsecond (values hold microseconds)",
-        span,
-    )
-}
 
 /// A temporal value as a GQL value.
 fn temporal<E>(value: Temporal) -> Value<E> {

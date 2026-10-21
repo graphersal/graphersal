@@ -44,6 +44,7 @@ spelling is either not supported yet or [refused](refused.md).
 | `CALL { WITH a, b ... }`, the importing `WITH` | `CALL (a, b) { ... }` | the first `WITH` of the body, when it lists plain variables only, is the variable scope clause ([CALL subqueries](subset.md#call-subqueries)) |
 | `SET n:A:B`, `REMOVE n:A:B` | `SET n:A, n:B`, `REMOVE n:A, n:B` | the labels in order; `SET n IS A & B` likewise ([Writing with GQL](writes.md#set)) |
 | `SET (n).k = v`, `REMOVE (n).k` | `SET n.k = v`, `REMOVE n.k` | a parenthesized variable as the target |
+| `localtime(x)`, `localdatetime(x)`, `datetime(x)` | `local_time(x)`, `local_datetime(x)`, `zoned_datetime(x)` | the temporal constructors ([Dates and times](#dates-and-times)) |
 
 Each pair below returns the same rows:
 
@@ -148,6 +149,7 @@ a meaning of their own, and no vendor function joins them (`apoc.*`, `text.*` ar
 | `nodes(p)`, `relationships(p)` | paths | GQL's `elements(p)` (not supported yet) |
 | `all(x IN l WHERE c)`, `any(..)`, `none(..)`, `single(..)` | list predicates | none; a list comprehension counted with `size()` (below) |
 | `reduce(acc = init, x IN l \| expr)` | lists | none; `FOR x IN l` and an aggregate fold the rows of a query, not a list per row |
+| `date.truncate(unit, x)` and the other `X.truncate()`, `duration.between(a, b)`, `duration.inMonths()` / `inDays()` / `inSeconds()`, `X.statement()`, `X.transaction()`, `datetime.fromepoch()`, `datetime.fromepochmillis()`, `toString(temporal)` | dates and times | the constructors `date()`, `local_time()`, ... and `duration()` ([Dates and times](#dates-and-times)) |
 
 **`CAST` is not an alias of `toInteger()`.** Both convert with the same rules, but they treat a
 text that does not convert differently: GQL's `CAST` fails the query with `22018`, Cypher's
@@ -300,6 +302,31 @@ g.gql("CALL { FILTER NOT EXISTS { MATCH (:city {name: 'Berlin'}) } INSERT (:city
 
 The differences from Neo4j are on [Semantics](semantics.md#merge).
 
+## Dates and times
+
+The temporal constructors have an ISO GQL name and a Cypher name; the Cypher names are aliases
+(the same function, the same value). The qualified Cypher functions have no ISO spelling: they
+are compatibility functions with Neo4j's meaning ([Dates and times](subset.md#dates-and-times)).
+
+| Cypher | ISO GQL | Notes |
+|---|---|---|
+| `date(x)` | `date(x)` | the same name |
+| `localtime(x)` | `local_time(x)` | a time of day without an offset |
+| `localdatetime(x)` | `local_datetime(x)` | |
+| `datetime(x)` | `zoned_datetime(x)` | an instant with its UTC offset |
+| `duration(x)` | `duration(x)` | the same name |
+| `date.truncate()`, `localtime.truncate()`, `localdatetime.truncate()`, `datetime.truncate()` | none | compatibility functions |
+| `duration.between()`, `duration.inMonths()`, `duration.inDays()`, `duration.inSeconds()` | none | compatibility functions; ISO's `duration_between()` is an unknown function that suggests `duration.between()` |
+| `X.statement()`, `X.transaction()`; `datetime.fromepoch()`, `datetime.fromepochmillis()` | none | compatibility functions; the clocks give the time the query started |
+| `time(x)`, `time.truncate()`, `time.statement()`, ... | `zoned_time(x)` | not supported yet: no engine type for a time with an offset; use `localtime()` or `datetime()` |
+| `X.realtime()` | none | refused: a clock that moves while the query runs |
+
+```rhai,graph=empty
+g.gql("RETURN datetime('2015-07-21T21:40+01:00') = zoned_datetime('2015-07-21T21:40+01:00') AS a, localtime('12:00') = local_time('12:00') AS b, localdatetime('2015-07-21T21:40') = local_datetime('2015-07-21T21:40') AS c").to_list()
+// #{"a": true, "b": true, "c": true}
+g.gql("RETURN zoned_time('12:00+01:00') AS t")   // error: zoned_time() (a time of day with a UTC offset) is not yet supported
+```
+
 ## Cypher spellings that are not aliases
 
 | Cypher | In `gql()` |
@@ -308,6 +335,7 @@ The differences from Neo4j are on [Semantics](semantics.md#merge).
 | `nodes(p)`, `relationships(p)` | supported as [compatibility functions](#compatibility-functions), not aliases: GQL has no such functions |
 | `x ^ y` | supported as a compatibility operator: GQL has no operator for it; it means `power(x, y)` (always a float, the same errors), binding tighter than `*` and looser than a unary minus |
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
+| `time()`, `time.*()`; `date.realtime()` and the other `X.realtime()` | `time()` not supported yet (no time-with-offset type: use `localtime()` or `datetime()`); `X.realtime()` refused, like `rand()` ([Dates and times](#dates-and-times)) |
 | map projections, list and pattern comprehensions | supported as [compatibility forms](#map-projections-and-comprehensions), not aliases |
 | `any()` / `all()` / `none()` / `single()`, `reduce()` | supported as [compatibility functions](#list-predicates-and-reduce), not aliases: GQL has no such functions |
 | `COUNT { }`, `COLLECT { }` | supported as [compatibility forms](#count-and-collect), not aliases |

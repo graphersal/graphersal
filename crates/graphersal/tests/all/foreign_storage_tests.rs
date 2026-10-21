@@ -1075,6 +1075,61 @@ const GQL_CURATED_3E: &[(Mode, &str)] = &[
     ),
 ];
 
+/// Stage 3g: the temporal functions over stored and computed values, writes of temporal
+/// properties, index lookups and ordering on them (no live clock: two storages run at different
+/// instants, so a clock is only compared with itself). The last two scripts fail.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3G: &[&str] = &[
+    r#"g.gql("MATCH (p:person) SET p.born = date({year: 2024 - p.age, month: 3, day: 1}) RETURN p.name, p.born.year AS y, toString(p.born) AS s ORDER BY p.born").toList()"#,
+    r#"g.gql("MATCH (p:person) SET p.at = localdatetime({date: date('2020-01-01'), hour: p.age % 24}) WITH p WHERE p.at > localdatetime('2020-01-01T08:00') RETURN p.name, p.at ORDER BY p.at DESC").toList()"#,
+    r#"g.gql("INSERT (:event {name: 'a', at: datetime('2015-07-21T21:40:32.142+01:00'), d: duration('P1M2DT3H')}), (:event {name: 'b', at: datetime('2015-07-21T20:40:32.142Z'), d: duration('PT1S')})").toList(); g.gql("MATCH (e:event) RETURN e.name, e.at = datetime('2015-07-21T20:40:32.142Z') AS same, e.at + e.d AS later, e.d.seconds AS s ORDER BY e.name").toList()"#,
+    r#"g.create_index(#{label: "event", key: "on"}); g.gql("FOR i IN range(1, 20) INSERT (:event {i: i, on: date('2024-01-01') + duration({days: i})})").toList(); g.gql("MATCH (e:event) WHERE e.on = date('2024-01-11') RETURN e.i").toList(); g.gql("MATCH (e:event) WHERE e.on >= date('2024-01-15') RETURN count(*) AS c").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN p.name, date.truncate('decade', date({year: 1950 + p.age, month: 6, day: 15})) AS d, duration.between(date({year: 1950 + p.age, month: 6, day: 15}), date('2024-01-01')) AS u ORDER BY p.name").toList()"#,
+    r#"g.gql("MATCH (p:person) WITH p, duration({days: p.age}) AS d RETURN p.name, d, d * 2 AS twice, d / 2 AS half, duration.inSeconds(localtime('00:00'), localtime('00:00') + d) AS s ORDER BY d, p.name").toList()"#,
+    r#"g.gql("MATCH (p:person) RETURN collect_list(localtime({hour: p.age % 24, minute: 30})) AS ts, max(date({year: 1990, month: 1, day: 1}) + duration({months: p.age})) AS last").toList()"#,
+    r#"g.gql("MATCH (p:person) MERGE (p)-[:on]->(d:day {d: date.truncate('month', date({year: 2000 + p.age, month: 7, day: 9}))}) RETURN count(*) AS c").toList(); g.gql("MATCH (d:day) RETURN d.d ORDER BY d.d").toList()"#,
+    r#"g.gql("RETURN date() = date.statement() AS a, datetime.transaction() = datetime() AS b, localtime() = localtime.statement() AS c").toList()"#,
+    r#"g.gql("MATCH (p:person) SET p.t = localtime('12:00') RETURN p.t, toString(p.t) AS s, CAST(p.t AS STRING) AS c").toList(); g.V().has_label("person").values("t").as_string().to_list()"#,
+    r#"g.gql("MATCH (p:person) RETURN date({year: p.age, month: 13}) AS d").toList()"#,
+    r#"g.gql("MATCH (p:person) SET p.t = localtime({hour: 12, minute: 0, second: 0, nanosecond: p.age})").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3g_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = Vec::new();
+    for script in GQL_CURATED_3G {
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), Mode::Plain, &script);
+        let actual = run_curated(forwarded(), Mode::Plain, &script);
+        if expected.result.is_err() {
+            failing.push(script.clone());
+        }
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 3g, not fail on the way: only the two error cases fail.
+    assert_eq!(failing.len(), 2, "{failing:#?}");
+    // The clocks of one query read one instant.
+    let clocks = run_curated(reference(), Mode::Plain, GQL_CURATED_3G[8]).result;
+    assert!(
+        clocks
+            .as_deref()
+            .is_ok_and(|text| !text.contains("false") && text.matches("true").count() == 3),
+        "{clocks:?}"
+    );
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_3e_scripts_give_the_same_result_on_both_storages() {

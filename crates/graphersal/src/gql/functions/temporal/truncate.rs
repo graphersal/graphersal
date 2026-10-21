@@ -35,7 +35,7 @@ use super::super::super::lexer::Span;
 use super::super::super::parser::{TemporalFunction, TemporalType};
 use super::super::{Arg, any_null};
 use super::construct::temporal_error;
-use super::{cypher_name, kind_name, not_yet};
+use super::{cypher_name, kind_name, sub_micro};
 use crate::CompactString;
 use crate::ElementProperty;
 use crate::value::dt::DT;
@@ -682,11 +682,7 @@ impl Override {
                 .map_or(Ok(0), |v| field(name, "nanosecond", v, 0, ns_max, span))?;
             let nanos = ms * 1_000_000 + us * 1000 + ns;
             if nanos % 1000 != 0 {
-                return Err(not_yet(
-                    "a temporal value with a part below the microsecond (values hold \
-                     microseconds)",
-                    span,
-                ));
+                return Err(sub_micro(span));
             }
             nanos / 1000
         };

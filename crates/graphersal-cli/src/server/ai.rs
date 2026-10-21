@@ -89,7 +89,9 @@ A GQL query (the gql tool) goes into such a block as the script that runs it, \
 `g.gql(\"MATCH (p:person) RETURN p.name AS name\")`, so the user can run it in the playground; \
 a GQL write likewise, e.g. `g.gql(\"INSERT (:tag {name: 'new'})\")`, \
 `g.gql(\"MATCH (t:tag {name: 'new'}) SET t.checked = true\")` or, to create it only when it \
-is missing, `g.gql(\"MERGE (t:tag {name: 'new'})\")`.
+is missing, `g.gql(\"MERGE (t:tag {name: 'new'})\")`. GQL has Cypher's date and time \
+functions (date(), datetime(), duration(), x.year, date.truncate('month', d), \
+duration.between(a, b)): the gql tool's description lists them.
 
 Write tables as GitHub-flavoured Markdown tables (a header row, a `|---|` separator row). Keep \
 answers short and say when a result was cut by the display limits.";

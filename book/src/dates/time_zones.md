@@ -87,3 +87,8 @@ g.inject(datetime("2023-03-26T12:00+02:00")).date_diff(datetime("2023-03-25T12:0
 g.inject(datetime("2023-03-26T12:00+02:00")).date_diff(datetime("2023-03-25T12:00+01:00"), DT.day, "Europe/Berlin").next()   // 1
 g.inject(datetime("2023-08-02T12:00Z")).date_trunc(DT.day, "America/New_York").next()   // datetime("2023-08-02T00:00:00-04:00")
 ```
+
+GQL has no zone argument: a zone name in its text (`datetime('..[Europe/Berlin]')`) or in a map
+(`timezone: 'Europe/Berlin'`) resolves to the zone's offset when the value is built, and its
+arithmetic then stays at that offset, unlike Neo4j, which keeps the name
+([Dates in GQL](gql.md), [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j)).

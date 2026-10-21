@@ -481,6 +481,30 @@
   },
   {
     "group": "GQL",
+    "subgroup": "Dates and times",
+    "graph": "empty",
+    "title": "Temporal values from text and maps: date(), localtime(), datetime(), duration()",
+    "lang": "gql",
+    "script": "// Cypher's constructors read ISO 8601 text (also week and ordinal dates) or a map of fields;\n// the ISO GQL names are local_time, local_datetime and zoned_datetime. A zone name gives its\n// UTC offset at that time: the value keeps the offset.\nRETURN date('2015-07-21') AS d,\n  date({year: 2015, week: 30, dayOfWeek: 2}) AS week_date,\n  localtime('12:31:14.645') AS t,\n  datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) AS dt,\n  duration({days: 14, hours: 16, minutes: 12}) AS dur"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Dates and times",
+    "graph": "empty",
+    "title": "Components, + duration and X.truncate()",
+    "lang": "gql",
+    "script": "// d.year, d.week, d.dayOfWeek (1 = Monday) read components; + duration('P1M') clamps to the\n// month's end; date.truncate(unit, d) cuts to the start of the unit.\nLET d = date('2024-01-31')\nRETURN d.year AS year, d.week AS week, d.dayOfWeek AS weekday,\n  d + duration('P1M') AS next_month,\n  date.truncate('month', d) AS month_start, date.truncate('week', d) AS monday"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Dates and times",
+    "graph": "empty",
+    "title": "duration.between and duration.inDays: the time between two dates",
+    "lang": "gql",
+    "script": "// duration.between gives whole months, then days, then the time; inDays only whole days.\nFOR born IN [date('1984-10-11'), date('2000-02-29')]\nRETURN born, duration.between(born, date('2024-06-01')) AS age,\n  duration.inDays(born, date('2024-06-01')).days AS days\nORDER BY born"
+  },
+  {
+    "group": "GQL",
     "subgroup": "GQL with Gremlin, profile and errors",
     "graph": "modern",
     "title": "Gremlin after GQL: continue from a row variable",

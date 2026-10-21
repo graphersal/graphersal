@@ -2,7 +2,8 @@
 
 [`date_trunc(DT.unit)`](../traversal/steps/date_trunc.md) is PostgreSQL's `date_trunc`, and
 [`date_part(DT.unit)`](../traversal/steps/date_part.md) is its `extract`. Both are Graphersal
-extensions; TinkerPop has neither. A `datetime` is read on its own wall clock, or on the wall
+extensions; TinkerPop has neither. GQL's `X.truncate()` and `x.year` do the same with Neo4j's
+names, but truncate millennia and centuries as Neo4j does ([Dates in GQL](gql.md#truncation)). A `datetime` is read on its own wall clock, or on the wall
 clock of a zone given as the last argument ([Time Zones](time_zones.md)).
 
 ## `date_trunc()`

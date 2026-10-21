@@ -11862,4 +11862,138 @@ mod gql {
             );
         }
     }
+
+    /// The temporal functions of stage 3g.T9 (rule 6): a constructor, a component, a
+    /// truncation and a difference given what they cannot take each name their forms with a
+    /// runnable example; a part below the microsecond (0A000, U1) names the forms that fit.
+    #[test]
+    fn gql_temporal_function_errors_name_their_forms() {
+        for (expr, status, caret, advice) in [
+            (
+                "date(p.age)",
+                "22G03",
+                "p.age",
+                "date(), localtime(), localdatetime() and datetime() (ISO local_time(), \
+                 local_datetime(), zoned_datetime()) take ISO 8601 text, a map of fields or a \
+                 temporal value",
+            ),
+            (
+                "date(localtime('12:00'))",
+                "22G03",
+                "localtime('12:00')",
+                "date(), localtime(), localdatetime() and datetime()",
+            ),
+            (
+                "date('2015-07-21').hour",
+                "22G03",
+                "date('2015-07-21').hour",
+                "A component of a temporal value is read by its name (in any case): a date",
+            ),
+            (
+                "duration('P1D').colour",
+                "22G03",
+                "duration('P1D').colour",
+                "A component of a temporal value is read by its name",
+            ),
+            (
+                "date.truncate('fortnight', date('2015-07-21'))",
+                "22023",
+                "'fortnight'",
+                "X.truncate(unit, value [, map]) takes a unit name (in any case): \
+                 date.truncate the units millennium, century, decade, year, weekYear, \
+                 quarter, month, week and day",
+            ),
+            (
+                "localtime.truncate('year', localtime('12:00'))",
+                "22023",
+                "'year'",
+                "X.truncate(unit, value [, map]) takes a unit name",
+            ),
+            (
+                "date.truncate('day', p.age)",
+                "22G03",
+                "p.age",
+                "X.truncate(unit, value [, map]) takes a unit name",
+            ),
+            (
+                "duration.inDays(localtime('12:00'), localtime('13:00'))",
+                "22G03",
+                // The excerpt is cut after a few characters: the caret starts here.
+                "duration.inDays(",
+                "duration.between(a, b), duration.inMonths(a, b), duration.inDays(a, b) and \
+                 duration.inSeconds(a, b) take two dates, local times, local datetimes or \
+                 datetimes, never durations",
+            ),
+            (
+                "duration.between(duration('P1D'), date('2015-07-21'))",
+                "22G03",
+                "duration('P1D')",
+                "duration.between(a, b), duration.inMonths(a, b)",
+            ),
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}: {report}"
+            );
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.starts_with("  query:"))
+                .take(2)
+                .collect::<Vec<_>>();
+            let [source, carets] = caret_line[..] else {
+                panic!("no excerpt in {report}");
+            };
+            let start = carets.find('^').expect("a caret");
+            let marked: String = source
+                .chars()
+                .skip(start)
+                .take(caret.chars().count())
+                .collect();
+            assert_eq!(marked, caret, "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // Millennia follow Neo4j in GQL, and the help says how Gremlin differs (U4).
+        let (err, _) = gql_failure(|g| {
+            g.gql("RETURN date.truncate('eon', date('2015-07-21')) AS x")
+                .to_list()
+        });
+        let help = err.help().expect("help");
+        assert!(
+            help.contains(
+                "Millennia and centuries start at the years 2000 and 1900, as in Neo4j (the \
+                 Gremlin step date_trunc() starts them at 2001 and 1901)."
+            ),
+            "{help}"
+        );
+        // Below the microsecond: the help names the forms that fit, never Gremlin.
+        for expr in [
+            "localtime('12:00:00.123456789')",
+            "localtime({hour: 12, minute: 0, second: 0, nanosecond: 5})",
+            "duration('PT1S') / 3",
+            "date.truncate('day', localdatetime('2015-07-21T12:00'), {}) + duration({nanoseconds: 1})",
+        ] {
+            let query = format!("RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{query}: {report}"
+            );
+            let help = err.help().expect("help");
+            assert!(
+                help.starts_with(
+                    "Temporal values hold microseconds, and gql() never cuts digits silently: \
+                     give at most six fraction digits"
+                ),
+                "{query}: {help}"
+            );
+            assert!(!help.contains("Gremlin"), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+    }
 }

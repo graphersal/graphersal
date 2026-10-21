@@ -4426,6 +4426,21 @@ pub(crate) enum GqlHelpTopic {
     /// Arithmetic with a temporal operand that has no meaning (22G03, stage 3g): what `+`,
     /// `-`, `*` and `/` take with dates, times and durations.
     TemporalArithmetic,
+    /// A temporal constructor given a value it cannot build from (22G03, stage 3g): the
+    /// arguments of `date()`, `localtime()`, `localdatetime()`, `datetime()`, `duration()` and
+    /// `datetime.fromepoch*()`.
+    TemporalConstruct,
+    /// A component `x.key` a temporal value does not have (22G03, stage 3g): the components of
+    /// each kind.
+    TemporalComponent,
+    /// A unit or value `X.truncate(unit, value [, map])` cannot take (22023, 22G03, stage 3g):
+    /// the units of each type.
+    TemporalTruncate,
+    /// An operand `duration.between()` and `duration.in*()` cannot take (22G03, stage 3g).
+    TemporalBetween,
+    /// A temporal value with a part below the microsecond (0A000 "not yet", stage 3g, 3g.P0
+    /// U1): values hold microseconds.
+    TemporalPrecision,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -6949,6 +6964,10 @@ fn gql_help(
             "Graphersal does not support this construct in gql(); write this part of the query \
              as Gremlin steps, for example g.v().has_label(\"person\").values(\"name\").",
         ),
+        // Stage 3g (U1): values hold microseconds; the fix is fewer digits, not Gremlin.
+        GqlErrorKind::NotYet if topic == GqlHelpTopic::TemporalPrecision => {
+            help.push_str(GQL_TEMPORAL_PRECISION_ADVICE)
+        }
         GqlErrorKind::NotYet => help.push_str(
             "This construct comes in a later version of gql(); until then, write the query \
              without it or as Gremlin steps.",
@@ -7048,6 +7067,14 @@ fn gql_help(
                 help.push_str(GQL_SUBSCRIPT_ADVICE);
             } else if topic == GqlHelpTopic::TemporalArithmetic {
                 help.push_str(GQL_TEMPORAL_ARITHMETIC_ADVICE);
+            } else if topic == GqlHelpTopic::TemporalConstruct {
+                help.push_str(GQL_TEMPORAL_CONSTRUCT_ADVICE);
+            } else if topic == GqlHelpTopic::TemporalComponent {
+                help.push_str(GQL_TEMPORAL_COMPONENT_ADVICE);
+            } else if topic == GqlHelpTopic::TemporalTruncate {
+                help.push_str(GQL_TEMPORAL_TRUNCATE_ADVICE);
+            } else if topic == GqlHelpTopic::TemporalBetween {
+                help.push_str(GQL_TEMPORAL_BETWEEN_ADVICE);
             } else if let Some(advice) = gql_data_status_advice(gqlstatus) {
                 help.push_str(advice);
                 help.push(' ');
@@ -7095,6 +7122,71 @@ const GQL_SUBSCRIPT_ADVICE: &str = "x[i] reads the item i of a list, with an int
      toString(k). x[a..b] takes the items from a up to b (excluded) of a list, as in \
      g.gql(\"RETURN [1, 2, 3, 4][1..3] AS xs\"); a text is no list: use substring(s, start, \
      length) for a part of it. ";
+
+/// The advice of a temporal constructor given a value it cannot build from
+/// ([`GqlHelpTopic::TemporalConstruct`], stage 3g): what each constructor takes.
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_CONSTRUCT_ADVICE: &str = "date(), localtime(), localdatetime() and \
+     datetime() (ISO local_time(), local_datetime(), zoned_datetime()) take ISO 8601 text, a map \
+     of fields or a temporal value with the parts the result needs: date(x) of a date, a local \
+     datetime or a datetime, localtime(x) of a local time, a local datetime or a datetime, \
+     localdatetime(x) of a local datetime or a datetime, datetime(x) of a local datetime (read \
+     at UTC) or a datetime; a date and a time are joined in a map, as in localdatetime({date: \
+     d, hour: 12}); duration() takes text or a map of numbers, and datetime.fromepoch(seconds, \
+     nanoseconds) and datetime.fromepochmillis(milliseconds) integers, as in \
+     g.gql(\"RETURN date(localdatetime('2015-07-21T12:00')) AS d, \
+     localdatetime({date: date('2015-07-21'), hour: 12}) AS t, \
+     datetime.fromepochmillis(1500) AS e\"). ";
+
+/// The advice of a component a temporal value does not have
+/// ([`GqlHelpTopic::TemporalComponent`], stage 3g): the components of each kind.
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_COMPONENT_ADVICE: &str = "A component of a temporal value is read by its \
+     name (in any case): a date, and the date of a local datetime or a datetime, has year, \
+     quarter, month, week, weekYear, dayOfQuarter, day, ordinalDay and dayOfWeek; a time of \
+     day has hour, minute, second, millisecond, microsecond and nanosecond; a datetime also \
+     has timezone, offset, offsetMinutes, offsetSeconds, epochSeconds and epochMillis; a \
+     duration has the totals years, quarters, months, weeks, days, hours, minutes, seconds, \
+     milliseconds, microseconds and nanoseconds and the remainders such as monthsOfYear and \
+     secondsOfMinute, as in g.gql(\"RETURN date('2015-07-21').week AS w, \
+     datetime('2015-07-21T21:40+01:00').offsetMinutes AS o, duration('P1Y2M').months AS m\"). \
+     A date has no time of day: join it with one first, as in localdatetime({date: d, hour: \
+     12}).hour. ";
+
+/// The advice of a unit or value `X.truncate()` cannot take
+/// ([`GqlHelpTopic::TemporalTruncate`], stage 3g): the units of each type.
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_TRUNCATE_ADVICE: &str = "X.truncate(unit, value [, map]) takes a unit name \
+     (in any case): date.truncate the units millennium, century, decade, year, weekYear, \
+     quarter, month, week and day; localdatetime.truncate and datetime.truncate those and \
+     hour, minute, second, millisecond, microsecond and nanosecond; localtime.truncate day \
+     to nanosecond. The value is a temporal value with the parts the result needs (a date \
+     gives a datetime at midnight), and the map sets fields of the result, as in \
+     g.gql(\"RETURN date.truncate('month', date('2015-07-21')) AS d, \
+     datetime.truncate('hour', datetime('2015-07-21T21:40:32+01:00'), {minute: 30}) AS t\"). \
+     Millennia and centuries start at the years 2000 and 1900, as in Neo4j (the Gremlin step \
+     date_trunc() starts them at 2001 and 1901). ";
+
+/// The advice of an operand `duration.between()` cannot take
+/// ([`GqlHelpTopic::TemporalBetween`], stage 3g).
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_BETWEEN_ADVICE: &str = "duration.between(a, b), duration.inMonths(a, b), \
+     duration.inDays(a, b) and duration.inSeconds(a, b) take two dates, local times, local \
+     datetimes or datetimes, never durations; kinds may be mixed (a value without a date \
+     gives the times only, one without a time is read at midnight). Two local times have no \
+     months or days: use duration.inSeconds(a, b) or duration.between(a, b) for them, as in \
+     g.gql(\"RETURN duration.between(date('2015-01-01'), localdatetime('2015-03-15T12:00')) \
+     AS u, duration.inSeconds(localtime('12:00'), localtime('13:30')) AS s\"). ";
+
+/// The advice of a temporal value with a part below the microsecond
+/// ([`GqlHelpTopic::TemporalPrecision`], stage 3g, 3g.P0 U1).
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_PRECISION_ADVICE: &str = "Temporal values hold microseconds, and gql() \
+     never cuts digits silently: give at most six fraction digits, or the fields millisecond \
+     and microsecond (nanosecond only in whole thousands, nanoseconds of a duration likewise), \
+     as in g.gql(\"RETURN localtime('12:31:14.645876') AS t, localtime({hour: 12, minute: \
+     31, second: 14, microsecond: 645876}) AS u, duration({seconds: 1, microseconds: 5}) AS \
+     d\"). Nanosecond precision comes in a later version.";
 
 /// The advice of temporal arithmetic without a meaning ([`GqlHelpTopic::TemporalArithmetic`],
 /// stage 3g): the forms `+`, `-`, `*` and `/` take, and `duration.between` for the time between
@@ -7653,7 +7745,12 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         | GqlHelpTopic::TextAndNumber
         | GqlHelpTopic::Subscript
         | GqlHelpTopic::StaticKind
-        | GqlHelpTopic::TemporalArithmetic => {
+        | GqlHelpTopic::TemporalArithmetic
+        | GqlHelpTopic::TemporalConstruct
+        | GqlHelpTopic::TemporalComponent
+        | GqlHelpTopic::TemporalTruncate
+        | GqlHelpTopic::TemporalBetween
+        | GqlHelpTopic::TemporalPrecision => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \

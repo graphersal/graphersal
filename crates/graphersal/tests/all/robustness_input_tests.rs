@@ -5628,3 +5628,396 @@ fn random_gql_3e_merge_never_panics_is_idempotent_equals_its_twin_and_fails_with
     }
     fatal.assert_empty("GQL 3e MERGE");
 }
+
+/// One random temporal value of stage 3g for [`random_gql_temporal_queries_never_panic_and_equal_their_twins`]:
+/// its GQL map constructor, its GQL text constructor, the same value as a Rhai literal, its
+/// Cypher type name and the `X.truncate()` units that type takes.
+#[cfg(feature = "gql")]
+struct GqlTemporal {
+    map: String,
+    text: String,
+    rhai: String,
+    of: &'static str,
+    units: &'static [&'static str],
+}
+
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_DATE_UNITS: &[&str] = &[
+    "millennium",
+    "century",
+    "decade",
+    "year",
+    "weekYear",
+    "quarter",
+    "month",
+    "week",
+    "day",
+];
+
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_DATETIME_UNITS: &[&str] = &[
+    "millennium",
+    "Century",
+    "decade",
+    "year",
+    "weekyear",
+    "quarter",
+    "month",
+    "week",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "MICROSECOND",
+    "nanosecond",
+];
+
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_TIME_UNITS: &[&str] = &[
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "microsecond",
+    "nanosecond",
+];
+
+/// A signed four-digit ISO year (`-0500`, `2015`).
+#[cfg(feature = "gql")]
+fn gql_temporal_year(year: i64) -> String {
+    if year < 0 {
+        format!("-{:04}", -year)
+    } else {
+        format!("{year:04}")
+    }
+}
+
+/// A random temporal value (years within -2000..9000 so that the arithmetic twins stay in
+/// range; the day at most 28, so every map is a valid date).
+#[cfg(feature = "gql")]
+fn random_gql_temporal(rng: &mut Rng) -> GqlTemporal {
+    let year = if rng.chance(15) {
+        rng.below(2001) as i64 - 2000
+    } else {
+        1 + rng.below(9000) as i64
+    };
+    let (month, day) = (1 + rng.below(12), 1 + rng.below(28));
+    let (hour, minute, second) = (rng.below(24), rng.below(60), rng.below(60));
+    let micro = if rng.chance(50) {
+        0
+    } else if rng.chance(50) {
+        rng.below(1000) * 1000
+    } else {
+        rng.below(1_000_000)
+    };
+    let date = format!("{}-{month:02}-{day:02}", gql_temporal_year(year));
+    let date_map = format!("year: {year}, month: {month}, day: {day}");
+    let time = if micro == 0 {
+        format!("{hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{hour:02}:{minute:02}:{second:02}.{micro:06}")
+    };
+    // The sub-second fields: one microsecond field, or milliseconds plus microseconds.
+    let fraction = if micro == 0 {
+        String::new()
+    } else if rng.chance(50) {
+        format!(", microsecond: {micro}")
+    } else {
+        format!(
+            ", millisecond: {}, microsecond: {}",
+            micro / 1000,
+            micro % 1000
+        )
+    };
+    let time_map = format!("hour: {hour}, minute: {minute}, second: {second}{fraction}");
+    match rng.below(5) {
+        0 => GqlTemporal {
+            map: format!("date({{{date_map}}})"),
+            text: format!("date('{date}')"),
+            rhai: format!("date(\"{date}\")"),
+            of: "date",
+            units: GQL_TEMPORAL_DATE_UNITS,
+        },
+        1 => GqlTemporal {
+            map: format!("localtime({{{time_map}}})"),
+            text: format!("local_time('{time}')"),
+            rhai: format!("time(\"{time}\")"),
+            of: "localtime",
+            units: GQL_TEMPORAL_TIME_UNITS,
+        },
+        2 => GqlTemporal {
+            map: format!("localdatetime({{{date_map}, {time_map}}})"),
+            text: format!("local_datetime('{date}T{time}')"),
+            rhai: format!("localdatetime(\"{date}T{time}\")"),
+            of: "localdatetime",
+            units: GQL_TEMPORAL_DATETIME_UNITS,
+        },
+        3 => {
+            let offset = if rng.chance(20) {
+                "Z".to_string()
+            } else {
+                let sign = if rng.chance(50) { '+' } else { '-' };
+                format!(
+                    "{sign}{:02}:{:02}",
+                    rng.below(15),
+                    *rng.pick(&[0usize, 15, 30, 45])
+                )
+            };
+            let zone = if offset == "Z" { "+00:00" } else { &offset };
+            GqlTemporal {
+                map: format!("datetime({{{date_map}, {time_map}, timezone: '{zone}'}})"),
+                text: format!("zoned_datetime('{date}T{time}{offset}')"),
+                rhai: format!("datetime(\"{date}T{time}{offset}\")"),
+                of: "datetime",
+                units: GQL_TEMPORAL_DATETIME_UNITS,
+            }
+        }
+        _ => {
+            let months = rng.below(400) as i64 - 200;
+            let days = rng.below(2000) as i64 - 1000;
+            let seconds = rng.below(400_000) as i64 - 200_000;
+            let micros = if rng.chance(50) {
+                0
+            } else {
+                rng.below(1_000_000) as i64
+            };
+            // The engine's own reading of the parts: months, days and signed seconds.
+            let total = seconds * 1_000_000 + micros;
+            let sign = if total < 0 { "-" } else { "" };
+            let (whole, fraction) = (total.abs() / 1_000_000, total.abs() % 1_000_000);
+            let text = format!("P{months}M{days}DT{sign}{whole}.{fraction:06}S");
+            GqlTemporal {
+                map: format!(
+                    "duration({{months: {months}, days: {days}, seconds: {seconds}, \
+                     microseconds: {micros}}})"
+                ),
+                text: format!("duration('{text}')"),
+                rhai: format!("duration(\"{text}\")"),
+                of: "duration",
+                units: &[],
+            }
+        }
+    }
+}
+
+/// A random duration without months (so `x + d - d = x` is exact for every instant type).
+#[cfg(feature = "gql")]
+fn random_gql_exact_duration(rng: &mut Rng) -> String {
+    format!(
+        "duration({{days: {}, hours: {}, seconds: {}, microseconds: {}}})",
+        rng.below(800) as i64 - 400,
+        rng.below(100) as i64 - 50,
+        rng.below(200_000) as i64 - 100_000,
+        rng.below(1_000_000) as i64 - 500_000
+    )
+}
+
+/// The twin conditions of one random temporal value: each must be TRUE.
+#[cfg(feature = "gql")]
+fn random_gql_temporal_twins(rng: &mut Rng, value: &GqlTemporal) -> Vec<String> {
+    let (x, of) = (&value.map, value.of);
+    let mut twins = vec![
+        // The text constructor equals the map constructor.
+        format!("{} = {x}", value.text),
+        // Cypher toString (the Neo4j text) and ISO CAST (the engine text) read back.
+        format!("{of}(toString({x})) = {x}"),
+        format!("{of}(CAST({x} AS STRING)) = {x}"),
+    ];
+    if of == "duration" {
+        let other = random_gql_temporal(rng);
+        let d = if other.of == "duration" {
+            other.map
+        } else {
+            random_gql_exact_duration(rng)
+        };
+        twins.push(format!("{x} + {d} - {d} = {x}"));
+        twins.push(format!("{x} * 2 - {x} = {x}"));
+        twins.push(format!("-(-{x}) = {x}"));
+    } else {
+        let d = random_gql_exact_duration(rng);
+        twins.push(format!("{x} + {d} - {d} = {x}"));
+        twins.push(format!("{d} + {x} - {d} = {x}"));
+        let unit = rng.pick(value.units);
+        let once = format!("{of}.truncate('{unit}', {x})");
+        twins.push(format!("{of}.truncate('{unit}', {once}) = {once}"));
+        if of != "localtime" && of != "date" && rng.chance(50) {
+            // A date unit of a value with a date, as a date.
+            let unit = rng.pick(GQL_TEMPORAL_DATE_UNITS);
+            let once = format!("date.truncate('{unit}', {x})");
+            twins.push(format!("date.truncate('{unit}', {once}) = {once}"));
+        }
+        // duration.between gives the duration that leads back to the value.
+        if of != "localtime" {
+            let other = random_gql_temporal(rng);
+            if other.of == of {
+                let y = &other.map;
+                twins.push(format!(
+                    "duration.inSeconds({x}, {y}) = duration.inSeconds({x}, {x} + \
+                     duration.inSeconds({x}, {y}))"
+                ));
+            }
+        }
+    }
+    twins
+}
+
+/// The rows of `query` on a fresh empty graph, or the diagnostic.
+#[cfg(feature = "gql")]
+fn gql_temporal_rows(query: &str) -> Result<Vec<ElementProperty>, String> {
+    let graph = TraversalGraph::new();
+    graph
+        .traversal()
+        .gql(query)
+        .to_list()
+        .map_err(|e| format_diagnostic(&e))
+}
+
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_CORPUS: &[&str] = &[
+    "RETURN date('2015-W30-2') AS d, date('2015202') AS o, date('2015-Q3-21') AS q",
+    "RETURN localtime('214032.142') AS t, localdatetime('2015-07-21T21:40') AS l",
+    "RETURN datetime('2015-07-21T21:40:32.142[Europe/London]') AS z",
+    "RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) AS z",
+    "RETURN date({year: 1984, week: 1, dayOfWeek: 7}).weekYear AS w",
+    "RETURN duration({years: 0.5, months: 1.25, days: -0.75}) AS d",
+    "RETURN duration('P1Y2M3W4DT5H6M7.5S').monthsOfYear AS m",
+    "RETURN date.truncate('millennium', date('2017-10-11')) AS d",
+    "RETURN datetime.truncate('week', datetime('2015-07-21T21:40+01:00'), {dayOfWeek: 7, timezone: 'Europe/Paris'}) AS d",
+    "RETURN duration.between(localtime('12:00'), datetime('2015-07-21T21:40+01:00')) AS d",
+    "RETURN duration.inMonths(date('2015-07-21'), localdatetime('2016-07-21T00:00')) AS d",
+    "RETURN date('2020-02-29') + duration('P1Y') AS d, localtime('23:00') + duration('PT2H') AS t",
+    "RETURN duration('P1M') < duration('P30D') AS lt, duration('P1D') / 0 AS z",
+    "RETURN datetime.fromepoch(9223372036854775807, 0) AS e",
+    "RETURN datetime.fromepochmillis(-9223372036854775808) AS e",
+    "RETURN duration({seconds: 9.3e18}) AS d",
+    "RETURN duration('P9223372036854775807Y') AS d",
+    "RETURN date('+999999999-12-31') AS d",
+    "RETURN localtime({hour: 12, nanosecond: 999999999}) AS t",
+    "RETURN time('12:00+01:00') AS t, localtime.realtime() AS r",
+    "RETURN date.statement() AS a, localdatetime.transaction('Europe/Berlin') AS b, datetime({timezone: '+05:00'}) AS c",
+    "RETURN toString(duration('-PT1M0.001S')) AS s, CAST(localtime('12:00') AS STRING) AS c",
+    "MATCH (p:person) RETURN p.name, date({year: p.age + 1950}) AS born ORDER BY born",
+    "FOR x IN [date('2015-01-01'), localtime('12:00'), duration('P1D'), NULL] RETURN x.year, x.hour, x.days",
+];
+
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_TOKENS: &[&str] = &[
+    "RETURN",
+    "date(",
+    "localtime(",
+    "local_datetime(",
+    "datetime(",
+    "duration(",
+    "date.truncate(",
+    "duration.between(",
+    "datetime.fromepoch(",
+    "'2015-07-21'",
+    "'12:31:14.645876'",
+    "'P1Y2M'",
+    "'+01:00'",
+    "'Europe/Berlin'",
+    "{year: 2015",
+    "month: 2",
+    "week: 53",
+    "timezone:",
+    "nanosecond: 1",
+    "})",
+    ")",
+    "(",
+    ",",
+    "+",
+    "-",
+    "*",
+    "/",
+    "<",
+    "=",
+    ".year",
+    ".epochMillis",
+    ".monthsOfYear",
+    "'millennium'",
+    "toString(",
+    "AS x",
+    "NULL",
+    "9223372036854775807",
+    "-0.5",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_temporal_queries_never_panic_and_equal_their_twins() {
+    let mut fatal = Fatal::default();
+    let mut differences = Vec::new();
+    let mut rng = Rng::new(0x3_6DA7_E000);
+    let truth = gql_temporal_rows("RETURN true AS same").expect("a constant row");
+    let mut texts: Vec<String> = GQL_TEMPORAL_CORPUS.iter().map(|s| s.to_string()).collect();
+    let mut checked = 0usize;
+    for _ in 0..budget(60) {
+        let value = random_gql_temporal(&mut rng);
+        let twins = random_gql_temporal_twins(&mut rng, &value);
+        let literal = format!("RETURN {} AS x", value.map);
+        texts.push(literal.clone());
+        texts.extend(twins.iter().map(|twin| format!("RETURN {twin} AS same")));
+        let label = literal.clone();
+        let rhai = value.rhai.clone();
+        let truth = truth.clone();
+        // A fresh graph for every case.
+        let outcome = guarded(WATCHDOG, move || {
+            let mut failed = Vec::new();
+            for twin in &twins {
+                let query = format!("RETURN {twin} AS same");
+                match gql_temporal_rows(&query) {
+                    Ok(rows) if rows == truth => {}
+                    other => failed.push(format!("{query}\n  {other:?}")),
+                }
+            }
+            // The constructor equals the Rhai literal of the same value.
+            let graph = Arc::new(Graph::new(TraversalGraph::new()));
+            let params: HashMap<String, ElementProperty> =
+                [("q".to_string(), ElementProperty::from(literal.as_str()))].into();
+            let same = eval_value_with_limits(
+                graph,
+                &format!("g.gql(q).next()[\"x\"] == {rhai}"),
+                params,
+                &ScriptLimits::default(),
+            );
+            if !matches!(same.as_ref().map(|v| v.as_bool()), Ok(Ok(true))) {
+                failed.push(format!("{literal} vs Rhai {rhai}: {same:?}"));
+            }
+            (twins.len() + 1, failed)
+        });
+        match outcome {
+            Ok((count, failed)) => {
+                checked += count;
+                differences.extend(failed);
+            }
+            Err(_) => fatal.check(&label, outcome.map(|_| ())),
+        }
+    }
+    assert!(
+        checked >= 5 * budget(60) as usize,
+        "only {checked} twins ran"
+    );
+    assert!(
+        differences.is_empty(),
+        "{} temporal twins differ:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    for _ in 0..budget(30) {
+        let base = rng.pick(GQL_TEMPORAL_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(30) {
+        let len = 1 + rng.below(14);
+        let soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_TEMPORAL_TOKENS)).collect();
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL temporal");
+}

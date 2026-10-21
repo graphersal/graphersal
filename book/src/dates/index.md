@@ -80,6 +80,8 @@ a time part, two `date`s days, two `time`s the elapsed time). `as_string()` is t
 - [Storage and Exchange](storage.md): the binary format, GraphSON, GraphML, change sets.
 - [From Python](python.md): the `datetime` mapping.
 - [TinkerPop Compatibility](tinkerpop.md): what is TinkerPop and what is an extension.
+- [Dates in GQL](gql.md): the openCypher temporal functions of `gql()` (`date()`, `x.year`,
+  `date.truncate()`, `duration.between()`) beside the steps of this part.
 
 The steps have generated reference pages: [as_date](../traversal/steps/as_date.md),
 [as_duration](../traversal/steps/as_duration.md), [date_add](../traversal/steps/date_add.md),

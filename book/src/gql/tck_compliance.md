@@ -118,8 +118,8 @@ excluded: they stay `missing`, the backlog.
 | `upstream-ignore` | marked @ignore by the TCK itself ("does not work in Cypher") | [gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope) | 1 |
 | `w21-property-kinds` | a list of maps is a valid property value (maps and lists of any kinds are stored as given); Neo4j raises a TypeError (deliberate deviation) | [gql/semantics.md#writes](../gql/semantics.md#writes) | 1 |
 | `parameter-at-compile-time` | parameters are bound when the query is compiled: a negative or non-integer SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime (deliberate deviation) | [gql/semantics.md#parameters-are-bound-when-the-query-is-compiled](../gql/semantics.md#parameters-are-bound-when-the-query-is-compiled) | 6 |
-| `zone-name-not-kept` | a datetime keeps its UTC offset, not the zone name: a zone name resolves to its offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], and a later change of the date keeps the offset (no daylight saving step) (deliberate deviation) | [dates/time_zones.md](../dates/time_zones.md) | 69 |
-| `year-range` | temporal values hold the years -9999 to 9999; a year beyond them is a data error (22008), Neo4j reads years up to 999999999 (deliberate deviation) | [dates/index.md#the-five-types](../dates/index.md#the-five-types) | 2 |
+| `zone-name-not-kept` | a datetime keeps its UTC offset, not the zone name: a zone name resolves to its offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], and a later change of the date keeps the offset (no daylight saving step) (deliberate deviation) | [gql/semantics.md#where-dates-and-times-differ-from-neo4j](../gql/semantics.md#where-dates-and-times-differ-from-neo4j) | 69 |
+| `year-range` | temporal values hold the years -9999 to 9999; a year beyond them is a data error (22008), Neo4j reads years up to 999999999 (deliberate deviation) | [gql/semantics.md#where-dates-and-times-differ-from-neo4j](../gql/semantics.md#where-dates-and-times-differ-from-neo4j) | 2 |
 | **all** | | | **131** |
 <!-- opencypher:end excluded -->
 

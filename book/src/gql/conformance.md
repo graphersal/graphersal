@@ -126,10 +126,14 @@ The mandatory core of a GQL query, by construct.
 | GP02 | inline procedure with implicit nested variable scope *(provisional)* | partial | `CALL { }` without a scope clause is accepted but imports **nothing** (Neo4j Cypher 25's reading; the ISO scoping is still to be checked); import with `CALL (*)` or Cypher's importing `WITH` |
 | GP03 | inline procedure with explicit nested variable scope *(provisional)* | supported | `CALL (a, b) { }`, `CALL (*) { }`, `CALL () { }` |
 | GP04 | named procedure calls *(provisional)* | no | vendor procedures (`CALL db.*`, `apoc.*`) are refused |
+| GV39 | temporal types: date, local datetime and local time *(provisional)* | partial | `date()`, `local_time()`, `local_datetime()` (Cypher `localtime()`, `localdatetime()`) from ISO 8601 text, a map of fields or another temporal value, components (`d.year`), arithmetic with durations, comparison ([Dates and times](subset.md#dates-and-times)); values hold microseconds (finer is `0A000`); the literals `DATE '..'`, `CAST(x AS DATE)` and `CURRENT_DATE` / `LOCAL_TIMESTAMP` not yet (`date()` with no argument instead) |
+| GV40 | temporal types: zoned datetime and zoned time *(provisional)* | partial | `zoned_datetime()` (Cypher `datetime()`) keeps a UTC offset; a zone name resolves to its offset at that instant and is not kept ([Semantics](semantics.md#where-dates-and-times-differ-from-neo4j)); `zoned_time()` (Cypher `time()`) not yet |
+| GV41 | temporal types: duration *(provisional)* | partial | `duration()` from text or a map, `+` / `-` / `*` / `/`, components; ISO `DURATION_BETWEEN` not yet (the Cypher compatibility function `duration.between()` instead); `<` on two durations is `NULL` |
 
 Every feature not listed here is not supported. Cypher spellings that GQL does not have, and the
 openCypher functions accepted without a GQL counterpart (`toInteger`, `substring`, `split`,
-`round`, `keys`, `nodes`, ...), are on [Cypher Aliases](aliases.md).
+`round`, `keys`, `nodes`, the temporal `date.truncate()`, `duration.between()`, ...), are on
+[Cypher Aliases](aliases.md).
 
 ## Implementation-defined choices
 
@@ -159,6 +163,11 @@ where it has one):
 | name of an unaliased column | the expression as written (Neo4j's names, such as `count(*)`, which the openCypher TCK confirms; the ISO text is still to be checked) |
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |
 | integer division | truncates toward zero; `%` takes the sign of the dividend |
+| temporal precision | microseconds; a value with a non-zero part below the microsecond is `0A000`, never cut |
+| default time zone | UTC: a `datetime` without an offset or zone, and the clocks without a zone |
+| the current date and time | one instant per query, taken when it starts; `X.realtime()` is refused |
+| `ORDER BY` of durations | by length, a month counted as 30 days (`<` on two durations is `NULL`) |
+| `CAST(temporal AS STRING)` | the engine's ISO 8601 text (`'12:00:00'`); Cypher's `toString()` writes Neo4j's (`'12:00'`) |
 | integer overflow | an error (`22003`), never a wrap |
 | text and numbers | no implicit conversion: `'a' + 1` is an error (`22G03`); convert with `CAST(x AS STRING)` |
 | `CAST` of a float to `INTEGER`, of text with surrounding spaces | truncated toward zero; the spaces are skipped (provisional) |

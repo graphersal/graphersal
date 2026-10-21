@@ -657,7 +657,16 @@ substring (0-based), left, right, split, replace, reverse, trim, btrim, ltrim, r
 char_length, size, || concatenation; numbers abs, ceil, floor, round(x[, precision[, mode]]), \
 sign, sqrt, exp, ln, log, log10, power, mod; lists head, last, tail, range, size, isEmpty; \
 elements keys, properties, labels, type, element_id, startNode(e) and endNode(e) (the edge's \
-stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; RETURN (mandatory; expressions \
+stored direction), a IS [NOT] SOURCE OF e / DESTINATION OF e; dates and times with \
+Cypher's temporal functions: date('2015-07-21'), localtime('12:31'), localdatetime(..), \
+datetime('2015-07-21T21:40+01:00') (ISO names local_time, local_datetime, zoned_datetime) from \
+ISO 8601 text or a map such as date({year: 2015, week: 30, dayOfWeek: 2}) or datetime({year: \
+1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) (no argument: the time the query \
+started), duration('P1M2DT3H') or duration({days: 14, hours: 16}); components x.year, x.month, \
+x.week, x.dayOfWeek, x.hour, x.epochMillis, dur.days; arithmetic d + duration('P1M'), dur * 2; \
+date.truncate('month', d) (also localtime / localdatetime / datetime.truncate); \
+duration.between(a, b), duration.inDays(a, b); values hold microseconds and a datetime keeps \
+its UTC offset, not a zone name; RETURN (mandatory; expressions \
 with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
 SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text); \
 writes: INSERT (Cypher alias CREATE) of node patterns (n:Label&Other {key: expr}) and directed \
@@ -696,7 +705,8 @@ label, properties}. Rows come in no defined order unless the query has ORDER BY:
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
-procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the write \
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID, date.realtime()), trigonometry, \
+Cypher's zoned time() (use localtime() or datetime()), a temporal value below the microsecond, and the write \
 FOREACH (write FOR x IN list INSERT .. instead); use the query tool with Gremlin for the rest, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \

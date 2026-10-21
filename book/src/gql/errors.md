@@ -141,6 +141,41 @@ Error: GQL construct not supported yet at line 1, column 25: sin() (a trigonomet
 Help: Gremlin math() after gql(), for example g.gql("MATCH (n:person) RETURN n.age AS a").select("a").math("sin(_)"). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
 ```
 
+### Dates and times
+
+The [temporal functions](subset.md#dates-and-times) fail with these codes; the help line shows
+the accepted forms with a runnable example:
+
+| Code | When |
+|---|---|
+| `22007` | text that is no value of the type (`date('nonsense')`, `date('2015-13-01')`, an offset in `localtime('12:00+01:00')`, an offset that is not the zone's in `'..+02:00[Europe/London]'`); a map with an unknown key or with two groups of date keys; an unknown time zone |
+| `22008` | a field out of range (`month: 13`, `day: 30` in February, `hour: 25`) or a value outside the years -9999 to 9999, also as the result of arithmetic (`date('9999-12-31') + duration('P1D')`) |
+| `22G03` | a component the value's type does not have (`date(..).hour`; the message lists the components it has); a constructor argument of the wrong kind (`date(42)`, `localdatetime(date(..))`); arithmetic without a meaning (`date + date`, `date * 2`); a truncation or difference of a value without the part it needs (`date.truncate('day', localtime(..))`, `duration.inDays()` of two local times) |
+| `22023` | a truncation unit the type does not have (`date.truncate('hour', ..)`) or an unknown unit |
+| `22012` | a duration divided by zero |
+| `0A000` | a part below the microsecond (`'12:00:00.0000001'`, `nanosecond: 5`), Cypher's zoned `time()` and ISO `zoned_time()` (not yet); `X.realtime()` (refused) |
+
+```rhai,graph=empty
+g.gql("RETURN date('nonsense') AS d")   // error: cannot parse "nonsense" as a date (22007)
+g.gql("RETURN date({year: 2015, mnth: 3}) AS d")   // error: the map has an unknown field mnth (22007)
+g.gql("RETURN datetime({year: 2015, timezone: 'Mars/Olympus'}) AS d")   // error: unknown time zone (22007)
+g.gql("RETURN date({year: 2015, month: 13, day: 1}) AS d")   // error: the field month cannot be 13 (22008)
+g.gql("RETURN date('9999-12-31') + duration('P1D') AS d")   // error: the result is outside the supported range (22008)
+g.gql("RETURN date('2015-01-01').foo AS x")   // error: a date has no component foo; its components are year, quarter, ... (22G03)
+g.gql("RETURN date('2015-01-01') * 2 AS x")   // error: * with a temporal value takes a duration and a number (22G03)
+g.gql("RETURN date.truncate('fortnight', date('2017-10-11')) AS d")   // error: unknown unit 'fortnight' (22023)
+g.gql("RETURN duration('P1D') / 0 AS d")   // error: division by zero (22012)
+g.gql("RETURN localtime('12:00:00.0000001') AS t")   // error: a part below the microsecond is not yet supported (0A000)
+```
+
+```text
+Caused by: GQL data exception at line 1, column 13: date(): the field month cannot be 13
+  query:     RETURN date({year: 2015, month: 13, day: 1}) AS d
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  GQLSTATUS: 22008
+Help: Temporal fields stay within their ranges (month 1 to 12, day within its month, week within its week-numbering year, hour 0 to 23, minute and second 0 to 59, millisecond 0 to 999) and every value within the years -9999 to 9999, as in g.gql("RETURN date({year: 1984, month: 10, day: 11}) AS d, localtime({hour: 23, minute: 59, second: 59, millisecond: 999}) AS t"). A row of the data made the marked expression fail. ...
+```
+
 ## Scope, grouping and limits
 
 The help of a semantic error explains the rule behind it. A variable that a `WITH` did not carry
@@ -672,26 +707,28 @@ give it (or a `"default"` in the schema, to match on other keys only). One raise
 |---|---|---|
 | `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND`; an `INSERT` edge without a direction or with a label expression, an `INSERT` node label other than a conjunction, `WHERE` or a quantifier in an `INSERT` pattern, a `SET` / `REMOVE` label item joined by `|`, `!` or `%`, a `DELETE` target written as a label test (`n:L`, `n IS L`), `DROP n`, a write inside `EXISTS` / `COUNT` / `COLLECT` or a comprehension, a write clause after `RETURN`; a second `MERGE` pattern after `,`, a `MERGE` edge without its one label or with a label expression, a quantifier in a `MERGE` pattern; a pattern predicate where a value is expected (a `RETURN` / `WITH` item, a function argument, a `LET` or `SET` value: write `EXISTS { }`, `COUNT { }` or a pattern comprehension) |
 | `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice; in `INSERT`, a bound variable with labels or properties, a bound edge variable, a duplicate key in a property map, an aggregate in a property value; in `SET` / `REMOVE`, an undefined target, a target that is a `LET` / `WITH` value, a path, a group variable or a `FOR` position, a label item on an edge variable, an aggregate in a value; in `DELETE`, a target known to hold no element (a literal, a computed value, a map, a `FOR` position), an aggregate in a target; in `MERGE`, a bound node with labels or properties, a bound edge variable, a pattern that is only a node bound before |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN` that writes nothing, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a `SET` / `REMOVE` target deeper than a variable (`p.a.b`, `head(l).k`), the write clause `FOREACH`, a subquery in a `MERGE` property value, an `INSERT` in a `UNION` operand or with a path variable; `LOAD CSV`, `CREATE INDEX` / `CONSTRAINT` / `GRAPH`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `rand()`, `elements()`, `CAST` to `DATE`; Cypher's zoned `time()`, a temporal value below the microsecond, `X.realtime()`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN` that writes nothing, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a `SET` / `REMOVE` target deeper than a variable (`p.a.b`, `head(l).k`), the write clause `FOREACH`, a subquery in a `MERGE` property value, an `INSERT` in a `UNION` operand or with a path variable; `LOAD CSV`, `CREATE INDEX` / `CONSTRAINT` / `GRAPH`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths; a quantified body's edges count once); split it into several MATCH clauses that share a variable, repeat a chain as a quantified path pattern, or use Gremlin `repeat()` |
 | `22004` | data | an endpoint of an `INSERT` edge is `NULL` (from an `OPTIONAL MATCH`); the right side of `SET n = ..` / `SET n += ..` is `NULL`; a property value of a `MERGE` pattern or a node bound before it is `NULL` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type, before the run when the kind is certain from the query text ([static kind checks](semantics.md#static-kind-checks): `false AND 123`, `1 IN true`, `type(n)` of a node variable, `p.name` of a path, `WITH 123 AS x RETURN x.num`), else when a row reaches it: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `IN` with a right operand that is no list, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a list, map, vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` or `SET` property value; a `SET` / `REMOVE` target that holds no node or edge, a label item on an edge at run time, a right side of `SET n = ..` / `+=` that is no map, node or edge; a `DELETE` target that holds no node, edge or path; a node bound before a `MERGE` that is no node, a node, edge or path as a `MERGE` property value |
+| `22G03` | data | a value of the wrong type, before the run when the kind is certain from the query text ([static kind checks](semantics.md#static-kind-checks): `false AND 123`, `1 IN true`, `type(n)` of a node variable, `p.name` of a path, `WITH 123 AS x RETURN x.num`), else when a row reaches it: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `IN` with a right operand that is no list, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a temporal component the type lacks (`date(..).hour`), temporal arithmetic without a meaning (`date + date`); a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a list, map, vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` or `SET` property value; a `SET` / `REMOVE` target that holds no node or edge, a label item on an edge at run time, a right side of `SET n = ..` / `+=` that is no map, node or edge; a `DELETE` target that holds no node, edge or path; a node bound before a `MERGE` that is no node, a node, edge or path as a `MERGE` property value |
 | `G1001` | data | a `DELETE` / `NODETACH DELETE` of a node that still has an edge the same clause does not delete (use `DETACH DELETE`) |
-| `22012` | data | integer division or `%` by zero (a float one gives `Infinity` or `NaN`), also `mod(a, 0)` |
+| `22012` | data | integer division or `%` by zero (a float one gives `Infinity` or `NaN`), also `mod(a, 0)`; a duration divided by zero |
+| `22007` | data | temporal text that is no value of the type, a temporal map with an unknown key or conflicting date keys, an unknown time zone ([Dates and times](#dates-and-times)) |
+| `22008` | data | a temporal field out of range, a temporal value or result outside the years -9999 to 9999 |
 | `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |
 | `22011` | data | a negative position or length in `substring()`, `left()`, `right()` |
 | `22027` | data | a `TRIM(c FROM s)` character `c` that is not exactly one character |
 | `2201E` | data | the logarithm of a number `<= 0`, or to a base `<= 0` or `1` (`ln`, `log`, `log10`) |
 | `2201F` | data | `sqrt()` of a negative number, `power()` of 0 to a negative power or of a negative number to a non-integer power |
-| `22023` | data | an argument outside the function's values: `range()` step 0, a negative `round()` precision or an unknown rounding mode, a negative `replace()` limit, a negative `n` in the list `trim(list, n)` |
+| `22023` | data | an argument outside the function's values: a truncation unit the type lacks or an unknown one (`date.truncate('hour', ..)`), `range()` step 0, a negative `round()` precision or an unknown rounding mode, a negative `replace()` limit, a negative `n` in the list `trim(list, n)` |
 
 `42001` is fixed; the other codes are **provisional**: they follow the standard's classes and
 may still be refined before the GQL support is complete. The function codes (`22018`, `22011`,
-`22027`, `2201E`, `2201F`, `22023`) are the ISO / SQL-heritage subclasses of class `22`; Neo4j
+`22027`, `2201E`, `2201F`, `22023`, `22007`, `22008`) are the ISO / SQL-heritage subclasses of class `22`; Neo4j
 reports the same failures with its own vendor subclasses (`22N38`, `22N03`, ...). Match on the kind
 (`GqlErrorKind`) in code, and treat the code as diagnostic information.
 

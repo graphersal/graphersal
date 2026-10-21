@@ -127,6 +127,7 @@
   - [Storage and Exchange](dates/storage.md)
   - [From Python](dates/python.md)
   - [TinkerPop Compatibility](dates/tinkerpop.md)
+  - [Dates in GQL](dates/gql.md)
 - [Schemas](users_guide/schema_enforcement.md)
 - [Saved Queries](users_guide/saved_queries.md)
 - [Property Indexes](users_guide/property_indexes.md)

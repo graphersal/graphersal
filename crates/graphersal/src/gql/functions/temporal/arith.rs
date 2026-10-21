@@ -30,7 +30,7 @@ use super::super::super::ast::{BinaryOp, UnaryOp};
 use super::super::super::eval::{EvalError, Value};
 use super::super::super::lexer::Span;
 use super::construct::temporal_error;
-use super::not_yet;
+use super::sub_micro;
 use crate::ElementProperty;
 use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
@@ -154,10 +154,7 @@ fn scale(d: Duration, n: &Number, divide: bool, span: Span) -> Result<Temporal, 
     };
     let scaled = arith::scale_duration(d, factor, divide).map_err(|e| temporal_error(e, span))?;
     if scaled.sub_micro {
-        return Err(not_yet(
-            "a temporal value with a part below the microsecond (values hold microseconds)",
-            span,
-        ));
+        return Err(sub_micro(span));
     }
     Ok(Temporal::Duration(scaled.duration))
 }

@@ -4,7 +4,8 @@ Three steps compute with dates: [`date_add()`](../traversal/steps/date_add.md) m
 [`date_diff()`](../traversal/steps/date_diff.md) measures the distance between two values as a
 number, [`age()`](../traversal/steps/age.md) as a `duration`. All of them are checked: a result
 outside the years -9999 to 9999 is an error, never a wrapped value. In a script the operators `+`
-and `-` do the same ([script values](index.md#script-values)).
+and `-` do the same ([script values](index.md#script-values)). In GQL, `+` with a duration and
+`duration.between()` follow Neo4j's rules instead ([Dates in GQL](gql.md#arithmetic)).
 
 ## Units: the `DT` token
 

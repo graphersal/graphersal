@@ -21,8 +21,15 @@
 //!      guard test checks that each case still gets its error at compile time.
 //!    - `zone-name-not-kept` (user decision 2026-10-21, 3g.P0 U3): a `datetime` keeps its UTC
 //!      offset, not the zone name (`datetime({.., timezone: 'Europe/Stockholm'})` is
-//!      `..+01:00`); the cases that print the name or depend on it.
-//!    - `year-range` (3g.P0 U10): temporal values hold the years -9999 to 9999 (22008 beyond).
+//!      `..+01:00`); the cases that print the name or depend on it (the name in the expected
+//!      text, `x.timezone` of a named zone, a daylight-saving step in `duration.between`).
+//!    - `year-range` (user decision 2026-10-21, 3g.P0 U10): temporal values hold the years
+//!      -9999 to 9999 (22008 beyond); Neo4j's two cases with larger years.
+//!
+//!    Both are documented in `src/gql/functions/temporal/mod.rs` ("Deliberate deviations from
+//!    Neo4j") and in `book/src/gql/semantics.md` ("Where dates and times differ from Neo4j").
+//!    Sub-microsecond values (U1), Cypher's zoned `time()` (U2) and `X.realtime()` (U9) are no
+//!    exclusions: those cases stay `missing` (0A000 "not yet" / refused).
 //!
 //!    The former family `type-error-at-evaluation` (131 cases expecting a compile-time
 //!    `InvalidArgumentType`) passes since stage 3f (user decision U9, the static kind checks of
@@ -94,7 +101,7 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         reason: "a datetime keeps its UTC offset, not the zone name: a zone name resolves to its \
                  offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], \
                  and a later change of the date keeps the offset (no daylight saving step)",
-        docs: "dates/time_zones.md",
+        docs: "gql/semantics.md#where-dates-and-times-differ-from-neo4j",
         deviation: true,
         ids: ZONE_NAME_NOT_KEPT,
     },
@@ -102,7 +109,7 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         code: "year-range",
         reason: "temporal values hold the years -9999 to 9999; a year beyond them is a data \
                  error (22008), Neo4j reads years up to 999999999",
-        docs: "dates/index.md#the-five-types",
+        docs: "gql/semantics.md#where-dates-and-times-differ-from-neo4j",
         deviation: true,
         ids: YEAR_RANGE,
     },
