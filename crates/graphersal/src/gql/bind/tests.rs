@@ -4273,7 +4273,7 @@ fn delete_errors() {
             "{query}"
         );
         assert!(
-            f.alternative.unwrap_or_default().contains("e:knows"),
+            f.alternative.unwrap_or_default().contains("g.gql("),
             "{query}"
         );
     }

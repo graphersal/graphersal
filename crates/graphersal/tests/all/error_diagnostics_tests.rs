@@ -4868,7 +4868,10 @@ fn id_of_a_vertex_removed_earlier_in_the_query_explains_the_stale_handle() {
         "{report}"
     );
     assert!(
-        report.contains("A lazy value such as values(\"name\") or id() taken before the drop"),
+        report.contains(
+            "Not every later read fails: values(), properties() and value_map() of the removed \
+             vertex find no properties"
+        ),
         "{report}"
     );
 }
@@ -9695,7 +9698,7 @@ mod gql {
     #[test]
     fn gql_call_errors_explain_imports_and_returned_columns() {
         let advice = "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write \
-             (INSERT, SET, REMOVE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
+             (INSERT, SET, REMOVE, DELETE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause \
              names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which must \
              be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as \
@@ -10682,7 +10685,9 @@ mod gql {
             ),
             (
                 "MATCH (p) REMOVE p",
-                "Expected `.`, `:`, IS at the marked position. ",
+                "REMOVE removes a property (REMOVE p.k) or a label (REMOVE p:A); to remove the \
+                 element itself, write DETACH DELETE p, as in g.gql(\"MATCH (p) DETACH DELETE \
+                 p\"). Expected `.`, `:`, IS at the marked position. ",
             ),
         ] {
             let (err, _) = gql_write_failure(query);
@@ -10839,5 +10844,280 @@ mod gql {
                 .starts_with("A closed schema admits only declared vertex labels")
         );
         assert!(failure("closed", "MATCH (p:person) SET p.zzz = 1").starts_with("Declare 'zzz'"));
+    }
+
+    /// The general advice of an error about a `DELETE` clause (stage 3d).
+    const DELETE_ADVICE: &str = "DELETE removes, for each row, the nodes and edges its targets \
+         give: a node or edge variable, a path (all its nodes and edges) or a list of them; a \
+         NULL target is skipped, and an element given twice is removed once. A node that still \
+         has edges is removed only together with them: DETACH DELETE removes its edges too, as \
+         in g.gql(\"MATCH (s:software {name: 'lop'}) DETACH DELETE s\"). The rest of the query \
+         can no longer read what it deleted, so read what it needs first, as in \
+         g.gql(\"MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p \
+         RETURN name\"); a query may end with the DELETE (it then returns no rows).";
+
+    /// G1001: a plain or NODETACH `DELETE` of a node that still has edges names `DETACH
+    /// DELETE` built from the failing query and the same-clause form, without the generic
+    /// data-row sentence; both fixes run, and the failure changes nothing.
+    #[test]
+    fn gql_delete_of_a_node_with_edges_names_detach_delete_on_the_failing_query() {
+        let before = state(&TraversalGraph::tinkerpop_modern());
+        let same_clause = "g.gql(\"MATCH (s:software {name: 'ripple'})<-[r]-() DELETE r, s\")";
+        for (query, fixed) in [
+            (
+                "MATCH (n:person {name: 'marko'}) DELETE n",
+                "MATCH (n:person {name: 'marko'}) DETACH DELETE n",
+            ),
+            (
+                "MATCH (n:person {name: 'marko'}) NODETACH DELETE n RETURN count(*) AS c",
+                "MATCH (n:person {name: 'marko'}) DETACH DELETE n RETURN count(*) AS c",
+            ),
+            (
+                "MATCH (n) CALL (n) { DELETE n RETURN 1 AS y } RETURN y",
+                "MATCH (n) CALL (n) { DETACH DELETE n RETURN 1 AS y } RETURN y",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "G1001".to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!(
+                    "remove the node together with its edges with DETACH DELETE, as in \
+                     g.gql(\"{fixed}\"), or delete its edges in the same clause, as in \
+                     {same_clause}."
+                ),
+                "{query}"
+            );
+            assert!(!help.contains("A row of the data"), "{help}");
+            assert_write_examples_run(&help);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+    }
+
+    /// W27 / W28: a read, a write or a `RETURN` of an element deleted earlier names reading it
+    /// with `properties(..)` before the `DELETE` (an edge also gets its own example); the
+    /// examples run, and the failure changes nothing.
+    #[test]
+    fn gql_reads_of_a_deleted_element_name_properties_before_the_delete() {
+        let before = state(&TraversalGraph::tinkerpop_modern());
+        let node = "The node was deleted earlier in this query (by DELETE or DETACH DELETE, or \
+             together with a node a DETACH DELETE removed), but a later part of the query still \
+             reads it: a deleted node has no properties, labels or id any more and cannot be \
+             returned or changed, and a pattern from it matches nothing; only count(n) and n IS \
+             NULL still work. Read what you need before the DELETE and keep that instead, for \
+             example g.gql(\"MATCH (n:person {name: 'marko'}) WITH n, properties(n) AS p DETACH \
+             DELETE n RETURN p\"), or run the DELETE as a separate query after reading.";
+        let edge = "The edge was deleted earlier in this query (by DELETE or DETACH DELETE, or \
+             together with a node a DETACH DELETE removed), but a later part of the query still \
+             reads it: a deleted edge has no properties, labels or id any more and cannot be \
+             returned or changed, and a pattern from it matches nothing; only count(r), r IS NULL \
+             and type(r) still work. Read what you need before the DELETE and keep that instead, \
+             for example g.gql(\"MATCH (:person)-[r:knows]->() WITH r, properties(r) AS p DELETE \
+             r RETURN p\"), or for a node g.gql(\"MATCH (n:person {name: 'marko'}) WITH n, \
+             properties(n) AS p DETACH DELETE n RETURN p\"), or run the DELETE as a separate \
+             query after reading.";
+        for (query, expected) in [
+            ("MATCH (n:software) DETACH DELETE n RETURN n.name", node),
+            ("MATCH (n:software) DETACH DELETE n RETURN n", node),
+            ("MATCH (n:software) DETACH DELETE n SET n.k = 1", node),
+            ("MATCH (n:software) DETACH DELETE n REMOVE n.lang", node),
+            (
+                "MATCH (n:software) DETACH DELETE n INSERT (n)-[:k]->(:x)",
+                node,
+            ),
+            ("MATCH ()-[r:created]->() DELETE r RETURN r.weight", edge),
+            ("MATCH ()-[r:created]->() DELETE r SET r.k = 1", edge),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            let help = err.help().expect("help");
+            assert_eq!(help, expected, "{query}");
+            assert_write_examples_run(&help);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+    }
+
+    /// E1 / E2 and the run-time 22G03: a DELETE target that is no element gets a runnable fix
+    /// built from the failing query, then the DELETE advice; every example runs.
+    #[test]
+    fn gql_delete_target_errors_build_a_runnable_fix() {
+        let before = state(&TraversalGraph::tinkerpop_modern());
+        for (query, kind, status, fix) in [
+            (
+                "MATCH (s:software {name: 'ripple'})<-[r]-() DELETE r, s:software",
+                GqlErrorKind::Syntax,
+                "42001",
+                "delete the element itself with DELETE s, as in g.gql(\"MATCH (s:software \
+                 {name: 'ripple'})<-[r]-() DELETE r, s\"), or remove the label and keep the \
+                 element with REMOVE s:software, as in g.gql(\"MATCH (s:software {name: \
+                 'ripple'})<-[r]-() DELETE r REMOVE s:software\"). ",
+            ),
+            (
+                "MATCH (n:person {name: 'vadas'}) DETACH DELETE n IS person",
+                GqlErrorKind::Syntax,
+                "42001",
+                "delete the element itself with DETACH DELETE n, as in g.gql(\"MATCH \
+                 (n:person {name: 'vadas'}) DETACH DELETE n\"), or remove the label and keep \
+                 the element with REMOVE n:person, as in g.gql(\"MATCH (n:person {name: \
+                 'vadas'}) REMOVE n:person\"). ",
+            ),
+            (
+                "MATCH (n:person) DELETE 1 + 1",
+                GqlErrorKind::Semantic,
+                "42002",
+                "name the element to remove by its variable, as in g.gql(\"MATCH (n:person) \
+                 DETACH DELETE n\"). ",
+            ),
+            (
+                "MATCH (a)-[e:knows]->(b) DELETE 'x'",
+                GqlErrorKind::Semantic,
+                "42002",
+                "name the element to remove by its variable, as in g.gql(\"MATCH \
+                 (a)-[e:knows]->(b) DELETE e\"). ",
+            ),
+            (
+                "RETURN 1 AS x NEXT DELETE 2",
+                GqlErrorKind::Semantic,
+                "42002",
+                "name the element to remove by its variable, as in g.gql(\"MATCH \
+                 (p:person)-[e:knows]->() DELETE e\"). ",
+            ),
+            (
+                "MATCH (n:person) WITH 1 AS x DELETE x",
+                GqlErrorKind::Data,
+                "22G03",
+                "give DELETE a node, an edge, a path or a list of them, and keep the rows where \
+                 the target holds something else away from it with FILTER or WHERE, as in \
+                 g.gql(\"MATCH (n:person {name: 'marko'}) DETACH DELETE n\"). ",
+            ),
+            (
+                "MATCH (n:person) DELETE n,",
+                GqlErrorKind::Syntax,
+                "42001",
+                "Expected an expression at the marked position. ",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(kind_and_status(&err), (kind, status.to_string()), "{query}");
+            let help = err.help().expect("help");
+            assert_eq!(help, format!("{fix}{DELETE_ADVICE}"), "{query}");
+            assert!(!help.contains("a GQL read query is"), "{help}");
+            assert_write_examples_run(&help);
+            assert_eq!(state(&graph), before, "{query}");
+        }
+    }
+
+    /// DELETE inside a subquery expression: the fix is the clause of the query itself, with a
+    /// DELETE as written (a node without edges for a plain or NODETACH DELETE), then the DELETE
+    /// advice.
+    #[test]
+    fn gql_delete_inside_a_subquery_expression_names_the_clause_form() {
+        for (query, change) in [
+            (
+                "MATCH (p) RETURN COUNT { MATCH (p) DELETE p } AS c",
+                "WHERE NOT EXISTS { (p)--() } INSERT (:maker {name: p.name}) DELETE p",
+            ),
+            (
+                "MATCH (p) WHERE EXISTS { MATCH (p) NODETACH DELETE p } RETURN p",
+                "WHERE NOT EXISTS { (p)--() } INSERT (:maker {name: p.name}) NODETACH DELETE p",
+            ),
+            (
+                "MATCH (p) RETURN [x IN [1] WHERE EXISTS { MATCH (p) DETACH DELETE p }] AS l",
+                "WHERE EXISTS { (p)-[:created]->() } INSERT (:maker {name: p.name}) DETACH \
+                 DELETE p",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Syntax, "42001".to_string()),
+                "{query}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!(
+                    "write the change as a clause of the query itself, after the clauses that \
+                     find its rows, for example g.gql(\"MATCH (p:person) {change}\"). \
+                     {DELETE_ADVICE}"
+                ),
+                "{query}"
+            );
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6));
+        }
+    }
+
+    /// The forms a Gremlin or Cypher user may write to delete: `REMOVE n` (the item forms and
+    /// `DETACH DELETE n`), `DROP n` (no such clause: `DETACH DELETE`), `FOREACH` over the
+    /// nodes of a path (DELETE takes the list); the rewritten queries run.
+    #[test]
+    fn gql_remove_and_drop_of_an_element_name_detach_delete() {
+        let (err, _) = gql_write_failure("MATCH (p:person) REMOVE p");
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with(
+                "REMOVE removes a property (REMOVE p.k) or a label (REMOVE p:A); to remove the \
+                 element itself, write DETACH DELETE p, as in g.gql(\"MATCH (p:person) DETACH \
+                 DELETE p\"). Expected `.`, `:`, IS at the marked position. "
+            ),
+            "{help}"
+        );
+        assert_write_examples_run(&help);
+        for (query, fixed) in [
+            (
+                "MATCH (p:person) DROP p",
+                "MATCH (p:person) DETACH DELETE p",
+            ),
+            (
+                "MATCH (s:software) drop s RETURN count(*) AS n",
+                "MATCH (s:software) DETACH DELETE s RETURN count(*) AS n",
+            ),
+        ] {
+            let (err, graph) = gql_write_failure(query);
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Syntax, "42001".to_string()),
+                "{query}"
+            );
+            let report = format_diagnostic(&err);
+            assert!(
+                report.contains("GQL has no DROP clause: DELETE removes nodes and edges"),
+                "{report}"
+            );
+            let help = err.help().expect("help");
+            assert_eq!(
+                help,
+                format!(
+                    "write DETACH DELETE (the GQL form of the Gremlin step drop()), as in \
+                     g.gql(\"{fixed}\"). {DELETE_ADVICE}"
+                ),
+                "{query}"
+            );
+            assert_write_examples_run(&help);
+            assert_eq!(counts(&graph), (6, 6));
+        }
+        let (_, report) = gql_failure(|g| {
+            g.gql("MATCH p = (:person)-->() FOREACH (n IN nodes(p) | DELETE n)")
+                .to_list()
+        });
+        assert!(
+            report.contains(
+                "DELETE takes a list itself, as in MATCH p = (:person)-[:knows]->() DETACH \
+                 DELETE nodes(p)."
+            ),
+            "{report}"
+        );
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        graph
+            .traversal_mut()
+            .gql("MATCH p = (:person)-[:knows]->() DETACH DELETE nodes(p)")
+            .to_list()
+            .expect("the FOREACH alternative runs");
+        assert_eq!(counts(&graph), (3, 1));
     }
 }

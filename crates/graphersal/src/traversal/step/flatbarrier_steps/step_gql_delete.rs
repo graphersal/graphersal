@@ -196,6 +196,7 @@ impl<'g, S: GraphStorage + 'g> StepGqlDelete<'g, S> {
              the target holds something else away from it with FILTER or WHERE, as in \
              g.gql(\"MATCH (n:person {name: 'marko'}) DETACH DELETE n\")",
         )
+        .topic(GqlHelpTopic::Delete)
         .into_error(&self.query)
     }
 
@@ -219,15 +220,13 @@ impl<'g, S: GraphStorage + 'g> StepGqlDelete<'g, S> {
             ),
         )
         .gqlstatus(status::EDGES_STILL_EXIST)
-        .alternative(match fixed {
-            Some(fixed) => format!(
-                "remove the node together with its edges with DETACH DELETE, as in {fixed}, or \
-                 delete its edges in the same clause, as in MATCH (n)-[r]-() DELETE r, n"
-            ),
-            None => "remove the node together with its edges with DETACH DELETE, or delete \
-                     its edges in the same clause, as in MATCH (n)-[r]-() DELETE r, n"
-                .to_string(),
-        })
+        .alternative(format!(
+            "remove the node together with its edges with DETACH DELETE, as in {}, or delete \
+             its edges in the same clause, as in g.gql(\"MATCH (s:software {{name: 'ripple'}})\
+             <-[r]-() DELETE r, s\")",
+            fixed.unwrap_or_else(|| format!("DETACH DELETE {text}"))
+        ))
+        .topic(GqlHelpTopic::Delete)
         .into_error(&self.query)
     }
 

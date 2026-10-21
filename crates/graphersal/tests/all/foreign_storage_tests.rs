@@ -850,6 +850,154 @@ fn curated_gql_3c_scripts_give_the_same_result_on_both_storages() {
     assert_eq!(outcome.state, modern);
 }
 
+/// Stage 3d: GQL `DELETE` / `DETACH DELETE` (nodes, edges, an edge with its ends in one
+/// clause, paths, lists and map members, NULL targets, values read before the delete,
+/// `type()` of a deleted edge, `CALL` bodies, `NEXT`, an index read after the delete, saved
+/// queries), each script ending in [`DUMP_3A`] on a fresh modern graph. Errors (nothing of the
+/// query stays): NODETACH on a connected node (G1001), a property read and a `RETURN` of a
+/// deleted node (W27, W28), the last row fails, a non-element target (22G03), an atomic
+/// script that throws.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3D: &[(Mode, &str)] = &[
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:person {name: 'marko'}) DETACH DELETE n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH ()-[r:knows]->() DELETE r RETURN type(r) AS t, count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (s:software {name: 'ripple'})<-[r]-() DELETE r, s").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH p = (:person {name: 'marko'})-[:knows]->() DETACH DELETE p").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:software) WITH collect(n) AS ns DETACH DELETE ns").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) WITH {k: [n]} AS m DETACH DELETE m.k RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) WITH n, n.name AS name DETACH DELETE n RETURN name ORDER BY name").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("OPTIONAL MATCH (n:nope) DELETE n RETURN n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:person) CALL (n) { DETACH DELETE n } RETURN count(*) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) RETURN n NEXT DETACH DELETE n DETACH DELETE n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("INSERT (n:X)-[:T]->(m:Y) DETACH DELETE n RETURN count(m) AS c").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.create_index(#{label: "person", key: "age"}); g.gql("MATCH (p:person) WHERE p.age > 30 DETACH DELETE p").toList(); g.V().has_label("person").has("age", P.gt(0)).count().next()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.define_query(#{name: "rm", language: "gql", params: #{n: "string"}, body: "MATCH (p {name: $n}) DETACH DELETE p"}); g.query("rm", #{n: "josh"}).iterate(); g.query("rm", #{n: "josh"}).iterate()"#,
+    ),
+    // Errors: nothing of the query stays.
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:person {name: 'marko'}) DELETE n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:software) DETACH DELETE n RETURN n.name").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n:software) DETACH DELETE n RETURN n").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("FOR x IN [1, 0] MATCH (n:person) DETACH DELETE n RETURN 1 / x AS y").toList()"#,
+    ),
+    (
+        Mode::Plain,
+        r#"g.gql("MATCH (n) WITH 1 AS x DELETE x").toList()"#,
+    ),
+    (
+        Mode::Atomic,
+        r#"g.gql("MATCH (n:software) DETACH DELETE n").toList(); g.gql("MATCH ()-[r]->() DELETE r").toList(); throw "boom""#,
+    ),
+    // Whole-script units and dry runs.
+    (
+        Mode::Atomic,
+        r#"g.gql("MATCH (n:software) DETACH DELETE n").toList(); g.gql("MATCH (p:person) WHERE NOT EXISTS { (p)--() } DELETE p").toList(); g.V().count().next()"#,
+    ),
+    (
+        Mode::DryRun,
+        r#"g.gql("MATCH (n:person {name: 'josh'}) DETACH DELETE n").toList(); g.V().count().next()"#,
+    ),
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3d_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = Vec::new();
+    for (mode, script) in GQL_CURATED_3D {
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), *mode, &script);
+        let actual = run_curated(forwarded(), *mode, &script);
+        if expected.result.is_err() {
+            failing.push(script.clone());
+        }
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts must exercise stage 3d, not fail on the way: only the six error cases fail.
+    assert_eq!(failing.len(), 6, "{failing:#?}");
+    // A failed write leaves the modern graph as it was.
+    let modern = run_curated(reference(), Mode::Plain, &format!("1; {DUMP_3A}")).state;
+    for (mode, script) in &GQL_CURATED_3D[14..20] {
+        let outcome = run_curated(reference(), *mode, &format!("{script}; {DUMP_3A}"));
+        assert!(outcome.result.is_err(), "{script}");
+        assert_eq!(outcome.state, modern, "{script}");
+    }
+    // The scripts that succeed change the graph.
+    for (mode, script) in &GQL_CURATED_3D[..14] {
+        let outcome = run_curated(reference(), *mode, &format!("{script}; {DUMP_3A}"));
+        if !script.contains("OPTIONAL MATCH (n:nope)") {
+            assert_ne!(outcome.state, modern, "{script}");
+        }
+    }
+    // A dry run reports the change set and keeps nothing.
+    let (mode, script) = GQL_CURATED_3D[GQL_CURATED_3D.len() - 1];
+    let outcome = run_curated(reference(), mode, script);
+    assert!(outcome.changes.is_some_and(|changes| !changes.is_empty()));
+    assert_eq!(outcome.state, modern);
+}
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_2e_scripts_give_the_same_result_on_both_storages() {

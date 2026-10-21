@@ -3846,7 +3846,7 @@ impl<'q> Binder<'q> {
         for target in &clause.targets {
             // Resolved first: an unknown name or an aggregate gets its own error.
             let value = self.write_value_in(target, IN_DELETE, &mut reads)?;
-            let kind = self.delete_kind(word, target)?;
+            let kind = self.delete_kind(word, clause.keyword, target)?;
             targets.push(DeleteTarget {
                 value,
                 kind,
@@ -3868,13 +3868,14 @@ impl<'q> Binder<'q> {
 
     /// What a `DELETE` target as written holds, as far as the binder knows (see
     /// [`DeleteKind`]); a target it knows holds no element is refused (42002, design E2).
-    fn delete_kind(&self, word: &str, target: &Expr) -> BResult<DeleteKind> {
+    fn delete_kind(&self, word: &str, keyword: Span, target: &Expr) -> BResult<DeleteKind> {
         let refuse = |what: &str| -> BResult<DeleteKind> {
             Err(no_element_target(
                 word,
                 target.span,
                 self.query.text(target.span),
                 what,
+                self.delete_example(word, keyword),
             ))
         };
         match &target.kind {
@@ -3882,7 +3883,7 @@ impl<'q> Binder<'q> {
             ExprKind::Literal(Literal::String(_)) => refuse("a text"),
             ExprKind::Literal(Literal::Bool(_)) => refuse("a boolean"),
             ExprKind::Literal(Literal::Integer(_) | Literal::Float(_)) => refuse("a number"),
-            ExprKind::Variable(var) => self.delete_variable_kind(word, var, target),
+            ExprKind::Variable(var) => self.delete_variable_kind(word, keyword, var, target),
             ExprKind::Parameter(_)
             | ExprKind::Property { .. }
             | ExprKind::FunctionCall { .. }
@@ -3915,10 +3916,47 @@ impl<'q> Binder<'q> {
         }
     }
 
+    /// A runnable `DELETE` for the error of a target that holds no element (rule 6): the
+    /// failing query's clauses before `keyword` with `word` and the first edge variable in
+    /// scope, else the first node or path variable with `DETACH DELETE` (so the example runs
+    /// on a node that has edges), or a fixed query deleting an edge.
+    fn delete_example(&self, word: &str, keyword: Span) -> String {
+        let fallback = "MATCH (p:person)-[e:knows]->()";
+        let element = |wanted: fn(BindingKind) -> bool| {
+            self.scope
+                .entries
+                .iter()
+                .find_map(|(name, symbol)| match symbol {
+                    Symbol::Binding(id) => self
+                        .bindings
+                        .get(id.0)
+                        .filter(|b| !b.group && wanted(b.kind))
+                        .map(|_| name.name.as_str()),
+                    _ => None,
+                })
+        };
+        let name = element(|k| matches!(k, BindingKind::Edge))
+            .map(|name| (word, name))
+            .or_else(|| {
+                element(|k| matches!(k, BindingKind::Node | BindingKind::Path))
+                    .map(|name| ("DETACH DELETE", name))
+            });
+        match name {
+            Some((word, name)) => self.write_example(
+                keyword,
+                &format!("{word} {}", crate::error::gql_key(name)),
+                fallback,
+            ),
+            None => crate::value::literal::rhai_query(&format!("{fallback} {word} e"))
+                .map_or_else(|| "g.gql(..)".to_string(), |q| format!("g.gql({q})")),
+        }
+    }
+
     /// The [`DeleteKind`] of a variable target (resolved already, so it is in scope).
     fn delete_variable_kind(
         &self,
         word: &str,
+        keyword: Span,
         var: &Identifier,
         target: &Expr,
     ) -> BResult<DeleteKind> {
@@ -3949,6 +3987,7 @@ impl<'q> Binder<'q> {
                         target.span,
                         self.query.text(target.span),
                         "the position of a FOR item (a number)",
+                        self.delete_example(word, keyword),
                     ));
                 }
                 DeleteKind::Unknown
@@ -6531,8 +6570,14 @@ fn ordinal_as_target(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
 }
 
 /// The error of a `DELETE` target the binder knows holds no element (42002, design E2):
-/// `written` is the target as written, `what` what it is.
-fn no_element_target(word: &str, span: Span, written: &str, what: &str) -> Box<GqlErrorBuilder> {
+/// `written` is the target as written, `what` what it is, `example` a runnable `DELETE`.
+fn no_element_target(
+    word: &str,
+    span: Span,
+    written: &str,
+    what: &str,
+    example: String,
+) -> Box<GqlErrorBuilder> {
     Box::new(
         semantic(
             span,
@@ -6542,10 +6587,9 @@ fn no_element_target(word: &str, span: Span, written: &str, what: &str) -> Box<G
             ),
         )
         .alternative(format!(
-            "name the element to remove by its variable, as in MATCH (p:person)-[e:knows]->() \
-             {word} e"
+            "name the element to remove by its variable, as in {example}"
         ))
-        .topic(GqlHelpTopic::PatternVariable),
+        .topic(GqlHelpTopic::Delete),
     )
 }
 

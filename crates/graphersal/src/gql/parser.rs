@@ -1161,8 +1161,37 @@ impl<'a> Parser<'a> {
                 span,
                 "FOREACH",
                 "write FOR x IN <list> followed by the write clause, for example \
-                 FOR name IN ['ann', 'bob'] INSERT (:person {name: name})",
+                 FOR name IN ['ann', 'bob'] INSERT (:person {name: name}). DELETE takes a \
+                 list itself, as in MATCH p = (:person)-[:knows]->() DETACH DELETE nodes(p)",
             ));
+        }
+        // Gremlin's `drop()` written as a clause, `DROP n` (catalog statements aside).
+        let catalog = [
+            "GRAPH",
+            "INDEX",
+            "CONSTRAINT",
+            "TYPE",
+            "SCHEMA",
+            "VIEW",
+            "TABLE",
+        ];
+        if text == "DROP"
+            && self.nth(1).name().is_some()
+            && !catalog.iter().any(|word| is_word(self.nth(1), word))
+        {
+            let fixed = self
+                .rewritten(span, "DETACH DELETE")
+                .unwrap_or_else(|| format!("DETACH DELETE {}", self.nth(1).text));
+            let b = err(
+                GqlErrorKind::Syntax,
+                span,
+                "GQL has no DROP clause: DELETE removes nodes and edges",
+            )
+            .alternative(format!(
+                "write DETACH DELETE (the GQL form of the Gremlin step drop()), as in {fixed}"
+            ))
+            .topic(GqlHelpTopic::Delete);
+            return Some(Box::new(b));
         }
         if text == "LOAD" && is_word(self.nth(1), "CSV") {
             let b = err(
@@ -1239,17 +1268,35 @@ impl<'a> Parser<'a> {
     /// The refusal of a write clause (`what`, as written in upper case) inside `place`, a
     /// subquery expression or a comprehension, which only read (design W3).
     fn banned_write(&self, span: Span, what: &str, place: &str) -> Box<GqlErrorBuilder> {
-        let (change, topic) = match what {
+        const CREATED: &str = "WHERE EXISTS { (p)-[:created]->() }";
+        let (condition, change, topic) = match what {
             // The INSERT form stays in the example: every write clause stands there.
             "SET" => (
-                "SET p.maker = true INSERT (:maker {name: p.name})",
+                CREATED,
+                "SET p.maker = true INSERT (:maker {name: p.name})".to_string(),
                 GqlHelpTopic::Set,
             ),
             "REMOVE" => (
-                "REMOVE p.age INSERT (:maker {name: p.name})",
+                CREATED,
+                "REMOVE p.age INSERT (:maker {name: p.name})".to_string(),
                 GqlHelpTopic::Set,
             ),
-            _ => ("INSERT (:maker {name: p.name})", GqlHelpTopic::Insert),
+            "DETACH DELETE" => (
+                CREATED,
+                "INSERT (:maker {name: p.name}) DETACH DELETE p".to_string(),
+                GqlHelpTopic::Delete,
+            ),
+            // A node without edges, so the DELETE as written runs.
+            "DELETE" | "NODETACH DELETE" => (
+                "WHERE NOT EXISTS { (p)--() }",
+                format!("INSERT (:maker {{name: p.name}}) {what} p"),
+                GqlHelpTopic::Delete,
+            ),
+            _ => (
+                CREATED,
+                "INSERT (:maker {name: p.name})".to_string(),
+                GqlHelpTopic::Insert,
+            ),
         };
         let b = err(
             GqlErrorKind::Syntax,
@@ -1258,8 +1305,7 @@ impl<'a> Parser<'a> {
         )
         .alternative(format!(
             "write the change as a clause of the query itself, after the clauses that find \
-             its rows, for example g.gql(\"MATCH (p:person) WHERE EXISTS {{ (p)-[:created]->() }} \
-             {change}\")"
+             its rows, for example g.gql(\"MATCH (p:person) {condition} {change}\")"
         ))
         .topic(topic);
         Box::new(b)
@@ -1922,6 +1968,9 @@ impl<'a> Parser<'a> {
         if matches!(last, Some(Stage::Set(_) | Stage::Remove(_))) {
             return set_topic(error);
         }
+        if matches!(last, Some(Stage::Delete(_))) {
+            return delete_topic(error);
+        }
         error
     }
 
@@ -2475,9 +2524,9 @@ impl<'a> Parser<'a> {
     /// `REMOVE item, ...`, at the keyword (stage 3c, [`RemoveClause`]).
     fn remove_clause(&mut self) -> PResult<RemoveClause> {
         let keyword = self.write_keyword()?;
-        let mut items = vec![self.remove_item()?];
+        let mut items = vec![self.remove_item(Some(keyword))?];
         while self.eat(&TokenKind::Comma).is_some() {
-            items.push(self.remove_item()?);
+            items.push(self.remove_item(None)?);
         }
         Ok(RemoveClause {
             items,
@@ -2500,13 +2549,21 @@ impl<'a> Parser<'a> {
         let explicit_nodetach = first.keyword() == Some(Keyword::Nodetach);
         let start = first.span;
         if detach || explicit_nodetach {
-            self.expect_kw(Keyword::Delete, &["DELETE"])?;
+            self.expect_kw(Keyword::Delete, &["DELETE"])
+                .map_err(delete_topic)?;
         }
         let keyword = start.to(self.last);
         self.writes.push(keyword);
-        let mut targets = vec![self.delete_target(&what)?];
+        let mut targets = vec![
+            self.delete_target(&what, keyword, None)
+                .map_err(delete_topic)?,
+        ];
         while self.eat(&TokenKind::Comma).is_some() {
-            targets.push(self.delete_target(&what)?);
+            let previous = targets.last().map(|t: &Expr| t.span);
+            targets.push(
+                self.delete_target(&what, keyword, previous)
+                    .map_err(delete_topic)?,
+            );
         }
         Ok(DeleteClause {
             detach,
@@ -2517,9 +2574,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// One target of a `DELETE` (`what`: its keywords as written in upper case): any
-    /// expression but a label predicate (design E1).
-    fn delete_target(&mut self, what: &str) -> PResult<Expr> {
+    /// One target of a `DELETE` (`what`: its keywords as written in upper case, at `keyword`;
+    /// `previous` the target before it): any expression but a label predicate (design E1).
+    fn delete_target(
+        &mut self,
+        what: &str,
+        keyword: Span,
+        previous: Option<Span>,
+    ) -> PResult<Expr> {
         // `n IS Label` (the label form of SET / REMOVE items) is no expression: read as one.
         let is_label = self.peek().name().is_some()
             && self.nth(1).keyword() == Some(Keyword::Is)
@@ -2534,29 +2596,58 @@ impl<'a> Parser<'a> {
             let element = self.advance().span;
             self.advance();
             let (labels, _) = self.label_expr()?;
-            return Err(self.label_target(what, element.to(self.last), element, labels.span));
+            let target = element.to(self.last);
+            return Err(self.label_target(what, (keyword, previous), target, element, labels.span));
         }
         let target = self.expr()?;
         if let ExprKind::IsLabeled {
             operand, labels, ..
         } = &target.kind
         {
-            return Err(self.label_target(what, target.span, operand.span, labels.span));
+            return Err(self.label_target(
+                what,
+                (keyword, previous),
+                target.span,
+                operand.span,
+                labels.span,
+            ));
         }
         Ok(target)
     }
 
     /// The syntax error of a `DELETE` target written as a label predicate (design E1): `span`
-    /// the target, `element` its operand, `labels` its label expression.
+    /// the target, `element` its operand, `labels` its label expression; `clause` the keyword
+    /// span of the `DELETE` and the target before this one. The fixes are the failing query
+    /// with the operand as the target, and with a `REMOVE` of the labels in place of the target
+    /// (and of the keyword for the first target; plain label names only).
     fn label_target(
         &self,
         what: &str,
+        clause: (Span, Option<Span>),
         span: Span,
         element: Span,
         labels: Span,
     ) -> Box<GqlErrorBuilder> {
         let written = self.text(span);
-        let element = self.text(element);
+        let element_text = self.text(element);
+        let label_text = self.text(labels);
+        let plain = label_text
+            .split(':')
+            .all(|name| !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'));
+        let (keyword, previous) = clause;
+        let as_in = |fix: Option<String>| fix.map(|q| format!(", as in {q}")).unwrap_or_default();
+        let delete = as_in(self.rewritten(span, element_text));
+        let remove_text = format!("REMOVE {element_text}:{label_text}");
+        let remove_fix = plain
+            .then(|| match previous {
+                None => self.rewritten(keyword.to(span), &remove_text),
+                Some(previous) => self.rewritten(
+                    previous.to(span),
+                    &format!("{} {remove_text}", self.text(previous)),
+                ),
+            })
+            .flatten();
+        let remove = as_in(remove_fix);
         let b = err(
             GqlErrorKind::Syntax,
             span,
@@ -2566,16 +2657,16 @@ impl<'a> Parser<'a> {
             ),
         )
         .alternative(format!(
-            "delete the element itself with {what} {element}, or remove the label and keep the \
-             element with REMOVE {element}:{}",
-            self.text(labels)
-        ));
+            "delete the element itself with {what} {element_text}{delete}, or remove the label \
+             and keep the element with {remove_text}{remove}"
+        ))
+        .topic(GqlHelpTopic::Delete);
         Box::new(b)
     }
 
     /// One `REMOVE` item: `v.key`, `(v).key`, `v:A:B` / `v IS A & B`; its errors get the SET
-    /// advice.
-    fn remove_item(&mut self) -> PResult<RemoveItem> {
+    /// advice. `keyword` is the clause's keyword when this is its first item.
+    fn remove_item(&mut self, keyword: Option<Span>) -> PResult<RemoveItem> {
         let start = self.peek().span;
         let (target, key) = self.item_target("REMOVE").map_err(set_topic)?;
         let kind = if let Some(key) = key {
@@ -2583,13 +2674,36 @@ impl<'a> Parser<'a> {
         } else if self.at(&TokenKind::Colon) || self.at_kw(Keyword::Is) {
             RemoveItemKind::Labels(self.label_item("REMOVE", &target).map_err(set_topic)?)
         } else {
-            return Err(set_topic(self.unexpected(&["`.`", "`:`", "IS"])));
+            return Err(self.bare_remove_target(keyword, &target));
         };
         Ok(RemoveItem {
             kind,
             target,
             span: start.to(self.last),
         })
+    }
+
+    /// The error of a `REMOVE` item that is a bare variable (`REMOVE n`): the expected item
+    /// forms, and `DETACH DELETE` for removing the element itself (stage 3d), built from the
+    /// failing query when the item is the clause's first (`keyword`).
+    #[inline(never)]
+    fn bare_remove_target(
+        &self,
+        keyword: Option<Span>,
+        target: &Identifier,
+    ) -> Box<GqlErrorBuilder> {
+        let mut error = set_topic(self.unexpected(&["`.`", "`:`", "IS"]));
+        let delete = format!("DETACH DELETE {}", self.text(target.span));
+        let example = keyword
+            .and_then(|keyword| self.rewritten(keyword.to(target.span), &delete))
+            .map(|query| format!(", as in {query}"))
+            .unwrap_or_default();
+        error.or_alternative(format!(
+            "REMOVE removes a property (REMOVE {name}.k) or a label (REMOVE {name}:A); to remove \
+             the element itself, write {delete}{example}",
+            name = self.text(target.span)
+        ));
+        error
     }
 
     /// The target of a `SET` / `REMOVE` item (design D2): a variable, with the key of a
@@ -4152,6 +4266,15 @@ impl<'a> Parser<'a> {
 
     fn text(&self, span: Span) -> &str {
         self.src.get(span.start..span.end).unwrap_or("")
+    }
+
+    /// The query with the text at `span` replaced by `with`, as a runnable `g.gql(..)` (rule
+    /// 6); `None` when it is too long to quote.
+    fn rewritten(&self, span: Span, with: &str) -> Option<String> {
+        let before = self.src.get(..span.start)?;
+        let after = self.src.get(span.end..)?;
+        let quoted = crate::value::literal::rhai_query(&format!("{before}{with}{after}"))?;
+        Some(format!("g.gql({quoted})"))
     }
 
     /// Dispatches on the first token of a primary expression (nested forms in own functions).
@@ -5855,6 +5978,12 @@ fn body_without_return(span: Span, word: &str, kind: SubqueryKind) -> Box<GqlErr
 /// error chose its own.
 fn set_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
     error.or_topic(GqlHelpTopic::Set);
+    error
+}
+
+/// [`GqlHelpTopic::Delete`] for an error inside a `DELETE` clause, unless set already.
+fn delete_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
+    error.or_topic(GqlHelpTopic::Delete);
     error
 }
 

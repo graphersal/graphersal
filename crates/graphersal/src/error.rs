@@ -2085,9 +2085,11 @@ impl DiagnosticError for GraphError {
                      properties and no edges, its id(), label() and value cannot be returned, \
                      and it cannot be changed. Materialize what you need before the drop (element_map(), value_map(), \
                      project()) and keep that instead, for example {example}, or run the drop as \
-                     a separate query after reading. A lazy value such as values(\"name\") or \
-                     id() taken before the drop is read only when it is returned, so it fails \
-                     the same way."
+                     a separate query after reading. Not every later read fails: values(), \
+                     properties() and value_map() of the removed {kind} find no properties and \
+                     give no value (or an empty map), and a step that walks its edges (out(), \
+                     in_e(), both()) finds none, without an error, so such a read silently \
+                     returns nothing."
                 ))
             }
             GraphError::InvalidElementState { .. } => {
@@ -4398,6 +4400,9 @@ pub(crate) enum GqlHelpTopic {
     /// A `SET` / `REMOVE` clause (stage 3c): the item forms, a write inside a subquery
     /// expression, a value an item cannot write at run time.
     Set,
+    /// A `[DETACH | NODETACH] DELETE` clause (stage 3d): its targets, a write inside a subquery
+    /// expression, a target that holds no element at run time.
+    Delete,
     /// `UNION` and `NEXT`: the column names of the operands, one kind of `UNION` per chain,
     /// what the statement after `NEXT` reads (stage 2d).
     Composite,
@@ -6868,6 +6873,10 @@ fn gql_help(
                 help.push_str(GQL_SET_ADVICE);
                 return help;
             }
+            if topic == GqlHelpTopic::Delete {
+                help.push_str(GQL_DELETE_ADVICE);
+                return help;
+            }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
                  [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
@@ -6955,6 +6964,14 @@ fn gql_help(
             );
             help.push_str(GQL_SET_ADVICE);
         }
+        // A node that still has edges (G1001): the step's alternative is the whole fix.
+        GqlErrorKind::Data
+            if topic == GqlHelpTopic::Delete
+                && gqlstatus == crate::gql::eval::status::EDGES_STILL_EXIST =>
+        {
+            help.truncate(help.trim_end().len())
+        }
+        GqlErrorKind::Data if topic == GqlHelpTopic::Delete => help.push_str(GQL_DELETE_ADVICE),
         GqlErrorKind::Data => {
             if topic == GqlHelpTopic::TextAndNumber {
                 help.push_str(
@@ -6998,22 +7015,44 @@ const GQL_SET_ADVICE: &str = "SET changes the nodes and edges of each row, item 
      g.gql(\"MATCH (s:software) SET s += {open: true}\").";
 
 /// The advice of a schema violation a GQL `SET` / `REMOVE` raised (stage 3c), with a runnable
+/// The general advice of an error about a `DELETE` clause ([`GqlHelpTopic::Delete`], stage
+/// 3d): its targets, `DETACH`, and reading before the delete.
+#[cfg(feature = "gql")]
+const GQL_DELETE_ADVICE: &str = "DELETE removes, for each row, the nodes and edges its targets \
+     give: a node or edge variable, a path (all its nodes and edges) or a list of them; a NULL \
+     target is skipped, and an element given twice is removed once. A node that still has \
+     edges is removed only together with them: DETACH DELETE removes its edges too, as in \
+     g.gql(\"MATCH (s:software {name: 'lop'}) DETACH DELETE s\"). The rest of the query can \
+     no longer read what it deleted, so read what it needs first, as in \
+     g.gql(\"MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p RETURN \
+     name\"); a query may end with the DELETE (it then returns no rows).";
+
 /// The help of a read of an element removed earlier in a GQL query (W27, W28 of stage 3d): what
 /// still works after a `DELETE`, and the query that reads what it needs before it.
 #[cfg(feature = "gql")]
 fn gql_element_removed_help(kind: GraphNodeType) -> String {
-    let (kind, still) = match kind {
-        GraphNodeType::Vertex => ("node", "count(n) and n IS NULL"),
-        GraphNodeType::Edge => ("edge", "count(r), r IS NULL and type(r)"),
+    let (kind, still, example) = match kind {
+        GraphNodeType::Vertex => (
+            "node",
+            "count(n) and n IS NULL",
+            "MATCH (n:person {name: 'marko'}) WITH n, properties(n) AS p DETACH DELETE n \
+             RETURN p",
+        ),
+        GraphNodeType::Edge => (
+            "edge",
+            "count(r), r IS NULL and type(r)",
+            "MATCH (:person)-[r:knows]->() WITH r, properties(r) AS p DELETE r RETURN p\"), \
+             or for a node g.gql(\"MATCH (n:person {name: 'marko'}) WITH n, properties(n) AS p \
+             DETACH DELETE n RETURN p",
+        ),
     };
     format!(
         "The {kind} was deleted earlier in this query (by DELETE or DETACH DELETE, or together \
          with a node a DETACH DELETE removed), but a later part of the query still reads it: a \
-         deleted {kind} has no properties, labels or id any more, it cannot be returned, \
-         changed or walked from; only {still} still work. Read what you need before the \
-         DELETE and keep that instead, for example g.gql(\"MATCH (n:person {{name: 'marko'}}) \
-         WITH n, properties(n) AS p DETACH DELETE n RETURN p\"), or run the DELETE as a \
-         separate query after reading."
+         deleted {kind} has no properties, labels or id any more and cannot be returned or \
+         changed, and a pattern from it matches nothing; only {still} still work. Read what \
+         you need before the DELETE and keep that instead, for example g.gql(\"{example}\"), or \
+         run the DELETE as a separate query after reading."
     )
 }
 
@@ -7342,7 +7381,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         }
         GqlHelpTopic::Call => {
             "A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT, SET, \
-             REMOVE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
+             REMOVE, DELETE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names \
              (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } \
              those of its first WITH), and passes on only the columns of its RETURN, which \
              must be new names; its aggregates, ORDER BY and LIMIT apply to each row's \
@@ -7352,6 +7391,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         }
         GqlHelpTopic::Insert => GQL_INSERT_ADVICE,
         GqlHelpTopic::Set => GQL_SET_ADVICE,
+        GqlHelpTopic::Delete => GQL_DELETE_ADVICE,
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
@@ -7934,6 +7974,13 @@ impl GqlErrorBuilder {
     pub(crate) fn alternative(mut self, alternative: impl Into<String>) -> Self {
         self.alternative = Some(alternative.into());
         self
+    }
+
+    /// [`alternative`](Self::alternative) unless an earlier stage gave one already.
+    pub(crate) fn or_alternative(&mut self, alternative: impl Into<String>) {
+        if self.alternative.is_none() {
+            self.alternative = Some(alternative.into());
+        }
     }
 
     /// A GQLSTATUS code more specific than the kind's default.

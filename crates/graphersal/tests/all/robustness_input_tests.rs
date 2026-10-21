@@ -4788,3 +4788,507 @@ fn random_gql_3c_set_never_panics_equals_its_twins_and_fails_without_trace() {
     }
     fatal.assert_empty("GQL 3c SET / REMOVE");
 }
+
+// ----- stage 3d: GQL DELETE / DETACH DELETE -----
+
+/// One source of [`GQL_3D_SOURCES`]: the GQL `MATCH`, its Gremlin twin, its node variables,
+/// its edge variables, and its path variable (whose elements are exactly the node and edge
+/// variables).
+#[cfg(feature = "gql")]
+type Gql3dSource = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    Option<&'static str>,
+);
+
+/// The rows of [`random_gql_3d_delete`]: every source binds its elements with `as()` labels
+/// in the twin, so the twin can drop what the GQL query deletes.
+#[cfg(feature = "gql")]
+const GQL_3D_SOURCES: &[Gql3dSource] = &[
+    (
+        "MATCH (p:person)",
+        "g.v().has_label(\"person\").as(\"p\")",
+        &["p"],
+        &[],
+        None,
+    ),
+    (
+        "MATCH (p:person)-[e:knows]->(q)",
+        "g.v().has_label(\"person\").as(\"p\").out_e(\"knows\").as(\"e\").in_v().as(\"q\")",
+        &["p", "q"],
+        &["e"],
+        None,
+    ),
+    (
+        "MATCH (s:software)<-[c:created]-(p)",
+        "g.v().has_label(\"software\").as(\"s\").in_e(\"created\").as(\"c\").out_v().as(\"p\")",
+        &["s", "p"],
+        &["c"],
+        None,
+    ),
+    (
+        "MATCH (s:software {name: 'ripple'})<-[c]-(p)",
+        "g.v().has_label(\"software\").has(\"name\", \"ripple\").as(\"s\").in_e().as(\"c\")\
+         .out_v().as(\"p\")",
+        &["s", "p"],
+        &["c"],
+        None,
+    ),
+    (
+        "MATCH t = (p:person {name: 'marko'})-[e]->(q)",
+        "g.v().has_label(\"person\").has(\"name\", \"marko\").as(\"p\").out_e().as(\"e\")\
+         .in_v().as(\"q\")",
+        &["p", "q"],
+        &["e"],
+        Some("t"),
+    ),
+    (
+        "MATCH ()-[e:created]->()",
+        "g.v().out_e(\"created\").as(\"e\")",
+        &[],
+        &["e"],
+        None,
+    ),
+];
+
+/// How [`random_gql_3d_delete`] deletes.
+#[cfg(feature = "gql")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gql3dMode {
+    /// `DETACH DELETE`, in one or two clauses: always succeeds.
+    Detach,
+    /// `DELETE` / `NODETACH DELETE` in one clause: fails with G1001 when a node keeps an edge
+    /// the clause does not delete.
+    Plain,
+    /// `FOR x IN [1, 0]` rows and `1 / x` before or after the `DETACH DELETE`: the last row
+    /// fails.
+    Fail,
+}
+
+/// A random DELETE query of stage 3d with its oracles: the GQL query; its Gremlin twin
+/// (Rhai), which drops the same elements (selected through `union()`, `dedup()`, a
+/// `barrier()`, then `drop()`); for `Detach`, the same deletion written as NODETACH with every
+/// node's edges matched by `OPTIONAL MATCH` and deleted explicitly in the same clause; for
+/// `Plain`, a GQL query telling whether a deleted node has an edge the clause does not delete
+/// (G1001 exactly then).
+#[cfg(feature = "gql")]
+fn random_gql_3d_delete(rng: &mut Rng, mode: Gql3dMode) -> (String, String, String) {
+    let (matched, source, nodes, edges, path) = *rng.pick(GQL_3D_SOURCES);
+    // The targets: element variables, perhaps the path, perhaps inside a list, perhaps NULL.
+    let mut vars: Vec<&str> = nodes.iter().chain(edges).copied().collect();
+    if let Some(t) = path {
+        vars.push(t);
+    }
+    let mut chosen: Vec<&str> = vars.iter().copied().filter(|_| rng.chance(60)).collect();
+    if chosen.is_empty() {
+        chosen.push(*rng.pick(&vars));
+    }
+    let null = rng.chance(25);
+    let mut targets: Vec<String> = Vec::new();
+    let mut pending: Vec<&str> = chosen.clone();
+    while !pending.is_empty() {
+        if pending.len() >= 2 && rng.chance(30) {
+            let a = pending.remove(0);
+            let b = pending.remove(0);
+            targets.push(format!("[{a}, {b}]"));
+        } else {
+            targets.push(pending.remove(0).to_string());
+        }
+    }
+    if null {
+        targets.insert(rng.below(targets.len() + 1), "z".to_string());
+    }
+    if rng.chance(10) {
+        targets.push("NULL".to_string());
+    }
+    // What the targets remove: the path stands for its elements.
+    let mut removed: Vec<&str> = Vec::new();
+    for var in &chosen {
+        if Some(*var) == path {
+            removed.extend(nodes.iter().chain(edges).copied());
+        } else {
+            removed.push(var);
+        }
+    }
+    removed.sort_unstable();
+    removed.dedup();
+    let removed_nodes: Vec<&str> = removed
+        .iter()
+        .copied()
+        .filter(|v| nodes.contains(v))
+        .collect();
+    let removed_edges: Vec<&str> = removed
+        .iter()
+        .copied()
+        .filter(|v| edges.contains(v))
+        .collect();
+    let mut gql = String::new();
+    if mode == Gql3dMode::Fail {
+        gql.push_str(rng.pick(&["FOR x IN [1, 0] ", "FOR x IN [2, 1, 0] "]));
+    }
+    gql.push_str(matched);
+    if null {
+        gql.push_str(" OPTIONAL MATCH (z:nope)");
+    }
+    let prefix = gql.clone();
+    let fail_before = mode == Gql3dMode::Fail && rng.chance(50);
+    if fail_before {
+        gql.push_str(" FILTER 1 / x > 0");
+    }
+    let keyword = match mode {
+        Gql3dMode::Plain => *rng.pick(&["DELETE", "NODETACH DELETE", "delete"]),
+        _ => *rng.pick(&["DETACH DELETE", "detach delete"]),
+    };
+    let split = mode == Gql3dMode::Detach && targets.len() >= 2 && rng.chance(30);
+    if split {
+        let at = 1 + rng.below(targets.len() - 1);
+        gql.push_str(&format!(
+            " {keyword} {} {keyword} {}",
+            targets[..at].join(", "),
+            targets[at..].join(", ")
+        ));
+    } else {
+        gql.push_str(&format!(" {keyword} {}", targets.join(", ")));
+    }
+    if mode == Gql3dMode::Fail {
+        if !fail_before {
+            gql.push_str(" RETURN 1 / x AS y");
+        }
+    } else {
+        let counted = removed.first().copied().unwrap_or("z");
+        let tail = match rng.below(4) {
+            0 => String::new(),
+            1 => " FINISH".to_string(),
+            2 => " RETURN count(*) AS c".to_string(),
+            _ => format!(" RETURN count({counted}) AS c"),
+        };
+        gql.push_str(&tail);
+    }
+    // The Gremlin twin: edges first, each element once, all selected before the first drop.
+    let selects: Vec<String> = removed_edges
+        .iter()
+        .chain(&removed_nodes)
+        .map(|v| format!("__.select(\"{v}\")"))
+        .collect();
+    let twin = format!(
+        "{source}.union({}).dedup().barrier().drop().iterate()",
+        selects.join(", ")
+    );
+    let oracle = match mode {
+        Gql3dMode::Detach => {
+            // NODETACH with every node's edges deleted explicitly in the same clause.
+            let mut text = prefix;
+            let mut extra: Vec<String> = Vec::new();
+            for (i, node) in removed_nodes.iter().enumerate() {
+                text.push_str(&format!(" OPTIONAL MATCH ({node})-[x{i}]-()"));
+                extra.push(format!("x{i}"));
+            }
+            extra.extend(targets.iter().cloned());
+            let word = *rng.pick(&["DELETE", "NODETACH DELETE"]);
+            text.push_str(&format!(" {word} {}", extra.join(", ")));
+            text
+        }
+        Gql3dMode::Plain => {
+            let es: Vec<String> = removed_edges
+                .iter()
+                .map(|e| format!("collect(DISTINCT {e})"))
+                .collect();
+            let ns: Vec<String> = removed_nodes
+                .iter()
+                .map(|n| format!("collect(DISTINCT {n})"))
+                .collect();
+            let or_empty = |parts: Vec<String>| {
+                if parts.is_empty() {
+                    "[]".to_string()
+                } else {
+                    parts.join(" + ")
+                }
+            };
+            format!(
+                "{prefix} WITH {} AS es, {} AS ns FOR n IN ns MATCH (n)-[w]-() WHERE NOT w IN \
+                 es RETURN count(w) > 0 AS left",
+                or_empty(es),
+                or_empty(ns)
+            )
+        }
+        Gql3dMode::Fail => String::new(),
+    };
+    (gql, twin, oracle)
+}
+
+/// Adversarial and refused DELETE queries of stage 3d: every target kind (nodes, edges,
+/// paths, lists, map members, NULL, non-elements, label predicates), NODETACH on connected
+/// nodes, deleted elements read, written, returned and walked from afterwards, deletes in
+/// subqueries, CALL bodies, UNION operands and after NEXT, huge row counts.
+#[cfg(feature = "gql")]
+const GQL_3D_CORPUS: &[&str] = &[
+    "MATCH (n) DETACH DELETE n",
+    "MATCH (n) DELETE n",
+    "MATCH (n) NODETACH DELETE n",
+    "MATCH ()-[r]-() DELETE r",
+    "MATCH (n)-[r]-(m) DELETE r, n, m RETURN count(*) AS c",
+    "MATCH (a)-[*]-(b) DETACH DELETE a, b RETURN count(*) AS c",
+    "MATCH p = (a)-[*1..3]->(b) DETACH DELETE p",
+    "MATCH p = (a)-->(b) DELETE p",
+    "MATCH (a) ((x)-[e]->(y)){1,2} (b) DETACH DELETE x, e",
+    "MATCH (n) WITH collect(n) AS ns DETACH DELETE ns",
+    "MATCH (n) WITH {k: n} AS m DETACH DELETE m.k",
+    "MATCH (n) WITH {k: [n, [n]]} AS m DETACH DELETE m.k",
+    "MATCH (n) DETACH DELETE [n, [n, [n, NULL]]]",
+    "OPTIONAL MATCH (n:nope) DELETE n RETURN n",
+    "DELETE NULL",
+    "MATCH (n) DELETE n:person",
+    "MATCH (n) DELETE n IS person",
+    "MATCH ()-[r]->() DELETE r:knows",
+    "MATCH (n) DELETE 1 + 1",
+    "MATCH (n) DELETE n.name",
+    "MATCH (n) WITH 1 AS x DELETE x",
+    "MATCH (n) DELETE {a: n}",
+    "MATCH (n) DELETE x",
+    "MATCH (n) DELETE count(n)",
+    "MATCH (n) DELETE",
+    "MATCH (n) DETACH n",
+    "MATCH (n) DELETE n,",
+    "MATCH (n) DROP n",
+    "MATCH (n) REMOVE n",
+    "MATCH (n) DETACH DELETE n RETURN n",
+    "MATCH (n) DETACH DELETE n RETURN n.name",
+    "MATCH (n) DETACH DELETE n RETURN labels(n), element_id(n)",
+    "MATCH (n) DETACH DELETE n RETURN count(n), n IS NULL",
+    "MATCH ()-[r]->() DELETE r RETURN type(r), count(*)",
+    "MATCH ()-[r]->() DELETE r RETURN r.weight",
+    "MATCH ()-[r]->() DELETE r RETURN startNode(r)",
+    "MATCH (n) DETACH DELETE n SET n.k = 1",
+    "MATCH (n) DETACH DELETE n REMOVE n:person",
+    "MATCH (n) DETACH DELETE n INSERT (n)-[:k]->(:x)",
+    "MATCH (n) DETACH DELETE n WITH n MATCH (n)-->(m) RETURN m",
+    "MATCH (n) DETACH DELETE n WITH n ORDER BY n.name RETURN count(*) AS c",
+    "MATCH (n) DETACH DELETE n RETURN n LIMIT 0",
+    "MATCH (n) DETACH DELETE n RETURN properties(n)",
+    "MATCH (n) WITH n, n.name AS name DETACH DELETE n RETURN name",
+    "MATCH (n) WITH n, properties(n) AS p DETACH DELETE n RETURN p",
+    "MATCH (n) DETACH DELETE n DETACH DELETE n",
+    "MATCH (n) DETACH DELETE n WITH * LIMIT 1 RETURN 1 AS one",
+    "MATCH (n) DETACH DELETE n SKIP 1",
+    "MATCH (n) RETURN COUNT { MATCH (n) DELETE n } AS c",
+    "MATCH (n) WHERE EXISTS { MATCH (n) DETACH DELETE n } RETURN n",
+    "MATCH (n) RETURN [x IN [1] WHERE EXISTS { MATCH (n) NODETACH DELETE n }] AS l",
+    "MATCH (n) CALL (n) { DETACH DELETE n } RETURN count(*) AS c",
+    "MATCH (n) CALL (n) { DELETE n RETURN 1 AS y } RETURN y",
+    "MATCH (n) OPTIONAL CALL (n) { DETACH DELETE n RETURN n.name AS m } RETURN m",
+    "MATCH (n) DETACH DELETE n RETURN 1 AS x UNION MATCH (m) RETURN 1 AS x",
+    "MATCH (n) RETURN n NEXT DETACH DELETE n",
+    "MATCH (n) FOREACH (x IN [n] | DELETE x)",
+    "FOR i IN range(1, 300) MATCH (n) DETACH DELETE n",
+    "MATCH (a), (b), (c) DETACH DELETE a, b, c",
+    "FOR x IN [1, 0] MATCH (n) DETACH DELETE n RETURN 1 / x AS y",
+    "INSERT (n:X)-[:T]->(m:Y) DELETE n",
+    "INSERT (n:X) DELETE n RETURN count(*) AS c",
+    "MATCH (n) SET n.k = 1 DETACH DELETE n",
+    "MATCH (n) DETACH DELETE $n",
+    "MATCH (n:`we ird`) DETACH DELETE n",
+];
+
+/// Tokens of stage 3d for the token soup (a new list: the existing ones stay as they are).
+#[cfg(feature = "gql")]
+const GQL_3D_TOKENS: &[&str] = &[
+    "DELETE",
+    "DETACH",
+    "NODETACH",
+    "MATCH",
+    "OPTIONAL",
+    "(n)",
+    "(n:person)",
+    "-[r]->",
+    "-[r]-",
+    "(m)",
+    "p =",
+    "n",
+    "r",
+    "p",
+    "[n, r]",
+    "NULL",
+    ":",
+    "person",
+    "IS",
+    ",",
+    "1",
+    "RETURN",
+    "n.name",
+    "count(*)",
+    "FINISH",
+    "WITH",
+    "SET n.k = 1",
+    "REMOVE",
+    "INSERT (x)",
+    "CALL",
+    "{",
+    "}",
+    "LIMIT 0",
+    "FOR x IN [1, 0]",
+    "1 / x",
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_3d_delete_never_panics_equals_its_twins_and_fails_without_trace() {
+    let mut fatal = Fatal::default();
+    let mut differences = Vec::new();
+    let mut traces = Vec::new();
+    let mut rng = Rng::new(0x3D_DE1E_7E00);
+    let modern = gql_3a_dump(&TraversalGraph::tinkerpop_modern());
+    let mut texts: Vec<String> = GQL_3D_CORPUS.iter().map(|s| s.to_string()).collect();
+    let mut generated = Vec::new();
+    for _ in 0..budget(30) {
+        for mode in [Gql3dMode::Detach, Gql3dMode::Plain, Gql3dMode::Fail] {
+            generated.push((random_gql_3d_delete(&mut rng, mode), mode));
+        }
+    }
+    let (mut twins, mut changed, mut refused) = (0usize, 0usize, 0usize);
+    for ((query, twin, oracle), mode) in generated {
+        texts.push(query.clone());
+        if !oracle.is_empty() {
+            texts.push(oracle.clone());
+        }
+        let label = query.clone();
+        let outcome = guarded(WATCHDOG, move || {
+            let run = |text: &str| {
+                let mut graph = TraversalGraph::tinkerpop_modern();
+                let rows = graph.traversal_mut().gql(text).to_list();
+                let status = match &rows {
+                    Err(err) => match err.root_cause() {
+                        TraverserError::Gql { gqlstatus, .. } => gqlstatus.clone(),
+                        other => format!("{other}"),
+                    },
+                    Ok(_) => String::new(),
+                };
+                let rows = rows.map_err(|e| format_diagnostic(&e));
+                (rows, status, gql_3a_dump(&graph))
+            };
+            let (rows, status, after) = run(&query);
+            let rhai = gql_3a_script_state(&format!(
+                "g.gql({}).iterate()",
+                graphersal_rhai_string(&query)
+            ));
+            let gremlin = gql_3a_script_state(&twin);
+            let oracle = match mode {
+                Gql3dMode::Detach => {
+                    let (rows, _, after) = run(&oracle);
+                    rows.map(|_| after.join("\n"))
+                }
+                Gql3dMode::Plain => {
+                    let mut graph = TraversalGraph::tinkerpop_modern();
+                    graph
+                        .traversal_mut()
+                        .gql(&oracle)
+                        .to_list()
+                        .map(|rows| format!("{rows:?}"))
+                        .map_err(|e| format_diagnostic(&e))
+                }
+                Gql3dMode::Fail => Ok(String::new()),
+            };
+            (
+                query,
+                twin,
+                rows.map(|_| ()),
+                status,
+                after,
+                rhai,
+                gremlin,
+                oracle,
+            )
+        });
+        let Ok((query, twin, rows, status, after, rhai, gremlin, oracle)) = outcome else {
+            fatal.check(&label, outcome.map(|_| ()));
+            continue;
+        };
+        match mode {
+            Gql3dMode::Fail => {
+                // The last row fails: an error, and nothing the DELETE removed stays removed.
+                if rows.is_ok() || rhai.is_ok() || after != modern {
+                    traces.push(format!("{query}\n  {rows:?}\n  rhai: {rhai:?}"));
+                }
+            }
+            Gql3dMode::Detach => {
+                twins += 1;
+                if after != modern {
+                    changed += 1;
+                }
+                let same = rows.is_ok()
+                    && gremlin.as_ref() == Ok(&after)
+                    && rhai.as_ref() == Ok(&after)
+                    && oracle.as_ref() == Ok(&after.join("\n"));
+                if !same {
+                    differences.push(format!(
+                        "{query}\n  GQL:     {rows:?} {after:?}\n  Rhai:    {rhai:?}\n  {twin}\n  \
+                         Gremlin: {gremlin:?}\n  NODETACH form: {oracle:?}"
+                    ));
+                }
+            }
+            Gql3dMode::Plain => {
+                // The oracle counts the edges the clause leaves on its nodes.
+                let left = oracle.as_ref().map(|rows| rows.contains("true"));
+                let ok = match (&rows, left) {
+                    (Ok(()), Ok(false)) => {
+                        twins += 1;
+                        if after != modern {
+                            changed += 1;
+                        }
+                        gremlin.as_ref() == Ok(&after) && rhai.as_ref() == Ok(&after)
+                    }
+                    (Err(_), Ok(true)) => {
+                        refused += 1;
+                        status == "G1001" && after == modern && rhai.is_err()
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    differences.push(format!(
+                        "{query}\n  GQL:     {rows:?} {status} {after:?}\n  Rhai:    {rhai:?}\n  \
+                         {twin}\n  Gremlin: {gremlin:?}\n  edges left: {oracle:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(twins >= budget(30) as usize, "only {twins} twins ran");
+    // The twins compare changed graphs, and plain DELETE both succeeds and refuses.
+    assert!(
+        changed * 2 > twins,
+        "only {changed} of {twins} twins changed the graph"
+    );
+    assert!(refused > 0, "no plain DELETE was refused with G1001");
+    assert!(
+        differences.is_empty(),
+        "{} DELETE queries whose final graph differs from their twins:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    assert!(
+        traces.is_empty(),
+        "{} failing DELETE queries left a trace:\n{}",
+        traces.len(),
+        traces.join("\n")
+    );
+    for _ in 0..budget(30) {
+        let base = rng.pick(GQL_3D_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(30) {
+        let len = 1 + rng.below(16);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_3D_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "MATCH (n)-[r]->(m) DETACH DELETE");
+        }
+        texts.push(soup.join(" "));
+    }
+    for text in texts {
+        let label = text.clone();
+        fatal.check(&label, exercise_gql_write(text.clone()));
+        fatal.check(&label, exercise_gql(text));
+    }
+    fatal.assert_empty("GQL 3d DELETE");
+}

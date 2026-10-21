@@ -362,7 +362,7 @@ g.gql("MATCH (p:person) CALL (p) { MATCH (p)-->(s) RETURN s.name AS sw } IN TRAN
 ```
 
 ```text
-Help: rename the column inside the body, as in RETURN ... AS p2. A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT, SET, REMOVE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } those of its first WITH), and passes on only the columns of its RETURN, which must be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as in g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made"). A row whose body returns no record is dropped; OPTIONAL CALL keeps it with NULL columns.
+Help: rename the column inside the body, as in RETURN ... AS p2. A CALL subquery, CALL (a, b) { <query ending in RETURN, or in a write (INSERT, SET, REMOVE, DELETE / FINISH)> }, runs its query once for each incoming row: the body reads only the variables its scope clause names (CALL (*) imports all of them, CALL { } none, and Cypher's CALL { WITH a .. } those of its first WITH), and passes on only the columns of its RETURN, which must be new names; its aggregates, ORDER BY and LIMIT apply to each row's records, as in g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made"). A row whose body returns no record is dropped; OPTIONAL CALL keeps it with NULL columns.
 Help: import `p` with a variable scope clause, as in CALL (p) { MATCH ... WHERE ... }, or in Cypher with a WITH of plain variables first and the rest of the body after it, as in CALL { WITH p MATCH ... WHERE ... }. A CALL subquery, ...
 Help: end the body with RETURN and the columns the query reads after it, for example MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN count(s) AS made } RETURN p.name, made. A CALL subquery, ...
 Help: remove IN TRANSACTIONS: the whole query commits at once, and a query that fails changes nothing. A CALL subquery, ...
@@ -541,19 +541,84 @@ names the conversion function in a `SET` of the label and key, a removed `requir
 (`REMOVE`, a `NULL` value, `SET n = {map}` without the key) the map that keeps it and `+=`, and
 a label whose `required` property the node lacks the `SET` that writes the key before the label.
 
+## DELETE
+
+A `DELETE` target that cannot hold an element fails before the run: a label test such as
+`n:person` or `n IS person` (`42001`: it is a boolean, and `DELETE` removes whole elements), a
+literal, a computed value, a map or a `FOR` position (`42002`). `DROP n`, the Gremlin step
+written as a clause, is a syntax error naming `DETACH DELETE`, and `REMOVE n` without an item
+names it too. Each help rewrites the failing query and ends with one shared paragraph on
+`DELETE`:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'vadas'}) DELETE n:person")   // error: `n:person` is a label test (a boolean), not an element
+g.gql("MATCH (n:person) DELETE 1 + 1")   // error: `1 + 1` is a computed value, not a node, an edge, a path or a list of them
+g.gql("MATCH (p:person) DROP p")   // error: GQL has no DROP clause: DELETE removes nodes and edges
+```
+
+```text
+Error: GQL syntax error at line 1, column 41: `n:person` is a label test (a boolean), not an element; DELETE removes whole nodes and edges (step #1 'gql:error("42001")' refused the query before the traversal ran)
+  at #1: v().gql:error("42001")
+             ^^^^^^^^^^^^^^^^^^
+  query:     MATCH (n:person {name: 'vadas'}) DELETE n:person
+                                                     ^^^^^^^^
+  GQLSTATUS: 42001
+Help: delete the element itself with DELETE n, as in g.gql("MATCH (n:person {name: 'vadas'}) DELETE n"), or remove the label and keep the element with REMOVE n:person, as in g.gql("MATCH (n:person {name: 'vadas'}) REMOVE n:person"). DELETE removes, for each row, the nodes and edges its targets give: a node or edge variable, a path (all its nodes and edges) or a list of them; a NULL target is skipped, and an element given twice is removed once. A node that still has edges is removed only together with them: DETACH DELETE removes its edges too, as in g.gql("MATCH (s:software {name: 'lop'}) DETACH DELETE s"). The rest of the query can no longer read what it deleted, so read what it needs first, as in g.gql("MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p RETURN name"); a query may end with the DELETE (it then returns no rows).
+Help: name the element to remove by its variable, as in g.gql("MATCH (n:person) DETACH DELETE n"). DELETE removes, for each row, ...
+Help: write DETACH DELETE (the GQL form of the Gremlin step drop()), as in g.gql("MATCH (p:person) DETACH DELETE p"). DELETE removes, for each row, ...
+```
+
+While the query runs, a plain (or `NODETACH`) `DELETE` of a node that still has an edge the same
+clause does not delete fails with `G1001`; the help names `DETACH DELETE` in the failing query
+and the form that deletes the edges in the same clause. A target that turns out to hold no
+element (a `WITH` value, a property) is `22G03`. Either failure changes nothing:
+
+```rhai,graph=modern
+g.gql("MATCH (n:person {name: 'marko'}) DELETE n")   // error: `n` is a node that still has edges
+g.gql("MATCH (n:person) WITH 1 AS x DELETE x")   // error: DELETE removes nodes, edges and paths, but `1` gives a number on this row
+```
+
+```text
+Caused by: GQL data exception at line 1, column 41: `n` is a node that still has edges, and DELETE removes only nodes without edges (besides the edges deleted in the same clause)
+  query:     MATCH (n:person {name: 'marko'}) DELETE n
+                                                     ^
+  GQLSTATUS: G1001
+Help: remove the node together with its edges with DETACH DELETE, as in g.gql("MATCH (n:person {name: 'marko'}) DETACH DELETE n"), or delete its edges in the same clause, as in g.gql("MATCH (s:software {name: 'ripple'})<-[r]-() DELETE r, s").
+Help: give DELETE a node, an edge, a path or a list of them, and keep the rows where the target holds something else away from it with FILTER or WHERE, as in g.gql("MATCH (n:person {name: 'marko'}) DETACH DELETE n"). DELETE removes, for each row, ...
+```
+
+After a `DELETE`, a later part of the query that reads a deleted element (a property,
+`labels()`, `element_id()`, a `SET`, `REMOVE` or `INSERT` on it) or returns it fails, and the
+query changes nothing. The error is the storage's (`ElementRemoved`), with a help line written for
+GQL: read what the query needs before the `DELETE`, for example with `properties(n)`.
+`count(n)`, `n IS NULL` and `type(r)` of a deleted edge still work, and a pattern from a deleted
+node matches nothing:
+
+```rhai,graph=modern
+g.gql("MATCH (n:software) DETACH DELETE n RETURN n.name")   // error: the node was deleted earlier in this query
+g.gql("MATCH ()-[r:created]->() DELETE r RETURN r.weight")   // error: the edge was deleted earlier in this query
+```
+
+```text
+Caused by: The vertex was removed earlier in this query; its id, label and value are no longer available
+Help: The node was deleted earlier in this query (by DELETE or DETACH DELETE, or together with a node a DETACH DELETE removed), but a later part of the query still reads it: a deleted node has no properties, labels or id any more and cannot be returned or changed, and a pattern from it matches nothing; only count(n) and n IS NULL still work. Read what you need before the DELETE and keep that instead, for example g.gql("MATCH (n:person {name: 'marko'}) WITH n, properties(n) AS p DETACH DELETE n RETURN p"), or run the DELETE as a separate query after reading.
+Help: The edge was deleted earlier in this query (...); only count(r), r IS NULL and type(r) still work. Read what you need before the DELETE and keep that instead, for example g.gql("MATCH (:person)-[r:knows]->() WITH r, properties(r) AS p DELETE r RETURN p"), or for a node g.gql("MATCH (n:person {name: 'marko'}) WITH n, properties(n) AS p DETACH DELETE n RETURN p"), or run the DELETE as a separate query after reading.
+```
+
 ## GQLSTATUS codes
 
 | Code | Kind | When |
 |---|---|---|
-| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND`; an `INSERT` edge without a direction or with a label expression, an `INSERT` node label other than a conjunction, `WHERE` or a quantifier in an `INSERT` pattern, a `SET` / `REMOVE` label item joined by `|`, `!` or `%`, a write inside `EXISTS` / `COUNT` / `COLLECT` or a comprehension, a write clause after `RETURN` |
-| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice; in `INSERT`, a bound variable with labels or properties, a bound edge variable, a duplicate key in a property map, an aggregate in a property value; in `SET` / `REMOVE`, an undefined target, a target that is a `LET` / `WITH` value, a path, a group variable or a `FOR` position, a label item on an edge variable, an aggregate in a value |
-| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN` that writes nothing, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a `SET` / `REMOVE` target deeper than a variable (`p.a.b`, `head(l).k`), the write clauses `DELETE`, `MERGE`, `FOREACH`, an `INSERT` in a `UNION` operand or with a path variable; `LOAD CSV`, `CREATE INDEX` / `CONSTRAINT` / `GRAPH`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
+| `42001` | syntax | the query does not parse: an unexpected token, a missing `RETURN`, an unclosed bracket, a quantifier with `m > n`, `GROUP BY` after `WITH` (grouping is implicit) or after `ORDER BY`; an unknown function or `CAST` type name (with a suggestion), a function called with the wrong number of arguments, the SQL form `SUBSTRING(s FROM a FOR b)`; `WITH ORDINALITY` / `WITH OFFSET` after `UNWIND`; an `INSERT` edge without a direction or with a label expression, an `INSERT` node label other than a conjunction, `WHERE` or a quantifier in an `INSERT` pattern, a `SET` / `REMOVE` label item joined by `|`, `!` or `%`, a `DELETE` target written as a label test (`n:L`, `n IS L`), `DROP n`, a write inside `EXISTS` / `COUNT` / `COLLECT` or a comprehension, a write clause after `RETURN` |
+| `42002` | semantic | an undefined variable, a variable used as a node and an edge, an edge variable bound twice in one `MATCH`, a duplicate column name, a missing parameter, an `ORDER BY` key that `RETURN DISTINCT` dropped; a variable a `WITH` did not carry on, a `LET` name bound again; a variable read outside an aggregate that is not a grouping key, an aggregate in `WHERE` / `FILTER` / `LET` or inside another aggregate, `ORDER BY` after an aggregation reading something other than a column; a `GROUP BY` key that is not an item without an aggregate, or such an item missing from `GROUP BY`; a path or group variable bound twice; a variable of a quantified path pattern that is not a new name, or a property of one read outside its body; a `FOR` / `UNWIND` name already in scope, one name for the item and its position, the position used as a node or edge, an aggregate in the `FOR` list; a new variable in a pattern predicate, a variable bound inside a subquery (`EXISTS`, a pattern predicate, `COUNT { }`, `COLLECT { }`) read outside it, a condition in a subquery reading a variable of a later `MATCH` clause of the body, a subquery in an aggregating item reading a variable outside the aggregates that is not a grouping key; a variable bound inside a pattern comprehension read outside it, a comprehension variable named like another variable of the query, an aggregate inside a comprehension's `WHERE` or `\|` part; a `COLLECT { }` body that does not return exactly one column; `UNION` operands with different column names, `UNION` mixed with `UNION ALL` in one chain, a variable read after `NEXT` that the `RETURN` before it does not return; a `CALL` body returning a name already in scope, reading a variable it does not import (also through a first `WITH` that is no importing `WITH`), importing one twice; in `INSERT`, a bound variable with labels or properties, a bound edge variable, a duplicate key in a property map, an aggregate in a property value; in `SET` / `REMOVE`, an undefined target, a target that is a `LET` / `WITH` value, a path, a group variable or a `FOR` position, a label item on an edge variable, an aggregate in a value; in `DELETE`, a target known to hold no element (a literal, a computed value, a map, a `FOR` position), an aggregate in a target |
+| `0A000` | refused / not yet | a [refused construct](refused.md) or one [not supported yet](subset.md#not-supported-yet) (also a function: `sin()`, `date()`, `rand()`, `elements()`, `^`, `CAST` to `DATE`; `EXCEPT`, `INTERSECT`, `OTHERWISE`; a `CALL` body without `RETURN` that writes nothing, `CALL { } IN TRANSACTIONS`; Cypher 4's `exists(n.p)`; a `SET` / `REMOVE` target deeper than a variable (`p.a.b`, `head(l).k`), the write clauses `MERGE`, `FOREACH`, an `INSERT` in a `UNION` operand or with a path variable; `LOAD CSV`, `CREATE INDEX` / `CONSTRAINT` / `GRAPH`; a list-comprehension or list-predicate variable read inside a subquery; inside a parenthesized path pattern: a nested group or quantified edge, a path variable, several patterns, no edge, a variable written twice or bound outside, a condition reading an outer variable, a subquery); also `gql()` after other steps |
 | `54001` | limit | the query nests too deeply (more than 128 levels of parentheses, or an expression taller than 512) |
 | `54001` | limit | more than 64 subqueries (`EXISTS`, pattern predicates, pattern comprehensions, `COUNT { }` and `COLLECT { }`, nested ones included), or more than 1024 subquery bodies to run (a `LET` / `WITH` variable holding a subquery counts once per reader); `CALL` bodies and whole-query subquery bodies nested more than 16 levels |
 | `54001` | limit | a MATCH clause holds more than 64 edge patterns (over all its comma-separated paths; a quantified body's edges count once); split it into several MATCH clauses that share a variable, repeat a chain as a quantified path pattern, or use Gremlin `repeat()` |
 | `22004` | data | an endpoint of an `INSERT` edge is `NULL` (from an `OPTIONAL MATCH`); the right side of `SET n = ..` / `SET n += ..` is `NULL` |
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
-| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` or `SET` property value; a `SET` / `REMOVE` target that holds no node or edge, a label item on an edge at run time, a right side of `SET n = ..` / `+=` that is no map, node or edge |
+| `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` or `SET` property value; a `SET` / `REMOVE` target that holds no node or edge, a label item on an edge at run time, a right side of `SET n = ..` / `+=` that is no map, node or edge; a `DELETE` target that holds no node, edge or path |
+| `G1001` | data | a `DELETE` / `NODETACH DELETE` of a node that still has an edge the same clause does not delete (use `DETACH DELETE`) |
 | `22012` | data | division or `%` by zero, also `mod(a, 0)` |
 | `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |
