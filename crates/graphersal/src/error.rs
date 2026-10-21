@@ -7484,6 +7484,27 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
              >= 0 and the list trim(list, n) an n >= 0, as in \
              g.gql(\"MATCH (p:person) RETURN round(p.age / 3.0, 1, 'HALF_EVEN') AS r\")."
         }
+        // Invalid datetime format (stage 3g).
+        "22007" => {
+            "A temporal constructor reads ISO 8601 text of its own type (date('2015-07-21'), \
+             date('2015-W30-2'), localtime('21:40:32'), localdatetime('2015-07-21T21:40'), \
+             datetime('2015-07-21T21:40+01:00'), duration('P14DT16H12M')) or a map of its \
+             fields: year with month / day, week / dayOfWeek, ordinalDay or quarter / \
+             dayOfQuarter; hour, minute, second, millisecond, microsecond, nanosecond; a \
+             datetime's timezone as an offset ('+01:00') or a zone name ('Europe/Berlin'); a \
+             base value as date, time or datetime; a duration's years .. nanoseconds, as in \
+             g.gql(\"RETURN date({year: 2015, week: 30, dayOfWeek: 2}) AS d, \
+             datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) \
+             AS t, duration({days: 14, hours: 16}) AS u\")."
+        }
+        // Datetime field overflow (stage 3g).
+        "22008" => {
+            "Temporal fields stay within their ranges (month 1 to 12, day within its month, \
+             week within its week-numbering year, hour 0 to 23, minute and second 0 to 59, \
+             millisecond 0 to 999) and every value within the years -9999 to 9999, as in \
+             g.gql(\"RETURN date({year: 1984, month: 10, day: 11}) AS d, \
+             localtime({hour: 23, minute: 59, second: 59, millisecond: 999}) AS t\")."
+        }
         _ => return None,
     })
 }

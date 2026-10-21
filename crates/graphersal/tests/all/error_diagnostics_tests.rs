@@ -11728,4 +11728,103 @@ mod gql {
              g.gql(\"INSERT (:person {name: 'value'})\")"
         ));
     }
+
+    /// The temporal constructors of stage 3g (3g.T4): text or a map that is no value of the
+    /// type is 22007, a field out of its range 22008, each with advice naming the forms and
+    /// ranges and runnable examples (rule 6); a part below the microsecond is 0A000 (U1).
+    #[test]
+    fn gql_temporal_constructor_errors_name_the_forms_and_ranges() {
+        for (expr, status, caret, advice) in [
+            (
+                "date('2015-13-45x')",
+                "22007",
+                "'2015-13-45x'",
+                "A temporal constructor reads ISO 8601 text of its own type",
+            ),
+            (
+                "date({year: 2015, colour: 1})",
+                "22007",
+                "{year: 2015, colour: 1}",
+                "A temporal constructor reads ISO 8601 text of its own type",
+            ),
+            (
+                "datetime({timezone: 'Nope', year: 1})",
+                "22007",
+                "{timezone: 'Nope', year: 1}",
+                "A temporal constructor reads ISO 8601 text of its own type",
+            ),
+            (
+                "duration('P1Q')",
+                "22007",
+                "'P1Q'",
+                "A temporal constructor reads ISO 8601 text of its own type",
+            ),
+            (
+                "date({year: p.age, month: 13})",
+                "22008",
+                "{year: p.age, month: 13}",
+                "Temporal fields stay within their ranges",
+            ),
+            (
+                "localtime({hour: 24})",
+                "22008",
+                "{hour: 24}",
+                "Temporal fields stay within their ranges",
+            ),
+            (
+                "date('+12015-01-01')",
+                "22008",
+                "'+12015-01-01'",
+                "Temporal fields stay within their ranges",
+            ),
+        ] {
+            let query = format!("MATCH (p:person {{name: 'marko'}}) RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, status.to_string()),
+                "{query}: {report}"
+            );
+            let caret_line = report
+                .lines()
+                .skip_while(|line| !line.starts_with("  query:"))
+                .take(2)
+                .collect::<Vec<_>>();
+            let [source, carets] = caret_line[..] else {
+                panic!("no excerpt in {report}");
+            };
+            let start = carets.find('^').expect("a caret");
+            let marked: String = source
+                .chars()
+                .skip(start)
+                .take(caret.chars().count())
+                .collect();
+            assert_eq!(marked, caret, "{query}: {report}");
+            let help = err.help().expect("help");
+            assert!(help.starts_with(advice), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+        // Below the microsecond: not yet, never cut.
+        for expr in [
+            "localtime({hour: 12, nanosecond: 5})",
+            "localtime('12:00:00.123456789')",
+            "duration({nanoseconds: 1})",
+            "datetime.fromepoch(0, 1)",
+        ] {
+            let query = format!("RETURN {expr} AS x");
+            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string()),
+                "{query}: {report}"
+            );
+            assert!(
+                report.contains(
+                    "a temporal value with a part below the microsecond (values hold \
+                     microseconds) is not yet supported in this version"
+                ),
+                "{report}"
+            );
+        }
+    }
 }

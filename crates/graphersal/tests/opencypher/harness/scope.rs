@@ -19,6 +19,10 @@
 //!      (`22G02` / `22G03` before any row), since parameters are bound then; the TCK expects the
 //!      `SyntaxError` at runtime. The user sees the same thing: an error before any row. The
 //!      guard test checks that each case still gets its error at compile time.
+//!    - `zone-name-not-kept` (user decision 2026-10-21, 3g.P0 U3): a `datetime` keeps its UTC
+//!      offset, not the zone name (`datetime({.., timezone: 'Europe/Stockholm'})` is
+//!      `..+01:00`); the cases that print the name or depend on it.
+//!    - `year-range` (3g.P0 U10): temporal values hold the years -9999 to 9999 (22008 beyond).
 //!
 //!    The former family `type-error-at-evaluation` (131 cases expecting a compile-time
 //!    `InvalidArgumentType`) passes since stage 3f (user decision U9, the static kind checks of
@@ -85,6 +89,88 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         deviation: true,
         ids: PARAMETER_AT_COMPILE_TIME,
     },
+    Exclusion {
+        code: "zone-name-not-kept",
+        reason: "a datetime keeps its UTC offset, not the zone name: a zone name resolves to its \
+                 offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], \
+                 and a later change of the date keeps the offset (no daylight saving step)",
+        docs: "dates/time_zones.md",
+        deviation: true,
+        ids: ZONE_NAME_NOT_KEPT,
+    },
+    Exclusion {
+        code: "year-range",
+        reason: "temporal values hold the years -9999 to 9999; a year beyond them is a data \
+                 error (22008), Neo4j reads years up to 999999999",
+        docs: "dates/index.md#the-five-types",
+        deviation: true,
+        ids: YEAR_RANGE,
+    },
+];
+
+/// The temporal cases whose expected value keeps a zone name (`[Europe/Stockholm]`) or depends
+/// on it (3g.P0 U3: a zone resolves to its offset).
+const ZONE_NAME_NOT_KEPT: &[&str] = &[
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::10",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::11",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::12",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::13",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::14",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::16",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::17",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::18",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::19",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::2",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::20",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::21",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::23",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::24",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::25",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::26",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::27",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::28",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::29",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::3",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::4",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::5",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::6",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::7",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::9",
+    "expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::1",
+    "expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::2",
+    "expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::3",
+    "expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::4",
+    "expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::5",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::12",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::13",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::15",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::16",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::28",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::29",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::31",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::32",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::44",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::45",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::47",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::48",
+    "expressions/temporal/Temporal3.feature::[11] Should datetime into date time::10",
+    "expressions/temporal/Temporal3.feature::[11] Should datetime into date time::5",
+    "expressions/temporal/Temporal3.feature::[11] Should datetime into date time::6",
+    "expressions/temporal/Temporal3.feature::[11] Should datetime into date time::7",
+    "expressions/temporal/Temporal3.feature::[11] Should datetime into date time::9",
+    "expressions/temporal/Temporal3.feature::[8] Should select date into date time::12",
+    "expressions/temporal/Temporal3.feature::[8] Should select date into date time::4",
+    "expressions/temporal/Temporal3.feature::[8] Should select date into date time::8",
+    "expressions/temporal/Temporal3.feature::[9] Should select time into date time::12",
+    "expressions/temporal/Temporal3.feature::[9] Should select time into date time::13",
+    "expressions/temporal/Temporal3.feature::[9] Should select time into date time::15",
+    "expressions/temporal/Temporal3.feature::[9] Should select time into date time::16",
+];
+
+/// The temporal cases with years beyond -9999..9999 (3g.P0 U10).
+const YEAR_RANGE: &[&str] = &[
+    "expressions/temporal/Temporal10.feature::[10] Should handle large durations in seconds",
+    "expressions/temporal/Temporal10.feature::[9] Should handle large durations",
 ];
 
 /// The `SKIP` / `LIMIT` cases with an invalid parameter (3f.P0 U8).

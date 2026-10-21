@@ -129,6 +129,12 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// returned-element check of a `RETURN`, W28).
     #[cfg(feature = "gql")]
     pub(crate) gql_deleted: crate::gql::runtime::GqlDeleted<S>,
+    /// The instant the GQL clocks of this execution read (`date()`, `datetime()`,
+    /// `X.statement()`, stage 3g U9; feature `gql`): taken on the first read from
+    /// [`Self::create_context`] when set, else from the storage's open unit or the system
+    /// clock, then the same for every row and every subquery of the execution.
+    #[cfg(feature = "gql")]
+    pub(crate) gql_now: std::cell::OnceCell<crate::value::temporal::DateTime>,
 }
 
 /// The loop counter of one active `repeat()`.
@@ -211,6 +217,8 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             create_context: None,
             #[cfg(feature = "gql")]
             gql_deleted: crate::gql::runtime::GqlDeleted::default(),
+            #[cfg(feature = "gql")]
+            gql_now: std::cell::OnceCell::new(),
         }
     }
 

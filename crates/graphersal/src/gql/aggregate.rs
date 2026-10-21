@@ -315,6 +315,10 @@ impl<En: Env> Env for WithAggregates<'_, En> {
     fn subquery(&self, index: usize) -> Option<Value<Self::Element>> {
         self.env.subquery(index)
     }
+
+    fn now(&self) -> crate::value::temporal::DateTime {
+        self.env.now()
+    }
 }
 
 /// What an [`Accumulator`] computes.

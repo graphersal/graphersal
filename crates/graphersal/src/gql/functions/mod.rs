@@ -214,6 +214,30 @@ pub(crate) fn call<En: Env>(
         return temporal::call(temporal, args, env, span);
     }
     match family(function) {
+        // Stage 3g (U6): Cypher `toString` of a temporal value writes the Neo4j text
+        // (`temporal::ops::to_text`, 0A000 until 3g.T5 implements it), never the engine text
+        // a wrong answer would show; `CAST(x AS STRING)` keeps the engine text. A bridge until
+        // 3g.T5 takes the branch into `convert.rs`.
+        Family::Convert(Conversion {
+            target: CastTarget::String,
+            mode: Mode::Lenient | Mode::OrNull,
+        }) if matches!(
+            args.first(),
+            Some(Arg {
+                value: Value::Scalar(ElementProperty::Temporal(_)),
+                ..
+            })
+        ) =>
+        {
+            match args.first() {
+                Some(Arg {
+                    value: Value::Scalar(ElementProperty::Temporal(value)),
+                    span,
+                }) => temporal::ops::to_text(value, *span)
+                    .map(|text| Value::Scalar(ElementProperty::String(text))),
+                _ => Ok(Value::Null),
+            }
+        }
         Family::Convert(conversion) => match args.into_iter().next() {
             Some(arg) => convert::convert(conversion, arg, env, span),
             None => Ok(Value::Null),
@@ -385,6 +409,8 @@ mod tests {
         status::POWER,
         status::INVALID_PARAMETER,
         status::LIMIT,
+        status::INVALID_DATETIME_FORMAT,
+        status::DATETIME_OVERFLOW,
     ];
 
     #[test]

@@ -23,21 +23,13 @@ reason = "refused: rand()"
 class = "missing"
 reason = "refused: rand()"
 
-["clauses/with-orderBy/WithOrderBy1.feature::[11] Sort dates in ascending order"]
-class = "missing"
-reason = "not yet: date()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[12] Sort dates in descending order"]
-class = "missing"
-reason = "not yet: date()"
-
 ["clauses/with-orderBy/WithOrderBy1.feature::[13] Sort local times in ascending order"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[14] Sort local times in descending order"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[15] Sort times in ascending order"]
 class = "missing"
@@ -49,59 +41,39 @@ reason = "not yet: time()"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[17] Sort local date times in ascending order"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[18] Sort local date times in descending order"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[19] Sort date times in ascending order"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[20] Sort date times in descending order"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[33] Sort by a date variable projected from a node property in ascending order::1"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[33] Sort by a date variable projected from a node property in ascending order::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[33] Sort by a date variable projected from a node property in ascending order::3"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[34] Sort by a date variable projected from a node property in descending order::1"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[34] Sort by a date variable projected from a node property in descending order::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[35] Sort by a local time variable projected from a node property in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[35] Sort by a local time variable projected from a node property in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[35] Sort by a local time variable projected from a node property in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[36] Sort by a local time variable projected from a node property in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[36] Sort by a local time variable projected from a node property in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[37] Sort by a time variable projected from a node property in ascending order::1"]
 class = "setup"
@@ -125,55 +97,51 @@ reason = "having executed: not yet: time()"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[39] Sort by a local date time variable projected from a node property in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[39] Sort by a local date time variable projected from a node property in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[39] Sort by a local date time variable projected from a node property in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[40] Sort by a local date time variable projected from a node property in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[40] Sort by a local date time variable projected from a node property in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[41] Sort by a date time variable projected from a node property in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[41] Sort by a date time variable projected from a node property in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[41] Sort by a date time variable projected from a node property in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[42] Sort by a date time variable projected from a node property in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[42] Sort by a date time variable projected from a node property in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::10"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::6"]
-class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::8"]
 class = "missing"
@@ -181,47 +149,47 @@ reason = "not yet: time()"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>::9"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::1"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::3"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[12] Sort by a date expression in descending order::1"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[12] Sort by a date expression in descending order::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{date: date({year: 1910, month: 5, day: 6})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[13] Sort by a local time expression in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[13] Sort by a local time expression in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[13] Sort by a local time expression in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[14] Sort by a local time expression in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[14] Sort by a local time expression in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{time: localtime({hour: 10, minute: 35})}\")' execution failed: not yet: localtime()"
+reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[15] Sort by a time expression in ascending order::1"]
 class = "setup"
@@ -245,43 +213,43 @@ reason = "having executed: not yet: time()"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[17] Sort by a local date time expression in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[17] Sort by a local date time expression in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[17] Sort by a local date time expression in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[18] Sort by a local date time expression in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[18] Sort by a local date time expression in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: l…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: localdatetime({year: 1984, month: 10, day: 11, hour: …\" (109 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[19] Sort by a date time expression in ascending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[19] Sort by a date time expression in ascending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[19] Sort by a date time expression in ascending order::3"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[20] Sort by a date time expression in descending order::1"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-orderBy/WithOrderBy2.feature::[20] Sort by a date time expression in descending order::2"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: d…"
+reason = "having executed: Step #1 'gql:insert_node([\"A\"], \"{datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, m…\" (124 chars))' execution failed: not yet: a…"
 
 ["clauses/with-skip-limit/WithSkipLimit1.feature::[1] Handle dependencies across WITH with SKIP"]
 class = "setup"
@@ -553,159 +521,27 @@ reason = "refused: rand()"
 
 ["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::1"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::12"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::13"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::14"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::15"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::16"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::17"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::18"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::19"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::20"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::21"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::22"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::23"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::24"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::25"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::26"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::27"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::28"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::29"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::7"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::8"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::9"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[11] Should construct date time from epoch"]
 class = "missing"
-reason = "not yet: datetime.fromepoch()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::1"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::2"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::3"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::4"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::5"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::6"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::7"]
-class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[12] Should construct duration::8"]
 class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal1.feature::[12] Should construct duration::9"]
-class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[13] Should construct temporal with time offset with second precision::1"]
 class = "missing"
@@ -719,249 +555,13 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal1.feature::[13] Should construct temporal with time offset with second precision::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::10"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::11"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::12"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::13"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::14"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::15"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::3"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::4"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::5"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::6"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::7"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::8"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[1] Should construct week date::9"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::10"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::11"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::12"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::13"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::14"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::15"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::2"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::3"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::4"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::6"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::7"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::8"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[2] Should construct week localdatetime::9"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::12"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::13"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::14"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::15"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::7"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::8"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[3] Should construct week datetime::9"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::3"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::4"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::5"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::6"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::7"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal1.feature::[4] Should construct date::8"]
-class = "missing"
-reason = "not yet: date()"
-
 ["expressions/temporal/Temporal1.feature::[5] Should construct local time::1"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[5] Should construct local time::2"]
 class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal1.feature::[5] Should construct local time::3"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal1.feature::[5] Should construct local time::4"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal1.feature::[5] Should construct local time::5"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal1.feature::[5] Should construct local time::6"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal1.feature::[5] Should construct local time::7"]
-class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[6] Should construct time::1"]
 class = "missing"
@@ -1021,411 +621,107 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::1"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::10"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::11"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::12"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::13"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::14"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::15"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::16"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::18"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::19"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::2"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::20"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::21"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::22"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::23"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::24"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::25"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::26"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::27"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::28"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::29"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[7] Should construct local date time::3"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::30"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::31"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::4"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::6"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::7"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::8"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal1.feature::[7] Should construct local date time::9"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::1"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::12"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::13"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::14"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::15"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::16"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::17"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::18"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::19"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::2"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::20"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::21"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::22"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::23"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::24"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::25"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::26"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::27"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::28"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::29"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::30"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::7"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::8"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[8] Should construct date time with default time zone::9"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::1"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::12"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::13"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::14"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::15"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::16"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::17"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::18"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::19"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::20"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::21"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::22"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::23"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::24"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::25"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::26"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::27"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::28"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::29"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::7"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::8"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal1.feature::[9] Should construct date time with offset time zone::9"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal10.feature::[10] Should handle large durations in seconds"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::1"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::10"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::2"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::3"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::4"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::5"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::6"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::8"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::9"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::1"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::2"]
 class = "missing"
@@ -1433,15 +729,15 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::4"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::5"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[13] Should propagate null::1"]
 class = "missing"
@@ -1461,31 +757,31 @@ reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::1"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::2"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::3"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::4"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::5"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::6"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::10"]
 class = "missing"
@@ -1513,23 +809,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::16"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::19"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::20"]
 class = "missing"
@@ -1537,19 +833,19 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::21"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::23"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::24"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::25"]
 class = "missing"
@@ -1557,11 +853,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::4"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::5"]
 class = "missing"
@@ -1569,23 +865,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::6"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::8"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::9"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::10"]
 class = "missing"
@@ -1597,19 +893,19 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::12"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::13"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::14"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::15"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::16"]
 class = "missing"
@@ -1617,23 +913,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::17"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::18"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::19"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::20"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::21"]
 class = "missing"
@@ -1641,11 +937,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::4"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::5"]
 class = "missing"
@@ -1653,15 +949,15 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::6"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::8"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::9"]
 class = "missing"
@@ -1669,7 +965,7 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::10"]
 class = "missing"
@@ -1681,19 +977,19 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::12"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::13"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::14"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::15"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::16"]
 class = "missing"
@@ -1701,23 +997,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::17"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::18"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::19"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::20"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::21"]
 class = "missing"
@@ -1725,11 +1021,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::4"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::5"]
 class = "missing"
@@ -1737,15 +1033,15 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::6"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::8"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::9"]
 class = "missing"
@@ -1753,7 +1049,7 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::10"]
 class = "missing"
@@ -1781,23 +1077,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::16"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::19"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::20"]
 class = "missing"
@@ -1805,19 +1101,19 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::21"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::23"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::24"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::25"]
 class = "missing"
@@ -1825,11 +1121,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::4"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::5"]
 class = "missing"
@@ -1837,143 +1133,67 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::6"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::7"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::8"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::9"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second."]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::3"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::4"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::5"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::1"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::2"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::3"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::4"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::5"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::6"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal10.feature::[9] Should handle large durations"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::10"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::11"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::3"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::4"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::5"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::6"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::7"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::8"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[1] Should parse date from string::9"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::1"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::2"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::3"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::4"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::5"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::6"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal2.feature::[2] Should parse local time from string::7"]
-class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal2.feature::[3] Should parse time from string::1"]
 class = "missing"
@@ -2007,165 +1227,29 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::2"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::3"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::4"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::6"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[4] Should parse local date time from string::7"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::7"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[5] Should parse date time from string::8"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::3"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[6] Should parse date time with named time zone from string::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::1"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::2"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::3"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::4"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::5"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::6"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal2.feature::[7] Should parse duration from string::7"]
-class = "missing"
-reason = "not yet: duration()"
-
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::1"]
 class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::10"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::11"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::12"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::13"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::14"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::15"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::16"]
-class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::19"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::20"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::21"]
 class = "missing"
@@ -2183,57 +1267,25 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::25"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::26"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::27"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::28"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::29"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::3"]
 class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::30"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::31"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::32"]
-class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::33"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::34"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::35"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::36"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::37"]
 class = "missing"
@@ -2249,43 +1301,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::4"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::40"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::41"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::42"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::43"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::44"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::45"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::46"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::47"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::48"]
-class = "missing"
-reason = "not yet: datetime()"
 
 ["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::5"]
 class = "missing"
@@ -2303,157 +1323,45 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::9"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::2"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::3"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::4"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::7"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::8"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[11] Should datetime into date time::9"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::1"]
-class = "missing"
-reason = "not yet: date()"
-
 ["expressions/temporal/Temporal3.feature::[1] Should select date::10"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::11"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::12"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::13"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::14"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::15"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::16"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::17"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::18"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::19"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::20"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::21"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::3"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::4"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::5"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::6"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[1] Should select date::7"]
-class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::8"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[1] Should select date::9"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[2] Should select local time::1"]
 class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::12"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[2] Should select local time::2"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[2] Should select local time::3"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[2] Should select local time::4"]
 class = "missing"
@@ -2466,18 +1374,6 @@ reason = "not yet: time()"
 ["expressions/temporal/Temporal3.feature::[2] Should select local time::6"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::7"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::8"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[2] Should select local time::9"]
-class = "missing"
-reason = "not yet: localdatetime()"
 
 ["expressions/temporal/Temporal3.feature::[3] Should select time::1"]
 class = "missing"
@@ -2559,37 +1455,13 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::3"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::4"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[4] Should select date into local date time::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
 ["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::1"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::2"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::3"]
 class = "missing"
@@ -2599,29 +1471,13 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::6"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::7"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[5] Should select time into local date time::8"]
-class = "missing"
-reason = "not yet: datetime()"
-
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::10"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::11"]
 class = "missing"
@@ -2631,29 +1487,13 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::13"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::14"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::15"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::16"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::17"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::18"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::19"]
 class = "missing"
@@ -2661,27 +1501,11 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::20"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::21"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::22"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::23"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::24"]
-class = "missing"
-reason = "not yet: datetime()"
 
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::3"]
 class = "missing"
@@ -2691,141 +1515,25 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::5"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::6"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::7"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::8"]
-class = "missing"
-reason = "not yet: date()"
-
 ["expressions/temporal/Temporal3.feature::[6] Should select date and time into local date time::9"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::2"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::3"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::4"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::5"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[7] Should select datetime into local date time::6"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::10"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::11"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::12"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::3"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::4"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::5"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::6"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::7"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::8"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[8] Should select date into date time::9"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[9] Should select time into date time::1"]
 class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::10"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::11"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::12"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::13"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::14"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::15"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::16"]
-class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[9] Should select time into date time::2"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[9] Should select time into date time::3"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[9] Should select time into date time::4"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal3.feature::[9] Should select time into date time::5"]
 class = "missing"
@@ -2843,34 +1551,6 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal3.feature::[9] Should select time into date time::9"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal4.feature::[10] Should store date time array::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal4.feature::[10] Should store date time array::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal4.feature::[11] Should store duration::1"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal4.feature::[12] Should store duration array::1"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal4.feature::[12] Should store duration array::2"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::1"]
-class = "missing"
-reason = "not yet: date()"
-
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::10"]
 class = "missing"
 reason = "not yet: time.transaction()"
@@ -2883,65 +1563,17 @@ reason = "not yet: time.statement()"
 class = "missing"
 reason = "refused: time.realtime()"
 
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::13"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::14"]
-class = "missing"
-reason = "not yet: localdatetime.transaction()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::15"]
-class = "missing"
-reason = "not yet: localdatetime.statement()"
-
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::16"]
 class = "missing"
 reason = "refused: localdatetime.realtime()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::17"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::18"]
-class = "missing"
-reason = "not yet: datetime.transaction()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::19"]
-class = "missing"
-reason = "not yet: datetime.statement()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::2"]
-class = "missing"
-reason = "not yet: date.transaction()"
 
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::20"]
 class = "missing"
 reason = "refused: datetime.realtime()"
 
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::21"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::3"]
-class = "missing"
-reason = "not yet: date.statement()"
-
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::4"]
 class = "missing"
 reason = "refused: date.realtime()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::5"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::6"]
-class = "missing"
-reason = "not yet: localtime.transaction()"
-
-["expressions/temporal/Temporal4.feature::[13] Should propagate null::7"]
-class = "missing"
-reason = "not yet: localtime.statement()"
 
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::8"]
 class = "missing"
@@ -2950,30 +1582,6 @@ reason = "refused: localtime.realtime()"
 ["expressions/temporal/Temporal4.feature::[13] Should propagate null::9"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal4.feature::[1] Should store date::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal4.feature::[2] Should store date array::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal4.feature::[2] Should store date array::2"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal4.feature::[3] Should store local time::1"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal4.feature::[4] Should store local time array::1"]
-class = "missing"
-reason = "not yet: localtime()"
-
-["expressions/temporal/Temporal4.feature::[4] Should store local time array::2"]
-class = "missing"
-reason = "not yet: localtime()"
 
 ["expressions/temporal/Temporal4.feature::[5] Should store time::1"]
 class = "missing"
@@ -2987,29 +1595,13 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal4.feature::[7] Should store local date time::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal4.feature::[8] Should store local date time array::1"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal4.feature::[8] Should store local date time array::2"]
-class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal4.feature::[9] Should store date time::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
 ["expressions/temporal/Temporal5.feature::[1] Should provide accessors for date"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: date({year: 1984, month: 10, day: 11})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: the component year of a date"
 
 ["expressions/temporal/Temporal5.feature::[2] Should provide accessors for date in last weekYear"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: date({year: 1984, month: 1, day: 1})}\")' execution failed: not yet: date()"
+class = "missing"
+reason = "not yet: the component year of a date"
 
 ["expressions/temporal/Temporal5.feature::[3] Should provide accessors for local time"]
 class = "setup"
@@ -3033,11 +1625,11 @@ reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: duration
 
 ["expressions/temporal/Temporal6.feature::[1] Should serialize date"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: toString() of a date"
 
 ["expressions/temporal/Temporal6.feature::[2] Should serialize local time"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal6.feature::[3] Should serialize time"]
 class = "missing"
@@ -3045,75 +1637,67 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal6.feature::[4] Should serialize local date time"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal6.feature::[5] Should serialize date time"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::1"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::10"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::11"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::2"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::3"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::4"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::5"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::6"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::7"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::8"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::9"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[7] Should serialize timezones correctly"]
 class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal7.feature::[1] Should compare dates::1"]
-class = "missing"
-reason = "not yet: date()"
-
-["expressions/temporal/Temporal7.feature::[1] Should compare dates::2"]
-class = "missing"
-reason = "not yet: date()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[2] Should compare local times::1"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[2] Should compare local times::2"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[3] Should compare times::1"]
 class = "missing"
@@ -3125,27 +1709,15 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal7.feature::[4] Should compare local date times::1"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[4] Should compare local date times::2"]
 class = "missing"
-reason = "not yet: localdatetime()"
-
-["expressions/temporal/Temporal7.feature::[5] Should compare date times::1"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal7.feature::[5] Should compare date times::2"]
-class = "missing"
-reason = "not yet: datetime()"
-
-["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::1"]
-class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::2"]
 class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::3"]
 class = "missing"
@@ -3153,31 +1725,15 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::4"]
 class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::5"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::6"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::7"]
-class = "missing"
-reason = "not yet: duration()"
-
-["expressions/temporal/Temporal7.feature::[6] Should compare durations for equality::8"]
-class = "missing"
-reason = "not yet: duration()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal8.feature::[1] Should add or subtract duration to or from date::1"]
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
 ["expressions/temporal/Temporal8.feature::[1] Should add or subtract duration to or from date::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({months: 1, days: -14, hours: 16, minutes: -12, s…\" (77 chars))' execution failed: not …"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["expressions/temporal/Temporal8.feature::[1] Should add or subtract duration to or from date::3"]
 class = "setup"
@@ -3188,8 +1744,8 @@ class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
 ["expressions/temporal/Temporal8.feature::[2] Should add or subtract duration to or from local time::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({months: 1, days: -14, hours: 16, minutes: -12, s…\" (77 chars))' execution failed: not …"
+class = "missing"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal8.feature::[2] Should add or subtract duration to or from local time::3"]
 class = "setup"
@@ -3200,8 +1756,8 @@ class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
 ["expressions/temporal/Temporal8.feature::[3] Should add or subtract duration to or from time::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({months: 1, days: -14, hours: 16, minutes: -12, s…\" (77 chars))' execution failed: not …"
+class = "missing"
+reason = "not yet: time()"
 
 ["expressions/temporal/Temporal8.feature::[3] Should add or subtract duration to or from time::3"]
 class = "setup"
@@ -3212,8 +1768,8 @@ class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
 ["expressions/temporal/Temporal8.feature::[4] Should add or subtract duration to or from local date time::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({months: 1, days: -14, hours: 16, minutes: -12, s…\" (77 chars))' execution failed: not …"
+class = "missing"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal8.feature::[4] Should add or subtract duration to or from local date time::3"]
 class = "setup"
@@ -3224,8 +1780,8 @@ class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
 ["expressions/temporal/Temporal8.feature::[5] Should add or subtract duration to or from date time::2"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({months: 1, days: -14, hours: 16, minutes: -12, s…\" (77 chars))' execution failed: not …"
+class = "missing"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal8.feature::[5] Should add or subtract duration to or from date time::3"]
 class = "setup"
@@ -3245,15 +1801,15 @@ reason = "having executed: Step #1 'gql:insert_node([\"Duration1\"], \"{date: du
 
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::4"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration1\"], \"{date: duration({months: 1, days: -14, hours: 16, minutes: -12, …\" (78 chars))' execution failed: not…"
+reason = "having executed: Step #2 'gql:insert_node([\"Duration2\"], \"{date: duration({years: 12, months: 5, days: 14, hours: 16, minu…\" (103 chars))' execution failed: no…"
 
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::5"]
-class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration1\"], \"{date: duration({months: 1, days: -14, hours: 16, minutes: -12, …\" (78 chars))' execution failed: not…"
+class = "missing"
+reason = "not yet: + on temporal values"
 
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::6"]
 class = "setup"
-reason = "having executed: Step #1 'gql:insert_node([\"Duration1\"], \"{date: duration({months: 1, days: -14, hours: 16, minutes: -12, …\" (78 chars))' execution failed: not…"
+reason = "having executed: Step #2 'gql:insert_node([\"Duration2\"], \"{date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16…\" (115 chars))' execution failed: no…"
 
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::7"]
 class = "setup"
@@ -3281,931 +1837,931 @@ reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{date: dur
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::10"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::11"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::12"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::13"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::14"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::15"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::16"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::19"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::20"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::21"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::23"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::24"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::25"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::26"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::27"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::28"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::29"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::3"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::30"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::31"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::32"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::33"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::34"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::35"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::36"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::37"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::38"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::39"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::4"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::40"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::41"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::42"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::43"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::44"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::45"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::46"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::47"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::48"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::49"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::5"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::50"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::51"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::6"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::7"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::8"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::9"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::10"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::100"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::101"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::102"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::103"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::104"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::105"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::11"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::12"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::13"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::14"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::15"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::16"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::19"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::20"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::21"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::23"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::24"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::25"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::26"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::27"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::28"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::29"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::3"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::30"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::31"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::32"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::33"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::34"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::35"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::36"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::37"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::38"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::39"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::4"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::40"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::41"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::42"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::43"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::44"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::45"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::46"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::47"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::48"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::49"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::5"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::50"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::51"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::52"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::53"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::54"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::55"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::56"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::57"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::58"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::59"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::6"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::60"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::61"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::62"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::63"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::64"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::65"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::66"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::67"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::68"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::69"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::7"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::70"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::71"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::72"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::73"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::74"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::75"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::76"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::77"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::78"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::79"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::8"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::80"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::81"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::82"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::83"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::84"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::85"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::86"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::87"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::88"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::89"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::9"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::90"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::91"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::92"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::93"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::94"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::95"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::96"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::97"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::98"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::99"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::1"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::10"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::11"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::12"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::13"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::14"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::15"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::16"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::17"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::18"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::19"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::2"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::20"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::21"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::23"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::24"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::25"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::26"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::27"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::28"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::29"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::3"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::30"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::31"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::32"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::33"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::34"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::35"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::36"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::37"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::38"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::39"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::4"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::40"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::41"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::42"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::43"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::44"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::45"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::46"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::47"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::48"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::49"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::5"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::50"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::51"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::52"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::53"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::54"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::55"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::56"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::57"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::58"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::59"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::6"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::60"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::61"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::62"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::63"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::64"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::65"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::66"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::67"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::68"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::69"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::7"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::70"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::71"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::72"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::73"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::74"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::8"]
 class = "missing"
-reason = "not yet: date()"
+reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::9"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::1"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::10"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::11"]
 class = "missing"
@@ -4217,27 +2773,27 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::13"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::14"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::15"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::16"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::17"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::18"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::19"]
 class = "missing"
@@ -4245,7 +2801,7 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::2"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::20"]
 class = "missing"
@@ -4253,27 +2809,27 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::21"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::22"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::23"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::24"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::25"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::26"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::27"]
 class = "missing"
@@ -4285,31 +2841,31 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::29"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::3"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::30"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::31"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::32"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::33"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::34"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::35"]
 class = "missing"
@@ -4321,31 +2877,31 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::37"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::38"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::39"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::4"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::40"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::41"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::42"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::43"]
 class = "missing"
@@ -4357,23 +2913,23 @@ reason = "not yet: time()"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::5"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::6"]
 class = "missing"
-reason = "not yet: datetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::7"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::8"]
 class = "missing"
-reason = "not yet: localdatetime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[4] Should truncate localtime::9"]
 class = "missing"
-reason = "not yet: localtime()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[5] Should truncate time::1"]
 class = "missing"

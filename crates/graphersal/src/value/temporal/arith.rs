@@ -699,11 +699,11 @@ const NANOS_PER_AVERAGE_MONTH: i128 = 2_629_746 * NANOS_PER_SECOND;
 /// An exact decimal amount of one duration unit with up to nine fraction digits (`1.5` days,
 /// `0.75` months), held as the amount times 10^9 ("nano-units"): every amount the GQL forms
 /// take is exact, so the fraction cascade ([`cascade`]) needs no floating point.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Amount(i128);
 
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 impl Amount {
     /// Nano-units in one unit.
     pub(crate) const SCALE: i128 = 1_000_000_000;
@@ -731,11 +731,13 @@ impl Amount {
     }
 
     /// The amount times 10^9.
+    #[allow(dead_code, reason = "the GQL temporal functions (3g.T6-T8) call it")]
     pub(crate) fn nano_units(self) -> i128 {
         self.0
     }
 
     /// Whether the amount is a whole number.
+    #[allow(dead_code, reason = "the GQL temporal functions (3g.T6-T8) call it")]
     pub(crate) fn is_whole(self) -> bool {
         self.0 % Self::SCALE == 0
     }
@@ -743,7 +745,7 @@ impl Amount {
 
 /// The components of a duration as the constructor map and the unit text give them (each
 /// possibly fractional and of either sign), summed by [`cascade`].
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct DurationParts {
     /// Years (12 months each).
@@ -771,7 +773,7 @@ pub(crate) struct DurationParts {
 /// A duration computed by [`cascade`] or [`scale_duration`], with whether non-zero digits below
 /// the microsecond were cut (truncated toward zero): our durations hold microseconds, and the
 /// GQL layer answers such a value with "not yet" rather than cut it silently.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Cascaded {
     /// The duration (microseconds truncated toward zero).
@@ -832,7 +834,7 @@ fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalRe
 /// days a month, a fraction of a day becomes time (`P0.75M` = `P22DT19H51M49.5S`, `P1.5D` =
 /// `P1DT12H`, `PT1.5M` = `PT1M30S`). A result outside the fields is
 /// [`TemporalError::OutOfRange`].
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn cascade(parts: &DurationParts) -> TemporalResult<Cascaded> {
     let months = plus(mul(parts.years.0, 12)?, parts.months.0)?;
     let days = plus(mul(parts.weeks.0, 7)?, parts.days.0)?;

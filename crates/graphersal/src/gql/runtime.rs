@@ -923,6 +923,23 @@ impl<S: GraphStorage> Env for Row<'_, '_, S> {
             }
         }
     }
+
+    /// The execution's pinned time (`TraverserContext::gql_now`): the one a creating step
+    /// stores (`with_now`, a script's evaluation `now()`), else the start of the storage's
+    /// outermost open unit, else the system clock, taken once, so every row and every call of
+    /// one execution reads the same instant.
+    fn now(&self) -> crate::value::temporal::DateTime {
+        let context = self.context;
+        *context
+            .gql_now
+            .get_or_init(|| match context.create_context {
+                Some(create) => create.now(),
+                None => {
+                    crate::graph::schema::defaults::CreateContext::for_storage(&*context.storage)
+                        .now()
+                }
+            })
+    }
 }
 
 /// The most subqueries one step hosts (one bit each in [`SubqueryAnswers`]): the binder admits

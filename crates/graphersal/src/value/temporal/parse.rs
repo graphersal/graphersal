@@ -426,7 +426,7 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
 // ---------------------------------------------------------------------------------------------
 
 /// A value read by [`parse_extended`], with what our types could not keep.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Extended {
     /// The value (a fraction below the microsecond truncated toward zero).
@@ -747,7 +747,7 @@ fn duration_extended(text: &str) -> TemporalResult<Extended> {
 /// duration beyond the fields is [`TemporalError::OutOfRange`], any other bad text
 /// [`TemporalError::Parse`]. Digits below the microsecond are cut and reported in
 /// [`Extended::sub_micro`].
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<Extended> {
     let plain = |value: Temporal, sub_micro: bool| Extended {
         value,

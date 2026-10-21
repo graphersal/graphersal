@@ -104,7 +104,7 @@ pub(crate) const fn iso_week(days: i32) -> (i32, u8) {
 
 /// The Monday of ISO week 1 of the week-numbering `year` (the week that holds January 4):
 /// 1817 starts on 1816-12-30. No range check.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) const fn week_year_start(year: i32) -> i32 {
     let jan4 = days_from_civil(year, 1, 4);
     jan4 - (iso_day_of_week(jan4) as i32 - 1)
@@ -118,7 +118,7 @@ pub(crate) const fn weeks_in_week_year(year: i32) -> u8 {
 /// The day of ISO `week` (1..=52 or 53) and ISO `day_of_week` (1 = Monday ..= 7) of the
 /// week-numbering `year`, the inverse of [`iso_week`] and [`iso_day_of_week`]; `None` for a week
 /// or weekday that does not exist or a day outside the supported range.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn from_iso_week(year: i32, week: u8, day_of_week: u8) -> Option<i32> {
     if !(MIN_YEAR..=MAX_YEAR).contains(&year)
         || week == 0
@@ -132,7 +132,7 @@ pub(crate) fn from_iso_week(year: i32, week: u8, day_of_week: u8) -> Option<i32>
 }
 
 /// The `ordinal`-th day (1..=365 or 366) of `year`; `None` when that day does not exist.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn from_ordinal(year: i32, ordinal: u16) -> Option<i32> {
     let length = if is_leap(year) { 366 } else { 365 };
     if !(MIN_YEAR..=MAX_YEAR).contains(&year) || ordinal == 0 || ordinal > length {
@@ -143,7 +143,7 @@ pub(crate) fn from_ordinal(year: i32, ordinal: u16) -> Option<i32> {
 
 /// The `day`-th day (1..=90, 91 or 92) of `quarter` (1..=4) of `year`; `None` when that day
 /// does not exist.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn from_quarter(year: i32, quarter: u8, day: u8) -> Option<i32> {
     if !(MIN_YEAR..=MAX_YEAR).contains(&year) || !(1..=4).contains(&quarter) || day == 0 {
         return None;

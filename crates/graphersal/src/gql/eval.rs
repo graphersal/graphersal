@@ -195,6 +195,12 @@ pub(crate) mod status {
     /// Dependent object error: edges still exist (a plain `DELETE` of a node that still has
     /// edges, stage 3d) [ISO].
     pub(crate) const EDGES_STILL_EXIST: &str = "G1001";
+    /// Data exception: invalid datetime format (temporal text that is no value of the type, a
+    /// constructor map with an unknown or conflicting field, an unknown time zone; stage 3g).
+    pub(crate) const INVALID_DATETIME_FORMAT: &str = "22007";
+    /// Data exception: datetime field overflow (a temporal field or result outside its range:
+    /// month 13, the year 10000; stage 3g).
+    pub(crate) const DATETIME_OVERFLOW: &str = "22008";
 }
 
 /// A failure of [`compile`] or of an evaluation.
@@ -504,6 +510,14 @@ pub(crate) trait Env {
         let _ = index;
         Value::Null
     }
+    /// The time the execution started, read by the temporal clocks (`date()`, `datetime()`,
+    /// `X.statement()`, `X.transaction()`, stage 3g U9): the same value for every row of one
+    /// execution. A row of the traversal answers the execution's pinned `now()` (the time a
+    /// creating step stores, [`TraverserContext::create_context`](crate::traversal::context::TraverserContext::create_context));
+    /// the default reads the system clock.
+    fn now(&self) -> crate::value::temporal::DateTime {
+        crate::graph::schema::defaults::datetime_of_micros(crate::graph::undo::now_micros())
+    }
 }
 
 /// The row of a comprehension's `WHERE` and `|` parts (design M4): the variable `index` bound
@@ -578,6 +592,10 @@ impl<E: Clone + PartialEq> Env for LocalEnv<'_, E> {
         } else {
             self.parent.local(index)
         }
+    }
+
+    fn now(&self) -> crate::value::temporal::DateTime {
+        self.parent.now()
     }
 }
 
