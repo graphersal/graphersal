@@ -651,9 +651,12 @@ TRUE), and every ordering of `NaN` against a number is FALSE (`NaN > 1`, `NaN <=
 another kind it is `NULL` (`NaN > 'a'`):
 
 ```rhai,graph=empty
-g.gql("WITH 0.0 / 0.0 AS n RETURN n = n AS a, n <> n AS b, n > 1 AS c, n > 'a' AS d, 1.0 / 0.0 AS e").to_list()   // #{"a": false, "b": true, "c": false, "d": (), "e": inf}
+g.gql("WITH 0.0 / 0.0 AS n RETURN n = n AS a, n <> n AS b, n > 1 AS c, n > 'a' AS d, toString(1.0 / 0.0) AS e, toString(n) AS f").to_list()   // #{"a": false, "b": true, "c": false, "d": (), "e": "Infinity", "f": "NaN"}
 g.gql("RETURN 1 / 0 AS x").to_list()   // error: division by zero (22012)
 ```
+
+(JSON has no `NaN` or infinity, so the playground and the dev server cannot show such a value
+itself; `toString(x)` shows it as text.)
 
 These rules follow Neo4j and the openCypher TCK, where ISO GQL calls a comparison of different
 kinds "not comparable" and raises `22012` for a division by zero of every numeric type
