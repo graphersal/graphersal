@@ -374,6 +374,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   node, `Data { Edge, label }` per label the edge pattern states, `Data { None, None }`
     ///   when the kind is unknown), a label item `Update` on `Data { Vertex, None }` per label;
     ///   never from `flow` (the current object is not the target);
+    /// - the GQL `MERGE` step `gql:merge`: `Create` per element its pattern can create
+    ///   (`Data { Vertex, label }` per label, `Data { Vertex, None }` label-less,
+    ///   `Data { Edge, label }`), then the `Update`s of its `ON CREATE` / `ON MATCH` items as
+    ///   `gql:set` asks them; its match child's `Read`s come from the walk over its children;
     /// - `drop()`: `Delete` on `Data` of the elements it receives, like `property`;
     /// - the GQL `DELETE` step `gql:delete`: `Delete` per target as the step's own static facts
     ///   state it (`Data { Vertex, None }` for a node, `Data { Edge, label }` per label the edge
@@ -495,6 +499,27 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                             ));
                         }
                         for (element, label) in updates {
+                            visit(AccessRequest::new(
+                                Action::Update,
+                                Resource::data(element, label),
+                            ))?;
+                        }
+                        Ok(())
+                    }
+                    // A GQL `MERGE` asks `Create` per element its pattern can create (as the
+                    // INSERT of the same pattern) and the `Update`s of its `ON CREATE` /
+                    // `ON MATCH` items (as `gql:set`); none without `ON` items, unlike
+                    // `merge_v` (design C7 of stage 3e). The matcher's `Read`s and the
+                    // creator's `Create`s are asked again by the walk over its children.
+                    #[cfg(feature = "gql")]
+                    "gql:merge" => {
+                        for (element, label) in step.gql_creates() {
+                            visit(AccessRequest::new(
+                                Action::Create,
+                                Resource::data(element, label),
+                            ))?;
+                        }
+                        for (element, label) in step.gql_updates() {
                             visit(AccessRequest::new(
                                 Action::Update,
                                 Resource::data(element, label),
@@ -663,6 +688,10 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
                     flow
                 }
             }
+            // A GQL `MERGE` yields its record (a row map, like a `CALL` record): the plan
+            // states nothing about it.
+            #[cfg(feature = "gql")]
+            GraphStep::SideEffectMut("gql:merge", _) => AccessFlow::default(),
             GraphStep::Filter("has_label", step) => match step.labels() {
                 Some(labels)
                     if flow.element == Some(ElementKind::Edge)
@@ -948,6 +977,13 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     #[cfg(feature = "gql")]
     fn gql_relabels(&self) -> bool {
         false
+    }
+    /// The elements a GQL `MERGE` step (`gql:merge`) can create, from its pattern: one
+    /// `(element kind, label)` per `Create` request ([`GraphStep::for_each_access_in`]). Empty
+    /// by default; only with the `gql` feature.
+    #[cfg(feature = "gql")]
+    fn gql_creates(&self) -> Vec<(Option<crate::graph::ElementKind>, Option<&str>)> {
+        Vec::new()
     }
     fn process(
         &self,

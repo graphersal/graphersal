@@ -10,6 +10,8 @@ pub(crate) mod step_gql_insert_edge;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_insert_node;
 #[cfg(feature = "gql")]
+pub(crate) mod step_gql_merge;
+#[cfg(feature = "gql")]
 pub(crate) mod step_gql_remove;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_set;

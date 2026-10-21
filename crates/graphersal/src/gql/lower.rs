@@ -1571,6 +1571,13 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn not(self, child: AnonymousTraversal<'g, S>) -> Self;
     fn count(self) -> Self;
     fn push_step(self, step: GraphStep<'g, S>) -> Self;
+    /// `gql:merge(..)`: one `MERGE` clause (stage 3e): its match and create children, the
+    /// E1 checks and the `ON` items.
+    #[allow(dead_code, reason = "the MERGE lowering (3e.T3) calls it")]
+    fn gql_merge(
+        self,
+        merge: crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge<'g, S>,
+    ) -> Self;
 }
 
 /// [`Sink`] for a traversal type with the builders of the same names (inherent methods take
@@ -1796,6 +1803,12 @@ macro_rules! sink {
             }
             fn push_step(self, step: GraphStep<'g, S>) -> Self {
                 self.push_step(step)
+            }
+            fn gql_merge(
+                self,
+                merge: crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge<'g, S>,
+            ) -> Self {
+                self.gql_merge(merge)
             }
         }
     };
