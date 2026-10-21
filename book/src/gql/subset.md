@@ -473,7 +473,10 @@ only its items on: the next clauses see only the names `WITH` lists (`WITH *` ke
 nothing in scope it passes the rows on, as in `MATCH () CREATE () WITH * CREATE ()`). An item
 that is not a plain variable needs `AS`. `WITH` may take `DISTINCT`, an aggregate,
 `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT` and a `WHERE`, in this order; the `WHERE` filters **after**
-`LIMIT` (Cypher's order of the sub-clauses).
+`LIMIT` (Cypher's order of the sub-clauses). The `WHERE` reads the items and also the variables
+the `WITH` drops (`WITH c WHERE r IS NULL`), except after an aggregation; after `DISTINCT` it
+filters the rows before they are folded (with `DISTINCT` and `ORDER BY` / `OFFSET` / `LIMIT` too,
+such a `WHERE` is not yet supported).
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) WITH p.name AS name, p.age AS age WHERE age < 30 RETURN name ORDER BY name").to_list()   // #{"name": "marko"}, #{"name": "vadas"}
@@ -481,6 +484,7 @@ g.gql("MATCH (p:person) WITH p ORDER BY p.age DESC LIMIT 2 MATCH (p)-[:created]-
 // #{"name": "josh", "sw": "lop"}, #{"name": "josh", "sw": "ripple"}, #{"name": "peter", "sw": "lop"}
 g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 3 WHERE p.age > 28 RETURN p.name AS name ORDER BY name").to_list()
 // #{"name": "josh"}, #{"name": "marko"}: the three youngest, then the filter
+g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[e:created]->() WITH p.name AS name WHERE e IS NULL RETURN name").to_list()   // #{"name": "vadas"}
 g.gql("MATCH (p:person) WITH p.name AS name RETURN p.age")   // error: the variable `p` is not in scope: the WITH before does not carry it
 g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 2 WITH collect(p) AS ps WITH ps[0] AS youngest MATCH (youngest)<-[:knows]-(f) RETURN f.name AS name").to_list()   // #{"name": "marko"}
 g.gql("MATCH (p:person) WITH collect(p.age) AS ages WITH ages[0] AS x MATCH (x)-->(y) RETURN y")   // error: `x` is written as a node of the pattern but holds a value that is not a node

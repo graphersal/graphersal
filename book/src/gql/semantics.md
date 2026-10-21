@@ -751,7 +751,10 @@ g.gql("FOR a IN [29.0, '27', null] MATCH (p:person {age: a}) RETURN a, p.name AS
 The sub-clauses of a `WITH` run in this order: the items (and their aggregation), `DISTINCT`,
 `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT`, and last the `WHERE`. So `WITH p ORDER BY p.age LIMIT 3
 WHERE p.age > 28` takes the three youngest and then filters them (Cypher's order; to be checked
-against the ISO text). A `WITH` that only passes values on (no `DISTINCT`, aggregate, `ORDER BY`,
+against the ISO text). The `WHERE` sees the variables before the `WITH` too, as in Neo4j: their
+elements are still on the row (a projecting `WITH` keeps it, `ORDER BY` / `OFFSET` / `LIMIT`
+keep its elements); with `DISTINCT` it filters before the rows are folded, since one folded row
+stands for many; after an aggregation only the keys and aggregates remain. A `WITH` that only passes values on (no `DISTINCT`, aggregate, `ORDER BY`,
 `OFFSET` or `LIMIT`) changes nothing in how the query runs; it only limits the names in scope.
 
 ## Either direction and self-loops

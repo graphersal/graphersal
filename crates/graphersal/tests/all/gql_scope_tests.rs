@@ -485,3 +485,117 @@ fn create_connects_nodes_held_by_values() {
     };
     assert_eq!(message, "22G03");
 }
+
+// ----- the WHERE of a WITH sees the names before it (B5) -----
+
+#[test]
+fn the_where_of_a_with_reads_the_variables_it_drops() {
+    let graph = modern();
+    // TCK WithWhere7 [1] / [3]: an item and a dropped variable side by side.
+    for (query, rewrite) in [
+        (
+            "MATCH (a:person) WITH a.name AS name WHERE a.age > 30 RETURN name",
+            "MATCH (a:person) WHERE a.age > 30 RETURN a.name AS name",
+        ),
+        (
+            "MATCH (a:person) WITH a.name AS name WHERE name = 'josh' OR a.age < 28 RETURN name",
+            "MATCH (a:person) WHERE a.name = 'josh' OR a.age < 28 RETURN a.name AS name",
+        ),
+        // TCK WithWhere1 [3] / TriadicSelection1: an OPTIONAL MATCH edge tested after WITH.
+        (
+            "MATCH (a:person) OPTIONAL MATCH (a)-[r:created]->() WITH a.name AS name \
+             WHERE r IS NULL RETURN name",
+            "MATCH (a:person) WHERE NOT EXISTS { (a)-[:created]->() } RETURN a.name AS name",
+        ),
+        // A pattern predicate on a dropped variable.
+        (
+            "MATCH (a)-->(b) WITH a.name AS name WHERE (b)-->() RETURN name",
+            "MATCH (a)-->(b) WHERE (b)-->() RETURN a.name AS name",
+        ),
+    ] {
+        assert_eq!(
+            table(&graph, query, &["name"]),
+            table(&graph, rewrite, &["name"]),
+            "{query}"
+        );
+        assert!(!rows(&graph, query).is_empty(), "{query}");
+    }
+    // TCK WithWhere1 [2]: DISTINCT folds the rows the WHERE keeps.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (a:person) WITH DISTINCT a.age > 30 AS old WHERE a.name <> 'josh' RETURN old",
+            &["old"]
+        ),
+        sorted(&["false", "true"])
+    );
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (a:person) WITH DISTINCT a.age > 30 AS old WHERE a.name IN ['josh', 'peter'] \
+             RETURN old",
+            &["old"]
+        ),
+        sorted(&["true"])
+    );
+    // After ORDER BY / LIMIT the WHERE filters the rows kept (the three first names, then the
+    // age test).
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (a:person) WITH a.name AS name ORDER BY name LIMIT 3 WHERE a.age > 30 \
+             RETURN name",
+            &["name"]
+        ),
+        sorted(&["'josh'", "'peter'"])
+    );
+    // A FOR item and a LET value dropped by the WITH.
+    assert_eq!(
+        table(
+            &graph,
+            "FOR x IN [1, 2, 3] WITH x * 2 AS y ORDER BY y LIMIT 2 WHERE x > 1 RETURN y",
+            &["y"]
+        ),
+        sorted(&["4"])
+    );
+    // Later clauses do not see them; nor does the WHERE after an aggregation.
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (a:person) WITH a.name AS name WHERE a.age > 30 RETURN a.age"
+        ),
+        "the variable `a` is not in scope: the WITH before does not carry it [42002]"
+    );
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (a:person) WITH a.name AS name, count(*) AS c WHERE a.age > 1 RETURN name"
+        ),
+        "the variable `a` is not in scope: the WITH before does not carry it [42002]"
+    );
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (a:person) WITH DISTINCT a.name AS name LIMIT 3 WHERE a.age > 28 RETURN name"
+        ),
+        "a WHERE after WITH DISTINCT and ORDER BY, OFFSET or LIMIT that reads a variable the \
+         WITH drops is not yet supported in this version [0A000]"
+    );
+}
+
+#[test]
+fn a_with_where_reading_only_its_items_keeps_its_plan() {
+    let graph = modern();
+    // The filter of a projecting WITH reads the substituted item: the same steps as written
+    // on the MATCH.
+    assert_eq!(
+        steps(
+            &graph,
+            "MATCH (a:person) WITH a.name AS name WHERE a.age > 30 RETURN name"
+        ),
+        steps(
+            &graph,
+            "MATCH (a:person) WITH a.name AS name, a.age AS age WHERE age > 30 RETURN name"
+        )
+    );
+}

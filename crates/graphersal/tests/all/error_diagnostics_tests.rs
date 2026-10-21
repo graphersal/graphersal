@@ -8078,7 +8078,8 @@ mod gql {
     #[test]
     fn gql_with_and_let_scope_errors_explain_the_scope() {
         let scope = "WITH passes on only its columns: a variable it does not list is out of \
-                     scope after it, so list every variable a later clause reads, as in \
+                     scope after it (only the WHERE of a WITH without an aggregate still reads \
+                     it), so list every variable a later clause reads, as in \
                      g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
                      p.name, n\"); a WITH item other than a variable needs a name (AS). LET \
                      adds variables and keeps all others in scope, each with a new name, as in \

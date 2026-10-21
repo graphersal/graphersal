@@ -1673,9 +1673,11 @@ fn pattern_predicates_introduce_no_variable() {
             "{query}: {f:?}"
         );
     }
-    // A name a WITH dropped keeps its own message.
-    let f = fail("MATCH (a)-->(b) WITH a WHERE (b)-->() RETURN a");
+    // A name a WITH dropped keeps its own message (the WHERE of the WITH itself still sees
+    // it, TCK WithWhere7).
+    let f = fail("MATCH (a)-->(b) WITH a MATCH (a) WHERE (b)-->() RETURN a");
     assert!(f.message.contains("does not carry it"), "{}", f.message);
+    ok("MATCH (a)-->(b) WITH a WHERE (b)-->() RETURN a");
     // Names in scope, anonymous elements, labels and property maps are fine; braces may bind.
     ok("MATCH (a), (b) WHERE (a)-[:T]->(b) AND NOT (b {x: 1})-->(:L) RETURN a");
     ok("MATCH (a) WHERE EXISTS { (a)-->(b) WHERE b.x = 1 } RETURN a");
@@ -4701,4 +4703,47 @@ fn a_value_written_as_a_pattern_element_is_materialized_and_checked() {
             f.message
         );
     }
+}
+
+#[test]
+fn the_where_of_a_with_sees_the_names_before_it() {
+    // TCK WithWhere7 [1]-[3], WithWhere1 [3] / [4], TriadicSelection1.
+    let src = "MATCH (a)-[r]->(b) WITH b AS c WHERE r.w > 1 AND c.k = a.k RETURN c";
+    let q = ok(src);
+    assert_eq!(
+        conjuncts(src, &q),
+        ["r.w > 1 [\"r\"]", "c.k = a.k [\"a\", \"b\"]"]
+    );
+    assert_eq!(segment_shapes(&q), ["match[0]"]);
+    // After it the dropped names are out of scope again.
+    let f = fail("MATCH (a)-->(b) WITH b WHERE a.k = 1 RETURN a");
+    assert!(f.message.contains("does not carry it"), "{}", f.message);
+    assert_eq!(f.text, "a");
+    // ORDER BY / LIMIT keep the rows' elements: the WHERE after LIMIT reads them.
+    let src = "MATCH (a)-->(b) WITH b.k AS k ORDER BY k LIMIT 2 WHERE a.k > 1 RETURN k";
+    let q = ok(src);
+    assert_eq!(segment_shapes(&q), ["match[0]", "with1"]);
+    assert_eq!(conjuncts(src, &q), ["a.k > 1 [\"a\"]"]);
+    assert_eq!(q.conjuncts[0].segment, 1);
+    // DISTINCT: the WHERE filters before the rows are folded, reading the items through
+    // their expressions.
+    let src = "MATCH (a)-->(b) WITH DISTINCT b.k AS k WHERE a.k > 1 AND k < 3 RETURN k";
+    let q = ok(src);
+    assert_eq!(segment_shapes(&q), ["match[0]", "with1"]);
+    assert!(
+        q.conjuncts.iter().all(|c| c.segment == 0),
+        "{:?}",
+        q.conjuncts
+    );
+    // Not with DISTINCT and ORDER BY / LIMIT, and never after an aggregation.
+    let parsed =
+        parse("MATCH (a)-->(b) WITH DISTINCT b.k AS k LIMIT 1 WHERE a.k > 1 RETURN k").unwrap();
+    let f = failure("", bind(&parsed));
+    assert_eq!(f.kind, GqlErrorKind::NotYet, "{f:?}");
+    let f = fail("MATCH (a)-->(b) WITH b, count(*) AS n WHERE a.k > 1 RETURN b");
+    assert!(f.message.contains("does not carry it"), "{}", f.message);
+    // An item shadows an earlier name of the same spelling.
+    let src = "MATCH (a)-->(b) WITH b.k AS a WHERE a > 1 RETURN a";
+    let q = ok(src);
+    assert_eq!(conjuncts(src, &q), ["a > 1 [\"b\"]"]);
 }

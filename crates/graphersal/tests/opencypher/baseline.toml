@@ -379,26 +379,6 @@ reason = "having executed: not yet: reading an element that the same CREATE crea
 class = "wrong_columns"
 reason = "columns differ: expected [\"m\", \"n\", \"x\"], actual [\"n\", \"m\", \"x\"]"
 
-["clauses/with-where/WithWhere1.feature::[2] Filter node with property predicate on a single variable with multiple distinct bindings"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 7: the variable `a` is not in scope: the WITH before does not carry it"
-
-["clauses/with-where/WithWhere1.feature::[3] Filter for an unbound relationship variable"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 18: the variable `r` is not in scope: the WITH before does not carry it"
-
-["clauses/with-where/WithWhere1.feature::[4] Filter for an unbound node variable"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 18: the variable `a` is not in scope: the WITH before does not carry it"
-
-["clauses/with-where/WithWhere7.feature::[1] WHERE sees a variable bound before but not after WITH"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 7: the variable `a` is not in scope: the WITH before does not carry it"
-
-["clauses/with-where/WithWhere7.feature::[3] WHERE sees both, variable bound before but not after WITH and variable bound after but not before WITH"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 21: the variable `a` is not in scope: the WITH before does not carry it"
-
 ["clauses/with/With1.feature::[2] Forwarind a node variable 2"]
 class = "wrong_columns"
 reason = "columns differ: expected [\"a\", \"b\", \"x\"], actual [\"a\", \"x\", \"b\"]"
@@ -518,22 +498,6 @@ reason = "expected row 1 | false | has no partner (in any order) among: | | null
 ["expressions/comparison/Comparison1.feature::[9] Equality between strings and numbers::4"]
 class = "wrong_result"
 reason = "expected row 1 | false | has no partner (in any order) among: | | null |"
-
-["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::1"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
-
-["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::2"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
-
-["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::3"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
-
-["expressions/comparison/Comparison2.feature::[3] Comparing across types yields null, except numbers::4"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 6, column 7: the variable `i` is not in scope: the WITH before does not carry it"
 
 ["expressions/comparison/Comparison2.feature::[4] Comparing lists::1"]
 class = "wrong_result"
@@ -5126,75 +5090,3 @@ reason = "expected TypeError at runtime, the query succeeded with 1 row(s)"
 ["expressions/typeConversion/TypeConversion4.feature::[10] Fail `toString()` on invalid types #Example: <exampleName>::2"]
 class = "wrong_error"
 reason = "expected TypeError at runtime, the query succeeded with 1 row(s)"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[10] Handling triadic friend of a friend that is not a friend with implicit superset of labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[11] Handling triadic friend of a friend that is a friend"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[12] Handling triadic friend of a friend that is a friend with different relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[13] Handling triadic friend of a friend that is a friend with superset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[16] Handling triadic friend of a friend that is a friend with same labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[17] Handling triadic friend of a friend that is a friend with different labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[18] Handling triadic friend of a friend that is a friend with implicit subset of labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[19] Handling triadic friend of a friend that is a friend with implicit superset of labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[2] Handling triadic friend of a friend that is not a friend"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[3] Handling triadic friend of a friend that is not a friend with different relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[4] Handling triadic friend of a friend that is not a friend with superset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[7] Handling triadic friend of a friend that is not a friend with same labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[8] Handling triadic friend of a friend that is not a friend with different labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"
-
-["useCases/triadicSelection/TriadicSelection1.feature::[9] Handling triadic friend of a friend that is not a friend with implicit subset of labels"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 14: the variable `r` is not in scope: the WITH before does not carry it"

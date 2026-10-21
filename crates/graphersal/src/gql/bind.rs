@@ -1974,7 +1974,7 @@ struct Resolved {
 }
 
 /// Why a name left the scope (for the message of a later read).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dropper {
     /// A `WITH` that does not carry it.
     With,
@@ -4918,6 +4918,36 @@ impl<'q> Binder<'q> {
             || with.order_by.is_some()
             || with.offset.is_some()
             || with.limit.is_some();
+        // The names before the WITH that it drops and its WHERE reads (TCK WithWhere7): they
+        // stay readable there, except after an aggregation (its rows hold only the keys).
+        let earlier = match with.where_clause {
+            Some(where_clause) if !aggregated && with.dropper == Dropper::With => {
+                self.dropped_reads(where_clause, &names)
+            }
+            _ => Vec::new(),
+        };
+        if materializing && !earlier.is_empty() && distinct {
+            return self.distinct_with_reading_earlier(with, columns, names, earlier);
+        }
+        self.with_columns(with, columns, names, distinct, earlier)
+    }
+
+    /// The rest of [`Binder::with_clause`] once its columns are bound.
+    fn with_columns(
+        &mut self,
+        with: &WithParts<'_>,
+        columns: Vec<Column>,
+        names: Vec<Identifier>,
+        distinct: bool,
+        earlier: Vec<(Identifier, Symbol)>,
+    ) -> BResult<()> {
+        let aggregated = columns.iter().any(|c| c.aggregate);
+        let materializing = with.materialize
+            || aggregated
+            || distinct
+            || with.order_by.is_some()
+            || with.offset.is_some()
+            || with.limit.is_some();
         if materializing {
             let order_by = self.order_by(with.order_by, &columns, distinct, with.clause)?;
             let offset = self.count(with.offset, "OFFSET")?;
@@ -4963,12 +4993,7 @@ impl<'q> Binder<'q> {
             self.open = None;
             self.replace_scope(next, with.dropper);
             if let Some(where_clause) = with.where_clause {
-                self.conjuncts_of(
-                    Ctx::refusing("in the WHERE of WITH"),
-                    where_clause,
-                    ConjunctOrigin::Filter,
-                    segment,
-                )?;
+                self.with_where(where_clause, segment, earlier)?;
             }
         } else {
             let mut next = Names::default();
@@ -4989,15 +5014,136 @@ impl<'q> Binder<'q> {
             self.replace_scope(next, with.dropper);
             if let Some(where_clause) = with.where_clause {
                 let segment = self.open_segment();
-                self.conjuncts_of(
-                    Ctx::refusing("in the WHERE of WITH"),
-                    where_clause,
-                    ConjunctOrigin::Filter,
-                    segment,
-                )?;
+                self.with_where(where_clause, segment, earlier)?;
             }
         }
         Ok(())
+    }
+
+    /// The `WHERE` of a `WITH` in the scope after it, where the `earlier` names it drops (and
+    /// the `WHERE` reads) stay readable: their elements are still on the row (a projecting
+    /// `WITH` keeps the traverser, `ORDER BY` / `OFFSET` / `LIMIT` keep its path).
+    fn with_where(
+        &mut self,
+        where_clause: &Expr,
+        segment: usize,
+        earlier: Vec<(Identifier, Symbol)>,
+    ) -> BResult<()> {
+        let ctx = Ctx::refusing("in the WHERE of WITH");
+        if earlier.is_empty() {
+            return self.conjuncts_of(ctx, where_clause, ConjunctOrigin::Filter, segment);
+        }
+        let after = self.scope.clone();
+        for (name, symbol) in earlier {
+            self.scope.insert(name, symbol);
+        }
+        let result = self.conjuncts_of(ctx, where_clause, ConjunctOrigin::Filter, segment);
+        self.scope = after;
+        result
+    }
+
+    /// `WITH DISTINCT .. WHERE` whose `WHERE` reads `earlier` names the `WITH` drops (TCK
+    /// WithWhere1 [2]): the `WHERE` filters the rows before `DISTINCT` folds them, reading the
+    /// items through their expressions and the earlier names as they are (one row of the
+    /// `DISTINCT` stands for many, so after it an earlier name has no single value). With
+    /// `ORDER BY`, `OFFSET` or `LIMIT` the `WHERE` filters after them: not yet.
+    fn distinct_with_reading_earlier(
+        &mut self,
+        with: &WithParts<'_>,
+        columns: Vec<Column>,
+        names: Vec<Identifier>,
+        earlier: Vec<(Identifier, Symbol)>,
+    ) -> BResult<()> {
+        let Some(where_clause) = with.where_clause else {
+            return Err(Box::new(semantic(
+                with.span,
+                "internal error: a WITH without WHERE reading earlier names",
+            )));
+        };
+        if with.order_by.is_some() || with.offset.is_some() || with.limit.is_some() {
+            let name = earlier.first().map_or("", |(n, _)| n.name.as_str());
+            return Err(not_yet(
+                where_clause.span,
+                "a WHERE after WITH DISTINCT and ORDER BY, OFFSET or LIMIT that reads a variable \
+                 the WITH drops",
+                &format!(
+                    "add `{name}` to the WITH items, as in WITH DISTINCT ..., {name} ORDER BY .. \
+                     WHERE .., or filter before the WITH with a WHERE of the MATCH"
+                ),
+            ));
+        }
+        // The scope of the WHERE: the earlier names, then the items (an item shadows an
+        // earlier name of the same spelling).
+        let after = self.scope.clone();
+        for (column, name) in columns.iter().zip(&names) {
+            let symbol = match column.variable {
+                Some(id) => Symbol::Binding(id),
+                None => Symbol::Value(Rc::new(Substitution {
+                    expr: column.expr.clone(),
+                    shape: shape_of(&column.expr),
+                    bindings: column.bindings.clone(),
+                })),
+            };
+            self.scope.insert(name.clone(), symbol);
+        }
+        let segment = self.open_segment();
+        let ctx = Ctx::refusing("in the WHERE of WITH");
+        let result = self.conjuncts_of(ctx, where_clause, ConjunctOrigin::Filter, segment);
+        self.scope = after;
+        result?;
+        let rest = WithParts {
+            where_clause: None,
+            ..*with
+        };
+        self.with_columns(&rest, columns, names, true, Vec::new())
+    }
+
+    /// The names of the scope that a `WITH` projecting `kept` drops and `where_clause` may
+    /// read, with their symbols (in scope order). A name counts when its spelling stands in
+    /// the text of the `WHERE` where a variable can (not after `.` or `:`, not as a map key
+    /// or function name): a name a comprehension or subquery binds itself may count too,
+    /// which only widens the scope of the `WHERE` by a name it does not read.
+    fn dropped_reads(&self, where_clause: &Expr, kept: &[Identifier]) -> Vec<(Identifier, Symbol)> {
+        let dropped =
+            |name: &str| self.scope.get(name).is_some() && !kept.iter().any(|k| k.name == name);
+        if self.scope.entries.iter().all(|(n, _)| !dropped(&n.name)) {
+            return Vec::new();
+        }
+        let Ok(tokens) = super::lexer::tokenize(self.query.text(where_clause.span)) else {
+            return Vec::new();
+        };
+        let mut read: Vec<&str> = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            if !token.is_variable_name() {
+                continue;
+            }
+            let before = i
+                .checked_sub(1)
+                .and_then(|j| tokens.get(j))
+                .map(|t| &t.kind);
+            let after = tokens.get(i + 1).map(|t| &t.kind);
+            if matches!(
+                before,
+                Some(super::lexer::TokenKind::Dot | super::lexer::TokenKind::Colon)
+            ) || matches!(
+                after,
+                Some(super::lexer::TokenKind::Colon | super::lexer::TokenKind::LParen)
+            ) {
+                continue;
+            }
+            if let Some(name) = token.name()
+                && dropped(name)
+                && !read.contains(&name)
+            {
+                read.push(name);
+            }
+        }
+        self.scope
+            .entries
+            .iter()
+            .filter(|(n, _)| read.contains(&n.name.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// Makes `next` the scope; the names it drops are remembered for the error message.
@@ -7033,6 +7179,7 @@ impl<'q> Binder<'q> {
 }
 
 /// The parts of a `WITH`, or of a `RETURN` before `NEXT` read as one (design E19).
+#[derive(Clone, Copy)]
 struct WithParts<'w> {
     distinct: bool,
     star: Option<Span>,
