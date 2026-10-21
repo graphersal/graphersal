@@ -178,8 +178,13 @@ impl WriteItems {
     /// The GQL text of the items (`n.age = n.age + 1, n:Admin`), for the profile; shown in a
     /// string literal, so respelling leaves it alone.
     pub(crate) fn text(&self) -> String {
+        self.text_of(0..self.texts.len())
+    }
+
+    /// The GQL text of the items at the positions `items`, joined by `, `.
+    pub(crate) fn text_of(&self, items: std::ops::Range<usize>) -> String {
         let mut text = String::new();
-        for (i, span) in self.texts.iter().enumerate() {
+        for (i, span) in self.texts.get(items).unwrap_or_default().iter().enumerate() {
             if i > 0 {
                 text.push_str(", ");
             }
@@ -400,7 +405,7 @@ type Entries = Vec<(CompactString, Option<ElementProperty>)>;
 /// with bulk 1 (derived, rule 20). Asks `Update` on the data of each item's target as the plan
 /// states it, like `property()` (design C6); a label item `Update` on `Data { Vertex, None }`
 /// like `add_label()` (D3). Built only by the GQL lowering; not a DSL step.
-struct StepGqlSet<'g, S: GraphStorage + 'g> {
+pub(crate) struct StepGqlSet<'g, S: GraphStorage + 'g> {
     items: Arc<[GqlSetItem<S>]>,
     write: WriteItems,
     /// The variable slots of the values (`values` index `bindings`).
@@ -436,6 +441,73 @@ impl<'g, S: GraphStorage + 'g> fmt::Display for StepGqlSet<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> StepGqlSet<'g, S> {
+    /// The items of one `SET` clause, their values reading the variable slots `bindings` and
+    /// hosting the subqueries `children` (child `i` answers the values' subquery `i`). Also the
+    /// `ON CREATE` / `ON MATCH` items of a `MERGE` (`gql:merge`, stage 3e), which applies a
+    /// range of them per record ([`Self::apply_items`]).
+    pub(crate) fn new(
+        query: Arc<str>,
+        items: Vec<GqlSetItem<S>>,
+        bindings: Arc<[Binding]>,
+        children: Vec<AnonymousTraversal<'g, S>>,
+    ) -> Self {
+        let write = WriteItems::new(
+            query,
+            "SET",
+            items.iter().map(|item| {
+                (
+                    item.target().clone(),
+                    item.span(),
+                    matches!(item, GqlSetItem::Labels { .. }),
+                )
+            }),
+        );
+        let values = || items.iter().filter_map(GqlSetItem::value);
+        let mut labels = write.labels();
+        labels.extend(labels_read(values(), &bindings));
+        labels.sort_unstable();
+        labels.dedup();
+        let mut history = write.history();
+        history.extend(history_read(values(), &bindings));
+        history.sort_unstable();
+        history.dedup();
+        Self {
+            items: items.into(),
+            write,
+            bindings,
+            labels: labels.into(),
+            history: history.into(),
+            host: SubqueryHost::new(children),
+        }
+    }
+
+    /// The number of items.
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// The GQL text of the items at the positions `items`, joined by `, ` (for a profile).
+    pub(crate) fn text_of(&self, items: std::ops::Range<usize>) -> String {
+        self.write.text_of(items)
+    }
+
+    /// Applies the items at the positions `items` left to right on `row`, as `gql:set` applies
+    /// all of its items; a subquery runs at most once for the row.
+    pub(crate) fn apply_items(
+        &self,
+        context: &mut TraverserContext<'_, S>,
+        row: &Traverser<S>,
+        items: std::ops::Range<usize>,
+    ) -> TraverserResult<()> {
+        let mut answers = SubqueryAnswers::default();
+        let start = items.start;
+        let selected = self.items.get(items).unwrap_or_default();
+        for (offset, item) in selected.iter().enumerate() {
+            self.apply(context, row, &mut answers, start + offset, item)?;
+        }
+        Ok(())
+    }
+
     /// Evaluates `value` on `row`.
     fn evaluate(
         &self,
@@ -720,36 +792,9 @@ fn set_step<'g, S: GraphStorage + 'g>(
     bindings: Arc<[Binding]>,
     children: Vec<AnonymousTraversal<'g, S>>,
 ) -> GraphStep<'g, S> {
-    let write = WriteItems::new(
-        query,
-        "SET",
-        items.iter().map(|item| {
-            (
-                item.target().clone(),
-                item.span(),
-                matches!(item, GqlSetItem::Labels { .. }),
-            )
-        }),
-    );
-    let values = || items.iter().filter_map(GqlSetItem::value);
-    let mut labels = write.labels();
-    labels.extend(labels_read(values(), &bindings));
-    labels.sort_unstable();
-    labels.dedup();
-    let mut history = write.history();
-    history.extend(history_read(values(), &bindings));
-    history.sort_unstable();
-    history.dedup();
     GraphStep::SideEffectMut(
         "gql:set",
-        Box::new(StepGqlSet {
-            items: items.into(),
-            write,
-            bindings,
-            labels: labels.into(),
-            history: history.into(),
-            host: SubqueryHost::new(children),
-        }),
+        Box::new(StepGqlSet::new(query, items, bindings, children)),
     )
 }
 
@@ -816,10 +861,7 @@ impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepGqlSet<'g, 
         let rows = write_rows(context, source, "gql:set")?;
         for row in &rows {
             context.tick()?;
-            let mut answers = SubqueryAnswers::default();
-            for (index, item) in self.items.iter().enumerate() {
-                self.apply(context, row, &mut answers, index, item)?;
-            }
+            self.apply_items(context, row, 0..self.items.len())?;
         }
         Ok(rows)
     }

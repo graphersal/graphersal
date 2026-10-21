@@ -157,6 +157,19 @@ Files appear as their stage lands; this table is the target layout.
   checks its columns for removed elements once a `gql:delete` removed something
   (`runtime::check_returned`, W28); the GQL help of `ElementRemoved` is chosen by the innermost
   failed `gql:` step (`error.rs` `gql_element_removed_help`).
+  Stage 3e: `gql:merge` (SideEffectMut, `sideeffect_steps/step_gql_merge.rs`, one argument
+  `GqlMerge`: `matcher` / `creator` children both ending in the record's `gql:project`, E1
+  `checks` on the incoming row (`check_bindings`), `on_create` / `on_match` `GqlSetItem`s on the
+  record (`item_bindings`, one subquery index space `item_children`), `creates`): per row and
+  per unit of bulk, `tick()`, E1 (a `NULL` property value 22004), the matcher on the row
+  (W34: after the earlier rows' writes), every match a record with `ON MATCH`, else the creator
+  once with `ON CREATE` (the `gql:set` code, `StepGqlSet::apply_items`); records derived from
+  the row (a new path position, children's positions do not continue it), bulk 1;
+  `set_create_time` stamps the creator; `Create` per `creates` + the items' `Update`s (explicit
+  arm, no `Update` without `ON` items), the children's requests from the walk, flow after it
+  `AccessFlow::default()`; in `MAP_PRODUCING_KINDS`; profile `gql:merge("<pattern>",
+  __.<matcher>, __.<creator>[, "ON CREATE SET .."][, "ON MATCH SET .."])`; tests
+  `runtime/merge_step_tests.rs`.
   The others ask no permission of
   their own (value-only, like `has()`); `gql:filter`, `gql:project`, `gql:value`, `gql:order`,
   `gql:aggregate` and `gql:for` may hold subquery children (`runtime::SubqueryHost`), which every

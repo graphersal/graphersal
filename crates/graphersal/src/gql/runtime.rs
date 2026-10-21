@@ -74,6 +74,8 @@ mod for_step_tests;
 #[cfg(test)]
 mod insert_step_tests;
 #[cfg(test)]
+mod merge_step_tests;
+#[cfg(test)]
 mod set_step_tests;
 #[cfg(test)]
 mod step_tests;

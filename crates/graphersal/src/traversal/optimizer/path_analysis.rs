@@ -46,6 +46,7 @@ const MAP_PRODUCING_KINDS: &[&str] = &[
     "gql:value",
     "gql:aggregate",
     "gql:for",
+    "gql:merge",
     "constant",
     "unfold",
     "group",
