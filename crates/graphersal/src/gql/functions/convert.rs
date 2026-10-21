@@ -32,8 +32,11 @@
 //! - **BOOLEAN**: a boolean stays; a string is trimmed, then `true` / `false` in any ASCII case,
 //!   and for `CAST` also `unknown` (-> `NULL`); an integer is `0` -> FALSE, else TRUE for
 //!   `toBoolean`, 22G03 for `CAST`; a float is 22G03.
-//! - **STRING**: a string stays; an integer, a uuid, a temporal, a vector: the engine text
-//!   (`ElementProperty::cast`); a float: the Java `Double.toString` form (design F10: `"1.0"`,
+//! - **STRING**: a string stays; an integer, a uuid, a vector: the engine text
+//!   (`ElementProperty::cast`); a temporal: for `CAST` the engine text (ISO 8601, `12:00:00`,
+//!   `-PT1M0.001S`), for `toString` / `toStringOrNull` the Neo4j / `java.time` text (stage 3g,
+//!   user decision U6: `12:00`, `1984-10-11T12:31Z`, `PT-1M-0.001S`,
+//!   `temporal::ops::to_text`); a float: the Java `Double.toString` form (design F10: `"1.0"`,
 //!   `"1.5E20"`, `"1.0E-4"`, `"NaN"`, `"Infinity"`); a boolean: `"true"` / `"false"`; a list or a
 //!   map: for `CAST` the Neo4j text form (`"[1, a, true]"`, `"{a: 1, b: hi}"`, strings
 //!   unquoted, `NULL` as `null`), its size reserved first ([`Env::reserve`], F6); for
@@ -578,6 +581,11 @@ fn write_scalar<E>(
             N::NegInt(value) => out.push(&value.to_string()),
             N::Float(value) => out.push(&float_text(value.0)),
         },
+        // Cypher `toString` writes the Neo4j text of a temporal (stage 3g, U6: `12:00`,
+        // `PT-1M-0.001S`); `CAST` keeps the engine text below, the shared `cast` is unchanged.
+        ElementProperty::Temporal(value) if conversion.mode != Mode::Cast => {
+            out.push(&super::temporal::ops::to_text(value))
+        }
         ElementProperty::Uuid(_)
         | ElementProperty::Temporal(_)
         | ElementProperty::Vector(_)

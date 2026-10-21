@@ -148,7 +148,10 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
 /// `12:00` and `1984-10-11T12:31` without zero seconds, an offset `Z` / `+01:00`, a duration
 /// signed per component (`PT-1M-0.001S`). Our values carry no zone name, so the
 /// `[Europe/Stockholm]` suffix is never written. The engine parsers read the text back.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(
+    not(feature = "gql"),
+    allow(dead_code, reason = "GQL toString() calls it")
+)]
 pub(crate) fn write_neo4j(f: &mut impl Write, value: &Temporal) -> fmt::Result {
     match *value {
         Temporal::Date(v) => write_date(f, v.days),
@@ -163,7 +166,10 @@ pub(crate) fn write_neo4j(f: &mut impl Write, value: &Temporal) -> fmt::Result {
 }
 
 /// [`write_neo4j`] into a new string.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(
+    not(feature = "gql"),
+    allow(dead_code, reason = "GQL toString() calls it")
+)]
 pub(crate) fn neo4j(value: &Temporal) -> String {
     let mut text = String::new();
     // Writing into a `String` never fails.
