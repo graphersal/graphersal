@@ -1595,14 +1595,6 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal5.feature::[1] Should provide accessors for date"]
-class = "missing"
-reason = "not yet: the component year of a date"
-
-["expressions/temporal/Temporal5.feature::[2] Should provide accessors for date in last weekYear"]
-class = "missing"
-reason = "not yet: the component year of a date"
-
 ["expressions/temporal/Temporal5.feature::[3] Should provide accessors for local time"]
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: …"
@@ -1623,10 +1615,6 @@ reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: datetime
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Val\"], \"{date: duration({years: 1, months: 4, days: 10, hours: 1, minute…\" (107 chars))' execution failed: not yet:…"
 
-["expressions/temporal/Temporal6.feature::[1] Should serialize date"]
-class = "missing"
-reason = "not yet: toString() of a date"
-
 ["expressions/temporal/Temporal6.feature::[2] Should serialize local time"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -1646,46 +1634,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal6.feature::[6] Should serialize duration::1"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::10"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::11"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::2"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::3"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::4"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::5"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::6"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::7"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::8"]
-class = "missing"
-reason = "not yet: toString() of a duration"
-
-["expressions/temporal/Temporal6.feature::[6] Should serialize duration::9"]
-class = "missing"
-reason = "not yet: toString() of a duration"
 
 ["expressions/temporal/Temporal6.feature::[7] Should serialize timezones correctly"]
 class = "missing"
@@ -1835,10 +1783,6 @@ reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{date: dur
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{date: duration({years: 12, months: 5, days: 14, hours: 16, minu…\" (103 chars))' execution failed: not…"
 
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::1"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::10"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -1850,14 +1794,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::12"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::13"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::14"]
-class = "missing"
-reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::15"]
 class = "missing"
@@ -1875,18 +1811,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::19"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::2"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::20"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::21"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -1902,14 +1826,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::24"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::25"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::26"]
-class = "missing"
-reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::27"]
 class = "missing"
@@ -1931,14 +1847,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::31"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::32"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::33"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -1954,14 +1862,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::36"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::37"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::38"]
-class = "missing"
-reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::39"]
 class = "missing"
@@ -1983,14 +1883,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::43"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::44"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::45"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2006,10 +1898,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::48"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::49"]
-class = "missing"
-reason = "not yet: date.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::5"]
 class = "missing"
@@ -2027,25 +1915,9 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::7"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
-["expressions/temporal/Temporal9.feature::[1] Should truncate date::8"]
-class = "missing"
-reason = "not yet: date.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[1] Should truncate date::9"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::1"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::10"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::100"]
 class = "missing"
@@ -2071,14 +1943,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::11"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::12"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::13"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2102,22 +1966,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::18"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::19"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::2"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::20"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::21"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::22"]
 class = "missing"
@@ -2143,22 +1991,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::28"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::29"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::3"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::30"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::31"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2182,18 +2014,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::36"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::37"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::38"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::39"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::4"]
 class = "missing"
@@ -2223,18 +2043,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::46"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::47"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::48"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::49"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2263,18 +2071,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::55"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::56"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::57"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::58"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2302,18 +2098,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::63"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::64"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::65"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::66"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::67"]
 class = "missing"
@@ -2345,15 +2129,7 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::73"]
 class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::74"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::75"]
-class = "missing"
-reason = "not yet: datetime.truncate()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[2] Should truncate datetime::76"]
 class = "missing"
@@ -2459,10 +2235,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::1"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::10"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2474,14 +2246,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::12"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::13"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::14"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::15"]
 class = "missing"
@@ -2499,18 +2263,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::19"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::2"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::20"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::21"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2526,14 +2278,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::24"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::25"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::26"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::27"]
 class = "missing"
@@ -2555,14 +2299,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::31"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::32"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::33"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2578,14 +2314,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::36"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::37"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::38"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::39"]
 class = "missing"
@@ -2607,14 +2335,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::43"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::44"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::45"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2633,15 +2353,11 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::49"]
 class = "missing"
-reason = "not yet: localdatetime.truncate()"
+reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::5"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::50"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::51"]
 class = "missing"
@@ -2723,10 +2439,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::7"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
-
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::70"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
@@ -2746,10 +2458,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::74"]
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
-
-["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::8"]
-class = "missing"
-reason = "not yet: localdatetime.truncate()"
 
 ["expressions/temporal/Temporal9.feature::[3] Should truncate localdatetime::9"]
 class = "missing"

@@ -39,18 +39,18 @@ checked by every test run (see [Running and regenerating](#running-and-regenerat
 edit it by hand.
 
 <!-- opencypher:begin scope -->
-3781 in-scope test cases; 116 excluded (procedures 52, upstream-ignore 1, w21-property-kinds 1, parameter-at-compile-time 6, zone-name-not-kept 54, year-range 2).
+3772 in-scope test cases; 125 excluded (procedures 52, upstream-ignore 1, w21-property-kinds 1, parameter-at-compile-time 6, zone-name-not-kept 63, year-range 2).
 <!-- opencypher:end scope -->
 
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **3001** / 3781 | **79.4 %** |
-| Unsupported (not yet or refused) | 780 / 3781 | 20.6 % |
-| **Wrong behaviour of supported constructs** | **0** / 3781 | **0.0 %** |
+| **Passed** | **3065** / 3772 | **81.3 %** |
+| Unsupported (not yet or refused) | 707 / 3772 | 18.7 % |
+| **Wrong behaviour of supported constructs** | **0** / 3772 | **0.0 %** |
 | Passed without `expressions/temporal` | 2704 / 2833 | 95.4 % |
 
-Unsupported = missing 711, setup 69. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
+Unsupported = missing 638, setup 69. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -96,11 +96,11 @@ Per sub-directory of the kit:
 | `expressions/precedence` | 100.0 % | 121 | 121 | · | · |
 | `expressions/quantifier` | 89.6 % | 541 | 604 | 63 | · |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
-| `expressions/temporal` | 31.3 % | 297 | 948 | 651 | · |
+| `expressions/temporal` | 38.4 % | 361 | 939 | 578 | · |
 | `expressions/typeConversion` | 100.0 % | 47 | 47 | · | · |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **79.4 %** | **3001** | **3781** | 780 | · |
+| **all** | **81.3 %** | **3065** | **3772** | 707 | · |
 <!-- opencypher:end directories -->
 
 ## Out of scope
@@ -118,9 +118,9 @@ excluded: they stay `missing`, the backlog.
 | `upstream-ignore` | marked @ignore by the TCK itself ("does not work in Cypher") | [gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope) | 1 |
 | `w21-property-kinds` | a list of maps is a valid property value (maps and lists of any kinds are stored as given); Neo4j raises a TypeError (deliberate deviation) | [gql/semantics.md#writes](../gql/semantics.md#writes) | 1 |
 | `parameter-at-compile-time` | parameters are bound when the query is compiled: a negative or non-integer SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime (deliberate deviation) | [gql/semantics.md#parameters-are-bound-when-the-query-is-compiled](../gql/semantics.md#parameters-are-bound-when-the-query-is-compiled) | 6 |
-| `zone-name-not-kept` | a datetime keeps its UTC offset, not the zone name: a zone name resolves to its offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], and a later change of the date keeps the offset (no daylight saving step) (deliberate deviation) | [dates/time_zones.md](../dates/time_zones.md) | 54 |
+| `zone-name-not-kept` | a datetime keeps its UTC offset, not the zone name: a zone name resolves to its offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], and a later change of the date keeps the offset (no daylight saving step) (deliberate deviation) | [dates/time_zones.md](../dates/time_zones.md) | 63 |
 | `year-range` | temporal values hold the years -9999 to 9999; a year beyond them is a data error (22008), Neo4j reads years up to 999999999 (deliberate deviation) | [dates/index.md#the-five-types](../dates/index.md#the-five-types) | 2 |
-| **all** | | | **116** |
+| **all** | | | **125** |
 <!-- opencypher:end excluded -->
 
 - **`procedures`:** the `clauses/call` scenarios register test procedures and call them.

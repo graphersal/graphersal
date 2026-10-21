@@ -165,6 +165,15 @@ const ZONE_NAME_NOT_KEPT: &[&str] = &[
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::13",
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::15",
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::16",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::12",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::2",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::20",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::29",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::38",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::47",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::56",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::65",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::74",
 ];
 
 /// The temporal cases with years beyond -9999..9999 (3g.P0 U10).
