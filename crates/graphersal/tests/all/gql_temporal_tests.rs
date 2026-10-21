@@ -69,32 +69,6 @@ fn single(graph: &TraversalGraph, query: &str) -> ElementProperty {
 }
 
 #[test]
-fn every_temporal_function_parses_binds_and_is_not_yet_at_run_time() {
-    let graph = graph();
-    for (call, name) in [
-        ("duration.between(n.d, n.d)", "duration.between()"),
-        ("duration.inMonths(n.d, n.d)", "duration.inMonths()"),
-        ("duration.inDays(n.d, n.d)", "duration.inDays()"),
-        ("duration.inSeconds(n.d, n.d)", "duration.inSeconds()"),
-    ] {
-        let query = format!("MATCH (n:x) RETURN {call} AS x");
-        let (status, kind, message, compile_time) = failure(&graph, &query);
-        assert_eq!(status, "0A000", "{query}");
-        assert_eq!(kind, GqlErrorKind::NotYet, "{query}");
-        assert!(!compile_time, "{query}: refused before the run");
-        assert_eq!(
-            message,
-            format!("{name} is not yet supported in this version"),
-            "{query}"
-        );
-        // The message names the Cypher spelling (the TCK's); no row reaching the call, no
-        // error.
-        let none = format!("MATCH (n:nothing) RETURN {call} AS x");
-        assert!(rows(&graph, &none).is_empty(), "{none}");
-    }
-}
-
-#[test]
 fn zoned_time_and_realtime_are_refused_before_the_run() {
     let graph = graph();
     for (call, kind) in [
@@ -194,6 +168,7 @@ fn static_kinds_accept_temporal_results_where_they_will_mean_something() {
     for expr in [
         "date('2020-01-01').year",
         "datetime.truncate('day', n.d).hour",
+        "duration.between(n.d, n.d).days",
     ] {
         let none = format!("MATCH (n:nothing) RETURN {expr} AS x");
         assert!(rows(&graph, &none).is_empty(), "{none}");
@@ -201,7 +176,6 @@ fn static_kinds_accept_temporal_results_where_they_will_mean_something() {
         assert_ne!(single(&graph, &query), ElementProperty::Null, "{query}");
     }
     for expr in [
-        "duration.between(n.d, n.d).days",
         "date() - duration('P1D')",
         "duration('P1D') * 2",
         "duration('P1D') / 2",
@@ -1276,4 +1250,151 @@ fn truncate_errors_and_null() {
             other => panic!("{other:?}"),
         }
     }
+}
+
+/// 3g.T8: one `t` vertex holding the TCK's Temporal10 operands `l0..l3` / `r0..r3` (a date, a
+/// local time, a local datetime and a datetime each side) and a duration `u`.
+fn between_graph() -> TraversalGraph {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let values = [
+        ("l0", graphersal::temporal::TemporalKind::Date, "1984-10-11"),
+        ("l1", graphersal::temporal::TemporalKind::Time, "14:30"),
+        (
+            "l2",
+            graphersal::temporal::TemporalKind::LocalDateTime,
+            "2015-07-21T21:40:32.142",
+        ),
+        (
+            "l3",
+            graphersal::temporal::TemporalKind::DateTime,
+            "2014-07-21T21:40:36.143+02:00",
+        ),
+        ("r0", graphersal::temporal::TemporalKind::Date, "2015-06-24"),
+        (
+            "r1",
+            graphersal::temporal::TemporalKind::LocalDateTime,
+            "2016-07-21T21:45:22.142",
+        ),
+        (
+            "r2",
+            graphersal::temporal::TemporalKind::DateTime,
+            "2015-07-21T21:40:32.142+01:00",
+        ),
+        ("r3", graphersal::temporal::TemporalKind::Time, "16:30"),
+    ];
+    let mut step = graph.traversal_mut().add_v("t");
+    for (key, kind, text) in values {
+        let value = Temporal::parse_as(kind, text).expect("a temporal value");
+        step = step.property(key, ElementProperty::Temporal(value));
+    }
+    step.property(
+        "u",
+        ElementProperty::Temporal(Temporal::Duration(Duration::new(0, 1, 0))),
+    )
+    .iterate()
+    .expect("the vertex");
+    graph
+}
+
+/// Microseconds of `h` hours, `m` minutes and `ms` milliseconds.
+fn hms(h: i64, m: i64, ms: i64) -> i64 {
+    ((h * 60 + m) * 60_000 + ms) * 1000
+}
+
+fn duration_of(graph: &TraversalGraph, expr: &str) -> ElementProperty {
+    single(graph, &format!("MATCH (n:t) RETURN {expr} AS x"))
+}
+
+fn duration(months: i32, days: i32, micros: i64) -> ElementProperty {
+    ElementProperty::Temporal(Temporal::Duration(Duration::new(months, days, micros)))
+}
+
+#[test]
+fn duration_between_follows_neo4j_over_mixed_operands() {
+    let graph = between_graph();
+    for (expr, expected) in [
+        // Temporal10 [2]: months, then days, then the rest; a missing date gives the times only.
+        ("duration.between(n.l0, n.r0)", duration(368, 13, 0)),
+        (
+            "duration.between(n.l0, n.r1)",
+            duration(381, 10, hms(21, 45, 22_142)),
+        ),
+        (
+            "duration.between(n.l0, n.r3)",
+            duration(0, 0, hms(16, 30, 0)),
+        ),
+        (
+            "duration.between(n.l1, n.r0)",
+            duration(0, 0, -hms(14, 30, 0)),
+        ),
+        (
+            "duration.between(n.l1, n.r2)",
+            duration(0, 0, hms(7, 10, 32_142)),
+        ),
+        (
+            "duration.between(n.l2, n.r0)",
+            duration(0, -27, -hms(21, 40, 32_142)),
+        ),
+        ("duration.between(n.l2, n.r2)", duration(0, 0, 0)),
+        (
+            "duration.between(n.l3, n.r0)",
+            duration(11, 2, hms(2, 19, 23_857)),
+        ),
+        (
+            "duration.between(n.l3, n.r2)",
+            duration(12, 0, hms(0, 59, 55_999)),
+        ),
+        // [3], [4], [5]: one unit each.
+        ("duration.inMonths(n.l0, n.r2)", duration(369, 0, 0)),
+        ("duration.inMonths(n.l1, n.r1)", duration(0, 0, 0)),
+        ("duration.inMonths(n.l3, n.r1)", duration(24, 0, 0)),
+        ("duration.inDays(n.l0, n.r1)", duration(0, 11_606, 0)),
+        ("duration.inDays(n.l2, n.r0)", duration(0, -27, 0)),
+        ("duration.inDays(n.l3, n.r2)", duration(0, 365, 0)),
+        (
+            "duration.inSeconds(n.l0, n.r2)",
+            duration(0, 0, hms(269_781, 40, 32_142)),
+        ),
+        (
+            "duration.inSeconds(n.l2, n.r0)",
+            duration(0, 0, -hms(669, 40, 32_142)),
+        ),
+        (
+            "duration.inSeconds(n.l3, n.r3)",
+            duration(0, 0, -hms(5, 10, 36_143)),
+        ),
+        ("duration.inSeconds(n.l1, n.l1)", duration(0, 0, 0)),
+        // [7]: negative months against an operand at another offset.
+        ("duration.inMonths(n.r2, n.l0)", duration(-369, 0, 0)),
+        // NULL in either argument (F2).
+        ("duration.between(NULL, NULL)", ElementProperty::Null),
+        ("duration.inMonths(n.l0, n.missing)", ElementProperty::Null),
+        ("duration.inDays(NULL, 1)", ElementProperty::Null),
+        ("duration.inSeconds(n.missing, n.r0)", ElementProperty::Null),
+    ] {
+        assert_eq!(duration_of(&graph, expr), expected, "{expr}");
+    }
+    // A non-temporal operand, a duration, and the months or days of two local times: 22G03.
+    for expr in [
+        "duration.between(n.l0, 1)",
+        "duration.between('2020-01-01', n.r0)",
+        "duration.inSeconds(n.l0, n.u)",
+        "duration.inMonths(n.l1, n.r3)",
+        "duration.inDays(n.l1, n.r3)",
+    ] {
+        let query = format!("MATCH (n:t) RETURN {expr} AS x");
+        let (status, kind, message, compile_time) = failure(&graph, &query);
+        assert_eq!(status, "22G03", "{query}: {message}");
+        assert_eq!(kind, GqlErrorKind::Data, "{query}");
+        assert!(!compile_time, "{query}");
+        assert!(message.starts_with("duration."), "{query}: {message}");
+    }
+    // No row reaching the call, no error.
+    assert!(
+        rows(
+            &graph,
+            "MATCH (n:nothing) RETURN duration.inDays(n.l1, n.r3) AS x"
+        )
+        .is_empty()
+    );
 }
