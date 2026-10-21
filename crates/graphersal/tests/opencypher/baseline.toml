@@ -679,109 +679,9 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::1"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::10"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::2"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::3"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::4"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::5"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::6"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::7"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::8"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[11] Should handle when seconds and subseconds have different signs::9"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::1"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
 ["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::2"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::3"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::4"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[12] Should compute durations with no difference::5"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[13] Should propagate null::1"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[13] Should propagate null::2"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[13] Should propagate null::3"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[13] Should propagate null::4"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::1"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::2"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::3"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::4"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::5"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[1] Should split between boundaries correctly::6"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::1"]
-class = "missing"
-reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::10"]
 class = "missing"
@@ -807,81 +707,17 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::16"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::17"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::18"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::19"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::2"]
-class = "missing"
-reason = "not yet: duration.between()"
-
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::20"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::21"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::22"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::23"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::24"]
-class = "missing"
-reason = "not yet: duration.between()"
 
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::25"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::3"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::4"]
-class = "missing"
-reason = "not yet: duration.between()"
-
 ["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::5"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::6"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::7"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::8"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[2] Should compute duration between two temporals::9"]
-class = "missing"
-reason = "not yet: duration.between()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::1"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::10"]
 class = "missing"
@@ -891,81 +727,21 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::12"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::13"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::14"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::15"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::16"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::17"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::18"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::19"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::2"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::20"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
 
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::21"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::3"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::4"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::5"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::6"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::7"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::8"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
 ["expressions/temporal/Temporal10.feature::[3] Should compute duration between two temporals in months::9"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::1"]
-class = "missing"
-reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::10"]
 class = "missing"
@@ -975,81 +751,21 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::12"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::13"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::14"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::15"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::16"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::17"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::18"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::19"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::2"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::20"]
-class = "missing"
-reason = "not yet: duration.inDays()"
 
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::21"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::3"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::4"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::5"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::6"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::7"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
-["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::8"]
-class = "missing"
-reason = "not yet: duration.inDays()"
-
 ["expressions/temporal/Temporal10.feature::[4] Should compute duration between two temporals in days::9"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::1"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::10"]
 class = "missing"
@@ -1075,125 +791,17 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::16"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::17"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::18"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::19"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::2"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::20"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::21"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::22"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::23"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::24"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::25"]
 class = "missing"
 reason = "not yet: time()"
 
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::3"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::4"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
 ["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::5"]
 class = "missing"
 reason = "not yet: time()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::6"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::7"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::8"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[5] Should compute duration between two temporals in seconds::9"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second."]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::1"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::2"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::3"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::4"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[7] Should compute negative duration between in big units::5"]
-class = "missing"
-reason = "not yet: duration.inMonths()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::1"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::2"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::3"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::4"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::5"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
-
-["expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::6"]
-class = "missing"
-reason = "not yet: duration.inSeconds()"
 
 ["expressions/temporal/Temporal2.feature::[3] Should parse time from string::1"]
 class = "missing"
