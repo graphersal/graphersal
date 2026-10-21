@@ -15,6 +15,8 @@
 //! | numbers: `abs`, `floor`, `ceil`, `round`, `sign`, `sqrt`, `exp`, `ln`, `log`, `log10`, `power`, `mod` | `numbers.rs` | [`numbers::call`] |
 //! | lists, elements, paths: `head`, `last`, `tail`, `trim(list, n)`, `range`, `keys`, `properties`, `startNode`, `endNode`, `nodes`, `relationships`; `IS [NOT] SOURCE OF` / `DESTINATION OF` | `lists.rs` | [`lists::call`], [`lists::is_endpoint`] |
 //!
+//! | temporal (stage 3g): `date`, `local_time` / `localtime`, `local_datetime` / `localdatetime`, `zoned_datetime` / `datetime`, `duration`, `X.statement` / `X.transaction`, `X.truncate`, `datetime.fromepoch(millis)`, `duration.between` / `inMonths` / `inDays` / `inSeconds`; components `x.year` and temporal arithmetic through the evaluator | `temporal/` | [`temporal::call`], [`temporal::component`], [`temporal::arith`] |
+//!
 //! `trim` is dispatched by its first argument (design F13): a list goes to `lists.rs`, anything
 //! else to `strings.rs`.
 //!
@@ -45,6 +47,7 @@ pub(crate) mod convert;
 pub(crate) mod lists;
 pub(crate) mod numbers;
 pub(crate) mod strings;
+pub(crate) mod temporal;
 
 #[cfg(test)]
 pub(crate) mod test_env;
@@ -82,6 +85,8 @@ pub(crate) enum Family {
     Numbers,
     /// `lists.rs`.
     Lists,
+    /// `temporal/` (stage 3g).
+    Temporal,
 }
 
 /// How a conversion treats a value it cannot convert (design K-D22).
@@ -194,6 +199,7 @@ pub(crate) fn family(function: Function) -> Family {
         | Function::EndNode
         | Function::Nodes
         | Function::Relationships => Family::Lists,
+        Function::Temporal(_) => Family::Temporal,
     }
 }
 
@@ -204,6 +210,9 @@ pub(crate) fn call<En: Env>(
     env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
+    if let Function::Temporal(temporal) = function {
+        return temporal::call(temporal, args, env, span);
+    }
     match family(function) {
         Family::Convert(conversion) => match args.into_iter().next() {
             Some(arg) => convert::convert(conversion, arg, env, span),
@@ -224,6 +233,8 @@ pub(crate) fn call<En: Env>(
         Family::Strings => strings::call(function, args, env, span),
         Family::Numbers => numbers::call(function, args, env, span),
         Family::Lists => lists::call(function, args, env, span),
+        // Taken above: the temporal variant carries its function.
+        Family::Temporal => Err(function_not_implemented(function, span)),
         Family::Core | Family::Aggregate | Family::Cast => Err(EvalError::new(
             status::SEMANTIC,
             format!("{}() is not evaluated here", function_name(function)),

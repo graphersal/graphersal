@@ -9141,12 +9141,13 @@ mod gql {
                 "Gremlin math() after gql(), for example g.gql(\"MATCH (n:person) RETURN n.age \
                  AS a\").select(\"a\").math(\"sin(_)\").",
             ),
+            // Stage 3g: date() is a function; Cypher's zoned time() stays not yet.
             (
-                "date('2020-01-01')",
+                "time('12:00')",
                 GqlErrorKind::NotYet,
-                "date() (a date or time function) is not yet supported",
-                "convert the value with Gremlin's date steps after gql(), for example \
-                 g.gql(\"RETURN '2020-01-05' AS d\").select(\"d\").as_date()",
+                "time() (a time of day with a UTC offset) is not yet supported",
+                "local_time() / localtime() is a time of day without an offset, for example \
+                 localtime('12:31:14')",
             ),
             (
                 "toIntegerList(p.tags)",

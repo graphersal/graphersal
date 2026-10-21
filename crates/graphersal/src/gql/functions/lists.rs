@@ -150,7 +150,8 @@ pub(crate) fn call<En: Env>(
         | Function::Log
         | Function::Log10
         | Function::Power
-        | Function::Mod => Err(function_not_implemented(function, span)),
+        | Function::Mod
+        | Function::Temporal(_) => Err(function_not_implemented(function, span)),
     }
 }
 

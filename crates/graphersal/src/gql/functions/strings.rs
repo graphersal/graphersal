@@ -118,7 +118,8 @@ pub(crate) fn call<En: Env>(
         | Function::StartNode
         | Function::EndNode
         | Function::Nodes
-        | Function::Relationships => Err(function_not_implemented(function, span)),
+        | Function::Relationships
+        | Function::Temporal(_) => Err(function_not_implemented(function, span)),
     }
 }
 

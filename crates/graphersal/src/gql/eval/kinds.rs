@@ -57,8 +57,11 @@ const K_MAP: u16 = 1 << 6;
 const K_NODE: u16 = 1 << 7;
 const K_EDGE: u16 = 1 << 8;
 const K_PATH: u16 = 1 << 9;
-/// Any other scalar (a uuid, a temporal value, a vector, ...).
+/// Any other scalar (a uuid, a vector, ...).
 const K_OTHER: u16 = 1 << 10;
+/// A temporal value (stage 3g): it has components (`d.year`) and takes `+` / `-` / `*` / `/`
+/// with a duration or a number, so those places accept it (no false static errors).
+const K_TEMPORAL: u16 = 1 << 11;
 const K_ALL: u16 = K_NULL
     | K_BOOL
     | K_INT
@@ -69,12 +72,13 @@ const K_ALL: u16 = K_NULL
     | K_NODE
     | K_EDGE
     | K_PATH
-    | K_OTHER;
+    | K_OTHER
+    | K_TEMPORAL;
 const K_NUMBER: u16 = K_INT | K_FLOAT;
 const K_ELEMENT: u16 = K_NODE | K_EDGE;
 
 /// The names of the kinds, in bit order (for messages).
-const NAMES: [&str; 11] = [
+const NAMES: [&str; 12] = [
     "NULL",
     "a boolean",
     "an integer",
@@ -86,6 +90,7 @@ const NAMES: [&str; 11] = [
     "an edge",
     "a path",
     "a value",
+    "a temporal value",
 ];
 
 impl Kind {
@@ -312,7 +317,7 @@ impl<'e> Walk<'_, 'e> {
                 self.binary(*op, (left, at), (right_kind, right.span))?
             }
             ExprKind::Property { key, .. } => {
-                self.require(left, K_ELEMENT | K_MAP, at, |k| {
+                self.require(left, K_ELEMENT | K_MAP | K_TEMPORAL, at, |k| {
                     format!(
                         "cannot read the property `{}` of {k}: only a node, an edge or a map \
                          has properties",
@@ -401,8 +406,13 @@ impl<'e> Walk<'_, 'e> {
             BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
                 // A NULL operand gives NULL before the other one is looked at.
                 if !left.null_only() && !right.null_only() {
+                    // Stage 3g: `x - dur`, `dur * n`, `dur / n` take temporal operands.
+                    let accept = match op {
+                        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => K_NUMBER | K_TEMPORAL,
+                        _ => K_NUMBER,
+                    };
                     for (kind, at) in [(left, left_at), (right, right_at)] {
-                        self.require(kind, K_NUMBER, at, |k| {
+                        self.require(kind, accept, at, |k| {
                             format!("arithmetic needs numbers, not {k}")
                         })?;
                     }
@@ -428,10 +438,12 @@ impl<'e> Walk<'_, 'e> {
             }
             UnaryOp::Minus | UnaryOp::Plus => {
                 let kind = self.kind(operand)?;
-                self.require(kind, K_NUMBER, operand.span, |k| {
+                self.require(kind, K_NUMBER | K_TEMPORAL, operand.span, |k| {
                     format!("a sign applies to a number, not {k}")
                 })?;
-                Ok(Kind::of((kind.bits & (K_NUMBER | K_NULL)) | K_NULL))
+                Ok(Kind::of(
+                    (kind.bits & (K_NUMBER | K_TEMPORAL | K_NULL)) | K_NULL,
+                ))
             }
         }
     }
@@ -550,6 +562,11 @@ impl<'e> Walk<'_, 'e> {
         let Some(spec) = lookup_function(name) else {
             return Ok(Kind::ANY);
         };
+        // Stage 3g: a temporal function gives a temporal value whatever its arguments (the
+        // clocks take none).
+        if let Function::Temporal(_) = spec.function {
+            return Ok(Kind::of(K_TEMPORAL | K_NULL));
+        }
         let Some((arg, at)) = first else {
             return Ok(Kind::ANY);
         };
@@ -624,6 +641,9 @@ impl<'e> Walk<'_, 'e> {
             Function::ToString | Function::ToStringOrNull => Kind::of(K_STRING | K_NULL),
             Function::ByteLength => Kind::of(K_INT | K_NULL),
             Function::IsEmpty => Kind::of(K_BOOL | K_NULL),
+            // Taken above: every temporal function gives a temporal value or `NULL`
+            // (`duration.inMonths` and its siblings give durations, as in Neo4j).
+            Function::Temporal(_) => Kind::of(K_TEMPORAL | K_NULL),
             Function::Coalesce
             | Function::Sum
             | Function::Avg

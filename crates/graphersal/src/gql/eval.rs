@@ -426,6 +426,9 @@ impl<E> Value<E> {
             Value::Scalar(ElementProperty::Number(_)) => "a number",
             Value::Scalar(ElementProperty::String(_)) => "a string",
             Value::Scalar(ElementProperty::Boolean(_)) => "a boolean",
+            Value::Scalar(ElementProperty::Temporal(value)) => {
+                functions::temporal::kind_name(value)
+            }
             Value::Scalar(_) => "a scalar value",
             Value::List(_) => "a list",
             Value::Map(_) => "a map",
@@ -1868,6 +1871,10 @@ fn property<En: Env>(
             .find(|(name, _)| name.as_str() == key)
             .map(|(_, value)| value.clone())
             .unwrap_or(Value::Null)),
+        // Stage 3g: `d.year`, `dur.days`, ...
+        Value::Scalar(ElementProperty::Temporal(value)) => {
+            functions::temporal::component(value, key, span)
+        }
         other => Err(EvalError::invalid_type(
             format!("cannot read the property {key} of {}", other.kind_name()),
             span,
@@ -2147,6 +2154,10 @@ fn unary<E>(op: UnaryOp, operand: &Value<E>, span: Span) -> Result<Value<E>, Eva
             )))),
         },
         (other, UnaryOp::Not) => Ok(truth_of(other, span)?.not().into_value()),
+        // Stage 3g: the sign of a duration (`functions/temporal/arith.rs`).
+        (Value::Scalar(ElementProperty::Temporal(value)), _) => {
+            functions::temporal::arith::sign(op, value, span)
+        }
         (other, _) => Err(EvalError::invalid_type(
             format!("a sign applies to a number, not {}", other.kind_name()),
             span,
@@ -2212,6 +2223,10 @@ fn binary<E: Clone + PartialEq>(
                 list.extend(items.iter().cloned());
                 Value::List(list)
             }
+            // Stage 3g: `x + dur`, `dur + dur` (`functions/temporal/arith.rs`).
+            _ if is_temporal(left) || is_temporal(right) => {
+                functions::temporal::arith::binary(op, left, right, span)?
+            }
             _ => return Err(add_error(left, right, span)),
         },
         BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
@@ -2221,6 +2236,12 @@ fn binary<E: Clone + PartialEq>(
                     Value::Scalar(ElementProperty::Number(a)),
                     Value::Scalar(ElementProperty::Number(b)),
                 ) => arithmetic(op, a, b, span)?,
+                // Stage 3g: `x - dur`, `dur * n`, `dur / n` (`functions/temporal/arith.rs`).
+                _ if matches!(op, BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div)
+                    && (is_temporal(left) || is_temporal(right)) =>
+                {
+                    functions::temporal::arith::binary(op, left, right, span)?
+                }
                 _ => {
                     return Err(EvalError::invalid_type(
                         format!(
@@ -2234,6 +2255,11 @@ fn binary<E: Clone + PartialEq>(
             }
         }
     })
+}
+
+/// Whether `value` is a temporal value (stage 3g).
+fn is_temporal<E>(value: &Value<E>) -> bool {
+    matches!(value, Value::Scalar(ElementProperty::Temporal(_)))
 }
 
 #[cold]
@@ -2565,7 +2591,8 @@ fn call<En: Env>(
         | Function::StartNode
         | Function::EndNode
         | Function::Nodes
-        | Function::Relationships => functions::call(
+        | Function::Relationships
+        | Function::Temporal(_) => functions::call(
             function,
             vec![Arg {
                 value: value.into_owned(),

@@ -494,6 +494,71 @@ pub(crate) enum Function {
     Nodes,
     /// Cypher `relationships(p)`: the edges of a path (design D21).
     Relationships,
+    // ----- stage 3g: temporal functions (`functions/temporal/`) -----
+    /// A temporal constructor, clock, truncation or difference (one variant for the family, so
+    /// the other families' exhaustive matches stay short).
+    Temporal(TemporalFunction),
+}
+
+/// The temporal types GQL constructs (stage 3g): Cypher's zoned `time()` has no engine type yet
+/// and stays "not yet" (user decision U2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalType {
+    /// `date`: a calendar day (engine `Date`).
+    Date,
+    /// `local_time`, Cypher `localtime`: a time of day without an offset (engine `Time`).
+    LocalTime,
+    /// `local_datetime`, Cypher `localdatetime`: a wall-clock date and time (engine
+    /// `LocalDateTime`).
+    LocalDateTime,
+    /// `zoned_datetime`, Cypher `datetime`: an instant with its UTC offset (engine `DateTime`).
+    DateTime,
+}
+
+/// The clock a Cypher `X.statement()` / `X.transaction()` reads (both the pinned `now()`, user
+/// decision U9; `X.realtime()` is refused like `rand()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Clock {
+    /// `X.statement()`.
+    Statement,
+    /// `X.transaction()`.
+    Transaction,
+}
+
+/// Cypher's `duration.between` and its `in*` forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Between {
+    /// `duration.between(a, b)`: the full difference (months, days and the rest).
+    Full,
+    /// `duration.inMonths(a, b)`: whole months.
+    InMonths,
+    /// `duration.inDays(a, b)`: whole days.
+    InDays,
+    /// `duration.inSeconds(a, b)`: seconds and fractions.
+    InSeconds,
+}
+
+/// A temporal function (stage 3g, `functions/temporal/`). The qualified Cypher names
+/// (`date.truncate`, `duration.between`, ...) are [`FUNCTIONS`] rows of their own, spelled with
+/// the dot; the parser reads `X.name(` as a call only when `X.name` is one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalFunction {
+    /// `date(..)`, `local_time(..)`, `local_datetime(..)`, `zoned_datetime(..)` and their
+    /// Cypher names: from a map, a string or another temporal value; with no argument the time
+    /// the query started.
+    Construct(TemporalType),
+    /// `duration(map | string)`.
+    Duration,
+    /// `X.statement([map])` / `X.transaction([map])`.
+    Clock(TemporalType, Clock),
+    /// `X.truncate(unit, value [, map])`.
+    Truncate(TemporalType),
+    /// `datetime.fromepoch(seconds, nanoseconds)`.
+    FromEpoch,
+    /// `datetime.fromepochmillis(milliseconds)`.
+    FromEpochMillis,
+    /// `duration.between(a, b)` and `duration.inMonths` / `inDays` / `inSeconds`.
+    Between(Between),
 }
 
 /// One entry of [`FUNCTIONS`].
@@ -632,7 +697,155 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         Function::PercentileDisc,
         &["percentile_disc", "percentileDisc"],
     ),
+    // ----- stage 3g: temporal functions; the ISO names first (verified against Neo4j's GQL
+    // conformance synonyms: ZONED_DATETIME = datetime, LOCAL_DATETIME = localdatetime,
+    // LOCAL_TIME = localtime), the Cypher names after; the qualified rows only in Cypher -----
+    temporal(
+        TemporalFunction::Construct(TemporalType::Date),
+        &["date"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::LocalTime),
+        &["local_time", "localtime"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::LocalDateTime),
+        &["local_datetime", "localdatetime"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::DateTime),
+        &["zoned_datetime", "datetime"],
+        0,
+        1,
+    ),
+    temporal(TemporalFunction::Duration, &["duration"], 1, 1),
+    temporal(
+        TemporalFunction::Clock(TemporalType::Date, Clock::Statement),
+        &["date.statement"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::Date, Clock::Transaction),
+        &["date.transaction"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::LocalTime, Clock::Statement),
+        &["localtime.statement"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::LocalTime, Clock::Transaction),
+        &["localtime.transaction"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::LocalDateTime, Clock::Statement),
+        &["localdatetime.statement"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::LocalDateTime, Clock::Transaction),
+        &["localdatetime.transaction"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::DateTime, Clock::Statement),
+        &["datetime.statement"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::DateTime, Clock::Transaction),
+        &["datetime.transaction"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Truncate(TemporalType::Date),
+        &["date.truncate"],
+        2,
+        3,
+    ),
+    temporal(
+        TemporalFunction::Truncate(TemporalType::LocalTime),
+        &["localtime.truncate"],
+        2,
+        3,
+    ),
+    temporal(
+        TemporalFunction::Truncate(TemporalType::LocalDateTime),
+        &["localdatetime.truncate"],
+        2,
+        3,
+    ),
+    temporal(
+        TemporalFunction::Truncate(TemporalType::DateTime),
+        &["datetime.truncate"],
+        2,
+        3,
+    ),
+    temporal(TemporalFunction::FromEpoch, &["datetime.fromepoch"], 2, 2),
+    temporal(
+        TemporalFunction::FromEpochMillis,
+        &["datetime.fromepochmillis"],
+        1,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Between(Between::Full),
+        &["duration.between"],
+        2,
+        2,
+    ),
+    temporal(
+        TemporalFunction::Between(Between::InMonths),
+        &["duration.inMonths"],
+        2,
+        2,
+    ),
+    temporal(
+        TemporalFunction::Between(Between::InDays),
+        &["duration.inDays"],
+        2,
+        2,
+    ),
+    temporal(
+        TemporalFunction::Between(Between::InSeconds),
+        &["duration.inSeconds"],
+        2,
+        2,
+    ),
 ];
+
+/// A scalar temporal row of [`FUNCTIONS`] (stage 3g).
+const fn temporal(
+    function: TemporalFunction,
+    names: &'static [&'static str],
+    min: usize,
+    max: usize,
+) -> FunctionSpec {
+    scalar(Function::Temporal(function), names, min, max)
+}
+
+/// Whether `name` is a qualified temporal function (`date.truncate`, ...): the parser reads
+/// `X.name(` as a call only then (else the namespaced-function refusal).
+pub(crate) fn is_qualified_function(name: &str) -> bool {
+    name.contains('.')
+        && (lookup_function(name).is_some() || lookup_unsupported_function(name).is_some())
+}
 
 /// A function name `gql()` knows but does not support (yet): the reason and the alternative
 /// instead of "unknown function" (an LLM reads the `Help:` line and retries).
@@ -678,15 +891,38 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "Gremlin math() after gql(), for example \
          g.gql(\"MATCH (n:person) RETURN n.age AS a\").select(\"a\").math(\"sin(_)\")",
     ),
+    // Stage 3g: Cypher's zoned `time()` has no engine type yet (user decision U2).
     not_yet_function(
         &[
-            "date",
-            "datetime",
-            "localdatetime",
-            "localtime",
+            "zoned_time",
             "time",
+            "time.truncate",
+            "time.statement",
+            "time.transaction",
+        ],
+        "a time of day with a UTC offset",
+        "local_time() / localtime() is a time of day without an offset, for example \
+         localtime('12:31:14'); zoned_datetime() / datetime() keeps an offset with a date, for \
+         example datetime('2015-07-21T12:31:14+01:00')",
+    ),
+    // Stage 3g: `X.realtime()` reads a clock that moves during the query (user decision U9).
+    UnsupportedFunction {
+        names: &[
+            "date.realtime",
+            "localtime.realtime",
+            "time.realtime",
+            "localdatetime.realtime",
+            "datetime.realtime",
+        ],
+        what: "a clock that moves while the query runs",
+        alternative: "gql() reads one clock per query: date(), localtime(), localdatetime() and \
+                      datetime() with no argument, or X.statement() / X.transaction(), give the \
+                      time the query started, for example datetime.statement()",
+        refused: true,
+    },
+    not_yet_function(
+        &[
             "timestamp",
-            "duration",
             "date_trunc",
             "datetime_trunc",
             "current_date",
@@ -694,10 +930,9 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
             "current_timestamp",
         ],
         "a date or time function",
-        "convert the value with Gremlin's date steps after gql(), for example \
-         g.gql(\"RETURN '2020-01-05' AS d\").select(\"d\").as_date() (also date_add(), \
-         date_diff()); ISO-8601 strings compare correctly as text, for example WHERE n.since >= \
-         '2020-01-01'",
+        "date(), localtime(), localdatetime() and datetime() with no argument give the time the \
+         query started, datetime().epochMillis its milliseconds since 1970, and X.truncate(unit, \
+         value) truncates, for example date.truncate('month', date('2020-01-05'))",
     ),
     not_yet_function(
         &[
@@ -4336,7 +4571,9 @@ impl<'a> Parser<'a> {
                     let key = self.expect_name(&["a property name"])?;
                     let span = expr.span.to(key.span);
                     if self.at(&TokenKind::LParen) {
-                        return Err(self.namespaced_function(&expr, &key, span));
+                        // A call continues the loop: `duration.between(a, b).days`.
+                        (expr, height) = self.qualified_call(expr, key, span)?;
+                        continue;
                     }
                     height = self.height(height, span)?;
                     expr = Expr {
@@ -4428,6 +4665,43 @@ impl<'a> Parser<'a> {
         Ok((subscript, open.to(self.last), height))
     }
 
+    /// `X.name(` after a primary, at the `(` (stage 3g): a call of a qualified temporal
+    /// function when `X` is a plain name and `X.name` is a [`FUNCTIONS`] row (`date.truncate`,
+    /// `duration.between`, ...), its not-yet / refused error when it is one of
+    /// [`NOT_YET_FUNCTIONS`] (`time.truncate`, `datetime.realtime`), else the namespaced-function
+    /// refusal. Out of line: the postfix loop is recursive.
+    #[inline(never)]
+    fn qualified_call(
+        &mut self,
+        target: Expr,
+        key: Identifier,
+        span: Span,
+    ) -> PResult<(Expr, usize)> {
+        let qualified = match &target.kind {
+            ExprKind::Variable(root) => format!("{}.{}", root.name, key.name),
+            _ => return Err(self.namespaced_function(&target, &key, span)),
+        };
+        if !is_qualified_function(&qualified) {
+            return Err(self.namespaced_function(&target, &key, span));
+        }
+        if let Some(unsupported) = lookup_unsupported_function(&qualified)
+            && lookup_function(&qualified).is_none()
+        {
+            return Err(unsupported_function(unsupported, &qualified, span));
+        }
+        let Some(spec) = lookup_function(&qualified) else {
+            return Err(self.namespaced_function(&target, &key, span));
+        };
+        let name = Identifier {
+            name: qualified,
+            span,
+        };
+        self.expect(&TokenKind::LParen, &["`(`"])?;
+        self.check_call_modifiers(spec)?;
+        let (args, height) = self.expr_list(&TokenKind::RParen, &["`,`", "`)`"])?;
+        self.finish_call(spec, name, false, args, height)
+    }
+
     /// The error for `a.b.c(...)`: a vendor function or procedure.
     fn namespaced_function(
         &self,
@@ -4456,7 +4730,9 @@ impl<'a> Parser<'a> {
             "write what the function does as Gremlin steps after gql(), or use one of the gql() \
              functions: conversions (CAST, toString, toInteger, ...), strings (substring, \
              replace, split, btrim, upper, lower, ...), numbers (round, abs, sqrt, ...), lists \
-             and elements (head, last, range, keys, properties, nodes, ...)",
+             and elements (head, last, range, keys, properties, nodes, ...), dates and times \
+             (date, localtime, localdatetime, datetime, duration, date.truncate, \
+             duration.between, ...)",
         );
         Box::new(b)
     }

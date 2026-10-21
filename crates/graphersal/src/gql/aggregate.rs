@@ -406,7 +406,8 @@ impl Aggregate {
             | Function::StartNode
             | Function::EndNode
             | Function::Nodes
-            | Function::Relationships => return None,
+            | Function::Relationships
+            | Function::Temporal(_) => return None,
         })
     }
 

@@ -88,6 +88,7 @@ mod gql_quantifier_tests;
 mod gql_scope_tests;
 mod gql_script_tests;
 mod gql_static_kind_tests;
+mod gql_temporal_tests;
 mod gql_tests;
 mod gql_write_integration_tests;
 mod gql_write_tests;

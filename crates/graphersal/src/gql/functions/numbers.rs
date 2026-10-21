@@ -93,7 +93,8 @@ pub(crate) fn call<En: Env>(
         | Function::StartNode
         | Function::EndNode
         | Function::Nodes
-        | Function::Relationships => return Err(function_not_implemented(function, span)),
+        | Function::Relationships
+        | Function::Temporal(_) => return Err(function_not_implemented(function, span)),
     }
     // F2: NULL in, NULL out, before any type check.
     if any_null(&args) {
@@ -265,7 +266,8 @@ pub(crate) fn call<En: Env>(
         | Function::StartNode
         | Function::EndNode
         | Function::Nodes
-        | Function::Relationships => Err(function_not_implemented(function, span)),
+        | Function::Relationships
+        | Function::Temporal(_) => Err(function_not_implemented(function, span)),
     }
 }
 

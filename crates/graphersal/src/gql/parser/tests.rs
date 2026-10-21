@@ -2147,8 +2147,9 @@ fn not_yet_functions_name_the_reason_and_the_alternative() {
         ("sin(n.x)", GqlErrorKind::NotYet, "math(\"sin(_)\")"),
         ("pi()", GqlErrorKind::NotYet, "math("),
         ("e()", GqlErrorKind::NotYet, "math("),
-        ("date('2024-01-01')", GqlErrorKind::NotYet, "as_date()"),
-        ("timestamp()", GqlErrorKind::NotYet, "as_date()"),
+        // Stage 3g: date() is a function; Cypher's zoned time() stays not yet.
+        ("time('12:00')", GqlErrorKind::NotYet, "localtime("),
+        ("timestamp()", GqlErrorKind::NotYet, "datetime()"),
         ("toIntegerList(n.l)", GqlErrorKind::NotYet, "unfold()"),
         ("normalize(n.s)", GqlErrorKind::NotYet, "lower()"),
         ("elements(p)", GqlErrorKind::NotYet, "nodes(p)"),
@@ -6044,4 +6045,265 @@ fn power_binds_between_multiplication_and_unary_minus() {
         assert_eq!(expr(src), tree, "{src}");
     }
     assert!(parse("RETURN 2 ^").is_err());
+}
+
+// ----- stage 3g: temporal functions -----
+
+#[test]
+fn temporal_constructors_are_functions_with_iso_names_first() {
+    for (name, canonical, function) in [
+        (
+            "date",
+            "date",
+            TemporalFunction::Construct(TemporalType::Date),
+        ),
+        (
+            "localtime",
+            "local_time",
+            TemporalFunction::Construct(TemporalType::LocalTime),
+        ),
+        (
+            "LOCAL_TIME",
+            "local_time",
+            TemporalFunction::Construct(TemporalType::LocalTime),
+        ),
+        (
+            "localdatetime",
+            "local_datetime",
+            TemporalFunction::Construct(TemporalType::LocalDateTime),
+        ),
+        (
+            "datetime",
+            "zoned_datetime",
+            TemporalFunction::Construct(TemporalType::DateTime),
+        ),
+        ("duration", "duration", TemporalFunction::Duration),
+    ] {
+        let spec = lookup_function(name).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(spec.name(), canonical, "{name}");
+        assert_eq!(spec.function, Function::Temporal(function), "{name}");
+        assert_eq!(spec.kind, FunctionKind::Scalar, "{name}");
+    }
+    assert_eq!(expr("date()"), "date()");
+    assert_eq!(expr("date('2020-01-01')"), "date('2020-01-01')");
+    assert_eq!(expr("datetime({year: 1984})"), "datetime({year: 1984})");
+    assert_eq!(expr("duration('P1D')"), "duration('P1D')");
+    let f = fail("MATCH (n) RETURN duration()");
+    assert_eq!(f.message, "duration() takes 1 argument, got 0");
+    let f = fail("MATCH (n) RETURN date(1, 2)");
+    assert_eq!(f.message, "date() takes 0 to 1 arguments, got 2");
+    // A variable or a property named like a function stays one.
+    assert_eq!(expr("date"), "date");
+    assert_eq!(expr("n.date"), "n.date");
+    assert_eq!(expr("date.year"), "date.year");
+}
+
+#[test]
+fn qualified_temporal_functions_parse_as_calls() {
+    for (call, sexp_text, function) in [
+        (
+            "date.truncate('month', n.d)",
+            "date.truncate('month' n.d)",
+            TemporalFunction::Truncate(TemporalType::Date),
+        ),
+        (
+            "localtime.truncate('hour', n.t, {minute: 2})",
+            "localtime.truncate('hour' n.t {minute: 2})",
+            TemporalFunction::Truncate(TemporalType::LocalTime),
+        ),
+        (
+            "localdatetime.truncate('day', n.d)",
+            "localdatetime.truncate('day' n.d)",
+            TemporalFunction::Truncate(TemporalType::LocalDateTime),
+        ),
+        (
+            "DateTime.Truncate('year', n.d)",
+            "DateTime.Truncate('year' n.d)",
+            TemporalFunction::Truncate(TemporalType::DateTime),
+        ),
+        (
+            "date.statement()",
+            "date.statement()",
+            TemporalFunction::Clock(TemporalType::Date, Clock::Statement),
+        ),
+        (
+            "datetime.transaction({timezone: '+01:00'})",
+            "datetime.transaction({timezone: '+01:00'})",
+            TemporalFunction::Clock(TemporalType::DateTime, Clock::Transaction),
+        ),
+        (
+            "localdatetime.statement()",
+            "localdatetime.statement()",
+            TemporalFunction::Clock(TemporalType::LocalDateTime, Clock::Statement),
+        ),
+        (
+            "localtime.transaction()",
+            "localtime.transaction()",
+            TemporalFunction::Clock(TemporalType::LocalTime, Clock::Transaction),
+        ),
+        (
+            "datetime.fromepoch(1, 2)",
+            "datetime.fromepoch(1 2)",
+            TemporalFunction::FromEpoch,
+        ),
+        (
+            "datetime.fromEpochMillis(1)",
+            "datetime.fromEpochMillis(1)",
+            TemporalFunction::FromEpochMillis,
+        ),
+        (
+            "duration.between(n.a, n.b)",
+            "duration.between(n.a n.b)",
+            TemporalFunction::Between(Between::Full),
+        ),
+        (
+            "duration.inMonths(n.a, n.b)",
+            "duration.inMonths(n.a n.b)",
+            TemporalFunction::Between(Between::InMonths),
+        ),
+        (
+            "duration.indays(n.a, n.b)",
+            "duration.indays(n.a n.b)",
+            TemporalFunction::Between(Between::InDays),
+        ),
+        (
+            "duration.inSeconds(n.a, n.b)",
+            "duration.inSeconds(n.a n.b)",
+            TemporalFunction::Between(Between::InSeconds),
+        ),
+    ] {
+        assert_eq!(expr(call), sexp_text, "{call}");
+        let query = ok(&format!("MATCH (n) RETURN {call} AS x"));
+        let ExprKind::FunctionCall { name, .. } = &query.ret.items[0].expr.kind else {
+            panic!("{call}: not a call");
+        };
+        assert_eq!(
+            lookup_function(&name.name).map(|spec| spec.function),
+            Some(Function::Temporal(function)),
+            "{call}"
+        );
+        // The name spans the qualified text as written.
+        let start = "MATCH (n) RETURN ".len();
+        assert_eq!(name.span.start, start, "{call}");
+        assert_eq!(
+            &call[..name.span.end - start],
+            call.split('(').next().unwrap_or(""),
+            "{call}"
+        );
+    }
+    // A call continues the postfix chain and nests.
+    assert_eq!(
+        expr("duration.between(n.a, n.b).days"),
+        "duration.between(n.a n.b).days"
+    );
+    assert_eq!(
+        expr("date.truncate('day', datetime.fromepochmillis(0))"),
+        "date.truncate('day' datetime.fromepochmillis(0))"
+    );
+    // Arity is checked against the qualified row.
+    let f = fail("MATCH (n) RETURN date.truncate('day')");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.message, "date.truncate() takes 2 to 3 arguments, got 1");
+    assert_eq!(f.text, "date.truncate('day')");
+    let f = fail("MATCH (n) RETURN duration.between(DISTINCT n.a, n.b)");
+    assert!(f.message.contains("DISTINCT"), "{}", f.message);
+}
+
+#[test]
+fn other_namespaced_calls_stay_refused() {
+    for (call, text, needle) in [
+        (
+            "foo.bar(1)",
+            "foo.bar",
+            "namespaced functions are not supported",
+        ),
+        (
+            "date.frobnicate(1)",
+            "date.frobnicate",
+            "namespaced functions",
+        ),
+        (
+            "n.date.truncate('day', 1)",
+            "n.date.truncate",
+            "namespaced functions",
+        ),
+        (
+            "apoc.date.format(1)",
+            "apoc.date.format",
+            "a vendor function",
+        ),
+        (
+            "duration.inweeks(1, 2)",
+            "duration.inweeks",
+            "namespaced functions",
+        ),
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{call}");
+        assert_eq!(f.text, text, "{call}");
+        assert!(f.message.contains(needle), "{call}: {}", f.message);
+    }
+    let f = fail("MATCH (n) RETURN foo.bar(1)");
+    assert!(
+        f.alternative.unwrap_or_default().contains("date.truncate"),
+        "the alternative names the temporal functions"
+    );
+}
+
+#[test]
+fn zoned_time_is_not_yet_and_realtime_is_refused() {
+    for call in [
+        "time('12:00')",
+        "zoned_time()",
+        "time.truncate('hour', n.t)",
+        "time.statement()",
+        "time.transaction()",
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
+        assert_eq!(f.gqlstatus, "0A000", "{call}");
+        let name = call.split('(').next().unwrap_or("");
+        assert_eq!(f.text, name, "{call}");
+        assert!(
+            f.message
+                .contains(&format!("{name}() (a time of day with a UTC offset)")),
+            "{}",
+            f.message
+        );
+        assert!(
+            f.alternative.unwrap_or_default().contains("localtime("),
+            "{call}"
+        );
+    }
+    for call in [
+        "date.realtime()",
+        "localtime.realtime()",
+        "time.realtime()",
+        "localdatetime.realtime({timezone: 'UTC'})",
+        "datetime.realtime()",
+    ] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{call}");
+        assert_eq!(f.gqlstatus, "0A000", "{call}");
+        let name = call.split('(').next().unwrap_or("");
+        assert_eq!(f.text, name, "{call}");
+        assert!(f.message.contains("is not supported"), "{}", f.message);
+        assert!(
+            f.alternative
+                .unwrap_or_default()
+                .contains("datetime.statement()"),
+            "{call}"
+        );
+    }
+    // The other spellings of the old not-yet row name the supported forms.
+    for call in ["timestamp()", "current_date()", "date_trunc('day', n.d)"] {
+        let f = fail(&format!("MATCH (n) RETURN {call}"));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("date.truncate("),
+            "{call}: {alternative}"
+        );
+        assert!(!alternative.contains("0.2.0"), "{call}: {alternative}");
+    }
 }

@@ -4815,3 +4815,31 @@ fn the_where_of_a_with_sees_the_names_before_it() {
     let q = ok(src);
     assert_eq!(conjuncts(src, &q), ["a > 1 [\"b\"]"]);
 }
+
+// ----- stage 3g: temporal functions bind as ordinary scalar functions -----
+
+#[test]
+fn temporal_calls_bind_as_scalar_functions() {
+    let q = ok(
+        "MATCH (a) RETURN date.truncate('day', a.d), duration.between(a.d, a.e) AS b, \
+                datetime(), local_time('12:00') AS t",
+    );
+    assert_eq!(
+        column_names(&q),
+        vec!["date.truncate('day', a.d)", "b", "datetime()", "t"]
+    );
+    assert_eq!(names(&q, &q.columns[0].bindings), vec!["a"]);
+    assert_eq!(names(&q, &q.columns[1].bindings), vec!["a"]);
+    assert!(q.columns[2].bindings.is_empty());
+    // Scalar: allowed beside an aggregate as a grouping key, inside one, in WHERE.
+    ok("MATCH (a) RETURN date.truncate('month', a.d) AS m, count(*) AS c");
+    ok("MATCH (a) RETURN collect_list(duration.inDays(a.d, a.e)) AS l");
+    ok("MATCH (a) WHERE a.d < date.statement() RETURN a");
+    // Their arguments are checked like any others.
+    let f = fail("MATCH (a) RETURN duration.between(a.d, x) AS b");
+    assert_eq!(f.gqlstatus, "42002");
+    assert_eq!(f.text, "x");
+    // An aggregate inside one is an aggregating item, like inside any scalar function.
+    let q = ok("MATCH (a) RETURN date.truncate('day', max(a.d)) AS m, a");
+    assert!(q.columns[0].aggregate);
+}
