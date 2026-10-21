@@ -48,6 +48,7 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | `addE("knows")` | `Create` on `Data(edge "knows")` |
 | `g.gql("INSERT (:person {name: 'ann'})-[:knows]->(:person)")` | `Create` on `Data(vertex "person")` per new node and label, `Create` on `Data(edge "knows")` per new edge, and nothing for the properties (`addV("person").property(..)` also asks `Update`, see [Writing with GQL](../gql/writes.md#permissions)); the `MATCH` before an `INSERT` asks its reads like its Gremlin twin |
 | `g.gql("MATCH (a)-[e:knows]->(b) SET e.seen = true, b:known")`, `REMOVE ..` | `Update` on `Data(vertex)` for a node target (any label, as for `addLabel()`), on `Data(edge "knows")` for an edge whose pattern names its labels, on `Data` when the kind is known only at run time (a `FOR` item); the same as the Gremlin twins `property()`, `removeProperty()`, `addLabel()`, `dropLabel()` |
+| `g.gql("MATCH ()-[e:knows]->() DELETE e")`, `DETACH DELETE n` | `Delete` on `Data(vertex)` for a node, on `Data(edge "knows")` for an edge whose pattern names its labels, on `Data` for a path, a list or a value known only at run time; `DETACH` asks nothing more; the same as `drop()` |
 | `mergeV(..)` / `mergeE(..)` | `Create` and `Update` on `Data(vertex)` / `Data(edge)` |
 | `property(..)`, `removeProperty(..)` | `Update` on the `Data` the steps before it state (see below), `Data` when they state nothing |
 | `addLabel(..)`, `dropLabel(..)` / `setLabel(..)` | `Update` on `Data(vertex)` / `Data(edge)`, with the edge label the steps before it state |
@@ -375,4 +376,4 @@ authorizer: a GQL query is lowered into ordinary steps before the check, so it i
 denied like its Gremlin equivalent. Its writes (`INSERT`) ask `Create` like `addV()` /
 `addE()`, but nothing for the new element's properties, where `addV(..).property(..)` also asks
 `Update` ([Writing with GQL](../gql/writes.md#permissions)); `SET` and `REMOVE` ask `Update`
-like `property()` and `addLabel()`; a read-only policy refuses them before anything runs.
+like `property()` and `addLabel()`, `DELETE` asks `Delete` like `drop()`; a read-only policy refuses them before anything runs.

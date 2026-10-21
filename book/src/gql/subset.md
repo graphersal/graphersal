@@ -17,7 +17,9 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
   WITH [DISTINCT] <item> [AS <name>], ...     -- or WITH *; Cypher
        [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>]
   [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row
-  INSERT <pattern> [, <pattern> ...]          -- Cypher spelling: CREATE; creates per row ]
+  INSERT <pattern> [, <pattern> ...]          -- Cypher spelling: CREATE; creates per row
+  SET <item> [, ...]  /  REMOVE <item> [, ...] -- change properties and labels per row
+  [DETACH | NODETACH] DELETE <expr> [, ...]   -- removes per row; NODETACH is the default ]
 RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *; items may aggregate
                                               -- (mandatory unless the last clause writes;
                                               -- FINISH ends a query without a result)
@@ -36,7 +38,7 @@ with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-withou
 Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
 ([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
 query of that shape for each row ([CALL subqueries](#call-subqueries)). `INSERT` creates nodes
-and edges once per row; a query whose last clause writes may end there and returns no rows
+and edges once per row, `SET` / `REMOVE` change them and `DELETE` removes them; a query whose last clause writes may end there and returns no rows
 ([Writing with GQL](writes.md)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
@@ -740,6 +742,20 @@ g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin RETURN p.
 g.gql("MATCH (p:person {name: 'marko'}) REMOVE p.age RETURN keys(p) AS keys").to_list()   // #{"keys": ["name"]}
 ```
 
+## DELETE
+
+`[DETACH | NODETACH] DELETE <expr>, ...` removes the nodes, edges, paths and lists of them its
+expressions give, for each row. `DETACH DELETE` removes a node with its edges; a plain `DELETE`
+(the default, also written `NODETACH DELETE`) fails the query (`G1001`) for a node that still
+has edges the same clause does not delete. A `NULL` target is skipped; reading or returning a
+deleted element later in the query is an error. The full rules are on [Writing with
+GQL](writes.md#delete).
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p RETURN name").to_list()   // #{"name": "vadas"}
+g.gql("MATCH (a {name: 'marko'})-[e:knows]->() DELETE e RETURN count(e) AS deleted").to_list()   // #{"deleted": 2}
+```
+
 ## Expressions
 
 | Kind | Forms |
@@ -1138,7 +1154,7 @@ construct and the alternative.
 
 | Construct | Until then |
 |---|---|
-| the write clauses `DELETE` / `DETACH DELETE` / `NODETACH DELETE`, `MERGE`, Cypher's `FOREACH` | Gremlin `drop()`, `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` (or `SET ..`) for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
+| the write clause `MERGE`, Cypher's `FOREACH` | Gremlin `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` (or `SET ..`, `DELETE ..`) for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
 | a write in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |

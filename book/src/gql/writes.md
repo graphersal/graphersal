@@ -145,6 +145,84 @@ g.v().has("name", "marko").remove_property("age").properties().key().to_list()  
 g.v().has("name", "ripple").add_label("product").drop_label("software").label().next()   // "product"
 ```
 
+## DELETE
+
+`DELETE` takes one or more comma-separated expressions and removes the nodes and edges they
+give, for every row that reaches it. **`DETACH DELETE`** removes a node together with all its
+edges. A plain `DELETE` (GQL's default, also written **`NODETACH DELETE`**) removes only nodes
+without edges: a node that still has an edge fails the query (`G1001`) and nothing is removed.
+Edges the same clause deletes do not count, so `DELETE e, n` removes a node and the edge that
+held it in one clause.
+
+```rhai,graph=modern,script
+g.gql("MATCH (p:person {name: 'marko'}) DETACH DELETE p").iterate();
+[g.v().count().next(), g.e().count().next()]   // [5, 3]
+```
+
+```rhai,graph=modern
+g.gql("MATCH (a {name: 'marko'})-[e:knows]->(b {name: 'vadas'}) DELETE e RETURN b.name AS still_here").to_list()   // #{"still_here": "vadas"}
+g.gql("MATCH (s:software {name: 'ripple'})<-[e]-() DELETE e, s RETURN count(*) AS n").to_list()   // #{"n": 1}
+g.gql("MATCH (p:person {name: 'marko'}) DELETE p")   // error: `p` is a node that still has edges (G1001)
+```
+
+The NODETACH check runs for the **whole clause** before it removes anything: the help of the
+error names the `DETACH DELETE` that works, built from the failing query.
+
+**Targets** are expressions: a node or an edge variable, a **path** (`MATCH p = .. DETACH DELETE
+p` removes its nodes and edges), a **list** of them (also nested, such as `collect(n)`), or an
+expression that gives one (a map member, `head(list)`). A `NULL` target (an `OPTIONAL MATCH`
+that found nothing) is skipped, and an element already removed (by an earlier row or clause) is
+not removed twice. A target that gives another value fails the query: before the run when the
+text shows it (`DELETE 1 + 1`, `42002`), on the row otherwise (`22G03`). A label test is not a
+target: `DELETE n:L` is a syntax error whose help names `REMOVE n:L`, which removes the label and
+keeps the node.
+
+```rhai,graph=modern,script
+g.gql("MATCH p = (:person {name: 'marko'})-[:knows]->(:person {name: 'vadas'}) DETACH DELETE p").iterate();
+[g.v().count().next(), g.e().count().next()]   // [4, 3]
+```
+
+```rhai,graph=modern
+g.gql("OPTIONAL MATCH (p:person {name: 'nobody'}) DELETE p RETURN p").to_list()   // #{"p": ()}
+g.gql("MATCH (p:person) WITH collect(p) AS people DETACH DELETE people RETURN size(people) AS n").to_list()   // #{"n": 4}
+g.gql("MATCH (n:person) DELETE n:person")   // error: a label test is not an element; REMOVE n:person removes the label
+```
+
+**After a `DELETE`.** A deleted element is gone for the rest of the query: reading its
+properties, labels, `element_id()` or endpoints is an **error**, never a silent `NULL`, and so
+is returning it (`RETURN n`, also with `LIMIT 0` after it, and `RETURN p` of a path holding it).
+Read what you need **before** the `DELETE` and carry it in a `WITH`; `count(n)` and `n IS NULL`
+still work, and `type(e)` of a deleted edge still gives its label (as in the openCypher tests).
+A walk from a deleted node (`MATCH (n)-->(m)` after deleting `n`) finds nothing.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'vadas'}) WITH p, properties(p) AS props DETACH DELETE p RETURN props").to_list()   // #{"props": #{"age": 27, "name": "vadas"}}
+g.gql("MATCH (p:person {name: 'vadas'}) DETACH DELETE p RETURN count(p) AS deleted").to_list()   // #{"deleted": 1}
+g.gql("MATCH (a)-[e:created]->(s:software {name: 'lop'}) DELETE e RETURN type(e) AS t, a.name AS who ORDER BY who").to_list()   // three rows, t "created"
+g.gql("MATCH (p:person {name: 'vadas'}) DETACH DELETE p RETURN p")   // error: the node was deleted earlier in this query
+g.gql("MATCH (p:person {name: 'vadas'}) DETACH DELETE p RETURN p.name AS name")   // error: the node was deleted earlier in this query
+```
+
+Returning a deleted node is an error in `gql()` where Neo4j returns a value of it; the reasons
+are on [Semantics](semantics.md#delete).
+
+A query that fails after its `DELETE` changed nothing ([Units](#one-query-is-one-unit)): the
+removed elements come back with their ids, labels, properties and edges. In Rust they are new
+elements: a `VertexId` / `EdgeId` handle taken before the failed run is stale and must be looked
+up again by id ([What a rollback restores](../users_guide/transactions.md#what-a-rollback-restores)),
+exactly as after a failing Gremlin `drop()`. A Rhai vertex or edge value finds the element by its
+id and stays usable.
+
+The same in Gremlin:
+
+```rhai,graph=modern
+g.v().has("name", "marko").drop().count().next()   // 0
+g.v().has("name", "marko").out_e("knows").where(__.in_v().has("name", "vadas")).drop().iterate()
+```
+
+`drop()` of a vertex always removes its edges (it is `DETACH DELETE`); the NODETACH check has no
+Gremlin twin.
+
 ## Once per row
 
 A write clause runs once for each row that reaches it, so the clauses before it decide how many
@@ -279,7 +357,10 @@ the reads of its `MATCH` clauses. `SET` and `REMOVE` ask `Update`, as `property(
 label, since a node's label set is not fixed by the pattern), on `Data(edge "label")` for an
 edge whose pattern names its labels, and on any element when the kind is not known before the
 run (an item of a `FOR` list). It asks nothing for the properties: they are part of creating
-the element. (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
+the element. `DELETE` asks `Delete`, as `drop()` does: on `Data(vertex)` for a node, on
+`Data(edge "label")` for an edge whose pattern names its labels, and on any element for a path,
+a list or a value whose kind is known only at run time; `DETACH` asks nothing more (as `drop()`
+of a vertex, which removes its edges too). (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
 runs before the optimizer folds the property into the creation; a policy that denies only
 `Update` allows the `INSERT` and refuses its Gremlin twin.) A read-only host
 (`AccessPolicy::read_only()`, the MCP server's `--mcp-read-only`, a read-only view of a past
@@ -289,9 +370,9 @@ state) refuses a GQL write before it runs.
 
 A saved query may be written in GQL itself ([Saved queries in
 GQL](../users_guide/saved_queries.md#saved-queries-in-gql)): the body is the plain query text,
-its `$parameters` are the declared ones, and an `INSERT`, `SET` or `REMOVE` makes it a query
-that writes, whose `effects` name what its plan creates and changes. A call writes in one unit
-and returns the rows:
+its `$parameters` are the declared ones, and an `INSERT`, `SET`, `REMOVE` or `DELETE` makes it
+a query that writes, whose `effects` name what its plan creates, changes and deletes. A call
+writes in one unit and returns the rows:
 
 ```rhai,graph=modern,script
 g.define_query(#{name: "hire", language: "gql", params: #{name: "string", company: "string"},
@@ -307,9 +388,14 @@ g.get_query("birthday")["effects"].map(|e| e.text);   // ["Update Data(vertex)"]
 g.query("birthday", #{name: "vadas"}).select("age").to_list()   // 28
 ```
 
+```rhai,graph=modern,script
+g.define_query(#{name: "unlink", language: "gql", params: #{}, body: "MATCH ()-[e:knows]->() DELETE e"});
+g.get_query("unlink")["effects"].map(|e| e.text)   // ["Delete Data(edge \"knows\")"]
+```
+
 A [saved query](../users_guide/saved_queries.md) in Rhai whose body runs `g.gql("INSERT ...")`
-with a literal query text is a writing query too: its `effects` name what it creates and
-changes. A computed query text claims every write; pass values as `$parameters` instead.
+with a literal query text is a writing query too: its `effects` name what it creates, changes
+and deletes. A computed query text claims every write; pass values as `$parameters` instead.
 
 In a script, a writing `gql()` takes the write lock like a Gremlin write (`is_mutating()` is
 true), and the playground asks before running it again. Gremlin steps may follow:
@@ -346,7 +432,9 @@ assert_eq!(
 An `INSERT` lowers to the internal steps `gql:insert_node` and `gql:insert_edge`, one per
 element of the pattern, in text order ([Plans and Performance](plans.md#writes)); a `SET` clause
 to one `gql:set` step and a `REMOVE` clause to one `gql:remove` step with its items, which pass
-the row on unchanged. Because the plan writes, its traversers are never merged into one with a
+the row on unchanged. A `DELETE` clause lowers to one `gql:delete` step: it collects the targets
+of all its rows first (the NODETACH check sees the whole clause), removes the edges, then the
+nodes, and passes the rows on unchanged. Because the plan writes, its traversers are never merged into one with a
 higher bulk: each row creates its own elements and applies its own changes.
 
 ```rhai,graph=modern

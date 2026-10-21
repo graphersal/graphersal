@@ -382,7 +382,8 @@ g.query("older", #{min: 26}).select("name").toList()
   query like `g.gql(body, args)` (no Rhai is evaluated) and returns its rows, one map per row, a
   traversal Gremlin steps may continue (`select("name")` above).
 - **Reads and writes**: the dialect comes from the query's plan, `graphersal-gql/1` when it
-  writes nothing and `graphersal-gql/2` when it writes (`INSERT` / `CREATE`, `SET`, `REMOVE`);
+  writes nothing and `graphersal-gql/2` when it writes (`INSERT` / `CREATE`, `SET`, `REMOVE`,
+  `DELETE`);
   its effects are the writes of the plan, exact per label (a `SET` on a node is `Update
   Data(vertex)`, as for `property()`). A call is authorized and limited exactly like a Rhai query
   of the same kind: a read-only query (and any query called from one) cannot write, also not

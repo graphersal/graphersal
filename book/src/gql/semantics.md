@@ -448,6 +448,8 @@ when the kind is known only at run time (an item of a `FOR` list, a `WITH` colum
 | `CREATE` requires `WITH` between a write and a following `MATCH` (Cypher 5) | `MATCH` may follow `INSERT` directly | GQL's linear statements allow it, as Neo4j's Cypher 25 does |
 | `SET n = NULL` / `SET n += NULL` | an error (`22004`) whose help names `SET n = {}` and `coalesce($map, {})` | a `NULL` map is more often a missing parameter than a wish to remove every property; an error can be relaxed later without changing a query that works, the opposite would silently start removing properties. GQL's own item takes a braced map only |
 | `SET` of a list of maps, a map, or a list of mixed kinds is a type error | stored as given, as for `INSERT` | as above |
+| `RETURN n` of a node deleted earlier in the query returns it | an error whose help shows `WITH n, properties(n) AS p DETACH DELETE n RETURN p` ([DELETE](#delete)) | a deliberate deviation (user decision): a returned deleted node would carry no id, labels or properties Graphersal could give, and a silent empty value hides the mistake |
+| a plain `DELETE` of a node that still has edges is checked when the transaction commits: `MATCH (n)-[r]-() DELETE n DELETE r` works | checked per clause, before the clause removes anything (`G1001`): delete the edges in the same clause (`DELETE r, n`) or use `DETACH DELETE` | a query is one unit, but each clause states its own result; a per-clause check fails at the clause that is wrong, never later |
 
 ## SET and REMOVE
 
@@ -494,6 +496,49 @@ clause (`WITH n.age AS old`) keeps its value, while the element itself is live, 
 reads the new state. A clause before the `SET` has found all its rows before the `SET` runs, so
 a `SET` never changes which rows an earlier `MATCH` matched; a `LIMIT 0` after the `SET` still
 lets it run for every row.
+
+## DELETE
+
+**Targets.** Each expression of a `DELETE` clause is evaluated per row and gives what the clause
+removes: a node, an edge, every node and edge of a path, or the items of a list (nested lists
+too). `NULL` (also inside a list) is skipped. A value of another kind is an error: before the run
+(`42002`) when the expression cannot give an element (a literal, arithmetic, a comparison), at
+run time (`22G03`) when only the row shows it (a `WITH` value, a list item). A label test
+(`n:L`, `n IS L`) is a syntax error (`42001`), since `REMOVE n:L` removes a label.
+
+**One clause, all rows.** The clause collects the targets of every row that reaches it, each
+element once (deleting the same element on several rows, or twice in one row, is no error, and
+an element an earlier clause removed is skipped), then removes the edges, then the nodes.
+
+**NODETACH is checked per clause.** Without `DETACH`, every node to remove must have no edges
+except those the same clause removes; the check covers the whole clause before anything is
+removed, so a failing check leaves the graph as it was and fails the query (`G1001`). `DETACH
+DELETE` removes the edges of each node first.
+
+```rhai,graph=modern
+g.gql("MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS n").to_list()   // #{"n": 12}
+g.gql("MATCH (n:person {name: 'marko'}) DELETE n")   // error: G1001, the node still has edges
+```
+
+**Reading a deleted element is an error.** After the clause, a property, `labels()`,
+`element_id()`, `keys()`, `properties()`, an endpoint or a sort key of a deleted element fails
+the query (the root cause is the storage's "element removed"), never a silent `NULL` or empty
+value. Returning the element itself fails too (`RETURN n`, a path holding it, also when a `LIMIT
+0` follows, since the `RETURN` builds each row before the `LIMIT` counts it). Three reads still
+work: `count(n)`, `n IS NULL` (false: the variable holds a deleted element), and `type(e)` of a
+deleted edge, which gives the label it had (the openCypher tests expect it). A pattern that walks
+from a deleted node finds no edges. Values computed before the `DELETE` keep their value: a
+`WITH n, n.age AS age` before it is evaluated before the clause runs.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'vadas'}) WITH p, p.age AS age DETACH DELETE p RETURN age, p IS NULL AS gone").to_list()   // #{"age": 27, "gone": false}
+g.gql("MATCH (p:person {name: 'vadas'}) DETACH DELETE p RETURN labels(p) AS l")   // error: the node was deleted earlier in this query
+```
+
+**A deliberate deviation from Neo4j:** Neo4j returns a node or relationship deleted earlier in
+the same query from `RETURN n`; `gql()` fails the query with a help naming the
+`properties(n)` pattern (see the table in [Writes](#writes)). An error can be relaxed later
+without changing a query that works.
 
 ## Type errors surface at evaluation time
 

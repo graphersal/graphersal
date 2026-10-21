@@ -481,6 +481,28 @@
     "group": "GQL",
     "subgroup": "Writes",
     "graph": "modern",
+    "title": "DETACH DELETE a node and its edges",
+    "script": "// DETACH DELETE removes the node together with all its edges. A deleted node cannot be read\n// afterwards: keep what you need in a WITH before the DELETE.\ng.gql(\"MATCH (p:person {name: 'josh'}) WITH p, properties(p) AS props, COUNT { (p)-[]-() } AS edges DETACH DELETE p RETURN props, edges\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "DELETE an edge",
+    "script": "// DELETE e removes the edge; both nodes stay. type(e) still reads the deleted edge's label.\ng.gql(\"MATCH (a:person {name: 'marko'})-[e:knows]->(b:person {name: 'vadas'}) DELETE e RETURN a.name AS from, type(e) AS deleted, b.name AS to\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "DELETE of a node with edges fails and changes nothing",
+    "script": "// A plain DELETE (NODETACH, the default) removes only nodes without edges: marko still has\n// edges, so the query fails (G1001) and nothing is removed. The help names DETACH DELETE, or\n// delete the edges in the same clause: MATCH (n)-[r]-() DELETE r, n.\ng.gql(\"MATCH (p:person {name: 'marko'}) DELETE p\")",
+    "expect": "error"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
     "title": "A failing write changes nothing",
     "script": "// One query is one transaction: the second row fails (division by zero), so the first row's\n// node is not kept either.\ng.gql(\"FOR x IN [1, 0] INSERT (:n {v: 1 / x})\")",
     "expect": "error"
