@@ -4403,6 +4403,9 @@ pub(crate) enum GqlHelpTopic {
     /// A `[DETACH | NODETACH] DELETE` clause (stage 3d): its targets, a write inside a subquery
     /// expression, a target that holds no element at run time.
     Delete,
+    /// A `MERGE` clause (stage 3e): its one pattern and what it may carry (design W30, W36),
+    /// its `ON CREATE` / `ON MATCH` items, a write inside a subquery expression.
+    Merge,
     /// `UNION` and `NEXT`: the column names of the operands, one kind of `UNION` per chain,
     /// what the statement after `NEXT` reads (stage 2d).
     Composite,
@@ -4444,8 +4447,8 @@ pub enum GqlErrorKind {
     /// query is one unit), Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, or the write
-    /// clauses after `INSERT` / `CREATE`, `SET` and `REMOVE` (`DELETE`, `MERGE`).
+    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, or Cypher's
+    /// `FOREACH` write clause.
     NotYet,
     /// The query exceeds a fixed bound of the parser, such as the nesting depth.
     Limit,
@@ -6877,6 +6880,10 @@ fn gql_help(
                 help.push_str(GQL_DELETE_ADVICE);
                 return help;
             }
+            if topic == GqlHelpTopic::Merge {
+                help.push_str(GQL_MERGE_ADVICE);
+                return help;
+            }
             help.push_str(
                 "Fix the query at the marked position: a GQL read query is MATCH <pattern> \
                  [WHERE <condition>], then any further MATCH, OPTIONAL MATCH, WITH, LET or \
@@ -7026,6 +7033,19 @@ const GQL_DELETE_ADVICE: &str = "DELETE removes, for each row, the nodes and edg
      no longer read what it deleted, so read what it needs first, as in \
      g.gql(\"MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p RETURN \
      name\"); a query may end with the DELETE (it then returns no rows).";
+
+/// The general advice of an error about a `MERGE` clause ([`GqlHelpTopic::Merge`], stage 3e):
+/// match or create, what the pattern may carry, the `ON` items, rows seeing earlier creations.
+#[cfg(feature = "gql")]
+const GQL_MERGE_ADVICE: &str = "MERGE looks for its whole pattern for each row: every match \
+     is a row, and when nothing matches the whole pattern is created, reusing the nodes bound \
+     before. Its one pattern has nodes with the labels written, joined by & or :, and a \
+     property map, edges with exactly one label (an edge without a direction matches either \
+     direction and is created from left to right), and a node bound before written alone, as \
+     (p); ON CREATE SET and ON MATCH SET items change what was created or matched, as in \
+     g.gql(\"MERGE (p:person {name: 'ann'}) ON CREATE SET p.new = true ON MATCH SET p.new = \
+     false RETURN p.new\"). Each row sees what the rows before it created, so FOR creates a \
+     repeated item once, as in g.gql(\"FOR n IN ['ann', 'ann'] MERGE (:person {name: n})\").";
 
 /// The help of a read of an element removed earlier in a GQL query (W27, W28 of stage 3d): what
 /// still works after a `DELETE`, and the query that reads what it needs before it.
@@ -7392,6 +7412,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::Insert => GQL_INSERT_ADVICE,
         GqlHelpTopic::Set => GQL_SET_ADVICE,
         GqlHelpTopic::Delete => GQL_DELETE_ADVICE,
+        GqlHelpTopic::Merge => GQL_MERGE_ADVICE,
         GqlHelpTopic::Kind | GqlHelpTopic::AggregateValue | GqlHelpTopic::TextAndNumber => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \

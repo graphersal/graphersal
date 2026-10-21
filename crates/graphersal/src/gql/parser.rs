@@ -17,12 +17,16 @@
 //! result     := return order_by? (OFFSET|SKIP expr)? (LIMIT expr)?
 //!             | FINISH                              -- FINISH: a contextual word (stage 3a)
 //!             |                                     -- nothing, after a stage that writes
-//! stage      := match | with | let | filter | for | call | insert | set | remove
+//! stage      := match | with | let | filter | for | call | insert | set | remove | delete
+//!             | merge
 //! insert     := (INSERT | CREATE) path (',' path)*   -- the insert form (stage 3a, below)
+//! merge      := MERGE path (ON (CREATE | MATCH) SET set_item (',' set_item)*)*
+//!                                                    -- one path, the merge form (stage 3e); ON: a contextual word
 //! set        := SET set_item (',' set_item)*         -- stage 3c
 //! set_item   := target '.' name '=' expr | var '=' expr | var '+=' expr | var label_item
 //! remove     := REMOVE remove_item (',' remove_item)*
 //! remove_item:= target '.' name | var label_item
+//! delete     := (DETACH | NODETACH)? DELETE expr (',' expr)*   -- stage 3d
 //! target     := var | '(' var ')'
 //! label_item := (':' | IS) labels                    -- a conjunction of names only
 //! call       := OPTIONAL? CALL ('(' (var (',' var)* | '*')? ')')? '{' composite '}'
@@ -102,8 +106,7 @@
 //!   followed by a word (`INDEX`, `CONSTRAINT`, `GRAPH`, `OR REPLACE`, Neo4j's `DATABASE`, ...)
 //!   is a refused catalog or administration command naming `g.create_index(..)` /
 //!   `g.set_schema(..)`; `LOAD CSV` is refused (vendor), Cypher `FOREACH` is "not yet"
-//!   naming `FOR x IN l INSERT ..`. `MERGE` is "not yet supported", naming the Gremlin step
-//!   that does the work (`merge_v()`); a write clause after `RETURN` is the "RETURN ends the
+//!   naming `FOR x IN l INSERT ..`; a write clause after `RETURN` is the "RETURN ends the
 //!   query" syntax error. The expected tokens after a clause do not name the write clauses
 //!   (coordinator default K9); after an `INSERT`, `SET`, `REMOVE` or `DELETE` they name `,`
 //!   and the clauses.
@@ -119,6 +122,14 @@
 //!   expression (an element variable, a path, a list, a map member, `NULL`; the binder refuses
 //!   the kinds it knows are no element, E2) except a label predicate (`n:L`, `n IS L`, `n IS
 //!   LABELED L`), a syntax error naming `REMOVE n:L` (design E1) ([`DeleteClause`]).
+//! - **`MERGE` (stage 3e, design W30-W37, a Cypher compatibility form)** stands where `SET`
+//!   stands (same placement rules). It takes exactly one path pattern (a `,` after it is a
+//!   syntax error naming one `MERGE` per pattern), checked for the merge form like an `INSERT`
+//!   pattern (the same messages, the MERGE advice) except that a path variable `p =` (P0 E3)
+//!   and undirected edges `-[e:T]-` (W33) are allowed. Then any number of `ON CREATE SET items`
+//!   / `ON MATCH SET items` in any order (W35; `ON` a contextual word, the items as in `SET`)
+//!   ([`MergeClause`]). The expected tokens after it name `ON CREATE SET`, `ON MATCH SET` (and
+//!   `,` after an item) and the clauses.
 //! - **A query may start without `MATCH`** (stage 2a, design M1 / E4): with `FOR` / `UNWIND`,
 //!   `LET`, `WITH`, `FILTER` or directly with `RETURN` (one unit row); [`LinearQuery::stages`] is then
 //!   empty or starts with that stage. ISO GQL allows `FILTER` as the first statement too, and
@@ -301,12 +312,12 @@ use super::ast::{
     ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Endpoint, Expr,
     ExprKind, FilterClause, ForClause, GroupBy, GroupStep, Identifier, ImportingWith, InsertClause,
     LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery, ListComprehension,
-    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, NextBlock,
-    NodePattern, OrderBy, Ordinal, OrdinalKind, ParenthesizedPath, PathPattern,
-    PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
-    ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind, ReturnClause, ReturnItem,
-    SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm,
-    SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
+    ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause, MergeAction,
+    MergeClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind, ParenthesizedPath,
+    PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock,
+    QueryEnd, ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind, ReturnClause,
+    ReturnItem, SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage, SubqueryExpr,
+    SubqueryForm, SubqueryKind, TrimSide, UnaryOp, UnionKind, UnionOperand, WithClause,
 };
 use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
@@ -1094,12 +1105,10 @@ impl<'a> Parser<'a> {
                 let (whole, what) = self.delete_keywords();
                 self.banned_write(whole, &what, place)
             }),
-            Keyword::Merge => {
-                if let Some(place) = self.write_ban {
-                    return Some(self.banned_write(span, &text, place));
-                }
-                not_yet(&text, &self.write_alternative())
-            }
+            // `MERGE` (stage 3e): where no clause can stand, a plain syntax error.
+            Keyword::Merge => self
+                .write_ban
+                .map(|place| self.banned_write(span, &text, place)),
             // An inline `CALL { }` / `CALL (..) { }` where no clause stands: a plain syntax error.
             Keyword::Call if matches!(self.nth(1).kind, TokenKind::LBrace | TokenKind::LParen) => {
                 None
@@ -1281,6 +1290,12 @@ impl<'a> Parser<'a> {
                 "REMOVE p.age INSERT (:maker {name: p.name})".to_string(),
                 GqlHelpTopic::Set,
             ),
+            // The INSERT example (every write clause stands there), the MERGE advice.
+            "MERGE" => (
+                CREATED,
+                "INSERT (:maker {name: p.name})".to_string(),
+                GqlHelpTopic::Merge,
+            ),
             "DETACH DELETE" => (
                 CREATED,
                 "INSERT (:maker {name: p.name}) DETACH DELETE p".to_string(),
@@ -1309,14 +1324,6 @@ impl<'a> Parser<'a> {
         ))
         .topic(topic);
         Box::new(b)
-    }
-
-    /// The Gremlin alternative of `MERGE`, the write clause that is not yet supported, at its
-    /// keyword: the steps that do it.
-    fn write_alternative(&self) -> String {
-        "find or create the element with the Gremlin steps merge_v() and merge_e(), for example \
-         g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})"
-            .to_string()
     }
 
     /// At `DETACH` / `NODETACH` (or `DELETE`): the span of the keywords up to `DELETE` and their
@@ -1645,6 +1652,7 @@ impl<'a> Parser<'a> {
             Some(Keyword::Delete | Keyword::Detach | Keyword::Nodetach) => {
                 Stage::Delete(self.delete_clause()?)
             }
+            Some(Keyword::Merge) => Stage::Merge(self.merge_clause()?),
             _ => return Ok(false),
         };
         stages.push(stage);
@@ -1961,10 +1969,18 @@ impl<'a> Parser<'a> {
             Some(Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) | Stage::Delete(_)) => {
                 vec!["`,`"]
             }
+            // After the pattern the parts; after an item also `,`.
+            Some(Stage::Merge(merge)) if merge.actions.is_empty() => {
+                vec!["ON CREATE SET", "ON MATCH SET"]
+            }
+            Some(Stage::Merge(_)) => vec!["`,`", "ON CREATE SET", "ON MATCH SET"],
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);
         let error = self.unexpected(&expected);
+        if matches!(last, Some(Stage::Merge(_))) {
+            return merge_topic(error);
+        }
         if matches!(last, Some(Stage::Set(_) | Stage::Remove(_))) {
             return set_topic(error);
         }
@@ -2423,10 +2439,12 @@ impl<'a> Parser<'a> {
     }
 
     /// One pattern of an `INSERT` (`word`: the clause as named in messages), checked for the
-    /// insert form.
+    /// insert form; with `word` `MERGE` the merge form (stage 3e, [`MergeClause`]: a path
+    /// variable and undirected edges allowed).
     fn insert_pattern(&mut self, word: &str) -> PResult<PathPattern> {
         let pattern = self.path_pattern()?;
-        if let Some(variable) = &pattern.variable {
+        // MERGE binds a path variable (P0 E3 of stage 3e); INSERT does not yet.
+        if let Some(variable) = pattern.variable.as_ref().filter(|_| word != "MERGE") {
             return Err(self.not_yet(
                 variable.span,
                 &format!("a path variable in {word}"),
@@ -2483,6 +2501,71 @@ impl<'a> Parser<'a> {
             keyword,
             span: keyword.to(self.last),
         })
+    }
+
+    /// `MERGE [p =] pattern { ON CREATE SET items | ON MATCH SET items }*`, at the keyword
+    /// (stage 3e, [`MergeClause`], design W30, W35): one pattern in the merge form, then any
+    /// number of `ON` parts in any order. `ON` is a contextual word. Out of line and boxed: the
+    /// clause frames lie under every nested body (module rule "Bounded recursion").
+    #[inline(never)]
+    fn merge_clause(&mut self) -> PResult<Box<MergeClause>> {
+        let keyword = self.write_keyword()?;
+        let pattern = self.insert_pattern("MERGE").map_err(merge_topic)?;
+        if let Some(comma) = self.eat(&TokenKind::Comma) {
+            return Err(self.merge_patterns(&pattern, comma));
+        }
+        let mut actions = Vec::new();
+        while is_word(self.peek(), "ON") {
+            actions.push(self.merge_action()?);
+        }
+        Ok(Box::new(MergeClause {
+            pattern,
+            actions,
+            keyword,
+            span: keyword.to(self.last),
+        }))
+    }
+
+    /// One `ON CREATE SET item, ..` / `ON MATCH SET item, ..` of a `MERGE`, at `ON`.
+    fn merge_action(&mut self) -> PResult<MergeAction> {
+        let on = self.advance().span;
+        let on_create = if self.eat_kw(Keyword::Create).is_some() {
+            true
+        } else if self.eat_kw(Keyword::Match).is_some() {
+            false
+        } else {
+            return Err(merge_topic(self.unexpected(&["CREATE", "MATCH"])));
+        };
+        self.expect_kw(Keyword::Set, &["SET"])
+            .map_err(merge_topic)?;
+        let keyword = on.to(self.last);
+        let mut items = vec![self.set_item()?];
+        while self.eat(&TokenKind::Comma).is_some() {
+            items.push(self.set_item()?);
+        }
+        Ok(MergeAction {
+            on_create,
+            items,
+            keyword,
+            span: on.to(self.last),
+        })
+    }
+
+    /// The error of a `,` after the pattern of a `MERGE` (design W30, 42001): one `MERGE`
+    /// takes one pattern; each pattern gets a `MERGE` of its own.
+    fn merge_patterns(&self, pattern: &PathPattern, comma: Span) -> Box<GqlErrorBuilder> {
+        let first = self.text(pattern.span).to_string();
+        let b = err(
+            GqlErrorKind::Syntax,
+            comma,
+            "MERGE takes exactly one pattern: a second pattern after `,` cannot stand here",
+        )
+        .alternative(format!(
+            "write one MERGE for each pattern, as in MERGE {first} MERGE (b:Label), or connect \
+             the patterns with an edge into one"
+        ))
+        .topic(GqlHelpTopic::Merge);
+        Box::new(b)
     }
 
     /// One `SET` item: `v.key = e`, `(v).key = e`, `v = e`, `v += e`, `v:A:B` / `v IS A & B`.
@@ -5981,6 +6064,13 @@ fn set_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
     error
 }
 
+/// [`GqlHelpTopic::Merge`] for an error inside a `MERGE` clause (stage 3e), unless set
+/// already.
+fn merge_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
+    error.or_topic(GqlHelpTopic::Merge);
+    error
+}
+
 /// [`GqlHelpTopic::Delete`] for an error inside a `DELETE` clause, unless set already.
 fn delete_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
     error.or_topic(GqlHelpTopic::Delete);
@@ -5988,14 +6078,30 @@ fn delete_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
 }
 
 /// An error of an insert pattern (designs W6 / W7): `fix` built from the failing pattern, then
-/// a runnable `INSERT` of a correct one; the advice is the INSERT topic's.
+/// a runnable `INSERT` of a correct one; the advice is the INSERT topic's (the MERGE topic's
+/// for a `MERGE` pattern, stage 3e).
 fn insert_error(span: Span, message: String, word: &str, fix: String) -> Box<GqlErrorBuilder> {
+    let topic = if word == "MERGE" {
+        GqlHelpTopic::Merge
+    } else {
+        GqlHelpTopic::Insert
+    };
     let b = err(GqlErrorKind::Syntax, span, message)
         .alternative(format!(
             "{fix}; for example g.gql(\"{word} (a:person {{name: 'ann'}})-[:knows]->(b:person:admin)\")"
         ))
-        .topic(GqlHelpTopic::Insert);
+        .topic(topic);
     Box::new(b)
+}
+
+/// What a write pattern of `word` does with an element, for messages: `INSERT` creates it,
+/// `MERGE` finds or creates it (stage 3e).
+fn creates(word: &str) -> &'static str {
+    if word == "MERGE" {
+        "finds or creates"
+    } else {
+        "creates"
+    }
 }
 
 /// The variable of a pattern element as GQL text (`default` when it has none).
@@ -6077,7 +6183,10 @@ fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
     if let Some(condition) = &node.where_clause {
         return Err(insert_error(
             condition.span,
-            format!("a WHERE inside a node pattern cannot stand in {word}: it creates the node"),
+            format!(
+                "a WHERE inside a node pattern cannot stand in {word}: it {} the node",
+                creates(word)
+            ),
             word,
             format!(
                 "give the new node its properties in its map instead, as in ({variable}:Label \
@@ -6122,9 +6231,9 @@ fn check_insert_node(node: &NodePattern, word: &str) -> PResult<()> {
 }
 
 /// An edge pattern of an `INSERT` (design W6): directed, exactly one label name, no quantifier,
-/// no `WHERE`.
+/// no `WHERE`. A `MERGE` edge may be undirected (stage 3e, W33).
 fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
-    if edge.direction == EdgeDirection::Any {
+    if edge.direction == EdgeDirection::Any && word != "MERGE" {
         let right = insert_edge_text(edge, None, "");
         let left = insert_edge_text(
             &EdgePattern {
@@ -6148,7 +6257,10 @@ fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
         let one = insert_edge_text(edge, None, "");
         return Err(insert_error(
             quantifier.span,
-            format!("a quantifier cannot stand in {word}: each edge pattern creates one edge"),
+            format!(
+                "a quantifier cannot stand in {word}: each edge pattern {} one edge",
+                creates(word)
+            ),
             word,
             format!("write one edge pattern for each edge to create, as in (a){one}(m){one}(b)"),
         ));
@@ -6187,7 +6299,10 @@ fn check_insert_edge(edge: &EdgePattern, word: &str) -> PResult<()> {
     if let Some(condition) = &edge.where_clause {
         return Err(insert_error(
             condition.span,
-            format!("a WHERE inside an edge pattern cannot stand in {word}: it creates the edge"),
+            format!(
+                "a WHERE inside an edge pattern cannot stand in {word}: it {} the edge",
+                creates(word)
+            ),
             word,
             format!(
                 "give the new edge its properties in its map instead, as in {}, and test \

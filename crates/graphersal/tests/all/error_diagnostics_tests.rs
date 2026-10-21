@@ -7823,9 +7823,9 @@ mod gql {
             help.starts_with("use element_id(p), the element's id"),
             "{help}"
         );
-        let (err, _) = camel("MERGE (p:person)");
+        let (err, _) = camel("MATCH (p:person) RETURN p EXCEPT MATCH (p:software) RETURN p");
         let help = err.help().expect("help");
-        assert!(help.contains("mergeV()"), "{help}");
+        assert!(help.contains("hasLabel("), "{help}");
     }
 
     /// The same through Rhai: `g.with("render.spelling", "camel").gql(..)`.

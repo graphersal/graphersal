@@ -2565,6 +2565,13 @@ impl<'q> Binder<'q> {
             Stage::Set(clause) => self.set_clause(clause),
             Stage::Remove(clause) => self.remove_clause(clause),
             Stage::Delete(clause) => self.delete_clause(clause),
+            // Parsed since stage 3e.T1, bound from 3e.T2 on.
+            Stage::Merge(clause) => Err(not_yet(
+                clause.keyword,
+                "MERGE",
+                "find or create the element with the Gremlin steps merge_v() and merge_e(), for \
+                 example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})",
+            )),
         }
     }
 
@@ -6772,7 +6779,11 @@ fn composite_writes(composite: &CompositeQuery) -> bool {
         for linear in linears {
             for stage in &linear.stages {
                 match stage {
-                    Stage::Insert(_) | Stage::Set(_) | Stage::Remove(_) | Stage::Delete(_) => {
+                    Stage::Insert(_)
+                    | Stage::Set(_)
+                    | Stage::Remove(_)
+                    | Stage::Delete(_)
+                    | Stage::Merge(_) => {
                         return true;
                     }
                     Stage::Call(call) => pending.push(&call.body),

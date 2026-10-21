@@ -791,8 +791,16 @@ fn lexer_errors_are_gql_syntax_errors() {
 #[test]
 fn writes_not_yet_supported_are_refused() {
     for (query, text, step) in [
-        ("MERGE (n:person {name: 'x'})", "MERGE", "merge_v("),
-        ("merge (n:person)", "merge", "merge_v("),
+        (
+            "MATCH (n) FOREACH (x IN [1] | SET n.x = x)",
+            "FOREACH",
+            "FOR x IN",
+        ),
+        (
+            "match (n) foreach (x in [1] | set n.x = x)",
+            "foreach",
+            "FOR x IN",
+        ),
     ] {
         let f = fail(query);
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
@@ -1216,6 +1224,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::Set(_) => "set",
             Stage::Remove(_) => "remove",
             Stage::Delete(_) => "delete",
+            Stage::Merge(_) => "merge",
         })
         .collect()
 }
@@ -3490,6 +3499,7 @@ fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
             Stage::Set(_) => "set",
             Stage::Remove(_) => "remove",
             Stage::Delete(_) => "delete",
+            Stage::Merge(_) => "merge",
         })
         .collect()
 }
@@ -5021,15 +5031,11 @@ fn catalog_and_vendor_commands_are_refused() {
 
 #[test]
 fn not_yet_write_clauses_build_the_gremlin_example_from_the_clause() {
-    for (query, example) in [
-        ("MERGE (p:person)", "merge_v("),
-        ("MATCH (p) FOREACH (x IN [1] | SET p.k = x)", "FOR name IN"),
-    ] {
-        let f = fail(query);
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
-        let alternative = f.alternative.unwrap_or_default();
-        assert!(alternative.contains(example), "{query}: {alternative}");
-    }
+    let (query, example) = ("MATCH (p) FOREACH (x IN [1] | SET p.k = x)", "FOR name IN");
+    let f = fail(query);
+    assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}");
+    let alternative = f.alternative.unwrap_or_default();
+    assert!(alternative.contains(example), "{query}: {alternative}");
 }
 
 // ----- stage 3c.T1: SET / REMOVE -----
@@ -5576,4 +5582,319 @@ fn delete_errors() {
     assert_eq!(f.text, ")");
     assert_eq!(f.expected.first().map(String::as_str), Some("`,`"));
     assert!(f.expected.iter().any(|e| e == "RETURN"), "{:?}", f.expected);
+}
+
+// ----- stage 3e.T1: MERGE -----
+
+/// Stage `index` of `linear` as a MERGE clause.
+fn merge_of(linear: &LinearQuery, index: usize) -> &MergeClause {
+    match linear.stages.get(index) {
+        Some(Stage::Merge(clause)) => clause,
+        other => panic!("stage {index} is no MERGE: {other:?}"),
+    }
+}
+
+/// The `help()` of the parse error of `query`.
+fn help_of(query: &str) -> String {
+    match parse(query) {
+        Ok(parsed) => panic!("{query:?} parsed: {parsed:?}"),
+        Err(e) => e.help().unwrap_or_default(),
+    }
+}
+
+#[test]
+fn merge_forms_and_spans() {
+    let query = "MATCH (a) MERGE (a)-[r:KNOWS {since: 1}]->(b:person:admin {name: 'x'})";
+    let q = ok(query);
+    assert_eq!(stage_kinds(&q), ["match", "merge"]);
+    let merge = merge_of(&q, 1);
+    assert_eq!(q.text(merge.keyword), "MERGE");
+    assert_eq!(
+        q.text(merge.span),
+        "MERGE (a)-[r:KNOWS {since: 1}]->(b:person:admin {name: 'x'})"
+    );
+    assert!(merge.actions.is_empty());
+    assert!(merge.pattern.variable.is_none());
+    assert_eq!(merge.pattern.steps.len(), 1);
+    // A path variable (P0 E3) and an undirected edge (W33) are allowed; lower case keywords.
+    let q = ok("merge p = (a:A)-[:T]-(b:B) return p");
+    let merge = merge_of(&q, 0);
+    assert_eq!(
+        merge.pattern.variable.as_ref().map(|v| v.name.as_str()),
+        Some("p")
+    );
+    assert_eq!(merge.pattern.steps[0].edge.direction, EdgeDirection::Any);
+    assert_eq!(q.text(merge.span), "merge p = (a:A)-[:T]-(b:B)");
+    // ON parts: several, any order, written order kept, items as in SET (TCK Merge4 [1]:
+    // ON MATCH first).
+    let query = "MERGE (a:A {k: 1}) ON MATCH SET a.seen = true, a:B ON CREATE SET a += {c: 1} \
+                 on create set a.n = 2 ON MATCH SET a = {k: 1} RETURN a";
+    let q = ok(query);
+    let merge = merge_of(&q, 0);
+    let parts: Vec<(bool, usize, &str)> = merge
+        .actions
+        .iter()
+        .map(|a| (a.on_create, a.items.len(), q.text(a.keyword)))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (false, 2, "ON MATCH SET"),
+            (true, 1, "ON CREATE SET"),
+            (true, 1, "on create set"),
+            (false, 1, "ON MATCH SET"),
+        ]
+    );
+    assert!(matches!(
+        merge.actions[0].items[1].kind,
+        SetItemKind::Labels(_)
+    ));
+    assert!(matches!(
+        merge.actions[1].items[0].kind,
+        SetItemKind::Merge { .. }
+    ));
+    assert_eq!(q.text(merge.actions[3].span), "ON MATCH SET a = {k: 1}");
+    assert!(q.text(merge.span).ends_with("ON MATCH SET a = {k: 1}"));
+    // `ON` is a contextual word: a variable may be named `on`.
+    let q = ok("FOR on IN [1] MERGE (a {k: on}) ON CREATE SET a.x = on RETURN a");
+    assert_eq!(merge_of(&q, 1).actions.len(), 1);
+}
+
+#[test]
+fn merge_stands_where_set_stands() {
+    for (query, kinds) in [
+        ("MERGE (a:A)", vec!["merge"]),
+        ("MERGE (a:A);", vec!["merge"]),
+        ("MERGE (a:A) FINISH", vec!["merge"]),
+        ("MERGE (a:A) RETURN a", vec!["merge"]),
+        (
+            "MATCH (n) MERGE (n)-[:T]->(m) MERGE (m)-[:T]->(o) RETURN o",
+            vec!["match", "merge", "merge"],
+        ),
+        (
+            "FOR x IN [1, 1] MERGE (a:N {x: x}) ON CREATE SET a.new = true SET a.k = 1",
+            vec!["for", "merge", "set"],
+        ),
+        (
+            "CREATE (a) MERGE (b) DELETE a MATCH (c) RETURN c",
+            vec!["insert", "merge", "delete", "match"],
+        ),
+    ] {
+        assert_eq!(stage_kinds(&ok(query)), kinds, "{query}");
+    }
+    assert!(matches!(ok("MERGE (a) FINISH").end(), QueryEnd::Finish(_)));
+    let q = ok("MATCH (n) RETURN n NEXT MERGE (n)-[:T]->(:X)");
+    assert_eq!(q.body.next.len(), 1);
+    // A CALL body may end in MERGE (a unit subquery) or return after it.
+    for query in [
+        "MATCH (n) CALL (n) { MERGE (n)-[:T]->(:X) } RETURN count(*)",
+        "MATCH (n) CALL (n) { MERGE (n)-[:T]->(x:X) RETURN x } RETURN x",
+        "MATCH (n) OPTIONAL CALL { WITH n MERGE (n)-[:T]->(:X) ON MATCH SET n.k = 1 } RETURN 1",
+    ] {
+        let q = ok(query);
+        let Some(Stage::Call(call)) = q.stages.get(1) else {
+            panic!("{query}: {:?}", q.stages);
+        };
+        let kinds = stage_kinds_of(&call.body.first.first);
+        assert!(kinds.contains(&"merge"), "{query}: {kinds:?}");
+    }
+    // A UNION operand that writes: not yet, at its keyword.
+    let f = fail("MERGE (n) RETURN 1 AS x UNION RETURN 2 AS x");
+    assert_eq!(f.kind, GqlErrorKind::NotYet, "{f:?}");
+    assert_eq!(f.text, "MERGE");
+    assert!(
+        f.message.contains("in an operand of UNION"),
+        "{}",
+        f.message
+    );
+    // After RETURN: RETURN ends the query.
+    let f = fail("MATCH (n) RETURN n MERGE (m)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "MERGE");
+    assert_eq!(f.message, "MERGE after RETURN: RETURN ends the query");
+    // Inside subquery expressions and comprehensions: the write ban (design W3).
+    for (query, text, place) in [
+        (
+            "MATCH (n) WHERE EXISTS { MATCH (n) MERGE (n)-[:T]->(m) RETURN m } RETURN n",
+            "MERGE",
+            "EXISTS",
+        ),
+        (
+            "MATCH (n) RETURN COUNT { merge (m:X) RETURN m } AS c",
+            "MERGE",
+            "COUNT",
+        ),
+        (
+            "MATCH (n) RETURN [x IN [n] WHERE MERGE (m) | x] AS l",
+            "MERGE",
+            "list comprehension",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text.to_ascii_uppercase(), text, "{query}");
+        assert!(f.message.contains(place), "{query}: {}", f.message);
+        assert!(f.message.contains("cannot write"), "{}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("INSERT (:maker"),
+            "{query}: {alternative}"
+        );
+        assert!(help_of(query).contains("MERGE looks for"), "{query}");
+    }
+    // Inside an expression: a clause, not a function.
+    let f = fail("MATCH (n) RETURN MERGE(n)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert_eq!(f.text, "MERGE");
+    assert!(f.message.contains("is a clause"), "{}", f.message);
+}
+
+#[test]
+fn merge_form_errors() {
+    // Design W30: the INSERT rules except the path variable and the direction, worded for
+    // MERGE, with the MERGE advice.
+    for (query, text, message) in [
+        (
+            "MERGE (a)-[:T*2]->(b)",
+            "*2",
+            "a quantifier cannot stand in MERGE: each edge pattern finds or creates one edge",
+        ),
+        (
+            "MERGE (a)-[:T]->{2}(b)",
+            "{2}",
+            "a quantifier cannot stand in MERGE",
+        ),
+        (
+            "MERGE (a WHERE a.k = 1)",
+            "a.k = 1",
+            "a WHERE inside a node pattern cannot stand in MERGE: it finds or creates the node",
+        ),
+        (
+            "MERGE (a)-[e:T WHERE e.k = 1]->(b)",
+            "e.k = 1",
+            "a WHERE inside an edge pattern cannot stand in MERGE",
+        ),
+        (
+            "MERGE (a:A|B)",
+            "A|B",
+            "`|` (a label alternative) cannot stand in MERGE",
+        ),
+        (
+            "MERGE (a:!A)",
+            "!A",
+            "`!` (a label negation) cannot stand in MERGE",
+        ),
+        ("MERGE (a:%)", "%", "`%` (any label) cannot stand in MERGE"),
+        (
+            "MERGE (a)-->(b)",
+            "-->",
+            "an edge in MERGE needs exactly one label, its type",
+        ),
+        (
+            "MERGE (a)-[NO_COLON]->(b)",
+            "-[NO_COLON]->",
+            "an edge in MERGE needs exactly one label, its type",
+        ),
+        (
+            "MERGE (a)-[:A|B]->(b)",
+            "A|B",
+            "an edge in MERGE has exactly one label",
+        ),
+        (
+            "MERGE (a) ((x)-[:T]->(y)){2} (b)",
+            "((x)-[:T]->(y))",
+            "a parenthesized path pattern cannot stand in MERGE",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(f.message.starts_with(message), "{query}: {}", f.message);
+        let alternative = f.alternative.unwrap_or_default();
+        assert!(
+            alternative.contains("g.gql(\"MERGE ("),
+            "{query}: {alternative}"
+        );
+        let help = help_of(query);
+        assert!(
+            help.contains("MERGE looks for its whole pattern"),
+            "{query}: {help}"
+        );
+    }
+    // Cypher's `:A|:B` (TCK Merge5 [25]) is no label expression of GQL: a syntax error at `:`.
+    let f = fail("MERGE (a)-[:A|:B]->(b)");
+    assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
+    assert_eq!(f.text, ":");
+    // A parameter as the property map (TCK Merge1 [16], Merge5 [27]): the existing 42001.
+    for query in [
+        "MERGE (n $param)",
+        "MATCH (a), (b) MERGE (a)-[r:FOO $param]->(b)",
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "42001", "{query}");
+    }
+    // Several patterns (W30): 42001 at the comma, one MERGE per pattern.
+    let query = "MERGE (a:A), (b:B)";
+    let f = fail(query);
+    assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
+    assert_eq!(f.gqlstatus, "42001");
+    assert_eq!(f.text, ",");
+    assert!(
+        f.message.starts_with("MERGE takes exactly one pattern"),
+        "{}",
+        f.message
+    );
+    let alternative = f.alternative.unwrap_or_default();
+    assert!(
+        alternative.contains("MERGE (a:A) MERGE (b:Label)"),
+        "{alternative}"
+    );
+    assert!(help_of(query).contains("MERGE looks for"));
+    // Missing or wrong pieces of an ON part: the expected tokens.
+    for (query, text, expected) in [
+        (
+            "MERGE (a) ON DELETE SET a.k = 1",
+            "DELETE",
+            vec!["CREATE", "MATCH"],
+        ),
+        ("MERGE (a) ON", "", vec!["CREATE", "MATCH"]),
+        ("MERGE (a) ON CREATE a.k = 1", "a", vec!["SET"]),
+        ("MERGE (a) ON MATCH", "", vec!["SET"]),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+        assert_eq!(f.expected, expected, "{query}");
+        assert!(help_of(query).contains("MERGE looks for"), "{query}");
+    }
+    for query in [
+        "MERGE (a) ON CREATE SET",
+        "MERGE (a) ON CREATE SET a.k = 1,",
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Syntax, "{query}: {f:?}");
+        assert_eq!(f.text, "", "{query}");
+    }
+    // After the pattern: the ON parts and the clauses; after an item also `,` (K9).
+    let f = fail("MERGE (a) )");
+    assert_eq!(f.text, ")");
+    assert_eq!(
+        f.expected.get(..2).unwrap_or_default(),
+        ["ON CREATE SET", "ON MATCH SET"]
+    );
+    assert!(f.expected.iter().any(|e| e == "RETURN"), "{:?}", f.expected);
+    let query = "MERGE (a) ON CREATE SET a.k = 1 )";
+    let f = fail(query);
+    assert_eq!(f.text, ")");
+    assert_eq!(
+        f.expected.get(..3).unwrap_or_default(),
+        ["`,`", "ON CREATE SET", "ON MATCH SET"]
+    );
+    assert!(help_of(query).contains("MERGE looks for"));
+    // A missing pattern.
+    let f = fail("MERGE RETURN 1");
+    assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
+    assert_eq!(f.text, "RETURN");
 }

@@ -36,7 +36,8 @@
 //! ending in a write clause or in `FINISH` ([`LinearQuery::end`]). A query without writes has
 //! exactly the tree of the stages before. Stage 3c adds `SET` ([`Stage::Set`], [`SetClause`])
 //! and `REMOVE` ([`Stage::Remove`], [`RemoveClause`]). Stage 3d adds `[DETACH | NODETACH]
-//! DELETE` ([`Stage::Delete`], [`DeleteClause`]).
+//! DELETE` ([`Stage::Delete`], [`DeleteClause`]). Stage 3e adds `MERGE` ([`Stage::Merge`],
+//! [`MergeClause`]).
 
 use super::lexer::Span;
 
@@ -237,6 +238,46 @@ pub(crate) enum Stage {
     Remove(RemoveClause),
     /// `[DETACH | NODETACH] DELETE expr, ...` (stage 3d).
     Delete(DeleteClause),
+    /// `MERGE [p =] pattern [ON CREATE SET ..] [ON MATCH SET ..]` (stage 3e, a Cypher
+    /// compatibility form).
+    Merge(Box<MergeClause>),
+}
+
+/// `MERGE [p =] pattern { ON CREATE SET item, .. | ON MATCH SET item, .. }*` (stage 3e, design
+/// W30-W37, a Cypher compatibility form without an ISO counterpart): once per incoming row, the
+/// pattern is matched as a whole; every match is a row and gets the `ON MATCH` items, or, when
+/// nothing matches, the whole pattern is created (nodes bound before are reused) and gets the
+/// `ON CREATE` items.
+///
+/// The parser guarantees the merge form of the pattern (design W30, P0 C2): exactly one path
+/// pattern, its path variable allowed (P0 E3, [`PathPattern::variable`]), no parenthesized path
+/// pattern; nodes without `WHERE`, their labels a conjunction of names only; edges with exactly
+/// one label name, no quantifier and no `WHERE`, in any direction (an undirected edge matches
+/// either direction and is created from left to right, W33). Properties are inline maps of any
+/// expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeClause {
+    /// The pattern (with its path variable, when written).
+    pub(crate) pattern: PathPattern,
+    /// The `ON CREATE SET` / `ON MATCH SET` parts in written order (any number of each, W35).
+    pub(crate) actions: Vec<MergeAction>,
+    /// The `MERGE` keyword as written.
+    pub(crate) keyword: Span,
+    /// From the keyword to the end of the last part.
+    pub(crate) span: Span,
+}
+
+/// One `ON CREATE SET item, ..` or `ON MATCH SET item, ..` of a [`MergeClause`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergeAction {
+    /// `ON CREATE` (`false`: `ON MATCH`).
+    pub(crate) on_create: bool,
+    /// The comma-separated items in written order (at least one), as a `SET` writes them.
+    pub(crate) items: Vec<SetItem>,
+    /// From `ON` to `SET`.
+    pub(crate) keyword: Span,
+    /// From `ON` to the end of the last item.
+    pub(crate) span: Span,
 }
 
 /// `[DETACH | NODETACH] DELETE expr, expr, ...` (stage 3d, design W27-W29): once per incoming

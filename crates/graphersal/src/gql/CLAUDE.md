@@ -83,7 +83,10 @@ Files appear as their stage lands; this table is the target layout.
   to one `gql:delete` per clause (`Instr::Delete`, after the W10 materialization; the rows pass
   on); the `RETURN` ending a query that holds a `DELETE` uses the returning builders
   (`gql_project_returning` / `gql_aggregate_returning`, W28), never a `WITH` or a body's;
-  `MERGE` is refused by the parser as not yet supported.
+  `MERGE` parsed since 3e.T1 (`Stage::Merge(Box<MergeClause>)`: one path pattern in the merge
+  form, `check_insert_node` / `check_insert_edge` with `word` `MERGE`: path variable and
+  undirected edges allowed; `MergeAction` per `ON CREATE SET` / `ON MATCH SET`, items parsed by
+  `set_item`; `GqlHelpTopic::Merge`).
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the
