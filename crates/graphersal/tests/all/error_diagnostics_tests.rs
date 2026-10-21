@@ -8278,6 +8278,43 @@ mod gql {
     }
 
     #[test]
+    fn gql_ambiguous_aggregation_names_the_computed_key() {
+        // Neo4j's rule (TCK Return6 [21], With6 [9]): a computed key is not reused by its text.
+        for (query, clause) in [
+            (
+                "MATCH (me:person)--(you:person) RETURN me.age + you.age, me.age + you.age + \
+                 count(*)",
+                "RETURN",
+            ),
+            (
+                "MATCH (me:person)--(you:person) WITH me.age + you.age AS grp, me.age + you.age \
+                 + count(*) AS agg RETURN *",
+                "WITH",
+            ),
+        ] {
+            let (err, _) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string())
+            );
+            assert!(
+                err.to_string()
+                    .contains("the grouping key `me.age + you.age` is a computed expression"),
+                "{err}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "compute the key first and read it by name, as in WITH *, me.age + you.age \
+                     AS key {clause} key, key + count(*)."
+                )),
+                "{help}"
+            );
+            assert_examples_run(&help);
+        }
+    }
+
+    #[test]
     fn gql_grouping_errors_explain_grouping_keys() {
         let grouping = "A RETURN or WITH with an aggregate groups the rows by its other items \
                         (the grouping keys): read a variable outside an aggregate only in such a \
@@ -8289,7 +8326,10 @@ mod gql {
                         aggregate takes no \
                         aggregate as its argument; aggregate in two steps with WITH, as in \
                         g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n RETURN \
-                        max(n)\").";
+                        max(n)\"). A computed key (not a variable or a property) is not \
+                        repeated in an item that aggregates: compute it in a WITH first and read \
+                        it by name, as in g.gql(\"MATCH (p:person)-[:created]->(s) WITH *, p.age \
+                        + 1 AS k RETURN k, k + count(s) AS n\").";
         let help = gql_help("MATCH (a) RETURN count(*), a.name ORDER BY a.age");
         assert_eq!(
             help,

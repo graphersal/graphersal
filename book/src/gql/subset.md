@@ -617,7 +617,9 @@ g.gql("MATCH (p:person) RETURN percentile_cont(p.age, 1.5) AS c")   // error: pe
 `NULL` values are skipped by every aggregate except `count(*)`. `DISTINCT` inside the call
 (`count(DISTINCT x)`) aggregates each distinct value once. An aggregate may be part of an
 expression (`count(*) + 1`); outside its aggregates such an item reads only grouping keys,
-constants and parameters. The details are on [Semantics](semantics.md#aggregation).
+constants and parameters. It may repeat a key written as a variable or a property (`p.age +
+count(*)` beside the key `p.age`), not a computed key (`a.age + b.age`): compute that one in a
+`WITH` first, as in `WITH *, a.age + b.age AS k RETURN k, k + count(*)`. The details are on [Semantics](semantics.md#aggregation).
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person) RETURN count(*) AS n, sum(p.age) AS total, avg(p.age) AS mean, min(p.age) AS lo, max(p.age) AS hi").to_list()

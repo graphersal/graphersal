@@ -7510,7 +7510,10 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) AS n ORDER BY \
              count(s) * 10 + size(p.name)\"). An aggregate takes no aggregate as its argument; aggregate in two steps \
              with WITH, as in g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n \
-             RETURN max(n)\")."
+             RETURN max(n)\"). A computed key (not a variable or a property) is not repeated \
+             in an item that aggregates: compute it in a WITH first and read it by name, as in \
+             g.gql(\"MATCH (p:person)-[:created]->(s) WITH *, p.age + 1 AS k RETURN k, k + \
+             count(s) AS n\")."
         }
         GqlHelpTopic::PatternVariable => {
             "In a MATCH clause a node variable names one node (written twice, it joins on the \

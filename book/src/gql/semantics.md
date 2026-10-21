@@ -758,6 +758,11 @@ The aggregates follow GQL and, where the standard text could not be checked yet,
   `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; ISO
   GQL, from SQL, may give `NULL` for `sum`: provisional). With grouping keys there is no group,
   so no row.
+- **Reusing a key.** An aggregating item may read a grouping key outside its aggregates by
+  repeating it when the key is a variable or a property (`RETURN p.age, p.age + count(*)`), not
+  when it is computed (`RETURN a.age + b.age, a.age + b.age + count(*)` is an error, `42002`, as
+  in Neo4j: the item reads `a` and `b`, which are no keys). Compute such a key in a `WITH`
+  first and read it by name.
 - **Group order** is unspecified (today: the order in which the groups first appear); write
   `ORDER BY`.
 - **`GROUP BY`** after the `RETURN` items lists the grouping keys explicitly; grouping stays

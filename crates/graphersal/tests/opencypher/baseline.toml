@@ -23,10 +23,6 @@ reason = "refused: rand()"
 class = "missing"
 reason = "refused: rand()"
 
-["clauses/return/Return6.feature::[21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
 ["clauses/with-orderBy/WithOrderBy1.feature::[11] Sort dates in ascending order"]
 class = "missing"
 reason = "not yet: date()"
@@ -298,10 +294,6 @@ reason = "having executed: not yet: reading an element that the same CREATE crea
 ["clauses/with/With2.feature::[1] Forwarding a property to express a join"]
 class = "setup"
 reason = "having executed: not yet: reading an element that the same CREATE creates"
-
-["clauses/with/With6.feature::[9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression"]
-class = "wrong_error"
-reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
 ["expressions/pattern/Pattern2.feature::[7] Use a pattern comprehension inside a list comprehension"]
 class = "missing"

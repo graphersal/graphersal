@@ -318,7 +318,11 @@
 //! list of `FOR` / `UNWIND`, a
 //! pattern, `OFFSET` / `LIMIT`, or inside another aggregate; an aggregate item reading, outside
 //! its aggregates, anything but constants, parameters, grouping-key variables and grouping-key
-//! expressions (by their text).
+//! expressions (by their text). Only a key that is a variable, a property chain on a variable, a
+//! literal or a parameter is reused by its text; a computed key (`a.x + b.x`, `toUpper(a.x)`)
+//! is not, and an aggregating item reading it outside its aggregates is refused (Neo4j's
+//! ambiguous-aggregation rule, TCK Return6 [21], With6 [9]; the fix computes the key in a
+//! `WITH` first).
 //!
 //! # Errors (GQLSTATUS provisional, like the kind defaults)
 //!
@@ -1715,6 +1719,30 @@ fn is_aggregate(name: &Identifier) -> bool {
 }
 
 /// Calls `f` on every direct sub-expression of `expr`, left to right.
+/// The grouping keys an aggregating item is checked against (`Binder::check_grouping`): key
+/// variables, the texts of the keys an item may reuse (properties `v.p`, literals,
+/// parameters, values), and the texts of computed keys, which it may not (Neo4j's
+/// ambiguous-aggregation rule).
+#[derive(Clone, Copy)]
+struct GroupKeys<'a> {
+    variables: &'a [BindingId],
+    texts: &'a [&'a str],
+    composite: &'a [&'a str],
+}
+
+/// Whether a grouping key may be reused by an aggregating item: a variable, a property chain
+/// on a variable, a literal or a parameter (Neo4j's rule, TCK Return6 [19] / [21]).
+fn simple_key(expr: &Expr) -> bool {
+    let mut expr = expr;
+    loop {
+        match &expr.kind {
+            ExprKind::Property { target, .. } => expr = target,
+            ExprKind::Variable(_) | ExprKind::Literal(_) | ExprKind::Parameter(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
 fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     match &expr.kind {
         ExprKind::Literal(_) | ExprKind::Parameter(_) | ExprKind::Variable(_) => {}
@@ -7007,7 +7035,8 @@ impl<'q> Binder<'q> {
     }
 
     /// Implicit grouping: an aggregate item reads outside its aggregates only constants,
-    /// parameters, grouping-key variables and grouping-key expressions (module docs).
+    /// parameters, grouping-key variables and grouping-key expressions that are no computed
+    /// expressions (module docs).
     fn check_grouping(
         &self,
         columns: &[Column],
@@ -7015,33 +7044,85 @@ impl<'q> Binder<'q> {
         star: bool,
         clause: &'static str,
     ) -> BResult<()> {
+        let star_columns = if star { self.scope.entries.len() } else { 0 };
         let keys: Vec<&Column> = columns.iter().filter(|c| !c.aggregate).collect();
         let key_variables: Vec<BindingId> = keys.iter().filter_map(|c| c.variable).collect();
-        let key_texts: Vec<&str> = keys
-            .iter()
-            .filter(|c| !matches!(c.expr.kind, ExprKind::Variable(_)) || c.variable.is_none())
-            .map(|c| self.query.text(c.written))
-            .filter(|t| !t.is_empty())
-            .collect();
-        let star_columns = if star { self.scope.entries.len() } else { 0 };
+        let mut key_texts: Vec<&str> = Vec::new();
+        let mut composite: Vec<&str> = Vec::new();
+        for (i, c) in columns.iter().enumerate() {
+            if c.aggregate || (matches!(c.expr.kind, ExprKind::Variable(_)) && c.variable.is_some())
+            {
+                continue;
+            }
+            let text = self.query.text(c.written);
+            if text.is_empty() {
+                continue;
+            }
+            // Judged as written (a `LET` / `WITH` name stands for its value in `c.expr`).
+            let written = i
+                .checked_sub(star_columns)
+                .and_then(|i| items.get(i))
+                .map_or(&c.expr, |item| &item.expr);
+            if simple_key(written) {
+                key_texts.push(text);
+            } else {
+                composite.push(text);
+            }
+        }
+        let keys = GroupKeys {
+            variables: &key_variables,
+            texts: &key_texts,
+            composite: &composite,
+        };
         for (item, column) in items.iter().zip(columns.get(star_columns..).unwrap_or(&[])) {
             if column.aggregate {
-                self.grouped(&item.expr, &key_variables, &key_texts, clause)?;
+                self.grouped(&item.expr, keys, clause).map_err(|error| {
+                    match self.ambiguous_key(&item.expr, keys, clause) {
+                        Some(ambiguous) => ambiguous,
+                        None => error,
+                    }
+                })?;
             }
         }
         Ok(())
     }
 
-    /// Checks one aggregate item (recursion bounded by the expression height).
-    fn grouped(
+    /// Neo4j's ambiguous-aggregation rule (TCK Return6 [21], With6 [9]): a grouping key that is
+    /// computed (not a variable, a property `v.p`, a literal or a parameter) is not reused by
+    /// an aggregating item written with the same text; the item then reads the key's
+    /// variables, which are no keys. Gives the error naming the key when `expr` holds one.
+    fn ambiguous_key(
         &self,
         expr: &Expr,
-        key_variables: &[BindingId],
-        key_texts: &[&str],
+        keys: GroupKeys<'_>,
         clause: &'static str,
-    ) -> BResult<()> {
+    ) -> Option<Box<GqlErrorBuilder>> {
+        let item = self.query.text(expr.span);
+        let key = keys.composite.iter().find(|k| item.contains(**k))?;
+        let rewritten = item.replace(key, "key");
+        Some(
+            semantic(
+                expr.span,
+                format!(
+                    "the grouping key `{key}` is a computed expression, so an item that \
+                     aggregates cannot reuse it outside its aggregates (it would be ambiguous): \
+                     only a key that is a variable or a property such as v.p can be reused"
+                ),
+            )
+            .alternative(format!(
+                "compute the key first and read it by name, as in WITH *, {key} AS key \
+                 {clause} key, {rewritten}"
+            ))
+            .topic(GqlHelpTopic::Grouping)
+            .into(),
+        )
+    }
+
+    /// Checks one aggregate item (recursion bounded by the expression height).
+    fn grouped(&self, expr: &Expr, keys: GroupKeys<'_>, clause: &'static str) -> BResult<()> {
+        let key_variables = keys.variables;
         let text = self.query.text(expr.span);
-        if key_texts.contains(&text) {
+        if keys.texts.contains(&text) {
             return Ok(());
         }
         match &expr.kind {
@@ -7079,14 +7160,14 @@ impl<'q> Binder<'q> {
             ExprKind::Variable(var) => self.grouped_variable(var, key_variables, clause),
             // In written order; a variable item `x` reads `x` like a variable.
             ExprKind::MapProjection(projection) => {
-                self.grouped(&projection.target, key_variables, key_texts, clause)?;
+                self.grouped(&projection.target, keys, clause)?;
                 for item in &projection.items {
                     match item {
                         ProjectionItem::Variable(var) => {
                             self.grouped_variable(var, key_variables, clause)?;
                         }
                         ProjectionItem::Entry(entry) => {
-                            self.grouped(&entry.value, key_variables, key_texts, clause)?;
+                            self.grouped(&entry.value, keys, clause)?;
                         }
                         ProjectionItem::Property(_) | ProjectionItem::AllProperties(_) => {}
                     }
@@ -7097,7 +7178,7 @@ impl<'q> Binder<'q> {
                 let mut result = Ok(());
                 for_each_child(expr, &mut |child| {
                     if result.is_ok() {
-                        result = self.grouped(child, key_variables, key_texts, clause);
+                        result = self.grouped(child, keys, clause);
                     }
                 });
                 result

@@ -231,6 +231,35 @@ fn aggregate_data_errors_name_the_function() {
     assert_eq!(status, "22003");
 }
 
+#[test]
+fn a_computed_key_is_not_reused_by_an_aggregating_item() {
+    // Neo4j's ambiguous-aggregation rule (TCK Return6 [21], With6 [9]); a variable or property
+    // key is reused (Return6 [19]), and a computed key read by name after a WITH is fine.
+    let graph = TraversalGraph::tinkerpop_modern();
+    for query in [
+        "MATCH (me:person)--(you:person) RETURN me.age + you.age, me.age + you.age + count(*)",
+        "MATCH (p:person) RETURN toUpper(p.name), toUpper(p.name) + count(*)",
+        "MATCH (me:person)--(you:person) WITH me.age + you.age AS g, me.age + you.age + count(*) \
+         AS a RETURN *",
+    ] {
+        let (status, message) = gql_error(&graph, query);
+        assert_eq!(status, "42002", "{query}");
+        assert!(message.contains("is a computed expression"), "{message}");
+    }
+    check(
+        &graph,
+        "MATCH (p:person) RETURN p.age AS a, p.age + count(*) AS b",
+        &["a", "b"],
+        &["a=27 b=28", "a=29 b=30", "a=32 b=33", "a=35 b=36"],
+    );
+    check(
+        &graph,
+        "MATCH (me:person)--(you:person) WITH *, me.age + you.age AS k RETURN k, k + count(*) AS n",
+        &["k", "n"],
+        &["k=56 n=58", "k=61 n=63"],
+    );
+}
+
 // ----- DISTINCT -----
 
 #[test]

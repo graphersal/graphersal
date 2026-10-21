@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2694** / 3837 | **70.2 %** |
+| **Passed** | **2696** / 3837 | **70.3 %** |
 | Unsupported (not yet or refused) | 1141 / 3837 | 29.7 % |
-| **Wrong behaviour of supported constructs** | **2** / 3837 | **0.1 %** |
-| Passed without `expressions/temporal` | 2694 / 2833 | 95.1 % |
+| **Wrong behaviour of supported constructs** | **0** / 3837 | **0.0 %** |
+| Passed without `expressions/temporal` | 2696 / 2833 | 95.2 % |
 
-Unsupported = missing 1054, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 2, unexpected_error 0, timeout 0, panic 0.
+Unsupported = missing 1054, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -70,13 +70,13 @@ Per sub-directory of the kit:
 | `clauses/match-where` | 100.0 % | 34 | 34 | · | · |
 | `clauses/merge` | 100.0 % | 75 | 75 | · | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
-| `clauses/return` | 96.8 % | 61 | 63 | 1 | 1 |
+| `clauses/return` | 98.4 % | 62 | 63 | 1 | · |
 | `clauses/return-orderby` | 100.0 % | 35 | 35 | · | · |
 | `clauses/return-skip-limit` | 96.0 % | 24 | 25 | 1 | · |
 | `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 100.0 % | 14 | 14 | · | · |
-| `clauses/with` | 93.1 % | 27 | 29 | 1 | 1 |
+| `clauses/with` | 96.6 % | 28 | 29 | 1 | · |
 | `clauses/with-orderBy` | 77.7 % | 227 | 292 | 65 | · |
 | `clauses/with-skip-limit` | 77.8 % | 7 | 9 | 2 | · |
 | `clauses/with-where` | 100.0 % | 19 | 19 | · | · |
@@ -100,7 +100,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 100.0 % | 47 | 47 | · | · |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **70.2 %** | **2694** | **3837** | 1141 | 2 |
+| **all** | **70.3 %** | **2696** | **3837** | 1141 | · |
 <!-- opencypher:end directories -->
 
 ## Out of scope
