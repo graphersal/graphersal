@@ -21,6 +21,11 @@
 //!   `value::temporal::parse::parse_extended`).
 //! - **From another temporal value**: its projection onto the type (`date(datetime)` the date
 //!   at its offset, `datetime(localdatetime)` at UTC).
+//! - **From the epoch** (`datetime` only): `{epochSeconds: s}` with an optional `millisecond`
+//!   / `microsecond` / `nanosecond` fraction, or `{epochMillis: ms}`: that instant as a base
+//!   `datetime` at UTC, which the other fields override (`java.time`'s `with`, as for
+//!   `datetime: x`) and `timezone` converts; both together, or next to `date` / `time` /
+//!   `datetime`, is 22007.
 //! - A zone name resolves to its offset at that time; the value keeps the offset only (U3).
 //! - A non-zero part below the microsecond is 0A000 "not yet" (U1): our values hold
 //!   microseconds, and a silently cut value would be a wrong answer.
@@ -215,6 +220,8 @@ enum Key {
     Microsecond,
     Nanosecond,
     Timezone,
+    EpochSeconds,
+    EpochMillis,
 }
 
 /// The map keys by name (matched ASCII case-insensitively), in the order messages list them.
@@ -237,6 +244,8 @@ const KEYS: &[(&str, Key)] = &[
     ("microsecond", Key::Microsecond),
     ("nanosecond", Key::Nanosecond),
     ("timezone", Key::Timezone),
+    ("epochSeconds", Key::EpochSeconds),
+    ("epochMillis", Key::EpochMillis),
 ];
 
 impl Key {
@@ -300,6 +309,8 @@ struct Fields {
     microsecond: Option<i64>,
     nanosecond: Option<i64>,
     timezone: Option<Zone>,
+    epoch_seconds: Option<i64>,
+    epoch_millis: Option<i64>,
 }
 
 impl Fields {
@@ -324,6 +335,8 @@ impl Fields {
 
     fn is_empty(&self) -> bool {
         self.date.is_none()
+            && self.epoch_seconds.is_none()
+            && self.epoch_millis.is_none()
             && self.time.is_none()
             && self.datetime.is_none()
             && !self.has_date_field()
@@ -403,12 +416,31 @@ fn read_fields<E>(
             Key::Millisecond => fields.millisecond = Some(integer()?),
             Key::Microsecond => fields.microsecond = Some(integer()?),
             Key::Nanosecond => fields.nanosecond = Some(integer()?),
+            Key::EpochSeconds => fields.epoch_seconds = Some(integer()?),
+            Key::EpochMillis => fields.epoch_millis = Some(integer()?),
             Key::Timezone => {
                 let Some(name) = value.as_str() else {
                     return Err(field_kind(function, key, value, span));
                 };
                 fields.timezone = Some(Zone::parse(name).map_err(|e| temporal_error(e, span))?);
             }
+        }
+    }
+    if fields.epoch_seconds.is_some() || fields.epoch_millis.is_some() {
+        if fields.epoch_seconds.is_some() && fields.epoch_millis.is_some() {
+            return Err(bad_map(
+                function,
+                "the map has either epochSeconds or epochMillis, not both",
+                span,
+            ));
+        }
+        if fields.date.is_some() || fields.time.is_some() || fields.datetime.is_some() {
+            return Err(bad_map(
+                function,
+                "the fields date, time and datetime cannot stand next to epochSeconds or \
+                 epochMillis",
+                span,
+            ));
         }
     }
     Ok(Some(fields))
@@ -554,7 +586,10 @@ impl Build<'_> {
     /// The local date and time of a `localdatetime` / `datetime` map.
     fn local(&self) -> Result<LocalDateTime, EvalError> {
         let f = self.fields;
-        let base = f.datetime.map(|t| self.local_of(t)).transpose()?;
+        let base = match self.epoch()? {
+            Some(utc) => Some(utc.local()),
+            None => f.datetime.map(|t| self.local_of(t)).transpose()?,
+        };
         if base.is_some() && (f.date.is_some() || f.time.is_some()) {
             return Err(bad_map(
                 self.function,
@@ -588,6 +623,7 @@ impl Build<'_> {
             (Some(Temporal::DateTime(v)), _) | (None, Some(Temporal::DateTime(v))) => {
                 Some(v.offset_seconds())
             }
+            _ if self.epoch()?.is_some() => Some(0),
             _ => None,
         };
         let local = self.local()?;
@@ -601,6 +637,23 @@ impl Build<'_> {
             (None, None) => DateTime::from_local(local, 0),
         }
         .map_err(error)
+    }
+
+    /// The UTC datetime of `epochSeconds` / `epochMillis` (Neo4j: a base `datetime` at UTC that
+    /// the other fields override and `timezone` converts); `None` without them.
+    fn epoch(&self) -> Result<Option<DateTime>, EvalError> {
+        let f = self.fields;
+        let error = |e| temporal_error(e, self.span);
+        match (f.epoch_seconds, f.epoch_millis) {
+            (Some(seconds), _) => seconds
+                .checked_mul(civil::MICROS_PER_SECOND)
+                .ok_or_else(|| TemporalError::out_of_range("the date-time"))
+                .and_then(|micros| DateTime::from_micros(micros, 0))
+                .map(Some)
+                .map_err(error),
+            (None, Some(millis)) => DateTime::from_epoch_millis(millis).map(Some).map_err(error),
+            (None, None) => Ok(None),
+        }
     }
 
     fn needs(&self, what: &str) -> EvalError {

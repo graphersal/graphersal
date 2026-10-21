@@ -7603,7 +7603,8 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
              fields: year with month / day, week / dayOfWeek, ordinalDay or quarter / \
              dayOfQuarter; hour, minute, second, millisecond, microsecond, nanosecond; a \
              datetime's timezone as an offset ('+01:00') or a zone name ('Europe/Berlin'); a \
-             base value as date, time or datetime; a duration's years .. nanoseconds, as in \
+             base value as date, time or datetime; a datetime's epochSeconds or epochMillis \
+             (not both, nor next to a base value); a duration's years .. nanoseconds, as in \
              g.gql(\"RETURN date({year: 2015, week: 30, dayOfWeek: 2}) AS d, \
              datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Berlin'}) \
              AS t, duration({days: 14, hours: 16}) AS u\")."

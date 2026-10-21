@@ -1320,12 +1320,15 @@ g.gql("RETURN date({year: 2015, month: 2, day: 30}) AS d")   // fails: the field
 
 `datetime.fromepoch(seconds, nanoseconds)` and `datetime.fromepochmillis(milliseconds)` give the
 `datetime` (UTC) of a time since 1970-01-01T00:00Z; the nanoseconds must be whole microseconds.
-The map keys `epochSeconds` / `epochMillis` of Neo4j's `datetime({..})` are not accepted: use
-these two functions.
+The map form does the same as in Neo4j: `datetime({epochSeconds: s})` with an optional
+`millisecond` / `microsecond` / `nanosecond`, or `datetime({epochMillis: ms})`, each with an
+optional `timezone` (the instant shown in that zone); no other field may stand next to them.
 
 ```rhai,graph=empty
 g.gql("RETURN datetime.fromepoch(1416779, 999999000) AS a, datetime.fromepochmillis(237821673987) AS b").to_list()
 // #{"a": datetime("1970-01-17T09:32:59.999999Z"), "b": datetime("1977-07-15T13:34:33.987Z")}
+g.gql("RETURN datetime({epochSeconds: 1416779, microsecond: 5}) AS a, datetime({epochMillis: 237821673987, timezone: '+01:00'}) AS b").to_list()
+// #{"a": datetime("1970-01-17T09:32:59.000005Z"), "b": datetime("1977-07-15T14:34:33.987+01:00")}
 ```
 
 #### Components
@@ -1467,8 +1470,9 @@ names), and `X.statement()` / `X.transaction()` (`date.statement()`, `datetime.t
 ...) give the time the query started: **one instant per query**, the same for every row and
 every call, so a query is deterministic and repeatable. A zone argument or map gives that
 instant in the zone (`datetime.statement('Europe/Berlin')`, `date({timezone: '+05:00'})`); the
-default zone is UTC. `X.realtime()`, a clock that moves while the query runs, is refused like
-`rand()`.
+default zone is UTC. In a script the instant is the script's own: `datetime()` in `g.gql(..)`
+equals the script's `now()`, and `date()` its `today()` at UTC. `X.realtime()`, a clock that
+moves while the query runs, is refused like `rand()`.
 
 ```rhai,graph=empty
 g.gql("RETURN date() = date.statement() AS a, datetime.transaction() = datetime() AS b, datetime({timezone: '+05:00'}).timezone AS z").to_list()   // #{"a": true, "b": true, "z": "+05:00"}

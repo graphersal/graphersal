@@ -1640,3 +1640,166 @@ fn temporal_comparison_follows_the_tck() {
         ["PT1H", "P1D", "P2D"].map(|t| ElementProperty::String(t.into()))
     );
 }
+
+// ----- 3g.T10: the epoch map keys, the script's pinned clock -----
+
+#[test]
+fn datetime_maps_take_epoch_seconds_and_millis_as_neo4j() {
+    let graph = graph();
+    let cases = [
+        (
+            "datetime({epochMillis: 424797300000})",
+            "1983-06-18T15:15:00Z",
+        ),
+        (
+            "datetime({epochSeconds: 1416779, microsecond: 5})",
+            "1970-01-17T09:32:59.000005Z",
+        ),
+        (
+            "datetime({epochSeconds: 1, nanosecond: 23000})",
+            "1970-01-01T00:00:01.000023Z",
+        ),
+        // A zone converts the instant.
+        (
+            "datetime({epochSeconds: 0, millisecond: 5, timezone: '+01:00'})",
+            "1970-01-01T01:00:00.005+01:00",
+        ),
+        (
+            "datetime({epochMillis: 237821673987, timezone: '+01:00'})",
+            "1977-07-15T14:34:33.987+01:00",
+        ),
+        // Other fields override the UTC base, as java.time's `with`.
+        (
+            "datetime({epochSeconds: 1, year: 2000})",
+            "2000-01-01T00:00:01Z",
+        ),
+        (
+            "datetime({epochMillis: 1, millisecond: 2})",
+            "1970-01-01T00:00:00.002Z",
+        ),
+        ("datetime({EPOCHMILLIS: 0})", "1970-01-01T00:00:00Z"),
+    ];
+    for (expr, expected) in cases {
+        assert_eq!(
+            temporal_text(&graph, &format!("RETURN {expr} AS x")),
+            engine_text(TemporalKind::DateTime, expected),
+            "{expr}"
+        );
+    }
+    assert_eq!(
+        single(&graph, "RETURN datetime({epochMillis: NULL}) AS x"),
+        ElementProperty::Null
+    );
+    for (expr, status, needle) in [
+        (
+            "datetime({epochMillis: 1, epochSeconds: 2})",
+            "22007",
+            "not both",
+        ),
+        (
+            "datetime({epochSeconds: 1, date: date('2000-01-01')})",
+            "22007",
+            "cannot stand next to epochSeconds",
+        ),
+        (
+            "datetime({datetime: datetime('2000-01-01T00:00Z'), epochMillis: 1})",
+            "22007",
+            "cannot stand next to epochSeconds",
+        ),
+        ("localdatetime({epochMillis: 1})", "22007", "epochMillis"),
+        ("date({epochSeconds: 1})", "22007", "epochSeconds"),
+        ("datetime({epochSeconds: 1.5})", "22G03", "integer"),
+        ("datetime({epochSeconds: 99999999999999})", "22008", "range"),
+        (
+            "datetime({epochSeconds: 1, nanosecond: 23})",
+            "0A000",
+            "below the microsecond",
+        ),
+    ] {
+        let (gqlstatus, _, message, _) = failure(&graph, &format!("RETURN {expr} AS x"));
+        assert_eq!(gqlstatus, status, "{expr}: {message}");
+        assert!(message.contains(needle), "{expr}: {message}");
+    }
+}
+
+/// Inside a script the GQL clocks read the evaluation's `now()` (a host's `pin_now` too), and
+/// the script's own `now()` / `today()` stay what they were.
+#[cfg(feature = "script")]
+#[test]
+fn gql_clocks_in_a_script_read_the_script_now() {
+    use crate::script_host::{engine_with_options, graph_scope_with_options};
+    use std::sync::Arc;
+    let script = r#"let n = now();
+        let row = g.gql("UNWIND [1, 2] AS i RETURN datetime() AS d, date() AS e, localdatetime() AS l, datetime.statement() AS s").to_list();
+        [n, today(), row[0].d, row[0].e, row[0].l, row[0].s, row[1].d, now()]"#;
+    type Row = (
+        DateTime,
+        Date,
+        DateTime,
+        Date,
+        LocalDateTime,
+        DateTime,
+        DateTime,
+        DateTime,
+    );
+    let values = |engine: &graphersal::script::rhai::Engine| -> Row {
+        let graph = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
+        let mut scope = graph_scope_with_options(graph, &[]);
+        let got = engine
+            .eval_with_scope::<graphersal::script::rhai::Array>(&mut scope, script)
+            .expect("the script");
+        let dt = |i: usize| got[i].clone().try_cast::<DateTime>().expect("a datetime");
+        let d = |i: usize| got[i].clone().try_cast::<Date>().expect("a date");
+        let ldt = got[4]
+            .clone()
+            .try_cast::<LocalDateTime>()
+            .expect("a local datetime");
+        (dt(0), d(1), dt(2), d(3), ldt, dt(5), dt(6), dt(7))
+    };
+    let check = |got: Row, now: DateTime| {
+        assert_eq!(got.0, now, "Rhai now()");
+        assert_eq!(got.1, now.local().date(), "Rhai today()");
+        assert_eq!(got.2, got.0, "GQL datetime() = the script's now()");
+        assert_eq!(got.3, got.1, "GQL date() = the script's today()");
+        assert_eq!(got.4, now.with_offset(0).expect("UTC").local());
+        assert_eq!(got.5, got.0);
+        assert_eq!(got.6, got.0, "every row");
+        assert_eq!(got.7, got.0, "one now() per evaluation");
+    };
+    // A host's pinned clock.
+    let pinned: DateTime = "2023-08-02T23:30:00Z".parse().expect("a datetime");
+    let mut engine = engine_with_options(&Default::default(), &[]);
+    graphersal::script::pin_now(&mut engine, Some(pinned));
+    check(values(&engine), pinned);
+    // The system clock: the evaluation's one instant.
+    graphersal::script::pin_now(&mut engine, None);
+    let got = values(&engine);
+    check(got, got.0);
+}
+
+/// Neo4j refuses a projection that would invent a part (`localdatetime(date)`: "Cannot get the
+/// time of"; `datetime(date)`: "Cannot select datetime from"), and so does `gql()` (22G03);
+/// the map form `{date: d}` gives midnight.
+#[test]
+fn a_projection_never_invents_the_time_of_a_date() {
+    let graph = graph();
+    for expr in [
+        "localdatetime(n.d)",
+        "localdatetime(date('2015-07-21'))",
+        "datetime(date('2015-07-21'))",
+        "localdatetime(localtime('12:00'))",
+        "datetime(localtime('12:00'))",
+    ] {
+        let query = format!("MATCH (n:x) RETURN {expr} AS x");
+        let (status, _, message, _) = failure(&graph, &query);
+        assert_eq!(status, "22G03", "{query}");
+        assert!(
+            message.contains("cannot be built from"),
+            "{query}: {message}"
+        );
+    }
+    assert_eq!(
+        temporal_text(&graph, "MATCH (n:x) RETURN localdatetime({date: n.d}) AS x"),
+        engine_text(TemporalKind::LocalDateTime, "2020-01-01T00:00")
+    );
+}

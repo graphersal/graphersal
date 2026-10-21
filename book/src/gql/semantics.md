@@ -1148,7 +1148,6 @@ g.gql("RETURN localtime({hour: 12, nanosecond: 5}) AS t")   // error: a part bel
 | `X.realtime()` reads the live clock | refused (`0A000`); the other clocks read one instant per query | a clock that moves during the query makes it non-deterministic, as `rand()` |
 | years -999 999 999 to 999 999 999 | years -9999 to 9999; beyond is `22008` | the engine's range ([Dates and Times](../dates/index.md)); 2 TCK cases are excluded (`year-range`) |
 | `duration.between` of two different types aligns them (a missing date: times only, a missing time: midnight, a missing zone: the other side's) | the same; the zone lent is a fixed offset, so a difference across a daylight saving change differs (part of the zone-name exclusion) | Neo4j's rule, on values that keep offsets |
-| `datetime({epochSeconds: .., nanosecond: ..})`, `datetime({epochMillis: ..})` | not accepted (`22007`: an unknown field); `datetime.fromepoch(s, ns)`, `datetime.fromepochmillis(ms)` | the map keys are not implemented |
 
 ## Ids are strings
 
