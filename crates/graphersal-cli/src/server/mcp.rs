@@ -445,7 +445,7 @@ const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
 traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries (experimental; MATCH \
-... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE, SET and REMOVE writes; \
+... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE, SET, REMOVE and DELETE writes; \
 see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
@@ -595,14 +595,14 @@ const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like)
 the shared graph and return its rows as JSON: one JSON object per row, its keys the RETURN \
 columns in the order written (bounded like query's: at most max_rows rows, default 100; a note \
 says when something was cut). It runs the script g.gql(query, params). A query may write \
-(INSERT, Cypher CREATE; SET; REMOVE): it is ONE transaction, a failing query changes nothing, and the answer \
+(INSERT, Cypher CREATE; SET; REMOVE; DELETE): it is ONE transaction, a failing query changes nothing, and the answer \
 says whether it changed the graph (with the net vertex and edge count changes) and the new \
 commit number; run writes only when the user asked for that change (a read-only server refuses \
 them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is experimental (its \
 subset and answers may still change between versions); the query tool with Gremlin stays the \
 complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a and 3c): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c and 3d): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -670,7 +670,14 @@ the map in), SET n:Label (adds labels to a node; an edge has exactly one label, 
 Gremlin set_label()), e.g. MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin \
 RETURN p.age AS age; REMOVE n.k and REMOVE n:Label remove a property or a label (nothing \
 happens when it is absent); SET n.k = NULL removes the property too, and a NULL target (from \
-OPTIONAL MATCH) is skipped; each clause sees every write of the clauses before it; a query may \
+OPTIONAL MATCH) is skipped; DETACH DELETE n removes a node with all its edges, e.g. MATCH \
+(p:person {name: 'marko'}) DETACH DELETE p; DELETE x (also written NODETACH DELETE) removes \
+nodes, edges, paths and lists of them, but a node that still has edges fails the query (G1001, \
+nothing removed) unless the same clause deletes those edges, e.g. MATCH (a)-[e:knows]->(b) \
+DELETE e or MATCH (n)-[r]-() DELETE r, n; a NULL target is skipped; after DELETE, reading or \
+returning the deleted element is an error (only count(n), n IS NULL and type(r) still work): \
+read what you need first, e.g. MATCH (p:person {name: 'vadas'}) WITH p, properties(p) AS props \
+DETACH DELETE p RETURN props; each clause sees every write of the clauses before it; a query may \
 end with its write clause or FINISH (no rows), or RETURN what it wrote. \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
 (trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
@@ -678,8 +685,8 @@ label, properties}. Rows come in no defined order unless the query has ORDER BY:
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
-procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the writes DELETE, \
-MERGE and FOREACH (drop(), merge_v()): use the query tool with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the writes \
+MERGE and FOREACH (merge_v(), merge_e(); FOR x IN list INSERT ..): use the query tool with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
 f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
@@ -2255,7 +2262,7 @@ mod tests {
     }
 
     /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
-    /// and the 3a and 3c writes (INSERT, CREATE, SET, REMOVE) as supported, calls GQL experimental
+    /// and the 3a, 3c and 3d writes (INSERT, CREATE, SET, REMOVE, DELETE) as supported, calls GQL experimental
     /// and still names what is refused.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
@@ -2326,6 +2333,13 @@ mod tests {
             "SET n += {k: expr}",
             "SET p.age = p.age + 1, p:admin",
             "SET n.k = NULL removes",
+            "DELETE",
+            "DETACH DELETE",
+            "NODETACH",
+            "G1001",
+            "MATCH (p:person {name: 'marko'}) DETACH DELETE p",
+            "DELETE r, n",
+            "properties(p) AS props",
         ] {
             assert!(supported.contains(named), "{named}");
         }
@@ -2334,7 +2348,7 @@ mod tests {
             "EXCEPT and INTERSECT",
             "IN TRANSACTIONS",
             "randomUUID",
-            "DELETE",
+            "FOREACH",
             "MERGE",
             "use the query tool",
         ] {
@@ -2352,6 +2366,7 @@ mod tests {
             "NEXT",
             "reduce()",
             "((a)-->(b)){1,3}",
+            "DELETE",
         ] {
             assert!(!refused.contains(gone), "{gone}");
         }

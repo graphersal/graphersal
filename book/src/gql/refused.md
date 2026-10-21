@@ -41,8 +41,8 @@ g.gql("MATCH (n:person) RETURN n.name AS name ORDER BY name").sample(1).count().
 g.gql("MATCH (n) RETURN element_id(n) AS id ORDER BY id LIMIT 2").to_list()   // #{"id": "1"}, #{"id": "2"}
 ```
 
-Writes are supported (`INSERT`, `SET`, `REMOVE`: [Writing with GQL](writes.md)); `DELETE` and
-`MERGE` are not supported *yet* and are listed there. The full message of a refused construct reads:
+Writes are supported (`INSERT`, `SET`, `REMOVE`, `DELETE`: [Writing with GQL](writes.md));
+`MERGE` and Cypher's `FOREACH` are not supported *yet* and are listed there. The full message of a refused construct reads:
 
 ```text
 Error: GQL unsupported construct at line 1, column 1: CREATE INDEX is a catalog command, not part of a gql() query (step #1 'gql:error("0A000")' refused the query before the traversal ran)

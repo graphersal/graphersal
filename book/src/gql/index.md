@@ -33,9 +33,9 @@ its real output (a list is shown as its items, comma-separated, or one per line)
   [Cypher Aliases](aliases.md) lists every one. There is no Graphersal-only syntax: an accepted
   query means the same in a GQL or Cypher 25 database (modulo the listed aliases).
 - **Reads and writes.** `INSERT` (Cypher `CREATE`) creates nodes and edges, `SET` and `REMOVE`
-  change their properties and labels, each once per row ([Writing with GQL](writes.md)); `DELETE`
-  and `MERGE` are not supported yet: use the [Gremlin mutation
-  steps](../dsl/changing_the_graph.md) for them. A query is one unit: a query that fails changes
+  change their properties and labels, and `DELETE` / `DETACH DELETE` remove them, each once per
+  row ([Writing with GQL](writes.md)); `MERGE` is not supported yet: use the [Gremlin mutation
+  steps](../dsl/changing_the_graph.md) for it. A query is one unit: a query that fails changes
   nothing.
 - **A start step.** `gql()` starts a traversal: `g.gql(..)`, never `g.v().gql(..)` or
   `__.gql(..)`.

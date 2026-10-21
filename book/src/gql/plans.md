@@ -42,6 +42,7 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:insert_node(["label", ...], "{props}")` | `INSERT` of one node: creates it per row, with all its properties in one storage call, and makes it the current element ([Writes](#writes)) |
 | `gql:insert_edge("label", "from", "to", "{props}")` | `INSERT` of one edge between the nodes of the row named `from` and `to` (`(#n)` for an unnamed node of the pattern) |
 | `gql:set("<items>")`, `gql:remove("<items>")` | one `SET` / `REMOVE` clause: applies its items per row to the elements the row's variables hold and passes the row on unchanged |
+| `gql:delete("[DETACH] DELETE <targets>")` | one `DELETE` clause: collects the targets of every row, checks the NODETACH rule for the whole clause, removes the edges, then the nodes, and passes the rows on unchanged |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 `gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
@@ -791,6 +792,13 @@ the variables it changes are labelled with `as()` before it, like those an inser
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person {name: 'marko'}) SET p.age = p.age + 1, p:admin").profile()
+```
+
+A `DELETE` clause becomes one `gql:delete` step with the clause as written. It is a barrier: it
+takes every row before it removes anything, so the NODETACH check sees the whole clause:
+
+```rhai,graph=modern
+g.gql("MATCH (p:person {name: 'marko'}) DETACH DELETE p").profile()
 ```
 
 A plan that writes never merges traversers, so the lowering places no merge points in it; a

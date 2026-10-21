@@ -163,14 +163,18 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// clauses `INSERT` (Cypher `CREATE`) of node and directed edge patterns, `SET` (a property
     /// `n.k = expr`, all properties `n = {..}`, Cypher's merge `n += {..}`, labels `n:A`) and
     /// `REMOVE` (`n.k`, `n:A`), each once per incoming row; a `NULL` value removes the
-    /// property; a query may end with its write clause or `FINISH` (no rows) or `RETURN` what
-    /// it wrote. Use [`Self::gql_with`] for a query with `$parameters`.
+    /// property; `DELETE` of nodes, edges, paths and lists of them (a node with edges only
+    /// with `DETACH DELETE` or with its edges in the same clause, checked per clause); a query
+    /// may end with its write clause or `FINISH` (no rows) or `RETURN` what it wrote. Reading
+    /// an element deleted earlier in the query is an error, and so is returning it: a
+    /// deliberate deviation from Neo4j, which returns it (book `gql/semantics.md`, section DELETE).
+    /// Use [`Self::gql_with`] for a query with `$parameters`.
     ///
     /// A writing query runs on a writable source (`graph.traversal_mut()`), as one unit like
     /// any traversal: a failing row leaves nothing. On a read source (`graph.traversal()`) it
     /// fails exactly like a Gremlin write does there. It asks `Create` on the labels it inserts,
-    /// like `add_v()` / `add_e()`, and `Update` on the elements `SET` / `REMOVE` change, like
-    /// `property()` / `add_label()`.
+    /// like `add_v()` / `add_e()`, `Update` on the elements `SET` / `REMOVE` change, like
+    /// `property()` / `add_label()`, and `Delete` on what `DELETE` removes, like `drop()`.
     ///
     /// Every result is one map per row: the keys are the column names (the `AS` alias, else the
     /// expression as written) in written order, a missing property is a `null` value (never a

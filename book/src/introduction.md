@@ -42,7 +42,7 @@ g.v().has("name", "marko").as("me")
   (`hasLabel`, `outE`). The text runs the same everywhere: in the browser, in the command line,
   from Python and through an AI agent.
 - **GQL patterns (experimental).** [`g.gql(..)`](gql/index.md) runs ISO GQL queries
-  (`MATCH (p:person)-[:knows]->(f) RETURN f.name`, `INSERT`, `SET`, Cypher spellings as aliases) on the
+  (`MATCH (p:person)-[:knows]->(f) RETURN f.name`, `INSERT`, `SET`, `DELETE`, Cypher spellings as aliases) on the
   same engine, and Gremlin steps may follow. Its subset and answers may still change between versions.
 - **A playground in the browser.** The real engine, compiled to WebAssembly: write a query, see a
   table, the graph drawing, the schema and the optimized plan. Nothing to install.

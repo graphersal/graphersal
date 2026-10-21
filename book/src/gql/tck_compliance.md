@@ -55,8 +55,9 @@ Unsupported = missing 1239, setup 88. Wrong behaviour = wrong_result 30, wrong_c
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
 are not yet supported in GQL, and `expressions/temporal` is about a quarter of the kit, so the
-headline also shows the share without it. The other large blocks are `MERGE` and `DELETE` (the
-next write stages; `SET` and `REMOVE` pass) and list indexing; `rand()` is refused by design
+headline also shows the share without it. The other large blocks are `MERGE` (the next write
+stage; `SET`, `REMOVE` and `DELETE` pass, the `DELETE` cases left in `clauses/delete` need list
+indexing) and list indexing; `rand()` is refused by design
 ([Refused Constructs](refused.md)). The ranking with counts is in the report.
 
 Per sub-directory of the kit:
