@@ -353,3 +353,135 @@ fn an_order_by_key_written_like_an_item_reads_its_column() {
         Some("gql:order(\"1 - count(x)\", \"p.name\")")
     );
 }
+
+// ----- a LET / WITH value as a pattern element (B11) -----
+
+#[test]
+fn a_value_holding_a_node_or_an_edge_continues_a_pattern() {
+    let graph = modern();
+    // TCK Match7 [22]: a computed node continues the pattern.
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (a:person {name: 'marko'}) OPTIONAL MATCH (a)-[:knows]->(b {name: 'nobody'}) \
+             WITH coalesce(b, a) AS x MATCH (x)-[:created]->(d) RETURN x.name AS x, d.name AS d",
+            &["x", "d"]
+        ),
+        sorted(&["'marko'|'lop'"])
+    );
+    // The same rows as the node variable itself (rewrite pair).
+    for (value, node) in [
+        (
+            "MATCH (p:person) WITH collect(p) AS ps FOR i IN range(0, size(ps) - 1) \
+             WITH ps[i] AS x MATCH (x)-[:created]->(s) RETURN x.name AS x, s.name AS s",
+            "MATCH (x:person)-[:created]->(s) RETURN x.name AS x, s.name AS s",
+        ),
+        (
+            "MATCH (p:person)-[e:knows]->() WITH collect(e) AS es LET r = head(es) \
+             MATCH (a)-[r]->(b) RETURN a.name AS x, b.name AS s",
+            "MATCH (p:person)-[e:knows]->() WITH collect(e) AS es MATCH (a)-[r]->(b) \
+             WHERE r = head(es) RETURN a.name AS x, b.name AS s",
+        ),
+    ] {
+        assert_eq!(
+            table(&graph, value, &["x", "s"]),
+            table(&graph, node, &["x", "s"]),
+            "{value}"
+        );
+    }
+    // TCK Path1 [1] / Path2 [3]: NULL matches nothing, OPTIONAL MATCH keeps the row.
+    assert_eq!(
+        table(
+            &graph,
+            "WITH null AS a OPTIONAL MATCH p = (a)-[r]->() RETURN nodes(p) AS n, r",
+            &["n", "r"]
+        ),
+        sorted(&["null|null"])
+    );
+    assert!(rows(&graph, "WITH null AS a MATCH (a)-->(b) RETURN b").is_empty());
+}
+
+#[test]
+fn a_value_of_another_kind_as_a_pattern_element_is_a_data_error() {
+    let graph = modern();
+    // Known only when a row reaches the pattern: 22G03.
+    for (query, message) in [
+        (
+            "MATCH (a:person) WITH collect(a.age) AS l LET x = l[0] MATCH (x)-->(b) RETURN b",
+            "`x` is written as a node of the pattern but holds a value that is not a node \
+             [22G03]",
+        ),
+        (
+            "MATCH (a:person) WITH collect(a.age) AS l LET x = l[0] MATCH (y)-->(x) RETURN y",
+            "`x` is written as a node of the pattern but holds a value that is not a node \
+             [22G03]",
+        ),
+    ] {
+        assert_eq!(failure(&graph, query), message, "{query}");
+    }
+    // An edge value is compared with the edges the pattern walks (no pattern starts at an
+    // edge): another kind matches none.
+    assert!(
+        rows(
+            &graph,
+            "MATCH (a:person) WITH collect(a) AS l LET r = l[0] MATCH ()-[r]->(b) RETURN b"
+        )
+        .is_empty()
+    );
+    // A literal is certainly no element: refused before the run, as before; so is the value
+    // column of a materializing WITH.
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (a:person) WITH a.name AS n LIMIT 1 MATCH (n)-->(b) RETURN b"
+        ),
+        "the variable `n` is used as a node here but holds a value computed by WITH, not a \
+         node or an edge [42002]"
+    );
+    assert_eq!(
+        failure(&graph, "WITH 1 AS a MATCH (a)-->(b) RETURN b"),
+        "`a` is a value defined by LET or WITH, not a node; a pattern variable is a new name or \
+         a node or edge variable [42002]"
+    );
+    // A FOR item keeps its own rule (design E3): another kind gives no row.
+    assert!(rows(&graph, "FOR x IN [1] MATCH (x)-->(b) RETURN b").is_empty());
+}
+
+#[test]
+fn create_connects_nodes_held_by_values() {
+    // TCK Match4 [4] (setup): the endpoints are items of a list.
+    let graph = modern();
+    let created = graph
+        .write()
+        .traversal_mut()
+        .gql(
+            "MATCH (a:person) WITH a ORDER BY a.name WITH collect(a) AS l \
+             UNWIND range(0, size(l) - 2) AS i WITH l[i] AS n1, l[i + 1] AS n2 \
+             CREATE (n1)-[:next]->(n2) RETURN count(*) AS c",
+        )
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        table(
+            &graph,
+            "MATCH (a)-[:next]->(b) RETURN a.name AS a, b.name AS b",
+            &["a", "b"]
+        ),
+        sorted(&["'josh'|'marko'", "'marko'|'peter'", "'peter'|'vadas'"])
+    );
+    // A value that is no node fails when the edge is created.
+    let message = match graph
+        .write()
+        .traversal_mut()
+        .gql("WITH [1] AS l WITH l[0] AS x CREATE (x)-[:T]->(:Y)")
+        .to_list()
+    {
+        Ok(rows) => panic!("{rows:?}"),
+        Err(e) => match e.root_cause() {
+            TraverserError::Gql { gqlstatus, .. } => gqlstatus.clone(),
+            other => panic!("{other}"),
+        },
+    };
+    assert_eq!(message, "22G03");
+}

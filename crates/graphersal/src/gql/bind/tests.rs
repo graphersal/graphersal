@@ -4663,3 +4663,42 @@ fn order_by_after_an_aggregation_reads_items_written_inside_a_key() {
         f.message
     );
 }
+
+#[test]
+fn a_value_written_as_a_pattern_element_is_materialized_and_checked() {
+    let checked = |q: &BoundQuery, name: &str| {
+        q.bindings
+            .iter()
+            .filter(|b| b.name.as_ref().is_some_and(|n| n.name == name))
+            .map(|b| (b.kind, b.checked))
+            .collect::<Vec<_>>()
+    };
+    // A projecting WITH value: the scope becomes a WITH * row, the column a checked node.
+    let q = ok("MATCH (a)-->(b) WITH coalesce(b, a) AS x MATCH (x)-->(d) RETURN d");
+    assert_eq!(segment_shapes(&q), ["match[0]", "with1", "match[1]"]);
+    assert_eq!(checked(&q, "x"), [(BindingKind::Node, true)]);
+    // An edge, a LET value, NULL, an INSERT endpoint.
+    let q = ok("MATCH ()-[e]->() WITH collect(e) AS es LET r = head(es) MATCH ()-[r]->() RETURN r");
+    assert_eq!(checked(&q, "r"), [(BindingKind::Edge, true)]);
+    let q = ok("WITH null AS a OPTIONAL MATCH p = (a)-[r]->() RETURN p");
+    assert_eq!(segment_shapes(&q), ["with1", "optional0"]);
+    let q = ok("MATCH (a) WITH collect(a) AS l WITH l[0] AS x, l[1] AS y INSERT (x)-[:T]->(y)");
+    assert_eq!(checked(&q, "x"), [(BindingKind::Node, true)]);
+    // A FOR item keeps its unchecked retype (design E3).
+    let q = ok("FOR x IN $l MATCH (x)-->(d) RETURN d");
+    assert_eq!(checked(&q, "x"), [(BindingKind::Node, false)]);
+    // A literal value is refused as written; a list or map literal too.
+    for query in [
+        "WITH 1 AS a MATCH (a)-->(b) RETURN b",
+        "LET a = [1], b = $p MATCH (a)-->(b) RETURN b",
+        "LET a = {k: 1} INSERT (a)-[:T]->(:X)",
+    ] {
+        let f = fail(query);
+        assert!(
+            f.message
+                .contains("is a value defined by LET or WITH, not a node"),
+            "{query}: {}",
+            f.message
+        );
+    }
+}

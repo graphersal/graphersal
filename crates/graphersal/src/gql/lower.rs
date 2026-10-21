@@ -136,6 +136,7 @@ use crate::traversal::step::flatbarrier_steps::step_barrier::lazy_barrier_step;
 use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateColumn;
 use crate::traversal::step::flatbarrier_steps::step_gql_delete::GqlDeleteTarget;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
+use crate::traversal::step::flatmap_steps::step_gql_bind::GqlBindCheck;
 use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
 use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLookupKey};
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
@@ -507,6 +508,9 @@ enum Instr<S: GraphStorage> {
         site: Site,
         name: CompactString,
         kind: ElementKind,
+        /// The run-time kind check of a value column written as a pattern element
+        /// ([`bind::Binding::checked`](crate::gql::bind::Binding)).
+        check: Option<Arc<GqlBindCheck>>,
     },
     /// `where(P.eq(label))`: the current element is the one bound earlier to the binding (a
     /// join: a cycle closing, a node or edge variable repeated).
@@ -1015,7 +1019,8 @@ impl<S: GraphStorage> Lowered<S> {
                     site,
                     name,
                     kind,
-                } => g.gql_bind(name, self.binding(id.0, site), kind),
+                    check,
+                } => g.gql_bind(name, self.binding(id.0, site), kind, check),
                 Instr::Same(id) => g.where_p(P::Eq(PValue::String(self.label(id)))),
                 Instr::Differs(id) => g.where_p(P::Neq(PValue::String(self.label(id)))),
                 Instr::Trail(ids) => g.gql_trail(ids.iter().map(|&id| self.label(id)).collect()),
@@ -1547,7 +1552,13 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn skip(self, n: usize) -> Self;
     fn limit(self, n: usize) -> Self;
     fn select(self, label: CompactString) -> Self;
-    fn gql_bind(self, name: CompactString, binding: Binding, kind: ElementKind) -> Self;
+    fn gql_bind(
+        self,
+        name: CompactString,
+        binding: Binding,
+        kind: ElementKind,
+        check: Option<Arc<GqlBindCheck>>,
+    ) -> Self;
     fn where_p(self, predicate: P<PValue>) -> Self;
     fn gql_trail(self, labels: Vec<CompactString>) -> Self;
     fn out(self, labels: ArgStrings) -> Self;
@@ -1732,8 +1743,14 @@ macro_rules! sink {
             fn select(self, label: CompactString) -> Self {
                 self.select(label)
             }
-            fn gql_bind(self, name: CompactString, binding: Binding, kind: ElementKind) -> Self {
-                self.gql_bind(name, binding, kind)
+            fn gql_bind(
+                self,
+                name: CompactString,
+                binding: Binding,
+                kind: ElementKind,
+                check: Option<Arc<GqlBindCheck>>,
+            ) -> Self {
+                self.gql_bind_checked(name, binding, kind, check)
             }
             fn where_p(self, predicate: P<PValue>) -> Self {
                 self.where_p(predicate)
@@ -2904,11 +2921,23 @@ impl<'q> Lowering<'q> {
             .map(|n| n.name.as_str())
             .or(binding.key.as_deref())
             .unwrap_or_default();
+        // A checked value reports its wrong kind under its first occurrence as an element.
+        let check = binding
+            .checked
+            .then(|| binding.occurrences.get(1).or(binding.occurrences.first()))
+            .flatten()
+            .map(|span| {
+                Arc::new(GqlBindCheck {
+                    query: Arc::from(self.query),
+                    span: span.start..span.end,
+                })
+            });
         Ok(Instr::Bind {
             id,
             site,
             name: CompactString::from(name),
             kind,
+            check,
         })
     }
 

@@ -473,6 +473,11 @@ pub(crate) struct Binding {
     /// The subquery whose body declares it (index into [`BoundQuery::subqueries`]): a local
     /// of that body, invisible outside it; `None` for a binding of the query itself.
     pub(crate) subquery: Option<usize>,
+    /// A value column of the `WITH *` materialized for a pattern that writes a `LET` /
+    /// projecting-`WITH` value as a node or an edge ([`Binder::materialize_values`]): written
+    /// there it takes that kind, checked when a row reaches the pattern (`NULL` gives no row,
+    /// any other value that is not an element of the kind 22G03).
+    pub(crate) checked: bool,
 }
 
 impl Binding {
@@ -1681,6 +1686,34 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     }
 }
 
+/// Whether `expr` certainly gives no node or edge by its form alone: a literal other than
+/// `NULL`, a list or map literal, a property access (a stored property never holds an element),
+/// an operator, a comprehension or a subquery. A variable, a parameter, a function call, a
+/// `CASE` or a subscript may.
+fn never_an_element(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(Literal::Null)
+        | ExprKind::Variable(_)
+        | ExprKind::Parameter(_)
+        | ExprKind::FunctionCall { .. }
+        | ExprKind::Case(_)
+        | ExprKind::Index(_) => false,
+        ExprKind::Literal(_)
+        | ExprKind::List(_)
+        | ExprKind::Map(_)
+        | ExprKind::Property { .. }
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::IsNull { .. }
+        | ExprKind::IsLabeled { .. }
+        | ExprKind::IsEndpoint { .. }
+        | ExprKind::Subquery(_)
+        | ExprKind::MapProjection(_)
+        | ExprKind::ListComprehension(_)
+        | ExprKind::PatternComprehension(_) => true,
+    }
+}
+
 /// Replaces every part of `expr` that `column_of` maps to a column by a variable named like
 /// that column (an `ORDER BY` alias reference, [`Binder::column_refs`]), pushing its index onto
 /// `used`. Recursion bounded by the expression's height (`MAX_HEIGHT`); a subquery body is a
@@ -2756,6 +2789,9 @@ impl<'q> Binder<'q> {
                 .ok_or_else(|| {
                     semantic(linear.span, "internal error: MATCH stages out of order")
                 })?;
+            if self.values_as_elements(&m.patterns) {
+                self.materialize_values(m.span)?;
+            }
             let clause = self.own.len();
             self.own.push(None);
             self.clause = clause;
@@ -3389,6 +3425,7 @@ impl<'q> Binder<'q> {
             group: site.group,
             column,
             subquery: self.subquery,
+            checked: false,
         });
         id
     }
@@ -3462,8 +3499,10 @@ impl<'q> Binder<'q> {
             return Err(bound_edge_list(var));
         }
         // A FOR item written as a node or edge takes that kind (design E3); as the edge of a
-        // quantified edge it is refused below (a group variable is always a new name).
-        let retype = for_column == Some(FOR_ITEM)
+        // quantified edge it is refused below (a group variable is always a new name). So does
+        // a value column materialized for the pattern ([`Binder::materialize_values`]), checked
+        // when a row reaches the pattern (TCK Match7 [22]).
+        let retype = (for_column == Some(FOR_ITEM) || binding.checked)
             && matches!(site.kind, BindingKind::Node | BindingKind::Edge);
         if binding.kind != site.kind && !retype {
             return Err(kind_conflict(var, site.kind, binding.kind));
@@ -3674,6 +3713,77 @@ impl<'q> Binder<'q> {
         })
     }
 
+    /// Whether a node, or an edge that is not quantified, of `patterns` names a `LET` /
+    /// projecting-`WITH` value in scope that may hold an element (TCK Match7 [22]: `WITH
+    /// coalesce(b, c) AS x MATCH (x)-->(d)`). When one of them certainly holds none
+    /// ([`never_an_element`]) nothing is materialized and the binder refuses it as written
+    /// (42002). Not inside a subquery body, whose imports keep their own rules.
+    fn values_as_elements(&self, patterns: &[PathPattern]) -> bool {
+        if self.subquery.is_some() {
+            return false;
+        }
+        let mut maybe = false;
+        let mut certain = false;
+        let mut value = |var: Option<&Identifier>| {
+            if let Some(Symbol::Value(substitution)) = var.and_then(|v| self.scope.get(&v.name)) {
+                if never_an_element(&substitution.expr) {
+                    certain = true;
+                } else {
+                    maybe = true;
+                }
+            }
+        };
+        let steps = |value: &mut dyn FnMut(Option<&Identifier>), steps: &[PatternStep]| {
+            for step in steps {
+                value(step.node.variable.as_ref());
+                if step.edge.quantifier.is_none() {
+                    value(step.edge.variable.as_ref());
+                }
+            }
+        };
+        for path in patterns {
+            value(path.start.variable.as_ref());
+            steps(&mut value, &path.steps);
+            for group in &path.groups {
+                value(group.node.variable.as_ref());
+                steps(&mut value, &group.steps);
+            }
+        }
+        maybe && !certain
+    }
+
+    /// The scope materialized as a `WITH *` (a [`Segment::With`]): its `LET` / projecting-`WITH`
+    /// values become columns, which a pattern then continues from like any `WITH` column, their
+    /// kind checked when a row reaches it ([`Binding::checked`]).
+    fn materialize_values(&mut self, span: Span) -> BResult<()> {
+        let first = self.bindings.len();
+        self.with_clause(&WithParts {
+            distinct: false,
+            star: Some(span),
+            items: &[],
+            group_by: None,
+            order_by: None,
+            offset: None,
+            limit: None,
+            where_clause: None,
+            span,
+            clause: "WITH",
+            dropper: Dropper::With,
+            materialize: true,
+        })?;
+        self.check_values(first);
+        Ok(())
+    }
+
+    /// Marks the value columns among the bindings from `first` on as [`Binding::checked`].
+    fn check_values(&mut self, first: usize) {
+        for binding in self.bindings.get_mut(first..).unwrap_or(&mut []) {
+            if binding.kind == BindingKind::Value {
+                binding.checked = true;
+            }
+        }
+    }
+
     /// `INSERT pattern, ..` / `CREATE pattern, ..` (module docs, "Writes"): a cut
     /// ([`Segment::Write`]) whose new nodes and edges enter the scope; the property
     /// expressions read the scope before the clause.
@@ -3687,7 +3797,17 @@ impl<'q> Binder<'q> {
                 format!("{word} cannot stand inside a subquery expression"),
             )));
         }
+        let values = self.values_as_elements(&clause.patterns);
+        let before = self.bindings.len();
         self.materialize_for_write(clause.keyword)?;
+        if values {
+            if self.bindings.len() == before {
+                self.materialize_values(clause.keyword)?;
+            } else {
+                // The write's own `WITH *` holds the values already.
+                self.check_values(before);
+            }
+        }
         let first = self.bindings.len();
         let mut nodes: Vec<(InsertNode, Option<&MapLiteral>)> = Vec::new();
         let mut edges: Vec<(InsertEdge, Option<&MapLiteral>)> = Vec::new();
@@ -3827,9 +3947,10 @@ impl<'q> Binder<'q> {
         if for_column == Some(FOR_ORDINAL) {
             return Err(ordinal_as_element(var, BindingKind::Node));
         }
-        // A FOR item written as a node takes that kind (design E3); a non-node item is an
-        // error when the edge is created.
-        let retype = for_column == Some(FOR_ITEM);
+        // A FOR item written as a node takes that kind (design E3), so does a value column
+        // materialized for the clause (TCK Match4 [4]); a non-node value is an error when the
+        // edge is created.
+        let retype = for_column == Some(FOR_ITEM) || binding.checked;
         if binding.kind != BindingKind::Node && !retype {
             return Err(kind_conflict(var, BindingKind::Node, binding.kind));
         }

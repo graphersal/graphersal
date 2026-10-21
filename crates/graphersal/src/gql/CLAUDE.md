@@ -127,7 +127,8 @@ Files appear as their stage lands; this table is the target layout.
   (FlatBarrier, `flatbarrier_steps/step_gql_aggregate.rs`, in `MAP_PRODUCING_KINDS`, generated
   traversers, `resets_path`), `gql:distinct` (FlatBarrier, GQL equality via
   `aggregate::GroupKey`), `gql:bind` (FlatMap, continues a pattern from a `Label` / `RowColumn`
-  source), `gql:trail` (Filter, the trail check of a quantified edge); stage 2a: `gql:for`
+  source; stage 3f: with a `GqlBindCheck` for a `LET` / `WITH` value written as a node or edge,
+  `bind::Binding::checked` set by `Binder::materialize_values`, a value of another kind is 22G03), `gql:trail` (Filter, the trail check of a quantified edge); stage 2a: `gql:for`
   (FlatMap, `flatmap_steps/step_gql_for.rs`, in `MAP_PRODUCING_KINDS`: one derived traverser
   per list item, the item itself or the record `{x, i}` with an ordinal; `NULL` no row, a
   non-list one row, E1), `gql:lookup` (FlatMap, `flatmap_steps/step_gql_lookup.rs`: a component that

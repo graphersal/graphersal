@@ -8191,6 +8191,48 @@ mod gql {
     }
 
     #[test]
+    fn gql_a_value_of_another_kind_in_a_pattern_names_the_fix() {
+        // 3f.T3 B11: a LET / WITH value written as a node fails when a row reaches it.
+        for (query, kind, example) in [
+            (
+                "MATCH (p:person) WITH collect(p.age) AS l WITH l[0] AS x MATCH (x)-->(y) \
+                 RETURN y",
+                "a node",
+                "WITH n AS x MATCH (x)-->(m)",
+            ),
+            (
+                "MATCH (p:person) WITH collect(p.age) AS l LET x = head(l) MATCH (y)<--(x) \
+                 RETURN y",
+                "a node",
+                "WITH n AS x MATCH (x)-->(m)",
+            ),
+        ] {
+            let (err, report) = gql_failure(|g| g.gql(query).to_list());
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string()),
+                "{query}"
+            );
+            assert!(
+                report.contains(&format!(
+                    "`x` is written as {kind} of the pattern but holds a value that is not {kind}"
+                )),
+                "{report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(&format!(
+                    "give it {kind} (or NULL, which matches nothing), for example the node \
+                     variable itself, as in {example}."
+                )),
+                "{help}"
+            );
+            assert!(help.contains("A row of the data made"), "{help}");
+            assert_examples_run(&help);
+        }
+    }
+
+    #[test]
     fn gql_pattern_variable_errors_explain_what_a_variable_names() {
         let pattern = "In a MATCH clause a node variable names one node (written twice, it joins \
                        on the same node), an edge variable one edge, a path variable the path \
@@ -8199,7 +8241,10 @@ mod gql {
                        nodes or edges, one per iteration, as in g.gql(\"MATCH p = \
                        (a:person)-[e:knows]->(b) RETURN p, e, b.name\") and g.gql(\"MATCH \
                        (a:person) ((x)-[e:knows]->(y)){1,2} (b) RETURN a.name, y\"); a name \
-                       defined by LET or WITH is a value, not a pattern variable.";
+                       defined by LET or WITH is a value, which a pattern may continue from \
+                       when it holds a node or an edge, as in g.gql(\"MATCH (p:person) WITH \
+                       collect(p) AS ps WITH ps[0] AS first MATCH (first)-->(x) RETURN \
+                       x.name\").";
         let help = gql_help("MATCH (a)-[e]->(b), (c)-[e]->(d) RETURN a");
         assert_eq!(
             help,

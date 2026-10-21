@@ -11,10 +11,6 @@ reason = "control query: columns differ: expected [\"a\", \"b\", \"c\", \"r1\", 
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["clauses/match/Match4.feature::[4] Matching longer variable length paths"]
-class = "setup"
-reason = "having executed: having executed: GQL semantic error at line 8, column 9: the variable `n1` is used as a node here but holds a value computed by WITH, not a no…"
-
 ["clauses/match/Match4.feature::[8] Matching relationships into a list and matching variable length using the list"]
 class = "missing"
 reason = "not yet: a quantified edge over a list of edges bound before"
@@ -30,10 +26,6 @@ reason = "GQL syntax error at line 2, column 18: the quantifier's lower bound 1 
 ["clauses/match/Match5.feature::[13] Handling upper bounded variable length match, empty interval"]
 class = "unexpected_error"
 reason = "GQL syntax error at line 2, column 18: the quantifier's lower bound 1 is greater than its upper bound 0"
-
-["clauses/match/Match7.feature::[22] MATCH after OPTIONAL MATCH"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 5, column 8: `x` is a value defined by LET or WITH, not a node; a pattern variable is a new name or a node or edge variable"
 
 ["clauses/match/Match9.feature::[6] Matching relationships into a list and matching variable length using the list, with bound nodes"]
 class = "missing"
@@ -738,14 +730,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 ["expressions/list/List6.feature::[6] Fail for `size()` on pattern predicates::8"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
-
-["expressions/path/Path1.feature::[1] `nodes()` on null path"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 2, column 21: `a` is a value defined by LET or WITH, not a node; a pattern variable is a new name or a node or edge variable"
-
-["expressions/path/Path2.feature::[3] `relationships()` on null path"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 2, column 21: `a` is a value defined by LET or WITH, not a node; a pattern variable is a new name or a node or edge variable"
 
 ["expressions/path/Path3.feature::[2] Failing when using `length()` on a node"]
 class = "wrong_error"

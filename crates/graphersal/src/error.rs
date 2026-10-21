@@ -7468,7 +7468,9 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
              a quantified path pattern the list of its nodes or edges, one per iteration, as \
              in g.gql(\"MATCH p = (a:person)-[e:knows]->(b) RETURN p, e, b.name\") and \
              g.gql(\"MATCH (a:person) ((x)-[e:knows]->(y)){1,2} (b) RETURN a.name, y\"); a \
-             name defined by LET or WITH is a value, not a pattern variable."
+             name defined by LET or WITH is a value, which a pattern may continue from when it \
+             holds a node or an edge, as in g.gql(\"MATCH (p:person) WITH collect(p) AS ps \
+             WITH ps[0] AS first MATCH (first)-->(x) RETURN x.name\")."
         }
         GqlHelpTopic::Names => {
             "Give every column of a RETURN or WITH, every variable of a LET and every key of a \

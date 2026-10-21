@@ -482,11 +482,18 @@ g.gql("MATCH (p:person) WITH p ORDER BY p.age DESC LIMIT 2 MATCH (p)-[:created]-
 g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 3 WHERE p.age > 28 RETURN p.name AS name ORDER BY name").to_list()
 // #{"name": "josh"}, #{"name": "marko"}: the three youngest, then the filter
 g.gql("MATCH (p:person) WITH p.name AS name RETURN p.age")   // error: the variable `p` is not in scope: the WITH before does not carry it
+g.gql("MATCH (p:person) WITH p ORDER BY p.age LIMIT 2 WITH collect(p) AS ps WITH ps[0] AS youngest MATCH (youngest)<-[:knows]-(f) RETURN f.name AS name").to_list()   // #{"name": "marko"}
+g.gql("MATCH (p:person) WITH collect(p.age) AS ages WITH ages[0] AS x MATCH (x)-->(y) RETURN y")   // error: `x` is written as a node of the pattern but holds a value that is not a node
 ```
 
 A `WITH` that only renames and computes values is as transparent as `LET`. One with `DISTINCT`,
 an aggregate, `ORDER BY`, `OFFSET` or `LIMIT` builds its rows first; a later `MATCH` continues
-from the elements in its columns. The order a `WITH ... ORDER BY` makes is not kept by later
+from the elements in its columns. A `LET` or `WITH` value computed from elements (`coalesce(b,
+c)`, `l[0]`, `head(collect(e))`) may stand for a node or an edge of a later pattern, also as an
+endpoint of `INSERT` / `CREATE`: `NULL` matches nothing, a value of another kind is a data error
+(`22G03`) when a row reaches the pattern (a value written as an edge is compared with the
+edges the pattern walks, so one of another kind matches nothing). A value written as a literal, an operator or a property access is never an
+element and is refused before the run. The order a `WITH ... ORDER BY` makes is not kept by later
 clauses: sort again in the final `RETURN` ([Ordering](semantics.md#ordering)).
 
 ## FOR and UNWIND
