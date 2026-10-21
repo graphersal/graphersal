@@ -120,7 +120,8 @@
 //!   gives `NULL` for a `NULL` list, 22G03 for a non-list, else folds: `acc` starts at `init`
 //!   (evaluated outside the locals) and takes `expr` per item; `acc` and `x` are two locals
 //!   bound by two `LocalEnv` frames.
-//! - **Aggregates** (`count`, `sum`, `avg`, `min`, `max`, `collect_list`) are compiled only where
+//! - **Aggregates** (`count`, `sum`, `avg`, `min`, `max`, `collect_list`, stage 3f
+//!   `percentile_cont` / `percentile_disc`) are compiled only where
 //!   the [`Scope`] admits them ([`Scope::aggregate`], the aggregating stage `aggregate.rs`); the
 //!   compiled call reads its result through [`Env::aggregate`]. Elsewhere they are error 0A000.
 //!
@@ -2516,7 +2517,9 @@ fn call<En: Env>(
         | Function::Avg
         | Function::Min
         | Function::Max
-        | Function::CollectList => Err(EvalError::new(
+        | Function::CollectList
+        | Function::PercentileCont
+        | Function::PercentileDisc => Err(EvalError::new(
             status::NOT_SUPPORTED,
             format!(
                 "the aggregate function {}() is not supported here",

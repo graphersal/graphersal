@@ -7789,6 +7789,46 @@ mod gql {
     }
 
     #[test]
+    fn gql_percentile_errors_explain_value_and_percentile() {
+        // Stage 3f: a percentile outside 0.0 to 1.0 (the openCypher TCK's NumberOutOfRange)
+        // and a value of another kind get the percentile advice, whose examples run.
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) RETURN percentileDisc(p.age, 1.1) AS x")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22003".to_string())
+        );
+        assert!(
+            report.contains("percentile_disc() takes a percentile from 0.0 to 1.0, not 1.1"),
+            "{report}"
+        );
+        let help = err.help().expect("help");
+        assert!(
+            help.starts_with(
+                "A row of the data gave the marked percentile aggregate a value it cannot take"
+            ),
+            "{help}"
+        );
+        assert_examples_run(&help);
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p) RETURN percentile_cont(p.name, 0.5) AS x")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report.contains("percentile_cont() takes numbers, not a string"),
+            "{report}"
+        );
+        let help = err.help().expect("help");
+        assert!(help.contains("value first"), "{help}");
+    }
+
+    #[test]
     fn gql_bad_limit_parameter_names_a_runnable_value() {
         let (err, report) = gql_failure(|g| {
             g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])
@@ -8914,10 +8954,11 @@ mod gql {
                 "elements() (a GQL path function pending verification) is not yet supported",
                 "nodes(p) and relationships(p) return the vertices and the edges of a path.",
             ),
+            // Stage 3f: percentileCont() is supported; stDev() stays not yet.
             (
-                "percentileCont(p.age, 0.5)",
+                "stDev(p.age)",
                 GqlErrorKind::NotYet,
-                "percentileCont() (a statistical aggregate function) is not yet supported",
+                "stDev() (a statistical aggregate function) is not yet supported",
                 "collect the values with collect_list(x) and compute it after gql().",
             ),
             (
@@ -8992,7 +9033,7 @@ mod gql {
             help.contains(".select(\"t\").unfold().asNumber()"),
             "{help}"
         );
-        let help = camel("MATCH (p) RETURN percentileCont(p.age, 0.5)");
+        let help = camel("MATCH (p) RETURN stDev(p.age)");
         assert!(help.contains("collect_list(x)"), "{help}");
     }
 

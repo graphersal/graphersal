@@ -591,6 +591,19 @@ all-aggregate `RETURN`; without any aggregate it gives one row per group, like `
 | `avg(x)` | the mean, always a float | `NULL` |
 | `min(x)`, `max(x)` | the smallest / largest value in the [order of `ORDER BY`](semantics.md#ordering) | `NULL` |
 | `collect_list(x)` (Cypher `collect(x)`) | the values as a list | `[]` |
+| `percentile_disc(x, p)` (Cypher `percentileDisc`) | the value at percentile `p` (0.0 to 1.0) of the sorted numbers, with its type | `NULL` |
+| `percentile_cont(x, p)` (Cypher `percentileCont`) | the percentile `p` interpolated linearly between the two nearest numbers, always a float | `NULL` |
+
+The percentiles take numbers (another kind is error `22G03`) and a percentile `p` from 0.0 to
+1.0 (outside it: error `22003`), evaluated and checked on every row; the group uses the value of
+its first row, so write a constant or a `$parameter`. `percentile_disc` returns the value at
+position `ceil(p * n) - 1` of the `n` sorted numbers (the first for `p = 0`), `percentile_cont`
+interpolates at position `p * (n - 1)` (Neo4j's definitions):
+
+```rhai,graph=modern
+g.gql("MATCH (p:person) RETURN percentile_disc(p.age, 0.5) AS d, percentile_cont(p.age, 0.5) AS c, percentileCont(p.age, 1) AS top").to_list()   // #{"c": 30.5, "d": 29, "top": 35.0}
+g.gql("MATCH (p:person) RETURN percentile_cont(p.age, 1.5) AS c")   // error: percentile_cont() takes a percentile from 0.0 to 1.0, not 1.5 (22003)
+```
 
 `NULL` values are skipped by every aggregate except `count(*)`. `DISTINCT` inside the call
 (`count(DISTINCT x)`) aggregates each distinct value once. An aggregate may be part of an
@@ -1249,7 +1262,7 @@ construct and the alternative.
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |
 | `normalize(s)` | store normalized text |
 | GQL's `elements(p)` | `nodes(p)` and `relationships(p)` |
-| statistical aggregates (`percentileCont()`, `stDev()`, ...) | `collect_list(x)`, then compute after `gql()` |
+| the standard deviations `stDev()`, `stDevP()` | `collect_list(x)`, then compute after `gql()` |
 
 ```rhai,graph=modern
 g.gql("MATCH (((a)-[:knows]->(b)){1,2})+ RETURN b")   // error: a parenthesized path pattern nested in another one is not yet supported

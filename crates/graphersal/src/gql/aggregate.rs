@@ -27,6 +27,13 @@
 //! - **`collect_list`** keeps the values in arrival order, a value of bulk `n` `n` times (stored
 //!   once with its bulk until [`Accumulator::finish`]; [`Accumulator::collected`] tells the step
 //!   the size first, so it can check its limits before the list is built).
+//! - **`percentile_cont(x, p)` / `percentile_disc(x, p)`** (stage 3f, ISO's binary set
+//!   functions, Cypher `percentileCont` / `percentileDisc`) keep the numbers with their bulk
+//!   (another kind 22G03) and sort them at the end; `p` is evaluated per row and must be a
+//!   number from 0.0 to 1.0 (22G03, 22003: the openCypher TCK's `NumberOutOfRange`), the first
+//!   row's is used. `percentile_disc` is the value at position `ceil(p * n) - 1` (0 for `p = 0`)
+//!   with its type, `percentile_cont` the linear interpolation at `p * (n - 1)`, a float
+//!   (Neo4j's definitions); no numbers: `NULL`.
 //! - **`DISTINCT`** keeps the first arrival of each value under the grouping equality and ignores
 //!   the bulk.
 //! - **Empty input** (C4, Neo4j's values): `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min`
@@ -69,6 +76,9 @@ pub(crate) struct AggregateCall<E> {
     pub(crate) distinct: bool,
     /// The argument, evaluated per input row; `None` for `count(*)`.
     pub(crate) argument: Option<Compiled<E>>,
+    /// The percentile of `percentile_cont` / `percentile_disc` (their second argument),
+    /// evaluated and checked per input row; `None` for the other aggregates.
+    pub(crate) percentile: Option<Compiled<E>>,
     /// The whole call (`sum(n.age)`).
     pub(crate) span: Span,
 }
@@ -86,6 +96,9 @@ impl<E: Clone + Eq + Hash> AggregateCall<E> {
         env: &En,
         bulk: u64,
     ) -> Result<(), EvalError> {
+        if let Some(percentile) = &self.percentile {
+            accumulator.percentile(&percentile.eval(env)?)?;
+        }
         match &self.argument {
             None => accumulator.add_rows(bulk),
             Some(argument) => accumulator.add(argument.eval(env)?, bulk, env),
@@ -128,6 +141,10 @@ pub(crate) fn compile_aggregating<'a, E: Clone>(
                     .argument
                     .map(|argument| compile(&argument, &nested))
                     .transpose()?,
+                percentile: pending
+                    .percentile
+                    .map(|percentile| compile(&percentile, &nested))
+                    .transpose()?,
                 span: pending.span,
             })
         })
@@ -140,6 +157,8 @@ struct Pending {
     aggregate: Aggregate,
     distinct: bool,
     argument: Option<Expr>,
+    /// The second argument of a percentile.
+    percentile: Option<Expr>,
     span: Span,
 }
 
@@ -163,10 +182,10 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
     }
 
     fn aggregate(&self, call: AggregateRef<'_>) -> Option<Result<usize, EvalError>> {
-        let argument = match call.args {
-            CallArgs::Star(_) => None,
-            // The parser and `compile` admit exactly one argument.
-            CallArgs::Exprs(exprs) => exprs.first().cloned(),
+        let (argument, percentile) = match call.args {
+            CallArgs::Star(_) => (None, None),
+            // The parser and `compile` admit exactly one argument, two for a percentile.
+            CallArgs::Exprs(exprs) => (exprs.first().cloned(), exprs.get(1).cloned()),
             // Only `CAST` / `TRIM` are parsed with these forms, never an aggregate.
             CallArgs::Cast { .. } | CallArgs::Trim { .. } => {
                 return Some(Err(EvalError::new(
@@ -189,6 +208,7 @@ impl<Sc: Scope> Scope for Collecting<'_, Sc> {
             aggregate,
             distinct: call.distinct,
             argument,
+            percentile,
             span: call.span,
         });
         Some(Ok(index))
@@ -306,6 +326,10 @@ pub(crate) enum Aggregate {
     Max,
     /// `collect_list(x)`, Cypher `collect(x)`.
     CollectList,
+    /// `percentile_cont(x, p)` (stage 3f).
+    PercentileCont,
+    /// `percentile_disc(x, p)` (stage 3f).
+    PercentileDisc,
 }
 
 impl Aggregate {
@@ -319,6 +343,8 @@ impl Aggregate {
             Function::Min => Aggregate::Min,
             Function::Max => Aggregate::Max,
             Function::CollectList => Aggregate::CollectList,
+            Function::PercentileCont => Aggregate::PercentileCont,
+            Function::PercentileDisc => Aggregate::PercentileDisc,
             Function::ElementId
             | Function::Labels
             | Function::Type
@@ -384,6 +410,8 @@ impl Aggregate {
             Aggregate::Min => "min",
             Aggregate::Max => "max",
             Aggregate::CollectList => "collect_list",
+            Aggregate::PercentileCont => "percentile_cont",
+            Aggregate::PercentileDisc => "percentile_disc",
         }
     }
 }
@@ -480,6 +508,8 @@ enum State<E> {
     Extreme(Option<Value<E>>),
     /// Values with their bulk, in arrival order (`DISTINCT`: kept in the seen set instead).
     Collect(Vec<(Value<E>, u64)>),
+    /// The numbers of a percentile with their bulk, and the percentile of the first row.
+    Percentile(Vec<(Number, u64)>, Option<f64>),
 }
 
 /// The running state of one aggregate call for one group (see the module docs).
@@ -501,6 +531,9 @@ impl<E: Clone + Eq + Hash> Accumulator<E> {
             Aggregate::Sum | Aggregate::Avg => State::Numeric(Numeric::default()),
             Aggregate::Min | Aggregate::Max => State::Extreme(None),
             Aggregate::CollectList => State::Collect(Vec::new()),
+            Aggregate::PercentileCont | Aggregate::PercentileDisc => {
+                State::Percentile(Vec::new(), None)
+            }
         };
         let seen = (distinct
             && !matches!(
@@ -514,6 +547,38 @@ impl<E: Clone + Eq + Hash> Accumulator<E> {
             seen,
             span,
         }
+    }
+
+    /// Checks the percentile of one row (a number from 0.0 to 1.0: 22G03 for another kind,
+    /// 22003 outside the range, as the openCypher TCK's `NumberOutOfRange`) and keeps the
+    /// first row's; only a percentile aggregate has one.
+    pub(crate) fn percentile(&mut self, percentile: &Value<E>) -> Result<(), EvalError> {
+        let State::Percentile(_, at) = &mut self.state else {
+            return Ok(());
+        };
+        let name = self.function.name();
+        let Value::Scalar(ElementProperty::Number(number)) = percentile else {
+            return Err(EvalError::new(
+                status::INVALID_VALUE_TYPE,
+                format!(
+                    "{name}() takes a percentile from 0.0 to 1.0, not {}",
+                    kind_name(percentile)
+                ),
+                self.span,
+            )
+            .with_topic(GqlHelpTopic::Percentile));
+        };
+        let p = super::eval::float(number);
+        if !(0.0..=1.0).contains(&p) {
+            return Err(EvalError::new(
+                status::OUT_OF_RANGE,
+                format!("{name}() takes a percentile from 0.0 to 1.0, not {number}"),
+                self.span,
+            )
+            .with_topic(GqlHelpTopic::Percentile));
+        }
+        at.get_or_insert(p);
+        Ok(())
     }
 
     /// Adds `bulk` rows to `count(*)` (other aggregates ignore it).
@@ -618,8 +683,74 @@ impl<E: Clone + Eq + Hash> Accumulator<E> {
                 Some(seen) => Ok(Value::List(seen.into_iter().map(|key| key.0).collect())),
                 None => collect(items, span),
             },
+            State::Percentile(values, at) => Ok(percentile(
+                values,
+                at,
+                self.function == Aggregate::PercentileCont,
+            )),
         }
     }
+}
+
+/// Orders two numbers totally (for sorting, never a panic): by their float value
+/// (`f64::total_cmp`), then integers among themselves exactly, an integer before a float.
+fn number_order(a: &Number, b: &Number) -> Ordering {
+    let rank = |n: &Number| match n.n {
+        N::NegInt(value) => (0u8, value),
+        N::Float(_) => (1u8, 0),
+    };
+    super::eval::float(a)
+        .total_cmp(&super::eval::float(b))
+        .then_with(|| rank(a).cmp(&rank(b)))
+}
+
+/// `percentile_cont` (`continuous`) / `percentile_disc` of the numbers with their bulk, at the
+/// percentile `at` (Neo4j's definitions): `NULL` without numbers. `percentile_disc` is the
+/// value at position `ceil(p * n) - 1` of the sorted values (0 for `p = 0`), with its type;
+/// `percentile_cont` interpolates linearly at position `p * (n - 1)` and is always a float.
+fn percentile<E>(mut values: Vec<(Number, u64)>, at: Option<f64>, continuous: bool) -> Value<E> {
+    let total = values
+        .iter()
+        .fold(0u64, |total, (_, bulk)| total.saturating_add(*bulk));
+    let (Some(p), true) = (at, total > 0) else {
+        return Value::Null;
+    };
+    values.sort_by(|(a, _), (b, _)| number_order(a, b));
+    // The value at a 0-based position of the sorted values, bulk counted.
+    let nth = |position: u64| {
+        let mut seen = 0u64;
+        for (number, bulk) in &values {
+            seen = seen.saturating_add(*bulk);
+            if position < seen {
+                return Some(number);
+            }
+        }
+        values.last().map(|(number, _)| number)
+    };
+    let n = total as f64;
+    if continuous {
+        let position = p * (n - 1.0);
+        let (lo, hi) = (position.floor(), position.ceil());
+        let (Some(low), Some(high)) = (nth(lo as u64), nth(hi as u64)) else {
+            return Value::Null;
+        };
+        let (low, high) = (super::eval::float(low), super::eval::float(high));
+        let value = if lo == hi {
+            low
+        } else {
+            low * (hi - position) + high * (position - lo)
+        };
+        return Value::Scalar(ElementProperty::Number(Number::from_f64(value)));
+    }
+    let position = p * n;
+    let index = if position == 0.0 || position.fract() != 0.0 {
+        position.floor()
+    } else {
+        position - 1.0
+    };
+    nth(index as u64).map_or(Value::Null, |number| {
+        Value::Scalar(ElementProperty::Number(number.clone()))
+    })
 }
 
 /// Adds a value to a count or a sum.
@@ -647,6 +778,22 @@ fn accept<E>(
                 span,
             )
             .with_topic(GqlHelpTopic::AggregateValue)),
+        },
+        State::Percentile(values, _) => match value {
+            Value::Scalar(ElementProperty::Number(number)) => {
+                values.push((number.clone(), bulk));
+                Ok(())
+            }
+            other => Err(EvalError::new(
+                status::INVALID_VALUE_TYPE,
+                format!(
+                    "{}() takes numbers, not {}",
+                    function.name(),
+                    kind_name(other)
+                ),
+                span,
+            )
+            .with_topic(GqlHelpTopic::Percentile)),
         },
         // `min` / `max` and `collect_list` are handled by `Accumulator::accept`; with
         // `DISTINCT` only `collect_list` keeps its values in the seen set.

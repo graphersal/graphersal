@@ -4413,6 +4413,9 @@ pub(crate) enum GqlHelpTopic {
     Call,
     /// A value of the wrong kind in `sum()` / `avg()` (22G03).
     AggregateValue,
+    /// A value or a percentile `percentile_cont()` / `percentile_disc()` cannot take (22G03,
+    /// 22003; stage 3f).
+    Percentile,
     /// Text and a number (or a boolean) joined by `+` or `||` (22G03): no implicit conversion.
     TextAndNumber,
     /// A subscript `x[i]` / `x[a..b]` of the wrong kind of value or index (22G03, stage 3f).
@@ -6970,6 +6973,15 @@ fn gql_help(
              as in g.gql(\"MATCH (p) RETURN sum(CASE WHEN p.age >= 0 THEN p.age END)\") (an \
              aggregate skips NULL).",
         ),
+        GqlErrorKind::Data if topic == GqlHelpTopic::Percentile => help.push_str(
+            "A row of the data gave the marked percentile aggregate a value it cannot take: \
+             percentile_cont(x, p) and percentile_disc(x, p) (Cypher percentileCont / \
+             percentileDisc) take numbers x and a percentile p from 0.0 to 1.0, value first, \
+             as in g.gql(\"MATCH (p:person) RETURN percentile_disc(p.age, 0.5) AS median\"); \
+             give p as a constant or a $parameter, and keep values of another kind out with \
+             a comparison to a number, as in \
+             g.gql(\"MATCH (p) WHERE p.age >= 0 RETURN percentile_cont(p.age, 0.9) AS p90\").",
+        ),
         GqlErrorKind::Data if topic == GqlHelpTopic::Insert => help.push_str(
             "A row of the data gave the marked endpoint of the new edge no node: an edge \
              connects two nodes, so a variable that OPTIONAL MATCH may leave NULL is filtered \
@@ -7565,6 +7577,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::Merge => GQL_MERGE_ADVICE,
         GqlHelpTopic::Kind
         | GqlHelpTopic::AggregateValue
+        | GqlHelpTopic::Percentile
         | GqlHelpTopic::TextAndNumber
         | GqlHelpTopic::Subscript => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \

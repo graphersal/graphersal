@@ -28,6 +28,7 @@ spelling is either not supported yet or [refused](refused.md).
 | `toLower(s)` | `lower(s)` | |
 | `size(s)` on a string | `char_length(s)` | `size(list)` is the item count, as `cardinality(list)` |
 | `collect(x)` | `collect_list(x)` | also `collect(DISTINCT x)` |
+| `percentileCont(x, p)`, `percentileDisc(x, p)` | `percentile_cont(x, p)`, `percentile_disc(x, p)` | ISO's binary set functions, value first ([Aggregation](subset.md#aggregation)) |
 | `length(p)` | `path_length(p)` | the number of edges of a path |
 | `log(x)` (one argument) | `ln(x)` | the natural logarithm; the two-argument `log(base, x)` is GQL's general logarithm |
 | `-[e:T*]->` | `-[e:T]->{1,}` | Cypher's lower bound is 1: **not** GQL's postfix `*`, which is `{0,}` |
@@ -300,7 +301,7 @@ The differences from Neo4j are on [Semantics](semantics.md#merge).
 |---|---|
 | `id(n)` | refused: an integer in Neo4j, Graphersal ids are strings; use `element_id(n)` |
 | `nodes(p)`, `relationships(p)` | supported as [compatibility functions](#compatibility-functions), not aliases: GQL has no such functions |
-| `x ^ y` | not supported yet; use GQL's `power(x, y)` |
+| `x ^ y` | supported as a compatibility operator: GQL has no operator for it; it means `power(x, y)` (always a float, the same errors), binding tighter than `*` and looser than a unary minus |
 | `rand()`, `randomUUID()` | refused: `gql()` functions are deterministic |
 | map projections, list and pattern comprehensions | supported as [compatibility forms](#map-projections-and-comprehensions), not aliases |
 | `any()` / `all()` / `none()` / `single()`, `reduce()` | supported as [compatibility functions](#list-predicates-and-reduce), not aliases: GQL has no such functions |

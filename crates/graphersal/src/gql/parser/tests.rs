@@ -2152,11 +2152,8 @@ fn not_yet_functions_name_the_reason_and_the_alternative() {
         ("toIntegerList(n.l)", GqlErrorKind::NotYet, "unfold()"),
         ("normalize(n.s)", GqlErrorKind::NotYet, "lower()"),
         ("elements(p)", GqlErrorKind::NotYet, "nodes(p)"),
-        (
-            "percentileCont(n.x, 0.5)",
-            GqlErrorKind::NotYet,
-            "collect_list",
-        ),
+        // Stage 3f: percentileCont() is supported; stDev() stays not yet.
+        ("stDev(n.x)", GqlErrorKind::NotYet, "collect_list"),
     ] {
         let f = fail(&format!("MATCH (n) RETURN {call}"));
         assert_eq!(f.kind, kind, "{call}");

@@ -395,6 +395,10 @@ pub(crate) enum Function {
     Max,
     /// `collect_list(x)`, Cypher `collect(x)`.
     CollectList,
+    /// `percentile_cont(x, p)`, Cypher `percentileCont(x, p)` (stage 3f).
+    PercentileCont,
+    /// `percentile_disc(x, p)`, Cypher `percentileDisc(x, p)` (stage 3f).
+    PercentileDisc,
     // ----- stage 1c: conversions (`functions/convert.rs`) -----
     /// `CAST(x AS type)`: the strict GQL conversion; the target is in [`CallArgs::Cast`].
     Cast,
@@ -538,6 +542,17 @@ const fn aggregate(function: Function, names: &'static [&'static str]) -> Functi
     }
 }
 
+/// An aggregate of a value and a percentile (ISO GQL's binary set functions, stage 3f).
+const fn binary_aggregate(function: Function, names: &'static [&'static str]) -> FunctionSpec {
+    FunctionSpec {
+        function,
+        names,
+        min_args: 2,
+        max_args: 2,
+        kind: FunctionKind::Aggregate,
+    }
+}
+
 /// Every function of the GQL support: the one list the parser, binder and evaluator read.
 pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     scalar(Function::ElementId, &["element_id", "elementId"], 1, 1),
@@ -606,6 +621,15 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     scalar(Function::EndNode, &["endNode"], 1, 1),
     scalar(Function::Nodes, &["nodes"], 1, 1),
     scalar(Function::Relationships, &["relationships"], 1, 1),
+    // ----- stage 3f: percentiles (ISO PERCENTILE_CONT / PERCENTILE_DISC) -----
+    binary_aggregate(
+        Function::PercentileCont,
+        &["percentile_cont", "percentileCont"],
+    ),
+    binary_aggregate(
+        Function::PercentileDisc,
+        &["percentile_disc", "percentileDisc"],
+    ),
 ];
 
 /// A function name `gql()` knows but does not support (yet): the reason and the alternative
@@ -694,7 +718,7 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "nodes(p) and relationships(p) return the vertices and the edges of a path",
     ),
     not_yet_function(
-        &["percentileCont", "percentileDisc", "stDev", "stDevP"],
+        &["stDev", "stDevP"],
         "a statistical aggregate function",
         "collect the values with collect_list(x) and compute it after gql()",
     ),

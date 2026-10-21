@@ -116,6 +116,8 @@ pub(crate) fn call<En: Env>(
         | Function::Min
         | Function::Max
         | Function::CollectList
+        | Function::PercentileCont
+        | Function::PercentileDisc
         | Function::Cast
         | Function::ToInteger
         | Function::ToIntegerOrNull

@@ -147,7 +147,9 @@ pub(crate) fn family(function: Function) -> Family {
         | Function::Avg
         | Function::Min
         | Function::Max
-        | Function::CollectList => Family::Aggregate,
+        | Function::CollectList
+        | Function::PercentileCont
+        | Function::PercentileDisc => Family::Aggregate,
         Function::Cast => Family::Cast,
         Function::ToInteger => conversion(CastTarget::Integer, Mode::Lenient),
         Function::ToIntegerOrNull => conversion(CastTarget::Integer, Mode::OrNull),

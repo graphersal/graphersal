@@ -809,3 +809,60 @@ fn group_by_keys_must_be_the_items_without_an_aggregate() {
         assert!(message.contains(text), "{query}: {message}");
     }
 }
+
+// ----- percentiles (stage 3f) -----
+
+#[test]
+fn percentiles_on_the_modern_graph() {
+    let graph = TraversalGraph::tinkerpop_modern();
+    // Ages 27, 29, 32, 35 (hand-computed with Neo4j's definitions).
+    check(
+        &graph,
+        "MATCH (p:person) RETURN percentile_disc(p.age, 0.5) AS d, \
+         percentile_cont(p.age, 0.5) AS c, percentileDisc(p.age, 0) AS d0, \
+         percentileCont(p.age, 1) AS c1, percentileCont(p.age, 0.25) AS q",
+        &["d", "c", "d0", "c1", "q"],
+        &["d=29 c=30.5 d0=27 c1=35.0 q=28.5"],
+    );
+    // Grouped, NULL skipped (software has no age), a parameter as the percentile.
+    let rows = graph
+        .traversal()
+        .gql_with(
+            "MATCH (n) RETURN n.lang AS l, percentileCont(n.age, $p) AS c",
+            [("p", 0.5)],
+        )
+        .to_list()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        table(&rows, &["l", "c"], false),
+        ["l=java c=null", "l=null c=30.5"]
+    );
+    // DISTINCT, and an aggregating WITH before a filter.
+    check(
+        &graph,
+        "MATCH (p:person)-[:knows|created]->(x) WITH percentile_disc(DISTINCT p.age, 1.0) AS d \
+         WHERE d > 30 RETURN d",
+        &["d"],
+        &["d=35"],
+    );
+}
+
+#[test]
+fn percentiles_aggregate_merged_rows_like_unmerged_ones() {
+    let graph = bulk_fixture();
+    let graph = graph.read();
+    let query = "MATCH (:r)-[:a]->()-[:b]->()-[:c]->(u) RETURN percentileDisc(u.x, 0.5) AS d, \
+                 percentileCont(u.x, 0.4) AS c";
+    let run = |merge: bool| {
+        graph
+            .traversal()
+            .with("bulk.merge", merge)
+            .gql(query)
+            .to_list()
+            .unwrap_or_else(|e| panic!("{query}: {e}"))
+    };
+    let merged = table(&run(true), &["d", "c"], false);
+    assert_eq!(merged, table(&run(false), &["d", "c"], false));
+    // 1, 1, 1, 2.5, 2.5, 2.5: disc at ceil(3) - 1 = 2, cont at 0.4 * 5 = 2.
+    assert_eq!(merged, ["d=1 c=1.0"]);
+}

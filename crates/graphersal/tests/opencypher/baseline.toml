@@ -367,58 +367,6 @@ reason = "having executed: not yet: reading an element that the same CREATE crea
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["expressions/aggregation/Aggregation6.feature::[1] `percentileDisc()`::1"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[1] `percentileDisc()`::2"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[1] `percentileDisc()`::3"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[2] `percentileCont()`::1"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[2] `percentileCont()`::2"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[2] `percentileCont()`::3"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[3] `percentileCont()` failing on bad arguments::1"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[3] `percentileCont()` failing on bad arguments::2"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[3] `percentileCont()` failing on bad arguments::3"]
-class = "missing"
-reason = "not yet: percentileCont()"
-
-["expressions/aggregation/Aggregation6.feature::[4] `percentileDisc()` failing on bad arguments::1"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[4] `percentileDisc()` failing on bad arguments::2"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[4] `percentileDisc()` failing on bad arguments::3"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
-["expressions/aggregation/Aggregation6.feature::[5] `percentileDisc()` failing in more involved query"]
-class = "missing"
-reason = "not yet: percentileDisc()"
-
 ["expressions/boolean/Boolean1.feature::[8] Fail on conjunction of at least one non-booleans::10"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"

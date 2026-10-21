@@ -37,6 +37,7 @@ The mandatory core of a GQL query, by construct.
 | list trim `TRIM(list, n)` | supported | drops the last `n` items |
 | parameters `$name` | supported | values only, never text |
 | aggregate functions `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `COLLECT_LIST`, with `DISTINCT` | supported | implicit grouping by the items without an aggregate; Cypher `collect` alias |
+| binary set functions `PERCENTILE_CONT`, `PERCENTILE_DISC` | supported | value first, then the percentile (0.0 to 1.0, `22003` outside); Cypher `percentileCont` / `percentileDisc` aliases (stage 3f) |
 | `OPTIONAL MATCH` | supported | also as the first clause |
 | `EXISTS` predicate: `EXISTS { MATCH ... }`, `EXISTS { <pattern> }`, `EXISTS ( ... )` *(provisional: whether the standard makes it core or an optional feature, and its identifier, are still to be checked)* | supported | anywhere an expression stands, nested too; TRUE or FALSE, never `NULL`; the body is a pattern, `MATCH` clauses, or a whole query ending in `RETURN` ([EXISTS](subset.md#exists-and-pattern-predicates)); Cypher pattern predicates as [aliases](aliases.md) |
 | Cypher `WITH` | supported | not GQL; accepted with Cypher's meaning ([Cypher Aliases](aliases.md#the-cypher-clause-with)) |

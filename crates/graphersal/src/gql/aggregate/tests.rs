@@ -525,3 +525,93 @@ fn path_values() {
         ElementProperty::from(vec![1i64, 2, 3])
     );
 }
+
+// ----- percentiles (stage 3f) -----
+
+/// A percentile aggregate at `p` over `(value, bulk)` rows.
+fn percentile_of(
+    function: Aggregate,
+    distinct: bool,
+    p: Value<El>,
+    rows: &[(Value<El>, u64)],
+) -> Result<Value<El>, EvalError> {
+    let mut accumulator = Accumulator::new(function, distinct, span());
+    for (value, bulk) in rows {
+        accumulator.percentile(&p)?;
+        accumulator.add(value.clone(), *bulk, &Row)?;
+    }
+    accumulator.finish()
+}
+
+#[test]
+fn percentiles_follow_neo4j_definitions() {
+    use Aggregate::{PercentileCont as Cont, PercentileDisc as Disc};
+    let rows: Vec<_> = [10.0, 30.0, 20.0]
+        .into_iter()
+        .map(|x| one(float(x)))
+        .collect();
+    let at = |function, p: f64| percentile_of(function, false, float(p), &rows).ok();
+    // The openCypher TCK `Aggregation6` [1] / [2].
+    for (p, expected) in [(0.0, 10.0), (0.5, 20.0), (1.0, 30.0)] {
+        assert_eq!(at(Disc, p), Some(float(expected)), "disc {p}");
+        assert_eq!(at(Cont, p), Some(float(expected)), "cont {p}");
+    }
+    assert_eq!(at(Disc, 0.4), Some(float(20.0)));
+    assert_eq!(at(Cont, 0.25), Some(float(15.0)));
+    // Integers: disc keeps the type, cont is a float; bulk counts as repeated rows.
+    let ints = [(int(27), 1), (int(35), 1), (int(29), 2), (Value::Null, 3)];
+    assert_eq!(
+        percentile_of(Disc, false, float(0.5), &ints).ok(),
+        Some(int(29))
+    );
+    assert_eq!(
+        percentile_of(Cont, false, float(0.5), &ints).ok(),
+        Some(float(29.0))
+    );
+    assert_eq!(
+        percentile_of(Disc, false, int(1), &ints).ok(),
+        Some(int(35))
+    );
+    // DISTINCT counts each value once: 27, 29, 35.
+    assert_eq!(
+        percentile_of(Cont, true, float(0.75), &ints).ok(),
+        Some(float(32.0))
+    );
+    // No numbers: NULL.
+    assert_eq!(
+        percentile_of(Cont, false, float(0.5), &[]).ok(),
+        Some(Value::Null)
+    );
+    assert_eq!(
+        percentile_of(Disc, false, float(0.5), &[one(Value::Null)]).ok(),
+        Some(Value::Null)
+    );
+}
+
+#[test]
+fn percentile_arguments_are_checked() {
+    use Aggregate::{PercentileCont as Cont, PercentileDisc as Disc};
+    let rows = [one(int(1))];
+    let status = |function, p: Value<El>, rows: &[(Value<El>, u64)]| {
+        percentile_of(function, false, p, rows)
+            .err()
+            .map(|e| e.gqlstatus)
+    };
+    // The openCypher TCK `Aggregation6` [3] / [4]: NumberOutOfRange.
+    for p in [int(1000), int(-1), float(1.1)] {
+        assert_eq!(status(Cont, p.clone(), &rows), Some("22003"));
+        assert_eq!(status(Disc, p, &rows), Some("22003"));
+    }
+    assert_eq!(status(Cont, string("0.5"), &rows), Some("22G03"));
+    assert_eq!(status(Cont, Value::Null, &rows), Some("22G03"));
+    assert_eq!(status(Disc, float(0.5), &[one(string("a"))]), Some("22G03"));
+    // NaN is no percentile.
+    assert_eq!(status(Cont, float(f64::NAN), &rows), Some("22003"));
+    // Compiling: two arguments, the second compiled apart.
+    let compiled = match aggregating("percentile_cont(k, 0.5), percentileDisc(k, 0.1)") {
+        Ok(compiled) => compiled,
+        Err(e) => panic!("{e:?}"),
+    };
+    assert!(compiled.calls.iter().all(|call| call.percentile.is_some()));
+    assert_eq!(compiled.calls[1].aggregate, Disc);
+}
