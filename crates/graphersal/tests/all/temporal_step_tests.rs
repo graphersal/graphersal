@@ -911,3 +911,35 @@ fn script_values_give_their_canonical_text() {
         "true"
     );
 }
+
+/// The GQL text forms (3g: Neo4j's `toString`, the extended ISO parser) leave the script's
+/// text untouched: zero seconds and trailing fraction zeros are still written, a negative
+/// duration keeps one leading sign, and the script constructors read only their own forms.
+#[test]
+fn the_gql_text_forms_leave_the_script_text_unchanged() {
+    assert_eq!(run(r#"time("12:00")"#), r#"time("12:00:00")"#);
+    assert_eq!(
+        run(r#"localdatetime("1984-10-11T12:31")"#),
+        r#"localdatetime("1984-10-11T12:31:00")"#
+    );
+    assert_eq!(
+        run(r#"duration("PT23H59M59.9S")"#),
+        r#"duration("PT23H59M59.900S")"#
+    );
+    assert_eq!(
+        run(r#"duration("PT-1M-0.001S").as_string()"#),
+        r#""-PT1M0.001S""#
+    );
+    assert_eq!(
+        run(r#"g.inject(time("12:00")).as_string().next()"#),
+        r#""12:00:00""#
+    );
+    for gql_only in [
+        r#"date("2015W302")"#,
+        r#"time("2140")"#,
+        r#"duration("P0.75M")"#,
+    ] {
+        let err = fails(gql_only);
+        assert!(err.contains("cannot parse"), "{gql_only}: {err}");
+    }
+}

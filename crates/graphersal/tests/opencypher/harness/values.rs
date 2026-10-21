@@ -52,8 +52,14 @@ pub enum TckValue {
     Relationship(TckRelationship),
     /// A path.
     Path(TckPath),
-    /// A result value without a TCK notation (a UUID, temporal, vector or a map with non-string
-    /// keys), kept as diagnostic text: it never equals an expected value.
+    /// A temporal result value, as its text in the TCK's form (`compare::temporal_text`: the
+    /// `java.time` / Neo4j `toString`). Never produced by [`parse_value`]: the TCK writes
+    /// temporals as strings, and an expected string matches it by exact text, so offsets are
+    /// compared too.
+    Temporal(String),
+    /// A result value without a TCK notation (a UUID, vector, a temporal value the TCK form
+    /// cannot write, or a map with non-string keys), kept as diagnostic text: it never equals an
+    /// expected value.
     Opaque(String),
 }
 
@@ -114,7 +120,7 @@ pub fn parse_value(text: &str) -> Result<TckValue, String> {
 }
 
 /// Converts a parameter value to an `ElementProperty`: lists become arrays, maps objects;
-/// nodes, relationships, paths (and opaque values) are an error.
+/// nodes, relationships, paths (and temporal or opaque values) are an error.
 pub fn to_element_property(value: &TckValue) -> Result<ElementProperty, String> {
     Ok(match value {
         TckValue::Null => ElementProperty::Null,
@@ -140,7 +146,9 @@ pub fn to_element_property(value: &TckValue) -> Result<ElementProperty, String> 
                 "a graph element cannot be a parameter value: {value}"
             ));
         }
-        TckValue::Opaque(text) => return Err(format!("not a parameter value: {text}")),
+        TckValue::Temporal(text) | TckValue::Opaque(text) => {
+            return Err(format!("not a parameter value: {text}"));
+        }
     })
 }
 
@@ -590,6 +598,7 @@ impl fmt::Display for TckValue {
                 }
                 f.write_str(">")
             }
+            TckValue::Temporal(text) => write!(f, "'{text}'"),
             TckValue::Opaque(text) => write!(f, "<opaque {text}>"),
         }
     }

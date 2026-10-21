@@ -12,6 +12,7 @@ Agent guidance for value types, tokens, temporal values, vectors, embedders and 
 ## Temporal (`temporal/`, book "Dates and Times" `book/src/dates/`, facade `graphersal::temporal`)
 
 `Date`/`LocalDateTime`/`DateTime`/`Time`/`Duration` as `ElementProperty::Temporal(Temporal)`: plain integers, `Copy`, 1 µs, years -9999..9999; a `DateTime` keeps its offset but compares by instant; a `Duration` (months/days/µs) compares field by field. IANA zones via `jiff` (bundled tzdb, same everywhere incl. wasm32; no `jiff` type in the API). `dt.rs` = the `DT` token. DSL `as_date`, `date_add`, `date_diff`, `age` (PostgreSQL), `date_trunc`, `date_part`, `at_zone`, `as_local`, globals `now()` (evaluation start, pinned by `script::pin_now`) and `today([zone])`. A string never becomes temporal implicitly: only by a schema `format`, a type tag or an explicit step.
+GQL-only helpers (Neo4j semantics the openCypher TCK measures; never called by the date steps, Rhai text unchanged): `parse::parse_extended` (every ISO 8601 form: basic, week, ordinal, quarter, short times, fractions on any duration unit, the alternative duration form; reports `sub_micro` / `zone_name` instead of failing), `arith::{cascade, scale_duration}` over `Amount` (exact nano-units, month = 30.436875 days), `arith::between_neo4j`, `format::neo4j` (the `toString` text), `civil::{from_iso_week, week_year_start, from_ordinal, from_quarter}`.
 
 ## Vectors (`vector/`, book `users_guide/vectors.md`, facade `graphersal::vector`)
 

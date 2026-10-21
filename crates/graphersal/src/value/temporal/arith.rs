@@ -296,7 +296,7 @@ pub(crate) fn diff_millis(a: Temporal, b: Temporal) -> TemporalResult<i64> {
 }
 
 /// Whole calendar days from `from` to `to` (truncated toward zero by the time of day).
-fn days_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
+pub(crate) fn days_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
     let mut days = to.date().days as i64 - from.date().days as i64;
     let (from_time, to_time) = (from.time().micros, to.time().micros);
     if days > 0 && to_time < from_time {
@@ -311,7 +311,7 @@ fn days_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
 /// `ChronoUnit.MONTHS.between` counts them: the month count of the dates, one less when the
 /// day of the month (and then the time of day) of `to` has not reached that of `from` (so
 /// January 31 to February 28 is 0 months, February 28 to March 31 is 1).
-fn months_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
+pub(crate) fn months_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
     let from_day = from.date().days;
     let mut end = to.date().days;
     let (from_time, to_time) = (from.time().micros, to.time().micros);
@@ -681,4 +681,234 @@ fn duration_part(v: Duration, unit: DT) -> Option<Number> {
             None
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Helpers of the GQL temporal functions (the semantics the openCypher TCK measures, Neo4j's;
+// used by GQL only, never by the date steps)
+// ---------------------------------------------------------------------------------------------
+
+/// Nanoseconds in a second.
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+/// Nanoseconds in a day of 24 hours.
+const NANOS_PER_DAY: i128 = 86_400 * NANOS_PER_SECOND;
+/// Nanoseconds in the average Gregorian month, 30.436875 days (365.2425 / 12), which a
+/// fraction of a month is worth (`duration({months: 0.75})` = `P22DT19H51M49.5S`).
+const NANOS_PER_AVERAGE_MONTH: i128 = 2_629_746 * NANOS_PER_SECOND;
+
+/// An exact decimal amount of one duration unit with up to nine fraction digits (`1.5` days,
+/// `0.75` months), held as the amount times 10^9 ("nano-units"): every amount the GQL forms
+/// take is exact, so the fraction cascade ([`cascade`]) needs no floating point.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Amount(i128);
+
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+impl Amount {
+    /// Nano-units in one unit.
+    pub(crate) const SCALE: i128 = 1_000_000_000;
+
+    /// A whole number of units.
+    pub(crate) fn from_i64(n: i64) -> Amount {
+        Amount(n as i128 * Self::SCALE)
+    }
+
+    /// A floating-point number of units, rounded to nine fraction digits (`0.75` stays exactly
+    /// `0.75`); `None` for a non-finite value or one beyond ±2^63.
+    pub(crate) fn from_f64(x: f64) -> Option<Amount> {
+        if !x.is_finite() || x.abs() >= 9.2e18 {
+            return None;
+        }
+        let whole = x.trunc();
+        // `x - whole` is exact; scaling the fraction keeps its decimal digits.
+        let fraction = ((x - whole) * 1e9).round();
+        Some(Amount(whole as i128 * Self::SCALE + fraction as i128))
+    }
+
+    /// An amount given in nano-units (the amount times 10^9).
+    pub(crate) fn from_nano_units(n: i128) -> Amount {
+        Amount(n)
+    }
+
+    /// The amount times 10^9.
+    pub(crate) fn nano_units(self) -> i128 {
+        self.0
+    }
+
+    /// Whether the amount is a whole number.
+    pub(crate) fn is_whole(self) -> bool {
+        self.0 % Self::SCALE == 0
+    }
+}
+
+/// The components of a duration as the constructor map and the unit text give them (each
+/// possibly fractional and of either sign), summed by [`cascade`].
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DurationParts {
+    /// Years (12 months each).
+    pub(crate) years: Amount,
+    /// Months.
+    pub(crate) months: Amount,
+    /// Weeks (7 days each).
+    pub(crate) weeks: Amount,
+    /// Days.
+    pub(crate) days: Amount,
+    /// Hours.
+    pub(crate) hours: Amount,
+    /// Minutes.
+    pub(crate) minutes: Amount,
+    /// Seconds.
+    pub(crate) seconds: Amount,
+    /// Milliseconds.
+    pub(crate) milliseconds: Amount,
+    /// Microseconds.
+    pub(crate) microseconds: Amount,
+    /// Nanoseconds.
+    pub(crate) nanoseconds: Amount,
+}
+
+/// A duration computed by [`cascade`] or [`scale_duration`], with whether non-zero digits below
+/// the microsecond were cut (truncated toward zero): our durations hold microseconds, and the
+/// GQL layer answers such a value with "not yet" rather than cut it silently.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cascaded {
+    /// The duration (microseconds truncated toward zero).
+    pub(crate) duration: Duration,
+    /// Whether a non-zero part below the microsecond was cut.
+    pub(crate) sub_micro: bool,
+}
+
+/// `a * b` on `i128`, the range error on overflow.
+fn mul(a: i128, b: i128) -> TemporalResult<i128> {
+    a.checked_mul(b).ok_or_else(out_of_range)
+}
+
+/// `a + b` on `i128`, the range error on overflow.
+fn plus(a: i128, b: i128) -> TemporalResult<i128> {
+    a.checked_add(b).ok_or_else(out_of_range)
+}
+
+/// The fraction cascade over `months / den` months, `days / den` days and `nanos / den`
+/// nanoseconds (Neo4j's `DurationValue.approximate`, exact here): the whole months stay months,
+/// a fraction of a month is worth [`NANOS_PER_AVERAGE_MONTH`] and joins the days, the whole
+/// days stay days, a fraction of a day joins the time part, and the time part is truncated
+/// toward zero to whole nanoseconds. Seconds are never folded into days (`PT49H` stays).
+fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalResult<Cascaded> {
+    if den == 0 {
+        return Err(out_of_range());
+    }
+    let (months, days, nanos, den) = if den < 0 {
+        (-months, -days, -nanos, -den)
+    } else {
+        (months, days, nanos, den)
+    };
+    let whole_months = months / den;
+    let month_rest = months - whole_months * den;
+    // Nanoseconds times `den`.
+    let day_total = plus(
+        mul(days, NANOS_PER_DAY)?,
+        mul(month_rest, NANOS_PER_AVERAGE_MONTH)?,
+    )?;
+    let day_unit = mul(NANOS_PER_DAY, den)?;
+    let whole_days = day_total / day_unit;
+    let rest = plus(day_total - whole_days * day_unit, nanos)?;
+    let total_nanos = rest / den;
+    let duration = Duration::new(
+        i32::try_from(whole_months).map_err(|_| out_of_range())?,
+        i32::try_from(whole_days).map_err(|_| out_of_range())?,
+        i64::try_from(total_nanos / 1000).map_err(|_| out_of_range())?,
+    );
+    Ok(Cascaded {
+        duration,
+        sub_micro: total_nanos % 1000 != 0,
+    })
+}
+
+/// The duration of the given components (the GQL `duration({..})` map and the unit text
+/// `P1.5D`), with Neo4j's fraction cascade: years and months sum to months, weeks and days to
+/// days, the rest to nanoseconds; a fraction of a month becomes days and time at 30.436875
+/// days a month, a fraction of a day becomes time (`P0.75M` = `P22DT19H51M49.5S`, `P1.5D` =
+/// `P1DT12H`, `PT1.5M` = `PT1M30S`). A result outside the fields is
+/// [`TemporalError::OutOfRange`].
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn cascade(parts: &DurationParts) -> TemporalResult<Cascaded> {
+    let months = plus(mul(parts.years.0, 12)?, parts.months.0)?;
+    let days = plus(mul(parts.weeks.0, 7)?, parts.days.0)?;
+    // Nanoseconds times 10^9.
+    let mut nanos = mul(mul(parts.hours.0, 3600)?, NANOS_PER_SECOND)?;
+    nanos = plus(nanos, mul(mul(parts.minutes.0, 60)?, NANOS_PER_SECOND)?)?;
+    nanos = plus(nanos, mul(parts.seconds.0, NANOS_PER_SECOND)?)?;
+    nanos = plus(nanos, mul(parts.milliseconds.0, 1_000_000)?)?;
+    nanos = plus(nanos, mul(parts.microseconds.0, 1000)?)?;
+    nanos = plus(nanos, parts.nanoseconds.0)?;
+    cascade_ratio(months, days, nanos, Amount::SCALE)
+}
+
+/// `duration * factor` (`divide` false) or `duration / factor` (`divide` true), Neo4j's
+/// `DurationValue.mul` / `div`: each field scaled, then the fraction cascade of [`cascade`]
+/// (`P1M * 0.5` = `P15DT5H14M33S`; a whole factor scales exactly). A zero divisor or a result
+/// outside the fields is [`TemporalError::OutOfRange`] (the caller reports a zero divisor
+/// first).
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn scale_duration(
+    duration: Duration,
+    factor: Amount,
+    divide: bool,
+) -> TemporalResult<Cascaded> {
+    let (num, den) = if divide {
+        (Amount::SCALE, factor.0)
+    } else {
+        (factor.0, Amount::SCALE)
+    };
+    cascade_ratio(
+        mul(duration.months as i128, num)?,
+        mul(duration.days as i128, num)?,
+        mul(mul(duration.micros as i128, 1000)?, num)?,
+        den,
+    )
+}
+
+/// `duration.between(from, to)` as Neo4j computes it (`java.time` `until`): the whole months
+/// from `from` to `to` (a month counts once the day of the month and the time of day are
+/// reached, [`months_between`]), then the whole days from `from` plus those months, then the
+/// rest of the time. The two values are of one type (the GQL layer aligns mixed operands
+/// first):
+///
+/// - two `date`s: months and days;
+/// - two `localdatetime`s: months, days and the time;
+/// - two `datetime`s: as two wall-clock values after `to` is moved to `from`'s offset (so the
+///   time part is the elapsed time);
+/// - two `time`s: the time between them within the day (negative when `to` is earlier).
+///
+/// Unlike [`age`] (PostgreSQL), every part has the sign of the direction and the borrowing
+/// follows `java.time`: `2018-01-01T10:00:00.2` to `2018-01-02T10:00:00.1` is
+/// `PT23H59M59.9S`.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn between_neo4j(from: Temporal, to: Temporal) -> TemporalResult<Duration> {
+    let kind = same_kind(from, to, "duration.between")?;
+    let (from, to) = match (from, to) {
+        (Temporal::Time(a), Temporal::Time(b)) => {
+            return Ok(Duration::from_micros(b.micros - a.micros));
+        }
+        (Temporal::Date(a), Temporal::Date(b)) => (
+            LocalDateTime::new(a, Time { micros: 0 }),
+            LocalDateTime::new(b, Time { micros: 0 }),
+        ),
+        (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => (a, b),
+        (Temporal::DateTime(a), Temporal::DateTime(b)) => {
+            (a.local(), b.with_offset(a.offset_seconds())?.local())
+        }
+        _ => return Err(TemporalError::unsupported("duration.between", kind)),
+    };
+    let months = months_between(from, to);
+    let after_months = local_add_months(from, months)?;
+    let days = days_between(after_months, to);
+    let after_days = local_add_days(after_months, days)?;
+    Ok(Duration::new(
+        to_i32(months)?,
+        to_i32(days)?,
+        to.micros() - after_days.micros(),
+    ))
 }
