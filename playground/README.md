@@ -110,7 +110,9 @@ playground/
     store-model.js         the Store menu's model: targets, actions, dialog texts, attic (pure, Node-tested)
     store-calendar.js      the Store menu's history calendar: marks/snapshots grouped by local day once,
                            month grid, colour buckets, keyboard moves, the menu's newest five (pure, Node-tested)
-    tabs.js                query tabs: pure state logic (no Vue/DOM), wrapped by store.js; tab kinds 'query' | 'ai'
+    tabs.js                query tabs: pure state logic (no Vue/DOM), wrapped by store.js; tab kinds 'query' | 'ai',
+                           a query tab's language 'rhai' | 'gql' with its Parameters text
+    gql-tab.js             GQL query tabs: switch rewrite, Parameters JSON reader, run text, error span (pure, Node-tested)
     ai-chat.js             the AI Chat tab: chat state, event merging, /commands, one controller per tab (pure, Node-tested)
     markdown.js            the chat's safe Markdown subset as a plain tree, GFM tables, table -> Markdown (pure, Node-tested)
     config.js              external links; re-exports examples.json
@@ -159,6 +161,11 @@ playground/
       tooltips.js          completion tooltips fixed-position in the body (or the enclosing modal dialog)
       tooltip-parent.js    picks that parent (pure, Node-tested)
       editor-status.js     the Query panel's status bar texts: run status, cursor position (pure, Node-tested)
+      gql-tokens.js  gql-language.js  gql-wrap.js   GQL tokenizer, highlighting, "Wrap as GQL" (pure parts Node-tested)
+      gql-complete.js      what to complete at a position of GQL text, variables, schema keys (pure, Node-tested)
+      gql-completion.js    the GQL completion source (keywords, functions, labels, keys, variables, $params)
+      gql-functions.js     the GQL functions with a short text; checked against the engine's table (Node-tested)
+      param-completion.js  a saved query's declared parameters in its body's completion (pure, Node-tested)
     components/            Vue components (template strings, no SFCs)
       start-page.js  workspace.js  panel-frame.js  query-editor.js  query-tabs.js
       results-panel.js  statistics-view.js  data-table.js  error-view.js  graph-panel.js  graph-canvas.js
@@ -198,6 +205,46 @@ functions on `{tabs, activeId}`, tested under Node), and `store.js` wraps it in 
 - **Extras:** duplicate tab, close other tabs, run all tabs (left to right, each into its own tab;
   a Stop ends the series), rename by double-click (or F2 on a focused tab), reorder by drag,
   middle-click closes.
+
+### GQL query tabs
+
+A query tab has a language, Rhai (the default) or GQL (`tab.language`, with `tab.params`, the JSON
+text of its Parameters field; both persist with the tab, a Rhai tab writes neither). It is chosen
+explicitly, never detected: the "+" menu's **GQL query** (`newGqlTab`) or the Rhai / GQL switch in
+the Query panel's header (`setTabLanguage`). The pure logic is `js/gql-tab.js`:
+
+- **Switch** (`switchTabLanguage`, like the saved-query editor's `switchDraftLanguage`): a Rhai
+  tab that is exactly one `g.gql(<literal>[, #{literals}])` call (`parseGqlCall`) becomes its query
+  and Parameters; GQL -> Rhai writes `wrapGql(query)` plus the map; other text is kept. A
+  Parameters field that is no JSON map refuses GQL -> Rhai with its fault.
+- **Run** (`store.js` `run`): the tab runs `gqlCallText(query, params)`, i.e. `g.gql("<query>",
+  #{..})` built exactly like `graphersal_session::queries::gql_call_text` (a strict JSON reader that
+  keeps integers and floats apart, `()` for null, quoted map keys where needed). The error's
+  `position` is replaced by the GQL span (`gqlErrorSpan` reads `GQL ... at line L, column C` and the
+  caret width from the diagnostic), moved into the editor by the run's offset; the editor underlines
+  it (`cm-gql-error`, `spanRange`) until the text changes. History entries carry `language` and
+  `params`; Profile, Stop, Run selection, the result refresh and "Run all tabs" need nothing else.
+- **Parameters field** (`parseParams`, `paramsErrorText`, `withQueryParams` for "+ Add
+  $parameters": every `$name` the query reads that the map lacks, as `null`).
+- **Completion** (`js/editor/gql-complete.js` pure, `js/editor/gql-completion.js` the CodeMirror
+  source): the context at the cursor (label after `:` with vertex / edge from the bracket, property
+  after `var.` with the variable's labels, a pattern's property-map key, `$param`, or a word with the
+  keywords of its clause, `GQL_CLAUSE_KEYWORDS`), the variables the text binds (`gqlVariables`),
+  the functions of `js/editor/gql-functions.js` (one line of text each; the set is the engine's
+  `FUNCTIONS` / `list_function` table in `crates/graphersal/src/gql/parser.rs`, and
+  `tests/gql-complete.test.mjs` reads that Rust table and fails on a missing or extra name: add a
+  line there when the engine gains a function), and the graph's vocabulary (`store.js`
+  `gqlVocabulary`: labels from `statistics()`, keys by label from the stored schema or, without
+  one, `inferSchema()`; loaded on first use and again after a data change). The Parameters field's
+  keys come first after `$`. The saved-query editor uses the same source for a GQL body (its
+  declared parameters after `$`) and `js/editor/param-completion.js` for a Rhai body (the declared
+  names with their type, above the DSL's globals); both read the parameter table on every request.
+- **Examples**: an example may carry `lang: "gql"` and `params` (a JSON map); it opens as a GQL tab.
+  The Rust tests that run every example (`graphersal-wasm`'s `playground_*examples*`) and the MCP
+  examples resource turn such an example into its `g.gql(..)` call with `gql_call_text`.
+- **Links**: `lang=gql` (and `params=<JSON>`) open a GQL tab (`js/link.js`); a link without `lang`
+  is a Rhai script as before. **Save as query…** of a GQL tab hands `{language: 'gql', query,
+  params}` to the saved-query editor (`draftFromGql`).
 
 ### AI Chat tabs (dev server with `--ai`, EXPERIMENTAL)
 

@@ -93,7 +93,7 @@ the walk from it.
 | Gremlin DSL (Rhai) | `g.gql(query)` and `g.gql(query, #{name: value})`; see [Writing GQL in Rhai Strings](rhai_strings.md) |
 | Command line | `graphersal -e 'g.gql("MATCH (p:person) RETURN p.name AS name")'`, or in the REPL |
 | Python | through a script: `graph.query('g.gql("...", #{...})', params={...})` |
-| Playground | type `g.gql("...")` in the query editor; the examples list has a GQL group |
+| Playground | a **GQL query** tab (the **+** menu, or the **Rhai / GQL** switch): plain GQL with completion and a Parameters field; or `g.gql("...")` in a Rhai tab; the examples list has a GQL group ([Web Playground](../users_guide/web_playground.md#what-it-does)) |
 | Saved queries | `g.define_query(#{name: "older", language: "gql", params: #{min: "integer"}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name"})`, then `g.query("older", #{min: 30})` from any front end ([Saved queries in GQL](../users_guide/saved_queries.md#saved-queries-in-gql)) |
 | MCP (dev server) | the tool `gql` {`query`, `params`, `profile`, `max_rows`}: the query as plain text, no Rhai string around it; it writes like the `query` tool, and a server started with `--mcp-read-only` refuses its writes |
 
@@ -116,6 +116,22 @@ assert_eq!(ages, [ElementProperty::from(29)]);
 ```
 
 A writing query runs on the writing source, `traversal_mut()` ([In Rust](writes.md#in-rust)).
+
+In the playground, a GQL tab takes the query as it is, without a Rhai string around it, and its
+parameters as a JSON map in the **Parameters** field under the editor:
+
+```text
+MATCH (p:person) WHERE p.age > $min
+RETURN p.name AS name ORDER BY name
+
+Parameters: {"min": 30}
+```
+
+The tab runs it as `g.gql("MATCH (p:person) WHERE p.age > $min\nRETURN p.name AS name ORDER BY name", #{min: 30})`:
+a JSON integer stays an integer, `30.0` is a float, `null` is `NULL`, lists and maps stay lists and
+maps. An error is underlined where the engine reports it, with its GQLSTATUS in the message. To
+continue a GQL result with Gremlin steps (`.select("p").out()`), switch the tab to Rhai: the query
+and its parameters become that `g.gql(..)` call.
 
 The feature `gql` is off by default in the `graphersal` crate ([Library Features](../users_guide/installation.md));
 the command line, the playground, the dev server and the Python package have it on.
