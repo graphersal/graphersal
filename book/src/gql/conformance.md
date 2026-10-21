@@ -83,12 +83,12 @@ The mandatory core of a GQL query, by construct.
 | G114 | `SAME` predicate *(provisional)* | not yet | |
 | G115 | `PROPERTY_EXISTS` predicate *(provisional)* | not yet | `x.key IS NOT NULL` tests a property |
 | GA03 | explicit ordering of nulls | not yet | `NULLS FIRST` / `NULLS LAST` |
-| GA04 | universal comparison *(provisional)* | no | comparing values of different kinds is `NULL` |
+| GA04 | universal comparison *(provisional)* | partial | `=` / `<>` between values of different kinds are FALSE / TRUE, the orderings `NULL` (Neo4j's reading, see [Differences from the standard](#differences-from-the-standard)); there is no total order across kinds outside `ORDER BY` |
 | GA05 | cast specification | partial | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` and their synonyms (`INT`, `BIGINT`, `DOUBLE`, `VARCHAR`, `BOOL`, ...); the other target types (`DATE`, `LIST<..>`, `DECIMAL`, ...) not yet; strict: unconvertible text is `22018` |
 | GA07 | ordering by discarded binding variables *(provisional)* | supported | `ORDER BY` may read variables that `RETURN` does not return (not after `RETURN DISTINCT`) |
 | GB02 | double minus sign comments | supported | `-- ...`, with the edge rule of [Writing GQL in Rhai Strings](rhai_strings.md#comments) |
 | GB03 | double solidus comments | supported | `// ...` |
-| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`), `SET`, `REMOVE`, `DELETE`; Cypher's `MERGE` (no ISO counterpart) as a [compatibility form](aliases.md#merge) ([Writing with GQL](writes.md)) |
+| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`), `SET`, `REMOVE`, `DELETE`; Cypher's `MERGE` (no ISO counterpart) as a [compatibility form](aliases.md#merge) ([Writing with GQL](writes.md)); the Cypher forms pass every in-scope case of the openCypher TCK's write clauses ([TCK Compliance](tck_compliance.md)) |
 | GD02 | graph label set changes *(provisional)* | supported | `SET n:A` / `SET n IS A` and `REMOVE n:A` add and remove node labels; an edge's single label is not changed by them ([Writing with GQL](writes.md#set)) |
 | GD03 | `DELETE` statement: subquery support *(provisional)* | supported | a `DELETE` item may hold a subquery, as in `DETACH DELETE COLLECT { MATCH (s)<-[e]-() RETURN e }`; a `CALL { }` body may end with a `DELETE` ([Writing with GQL](writes.md#delete)) |
 | GD04 | `DELETE` statement: simple expression support *(provisional)* | supported | a `DELETE` item is an expression: a variable, a path, a list (`collect(n)`), a map member, a function result; `NULL` is skipped, another value is `42002` / `22G03` ([Semantics](semantics.md#delete)) |
@@ -147,16 +147,16 @@ where it has one):
 | order of the rows of a `UNION` | unspecified, also when the operands are sorted: sort after `NEXT` |
 | a `CALL` body that imports nothing | still run once per incoming row; its rows are not cached |
 | the `RETURN` items of a projecting `COUNT { }` body | not evaluated: the rows are counted, an expression that would fail raises no error (a deviation, [Semantics](semantics.md#count-and-collect)) |
-| a comprehension variable named like another variable of the query | an error (`42002`), also for a name no longer in scope (stricter than Neo4j) |
+| a comprehension variable named like another variable of the query | an error (`42002`) for a name in scope or one a `LET` / `WITH` value in scope still reads (stricter than Neo4j only there); a name no longer in scope may be used again ([Semantics](semantics.md#map-projections-and-comprehensions)) |
 | `DISTINCT`, grouping keys, `DISTINCT` in aggregates | GQL equality: `1` and `1.0` are one value, `NULL`s form one group |
-| aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values; provisional) |
+| aggregates of no rows (no grouping keys) | one row: `count` 0, `sum` 0, `collect_list` `[]`, `avg` / `min` / `max` `NULL` (Neo4j's values, which the openCypher TCK confirms; the ISO text is still to be checked) |
 | `min` / `max` over values of different kinds | the `ORDER BY` order, never an error |
 | `sum` of integers | an integer; overflow is an error (`22003`) |
 | unbounded quantifiers | no own limit: trail ends them; `repeat.max_loops` and `traversal.max_traversers` are errors, never a shortened result (quantified edges and quantified path patterns alike) |
 | outer nodes next to a quantified path pattern | merged with the body's first node of the first iteration and last node of the last iteration (Neo4j Cypher 25's reading) |
 | order of a group variable's list | the iterations in the order the text reads, also when the plan walks the pattern from its far end |
 | `WITH ... LIMIT ... WHERE` | the `WHERE` filters after `ORDER BY` / `OFFSET` / `LIMIT` (Cypher's order; provisional) |
-| name of an unaliased column | the expression as written (provisional) |
+| name of an unaliased column | the expression as written (Neo4j's names, such as `count(*)`, which the openCypher TCK confirms; the ISO text is still to be checked) |
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |
 | integer division | truncates toward zero; `%` takes the sign of the dividend |
 | integer overflow | an error (`22003`), never a wrap |
@@ -183,3 +183,5 @@ follows Neo4j in these places (user decision, stage 3f):
 | `<` `<=` `>` `>=` on two lists | not comparable | lexicographic, three-valued |
 | a float divided by zero | `22012` | IEEE 754: `Infinity`, `-Infinity` or `NaN`; an integer divided by zero stays `22012` |
 | `NaN` in a comparison | (no `NaN` arises: every division by zero is `22012`) | never equal (`NaN = NaN` FALSE), every ordering against a number FALSE |
+
+The deliberate differences from Neo4j are listed on [Semantics](semantics.md#differences-from-neo4j).

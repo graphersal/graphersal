@@ -733,8 +733,9 @@ g.gql("WITH 0.0 / 0.0 AS n RETURN n = n AS a, n <> n AS b, n > 1 AS c, n > 'a' A
 g.gql("RETURN 1 / 0 AS x").to_list()   // error: division by zero (22012)
 ```
 
-(JSON has no `NaN` or infinity, so the playground and the dev server cannot show such a value
-itself; `toString(x)` shows it as text.)
+The playground and the dev server show such a value as `NaN`, `Infinity` or `-Infinity`; JSON
+output writes it as a GraphSON typed double
+([Displaying Results](../users_guide/displaying_results.md)).
 
 These rules follow Neo4j and the openCypher TCK, where ISO GQL calls a comparison of different
 kinds "not comparable" and raises `22012` for a division by zero of every numeric type
@@ -1121,3 +1122,29 @@ g.gql("MATCH (n) WHERE element_id(n) = 1 RETURN n.name AS n").to_list()   // no 
 - `n.k` reads a property. A [jpath key](../users_guide/jpath_keys.md) or a map-valued property
   reads as a map, and `m.key` reads into it.
 - `NULL` from a missing property and a stored `null` are the same value.
+
+## Differences from Neo4j
+
+`gql()` accepts Neo4j's Cypher spellings as [compatibility forms](aliases.md) with Neo4j's
+meaning, measured by the openCypher TCK ([TCK Compliance](tck_compliance.md): no supported
+construct behaves differently from the kit, except where a case is excluded below). Each of
+these differences is a deliberate decision, described in its section:
+
+| Neo4j | `gql()` | Where |
+|---|---|---|
+| a negative or non-integer `$parameter` of `SKIP` / `LIMIT` is a `SyntaxError` at runtime | refused when the query is compiled (`22G02` / `22G03`), before any row: parameters are bound then (TCK cases excluded) | [Parameters are bound when the query is compiled](#parameters-are-bound-when-the-query-is-compiled) |
+| more type errors at compile time, from its static type system | refused before the run only where the kind is certain from the query text; any other wrong kind fails when a row reaches it | [Static kind checks](#static-kind-checks), [Type errors surface at evaluation time](#type-errors-surface-at-evaluation-time) |
+| a property value is a scalar or a list of scalars of one kind | maps, mixed and nested lists are stored as given (a TCK case excluded) | [Writes](#writes) |
+| `SET n = NULL` removes every property | an error (`22004`), also for `SET n += NULL` | [Writes](#writes) |
+| a plain `DELETE` of a node with edges is checked when the transaction commits | checked per clause (`G1001`) | [Writes](#writes), [DELETE](#delete) |
+| `RETURN n` of a node deleted earlier in the query returns it | an error naming `properties(n)` | [DELETE](#delete) |
+| a `required` (existence-constrained) property may come from `ON CREATE SET` | checked when `MERGE` creates the element | [MERGE](#merge) |
+| the `RETURN` of a `COUNT { }` body is evaluated | not evaluated when it only projects | [COUNT and COLLECT](#count-and-collect) |
+| a comprehension variable may reuse any name that is not in scope | not a name that a `LET` / `WITH` value in scope still reads | [Map projections and comprehensions](#map-projections-and-comprehensions) |
+| `'a' + 1` is `'a1'` | an error (`22G03`): convert explicitly | [Comparisons across types](#comparisons-across-types) |
+| some functions saturate, give `NaN` / infinity or take floats | errors or GQL's types | [Where functions differ from Neo4j](#where-functions-differ-from-neo4j) |
+| `id(x)` is an integer; `rand()` | ids are strings (`element_id(x)`); `id()` and `rand()` are refused | [Ids are strings](#ids-are-strings), [Refused Constructs](refused.md) |
+
+Where ISO GQL and Neo4j disagree, `gql()` follows Neo4j in a few places (comparisons across
+kinds, list ordering, float division by zero, `NaN`): [Differences from the
+standard](conformance.md#differences-from-the-standard).

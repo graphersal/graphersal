@@ -56,7 +56,9 @@ impl<S: GraphStorage> Clone for GqlDeleteTarget<S> {
 /// `NODETACH` (plain `DELETE`, the default): before anything is removed, every node to delete
 /// must have no edge besides the edges this same clause deletes (per clause, W29: `MATCH
 /// (n)-[r]-() DELETE n, r` works), else the clause fails with GQLSTATUS `G1001` (dependent
-/// object error: edges still exist) and, as every failure of a unit, changes nothing. `DETACH`
+/// object error: edges still exist) and, as every failure of a unit, changes nothing (a
+/// deliberate deviation from Neo4j, which checks at commit time; book `gql/semantics.md`,
+/// "Differences from Neo4j"). `DETACH`
 /// removes the nodes with all their edges. Edges go first, then nodes, through the storage's
 /// `drop_edge` / `drop_vertex` (both idempotent, the write path of `drop()`).
 ///

@@ -391,9 +391,10 @@ type Entries = Vec<(CompactString, Option<ElementProperty>)>;
 /// write, the `property(map)` rule; an element's properties are a snapshot taken before it,
 /// so `SET n = n` changes nothing); `n += expr` merges (W24, a `NULL` entry removes its key);
 /// `n:A:B` adds each label (idempotent, W26). Values are the INSERT values (W21: maps and
-/// mixed lists stored, a node, an edge or a path 22G03). A `NULL` right side of `=` / `+=` is
-/// 22004 (D4 of stage 3c). The storage write path applies the schema (write-time coercion,
-/// enforcement).
+/// mixed lists stored, a deliberate deviation from Neo4j; a node, an edge or a path 22G03). A
+/// `NULL` right side of `=` / `+=` is 22004 (D4 of stage 3c, a deliberate deviation from
+/// Neo4j, which removes every property; book `gql/semantics.md`, "Differences from Neo4j").
+/// The storage write path applies the schema (write-time coercion, enforcement).
 ///
 /// Targets: a `NULL` target makes the item a no-op whatever its right side (W25, not
 /// evaluated); a target removed earlier in the query is the storage's `ElementRemoved`

@@ -694,8 +694,10 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
             "current_timestamp",
         ],
         "a date or time function",
-        "dates and times are planned for version 0.2.0; ISO-8601 strings compare correctly as \
-         text, for example WHERE n.since >= '2020-01-01'",
+        "convert the value with Gremlin's date steps after gql(), for example \
+         g.gql(\"RETURN '2020-01-05' AS d\").select(\"d\").as_date() (also date_add(), \
+         date_diff()); ISO-8601 strings compare correctly as text, for example WHERE n.since >= \
+         '2020-01-01'",
     ),
     not_yet_function(
         &[

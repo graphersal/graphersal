@@ -9145,7 +9145,8 @@ mod gql {
                 "date('2020-01-01')",
                 GqlErrorKind::NotYet,
                 "date() (a date or time function) is not yet supported",
-                "dates and times are planned for version 0.2.0",
+                "convert the value with Gremlin's date steps after gql(), for example \
+                 g.gql(\"RETURN '2020-01-05' AS d\").select(\"d\").as_date()",
             ),
             (
                 "toIntegerList(p.tags)",

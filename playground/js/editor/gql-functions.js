@@ -27,6 +27,8 @@ export const GQL_FUNCTIONS = Object.freeze([
   { name: 'min', aliases: [], call: '(x)', kind: 'aggregate', doc: 'The smallest value in the order of ORDER BY; NULL on no input.' },
   { name: 'max', aliases: [], call: '(x)', kind: 'aggregate', doc: 'The largest value in the order of ORDER BY; NULL on no input.' },
   { name: 'collect_list', aliases: ['collect'], call: '(x)', kind: 'aggregate', doc: 'The values as a list ([] on no input).' },
+  { name: 'percentile_cont', aliases: ['percentileCont'], call: '(x, p)', kind: 'aggregate', doc: 'The percentile p (0.0 to 1.0) of the numbers, interpolated; a float, NULL on no input.' },
+  { name: 'percentile_disc', aliases: ['percentileDisc'], call: '(x, p)', kind: 'aggregate', doc: 'The percentile p (0.0 to 1.0) of the numbers: the nearest value itself; NULL on no input.' },
   // Conversions
   { name: 'cast', aliases: [], call: '(x AS INTEGER)', kind: 'scalar', doc: 'Strict conversion to INTEGER, FLOAT, STRING or BOOLEAN: text that is no value of the type is an error (22018).' },
   { name: 'toInteger', aliases: [], call: '(x)', kind: 'scalar', doc: 'Lenient conversion to an integer: unconvertible text gives NULL; also true / false and Cypher literals.' },

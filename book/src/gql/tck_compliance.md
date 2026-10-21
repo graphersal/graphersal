@@ -127,6 +127,14 @@ excluded: they stay `missing`, the backlog.
 - **`w21-property-kinds`** (a deliberate deviation, user decision): a list of maps is a valid
   property value in Graphersal, where Neo4j raises a `TypeError`
   ([Semantics](semantics.md#writes)).
+- **`parameter-at-compile-time`** (a deliberate deviation, user decision): a negative or
+  non-integer `$parameter` of `SKIP` / `LIMIT` is refused when the query is compiled, since
+  parameters are bound then; the kit expects the `SyntaxError` at runtime. The user sees the
+  same thing, an error before any row
+  ([Semantics](semantics.md#parameters-are-bound-when-the-query-is-compiled)).
+
+Every difference from Neo4j, also those the kit has no case for, is listed on
+[Semantics](semantics.md#differences-from-neo4j).
 
 The deliberate deviations run in a guard test (`deviation_cases_still_deviate`): it fails when
 one of them passes, so it moves back into scope. `id()` (an integer in Neo4j, a string id here)

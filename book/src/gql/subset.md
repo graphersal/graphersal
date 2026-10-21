@@ -1276,7 +1276,7 @@ construct and the alternative.
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
-| date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
+| date and time functions (`date()`, `datetime()`, `duration()`, ...) | not yet in GQL; Gremlin's date steps (`as_date()`, `date_add()`, `date_diff()`) after `gql()`, and ISO-8601 strings compare correctly as text |
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |
 | `normalize(s)` | store normalized text |
 | GQL's `elements(p)` | `nodes(p)` and `relationships(p)` |

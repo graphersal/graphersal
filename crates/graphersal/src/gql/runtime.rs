@@ -128,7 +128,8 @@ pub(crate) fn is_live<S: GraphStorage>(storage: &S, element: &GqlElement<S>) -> 
 
 /// W28: a `RETURN` column holding a vertex or an edge removed earlier in the query (itself, or
 /// inside a list, a map or a path) is an error, since a removed element can be neither
-/// materialized nor walked from. Checked only after a `gql:delete` removed something in this
+/// materialized nor walked from (a deliberate deviation from Neo4j, which returns it; book
+/// `gql/semantics.md`, "Differences from Neo4j"). Checked only after a `gql:delete` removed something in this
 /// execution ([`GqlDeleted::any`]); an explicit stack, so a deeply nested value cannot
 /// overflow the call stack.
 pub(crate) fn check_returned<S: GraphStorage>(
