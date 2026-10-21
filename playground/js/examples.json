@@ -310,7 +310,7 @@
     "graph": "modern",
     "title": "EXISTS in RETURN: a TRUE / FALSE column per row",
     "lang": "gql",
-    "script": "// EXISTS is TRUE or FALSE, never NULL, and stands anywhere an expression does.\nMATCH (p:person)\nRETURN p.name AS name,\n       EXISTS { (p)-[:knows]->() } AS knows_someone,\n       (p)-[:created]->(:software {lang: 'java'}) AS creates_java\nORDER BY name"
+    "script": "// EXISTS is TRUE or FALSE, never NULL, and stands anywhere an expression does\n// (a bare pattern is a condition only in WHERE).\nMATCH (p:person)\nRETURN p.name AS name,\n       EXISTS { (p)-[:knows]->() } AS knows_someone,\n       EXISTS { (p)-[:created]->(:software {lang: 'java'}) } AS creates_java\nORDER BY name"
   },
   {
     "group": "GQL",
