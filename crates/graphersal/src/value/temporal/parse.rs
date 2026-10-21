@@ -15,11 +15,12 @@
 //! - duration: `[+-]P[nY][nM][nW][nD][T[nH][nM][n[.f]S]]`, each number with an optional sign
 //!   of its own (`P1M-2D`), letters in either case.
 
+use super::arith::{Amount, DurationParts, cascade};
 use super::civil::{self, MICROS_PER_SECOND};
 use super::zone::Zone;
 use super::{
-    Date, DateTime, Duration, LocalDateTime, MAX_OFFSET_SECONDS, TemporalError, TemporalResult,
-    Time,
+    Date, DateTime, Duration, LocalDateTime, MAX_OFFSET_SECONDS, Temporal, TemporalError,
+    TemporalKind, TemporalResult, Time,
 };
 
 struct Cursor<'a> {
@@ -415,6 +416,398 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
     ) {
         (Ok(months), Ok(days), Ok(micros)) => Ok(Duration::new(months, days, micros)),
         _ => c.fail("the duration is too large"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The extended forms of the GQL constructors (`date('2015W302')`, `duration('P0.75M')`): ISO
+// 8601 in full as Neo4j reads it. Used by GQL only; the parsers above (Rhai, schemas, imports)
+// are unchanged.
+// ---------------------------------------------------------------------------------------------
+
+/// A value read by [`parse_extended`], with what our types could not keep.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Extended {
+    /// The value (a fraction below the microsecond truncated toward zero).
+    pub(crate) value: Temporal,
+    /// Whether non-zero digits below the microsecond were cut (`.645876123`): the GQL layer
+    /// answers that with "not yet" (3g U1) instead of keeping the cut value.
+    pub(crate) sub_micro: bool,
+    /// Whether the text named an IANA zone (`[Europe/London]`), resolved to its offset at that
+    /// time: the value keeps only the offset (3g U3).
+    pub(crate) zone_name: bool,
+}
+
+/// Up to nine fraction digits after `.` or `,` (none: zero): the microseconds (cut) and whether
+/// a non-zero digit below the microsecond was cut.
+fn read_fraction_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
+    let nanos = read_nano_fraction(c)?;
+    Ok(((nanos / 1000) as i64, nanos % 1000 != 0))
+}
+
+/// The number of ASCII digits from the cursor on, without consuming them.
+fn digit_run(c: &Cursor) -> usize {
+    c.bytes[c.pos..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count()
+}
+
+/// A year: four digits, or a sign and four to nine digits (`+2015`, `-0044`; a signed run of
+/// digits is the year, as Neo4j reads `+20150721`); a year outside -9999..9999 is
+/// [`TemporalError::OutOfRange`].
+fn read_year_extended(c: &mut Cursor) -> TemporalResult<i32> {
+    let sign: i64 = if c.eat(b'-') {
+        -1
+    } else if c.eat(b'+') {
+        1
+    } else {
+        let year = c.digits(4, "expected a four-digit year")?;
+        return Ok(year as i32);
+    };
+    let run = digit_run(c);
+    if !(4..=9).contains(&run) {
+        return c.fail("expected a year of four to nine digits after the sign");
+    }
+    let year = sign * c.digits(run, "expected a year")? as i64;
+    if year < civil::MIN_YEAR as i64 || year > civil::MAX_YEAR as i64 {
+        return Err(TemporalError::out_of_range("the year"));
+    }
+    Ok(year as i32)
+}
+
+/// A date in any ISO 8601 form, each `-` optional: calendar (`2015-07-21`, `20150721`), year and
+/// month (`2015-07`, `201507`: the first), week (`2015-W30-2`, `2015W302`; `2015-W30`: its
+/// Monday), ordinal (`2015-202`, `2015202`), quarter (`2015-Q3-21`, `2015-Q3`) or the year
+/// alone (`2015`: January 1). Days since 1970-01-01.
+fn read_date_extended(c: &mut Cursor) -> TemporalResult<i32> {
+    let year = read_year_extended(c)?;
+    let dash = c.eat(b'-');
+    let missing = "the date does not exist";
+    let days = match c.peek() {
+        Some(b'W' | b'w') => {
+            c.pos += 1;
+            let week = c.digits(2, "expected a two-digit week (2015-W30)")?;
+            let dash = c.eat(b'-');
+            let day = if dash || matches!(c.peek(), Some(b'0'..=b'9')) {
+                c.digits(1, "expected a one-digit day of the week (2015-W30-2)")?
+            } else {
+                1
+            };
+            civil::from_iso_week(year, week as u8, day as u8)
+        }
+        Some(b'Q' | b'q') => {
+            c.pos += 1;
+            let quarter = c.digits(1, "expected a one-digit quarter (2015-Q3)")?;
+            let dash = c.eat(b'-');
+            let day = if dash || matches!(c.peek(), Some(b'0'..=b'9')) {
+                c.digits(2, "expected a two-digit day of the quarter (2015-Q3-21)")?
+            } else {
+                1
+            };
+            civil::from_quarter(year, quarter as u8, day as u8)
+        }
+        Some(b'0'..=b'9') => match digit_run(c) {
+            3 => {
+                let ordinal = c.digits(3, "expected a three-digit day of the year")?;
+                civil::from_ordinal(year, ordinal as u16)
+            }
+            2 | 4 => {
+                let month = c.digits(2, "expected a two-digit month")?;
+                let dash = c.eat(b'-');
+                let day = if dash || matches!(c.peek(), Some(b'0'..=b'9')) {
+                    c.digits(2, "expected a two-digit day")?
+                } else {
+                    1
+                };
+                if (1..=12).contains(&month) && day >= 1 {
+                    let (month, day) = (month as u8, day as u8);
+                    (day <= civil::days_in_month(year, month))
+                        .then(|| civil::days_from_civil(year, month, day))
+                } else {
+                    None
+                }
+            }
+            _ => return c.fail("expected a month, a week, a quarter or a day of the year"),
+        },
+        _ if dash => return c.fail("expected a month, a week, a quarter or a day after '-'"),
+        _ => Some(civil::days_from_civil(year, 1, 1)),
+    };
+    match days {
+        Some(days) => Ok(days),
+        None => c.fail(missing),
+    }
+}
+
+/// A time of day, each `:` optional: `21:40:32.142`, `214032.142`, `21:40`, `2140`, `21`.
+/// Microseconds of the day and whether digits below the microsecond were cut.
+fn read_time_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
+    let hour = c.digits(2, "expected a two-digit hour")?;
+    let mut minute = 0;
+    let mut second = 0;
+    let mut fraction = (0, false);
+    let colon = c.eat(b':');
+    if colon || matches!(c.peek(), Some(b'0'..=b'9')) {
+        minute = c.digits(2, "expected two-digit minutes")?;
+        let colon = c.eat(b':');
+        if colon || matches!(c.peek(), Some(b'0'..=b'9')) {
+            second = c.digits(2, "expected two-digit seconds")?;
+            fraction = read_fraction_extended(c)?;
+        }
+    }
+    if hour > 23 {
+        return c.fail("the hour is not 00-23");
+    }
+    if minute > 59 {
+        return c.fail("the minutes are not 00-59");
+    }
+    if second > 59 {
+        return c.fail("the seconds are not 00-59");
+    }
+    let micros =
+        ((hour as i64 * 60 + minute as i64) * 60 + second as i64) * MICROS_PER_SECOND + fraction.0;
+    Ok((micros, fraction.1))
+}
+
+/// A date, then optionally `T` and a time: local microseconds and the sub-microsecond flag.
+fn read_local_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
+    let days = read_date_extended(c)?;
+    let mut micros = days as i64 * civil::MICROS_PER_DAY;
+    let mut sub_micro = false;
+    if c.eat(b'T') || c.eat(b't') {
+        let (time, cut) = read_time_extended(c)?;
+        micros += time;
+        sub_micro = cut;
+    }
+    Ok((micros, sub_micro))
+}
+
+/// Up to nine fraction digits after `.` or `,` as billionths (none: zero).
+fn read_nano_fraction(c: &mut Cursor) -> TemporalResult<i128> {
+    if !(c.eat(b'.') || c.eat(b',')) {
+        return Ok(0);
+    }
+    let count = digit_run(c);
+    if count == 0 {
+        return c.fail("expected digits after the decimal point");
+    }
+    if count > 9 {
+        return c.fail("more than nine fraction digits");
+    }
+    let mut nanos = c.digits(count, "expected fraction digits")? as i128;
+    for _ in count..9 {
+        nanos *= 10;
+    }
+    Ok(nanos)
+}
+
+/// One number of a unit-based duration: an optional sign, digits, an optional fraction of up
+/// to nine digits (`-1.5`).
+fn read_amount(c: &mut Cursor) -> TemporalResult<Option<Amount>> {
+    let negative = if c.eat(b'-') {
+        true
+    } else {
+        c.eat(b'+');
+        false
+    };
+    let Some(whole) = c.number()? else {
+        return Ok(None);
+    };
+    let amount = whole as i128 * Amount::SCALE + read_nano_fraction(c)?;
+    Ok(Some(Amount::from_nano_units(if negative {
+        -amount
+    } else {
+        amount
+    })))
+}
+
+/// A duration in the unit form with a fraction on any unit (`P5M1.5D`, `P0.75M`, `PT0.75M`,
+/// `P2.5W`, `P12Y5M14DT16H12M70S`, `PT-1.999S`) or the ISO alternative form
+/// `PYYYY-MM-DDThh:mm:ss[.f]` (`P2012-02-02T14:37:21.545`), with an optional leading sign;
+/// summed by the fraction cascade ([`cascade`]).
+fn duration_extended(text: &str) -> TemporalResult<Extended> {
+    let mut c = Cursor::new(text, "duration");
+    let negative = if c.eat(b'-') {
+        true
+    } else {
+        c.eat(b'+');
+        false
+    };
+    if !(c.eat(b'P') || c.eat(b'p')) {
+        return c.fail("expected 'P' (ISO 8601 duration such as P1DT2H)");
+    }
+    let mut parts = DurationParts::default();
+    let alternative = digit_run(&c) == 4 && c.bytes.get(c.pos + 4) == Some(&b'-');
+    if alternative {
+        let years = c.digits(4, "expected a four-digit year (P2012-02-02T14:37:21)")?;
+        c.expect(b'-', "expected '-' after the years (P2012-02-02T14:37:21)")?;
+        let months = c.digits(2, "expected two-digit months (P2012-02-02T14:37:21)")?;
+        c.expect(b'-', "expected '-' after the months (P2012-02-02T14:37:21)")?;
+        let days = c.digits(2, "expected two-digit days (P2012-02-02T14:37:21)")?;
+        if !(c.eat(b'T') || c.eat(b't')) {
+            return c.fail("expected 'T' and the time (P2012-02-02T14:37:21)");
+        }
+        let hours = c.digits(2, "expected two-digit hours (P2012-02-02T14:37:21)")?;
+        c.expect(b':', "expected ':' after the hours (P2012-02-02T14:37:21)")?;
+        let minutes = c.digits(2, "expected two-digit minutes (P2012-02-02T14:37:21)")?;
+        c.expect(
+            b':',
+            "expected ':' after the minutes (P2012-02-02T14:37:21)",
+        )?;
+        let seconds = c.digits(2, "expected two-digit seconds (P2012-02-02T14:37:21)")?;
+        let nanos = read_nano_fraction(&mut c)?;
+        if months > 12 || days > 31 || hours > 23 || minutes > 59 || seconds > 59 {
+            return c.fail("a field of the alternative duration form is out of range");
+        }
+        parts.years = Amount::from_i64(years as i64);
+        parts.months = Amount::from_i64(months as i64);
+        parts.days = Amount::from_i64(days as i64);
+        parts.hours = Amount::from_i64(hours as i64);
+        parts.minutes = Amount::from_i64(minutes as i64);
+        parts.seconds = Amount::from_nano_units(seconds as i128 * Amount::SCALE + nanos);
+    } else {
+        const DATE_UNITS: &[u8] = b"YMWD";
+        const TIME_UNITS: &[u8] = b"HMS";
+        let mut in_time = false;
+        let mut next_unit = 0usize;
+        let mut any = false;
+        loop {
+            if c.at_end() {
+                break;
+            }
+            if !in_time && (c.eat(b'T') || c.eat(b't')) {
+                in_time = true;
+                next_unit = 0;
+                if c.at_end() {
+                    return c.fail("expected a time part after 'T'");
+                }
+                continue;
+            }
+            let Some(amount) = read_amount(&mut c)? else {
+                return c.fail("expected a number before a duration unit");
+            };
+            let Some(unit) = c.peek().map(|b| b.to_ascii_uppercase()) else {
+                return c.fail("expected a unit (Y, M, W, D, H, M or S) after the number");
+            };
+            c.pos += 1;
+            let units = if in_time { TIME_UNITS } else { DATE_UNITS };
+            let Some(index) = units[next_unit..].iter().position(|&u| u == unit) else {
+                return c.fail("unknown or out-of-order duration unit");
+            };
+            next_unit += index + 1;
+            let slot = match (in_time, unit) {
+                (false, b'Y') => &mut parts.years,
+                (false, b'M') => &mut parts.months,
+                (false, b'W') => &mut parts.weeks,
+                (false, _) => &mut parts.days,
+                (true, b'H') => &mut parts.hours,
+                (true, b'M') => &mut parts.minutes,
+                (true, _) => &mut parts.seconds,
+            };
+            *slot = amount;
+            any = true;
+        }
+        if !any {
+            return c.fail("a duration needs at least one part (PT0S for zero)");
+        }
+    }
+    c.finish()?;
+    let cascaded = cascade(&parts)?;
+    let duration = if negative {
+        cascaded.duration.checked_neg()?
+    } else {
+        cascaded.duration
+    };
+    Ok(Extended {
+        value: Temporal::Duration(duration),
+        sub_micro: cascaded.sub_micro,
+        zone_name: false,
+    })
+}
+
+/// Parses the text of a GQL temporal constructor (`date('2015-W30-2')`, `localtime('2140')`,
+/// `duration('P0.75M')`) in every ISO 8601 form Neo4j reads, wider than [`Temporal::parse_as`]
+/// (whose forms it includes):
+///
+/// - date: calendar, year-month, week, ordinal, quarter or year alone, each `-` optional
+///   (`2015-07-21`, `20150721`, `2015-07`, `2015W302`, `2015-W30`, `2015-202`, `2015`); a year
+///   beyond four digits takes a sign (`+2015`, `-0044`);
+/// - time (a local time of day): `21:40:32.142`, `214032.142`, `21:40`, `2140`, `21`, up to nine
+///   fraction digits; an offset is refused (a time with an offset is another type);
+/// - local date-time: a date, optionally `T` and a time (`2015-W30-2T214032.142`,
+///   `2015T214032`, `2015202T21`);
+/// - date-time: a local date-time, then an offset (`Z`, `+01:00`, `+0100`, `-02`) and / or a
+///   zone in brackets (`[Europe/London]`), resolved as by [`Temporal::parse_as`]; neither is
+///   UTC;
+/// - duration: the unit form with a fraction on any unit, or the alternative form
+///   (`duration_extended`).
+///
+/// Never a guess from the content: the caller names the type. A year outside -9999..9999 or a
+/// duration beyond the fields is [`TemporalError::OutOfRange`], any other bad text
+/// [`TemporalError::Parse`]. Digits below the microsecond are cut and reported in
+/// [`Extended::sub_micro`].
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<Extended> {
+    let plain = |value: Temporal, sub_micro: bool| Extended {
+        value,
+        sub_micro,
+        zone_name: false,
+    };
+    match kind {
+        TemporalKind::Duration => duration_extended(text),
+        TemporalKind::Date => {
+            let mut c = Cursor::new(text, "date");
+            let days = read_date_extended(&mut c)?;
+            c.finish()?;
+            Ok(plain(Temporal::Date(Date { days }), false))
+        }
+        TemporalKind::Time => {
+            let mut c = Cursor::new(text, "time");
+            let (micros, sub_micro) = read_time_extended(&mut c)?;
+            if matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-' | b'[')) {
+                return c.fail("a local time has no UTC offset or time zone");
+            }
+            c.finish()?;
+            Ok(plain(Temporal::Time(Time { micros }), sub_micro))
+        }
+        TemporalKind::LocalDateTime => {
+            let mut c = Cursor::new(text, "localdatetime");
+            let (micros, sub_micro) = read_local_extended(&mut c)?;
+            if matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-' | b'[')) {
+                return c.fail("a local date-time has no UTC offset or time zone (use a datetime)");
+            }
+            c.finish()?;
+            Ok(plain(
+                Temporal::LocalDateTime(LocalDateTime { micros }),
+                sub_micro,
+            ))
+        }
+        TemporalKind::DateTime => {
+            let mut c = Cursor::new(text, "datetime");
+            let (local, sub_micro) = read_local_extended(&mut c)?;
+            let offset = read_offset(&mut c)?;
+            let zone = read_zone(&mut c)?;
+            c.finish()?;
+            let local = LocalDateTime { micros: local };
+            let value = match (offset, zone) {
+                (Some(offset), None) => DateTime::from_local(local, offset)?,
+                (None, None) => DateTime::from_local(local, 0)?,
+                (None, Some(name)) => Zone::parse(name)?.resolve(local)?,
+                (Some(offset), Some(name)) => {
+                    let value = DateTime::from_local(local, offset)?;
+                    if Zone::parse(name)?.offset_at(value)? != offset {
+                        return c.fail("the offset is not the time zone's offset at that time");
+                    }
+                    value
+                }
+            };
+            Ok(Extended {
+                value: Temporal::DateTime(value),
+                sub_micro,
+                zone_name: zone.is_some(),
+            })
+        }
     }
 }
 

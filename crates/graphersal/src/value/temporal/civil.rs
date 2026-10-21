@@ -102,6 +102,63 @@ pub(crate) const fn iso_week(days: i32) -> (i32, u8) {
     (year, week as u8)
 }
 
+/// The Monday of ISO week 1 of the week-numbering `year` (the week that holds January 4):
+/// 1817 starts on 1816-12-30. No range check.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) const fn week_year_start(year: i32) -> i32 {
+    let jan4 = days_from_civil(year, 1, 4);
+    jan4 - (iso_day_of_week(jan4) as i32 - 1)
+}
+
+/// The number of ISO weeks (52 or 53) of the week-numbering `year`.
+pub(crate) const fn weeks_in_week_year(year: i32) -> u8 {
+    ((week_year_start(year + 1) - week_year_start(year)) / 7) as u8
+}
+
+/// The day of ISO `week` (1..=52 or 53) and ISO `day_of_week` (1 = Monday ..= 7) of the
+/// week-numbering `year`, the inverse of [`iso_week`] and [`iso_day_of_week`]; `None` for a week
+/// or weekday that does not exist or a day outside the supported range.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn from_iso_week(year: i32, week: u8, day_of_week: u8) -> Option<i32> {
+    if !(MIN_YEAR..=MAX_YEAR).contains(&year)
+        || week == 0
+        || week > weeks_in_week_year(year)
+        || !(1..=7).contains(&day_of_week)
+    {
+        return None;
+    }
+    let days = week_year_start(year) as i64 + (week as i64 - 1) * 7 + day_of_week as i64 - 1;
+    day_in_range(days).then_some(days as i32)
+}
+
+/// The `ordinal`-th day (1..=365 or 366) of `year`; `None` when that day does not exist.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn from_ordinal(year: i32, ordinal: u16) -> Option<i32> {
+    let length = if is_leap(year) { 366 } else { 365 };
+    if !(MIN_YEAR..=MAX_YEAR).contains(&year) || ordinal == 0 || ordinal > length {
+        return None;
+    }
+    Some(days_from_civil(year, 1, 1) + ordinal as i32 - 1)
+}
+
+/// The `day`-th day (1..=90, 91 or 92) of `quarter` (1..=4) of `year`; `None` when that day
+/// does not exist.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn from_quarter(year: i32, quarter: u8, day: u8) -> Option<i32> {
+    if !(MIN_YEAR..=MAX_YEAR).contains(&year) || !(1..=4).contains(&quarter) || day == 0 {
+        return None;
+    }
+    let first_month = (quarter - 1) * 3 + 1;
+    let start = days_from_civil(year, first_month, 1);
+    let next = if quarter == 4 {
+        days_from_civil(year + 1, 1, 1)
+    } else {
+        days_from_civil(year, first_month + 3, 1)
+    };
+    let days = start + day as i32 - 1;
+    (days < next).then_some(days)
+}
+
 /// Adds `months` to a civil date, clamping the day to the end of the target month
 /// (Jan 31 + 1 month = Feb 28/29, as PostgreSQL and `java.time` do). `None` outside the range.
 pub(crate) fn add_months(days: i32, months: i64) -> Option<i32> {
@@ -181,6 +238,70 @@ mod tests {
         assert_eq!(day_of_year(days_from_civil(2024, 12, 31)), 366);
         // Negative years.
         assert_eq!(day_of_week(days_from_civil(-1, 12, 31)), 5);
+    }
+
+    #[test]
+    fn iso_week_dates_invert_iso_week() {
+        // 1817 week 1 starts on 1816-12-30; 1984-01-01 is in week 52 of 1983.
+        assert_eq!(civil_from_days(week_year_start(1817)), (1816, 12, 30));
+        assert_eq!(
+            civil_from_days(from_iso_week(2015, 30, 2).unwrap()),
+            (2015, 7, 21)
+        );
+        assert_eq!(
+            civil_from_days(from_iso_week(1983, 52, 7).unwrap()),
+            (1984, 1, 1)
+        );
+        assert_eq!(weeks_in_week_year(2020), 53);
+        assert_eq!(weeks_in_week_year(2021), 52);
+        assert!(from_iso_week(2020, 53, 7).is_some());
+        assert_eq!(from_iso_week(2021, 53, 1), None);
+        assert_eq!(from_iso_week(2021, 0, 1), None);
+        assert_eq!(from_iso_week(2021, 1, 0), None);
+        assert_eq!(from_iso_week(2021, 1, 8), None);
+        // The edges of the range.
+        assert_eq!(
+            iso_week(from_iso_week(MIN_YEAR, 1, 1).unwrap()),
+            (MIN_YEAR, 1)
+        );
+        assert_eq!(from_iso_week(MIN_YEAR - 1, 52, 1), None);
+        assert!(from_iso_week(MAX_YEAR, 52, 1).is_some());
+        // The inverse over a stride of the range.
+        let mut d = MIN_DAY + 7;
+        while d <= MAX_DAY - 7 {
+            let (year, week) = iso_week(d);
+            assert_eq!(from_iso_week(year, week, iso_day_of_week(d)), Some(d));
+            d += 13;
+        }
+    }
+
+    #[test]
+    fn ordinal_and_quarter_dates() {
+        assert_eq!(
+            civil_from_days(from_ordinal(2015, 202).unwrap()),
+            (2015, 7, 21)
+        );
+        assert_eq!(
+            civil_from_days(from_ordinal(2024, 366).unwrap()),
+            (2024, 12, 31)
+        );
+        assert_eq!(from_ordinal(2023, 366), None);
+        assert_eq!(from_ordinal(2023, 0), None);
+        assert_eq!(
+            civil_from_days(from_quarter(2015, 3, 21).unwrap()),
+            (2015, 7, 21)
+        );
+        assert_eq!(
+            civil_from_days(from_quarter(2024, 1, 91).unwrap()),
+            (2024, 3, 31)
+        );
+        assert_eq!(from_quarter(2023, 1, 91), None);
+        assert_eq!(
+            civil_from_days(from_quarter(2023, 4, 92).unwrap()),
+            (2023, 12, 31)
+        );
+        assert_eq!(from_quarter(2023, 4, 93), None);
+        assert_eq!(from_quarter(2023, 5, 1), None);
     }
 
     #[test]

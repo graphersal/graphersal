@@ -1299,3 +1299,566 @@ fn the_physical_form_is_the_canonical_text_and_lifts_back_by_kind() {
     let date_text = PhysicalValue::String("2023-08-02".into());
     assert!(lift_temporal(&date_text, TemporalKind::Time).is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// The GQL helpers (3g.T3): the extended parser, the Neo4j text, the fraction cascade and
+// `duration.between`. The expected texts are the openCypher TCK's (Temporal1, 2, 6, 8, 10).
+// ---------------------------------------------------------------------------------------------
+
+mod gql_helpers {
+    use super::super::arith::{
+        Amount, Cascaded, DurationParts, between_neo4j, cascade, scale_duration,
+    };
+    use super::super::format::neo4j;
+    use super::super::parse::{Extended, parse_extended};
+    use super::*;
+
+    /// The Neo4j text of what `text` parses to as a `kind`; panics on a parse error.
+    fn ext(kind: TemporalKind, text: &str) -> String {
+        match parse_extended(kind, text) {
+            Ok(parsed) => neo4j(&parsed.value),
+            Err(e) => panic!("{kind} {text:?}: {e}"),
+        }
+    }
+
+    fn rows(kind: TemporalKind, cases: &[(&str, &str)]) {
+        for (text, expected) in cases {
+            assert_eq!(ext(kind, text), *expected, "{kind} {text:?}");
+        }
+    }
+
+    #[test]
+    fn dates_in_every_iso_form() {
+        rows(
+            TemporalKind::Date,
+            &[
+                ("2015-07-21", "2015-07-21"),
+                ("20150721", "2015-07-21"),
+                ("2015-07", "2015-07-01"),
+                ("201507", "2015-07-01"),
+                ("2015-W30-2", "2015-07-21"),
+                ("2015W302", "2015-07-21"),
+                ("2015-W30", "2015-07-20"),
+                ("2015W30", "2015-07-20"),
+                ("2015-202", "2015-07-21"),
+                ("2015202", "2015-07-21"),
+                ("2015", "2015-01-01"),
+                ("2015-Q3-21", "2015-07-21"),
+                ("2015Q3", "2015-07-01"),
+                ("1817-W01-1", "1816-12-30"),
+                ("+2015-07-21", "2015-07-21"),
+                ("-0044-03-15", "-0044-03-15"),
+                ("+0000-01-01", "0000-01-01"),
+            ],
+        );
+    }
+
+    #[test]
+    fn local_times_and_date_times_in_every_iso_form() {
+        rows(
+            TemporalKind::Time,
+            &[
+                ("21:40:32.142", "21:40:32.142"),
+                ("214032.142", "21:40:32.142"),
+                ("21:40:32", "21:40:32"),
+                ("214032", "21:40:32"),
+                ("21:40", "21:40"),
+                ("2140", "21:40"),
+                ("21", "21:00"),
+                ("00:00:00.000001", "00:00:00.000001"),
+                ("12:31:14,5", "12:31:14.500"),
+            ],
+        );
+        rows(
+            TemporalKind::LocalDateTime,
+            &[
+                ("2015-07-21T21:40:32.142", "2015-07-21T21:40:32.142"),
+                ("2015-W30-2T214032.142", "2015-07-21T21:40:32.142"),
+                ("2015-202T21:40:32", "2015-07-21T21:40:32"),
+                ("2015T214032", "2015-01-01T21:40:32"),
+                ("20150721T21:40", "2015-07-21T21:40"),
+                ("2015-W30T2140", "2015-07-20T21:40"),
+                ("2015202T21", "2015-07-21T21:00"),
+                ("2015-07-21", "2015-07-21T00:00"),
+            ],
+        );
+        rows(
+            TemporalKind::DateTime,
+            &[
+                (
+                    "2015-07-21T21:40:32.142+0100",
+                    "2015-07-21T21:40:32.142+01:00",
+                ),
+                ("2015-W30-2T214032.142Z", "2015-07-21T21:40:32.142Z"),
+                ("2015-202T21:40:32+01:00", "2015-07-21T21:40:32+01:00"),
+                ("2015T214032-0100", "2015-01-01T21:40:32-01:00"),
+                ("20150721T21:40-01:30", "2015-07-21T21:40-01:30"),
+                ("2015-W30T2140-00:00", "2015-07-20T21:40Z"),
+                ("2015-W30T2140-02", "2015-07-20T21:40-02:00"),
+                ("2015202T21+18:00", "2015-07-21T21:00+18:00"),
+                ("2015-07-21T21:40:32.142", "2015-07-21T21:40:32.142Z"),
+                // A zone name is resolved to its offset at that time (the name is not kept).
+                (
+                    "2015-07-21T21:40:32.142+02:00[Europe/Stockholm]",
+                    "2015-07-21T21:40:32.142+02:00",
+                ),
+                (
+                    "2015-07-21T21:40:32.142+0845[Australia/Eucla]",
+                    "2015-07-21T21:40:32.142+08:45",
+                ),
+                (
+                    "2015-07-21T21:40:32.142-04[America/New_York]",
+                    "2015-07-21T21:40:32.142-04:00",
+                ),
+                (
+                    "2015-07-21T21:40:32.142[Europe/London]",
+                    "2015-07-21T21:40:32.142+01:00",
+                ),
+                (
+                    "1818-07-21T21:40:32.142[Europe/Stockholm]",
+                    "1818-07-21T21:40:32.142+00:53:28",
+                ),
+            ],
+        );
+        let named = parse_extended(TemporalKind::DateTime, "2015-07-21T21:40[Europe/London]");
+        assert!(named.is_ok_and(|p| p.zone_name && !p.sub_micro));
+        let fixed = parse_extended(TemporalKind::DateTime, "2015-07-21T21:40+01:00");
+        assert!(fixed.is_ok_and(|p| !p.zone_name));
+    }
+
+    #[test]
+    fn digits_below_the_microsecond_are_reported_never_kept() {
+        let parsed = parse_extended(TemporalKind::Time, "12:31:14.645876123");
+        let Ok(Extended {
+            value, sub_micro, ..
+        }) = parsed
+        else {
+            panic!("{parsed:?}");
+        };
+        assert!(sub_micro);
+        assert_eq!(neo4j(&value), "12:31:14.645876");
+        for (kind, text) in [
+            (TemporalKind::Time, "12:31:14.645876000"),
+            (TemporalKind::Time, "12:31:14.6"),
+            (TemporalKind::LocalDateTime, "1984-10-11T12:31:14.645876"),
+            (TemporalKind::Duration, "PT0.000001S"),
+        ] {
+            assert!(
+                parse_extended(kind, text).is_ok_and(|p| !p.sub_micro),
+                "{text}"
+            );
+        }
+        for (kind, text) in [
+            (TemporalKind::LocalDateTime, "1984-10-11T12:31:14.645876123"),
+            (TemporalKind::DateTime, "1984-10-11T12:31:14.000000001Z"),
+            (TemporalKind::Duration, "PT0.000000001S"),
+            (TemporalKind::Duration, "P0.000000001D"),
+        ] {
+            assert!(
+                parse_extended(kind, text).is_ok_and(|p| p.sub_micro),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn durations_with_fractions_and_the_alternative_form() {
+        rows(
+            TemporalKind::Duration,
+            &[
+                ("P14DT16H12M", "P14DT16H12M"),
+                ("P5M1.5D", "P5M1DT12H"),
+                ("P0.75M", "P22DT19H51M49.5S"),
+                ("PT0.75M", "PT45S"),
+                ("P2.5W", "P17DT12H"),
+                ("P12Y5M14DT16H12M70S", "P12Y5M14DT16H13M10S"),
+                ("P2012-02-02T14:37:21.545", "P2012Y2M2DT14H37M21.545S"),
+                ("PT-1.999S", "PT-1.999S"),
+                ("PT-1M-0.001S", "PT-1M-0.001S"),
+                ("P12Y5M-14DT16H", "P12Y5M-14DT16H"),
+                ("-P1DT2H", "P-1DT-2H"),
+                ("+P1D", "P1D"),
+                ("P0.5Y", "P6M"),
+                ("PT1,5H", "PT1H30M"),
+                ("PT0S", "PT0S"),
+                ("p1dt1s", "P1DT1S"),
+            ],
+        );
+        for bad in [
+            "",
+            "P",
+            "PT",
+            "1D",
+            "P1",
+            "P1X",
+            "PD",
+            "P1.D",
+            "P1D1Y",
+            "P1H",
+            "PT1D",
+            "P0.0000000001D",
+            "P2012-02-02",
+            "P2012-13-02T00:00:00",
+            "P1DT",
+            "PT1S1M",
+        ] {
+            assert!(
+                parse_extended(TemporalKind::Duration, bad).is_err(),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            parse_extended(TemporalKind::Duration, "P9999999999999Y"),
+            Err(TemporalError::OutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn bad_extended_texts_are_errors() {
+        for (kind, bad) in [
+            (TemporalKind::Date, ""),
+            (TemporalKind::Date, "2015-"),
+            (TemporalKind::Date, "201"),
+            (TemporalKind::Date, "2015-13"),
+            (TemporalKind::Date, "2015-02-30"),
+            (TemporalKind::Date, "2015-W54"),
+            (TemporalKind::Date, "2015-W30-8"),
+            (TemporalKind::Date, "2015-366"),
+            (TemporalKind::Date, "2015-Q5"),
+            (TemporalKind::Date, "2015-07-21T10:00"),
+            (TemporalKind::Date, "20150721x"),
+            (TemporalKind::Date, "2015-0"),
+            (TemporalKind::Time, "24:00"),
+            (TemporalKind::Time, "12:60"),
+            (TemporalKind::Time, "1"),
+            (TemporalKind::Time, "12:"),
+            (TemporalKind::Time, "12:00:00."),
+            (TemporalKind::Time, "12:00:00.1234567890"),
+            (TemporalKind::Time, "2140-02"),
+            (TemporalKind::Time, "21:40Z"),
+            (TemporalKind::LocalDateTime, "2015-07-21T21:40Z"),
+            (TemporalKind::LocalDateTime, "2015-07-21T"),
+            (TemporalKind::DateTime, "2015-07-21T21:40+19:00"),
+            (TemporalKind::DateTime, "2015-07-21T21:40[Mars/Base]"),
+            (
+                TemporalKind::DateTime,
+                "2015-07-21T21:40+05:00[Europe/London]",
+            ),
+        ] {
+            assert!(parse_extended(kind, bad).is_err(), "{kind} {bad:?}");
+        }
+        // A well-formed year outside the range is a range error, not a parse error.
+        for text in ["-999999999-01-01", "+10000-01-01", "+20150721"] {
+            assert!(
+                matches!(
+                    parse_extended(TemporalKind::Date, text),
+                    Err(TemporalError::OutOfRange { .. })
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    /// Every canonical text the strict parsers read gives the same value here, and the Neo4j
+    /// text of every value reads back to it exactly (also by the canonical parser).
+    #[test]
+    fn the_extended_parser_includes_the_canonical_forms_and_reads_the_neo4j_text() {
+        let mut rng = Rng(0x5EED_3637);
+        let mut values: Vec<Temporal> = Vec::new();
+        for _ in 0..4000 {
+            let micros = rng.range(MIN_MICROS, MAX_MICROS);
+            let micros = match rng.range(0, 3) {
+                0 => micros - micros.rem_euclid(MICROS_PER_SECOND),
+                1 => micros - micros.rem_euclid(60 * MICROS_PER_SECOND),
+                _ => micros,
+            };
+            let local = LocalDateTime::from_micros(micros).unwrap();
+            values.push(Temporal::LocalDateTime(local));
+            values.push(Temporal::Date(local.date()));
+            values.push(Temporal::Time(local.time()));
+            let offset = rng.range(-18 * 3600, 18 * 3600) as i32;
+            if let Ok(value) = DateTime::from_local(local, offset) {
+                values.push(Temporal::DateTime(value));
+            }
+            let months = rng.range(-30_000, 30_000) as i32;
+            let days = rng.range(-30_000, 30_000) as i32;
+            let micros = rng.range(-(1 << 50), 1 << 50);
+            values.push(Temporal::Duration(Duration::new(months, days, micros)));
+        }
+        for value in values {
+            let canonical = value.to_string();
+            let parsed = parse_extended(value.kind(), &canonical)
+                .unwrap_or_else(|e| panic!("{canonical}: {e}"));
+            assert_same(parsed.value, value);
+            assert!(!parsed.sub_micro && !parsed.zone_name);
+            let text = neo4j(&value);
+            let back =
+                parse_extended(value.kind(), &text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_same(back.value, value);
+            assert_same(Temporal::parse_as(value.kind(), &text).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn neo4j_text_differs_from_the_canonical_text_only_in_its_forms() {
+        let cases: [(Temporal, &str, &str); 9] = [
+            (time("12:00").into(), "12:00", "12:00:00"),
+            (time("12:31:14").into(), "12:31:14", "12:31:14"),
+            (time("00:00:00.25").into(), "00:00:00.250", "00:00:00.250"),
+            (
+                ldt("1984-10-11T12:31").into(),
+                "1984-10-11T12:31",
+                "1984-10-11T12:31:00",
+            ),
+            (
+                dt("1984-10-11T12:31Z").into(),
+                "1984-10-11T12:31Z",
+                "1984-10-11T12:31:00Z",
+            ),
+            (
+                dt("1984-10-11T12:31:14+02:05:59").into(),
+                "1984-10-11T12:31:14+02:05:59",
+                "1984-10-11T12:31:14+02:05:59",
+            ),
+            (
+                dur("PT23H59M59.9S").into(),
+                "PT23H59M59.9S",
+                "PT23H59M59.900S",
+            ),
+            (dur("-PT1M0.001S").into(), "PT-1M-0.001S", "-PT1M0.001S"),
+            (dur("-P1YT4M50S").into(), "P-1YT-4M-50S", "-P1YT4M50S"),
+        ];
+        for (value, neo4j_text, canonical) in cases {
+            assert_eq!(neo4j(&value), neo4j_text);
+            assert_eq!(value.to_string(), canonical);
+        }
+        assert_eq!(neo4j(&dur("P1M-2D").into()), "P1M-2D");
+        assert_eq!(neo4j(&dur("PT8784H").into()), "PT8784H");
+        assert_eq!(neo4j(&dur("PT0S").into()), "PT0S");
+        assert_eq!(neo4j(&dur("PT0.000001S").into()), "PT0.000001S");
+        assert_eq!(neo4j(&date("-0044-03-15").into()), "-0044-03-15");
+    }
+
+    fn whole(n: i64) -> Amount {
+        Amount::from_i64(n)
+    }
+
+    fn real(x: f64) -> Amount {
+        Amount::from_f64(x).unwrap()
+    }
+
+    fn cascaded(parts: DurationParts) -> String {
+        let c = cascade(&parts).unwrap();
+        assert!(!c.sub_micro);
+        neo4j(&c.duration.into())
+    }
+
+    #[test]
+    fn the_fraction_cascade_is_neo4js() {
+        // Temporal1 [12], without the nanosecond row.
+        let p = DurationParts::default;
+        assert_eq!(
+            cascaded(DurationParts {
+                days: whole(14),
+                hours: whole(16),
+                minutes: whole(12),
+                ..p()
+            }),
+            "P14DT16H12M"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                months: whole(5),
+                days: real(1.5),
+                ..p()
+            }),
+            "P5M1DT12H"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                months: real(0.75),
+                ..p()
+            }),
+            "P22DT19H51M49.5S"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                weeks: real(2.5),
+                ..p()
+            }),
+            "P17DT12H"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                years: whole(12),
+                months: whole(5),
+                days: whole(14),
+                hours: whole(16),
+                minutes: whole(12),
+                seconds: whole(70),
+                ..p()
+            }),
+            "P12Y5M14DT16H13M10S"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                days: whole(14),
+                seconds: whole(70),
+                milliseconds: whole(1),
+                ..p()
+            }),
+            "P14DT1M10.001S"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                days: whole(14),
+                seconds: whole(70),
+                microseconds: whole(1),
+                ..p()
+            }),
+            "P14DT1M10.000001S"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                minutes: real(1.5),
+                seconds: whole(1),
+                ..p()
+            }),
+            "PT1M31S"
+        );
+        // Negative fractions cascade toward zero; a fraction of a year becomes months.
+        assert_eq!(
+            cascaded(DurationParts {
+                days: real(-1.5),
+                ..p()
+            }),
+            "P-1DT-12H"
+        );
+        assert_eq!(
+            cascaded(DurationParts {
+                years: real(12.5),
+                months: real(5.5),
+                ..p()
+            }),
+            "P12Y11M15DT5H14M33S"
+        );
+        // A nanosecond is reported, not kept.
+        let ns = cascade(&DurationParts {
+            days: whole(14),
+            seconds: whole(70),
+            nanoseconds: whole(1),
+            ..p()
+        })
+        .unwrap();
+        assert!(ns.sub_micro);
+        assert_eq!(neo4j(&ns.duration.into()), "P14DT1M10S");
+        // Beyond the fields.
+        assert!(
+            cascade(&DurationParts {
+                months: whole(i64::MAX),
+                ..p()
+            })
+            .is_err()
+        );
+        assert!(
+            cascade(&DurationParts {
+                hours: whole(i64::MAX),
+                ..p()
+            })
+            .is_err()
+        );
+        assert_eq!(Amount::from_f64(f64::NAN), None);
+        assert_eq!(Amount::from_f64(f64::INFINITY), None);
+        assert_eq!(Amount::from_f64(1e19), None);
+        assert_eq!(real(0.1).nano_units(), 100_000_000);
+        assert_eq!(Amount::from_nano_units(1).nano_units(), 1);
+        assert!(real(2.0).is_whole() && !real(2.5).is_whole());
+    }
+
+    #[test]
+    fn durations_scale_by_numbers_as_neo4j() {
+        let d = dur("P12Y5M14DT16H13M10S");
+        let text = |c: Cascaded| neo4j(&c.duration.into());
+        // Temporal8 [7], without the nanosecond.
+        for (factor, divide, expected) in [
+            (whole(1), false, "P12Y5M14DT16H13M10S"),
+            (whole(2), false, "P24Y10M28DT32H26M20S"),
+            (real(0.5), false, "P6Y2M22DT13H21M8S"),
+            (whole(1), true, "P12Y5M14DT16H13M10S"),
+            (whole(2), true, "P6Y2M22DT13H21M8S"),
+            (real(0.5), true, "P24Y10M28DT32H26M20S"),
+        ] {
+            assert_eq!(text(scale_duration(d, factor, divide).unwrap()), expected);
+        }
+        assert_eq!(
+            text(scale_duration(dur("P1M"), real(0.5), false).unwrap()),
+            "P15DT5H14M33S"
+        );
+        assert_eq!(
+            text(scale_duration(dur("P1D"), whole(-3), true).unwrap()),
+            "PT-8H"
+        );
+        assert!(scale_duration(d, whole(0), true).is_err());
+        assert!(scale_duration(d, whole(i64::MAX), false).is_err());
+        let third = scale_duration(dur("PT1S"), whole(3), true).unwrap();
+        assert!(third.sub_micro);
+        assert_eq!(text(third), "PT0.333333S");
+    }
+
+    #[test]
+    fn duration_between_is_neo4js() {
+        let between = |a: Temporal, b: Temporal| neo4j(&between_neo4j(a, b).unwrap().into());
+        // Temporal10 [1] and [2], the rows of one type.
+        let local = |a: &str, b: &str| between(ldt(a).into(), ldt(b).into());
+        assert_eq!(local("2018-01-01T12:00", "2018-01-02T10:00"), "PT22H");
+        assert_eq!(local("2018-01-02T10:00", "2018-01-01T12:00"), "PT-22H");
+        assert_eq!(
+            local("2018-01-01T10:00:00.2", "2018-01-02T10:00:00.1"),
+            "PT23H59M59.9S"
+        );
+        assert_eq!(
+            local("2018-01-02T10:00:00.1", "2018-01-01T10:00:00.2"),
+            "PT-23H-59M-59.9S"
+        );
+        assert_eq!(
+            local("2015-07-21T21:40:32.142", "2016-07-21T21:45:22.142"),
+            "P1YT4M50S"
+        );
+        assert_eq!(
+            local("2015-07-21T21:40:32.142", "2015-06-24T00:00"),
+            "P-27DT-21H-40M-32.142S"
+        );
+        assert_eq!(
+            between(
+                dt("2017-10-28T23:00+02:00").into(),
+                dt("2017-10-29T04:00+01:00").into()
+            ),
+            "PT6H"
+        );
+        assert_eq!(
+            between(
+                dt("2014-07-21T21:40:36.143+02:00").into(),
+                dt("2015-07-21T21:40:32.142+01:00").into()
+            ),
+            "P1YT59M55.999S"
+        );
+        assert_eq!(
+            between(date("1984-10-11").into(), date("2015-06-24").into()),
+            "P30Y8M13D"
+        );
+        assert_eq!(between(time("14:30").into(), time("16:30").into()), "PT2H");
+        assert_eq!(between(time("16:30").into(), time("14:30").into()), "PT-2H");
+        // Month ends: January 31 to February 28 is 28 days, not a month.
+        assert_eq!(
+            between(date("2023-01-31").into(), date("2023-02-28").into()),
+            "P28D"
+        );
+        assert_eq!(
+            between(date("2023-01-31").into(), date("2023-03-01").into()),
+            "P1M1D"
+        );
+        // Mixed types are aligned by the caller; durations have no between.
+        assert!(between_neo4j(date("2023-01-31").into(), time("10:00").into()).is_err());
+        assert!(between_neo4j(dur("P1D").into(), dur("P2D").into()).is_err());
+    }
+}

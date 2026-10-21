@@ -13,7 +13,7 @@
 use std::fmt::{self, Write};
 
 use super::civil::{self, MICROS_PER_SECOND};
-use super::{Date, DateTime, Duration, LocalDateTime, Time};
+use super::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
 
 fn write_date(f: &mut impl Write, days: i32) -> fmt::Result {
     let (year, month, day) = civil::civil_from_days(days);
@@ -66,6 +66,109 @@ pub(crate) fn write_offset(f: &mut impl Write, offset_seconds: i32) -> fmt::Resu
         write!(f, ":{:02}", abs % 60)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The Neo4j text (GQL `toString`, the Cypher compatibility form; 3g U6)
+// ---------------------------------------------------------------------------------------------
+
+/// The time of day as `java.time` `LocalTime.toString` writes it: `HH:MM`, `:SS` only when the
+/// seconds or the fraction are not zero, the fraction in groups of three digits.
+fn write_neo4j_time(f: &mut impl Write, micros_of_day: i64) -> fmt::Result {
+    let seconds = micros_of_day / MICROS_PER_SECOND;
+    let fraction = micros_of_day % MICROS_PER_SECOND;
+    write!(f, "{:02}:{:02}", seconds / 3600, seconds / 60 % 60)?;
+    if seconds % 60 != 0 || fraction != 0 {
+        write!(f, ":{:02}", seconds % 60)?;
+    }
+    write_fraction(f, fraction)
+}
+
+/// A local date-time in the Neo4j text: `<date>T<time>` with the short time.
+fn write_neo4j_local(f: &mut impl Write, micros: i64) -> fmt::Result {
+    let (days, of_day) = civil::split_micros(micros);
+    write_date(f, days as i32)?;
+    f.write_char('T')?;
+    write_neo4j_time(f, of_day)
+}
+
+/// A duration in the Neo4j text (`DurationValue.prettyPrint`): `P[nY][nM][nD][T[nH][nM][nS]]`
+/// with every component signed on its own, hours not folded into days (`PT49H`), the seconds
+/// signed together with their fraction (`PT-1M-0.001S`, `PT-1.999S`), the fraction without
+/// trailing zeros (`PT59.9S`), `PT0S` when zero.
+fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
+    if value.is_zero() {
+        return f.write_str("PT0S");
+    }
+    f.write_char('P')?;
+    let months = value.months as i64;
+    let part = |f: &mut dyn Write, n: i64, unit: char| -> fmt::Result {
+        if n != 0 {
+            write!(f, "{n}{unit}")?;
+        }
+        Ok(())
+    };
+    part(f, months / 12, 'Y')?;
+    part(f, months % 12, 'M')?;
+    part(f, value.days as i64, 'D')?;
+    let micros = value.micros;
+    if micros != 0 {
+        f.write_char('T')?;
+        // Truncating division: every component takes the sign of the time part.
+        let (hours, rest) = (
+            micros / (3600 * MICROS_PER_SECOND),
+            micros % (3600 * MICROS_PER_SECOND),
+        );
+        let (minutes, rest) = (
+            rest / (60 * MICROS_PER_SECOND),
+            rest % (60 * MICROS_PER_SECOND),
+        );
+        part(f, hours, 'H')?;
+        part(f, minutes, 'M')?;
+        if rest != 0 {
+            if rest < 0 {
+                f.write_char('-')?;
+            }
+            let rest = rest.unsigned_abs();
+            let micro = MICROS_PER_SECOND as u64;
+            write!(f, "{}", rest / micro)?;
+            let fraction = rest % micro;
+            if fraction != 0 {
+                let digits = format!("{fraction:06}");
+                write!(f, ".{}", digits.trim_end_matches('0'))?;
+            }
+            f.write_char('S')?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes a value in the text Neo4j gives it (`java.time` `toString`), the form of GQL's
+/// `toString` (Cypher compatibility; ISO `CAST(x AS STRING)` keeps the canonical text):
+/// `12:00` and `1984-10-11T12:31` without zero seconds, an offset `Z` / `+01:00`, a duration
+/// signed per component (`PT-1M-0.001S`). Our values carry no zone name, so the
+/// `[Europe/Stockholm]` suffix is never written. The engine parsers read the text back.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn write_neo4j(f: &mut impl Write, value: &Temporal) -> fmt::Result {
+    match *value {
+        Temporal::Date(v) => write_date(f, v.days),
+        Temporal::Time(v) => write_neo4j_time(f, v.micros),
+        Temporal::LocalDateTime(v) => write_neo4j_local(f, v.micros),
+        Temporal::DateTime(v) => {
+            write_neo4j_local(f, v.local().micros)?;
+            write_offset(f, v.offset_seconds)
+        }
+        Temporal::Duration(v) => write_neo4j_duration(f, v),
+    }
+}
+
+/// [`write_neo4j`] into a new string.
+#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+pub(crate) fn neo4j(value: &Temporal) -> String {
+    let mut text = String::new();
+    // Writing into a `String` never fails.
+    let _ = write_neo4j(&mut text, value);
+    text
 }
 
 impl fmt::Display for Date {

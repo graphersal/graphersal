@@ -29,8 +29,9 @@ use std::str::FromStr;
 // The date steps (`date_add`, `date_diff`, `date_trunc`, `date_part`, `age`) call these.
 pub(crate) mod arith;
 pub(crate) mod civil;
-mod format;
-mod parse;
+// `format::neo4j` and `parse::parse_extended` are the GQL text forms; the rest stays private.
+pub(crate) mod format;
+pub(crate) mod parse;
 #[cfg_attr(not(any(feature = "serde", feature = "io")), allow(dead_code))]
 // ChangeSet serde, GraphSON.
 pub(crate) mod tags;
