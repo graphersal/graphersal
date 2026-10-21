@@ -137,20 +137,19 @@ fn make_json_safe(value: &mut ElementProperty) {
         ElementProperty::Object(map) => json_safe_map(map),
         ElementProperty::Vertex(vertex) => json_safe_map(vertex.properties_mut()),
         ElementProperty::Edge(edge) => json_safe_map(edge.properties_mut()),
-        ElementProperty::Map(map) => {
+        ElementProperty::Map(map)
             if map
                 .iter()
-                .any(|(k, v)| has_non_finite(k) || has_non_finite(v))
-            {
-                let mut safe = ValueMap::with_capacity(map.len());
-                for (key, item) in map.iter() {
-                    let (mut key, mut item) = (key.clone(), item.clone());
-                    make_json_safe(&mut key);
-                    make_json_safe(&mut item);
-                    safe.insert(key, item);
-                }
-                *value = safe.into_property();
+                .any(|(k, v)| has_non_finite(k) || has_non_finite(v)) =>
+        {
+            let mut safe = ValueMap::with_capacity(map.len());
+            for (key, item) in map.iter() {
+                let (mut key, mut item) = (key.clone(), item.clone());
+                make_json_safe(&mut key);
+                make_json_safe(&mut item);
+                safe.insert(key, item);
             }
+            *value = safe.into_property();
         }
         _ => {}
     }
