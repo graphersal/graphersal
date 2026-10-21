@@ -5112,3 +5112,36 @@ fn mcp_gql_tool_writes_unless_read_only() {
     assert!(!error && text.contains("\"tags\": 0"), "{text}");
     assert_eq!(changes(port)["version"], 0, "nothing was committed");
 }
+
+/// A GQL MERGE through the gql tool (3e): the first call creates and its answer carries the
+/// change summary; the second only matches, so it changes nothing and the answer reports no
+/// change and no commit.
+#[test]
+fn mcp_gql_merge_reports_a_change_only_when_it_creates() {
+    let server = start(&["--graph", "modern", "--mcp"]);
+    let port = server.port;
+    let mut mcp = McpClient::connect(port, &[]);
+    let query =
+        serde_json::json!({"query": "MERGE (c:city {name: 'Berlin'}) RETURN c.name AS name"});
+    let (error, text) = mcp.call("gql", query.clone());
+    assert!(!error, "{text}");
+    assert!(
+        text.contains("changed the data, committed as commit 1 (+1 vertex)")
+            && text.contains("Berlin"),
+        "{text}"
+    );
+    let (error, text) = mcp.call("gql", query);
+    assert!(
+        !error && text.starts_with("ok: 1 result") && text.contains("Berlin"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("committed") && !text.contains("vertex"),
+        "{text}"
+    );
+    assert_eq!(
+        changes(port)["version"],
+        1,
+        "the matching MERGE commits nothing"
+    );
+}

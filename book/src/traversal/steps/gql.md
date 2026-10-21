@@ -3,7 +3,7 @@
 
 `gql` · category: [Start](../../traversal/step_reference.md#start)
 
-Runs a GQL query (experimental: MATCH, OPTIONAL MATCH, WHERE, LET, FILTER, WITH, RETURN with aggregates, ORDER BY, OFFSET, LIMIT, quantified edges and path patterns, path variables, and the writes INSERT / CREATE, SET, REMOVE and [DETACH] DELETE; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.
+Runs a GQL query (experimental: MATCH, OPTIONAL MATCH, WHERE, LET, FILTER, WITH, RETURN with aggregates, ORDER BY, OFFSET, LIMIT, quantified edges and path patterns, path variables, and the writes INSERT / CREATE, SET, REMOVE, [DETACH] DELETE and MERGE; $name reads a value of the optional parameter map) at the start of a traversal; each row is a map from column name to value, and Gremlin steps may follow.
 
 ## Forms
 

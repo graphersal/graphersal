@@ -446,7 +446,7 @@ when the kind is known only at run time (an item of a `FOR` list, a `WITH` colum
 |---|---|---|
 | a property value must be a scalar or a list of scalars of one kind; a map, a list of mixed kinds, a nested list or a `NULL` inside a list is a type error | stored as given: maps, mixed and nested lists (a `NULL` inside a list stays in the list) | Graphersal's data model stores JSON-like values ([jpath keys](../users_guide/jpath_keys.md)); a [schema](../users_guide/schema_enforcement.md) restricts a property's type where wanted |
 | `CREATE` requires `WITH` between a write and a following `MATCH` (Cypher 5) | `MATCH` may follow `INSERT` directly | GQL's linear statements allow it, as Neo4j's Cypher 25 does |
-| `SET n = NULL` / `SET n += NULL` | an error (`22004`) whose help names `SET n = {}` and `coalesce($map, {})` | a `NULL` map is more often a missing parameter than a wish to remove every property; an error can be relaxed later without changing a query that works, the opposite would silently start removing properties. GQL's own item takes a braced map only |
+| `SET n = NULL` / `SET n += NULL` | an error (`22004`) whose help names `SET n = {}` and `coalesce($map, {})` | a `NULL` map is more often a missing parameter than a wish to remove every property; an error can be relaxed later without changing a query that works, the opposite would silently start removing properties. GQL's own item takes a braced map only: standard GQL has no `SET n = NULL` form, so the error is our choice for the compatibility form |
 | `SET` of a list of maps, a map, or a list of mixed kinds is a type error | stored as given, as for `INSERT` | as above |
 | `RETURN n` of a node deleted earlier in the query returns it | an error whose help shows `WITH n, properties(n) AS p DETACH DELETE n RETURN p` ([DELETE](#delete)) | a deliberate deviation (user decision): a returned deleted node would carry no id, labels or properties Graphersal could give, and a silent empty value hides the mistake |
 | a plain `DELETE` of a node that still has edges is checked when the transaction commits: `MATCH (n)-[r]-() DELETE n DELETE r` works | checked per clause, before the clause removes anything (`G1001`): delete the edges in the same clause (`DELETE r, n`) or use `DETACH DELETE` | a query is one unit, but each clause states its own result; a per-clause check fails at the clause that is wrong, never later |
@@ -539,6 +539,63 @@ g.gql("MATCH (p:person {name: 'vadas'}) DETACH DELETE p RETURN labels(p) AS l") 
 the same query from `RETURN n`; `gql()` fails the query with a help naming the
 `properties(n)` pattern (see the table in [Writes](#writes)). An error can be relaxed later
 without changing a query that works.
+
+## MERGE
+
+`MERGE` is a [compatibility form](aliases.md#merge) with Neo4j Cypher 25's meaning, checked
+against the openCypher TCK's `clauses/merge` scenarios ([TCK Compliance](tck_compliance.md)).
+
+**One pattern.** A clause holds one path pattern; a second after `,` is a syntax error
+(`42001`). Node labels are conjunctions only (`:A:B`, `:A&B`, `IS A & B`); an edge has exactly
+one label, no quantifier, no inline `WHERE`, and no `$parameter` stands for a whole property map.
+A path variable (`MERGE p = ..`) is a new variable holding the found or the created path.
+
+**Match or create, per row.** For each row the clause searches the whole pattern, with GQL `=`
+on the properties (so `1` finds `1.0`), label-set containment (a node with more labels than the
+pattern names is found) and trail semantics (each edge at most once per match). Every match is a
+row: two matching nodes give two rows. When nothing matches, the whole pattern is created, the
+variables bound before reused and every other element new; the row continues with exactly one
+record.
+
+**`NULL` is an error.** A pattern property whose value is `NULL` on a row fails the query with
+`22004` when that row runs, before the search: `MERGE` can neither find nor store a `NULL`
+value. The check is at run time, also for a literal `NULL`, as the TCK expects.
+
+**Either direction.** `MERGE (a)-[:T]-(b)` finds an edge in either direction (a found edge in
+each direction is a row of its own) and creates one from left to right, `a` to `b`. Directed
+edges are found and created as written.
+
+**Rows see earlier rows.** The rows run in order, one at a time, and each row's search sees what
+the rows before it created: `FOR x IN [1, 1] MERGE (:N {x: x})` creates one node, and a second
+row matching the first row's creation runs `ON MATCH`. Within a clause this is the only
+uniqueness `MERGE` gives (there is no constraint); it is race-free because one query is one unit
+under the write lock. The search runs inside the write step, row by row, so unlike a `MATCH`
+before a write ([Writes](#writes)) it sees the clause's own earlier creations.
+
+```rhai,graph=modern
+g.gql("FOR x IN [1, 1, 2] MERGE (n:N {x: x}) RETURN count(*) AS rows, count(DISTINCT n) AS nodes").to_list()   // #{"nodes": 2, "rows": 3}
+```
+
+**`ON CREATE SET` and `ON MATCH SET`.** Any number of each, in any order; they apply in the
+order written, each in its case, with the rules of [`SET`](#set-and-remove) (items left to right,
+`NULL` removes). They read the pattern's variables and every variable bound before. They run
+after the creation, as a second write in the same unit: the schema checks the created element
+before them ([Writing with GQL](writes.md#schema)).
+
+**Bound variables.** A node variable bound before is a reference only, `(a)`: new labels or
+properties on it, a bound edge variable, and a pattern that is only a bound node are refused
+before the run (`42002`). After `WITH a AS x`, `a` is a new name and finds any node.
+
+**Schema defaults.** A created element gets the schema's create-time defaults and its
+write-time coercion, exactly as an `INSERT` of the pattern.
+
+**Where `MERGE` differs from Neo4j:**
+
+| Neo4j | `gql()` | Why |
+|---|---|---|
+| a property existence constraint is checked when the transaction commits, so `ON CREATE SET n.k = ..` satisfies it | a `required` property of the schema is checked when the element is created, before the `ON CREATE SET` items: give it in the pattern's map | the schema checks each write; a later item is a second write in the same unit ([Writing with GQL](writes.md#schema)) |
+| two concurrent `MERGE`s of the same pattern may both create, unless a uniqueness constraint holds | never: a query writes under the write lock, and each row sees the rows before it | one query is one unit; Graphersal has no concurrent writers |
+| no permission model on the clause | asks `Create` per label it can create and `Update` for its `ON` items before it runs, also when every row would only find; then the `Read`s of its search | the check sees the plan before anything runs ([Writing with GQL](writes.md#permissions)) |
 
 ## Type errors surface at evaluation time
 

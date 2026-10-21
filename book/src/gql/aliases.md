@@ -5,9 +5,10 @@ unambiguous and mean exactly the same: an alias is translated to its GQL form wh
 parsed, so both spellings give the same plan and the same rows. An alias never has a meaning of
 its own. This table lists every accepted alias; Cypher functions without any GQL counterpart are
 the [compatibility functions](#compatibility-functions) below, and Cypher's map projections and
-comprehensions, `COUNT { }` and `COLLECT { }` the compatibility forms
+comprehensions, `COUNT { }`, `COLLECT { }`, `SET n += ..` and `MERGE` the compatibility forms
 ([Map projections and comprehensions](#map-projections-and-comprehensions),
-[COUNT and COLLECT](#count-and-collect)); any other Cypher
+[COUNT and COLLECT](#count-and-collect), [SET and REMOVE](#set-and-remove), [MERGE](#merge));
+any other Cypher
 spelling is either not supported yet or [refused](refused.md).
 
 | Cypher spelling | GQL form | Notes |
@@ -259,7 +260,9 @@ Cypher's meaning:
   plain map.
 
 A `NULL` on the right of `=` or `+=` is an error (`22004`) rather than an empty map; write
-`coalesce($map, {})` ([Semantics](semantics.md#set-and-remove)).
+`coalesce($map, {})` ([Semantics](semantics.md#set-and-remove)). This is our choice for the
+compatibility form, where Neo4j removes every property: standard GQL has no such form, since its
+`SET n = {..}` takes a braced map only.
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person {name: 'marko'}) SET p += {city: 'Rome'} RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 29, "city": "Rome", "name": "marko"}}
@@ -267,6 +270,28 @@ g.gql("MATCH (p:person {name: 'marko'}) SET p = $props RETURN properties(p) AS p
 g.gql("MATCH (p:person {name: 'marko'}), (q:person {name: 'josh'}) SET p = q RETURN properties(p) AS props").to_list()   // #{"props": #{"age": 32, "name": "josh"}}
 g.gql("MATCH (p:person {name: 'marko'}) SET p += $more", #{more: ()})   // error: the right side of SET p += .. is NULL, not a map
 ```
+
+## MERGE
+
+Cypher's `MERGE` ("find or create") has no ISO GQL counterpart. `gql()` accepts it as a
+**compatibility form** with Neo4j Cypher 25's meaning, and with it its `ON CREATE SET` and
+`ON MATCH SET` actions:
+
+| Cypher | In `gql()` | Notes |
+|---|---|---|
+| `MERGE <pattern>` | supported as a compatibility form | one path pattern per clause; per row, every match is a row, or the whole pattern is created; each row sees the rows before it ([Writing with GQL](writes.md#merge)) |
+| `ON CREATE SET <items>`, `ON MATCH SET <items>` | supported as a compatibility form | the items of `SET`, several actions in any order, applied in the order written |
+| `MERGE p = <pattern>` | supported | the path found or created |
+| `MERGE (a)-[:T]-(b)` without a direction | supported | matches either direction, creates from left to right |
+
+Plain GQL writes the same with a `CALL` body that inserts only when nothing exists:
+
+```rhai,graph=modern
+g.gql("MERGE (c:city {name: 'Berlin'}) RETURN c.name AS name").to_list()   // #{"name": "Berlin"}
+g.gql("CALL { FILTER NOT EXISTS { MATCH (:city {name: 'Berlin'}) } INSERT (:city {name: 'Berlin'}) } MATCH (c:city {name: 'Berlin'}) RETURN c.name AS name").to_list()   // #{"name": "Berlin"}
+```
+
+The differences from Neo4j are on [Semantics](semantics.md#merge).
 
 ## Cypher spellings that are not aliases
 
@@ -282,7 +307,8 @@ g.gql("MATCH (p:person {name: 'marko'}) SET p += $more", #{more: ()})   // error
 | `CALL { } IN TRANSACTIONS` | [refused](refused.md): a write form; the `CALL` itself is supported |
 | `exists(n.p)` (Cypher 4) | [refused](refused.md): `EXISTS` takes a pattern; test a property with `n.p IS NOT NULL` |
 | `GROUP BY` (not Cypher) | ISO GQL, accepted after the `RETURN` items (optional: grouping is implicit); after `WITH` an error that explains implicit grouping |
-| `MERGE`, `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT`; `SET` and `REMOVE` are supported, `+=` as a [compatibility form](#set-and-remove) |
+| `MERGE` | supported as a [compatibility form](#merge), with `ON CREATE SET` / `ON MATCH SET` |
+| `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT`; `SET` and `REMOVE` are supported, `+=` as a [compatibility form](#set-and-remove) |
 | `DELETE`, `DETACH DELETE` | the same in GQL, supported ([Writing with GQL](writes.md#delete)); GQL also writes the default explicitly as `NODETACH DELETE` |
 | `SET n[key] = v`, `SET n:$(expr)` (Cypher 25 dynamic keys and labels) | not supported; name the key and the label in the query |
 | `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |

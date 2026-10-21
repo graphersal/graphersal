@@ -3,9 +3,9 @@
 `gql()` writes too. This version supports **`INSERT`** (Cypher `CREATE` is its
 [alias](aliases.md)), which creates nodes and edges, and **`SET`** and **`REMOVE`**, which change
 the properties and labels of existing ones, and **`DELETE`** / **`DETACH DELETE`**, which remove
-them; each runs once for each row that reaches it. `MERGE` comes in a later version; until then
-it fails before the run with GQLSTATUS `0A000` and a help line naming the Gremlin step that does
-the same ([Not yet](#not-yet)).
+them; each runs once for each row that reaches it. Cypher's **`MERGE`**, which finds a pattern
+or creates it when it is missing, is accepted as a [compatibility form](aliases.md#merge)
+([MERGE](#merge)).
 
 A writing query is one unit, like every traversal: it commits when it succeeds, and a query that
 fails, on any row, changes nothing ([Units](#one-query-is-one-unit)).
@@ -223,6 +223,116 @@ g.v().has("name", "marko").out_e("knows").where(__.in_v().has("name", "vadas")).
 `drop()` of a vertex always removes its edges (it is `DETACH DELETE`); the NODETACH check has no
 Gremlin twin.
 
+## MERGE
+
+`MERGE` is Cypher's "find or create": for each row it looks for its **one pattern**, and every
+match becomes a row; when nothing matches, it **creates the whole pattern** and the row goes on
+with the new elements. ISO GQL has no `MERGE` statement; `gql()` accepts it as a
+[compatibility form](aliases.md#merge) with Cypher's meaning, so a query written for Neo4j runs
+as it is. The second `MERGE` of the first block finds the city the first one created:
+
+```rhai,graph=modern,script
+g.gql("MERGE (c:city {name: 'Berlin'}) RETURN c.name AS name").to_list();   // #{"name": "Berlin"}: created
+g.gql("MERGE (c:city {name: 'Berlin'}) RETURN c.name AS name").to_list();   // #{"name": "Berlin"}: found
+g.v().has_label("city").count().next()   // 1
+```
+
+```rhai,graph=modern
+g.gql("MERGE (p:person {name: 'marko'}) RETURN p.age AS age").to_list()   // #{"age": 29}: found, nothing created
+g.gql("MERGE p = (:person {name: 'marko'})-[:knows]->(f:person) RETURN f.name AS friend, path_length(p) AS hops ORDER BY friend").to_list()   // josh and vadas: two matches, two rows
+```
+
+**The pattern.** One path pattern (a second one after `,` is a syntax error: write one `MERGE`
+per pattern). Its nodes have the labels written (`:A:B` or `:A&B`; a found node carries all of
+them and may have more) and a property map compared with GQL `=`; its edges have exactly one
+label and no quantifier, and the pattern has no `WHERE`. A path variable (`MERGE p = ..`) gives
+the found or the created path.
+
+**A variable bound before** stands for its element: write it alone, as `(a)`, and `MERGE`
+reuses it in both cases, so an edge between matched nodes is created only when it is missing.
+Labels or properties on a bound node (`MERGE (a:admin)`), a bound edge variable, and a pattern
+that is only a bound node (`MATCH (a) MERGE (a)`) are refused before the run (`42002`); change a
+bound node with `SET`. An unbound variable is new: the `MERGE` finds or creates its element.
+
+```rhai,graph=modern,script
+g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'peter'}) MERGE (a)-[e:knows]->(b) RETURN b.name AS to").to_list();   // #{"to": "peter"}: created
+g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'peter'}) MERGE (a)-[e:knows]->(b) RETURN b.name AS to").to_list();   // found
+g.e().has_label("knows").count().next()   // 3: marko's two edges and the new one
+```
+
+```rhai,graph=modern
+g.gql("MATCH (a:person) MERGE (a)")   // error: a bound variable alone has nothing to find or create
+g.gql("MATCH (a:person) MERGE (a:admin)")   // error: a bound node carries no new labels in MERGE; SET a:admin does
+g.gql("MERGE (a:person {name: 'x'}), (b:person {name: 'y'})")   // error: MERGE takes exactly one pattern
+```
+
+**Either direction.** An edge without a direction, `-[:T]-`, matches an edge in either
+direction; when it is created, it points from left to right, from the node written first:
+
+```rhai,graph=modern
+g.gql("MATCH (a:person {name: 'josh'}), (b:person {name: 'marko'}) MERGE (a)-[e:knows]-(b) RETURN startNode(e).name AS from").to_list()   // #{"from": "marko"}: the stored edge marko -> josh
+g.gql("MATCH (a:person {name: 'vadas'}), (b:person {name: 'josh'}) MERGE (a)-[e:knows]-(b) RETURN startNode(e).name AS from").to_list()   // #{"from": "vadas"}: created left to right
+```
+
+**Per row, and each row sees the rows before it.** `MERGE` runs once for each row, in order,
+and a row finds what an earlier row created: a repeated item is created once, so `MERGE` is
+idempotent within a query as across queries. The whole pattern is matched or created: `MATCH
+(p:person) MERGE (p)-[:in]->(g:group {name: 'x'})` creates a group for every person without
+such an edge, because the pattern with the edge does not match for them; to share one group,
+`MERGE` the group first and the edge second:
+
+```rhai,graph=modern
+g.gql("FOR n IN ['Rome', 'Rome', 'Oslo'] MERGE (c:city {name: n}) RETURN count(*) AS rows, count(DISTINCT c) AS cities").to_list()   // #{"cities": 2, "rows": 3}
+g.gql("MATCH (p:person) WHERE p.age > 30 MERGE (g:group {name: 'over30'}) MERGE (p)-[:in]->(g) RETURN count(DISTINCT g) AS groups").to_list()   // #{"groups": 1}
+```
+
+**ON CREATE SET and ON MATCH SET.** After the pattern, `ON CREATE SET <items>` changes the
+elements of a row that the `MERGE` created, and `ON MATCH SET <items>` those of a row it found.
+The items are the items of [`SET`](#set) and may read every variable of the row (the pattern's
+and the earlier ones). Both may be written several times and in any order; they apply in the
+order written, each in its own case.
+
+```rhai,graph=modern,script
+g.gql("FOR name IN ['marko', 'ann'] MERGE (p:person {name: name}) ON CREATE SET p.visits = 1 ON MATCH SET p.visits = coalesce(p.visits, 0) + 1").iterate();
+g.gql("FOR name IN ['marko', 'ann'] MERGE (p:person {name: name}) ON CREATE SET p.visits = 1 ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name, p.visits AS visits ORDER BY name").to_list()   // ann 2, marko 2
+```
+
+```rhai,graph=modern
+g.gql("MERGE (p:person {name: 'marko'}) ON CREATE SET p.new = true ON MATCH SET p.new = false RETURN p.new AS new").to_list()   // #{"new": false}
+g.gql("MERGE (p:person {name: 'marko'}) ON MATCH SET p.seen = 1 ON MATCH SET p.seen = p.seen + 1 RETURN p.seen AS seen").to_list()   // #{"seen": 2}
+```
+
+**NULL in the pattern.** `MERGE` cannot look for or create a `NULL` property value: a property
+of the pattern that is `NULL` on a row (a missing parameter, an `OPTIONAL MATCH` that found
+nothing) fails the query with `22004` when that row runs, and nothing of the query is kept.
+Keep such rows away with `FILTER x IS NOT NULL`, or give a default with `coalesce()`:
+
+```rhai,graph=modern
+g.gql("FOR x IN [1, NULL] MERGE (n:num {v: x})")   // error: MERGE cannot match or create `{v: NULL}` (22004)
+g.gql("FOR x IN [1, NULL] FILTER x IS NOT NULL MERGE (n:num {v: x}) RETURN count(*) AS n").to_list()   // #{"n": 1}
+```
+
+**A `MERGE` that only finds changes nothing.** It commits no change: a commit hook and the
+journal see nothing, and the dev server's answer reports no change summary and no commit. An
+`ON MATCH SET` that runs is a change, as a `SET` is.
+
+The same in Gremlin: [`merge_v()`](../traversal/steps/merge_v.md) finds or creates a vertex,
+[`merge_e()`](../traversal/steps/merge_e.md) an edge between given vertices, and the
+`fold().coalesce(__.unfold(), __.add_v(..))` idiom does it by hand. Their `onCreate` option map
+replaces the creation map, while `ON CREATE SET` changes the created element afterwards.
+
+```rhai,graph=modern
+g.merge_v(#{"T.label": "city", name: "Berlin"}).values("name").to_list()   // "Berlin"
+g.v().has_label("city").has("name", "Berlin").fold().coalesce(__.unfold(), __.add_v("city").property("name", "Berlin")).values("name").to_list()   // "Berlin"
+```
+
+The same in plain GQL, without the compatibility form: a `CALL` body that inserts only when
+nothing exists yet, then a `MATCH` that reads the result:
+
+```rhai,graph=modern
+g.gql("CALL { FILTER NOT EXISTS { MATCH (:city {name: 'Berlin'}) } INSERT (:city {name: 'Berlin'}) } MATCH (c:city {name: 'Berlin'}) RETURN count(c) AS cities").to_list()   // #{"cities": 1}
+```
+
 ## Once per row
 
 A write clause runs once for each row that reaches it, so the clauses before it decide how many
@@ -339,6 +449,18 @@ Caused by: Missing required property 'name' on vertex 'person'
 Help: Give 'name' a value in the property map of the INSERT, as in g.gql("INSERT (:person {name: 'value'})"); a NULL value (such as a property the matched element lacks) is not stored and so is missing too: give it a fallback, as in {name: coalesce(n.name, 'unknown')}. Or remove it from the label's "required" in the schema, or give it a "default" (or "defaultFunction") in the schema: it is stored when an element is created without the property.
 ```
 
+A `MERGE` that creates creates like an `INSERT` of its pattern: the schema's defaults are filled
+in and the pattern's map must satisfy `required`. Its `ON CREATE SET` items run afterwards, as a
+second write in the same query, so a `required` property given only there is missing when the
+element is created and fails the query; put it into the pattern's map instead (where it is also
+part of what `MERGE` looks for):
+
+```rhai,graph=empty,script
+g.set_schema(#{mode: "open", vertices: #{person: #{schema: #{type: "object", properties: #{
+    name: #{type: "string"}, active: #{type: "boolean", default: true}}, required: ["name"]}}}});
+g.gql("MERGE (p:person {name: 'ann'}) RETURN p.active AS active").to_list()   // #{"active": true}
+```
+
 A value of the wrong type is not converted, and GQL never infers a type from text. Convert it where
 the `INSERT` writes it:
 
@@ -360,7 +482,13 @@ run (an item of a `FOR` list). It asks nothing for the properties: they are part
 the element. `DELETE` asks `Delete`, as `drop()` does: on `Data(vertex)` for a node, on
 `Data(edge "label")` for an edge whose pattern names its labels, and on any element for a path,
 a list or a value whose kind is known only at run time; `DETACH` asks nothing more (as `drop()`
-of a vertex, which removes its edges too). (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
+of a vertex, which removes its edges too). `MERGE` asks what its two halves need, whether a
+row will find or create: `Read` for the search (as a `MATCH` of its pattern), `Create` per label
+of every element the pattern can create (as the `INSERT` of it), and, only when it has
+`ON CREATE SET` / `ON MATCH SET` items, their `Update`s (as `SET`). The step's own `Create` and
+`Update` requests are checked first, then the `Read`s of its search; a policy that denies
+`Create` refuses a `MERGE` even where every row would only find. `merge_v()` and `merge_e()`
+always ask `Create` and `Update` on any vertex or edge instead. (Gremlin's `add_v(..).property(..)` asks `Create` and `Update`, because the check
 runs before the optimizer folds the property into the creation; a policy that denies only
 `Update` allows the `INSERT` and refuses its Gremlin twin.) A read-only host
 (`AccessPolicy::read_only()`, the MCP server's `--mcp-read-only`, a read-only view of a past
@@ -370,7 +498,7 @@ state) refuses a GQL write before it runs.
 
 A saved query may be written in GQL itself ([Saved queries in
 GQL](../users_guide/saved_queries.md#saved-queries-in-gql)): the body is the plain query text,
-its `$parameters` are the declared ones, and an `INSERT`, `SET`, `REMOVE` or `DELETE` makes it
+its `$parameters` are the declared ones, and an `INSERT`, `SET`, `REMOVE`, `DELETE` or `MERGE` makes it
 a query that writes, whose `effects` name what its plan creates, changes and deletes. A call
 writes in one unit and returns the rows:
 
@@ -391,6 +519,12 @@ g.query("birthday", #{name: "vadas"}).select("age").to_list()   // 28
 ```rhai,graph=modern,script
 g.define_query(#{name: "unlink", language: "gql", params: #{}, body: "MATCH ()-[e:knows]->() DELETE e"});
 g.get_query("unlink")["effects"].map(|e| e.text)   // ["Delete Data(edge \"knows\")"]
+```
+
+```rhai,graph=modern,script
+g.define_query(#{name: "visit", language: "gql", params: #{name: "string"},
+    body: "MERGE (p:person {name: $name}) ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name"});
+g.get_query("visit")["effects"].map(|e| e.text)   // ["Create Data(vertex \"person\")", "Update Data(vertex)"]
 ```
 
 A [saved query](../users_guide/saved_queries.md) in Rhai whose body runs `g.gql("INSERT ...")`
@@ -434,11 +568,15 @@ element of the pattern, in text order ([Plans and Performance](plans.md#writes))
 to one `gql:set` step and a `REMOVE` clause to one `gql:remove` step with its items, which pass
 the row on unchanged. A `DELETE` clause lowers to one `gql:delete` step: it collects the targets
 of all its rows first (the NODETACH check sees the whole clause), removes the edges, then the
-nodes, and passes the rows on unchanged. Because the plan writes, its traversers are never merged into one with a
+nodes, and passes the rows on unchanged. A `MERGE` lowers to one `gql:merge` step with two
+children: the search (the plan of a `MATCH` of the pattern, starting from a bound node or using
+a [property index](plans.md) where one serves it) and the creation (the `gql:insert_node` /
+`gql:insert_edge` chain of the pattern); `.profile()` shows both under the step. Because the plan writes, its traversers are never merged into one with a
 higher bulk: each row creates its own elements and applies its own changes.
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person {name: 'marko'}) SET p.age = 1 RETURN p").profile()
+g.gql("MERGE (c:city {name: 'Rome'}) RETURN c").profile()
 ```
 
 ## Not yet

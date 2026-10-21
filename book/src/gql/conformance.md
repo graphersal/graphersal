@@ -47,6 +47,7 @@ The mandatory core of a GQL query, by construct.
 | data-modifying statements: `INSERT` | supported | nodes with label conjunctions and properties, directed edges with one label, once per row; Cypher `CREATE` as an [alias](aliases.md) ([Writing with GQL](writes.md)) |
 | data-modifying statements: `SET`, `REMOVE` | supported | property items `n.k = v`, all properties `n = {..}`, label items `n:A` / `n IS A`; once per row, items left to right, `NULL` removes; Cypher's `+=` and `SET n = <expression>` as [compatibility forms](aliases.md#set-and-remove) ([Writing with GQL](writes.md#set)) |
 | data-modifying statements: `DELETE` | supported | `DETACH DELETE` and `[NODETACH] DELETE` of nodes, edges, paths and lists of them, once per row; NODETACH checked per clause (`G1001`); reading a deleted element afterwards is an error ([Writing with GQL](writes.md#delete), [Semantics](semantics.md#delete)) |
+| Cypher `MERGE` with `ON CREATE SET` / `ON MATCH SET` | supported | not GQL; a compatibility form with Cypher's meaning ([Cypher Aliases](aliases.md#merge)): one pattern, per row every match a row or the whole pattern created, rows see earlier rows' creations, `NULL` in the pattern `22004` ([Writing with GQL](writes.md#merge), [Semantics](semantics.md#merge)) |
 | catalog statements (`CREATE GRAPH`, `CREATE GRAPH TYPE`, ...), session and transaction commands | no | the host application manages graphs, schemas and transactions |
 | value types | partial | the GQL types Graphersal has (integers, floats, strings, booleans, lists, records/maps, dates and times, `NULL`); path values; no byte strings |
 
@@ -86,7 +87,7 @@ The mandatory core of a GQL query, by construct.
 | GA07 | ordering by discarded binding variables *(provisional)* | supported | `ORDER BY` may read variables that `RETURN` does not return (not after `RETURN DISTINCT`) |
 | GB02 | double minus sign comments | supported | `-- ...`, with the edge rule of [Writing GQL in Rhai Strings](rhai_strings.md#comments) |
 | GB03 | double solidus comments | supported | `// ...` |
-| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`), `SET`, `REMOVE`, `DELETE`; Cypher's `MERGE` not yet ([Writing with GQL](writes.md)) |
+| GD01 | updatable graphs *(provisional)* | partial | `INSERT` (Cypher `CREATE`), `SET`, `REMOVE`, `DELETE`; Cypher's `MERGE` (no ISO counterpart) as a [compatibility form](aliases.md#merge) ([Writing with GQL](writes.md)) |
 | GD02 | graph label set changes *(provisional)* | supported | `SET n:A` / `SET n IS A` and `REMOVE n:A` add and remove node labels; an edge's single label is not changed by them ([Writing with GQL](writes.md#set)) |
 | GD03 | `DELETE` statement: subquery support *(provisional)* | supported | a `DELETE` item may hold a subquery, as in `DETACH DELETE COLLECT { MATCH (s)<-[e]-() RETURN e }`; a `CALL { }` body may end with a `DELETE` ([Writing with GQL](writes.md#delete)) |
 | GD04 | `DELETE` statement: simple expression support *(provisional)* | supported | a `DELETE` item is an expression: a variable, a path, a list (`collect(n)`), a map member, a function result; `NULL` is skipped, another value is `42002` / `22G03` ([Semantics](semantics.md#delete)) |

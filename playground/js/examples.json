@@ -481,6 +481,27 @@
     "group": "GQL",
     "subgroup": "Writes",
     "graph": "modern",
+    "title": "MERGE a node: create it only when it is missing",
+    "script": "// MERGE (Cypher) finds its pattern or creates it when nothing matches. Run it twice: the second\n// run finds the city of the first, so there is still one and nothing changes.\ng.gql(\"MERGE (c:city {name: 'Berlin'}) WITH c MATCH (all:city) RETURN c.name AS merged, count(all) AS cities\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "MERGE an edge between matched nodes",
+    "script": "// Bound nodes are reused: MERGE creates only the missing knows edge. Run it again: still one.\n// An edge without a direction, -[:knows]-, matches either direction (created left to right).\ng.gql(\"MATCH (a:person {name: 'marko'}), (b:person {name: 'peter'}) MERGE (a)-[e:knows]->(b) RETURN a.name AS from, b.name AS to, COUNT { (a)-[:knows]->(b) } AS edges\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
+    "title": "MERGE ... ON CREATE SET / ON MATCH SET: counters",
+    "script": "// ON CREATE SET runs on a created element, ON MATCH SET on a found one. marko exists, ann is\n// created; run it again and both counters go up.\ng.gql(\"FOR name IN ['marko', 'ann'] MERGE (p:person {name: name}) ON CREATE SET p.visits = 1 ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name, p.visits AS visits ORDER BY name\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Writes",
+    "graph": "modern",
     "title": "DETACH DELETE a node and its edges",
     "script": "// DETACH DELETE removes the node together with all its edges. A deleted node cannot be read\n// afterwards: keep what you need in a WITH before the DELETE.\ng.gql(\"MATCH (p:person {name: 'josh'}) WITH p, properties(p) AS props, COUNT { (p)-[]-() } AS edges DETACH DELETE p RETURN props, edges\")"
   },

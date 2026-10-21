@@ -19,7 +19,9 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
   [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row
   INSERT <pattern> [, <pattern> ...]          -- Cypher spelling: CREATE; creates per row
   SET <item> [, ...]  /  REMOVE <item> [, ...] -- change properties and labels per row
-  [DETACH | NODETACH] DELETE <expr> [, ...]   -- removes per row; NODETACH is the default ]
+  [DETACH | NODETACH] DELETE <expr> [, ...]   -- removes per row; NODETACH is the default
+  MERGE [<name> =] <pattern>                  -- Cypher; finds or creates one pattern per row
+       { ON CREATE SET <item> [, ...] | ON MATCH SET <item> [, ...] }   -- any number, any order ]
 RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *; items may aggregate
                                               -- (mandatory unless the last clause writes;
                                               -- FINISH ends a query without a result)
@@ -38,7 +40,8 @@ with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-withou
 Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
 ([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
 query of that shape for each row ([CALL subqueries](#call-subqueries)). `INSERT` creates nodes
-and edges once per row, `SET` / `REMOVE` change them and `DELETE` removes them; a query whose last clause writes may end there and returns no rows
+and edges once per row, `SET` / `REMOVE` change them, `DELETE` removes them and Cypher's `MERGE`
+finds or creates them; a query whose last clause writes may end there and returns no rows
 ([Writing with GQL](writes.md)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
@@ -756,6 +759,20 @@ g.gql("MATCH (p:person {name: 'vadas'}) WITH p, p.name AS name DETACH DELETE p R
 g.gql("MATCH (a {name: 'marko'})-[e:knows]->() DELETE e RETURN count(e) AS deleted").to_list()   // #{"deleted": 2}
 ```
 
+## MERGE
+
+`MERGE [p =] <pattern> [ON CREATE SET <items>] [ON MATCH SET <items>]` (Cypher, a
+[compatibility form](aliases.md#merge)) looks for its one pattern on each row: every match is a
+row, and when nothing matches, the whole pattern is created, reusing the nodes bound before.
+Each row sees what the rows before it created. `ON CREATE SET` and `ON MATCH SET` hold `SET`
+items for the created or the found elements. A `NULL` property value in the pattern fails the
+query (`22004`). The full rules are on [Writing with GQL](writes.md#merge).
+
+```rhai,graph=modern
+g.gql("FOR n IN ['ann', 'ann'] MERGE (p:person {name: n}) ON CREATE SET p.new = true RETURN count(DISTINCT p) AS people").to_list()   // #{"people": 1}
+g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:knows]->(b) RETURN e.weight AS weight").to_list()   // #{"weight": 1.0}: found
+```
+
 ## Expressions
 
 | Kind | Forms |
@@ -1154,7 +1171,7 @@ construct and the alternative.
 
 | Construct | Until then |
 |---|---|
-| the write clause `MERGE`, Cypher's `FOREACH` | Gremlin `merge_v()` / `merge_e()`; `FOR x IN list INSERT ..` (or `SET ..`, `DELETE ..`) for `FOREACH` ([Writing with GQL](writes.md#not-yet)) |
+| Cypher's `FOREACH` | `FOR x IN list INSERT ..` (or `SET ..`, `DELETE ..`, `MERGE ..`) ([Writing with GQL](writes.md#not-yet)) |
 | a write in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |

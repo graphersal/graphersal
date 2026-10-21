@@ -27,7 +27,7 @@
 //!
 //! An excluded case is not executed, gets the class `excluded` (detail [`DETAIL_PREFIX`] + its
 //! code), is left out of every total and percentage and has no baseline entry (an entry for it
-//! is stale). Merely unimplemented constructs (temporal types, `MERGE`, list indexing, ...) are
+//! is stale). Merely unimplemented constructs (temporal types, list indexing, ...) are
 //! never excluded: they stay `missing`, the backlog.
 
 /// Prefix of the outcome detail of an excluded case; the exclusion code follows it.
