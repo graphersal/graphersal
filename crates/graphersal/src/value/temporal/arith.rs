@@ -885,7 +885,7 @@ pub(crate) fn scale_duration(
 /// Unlike [`age`] (PostgreSQL), every part has the sign of the direction and the borrowing
 /// follows `java.time`: `2018-01-01T10:00:00.2` to `2018-01-02T10:00:00.1` is
 /// `PT23H59M59.9S`.
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn between_neo4j(from: Temporal, to: Temporal) -> TemporalResult<Duration> {
     let kind = same_kind(from, to, "duration.between")?;
     let (from, to) = match (from, to) {
