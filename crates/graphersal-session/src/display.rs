@@ -5,6 +5,7 @@
 //! shown here is cut, with the CLI's `…` marker. Values stay [`ElementProperty`] until they are
 //! serialized, so map keys keep the engine's order (a `serde_json::Value` would sort them).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use graphersal::exec::RenderOptions;
@@ -40,9 +41,11 @@ pub const VECTOR_PREVIEW: usize = 16;
 /// A table cell's value: a vector becomes the marker the playground shows as
 /// `vector[768 f32]` with an expandable preview, `{"@type": "graphersal:Vector", "element",
 /// "dimension", "preview": [first values]}` (the JSON view keeps the full list of values);
-/// anything else is unchanged.
-pub fn table_cell(value: ElementProperty) -> ElementProperty {
+/// anything else is unchanged, except that its non-finite floats become their
+/// [`non_finite_marker`] ([`json_safe`]).
+pub fn table_cell(mut value: ElementProperty) -> ElementProperty {
     let ElementProperty::Vector(vector) = &value else {
+        make_json_safe(&mut value);
         return value;
     };
     let mut marker = PropertyMap::default();
@@ -64,6 +67,108 @@ pub fn table_cell(value: ElementProperty) -> ElementProperty {
         ),
     );
     ElementProperty::Object(Box::new(marker))
+}
+
+/// The GraphSON 3 tag of a double, which carries a non-finite float in the session's JSON.
+pub const DOUBLE_TAG: &str = "g:Double";
+
+/// The JSON form of a non-finite float in every answer of the session (results, the JSON and
+/// Table tabs, the inspector): GraphSON's typed double `{"@type": "g:Double", "@value": "NaN"}`
+/// (payloads `"NaN"`, `"Infinity"`, `"-Infinity"`), the text the engine's own `to_json()` and
+/// `json` visualizer write. JSON has no number for these, and the tag keeps the value apart from
+/// the string `"NaN"`; the playground shows it as `NaN` / `Infinity` / `-Infinity`
+/// (`playground/js/util.js`). `None` for a finite number or another value.
+pub fn non_finite_marker(value: &ElementProperty) -> Option<ElementProperty> {
+    let ElementProperty::Number(number) = value else {
+        return None;
+    };
+    if number.as_i64().is_some() {
+        return None;
+    }
+    let f = number.as_f64()?;
+    let text = if f.is_nan() {
+        "NaN"
+    } else if f == f64::INFINITY {
+        "Infinity"
+    } else if f == f64::NEG_INFINITY {
+        "-Infinity"
+    } else {
+        return None;
+    };
+    let mut marker = PropertyMap::default();
+    marker.insert("@type", ElementProperty::from(DOUBLE_TAG));
+    marker.insert("@value", ElementProperty::from(text));
+    Some(ElementProperty::Object(Box::new(marker)))
+}
+
+/// `value` ready for JSON: a copy with every non-finite float (at any depth: lists, maps, map
+/// keys, the properties of a vertex or edge value) replaced by its [`non_finite_marker`], or
+/// `value` itself when it holds none (no copy). The plain serde of a value refuses a non-finite
+/// float, so every value the session serializes goes through this (or [`json_safe_map`]) first;
+/// the display logic (table columns, the result graph) keeps working on the value itself.
+pub fn json_safe(value: &ElementProperty) -> Cow<'_, ElementProperty> {
+    if has_non_finite(value) {
+        let mut safe = value.clone();
+        make_json_safe(&mut safe);
+        Cow::Owned(safe)
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+/// The JSON text of a list of values ([`json_safe`] of each).
+pub fn values_json(values: &[ElementProperty]) -> String {
+    let safe: Vec<Cow<'_, ElementProperty>> = values.iter().map(json_safe).collect();
+    serde_json::to_string(&safe).unwrap_or_else(|_| "[]".into())
+}
+
+/// [`json_safe`] in place, for every value of a property map.
+pub fn json_safe_map(map: &mut PropertyMap) {
+    map.values_mut().for_each(make_json_safe);
+}
+
+fn make_json_safe(value: &mut ElementProperty) {
+    if let Some(marker) = non_finite_marker(value) {
+        *value = marker;
+        return;
+    }
+    match value {
+        ElementProperty::Array(items) => items.iter_mut().for_each(make_json_safe),
+        ElementProperty::Object(map) => json_safe_map(map),
+        ElementProperty::Vertex(vertex) => json_safe_map(vertex.properties_mut()),
+        ElementProperty::Edge(edge) => json_safe_map(edge.properties_mut()),
+        ElementProperty::Map(map) => {
+            if map
+                .iter()
+                .any(|(k, v)| has_non_finite(k) || has_non_finite(v))
+            {
+                let mut safe = ValueMap::with_capacity(map.len());
+                for (key, item) in map.iter() {
+                    let (mut key, mut item) = (key.clone(), item.clone());
+                    make_json_safe(&mut key);
+                    make_json_safe(&mut item);
+                    safe.insert(key, item);
+                }
+                *value = safe.into_property();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `value` holds a non-finite float anywhere.
+fn has_non_finite(value: &ElementProperty) -> bool {
+    match value {
+        ElementProperty::Number(_) => non_finite_marker(value).is_some(),
+        ElementProperty::Array(items) => items.iter().any(has_non_finite),
+        ElementProperty::Object(map) => map.values().any(has_non_finite),
+        ElementProperty::Vertex(vertex) => vertex.properties().values().any(has_non_finite),
+        ElementProperty::Edge(edge) => edge.properties().values().any(has_non_finite),
+        ElementProperty::Map(map) => map
+            .iter()
+            .any(|(k, v)| has_non_finite(k) || has_non_finite(v)),
+        _ => false,
+    }
 }
 
 /// Display limits: `None` is unbounded.
@@ -141,9 +246,10 @@ pub fn bounded_display(results: &[ElementProperty], as_rows: bool, bounds: &Boun
         None
     };
     let json = if as_rows {
-        serde_json::to_string_pretty(&rows)
+        let safe: Vec<Cow<'_, ElementProperty>> = rows.iter().map(json_safe).collect();
+        serde_json::to_string_pretty(&safe)
     } else {
-        serde_json::to_string_pretty(rows.first().unwrap_or(&ElementProperty::Null))
+        serde_json::to_string_pretty(&json_safe(rows.first().unwrap_or(&ElementProperty::Null)))
     }
     .unwrap_or_default();
     Display {
@@ -517,8 +623,15 @@ pub fn node_of<S: GraphStorage>(g: &S, v: S::VertexId) -> Node {
         id: g.vertex_id(v).unwrap_or_default().to_string(),
         label: labels.first().cloned().unwrap_or_default(),
         labels,
-        properties: g.vertex_properties(v).cloned().unwrap_or_default(),
+        properties: inspected_properties(g.vertex_properties(v)),
     }
+}
+
+/// A copy of an element's properties for the inspector, non-finite floats typed ([`json_safe`]).
+fn inspected_properties(properties: Option<&PropertyMap>) -> PropertyMap {
+    let mut properties = properties.cloned().unwrap_or_default();
+    json_safe_map(&mut properties);
+    properties
 }
 
 /// An edge as the playground draws it.
@@ -537,7 +650,7 @@ pub fn edge_of<S: GraphStorage>(g: &S, e: S::EdgeId) -> Edge {
         label: g.edge_label(e).unwrap_or_default().to_string(),
         source,
         target,
-        properties: g.edge_properties(e).cloned().unwrap_or_default(),
+        properties: inspected_properties(g.edge_properties(e)),
     }
 }
 

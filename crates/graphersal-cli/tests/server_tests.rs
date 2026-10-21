@@ -2176,6 +2176,50 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
     );
 }
 
+/// A non-finite float reaches the page, the inspector and an MCP client as GraphSON's typed
+/// double `{"@type": "g:Double", "@value": "NaN"}`, never as a JSON error.
+#[test]
+fn non_finite_floats_over_http_and_mcp() {
+    let ui = ui_dir("non-finite");
+    let server = start(&[
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let port = server.port;
+    let nan = serde_json::json!({"@type": "g:Double", "@value": "NaN"});
+    let inf = serde_json::json!({"@type": "g:Double", "@value": "Infinity"});
+
+    let r = execute(
+        port,
+        r#"g.add_v("x").property(T.id, "a").property("w", 0.0 / 0.0).values("w").to_list()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["execution"]["results"], serde_json::json!([nan]), "{r}");
+    assert_eq!(
+        r["display"]["table"]["rows"],
+        serde_json::json!([[nan]]),
+        "{r}"
+    );
+    let element = get(port, "/api/element?kind=vertex&id=a").json();
+    assert_eq!(element["properties"]["w"], nan, "{element}");
+
+    let mut mcp = McpClient::connect(port, &[]);
+    let (is_error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.inject(1.0 / 0.0, 0.0 / 0.0).to_list()"}),
+    );
+    assert!(!is_error, "{text}");
+    let json = text
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let shown: Value = serde_json::from_str(json).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(shown, serde_json::json!([inf, nan]), "{text}");
+}
+
 #[test]
 fn mcp_read_only_token_and_off() {
     let ui = ui_dir("mcp-ro");

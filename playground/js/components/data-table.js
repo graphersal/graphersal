@@ -2,7 +2,7 @@
 // a long list of numbers is collapsed with an expand button (components/value-text.js); the
 // engine's vector marker keeps its own disclosure (the JSON view has every value).
 
-import { formatValue, isVectorCell, vectorPreview, vectorSummary } from '../util.js';
+import { formatValue, isNonFiniteCell, isVectorCell, vectorPreview, vectorSummary } from '../util.js';
 import { ValueText } from './value-text.js';
 
 export const DataTable = {
@@ -20,6 +20,8 @@ export const DataTable = {
     function cellClass(v) {
       if (v === null || v === undefined) return 'cell-null';
       if (isVectorCell(v)) return 'cell-vector';
+      // NaN / Infinity / -Infinity (the engine's typed double) is a number.
+      if (isNonFiniteCell(v)) return 'num';
       if (typeof v === 'number') return 'num';
       if (typeof v === 'boolean') return 'cell-bool';
       if (typeof v === 'object') return 'cell-json';

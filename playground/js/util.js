@@ -46,8 +46,42 @@ export const modKey = isMac ? '⌘' : 'Ctrl';
 export function formatValue(v) {
   if (v === null || v === undefined) return 'null';
   if (isVectorCell(v)) return `${vectorSummary(v)} ${vectorPreview(v)}`;
-  if (typeof v === 'object') return JSON.stringify(v);
+  if (isNonFiniteCell(v)) return v['@value'];
+  if (typeof v === 'object') return jsonText(v);
   return String(v);
+}
+
+/** The payloads of a non-finite float: JSON has no number for them. */
+const NON_FINITE = Object.freeze({ NaN: NaN, Infinity: Infinity, '-Infinity': -Infinity });
+
+/**
+ * Whether a value is a non-finite float: the engine sends `NaN`, `Infinity` and `-Infinity` as
+ * GraphSON's typed double `{"@type": "g:Double", "@value": "NaN"}` (crates/graphersal-session
+ * `display.rs` `non_finite_marker`), so it is not mistaken for the string "NaN".
+ */
+export function isNonFiniteCell(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) && v['@type'] === 'g:Double'
+    && Object.keys(v).length === 2 && Object.prototype.hasOwnProperty.call(NON_FINITE, v['@value']);
+}
+
+/** The number of a non-finite float cell (`NaN`, `Infinity`, `-Infinity`). */
+export function nonFiniteNumber(v) {
+  return NON_FINITE[v['@value']];
+}
+
+/**
+ * Compact JSON of a nested value, with every non-finite float shown bare as `NaN`, `Infinity` or
+ * `-Infinity` (`[1.5, NaN]`), the way the result table shows a number.
+ */
+export function jsonText(v) {
+  const marks = [];
+  const text = JSON.stringify(v, (key, item) => {
+    if (!isNonFiniteCell(item)) return item;
+    marks.push(item['@value']);
+    return `\u0000${marks.length - 1}\u0000`;
+  });
+  if (!marks.length) return text;
+  return text.replace(/"\\u0000(\d+)\\u0000"/g, (_, i) => marks[Number(i)]);
 }
 
 /**
@@ -105,7 +139,8 @@ function markdownCell(v) {
   let text;
   if (v === undefined) text = '';
   else if (v === null) text = 'null';
-  else if (typeof v === 'object') text = JSON.stringify(v);
+  else if (isNonFiniteCell(v)) text = v['@value'];
+  else if (typeof v === 'object') text = jsonText(v);
   else text = String(v);
   return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
 }

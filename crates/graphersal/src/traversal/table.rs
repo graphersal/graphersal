@@ -412,10 +412,8 @@ pub(crate) fn format_elements_as_lines(elements: &[ElementProperty], limit: &Ite
             el
         };
         match crate::value::physical::to_json_text(el) {
+            // A non-finite float is GraphSON's typed `g:Double`, like in every value JSON.
             Ok(text) => buf.push_str(&text),
-            Err(crate::value::physical::PhysicalError::NonFiniteFloat(f)) => {
-                buf.push_str(&f.to_string())
-            }
             Err(err) => buf.push_str(&err.to_string()),
         }
     }

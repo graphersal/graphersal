@@ -218,6 +218,30 @@ fn vectors_print_their_kind_in_tables_and_as_literals_as_values() {
     assert_eq!(value.stdout.trim(), "vector([0.5, 1.0])");
 }
 
+/// JSON output writes a non-finite float as GraphSON's typed double instead of failing.
+#[test]
+fn non_finite_floats_are_typed_doubles_in_json_output() {
+    let query = "g.inject(0.0 / 0.0, 1.0 / 0.0, [-1.0 / 0.0])";
+    let json = run(&["--format", "json", "-e", query], "");
+    assert_eq!(json.code, 0, "stderr: {}", json.stderr);
+    let value: serde_json::Value = serde_json::from_str(&json.stdout).expect("valid JSON");
+    assert_eq!(
+        value,
+        serde_json::json!([
+            {"@type": "g:Double", "@value": "NaN"},
+            {"@type": "g:Double", "@value": "Infinity"},
+            [{"@type": "g:Double", "@value": "-Infinity"}],
+        ])
+    );
+    let text = run(&["-e", "g.inject(0.0 / 0.0).to_json()"], "");
+    assert_eq!(text.code, 0, "stderr: {}", text.stderr);
+    let value: serde_json::Value = serde_json::from_str(&text.stdout).expect("valid JSON");
+    assert_eq!(
+        value,
+        serde_json::json!([{"@type": "g:Double", "@value": "NaN"}])
+    );
+}
+
 #[test]
 fn failing_query_reports_diagnostic_on_stderr() {
     let res = run(&["-e", "g.v().values(\"name\").sum().next()"], "");

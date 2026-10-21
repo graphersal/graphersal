@@ -384,11 +384,50 @@ pub(crate) fn lift_temporal(
     }
 }
 
+/// The GraphSON 3 type tag of a double: the typed form of a non-finite float in value JSON.
+pub(crate) const DOUBLE_TAG: &str = "g:Double";
+
+/// The GraphSON text of a non-finite float: `"NaN"`, `"Infinity"` or `"-Infinity"` (`None` for a
+/// finite one). GraphSON export writes it as the payload of a [`DOUBLE_TAG`], and so does the
+/// value JSON of the codec ([`write_json_typed`], [`to_json_text`], `TypedFloats`).
+pub(crate) fn non_finite_text(value: f64) -> Option<&'static str> {
+    if value.is_nan() {
+        Some("NaN")
+    } else if value == f64::INFINITY {
+        Some("Infinity")
+    } else if value == f64::NEG_INFINITY {
+        Some("-Infinity")
+    } else {
+        None
+    }
+}
+
 /// Writes a physical value as compact RFC 8259 JSON text.
 ///
 /// A float is always written as a JSON number with a fraction or exponent (`1.0`, never `1`), so
-/// a reader gets a float back. A non-finite float is an error, never silently `null`.
+/// a reader gets a float back. A non-finite float is an error, never silently `null`: this is the
+/// strict writer of formats that embed JSON and read it back untyped (GraphML). Value JSON for a
+/// reader (results, `to_json()`, the `json` visualizer) uses [`write_json_typed`].
 pub(crate) fn write_json<W: fmt::Write>(
+    value: &PhysicalValue<'_>,
+    out: &mut W,
+) -> Result<(), PhysicalError> {
+    write_json_as::<W, false>(value, out)
+}
+
+/// Writes a physical value as compact JSON text like [`write_json`], except that a non-finite
+/// float is written in GraphSON's typed form `{"@type":"g:Double","@value":"NaN"}` (payloads
+/// `"NaN"`, `"Infinity"`, `"-Infinity"`) instead of being an error: JSON has no number for it,
+/// and the tag says the value is a float, not the string `"NaN"`. Output only: the untyped
+/// readers ([`read_json`], serde) do not interpret the tag (like a `g:Map`).
+pub(crate) fn write_json_typed<W: fmt::Write>(
+    value: &PhysicalValue<'_>,
+    out: &mut W,
+) -> Result<(), PhysicalError> {
+    write_json_as::<W, true>(value, out)
+}
+
+fn write_json_as<W: fmt::Write, const TYPED: bool>(
     value: &PhysicalValue<'_>,
     out: &mut W,
 ) -> Result<(), PhysicalError> {
@@ -397,7 +436,12 @@ pub(crate) fn write_json<W: fmt::Write>(
         PhysicalValue::Bool(true) => out.write_str("true")?,
         PhysicalValue::Bool(false) => out.write_str("false")?,
         PhysicalValue::Int(i) => write!(out, "{i}")?,
-        PhysicalValue::Float(f) => write_float(*f, out)?,
+        PhysicalValue::Float(f) => match non_finite_text(*f) {
+            Some(text) if TYPED => {
+                write!(out, r#"{{"@type":"{DOUBLE_TAG}","@value":"{text}"}}"#)?;
+            }
+            _ => write_float(*f, out)?,
+        },
         PhysicalValue::String(s) => write_json_string(s, out)?,
         PhysicalValue::Array(items) => {
             out.write_char('[')?;
@@ -405,7 +449,7 @@ pub(crate) fn write_json<W: fmt::Write>(
                 if i > 0 {
                     out.write_char(',')?;
                 }
-                write_json(item, out)?;
+                write_json_as::<W, TYPED>(item, out)?;
             }
             out.write_char(']')?;
         }
@@ -417,7 +461,7 @@ pub(crate) fn write_json<W: fmt::Write>(
                 }
                 write_json_string(key, out)?;
                 out.write_char(':')?;
-                write_json(field, out)?;
+                write_json_as::<W, TYPED>(field, out)?;
             }
             out.write_char('}')?;
         }
@@ -425,13 +469,14 @@ pub(crate) fn write_json<W: fmt::Write>(
     Ok(())
 }
 
-/// Renders a logical value as compact JSON text: [`lower`] followed by [`write_json`].
+/// Renders a logical value as compact JSON text: [`lower`] followed by [`write_json_typed`].
 ///
 /// This is the one converter for a value that must become text (a `Uuid` becomes its canonical
-/// string, containers become JSON), never its `Debug` rendering.
+/// string, containers become JSON, a non-finite float `{"@type":"g:Double","@value":"NaN"}`),
+/// never its `Debug` rendering.
 pub(crate) fn to_json_text(value: &ElementProperty) -> Result<String, PhysicalError> {
     let mut out = String::new();
-    write_json(&lower(value), &mut out)?;
+    write_json_typed(&lower(value), &mut out)?;
     Ok(out)
 }
 
@@ -799,7 +844,7 @@ type ReadResult = Result<PhysicalValue<'static>, JsonReadError>;
 #[cfg(feature = "serde")]
 pub(crate) use self::serde_glue::from_serde_json;
 #[cfg(feature = "serde")]
-pub(crate) use self::serde_glue::{Tagged, TaggedOwned};
+pub(crate) use self::serde_glue::{Tagged, TaggedOwned, TypedFloats};
 
 /// Plain-JSON serde for [`ElementProperty`] and [`Number`], built on the codec.
 #[cfg(feature = "serde")]
@@ -814,35 +859,65 @@ mod serde_glue {
 
     const NON_FINITE: &str = "non-finite float cannot be represented in JSON";
 
-    impl Serialize for PhysicalValue<'_> {
+    /// A physical value serialized strictly (`TYPED = false`: a non-finite float is an error) or
+    /// as value JSON (`TYPED = true`: a non-finite float is `{"@type": "g:Double", "@value":
+    /// "NaN"}`, the form of [`write_json_typed`]).
+    struct Physical<'b, 'a, const TYPED: bool>(&'b PhysicalValue<'a>);
+
+    impl<const TYPED: bool> Serialize for Physical<'_, '_, TYPED> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            match self {
+            match self.0 {
                 PhysicalValue::Null => serializer.serialize_unit(),
                 PhysicalValue::Bool(b) => serializer.serialize_bool(*b),
                 PhysicalValue::Int(i) => serializer.serialize_i64(*i),
-                PhysicalValue::Float(f) => {
-                    if f.is_finite() {
-                        serializer.serialize_f64(*f)
-                    } else {
-                        Err(ser::Error::custom(NON_FINITE))
+                PhysicalValue::Float(f) => match non_finite_text(*f) {
+                    None => serializer.serialize_f64(*f),
+                    Some(text) if TYPED => {
+                        let mut map = serializer.serialize_map(Some(2))?;
+                        map.serialize_entry(TYPE_KEY, DOUBLE_TAG)?;
+                        map.serialize_entry(VALUE_KEY, text)?;
+                        map.end()
                     }
-                }
+                    Some(_) => Err(ser::Error::custom(NON_FINITE)),
+                },
                 PhysicalValue::String(s) => serializer.serialize_str(s),
                 PhysicalValue::Array(items) => {
                     let mut seq = serializer.serialize_seq(Some(items.len()))?;
                     for item in items {
-                        seq.serialize_element(item)?;
+                        seq.serialize_element(&Physical::<TYPED>(item))?;
                     }
                     seq.end()
                 }
                 PhysicalValue::Object(fields) => {
                     let mut map = serializer.serialize_map(Some(fields.len()))?;
                     for (key, field) in fields {
-                        map.serialize_entry(key.as_ref(), field)?;
+                        map.serialize_entry(key.as_ref(), &Physical::<TYPED>(field))?;
                     }
                     map.end()
                 }
             }
+        }
+    }
+
+    impl Serialize for PhysicalValue<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            Physical::<false>(self).serialize(serializer)
+        }
+    }
+
+    /// Logical values serialized as value JSON: a list of [`lower`]ed values, each non-finite
+    /// float in GraphSON's typed form `{"@type": "g:Double", "@value": "NaN"}` (`"Infinity"`,
+    /// `"-Infinity"`), exactly the text of [`to_json_text`]. The `json` visualizer writes its
+    /// results through it; the plain serde of [`ElementProperty`] stays strict.
+    pub(crate) struct TypedFloats<'a>(pub(crate) &'a [ElementProperty]);
+
+    impl Serialize for TypedFloats<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+            for item in self.0 {
+                seq.serialize_element(&Physical::<true>(&lower(item)))?;
+            }
+            seq.end()
         }
     }
 
@@ -1406,6 +1481,58 @@ mod tests {
             to_json(&PhysicalValue::Float(f64::INFINITY)),
             Err(PhysicalError::NonFiniteFloat(_))
         ));
+    }
+
+    fn float(f: f64) -> ElementProperty {
+        ElementProperty::Number(Number::from_f64(f))
+    }
+
+    #[test]
+    fn value_json_writes_non_finite_floats_as_typed_doubles() {
+        assert_eq!(non_finite_text(f64::NAN), Some("NaN"));
+        assert_eq!(non_finite_text(f64::INFINITY), Some("Infinity"));
+        assert_eq!(non_finite_text(f64::NEG_INFINITY), Some("-Infinity"));
+        assert_eq!(non_finite_text(1.5), None);
+        assert_eq!(
+            to_json_text(&float(f64::NAN)).unwrap(),
+            r#"{"@type":"g:Double","@value":"NaN"}"#
+        );
+        assert_eq!(
+            to_json_text(&float(f64::INFINITY)).unwrap(),
+            r#"{"@type":"g:Double","@value":"Infinity"}"#
+        );
+        // At any depth, finite floats unchanged.
+        let nested = object(vec![
+            (
+                "xs",
+                ElementProperty::Array(vec![float(f64::NEG_INFINITY), float(2.0)]),
+            ),
+            ("s", ElementProperty::String("NaN".into())),
+        ]);
+        assert_eq!(
+            to_json_text(&nested).unwrap(),
+            r#"{"xs":[{"@type":"g:Double","@value":"-Infinity"},2.0],"s":"NaN"}"#
+        );
+        // The strict writer keeps refusing it (GraphML embeds JSON that is read back untyped).
+        assert!(matches!(
+            write_json(&lower(&nested), &mut String::new()),
+            Err(PhysicalError::NonFiniteFloat(_))
+        ));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn typed_floats_serde_matches_to_json_text() {
+        let values = vec![
+            float(f64::NAN),
+            ElementProperty::Array(vec![float(f64::INFINITY), float(0.5)]),
+            ElementProperty::Number(Number::from_i64(3)),
+        ];
+        let text = serde_json::to_string(&TypedFloats(&values)).unwrap();
+        let expected: Vec<String> = values.iter().map(|v| to_json_text(v).unwrap()).collect();
+        assert_eq!(text, format!("[{}]", expected.join(",")));
+        // The plain serde of a value stays strict.
+        assert!(serde_json::to_string(&float(f64::NAN)).is_err());
     }
 
     #[test]
