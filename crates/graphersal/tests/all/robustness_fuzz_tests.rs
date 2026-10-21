@@ -1104,6 +1104,12 @@ pub(crate) enum Outcome {
 /// Host `evaluationTimeout` of every case, in milliseconds.
 const EVALUATION_TIMEOUT_MS: i64 = 1_000;
 
+/// Host `memory.limit` of every case, in bytes (like the openCypher TCK runner): an unbounded
+/// `repeat()` stops with the memory limit error instead of growing to gigabytes within the
+/// `evaluationTimeout`. Without a tracking allocator in this binary the engine's estimate is
+/// compared.
+const MEMORY_LIMIT_BYTES: i64 = 512 * 1024 * 1024;
+
 /// A fresh, empty directory for one case: its file root. Removed by `Drop`.
 struct CaseDir(std::path::PathBuf);
 
@@ -1127,6 +1133,12 @@ impl Drop for CaseDir {
 }
 
 fn run_inner(script: &str, kind: GraphKind) -> Outcome {
+    run_inner_with(script, kind, EVALUATION_TIMEOUT_MS, MEMORY_LIMIT_BYTES)
+}
+
+/// [`run_inner`] with an `evaluationTimeout` of `timeout_ms` and a `memory.limit` of
+/// `memory_limit` bytes.
+fn run_inner_with(script: &str, kind: GraphKind, timeout_ms: i64, memory_limit: i64) -> Outcome {
     // Files only inside the case's own temporary directory: a path that leaves it (`..`, an
     // absolute path, a symbolic link) is denied, so a generated export never touches real files.
     let case_dir = CaseDir::new();
@@ -1137,10 +1149,10 @@ fn run_inner(script: &str, kind: GraphKind) -> Outcome {
         GraphKind::Empty => GraphSource::empty(),
     });
     let limits = ScriptLimits::default();
-    let presets = [(
-        "evaluationTimeout",
-        ElementProperty::from(EVALUATION_TIMEOUT_MS),
-    )];
+    let presets = [
+        ("evaluationTimeout", ElementProperty::from(timeout_ms)),
+        ("memory.limit", ElementProperty::from(memory_limit)),
+    ];
     let engine = graphersal::script::engine_with_options(&limits, authorizer.clone(), &presets);
     let mut scope = graphersal::script::graph_scope_with_options(graph, &presets, authorizer);
     scope.push("nan", f64::NAN);
@@ -1945,6 +1957,37 @@ fn fuzz_fast() {
         ok > runs / 20,
         "only {ok} of {runs} runs succeeded: the generator is too noisy"
     );
+}
+
+/// Seeds of the long campaign whose unbounded `repeat()` grew to gigabytes within the 1 s
+/// `evaluationTimeout` (`repeat(__.constant([..]).unfold())`, `repeat(__.group().barrier())`,
+/// `repeat(__.path())`): under the host's `memory.limit` each stops with the memory limit error.
+/// The `evaluationTimeout` is raised so a debug build reaches the limit before the deadline, and
+/// the limit is lowered to 64 MiB to keep the test small: the engine's estimate (no tracking
+/// allocator here) undercounts these loops several times over, so the 512 MiB host limit still
+/// lets one case reach about 3 GB of resident memory.
+#[test]
+fn unbounded_repeat_stops_at_the_memory_limit() {
+    for seed in [23_102_892, 23_189_523, 23_159_444] {
+        let script = generate(seed).render();
+        for kind in [GraphKind::Modern, GraphKind::Empty] {
+            let start = Instant::now();
+            let owned = script.clone();
+            let outcome = guarded(Duration::from_secs(60), move || {
+                run_inner_with(&owned, kind, 60_000, 64 * 1024 * 1024)
+            })
+            .unwrap_or_else(|outcome| outcome);
+            let elapsed = start.elapsed();
+            assert!(
+                matches!(&outcome, Outcome::Error(text) if text.contains("'memory.limit' exceeded")),
+                "seed {seed} on {kind:?}: {script}\n  -> {outcome:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(30),
+                "seed {seed} on {kind:?} took {elapsed:?}"
+            );
+        }
+    }
 }
 
 /// The long budget (opt-in, see the module docs). Never fails on findings: it reports them.
