@@ -149,6 +149,13 @@ impl ScopeLabels {
             return Ok(false);
         };
         let results = traversal.apply_to(context, start)?;
-        Ok(results.iter().any(|result| result.value == target))
+        // Logical equality, as `where(P.eq(..))` compares: a computed `29` equals a lazily
+        // read `values("age")`.
+        for result in &results {
+            if crate::value::predicate::values_equal(context, &result.value, &target)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

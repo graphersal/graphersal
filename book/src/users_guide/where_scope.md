@@ -34,8 +34,12 @@ operands:
 A comparison without a label operand (`where(P.gt(30)).by("age")`) projects only the current
 object. A `by()` that yields no value (a vertex without the property, a child traversal with no
 result) drops the traverser, also under a `not()`. Without `by()`, two scalars compare by value
-(`values("age").as("a")` followed by `where(P.gt("a"))` works); two elements compare by identity
-for `eq`/`neq` and are incomparable (false) for an ordering. `has(key, P.gt("x"))`, `is(P.gt("x"))`,
+(`values("age").as("a")` followed by `where(P.gt("a"))` works), however each is held: a computed
+`29` (`g.inject(29).as("x").V().values("age").where(P.eq("x"))`) equals a property read with
+`values("age")`, and `1` equals `1.0`, as `P.eq(29)` and `is(29)` compare; the end label of
+`where(__.values("age").as("x"))` and `where(P.within("side effect"))` compare the same way. Two
+elements compare by identity for `eq`/`neq` and are incomparable (false) for an ordering; lists
+and maps are equal when their contents are. `has(key, P.gt("x"))`, `is(P.gt("x"))`,
 `all()` and `any()` keep comparing literal strings, even when a label `x` exists.
 
 ## Deviations

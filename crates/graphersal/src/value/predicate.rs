@@ -303,6 +303,78 @@ impl<'a> Scalar<'a> {
     }
 }
 
+impl Scalar<'_> {
+    /// Whether two scalars are equal by the comparability rules `P.eq` applies to a literal
+    /// operand ([`P::compare`]): numbers by value across `int64`/`float64` (`1` equals `1.0`,
+    /// `NaN` equals nothing), temporal values within one type, every other kind with itself.
+    fn equals(&self, other: &Scalar<'_>) -> bool {
+        match (self, other) {
+            (Scalar::Number(a), Scalar::Number(b)) => {
+                crate::value::scalar::compare_numbers(a, b) == Some(Ordering::Equal)
+            }
+            (Scalar::Str(a), Scalar::Str(b)) => a == b,
+            (Scalar::Bool(a), Scalar::Bool(b)) => a == b,
+            (Scalar::Uuid(a), Scalar::Uuid(b)) => a == b,
+            (Scalar::Temporal(a), Scalar::Temporal(b)) => {
+                a.kind() == b.kind() && a.cmp(b) == Ordering::Equal
+            }
+            (Scalar::Vector(a), Scalar::Vector(b)) => (*a).cmp(b) == Ordering::Equal,
+            (Scalar::Null, Scalar::Null) => true,
+            (
+                Scalar::Null
+                | Scalar::Bool(_)
+                | Scalar::Number(_)
+                | Scalar::Str(_)
+                | Scalar::Uuid(_)
+                | Scalar::Temporal(_)
+                | Scalar::Vector(_),
+                _,
+            ) => false,
+        }
+    }
+}
+
+/// Whether two stream values are logically equal: the equality `where(P.eq("a"))`,
+/// `where(__.as("a")..as("b"))` and `where(P.eq("a")).by(..)` apply between the current object
+/// and a labelled one, the same `P.eq` applies to a literal operand (`is(29)`).
+///
+/// How a value is held does not matter: a computed `29` (from `inject`, `constant`, `math`)
+/// equals a property read lazily (`values("age")`), and `1` equals `1.0`. Two scalars compare by
+/// the comparability rules, read in place (nothing is cloned); a scalar never equals an element
+/// or a container. A graph element (a vertex, an edge, a `properties()` element) equals only
+/// itself. Two containers or paths are equal when they are the same value, else by their
+/// materialized values (only then is anything materialized).
+pub(crate) fn values_equal<S: crate::graph::GraphStorage>(
+    context: &TraverserContext<'_, S>,
+    a: &TraverserValue<S>,
+    b: &TraverserValue<S>,
+) -> TraverserResult<bool> {
+    let left = P::<PValue>::read_scalar(context, a)?;
+    let right = P::<PValue>::read_scalar(context, b)?;
+    match (left, right) {
+        (Some(left), Some(right)) => return Ok(left.equals(&right)),
+        (Some(_), None) | (None, Some(_)) => return Ok(false),
+        (None, None) => {}
+    }
+    if is_element_handle(a) || is_element_handle(b) || a == b {
+        return Ok(a == b);
+    }
+    let storage: &S = context.storage;
+    Ok(a.into_node_property(storage)? == b.into_node_property(storage)?)
+}
+
+/// Whether `value` is a handle to a graph element (a vertex, an edge, a `properties()`
+/// element), which equals only itself.
+fn is_element_handle<S: crate::graph::GraphStorage>(value: &TraverserValue<S>) -> bool {
+    match value {
+        TraverserValue::Vertex(_) | TraverserValue::Edge(_) => true,
+        TraverserValue::VertexProperty(_, _, kind) | TraverserValue::EdgeProperty(_, _, kind) => {
+            !kind.reads_property()
+        }
+        _ => false,
+    }
+}
+
 /// A literal operand of a predicate [`P`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -473,14 +545,20 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
     }
 
     /// Compares the stream value with a labelled path object by this comparison (`labelled` is
-    /// the operand): two scalars by the usual comparability rules, anything else (elements,
-    /// paths, collections) by identity for `eq`/`neq` and incomparable (false) for an ordering.
+    /// the operand): `eq`/`neq` by [`values_equal`] (two scalars by the comparability rules,
+    /// however each is held; elements by identity; containers and paths by value); an ordering
+    /// orders two scalars by the usual comparability rules and is false for anything else.
     fn compare_to_labelled<S: crate::graph::GraphStorage>(
         &self,
         context: &mut TraverserContext<'_, S>,
         start: &TraverserValue<S>,
         labelled: &TraverserValue<S>,
     ) -> TraverserResult<bool> {
+        match self {
+            P::Eq(_) => return values_equal(context, start, labelled),
+            P::Neq(_) => return Ok(!values_equal(context, start, labelled)?),
+            _ => {}
+        }
         let operand = match labelled {
             TraverserValue::Vertex(_)
             | TraverserValue::Edge(_)
@@ -510,14 +588,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                 P::Gte(_) => P::Gte(operand).test_literal(context, start),
                 _ => Ok(false),
             },
-            None => {
-                let same = start == labelled;
-                Ok(match self {
-                    P::Eq(_) => same,
-                    P::Neq(_) => !same,
-                    _ => false,
-                })
-            }
+            None => Ok(false),
         }
     }
 
@@ -639,14 +710,15 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
         let Some(bucket) = context.side_effect.get(key.as_str()) else {
             return Ok(None);
         };
-        // Handle against handle compares by identity; anything else by materialized value. The
-        // argument is materialized at most once, a handle member only when the argument is not
-        // the same kind of handle (never the whole bucket per traverser when it can be avoided).
-        let storage: &S = context.storage;
+        // Two scalars compare by value however each is held, an element by identity, anything
+        // else by materialized value. The argument is materialized at most once, and only when
+        // neither side is a scalar or an element (never the whole bucket per traverser when it
+        // can be avoided).
+        let context: &TraverserContext<'_, S> = context;
         let mut materialized: Option<ElementProperty> = None;
         let mut contains = false;
         for member in bucket.members() {
-            if side_effect_member_matches(storage, arg_value, &member, &mut materialized)? {
+            if side_effect_member_matches(context, arg_value, &member, &mut materialized)? {
                 contains = true;
                 break;
             }
@@ -874,7 +946,7 @@ impl<T: Into<PValue> + Debug + Clone> P<T> {
                     if operands == Operands::PathLabels
                         && let Some(labelled) = context.paths.by_label(arg_path, label.as_str())
                     {
-                        return Ok(arg_value.eq(&labelled));
+                        return values_equal(context, arg_value, &labelled);
                     }
                     if let TraverserValue::Vertex(node_index) = arg_value {
                         let id = crate::graph::storage::stored_vertex_id(
@@ -1340,27 +1412,27 @@ impl From<f64> for P<PValue> {
     }
 }
 
-/// Whether one side-effect member equals the `where(within(..))` argument: two element handles
-/// by identity, two plain values directly, anything else by materialized value (the argument's
-/// snapshot is computed once into `materialized`).
+/// Whether one side-effect member equals the `where(within(..))` argument: two scalars by
+/// value however each is held (a computed `29` equals a lazily read `values("age")` and `29.0`,
+/// [`values_equal`]), element handles by identity, anything else by materialized value (the
+/// argument's snapshot is computed once into `materialized`).
 fn side_effect_member_matches<S: crate::graph::GraphStorage>(
-    storage: &S,
+    context: &TraverserContext<'_, S>,
     arg: &TraverserValue<S>,
     member: &TraverserValue<S>,
     materialized: &mut Option<ElementProperty>,
 ) -> TraverserResult<bool> {
-    match (arg, member) {
-        (TraverserValue::Computed(a, _), TraverserValue::Computed(m, _)) => return Ok(a == m),
-        (TraverserValue::Vertex(_), TraverserValue::Vertex(_))
-        | (TraverserValue::Edge(_), TraverserValue::Edge(_))
-        | (TraverserValue::VertexProperty(..), TraverserValue::VertexProperty(..))
-        | (TraverserValue::EdgeProperty(..), TraverserValue::EdgeProperty(..)) => {
-            return Ok(arg == member);
-        }
-        (TraverserValue::Vertex(_), TraverserValue::Edge(_))
-        | (TraverserValue::Edge(_), TraverserValue::Vertex(_)) => return Ok(false),
-        _ => {}
+    let left = P::<PValue>::read_scalar(context, arg)?;
+    let right = P::<PValue>::read_scalar(context, member)?;
+    match (left, right) {
+        (Some(left), Some(right)) => return Ok(left.equals(&right)),
+        (Some(_), None) | (None, Some(_)) => return Ok(false),
+        (None, None) => {}
     }
+    if is_element_handle(arg) && is_element_handle(member) {
+        return Ok(arg == member);
+    }
+    let storage: &S = context.storage;
     if materialized.is_none() {
         *materialized = Some(arg.into_node_property(storage)?);
     }
