@@ -34,9 +34,8 @@ its real output (a list is shown as its items, comma-separated, or one per line)
   query means the same in a GQL or Cypher 25 database (modulo the listed aliases).
 - **Reads and writes.** `INSERT` (Cypher `CREATE`) creates nodes and edges, `SET` and `REMOVE`
   change their properties and labels, and `DELETE` / `DETACH DELETE` remove them, each once per
-  row ([Writing with GQL](writes.md)); `MERGE` is not supported yet: use the [Gremlin mutation
-  steps](../dsl/changing_the_graph.md) for it. A query is one unit: a query that fails changes
-  nothing.
+  row, and Cypher's `MERGE` finds or creates a pattern ([Writing with GQL](writes.md)). A query
+  is one unit: a query that fails changes nothing.
 - **A start step.** `gql()` starts a traversal: `g.gql(..)`, never `g.v().gql(..)` or
   `__.gql(..)`.
 - **Rows are maps.** Each result row is a map from column name to value

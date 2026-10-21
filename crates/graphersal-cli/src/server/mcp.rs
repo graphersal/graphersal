@@ -445,7 +445,7 @@ const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
 playground at the same time; the browser reloads when you change the graph. Use `query` to run \
 traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries (experimental; MATCH \
-... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE, SET, REMOVE and DELETE writes; \
+... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE, SET, REMOVE, DELETE and MERGE writes; \
 see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
@@ -595,14 +595,14 @@ const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like)
 the shared graph and return its rows as JSON: one JSON object per row, its keys the RETURN \
 columns in the order written (bounded like query's: at most max_rows rows, default 100; a note \
 says when something was cut). It runs the script g.gql(query, params). A query may write \
-(INSERT, Cypher CREATE; SET; REMOVE; DELETE): it is ONE transaction, a failing query changes nothing, and the answer \
+(INSERT, Cypher CREATE; SET; REMOVE; DELETE; MERGE): it is ONE transaction, a failing query changes nothing, and the answer \
 says whether it changed the graph (with the net vertex and edge count changes) and the new \
 commit number; run writes only when the user asked for that change (a read-only server refuses \
 them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is experimental (its \
 subset and answers may still change between versions); the query tool with Gremlin stays the \
 complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c and 3d): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c, 3d and 3e): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -677,7 +677,18 @@ nothing removed) unless the same clause deletes those edges, e.g. MATCH (a)-[e:k
 DELETE e or MATCH (n)-[r]-() DELETE r, n; a NULL target is skipped; after DELETE, reading or \
 returning the deleted element is an error (only count(n), n IS NULL and type(r) still work): \
 read what you need first, e.g. MATCH (p:person {name: 'vadas'}) WITH p, properties(p) AS props \
-DETACH DELETE p RETURN props; each clause sees every write of the clauses before it; a query may \
+DETACH DELETE p RETURN props; MERGE <pattern> (Cypher compatibility form) finds or creates one \
+pattern per row: every match is a row, and when nothing matches the whole pattern is created, \
+reusing the nodes bound before (written alone, as (a)); each row sees what earlier rows created, \
+so it is idempotent and FOR creates a repeated item once, e.g. create-if-missing: MERGE \
+(c:city {name: 'Berlin'}) RETURN c.name AS name (run twice, one city), an edge between matched \
+nodes: MATCH (a:person {name: 'marko'}), (b:person {name: 'peter'}) MERGE (a)-[e:knows]->(b) \
+RETURN e; ON CREATE SET and ON MATCH SET items (SET items, in written order) change what was \
+created or matched, e.g. FOR n IN $names MERGE (p:person {name: n}) ON CREATE SET p.visits = 1 \
+ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name, p.visits AS visits; \
+an edge without a direction -[:T]- matches either direction and is created from left to right; \
+a NULL property value in the pattern fails the query (22004); \
+each clause sees every write of the clauses before it; a query may \
 end with its write clause or FINISH (no rows), or RETURN what it wrote. \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
 (trail semantics), also inside quantified edges and path patterns. Vertices and edges in a row come back as {id, \
@@ -685,8 +696,8 @@ label, properties}. Rows come in no defined order unless the query has ORDER BY:
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
-procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the writes \
-MERGE and FOREACH (merge_v(), merge_e(); FOR x IN list INSERT ..): use the query tool with Gremlin for those, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
+procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID), trigonometry, and the write \
+FOREACH (write FOR x IN list INSERT .. instead); use the query tool with Gremlin for the rest, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \
 f.name AS friend ORDER BY friend LIMIT 10 with params {\"min\": 30}; MATCH (p:person) \
@@ -728,7 +739,7 @@ fn all_tools() -> Vec<Tool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ... or SET ...), as plain text."},
+                    "query": {"type": "string", "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ..., SET ... or MERGE ...), as plain text."},
                     "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
                     "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
                     "max_rows": {"type": "integer", "minimum": 1, "description": "Most rows returned (default 100)."},
@@ -2262,7 +2273,7 @@ mod tests {
     }
 
     /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
-    /// and the 3a, 3c and 3d writes (INSERT, CREATE, SET, REMOVE, DELETE) as supported, calls GQL experimental
+    /// and the 3a, 3c, 3d and 3e writes (INSERT, CREATE, SET, REMOVE, DELETE, MERGE) as supported, calls GQL experimental
     /// and still names what is refused.
     #[test]
     fn gql_description_lists_stage_1b_and_what_is_still_refused() {
@@ -2340,6 +2351,14 @@ mod tests {
             "MATCH (p:person {name: 'marko'}) DETACH DELETE p",
             "DELETE r, n",
             "properties(p) AS props",
+            "MERGE",
+            "ON CREATE SET",
+            "ON MATCH SET",
+            "MERGE (c:city {name: 'Berlin'})",
+            "MERGE (a)-[e:knows]->(b)",
+            "coalesce(p.visits, 0) + 1",
+            "created from left to right",
+            "22004",
         ] {
             assert!(supported.contains(named), "{named}");
         }
@@ -2349,7 +2368,6 @@ mod tests {
             "IN TRANSACTIONS",
             "randomUUID",
             "FOREACH",
-            "MERGE",
             "use the query tool",
         ] {
             assert!(refused.contains(named), "{named}");
@@ -2367,6 +2385,8 @@ mod tests {
             "reduce()",
             "((a)-->(b)){1,3}",
             "DELETE",
+            "MERGE",
+            "merge_v",
         ] {
             assert!(!refused.contains(gone), "{gone}");
         }

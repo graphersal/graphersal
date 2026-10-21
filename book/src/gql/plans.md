@@ -43,6 +43,7 @@ label into the scan, exactly as it does for the Gremlin form.
 | `gql:insert_edge("label", "from", "to", "{props}")` | `INSERT` of one edge between the nodes of the row named `from` and `to` (`(#n)` for an unnamed node of the pattern) |
 | `gql:set("<items>")`, `gql:remove("<items>")` | one `SET` / `REMOVE` clause: applies its items per row to the elements the row's variables hold and passes the row on unchanged |
 | `gql:delete("[DETACH] DELETE <targets>")` | one `DELETE` clause: collects the targets of every row, checks the NODETACH rule for the whole clause, removes the edges, then the nodes, and passes the rows on unchanged |
+| `gql:merge("<pattern>", <search>, <creation>[, "ON CREATE SET ..", "ON MATCH SET .."])` | one `MERGE` clause: per row, runs the search child (a `MATCH` of the pattern from the row) and emits a row per match, or runs the creation child (the insert chain) once; then its `ON` items |
 | `gql:error("<GQLSTATUS>")` | the marker of a query that failed to parse or bind; raises the error before the run |
 
 `gql:filter`, `gql:project`, `gql:value`, `gql:order`, `gql:aggregate` and `gql:for` may hold
@@ -799,6 +800,15 @@ takes every row before it removes anything, so the NODETACH check sees the whole
 
 ```rhai,graph=modern
 g.gql("MATCH (p:person {name: 'marko'}) DETACH DELETE p").profile()
+```
+
+A `MERGE` clause becomes one `gql:merge` step holding two children, shown as `\>` lines: the
+search, planned like a `MATCH` of the pattern that starts from a bound node of the row (or from
+a lookup by id or a property index), and the creation, the insert chain of the pattern; both end
+in the same `gql:project` of the pattern's variables, so a found and a created row look alike:
+
+```rhai,graph=modern
+g.gql("MATCH (a:person {name: 'marko'}) MERGE (a)-[:likes]->(f:fruit {name: 'apple'})").profile()
 ```
 
 A plan that writes never merges traversers, so the lowering places no merge points in it; a

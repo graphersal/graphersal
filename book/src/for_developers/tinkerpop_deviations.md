@@ -18,7 +18,7 @@ These TinkerPop features are not planned. Their scenarios are listed by id in
 
 | Code | Feature | Why |
 |---|---|---|
-| `match-step` | `match()` | declarative pattern matching is the start step [`gql()`](../gql/index.md) instead: ISO GQL queries on the same engine: reads (`MATCH ... WHERE ... RETURN ...`) and `INSERT` / `CREATE`, `SET`, `REMOVE` and `DELETE` writes; `match` is also a reserved Rhai word |
+| `match-step` | `match()` | declarative pattern matching is the start step [`gql()`](../gql/index.md) instead: ISO GQL queries on the same engine: reads (`MATCH ... WHERE ... RETURN ...`) and `INSERT` / `CREATE`, `SET`, `REMOVE`, `DELETE` and `MERGE` writes; `match` is also a reserved Rhai word |
 | `extra-number-types` | `GType.BYTE`/`SHORT`/`BIGINT`/`BIGDECIMAL`/`CHAR`/`BINARY`, `BigInteger` literals | the number model is `int64`/`float64`; see [Number widths](#number-width-literals-in-the-test-surface) |
 | `io-step` | `io()`, `read()`, `write()`, the `IO` tokens | GraphSON and GraphML import and export is Graphersal's own API (`GraphSource::from_graphson`, `from_graphml`, `import_graphson`, `import_graphml`, the CLI's `--graph`), not a traversal step ([GraphSON](#graphson)) |
 | `graph-algorithms` | `pageRank()`, `shortestPath()`, `connectedComponent()`, `peerPressure()` and their token classes | GraphComputer vertex programs, not planned for the traversal language (the scenarios are `@GraphComputerOnly` as well) |
