@@ -3,7 +3,7 @@
 // With the dev server (`graphersal --server`) there is no start page: the server serves one
 // graph, so every route is the workspace on that graph.
 //
-// A playground link (`#/play?graph=..&q=..&run=1`, js/link.js) loads its sample graph, or the
+// A playground link (`#/play?graph=..&q=..&run=1`, `&lang=gql` for a GQL tab; js/link.js) loads its sample graph, or the
 // graph it carries (`data`, with its `schema`: loaded like a GraphSON file with a schema file),
 // puts its query into the editor and, with run=1, runs it; the address then goes back to `#/play`,
 // so a reload does not apply the link again. With the dev server only the query is opened: the
@@ -29,7 +29,7 @@ const SAMPLE_NAMES = { modern: 'Modern (TinkerPop)', empty: 'empty', large: 'lar
 /** Puts a link's query into the editor (a new tab when the current one holds the user's text). */
 function openLinkScript(link) {
   if (link.script === null) return null;
-  return openScript({ title: link.title || 'Linked query', script: link.script });
+  return openScript({ title: link.title || 'Linked query', script: link.script, language: link.language, params: link.params });
 }
 
 /** The load request of a link that carries its graph: a GraphSON file and an optional schema file. */

@@ -13,6 +13,9 @@
 //   schema  with `data` only: the graph's schema (the schema format's JSON), encoded the same way
 //   v       the format of `data` and `schema`; absent means 1, the only format so far
 //   q       the script for the editor
+//   lang    gql: `q` is a plain GQL query and opens in a GQL tab (absent: a Rhai script; any
+//           other value is refused, so a later language is not run as Rhai)
+//   params  with lang=gql: the JSON text of the tab's Parameters field (optional)
 //   title   the tab name (optional)
 //   run     1: run the script once it is in the editor (never with the dev server, whose graph is
 //           the user's own data)
@@ -52,7 +55,7 @@ const BASE64URL = /^[A-Za-z0-9_-]*$/;
  * `graph`, `data` or `q`). A link that names an unknown graph, is too long or malformed comes back
  * with `error` and nothing else to apply. `data`/`schema` stay encoded (`decodeLinkData`).
  * @param {string} hash  `window.location.hash`, with or without the leading `#`
- * @returns {null | {graph: string|null, data: string|null, schema: string|null, script: string|null, title: string, run: boolean} | {error: string}}
+ * @returns {null | {graph: string|null, data: string|null, schema: string|null, script: string|null, title: string, run: boolean, language?: 'gql', params?: string} | {error: string}}
  */
 export function parseLink(hash) {
   const h = String(hash || '').replace(/^#/, '');
@@ -97,15 +100,26 @@ export function parseLink(hash) {
     return { error: `The link's query is longer than ${MAX_LINK_SCRIPT} characters.` };
   }
   const title = (params.get('title') || '').trim().slice(0, MAX_TITLE);
-  return { graph, data, schema, script, title, run: params.get('run') === '1' && script !== null && script.trim() !== '' };
+  let language = 'rhai';
+  if (params.has('lang')) {
+    const lang = params.get('lang');
+    if (lang !== 'gql' && lang !== 'rhai') return { error: `The link's query language "${lang.slice(0, 20)}" is unknown; this playground reads rhai and gql.` };
+    language = lang;
+  }
+  const gqlParams = language === 'gql' && params.has('params') ? params.get('params') : '';
+  if (gqlParams.length > MAX_LINK_SCRIPT) return { error: `The link's parameters are longer than ${MAX_LINK_SCRIPT} characters.` };
+  const link = { graph, data, schema, script, title, run: params.get('run') === '1' && script !== null && script.trim() !== '' };
+  // A Rhai link keeps the shape it always had; a GQL link adds its language and parameters.
+  return language === 'gql' ? { ...link, language, params: gqlParams } : link;
 }
 
 /**
  * The location hash of a link (the inverse of `parseLink`). With `data` (from `encodeLinkData`)
  * the link carries the graph itself and `graph` is not written.
- * @param {{graph?: string, data?: string|null, schema?: string|null, script?: string, title?: string, run?: boolean}} link
+ * `language` 'gql' writes `lang=gql` (and `params` when the Parameters field is not blank).
+ * @param {{graph?: string, data?: string|null, schema?: string|null, script?: string, title?: string, run?: boolean, language?: string, params?: string}} link
  */
-export function linkHash({ graph = 'modern', data = null, schema = null, script, title, run = false }) {
+export function linkHash({ graph = 'modern', data = null, schema = null, script, title, run = false, language = 'rhai', params = '' }) {
   const parts = [];
   if (data !== null && data !== undefined) {
     parts.push(`v=${LINK_FORMAT}`, `data=${data}`);
@@ -114,6 +128,10 @@ export function linkHash({ graph = 'modern', data = null, schema = null, script,
     parts.push(`graph=${encodeURIComponent(graph)}`);
   }
   if (script !== undefined && script !== null) parts.push(`q=${encodeURIComponent(script)}`);
+  if (language === 'gql') {
+    parts.push('lang=gql');
+    if (params && params.trim()) parts.push(`params=${encodeURIComponent(params)}`);
+  }
   if (title) parts.push(`title=${encodeURIComponent(title)}`);
   if (run) parts.push('run=1');
   return `#/play?${parts.join('&')}`;
