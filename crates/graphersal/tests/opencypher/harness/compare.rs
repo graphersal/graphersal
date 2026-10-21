@@ -19,12 +19,17 @@
 //!      [`ListOrder::IgnoreElementOrder`]; maps by key set and values; nodes by label set and
 //!      properties, relationships by type and properties (no ids); an expected path matches an
 //!      actual list `[node, rel, node, ..]` (our path value) whose relationships connect the
-//!      neighbouring nodes in the written direction. Opaque values never match.
+//!      neighbouring nodes in the written direction; a temporal value ([`temporal_text`])
+//!      matches an expected string of exactly its text (so the offset is compared, and `Z` is
+//!      not `+00:00`). Opaque values never match.
 
 use std::collections::BTreeMap;
 
+use std::fmt::Write as _;
+
 use graphersal::ElementProperty;
 use graphersal::storage::GraphStorage;
+use graphersal::temporal::{Date, Duration, Temporal, Time};
 
 use super::gherkin::{ListOrder, RowOrder, Table};
 use super::values::{Direction, TckNode, TckPath, TckRelationship, TckValue, parse_value};
@@ -153,17 +158,162 @@ pub fn to_tck<S: GraphStorage>(graph: &S, value: &ElementProperty) -> TckValue {
                 },
             })
         }
+        ElementProperty::Temporal(t) => match temporal_text(t) {
+            Some(text) => TckValue::Temporal(text),
+            None => TckValue::Opaque(format!("{t:?}")),
+        },
         other => {
             let logical = other.logical();
             if matches!(logical.as_ref(), ElementProperty::String(_)) {
                 // A compressed / deduplicated string read from storage.
                 to_tck(graph, logical.as_ref())
             } else {
-                // UUID, temporal, vector, a map with non-string keys: no TCK notation yet.
+                // UUID, vector, a map with non-string keys: no TCK notation yet.
                 TckValue::Opaque(format!("{other:?}"))
             }
         }
     }
+}
+
+/// The text of a temporal value as the TCK writes it: the `toString` of `java.time` (as Neo4j
+/// prints its values), written here from the public getters only, independently of the
+/// engine's own text and of GQL's `toString`, so the two check each other.
+///
+/// - a date `YYYY-MM-DD` (a `-` before years below 1, a `+` above 9999);
+/// - a time `HH:MM`, then `:SS` only when the seconds or the fraction are not zero, then the
+///   fraction in groups of three digits (`.645`, `.645876`; nine with nanoseconds, which our
+///   values do not have);
+/// - a local date-time `<date>T<time>`, a date-time with its offset `Z` / `+HH:MM[:SS]` (a
+///   `datetime` keeps no zone name, so the `[Europe/Stockholm]` form is never written);
+/// - a duration `P[nY][nM][nD][T[nH][nM][n.fS]]` (Neo4j's `DurationValue`): years and months
+///   from the months, the days as they are, hours / minutes / seconds from the time part
+///   without folding into days (`PT8784H`); every component carries its own sign, the seconds
+///   signed together with their fraction (`PT-1M-0.001S`, `PT-1.999S`), the fraction without
+///   trailing zeros (`PT23H59M59.9S`); `PT0S` when zero.
+///
+/// `None` for a kind this harness does not know yet (the enum is non-exhaustive).
+pub fn temporal_text(value: &Temporal) -> Option<String> {
+    let mut out = String::new();
+    match value {
+        Temporal::Date(d) => write_date(&mut out, *d),
+        Temporal::Time(t) => write_time(&mut out, *t),
+        Temporal::LocalDateTime(v) => {
+            write_date(&mut out, v.date());
+            out.push('T');
+            write_time(&mut out, v.time());
+        }
+        Temporal::DateTime(v) => {
+            let local = v.local();
+            write_date(&mut out, local.date());
+            out.push('T');
+            write_time(&mut out, local.time());
+            write_offset(&mut out, v.offset_seconds());
+        }
+        Temporal::Duration(d) => write_duration(&mut out, *d),
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn write_date(out: &mut String, d: Date) {
+    let year = d.year();
+    if year < 0 {
+        let _ = write!(out, "-{:04}", -(year as i64));
+    } else if year > 9999 {
+        let _ = write!(out, "+{year}");
+    } else {
+        let _ = write!(out, "{year:04}");
+    }
+    let _ = write!(out, "-{:02}-{:02}", d.month(), d.day());
+}
+
+fn write_time(out: &mut String, t: Time) {
+    let _ = write!(out, "{:02}:{:02}", t.hour(), t.minute());
+    let nanos = t.microsecond() as u64 * 1000;
+    if t.second() != 0 || nanos != 0 {
+        let _ = write!(out, ":{:02}", t.second());
+    }
+    if nanos == 0 {
+        return;
+    }
+    if nanos.is_multiple_of(1_000_000) {
+        let _ = write!(out, ".{:03}", nanos / 1_000_000);
+    } else if nanos.is_multiple_of(1000) {
+        let _ = write!(out, ".{:06}", nanos / 1000);
+    } else {
+        let _ = write!(out, ".{nanos:09}");
+    }
+}
+
+/// `ZoneOffset.getId()`: `Z`, `+HH:MM`, `+HH:MM:SS`.
+fn write_offset(out: &mut String, seconds: i32) {
+    if seconds == 0 {
+        out.push('Z');
+        return;
+    }
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let abs = seconds.unsigned_abs();
+    let _ = write!(out, "{sign}{:02}:{:02}", abs / 3600, abs / 60 % 60);
+    if !abs.is_multiple_of(60) {
+        let _ = write!(out, ":{:02}", abs % 60);
+    }
+}
+
+/// Neo4j's `DurationValue.prettyPrint` over (months, days, seconds, nanoseconds), the seconds
+/// floored and the nanoseconds in `0..1e9` as Neo4j keeps them.
+fn write_duration(out: &mut String, d: Duration) {
+    let months = d.months() as i64;
+    let days = d.days() as i64;
+    let mut seconds = d.micros().div_euclid(1_000_000);
+    let mut nanos = d.micros().rem_euclid(1_000_000) * 1000;
+    if months == 0 && days == 0 && seconds == 0 && nanos == 0 {
+        out.push_str("PT0S");
+        return;
+    }
+    out.push('P');
+    let part = |out: &mut String, value: i64, unit: char| {
+        if value != 0 {
+            let _ = write!(out, "{value}{unit}");
+        }
+    };
+    part(out, months / 12, 'Y');
+    part(out, months % 12, 'M');
+    part(out, days, 'D');
+    if seconds != 0 || nanos != 0 {
+        // A negative time part is written with the fraction's sign on the seconds.
+        if seconds < 0 && nanos != 0 {
+            seconds += 1;
+            nanos -= 1_000_000_000;
+        }
+        out.push('T');
+        part(out, seconds / 3600, 'H');
+        seconds %= 3600;
+        part(out, seconds / 60, 'M');
+        seconds %= 60;
+        if seconds != 0 {
+            let _ = write!(out, "{seconds}");
+            write_nanos(out, nanos);
+            out.push('S');
+        } else if nanos != 0 {
+            if nanos < 0 {
+                out.push('-');
+            }
+            out.push('0');
+            write_nanos(out, nanos);
+            out.push('S');
+        }
+    }
+}
+
+/// `.` and the digits of `|nanos|` (nine places, trailing zeros dropped); nothing for zero.
+fn write_nanos(out: &mut String, nanos: i64) {
+    let n = nanos.unsigned_abs();
+    if n == 0 {
+        return;
+    }
+    let digits = format!("{n:09}");
+    out.push('.');
+    out.push_str(digits.trim_end_matches('0'));
 }
 
 /// Compares `actual` with the `expected` table (see the module doc). `Err` names the first
@@ -242,6 +392,7 @@ pub fn matches(expected: &TckValue, actual: &TckValue, lists: ListOrder) -> bool
         (TckValue::Int(e), TckValue::Int(a)) => e == a,
         (TckValue::Float(e), TckValue::Float(a)) => floats_within_one_ulp(*e, *a),
         (TckValue::String(e), TckValue::String(a)) => e == a,
+        (TckValue::String(e) | TckValue::Temporal(e), TckValue::Temporal(a)) => e == a,
         (TckValue::List(e), TckValue::List(a)) => match lists {
             ListOrder::Strict => {
                 e.len() == a.len() && e.iter().zip(a).all(|(e, a)| matches(e, a, lists))
@@ -437,6 +588,9 @@ fn render_rows(what: &str, rows: &[Vec<TckValue>]) -> String {
 #[cfg(test)]
 mod tests {
     use graphersal::prelude::*;
+    use graphersal::temporal::{DateTime, LocalDateTime, TemporalKind};
+
+    use super::super::values::to_element_property;
 
     use super::*;
 
@@ -700,6 +854,273 @@ mod tests {
             rows: vec![vec![TckValue::Float(f64::NAN)]],
         };
         compare_result(&table(&["x"], &[&["NaN"]]), RowOrder::Ordered, S, &nan).unwrap();
+    }
+
+    fn text(value: impl Into<Temporal>) -> String {
+        temporal_text(&value.into()).unwrap_or_default()
+    }
+
+    fn date(y: i32, m: u8, d: u8) -> Date {
+        Date::from_ymd(y, m, d).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn time(h: u8, m: u8, s: u8, micro: u32) -> Time {
+        Time::from_hms_micro(h, m, s, micro).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn temporal_text_of_dates_and_times() {
+        assert_eq!(text(date(1984, 10, 11)), "1984-10-11");
+        assert_eq!(text(date(1, 1, 1)), "0001-01-01");
+        assert_eq!(text(date(0, 1, 1)), "0000-01-01");
+        assert_eq!(text(date(-44, 3, 15)), "-0044-03-15");
+        assert_eq!(text(date(-9999, 1, 1)), "-9999-01-01");
+        assert_eq!(text(date(9999, 12, 31)), "9999-12-31");
+        // Seconds only when they or the fraction are not zero; fractions in groups of three.
+        assert_eq!(text(time(12, 0, 0, 0)), "12:00");
+        assert_eq!(text(time(12, 31, 0, 0)), "12:31");
+        assert_eq!(text(time(12, 31, 14, 0)), "12:31:14");
+        assert_eq!(text(time(12, 31, 0, 1)), "12:31:00.000001");
+        assert_eq!(text(time(12, 31, 14, 645_000)), "12:31:14.645");
+        assert_eq!(text(time(12, 31, 14, 645_876)), "12:31:14.645876");
+        assert_eq!(text(time(0, 0, 0, 100_000)), "00:00:00.100");
+        let local = LocalDateTime::new(date(1984, 10, 11), time(12, 31, 0, 0));
+        assert_eq!(text(local), "1984-10-11T12:31");
+        let local = LocalDateTime::new(date(2015, 7, 21), time(21, 40, 32, 142_000));
+        assert_eq!(text(local), "2015-07-21T21:40:32.142");
+    }
+
+    #[test]
+    fn temporal_text_of_date_times_writes_the_offset() {
+        let at = |offset: i32| {
+            let local = LocalDateTime::new(date(1984, 10, 11), time(12, 31, 0, 0));
+            text(DateTime::from_local(local, offset).unwrap_or_else(|e| panic!("{e}")))
+        };
+        assert_eq!(at(0), "1984-10-11T12:31Z");
+        assert_eq!(at(3600), "1984-10-11T12:31+01:00");
+        assert_eq!(at(-5400), "1984-10-11T12:31-01:30");
+        assert_eq!(at(2 * 3600 + 5 * 60 + 59), "1984-10-11T12:31+02:05:59");
+        assert_eq!(at(-(2 * 3600 + 5 * 60 + 7)), "1984-10-11T12:31-02:05:07");
+        assert_eq!(at(18 * 3600), "1984-10-11T12:31+18:00");
+        // The same instant at another offset is another text: the comparison sees the offset.
+        let utc = TckValue::Temporal(at(0));
+        assert!(matches(&TckValue::String(at(0)), &utc, S));
+        assert!(!matches(&v("'1984-10-11T12:31+00:00'"), &utc, S));
+        assert!(!matches(
+            &v("'1984-10-11T13:31+01:00'"),
+            &TckValue::Temporal(at(0)),
+            S
+        ));
+    }
+
+    #[test]
+    fn temporal_text_of_durations_follows_the_tck_forms() {
+        const SECOND: i64 = 1_000_000;
+        let d = |months: i32, days: i32, micros: i64| text(Duration::new(months, days, micros));
+        assert_eq!(d(0, 0, 0), "PT0S");
+        assert_eq!(d(12, 0, 0), "P1Y");
+        assert_eq!(d(-20, 0, 0), "P-1Y-8M");
+        assert_eq!(d(0, -27, 0), "P-27D");
+        assert_eq!(d(0, 0, 8784 * 3600 * SECOND), "PT8784H");
+        assert_eq!(
+            d(0, 0, (23 * 3600 + 59 * 60 + 59) * SECOND + 900_000),
+            "PT23H59M59.9S"
+        );
+        assert_eq!(d(0, 0, 400_000), "PT0.4S");
+        assert_eq!(d(0, 0, -(599 * SECOND + 400_000)), "PT-9M-59.4S");
+        assert_eq!(
+            d(0, -27, -((21 * 3600 + 40 * 60 + 32) * SECOND + 142_000)),
+            "P-27DT-21H-40M-32.142S"
+        );
+        // Temporal6 [6]: the duration forms of `toString` (the nanosecond row needs ns).
+        let rows: [(i32, i32, i64, &str); 10] = [
+            (12 * 12 + 5, -14, 16 * 3600 * SECOND, "P12Y5M-14DT16H"),
+            (0, 0, 12 * 60 * SECOND - 60 * SECOND, "PT11M"),
+            (0, 0, 2 * SECOND - 1000, "PT1.999S"),
+            (0, 0, -2 * SECOND + 1000, "PT-1.999S"),
+            (0, 0, -2 * SECOND - 1000, "PT-2.001S"),
+            (0, 1, 1000, "P1DT0.001S"),
+            (0, 1, -1000, "P1DT-0.001S"),
+            (0, 0, 60 * SECOND - 1000, "PT59.999S"),
+            (0, 0, -60 * SECOND + 1000, "PT-59.999S"),
+            (0, 0, -60 * SECOND - 1000, "PT-1M-0.001S"),
+        ];
+        for (months, days, micros, expected) in rows {
+            assert_eq!(d(months, days, micros), expected);
+        }
+        assert_eq!(
+            d(12 * 12 + 5, 14, ((16 * 60 + 13) * 60 + 10) * SECOND),
+            "P12Y5M14DT16H13M10S"
+        );
+    }
+
+    #[test]
+    fn temporal_results_match_expected_strings_by_text() {
+        let graph = TraversalGraph::new();
+        let value = ElementProperty::Temporal(date(1984, 10, 11).into());
+        assert_eq!(
+            to_tck(&graph, &value),
+            TckValue::Temporal("1984-10-11".into())
+        );
+        let actual = TckValue::Temporal("12:31".into());
+        assert!(matches(&v("'12:31'"), &actual, S));
+        assert!(!matches(&v("'12:31:00'"), &actual, S));
+        assert!(matches(&actual, &actual, S));
+        // Not a string the other way round, nor a number.
+        assert!(!matches(&actual, &v("'12:31'"), S));
+        assert!(!matches(&v("1231"), &actual, S));
+        // Lists of temporals (Temporal4 stores lists) and node properties go through `to_tck`.
+        let list = ElementProperty::Array(vec![
+            value.clone(),
+            ElementProperty::Temporal(Duration::new(0, 1, 0).into()),
+        ]);
+        assert!(matches(
+            &v("['1984-10-11', 'P1D']"),
+            &to_tck(&graph, &list),
+            S
+        ));
+        assert!(to_element_property(&actual).is_err());
+    }
+
+    /// The temporal type a TCK text has, by its shape; `None` for any other string.
+    fn temporal_shape(s: &str) -> Option<&'static str> {
+        let b = s.as_bytes();
+        let digits = |range: std::ops::Range<usize>| {
+            b.get(range)
+                .is_some_and(|r| r.iter().all(u8::is_ascii_digit))
+        };
+        if s.starts_with('P') || s.starts_with("-P") {
+            return Some("duration");
+        }
+        let date_at = |i: usize| digits(i..i + 4) && b.get(i + 4) == Some(&b'-');
+        if date_at(0) || ((s.starts_with('-') || s.starts_with('+')) && date_at(1)) {
+            return Some(match s.find('T') {
+                None => "date",
+                Some(t) if s[t..].contains(['Z', '+', '-', '[']) => "datetime",
+                Some(_) => "localdatetime",
+            });
+        }
+        if digits(0..2) && b.get(2) == Some(&b':') {
+            return Some(if s.contains(['Z', '+', '-']) {
+                "time"
+            } else {
+                "localtime"
+            });
+        }
+        None
+    }
+
+    /// Why a TCK text cannot be one of our values, or `None` when it can.
+    fn unrepresentable(s: &str, shape: &str) -> Option<&'static str> {
+        if s.contains('[') {
+            return Some("a zone name");
+        }
+        if shape == "time" {
+            return Some("a time with an offset");
+        }
+        // Digits below the microsecond.
+        let mut rest = s;
+        while let Some(at) = rest.find('.') {
+            let fraction: String = rest[at + 1..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if fraction.len() > 6 && fraction[6..].bytes().any(|c| c != b'0') {
+                return Some("nanoseconds");
+            }
+            rest = &rest[at + 1..];
+        }
+        // Years beyond four digits, or a count beyond our fields.
+        if s.split(|c: char| !c.is_ascii_digit()).any(|n| n.len() > 9)
+            || (shape != "duration" && s.trim_start_matches(['-', '+']).find('-') > Some(4))
+        {
+            return Some("the range");
+        }
+        None
+    }
+
+    /// Every temporal text in a result table of `expressions/temporal` (outlines expanded):
+    /// each one that our types can hold is read back (the engine's ISO parser), written by
+    /// [`temporal_text`] and gives the same text; the others are counted by reason.
+    #[test]
+    fn every_temporal_cell_of_the_tree_renders_back() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/opencypher/features");
+        let features = super::super::gherkin::load_all(&root).unwrap_or_else(|e| panic!("{e}"));
+        let kind_of = |shape: &str| match shape {
+            "date" => TemporalKind::Date,
+            "localtime" => TemporalKind::Time,
+            "localdatetime" => TemporalKind::LocalDateTime,
+            "datetime" => TemporalKind::DateTime,
+            _ => TemporalKind::Duration,
+        };
+        fn strings(value: &TckValue, out: &mut Vec<String>) {
+            match value {
+                TckValue::String(s) => out.push(s.clone()),
+                TckValue::List(items) => items.iter().for_each(|i| strings(i, out)),
+                TckValue::Map(map) => map.values().for_each(|i| strings(i, out)),
+                TckValue::Node(n) => n.properties.values().for_each(|i| strings(i, out)),
+                TckValue::Relationship(r) => r.properties.values().for_each(|i| strings(i, out)),
+                _ => {}
+            }
+        }
+        let mut rendered: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut failures = Vec::new();
+        for feature in features
+            .iter()
+            .filter(|f| f.path.starts_with("expressions/temporal/"))
+        {
+            for case in feature.scenarios.iter().flat_map(|s| &s.cases) {
+                for step in &case.steps {
+                    let super::super::gherkin::Step::Result { table, .. } = &step.step else {
+                        continue;
+                    };
+                    let mut texts = Vec::new();
+                    for cell in table.rows.iter().flatten() {
+                        match parse_value(cell) {
+                            Ok(value) => strings(&value, &mut texts),
+                            Err(e) => failures.push(format!("{}: {e}", case.id)),
+                        }
+                    }
+                    for s in texts {
+                        let Some(shape) = temporal_shape(&s) else {
+                            continue;
+                        };
+                        if let Some(reason) = unrepresentable(&s, shape) {
+                            *skipped.entry(reason).or_default() += 1;
+                            continue;
+                        }
+                        match Temporal::parse_as(kind_of(shape), &s) {
+                            Ok(t) if temporal_text(&t).as_deref() == Some(s.as_str()) => {
+                                *rendered.entry(shape).or_default() += 1;
+                            }
+                            Ok(t) => failures.push(format!(
+                                "{}: {s:?} renders as {:?}",
+                                case.id,
+                                temporal_text(&t)
+                            )),
+                            Err(e) => failures.push(format!("{}: {s:?}: {e}", case.id)),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+        for shape in ["date", "localtime", "localdatetime", "datetime", "duration"] {
+            assert!(
+                rendered.get(shape).is_some_and(|n| *n >= 10),
+                "too few {shape} texts: {rendered:?}, skipped {skipped:?}"
+            );
+        }
+        for reason in ["a zone name", "a time with an offset", "nanoseconds"] {
+            assert!(skipped.contains_key(reason), "{skipped:?}");
+        }
     }
 
     #[test]

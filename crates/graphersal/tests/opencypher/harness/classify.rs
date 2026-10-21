@@ -493,6 +493,78 @@ mod tests {
         assert_eq!(context_prefix("other"), "");
     }
 
+    fn case(outcome: &str, control: bool) -> Case {
+        let control = if control {
+            "    When executing control query:\n      \"\"\"\n      RETURN 1 AS y\n      \"\"\"\n    \
+             Then the result should be, in any order:\n      | y |\n      | 1 |\n"
+        } else {
+            ""
+        };
+        let text = format!(
+            "Feature: F\n\n  Scenario: s\n    Given an empty graph\n    When executing query:\n      \
+             \"\"\"\n      RETURN 1 AS x\n      \"\"\"\n{outcome}{control}"
+        );
+        let mut feature = super::super::gherkin::parse_feature("x/T.feature", &text)
+            .unwrap_or_else(|e| panic!("{e}"));
+        feature.scenarios.remove(0).cases.remove(0)
+    }
+
+    fn ran(outcome: QueryOutcome, controls: Vec<QueryOutcome>) -> RawOutcome {
+        RawOutcome::Ran(MainRun {
+            outcome,
+            side_effects: SideEffects::default(),
+            controls,
+        })
+    }
+
+    /// A "not yet" raised while the query runs (a temporal value the engine cannot hold, found
+    /// only at runtime: 3g U1-U3) is `missing`, as one raised at compile time, whatever the case
+    /// expects, and in a control query too.
+    #[test]
+    fn a_runtime_not_yet_is_missing() {
+        let result = "    Then the result should be, in any order:\n      | x |\n      | 1 |\n";
+        let error = "    Then a TypeError should be raised at runtime: InvalidArgumentType\n";
+        let mut not_yet = gql(Phase::Runtime, GqlErrorKind::NotYet, "0A000");
+        not_yet.message = "GQL construct not supported yet at line 1, column 8: \
+                           sub-microsecond precision is not yet supported in this version"
+            .to_string();
+        for expected in [result, error] {
+            let outcome = classify(
+                &case(expected, false),
+                &ran(QueryOutcome::Error(not_yet.clone()), vec![]),
+            );
+            assert_eq!(outcome.class, Class::Missing, "{outcome:?}");
+            assert_eq!(
+                construct(&outcome.detail),
+                "not yet: sub-microsecond precision"
+            );
+        }
+        let refused = gql(Phase::Runtime, GqlErrorKind::Refused, "0A000");
+        let outcome = classify(
+            &case(result, false),
+            &ran(QueryOutcome::Error(refused), vec![]),
+        );
+        assert_eq!(outcome.class, Class::Missing);
+        // In a control query.
+        let rows = QueryOutcome::Rows(Ok(ActualResult {
+            columns: vec!["x".into()],
+            rows: vec![vec![super::super::values::TckValue::Int(1)]],
+        }));
+        let outcome = classify(
+            &case(result, true),
+            &ran(rows, vec![QueryOutcome::Error(not_yet.clone())]),
+        );
+        assert_eq!(outcome.class, Class::Missing, "{outcome:?}");
+        assert!(outcome.detail.starts_with("control query: "));
+        // Any other runtime data error stays wrong behaviour.
+        let data = gql(Phase::Runtime, GqlErrorKind::Data, "22007");
+        let outcome = classify(
+            &case(result, false),
+            &ran(QueryOutcome::Error(data), vec![]),
+        );
+        assert_eq!(outcome.class, Class::UnexpectedError);
+    }
+
     #[test]
     fn errors_match_by_type_and_phase() {
         let syntax = gql(Phase::Compile, GqlErrorKind::Syntax, "42001");
