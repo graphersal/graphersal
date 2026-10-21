@@ -1899,14 +1899,9 @@ fn write_typed(value: &ElementProperty, out: &mut String) -> Result<(), Physical
             N::Float(f) => {
                 let f = f.into_inner();
                 out.push_str("{\"@type\":\"g:Double\",\"@value\":");
-                if f.is_nan() {
-                    out.push_str("\"NaN\"");
-                } else if f == f64::INFINITY {
-                    out.push_str("\"Infinity\"");
-                } else if f == f64::NEG_INFINITY {
-                    out.push_str("\"-Infinity\"");
-                } else {
-                    write_float(f, out)?;
+                match crate::value::physical::non_finite_text(f) {
+                    Some(text) => write_json_string(text, out)?,
+                    None => write_float(f, out)?,
                 }
                 out.push('}');
             }

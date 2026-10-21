@@ -103,6 +103,17 @@ prints:
 - **Maps with typed keys in JSON**: a map with a non-string key (`groupCount().by("age")`) is written in
   the GraphSON shape `{"@type": "g:Map", "@value": [29, 1, 27, 1]}`; a string-keyed map is a plain object.
   Tables and trees print such keys as text (`29`, `v[1]`); see [Maps With Non-String Keys](value_keyed_maps.md).
+- **Non-finite floats in JSON**: JSON has no number for `NaN`, `Infinity` or `-Infinity`, so a
+  result holding one (`math("0 / 0")`, `0.0 / 0.0`, a stored `NaN` property) writes it in GraphSON's
+  typed form, `{"@type": "g:Double", "@value": "NaN"}` (payloads `"NaN"`, `"Infinity"`,
+  `"-Infinity"`), at any depth, the same form a [GraphSON export](graphson.md) writes. The tag keeps
+  it apart from the string `"NaN"`, which stays a plain string. This holds for `to_json()`,
+  `--format json`, `execute().to_json()`, the playground's and the dev server's answers and the
+  MCP `query` tool; tables and trees print the number itself (`NaN`, `inf`, `-inf`), and the
+  playground shows `NaN`, `Infinity`, `-Infinity` in its Table view and inspector. The tag is
+  written, not read: plain JSON read back (serde of a value, GraphML's embedded JSON) does not turn
+  it into a float; GraphSON import does. The serde `Serialize` of a value itself stays strict and
+  refuses a non-finite float, and GraphML export refuses one (with a help naming the fix).
 - **JSON stays valid JSON**: an array of the first `max_rows` results, with nested collections cut
   and no marker inside, since a sentinel element would break the data's types. The only signal is
   the notice. The JSON-per-line fallback formats (`jsonschema`, `mermaid`, `plantuml` on

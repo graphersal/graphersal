@@ -2033,12 +2033,14 @@ pub(crate) fn render_elements(
         VisualizeFormat::Json => {
             #[cfg(feature = "serde")]
             {
+                // Value JSON: a non-finite float is GraphSON's typed `g:Double`.
+                use crate::value::physical::TypedFloats;
                 let result = if limit.is_limited() {
                     let cut: Vec<ElementProperty> =
                         elements.iter().map(|el| cut_nested(el, &limit)).collect();
-                    serde_json::to_string_pretty(&cut)
+                    serde_json::to_string_pretty(&TypedFloats(&cut))
                 } else {
-                    serde_json::to_string_pretty(elements)
+                    serde_json::to_string_pretty(&TypedFloats(elements))
                 };
                 result.map_err(|e| {
                     Box::new(crate::error::TraverserError::Io(

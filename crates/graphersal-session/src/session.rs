@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
-use crate::display::{Bounds, CompactGraph, Display, Table, bounded_display};
+use crate::display::{
+    Bounds, CompactGraph, Display, Table, bounded_display, json_safe, values_json,
+};
 use crate::storage::{GraphFactory, IntoSessionGraph, SessionGraph, StorageKind};
 
 /// The diagnostic of a script stopped through [`Session::cancel_token`] outside a traversal (a
@@ -964,7 +966,7 @@ impl Session {
                 Ok(rendered) => display.raw = rendered.text,
                 Err(diagnostic) => display.raw = diagnostic,
             }
-            let results_json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
+            let results_json = values_json(&results);
             return Outcome {
                 ok: true,
                 terminal: hint.unwrap_or("value"),
@@ -1120,7 +1122,7 @@ impl Session {
             }
             Err(diagnostic) => display.raw = diagnostic,
         }
-        let results_json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
+        let results_json = values_json(&results);
         Outcome {
             ok: true,
             terminal,
@@ -1539,7 +1541,7 @@ fn parse_schema_text(text: &str) -> Value {
 
 /// An engine value (a validation report, a diff) as a JSON value.
 fn value_json(value: &ElementProperty) -> Result<Value, String> {
-    serde_json::to_value(value).map_err(|err| err.to_string())
+    serde_json::to_value(json_safe(value)).map_err(|err| err.to_string())
 }
 
 /// Properties whose logical type differs between the saved graph and the graph loaded back from
@@ -1602,6 +1604,79 @@ mod tests {
         let mut session = Session::new();
         session.load_sample("modern").unwrap();
         session
+    }
+
+    fn double(text: &str) -> Value {
+        json!({"@type": "g:Double", "@value": text})
+    }
+
+    /// A non-finite float reaches the page as GraphSON's typed double through every result
+    /// path (a terminal, a traversal without one, `execute()`), in the results, the Table tab and
+    /// the JSON tab, at any depth and as a map key.
+    #[test]
+    fn non_finite_floats_are_typed_doubles_in_results() {
+        let mut session = modern();
+        let nan = double("NaN");
+        let inf = double("Infinity");
+        let ninf = double("-Infinity");
+        for script in [
+            "g.inject(0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0).to_list()",
+            "g.inject(0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0)",
+            "g.inject(0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0).execute()",
+        ] {
+            let response = run(&mut session, script);
+            assert_eq!(response["ok"], true, "{script}: {response}");
+            assert_eq!(
+                response["execution"]["results"],
+                json!([nan, inf, ninf]),
+                "{script}"
+            );
+            assert_eq!(
+                response["display"]["table"]["rows"],
+                json!([[nan], [inf], [ninf]]),
+                "{script}"
+            );
+            let shown: Value =
+                serde_json::from_str(response["display"]["json"].as_str().unwrap()).unwrap();
+            assert_eq!(shown, json!([nan, inf, ninf]), "{script}");
+        }
+        // Nested in a list and a map, a map key, and a string "NaN" stays a string.
+        let response = run(
+            &mut session,
+            r#"g.inject(#{a: [1.5, 0.0 / 0.0], s: "NaN"}).to_list()"#,
+        );
+        assert_eq!(
+            response["execution"]["results"],
+            json!([{"a": [1.5, nan], "s": "NaN"}])
+        );
+        let response = run(&mut session, "g.inject(1.0 / 0.0).group_count().next()");
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(
+            response["execution"]["results"][0],
+            json!({"@type": "g:Map", "@value": [inf, 1]})
+        );
+    }
+
+    /// The inspector shows a stored non-finite property as its typed double.
+    #[test]
+    fn the_inspector_types_a_stored_non_finite_property() {
+        let mut session = Session::new();
+        let response = run(
+            &mut session,
+            r#"g.add_v("x").property(T.id, "a").property("w", 0.0 / 0.0).property("xs", [-1.0 / 0.0, 2.0]).to_list()"#,
+        );
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(
+            response["execution"]["results"][0]["properties"]["w"],
+            double("NaN")
+        );
+        let element: Value =
+            serde_json::from_str(&session.element("vertex", "a").unwrap()).unwrap();
+        assert_eq!(element["properties"]["w"], double("NaN"));
+        assert_eq!(
+            element["properties"]["xs"],
+            json!([double("-Infinity"), 2.0])
+        );
     }
 
     /// The token values come from the engine and cover at least what the playground's former

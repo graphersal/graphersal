@@ -122,7 +122,7 @@ fn effect_json(effect: &AccessRequestBuf) -> Value {
 }
 
 fn value_json(value: &ElementProperty) -> Value {
-    serde_json::to_value(value).unwrap_or(Value::Null)
+    serde_json::to_value(crate::display::json_safe(value)).unwrap_or(Value::Null)
 }
 
 /// Whether `folder` is `prefix` or a folder below it (`""` matches everything).

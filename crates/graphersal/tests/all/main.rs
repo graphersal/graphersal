@@ -121,6 +121,7 @@ mod model2vec_tests;
 mod nested_profiling_tests;
 mod nested_source_tests;
 mod newer_format_tests;
+mod non_finite_json_tests;
 mod operator_tests;
 mod optimizer_differential_tests;
 mod optimizer_rule_toggle_tests;
