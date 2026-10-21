@@ -438,8 +438,8 @@ fn run_and_classify(cases: &[&gherkin::Case]) -> Vec<harness::classify::Outcome>
         .collect()
 }
 
-/// The scope table (`harness::scope`) names existing cases only, covers every procedure and
-/// `@ignore` case and links existing book pages.
+/// The scope table (`harness::scope`) names existing cases only, covers every `@ignore` case
+/// and links existing book pages.
 #[test]
 fn scope_table_is_consistent() {
     use harness::scope;
@@ -465,21 +465,41 @@ fn scope_table_is_consistent() {
         }
     }
     for case in &cases {
-        let procedure = case
-            .steps
-            .iter()
-            .any(|s| matches!(s.step, Step::Procedure { .. }));
         let code = scope::exclusion(&case.id).map(|e| e.code);
-        if procedure && code != Some("procedures") {
-            problems.push(format!(
-                "{}: uses a vendor procedure, not in `procedures`",
-                case.id
-            ));
-        }
         if case.is_ignored() && code != Some("upstream-ignore") {
             problems.push(format!("{}: @ignore, not in `upstream-ignore`", case.id));
         }
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Every `there exists a procedure` of the tree becomes a saved GQL query
+/// (`harness::procedure`) that the catalog stores.
+#[test]
+fn every_procedure_fixture_registers() {
+    use graphersal::{GraphTraversalSource, TraversalGraph};
+
+    let features =
+        gherkin::load_all(&features_root()).unwrap_or_else(|e| panic!("parse error: {e}"));
+    let mut problems = Vec::new();
+    let mut count = 0;
+    for case in all_cases(&features) {
+        for step in &case.steps {
+            if let Step::Procedure { signature, table } = &step.step {
+                count += 1;
+                let mut graph = TraversalGraph::default();
+                let registered = harness::procedure::definition(signature, table).and_then(|d| {
+                    GraphTraversalSource::new(&mut graph)
+                        .set_definition(d)
+                        .map_err(|e| e.to_string())
+                });
+                if let Err(e) = registered {
+                    problems.push(format!("{}: {signature}: {e}", case.id));
+                }
+            }
+        }
+    }
+    assert!(count > 0, "no procedure step in the tree");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 

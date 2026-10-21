@@ -115,7 +115,8 @@ pub enum Step {
     HavingExecuted(String),
     /// `And parameters are:` + a headerless 2-column table `| name | value |` (raw value cells).
     Parameters(Vec<(String, String)>),
-    /// `And there exists a procedure <signature>:` + table (procedure scenarios are out of scope).
+    /// `And there exists a procedure <signature>:` + table (registered as a saved GQL
+    /// query, `procedure.rs`).
     Procedure {
         /// The signature text, e.g. `test.my.proc(in :: INTEGER?) :: (out :: STRING?)`.
         signature: String,

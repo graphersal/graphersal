@@ -29,7 +29,8 @@
 //! | `ArithmeticError` | 22003, 22012, 2201x | the same |
 //! | `EntityNotFound` | never | an element read after its removal |
 //! | `ConstraintVerificationFailed` | never | a GQL error of class G1 |
-//! | the others (procedures, unused) | never | never |
+//! | `ProcedureError` (`ProcedureNotFound`: no saved query of that folder and name) | 42002 | never |
+//! | the others (unused) | never | never |
 //!
 //! Errors imply no side effects (G8): a case that expects an error and gets a matching one is
 //! `wrong_side_effects` when the state changed.
@@ -446,10 +447,11 @@ pub fn error_matches(
         ErrorType::ArithmeticError => one_of(&["22003", "22012"]) || in_class("2201"),
         ErrorType::EntityNotFound => actual.root == ErrorRoot::ElementRemoved,
         ErrorType::ConstraintVerificationFailed => in_class("G1"),
+        // A `CALL` is resolved against the catalog when the query is compiled (3h.P0).
+        ErrorType::ProcedureError => actual.phase == Phase::Compile && status == "42002",
         ErrorType::ConstraintValidationFailed
         | ErrorType::PropertyNotFound
-        | ErrorType::LabelNotFound
-        | ErrorType::ProcedureError => false,
+        | ErrorType::LabelNotFound => false,
     }
 }
 
@@ -630,5 +632,38 @@ mod tests {
         for (kind, _) in ErrorType::ALL {
             assert!(!error_matches(kind, ErrorPhase::AnyTime, "x", &refused));
         }
+    }
+
+    #[test]
+    fn a_procedure_error_is_a_compile_time_42002() {
+        let not_found = gql(Phase::Compile, GqlErrorKind::Semantic, "42002");
+        for phase in [ErrorPhase::CompileTime, ErrorPhase::AnyTime] {
+            assert!(error_matches(
+                ErrorType::ProcedureError,
+                phase,
+                "ProcedureNotFound",
+                &not_found
+            ));
+        }
+        assert!(!error_matches(
+            ErrorType::ProcedureError,
+            ErrorPhase::Runtime,
+            "ProcedureNotFound",
+            &not_found
+        ));
+        let syntax = gql(Phase::Compile, GqlErrorKind::Syntax, "42001");
+        assert!(!error_matches(
+            ErrorType::ProcedureError,
+            ErrorPhase::CompileTime,
+            "ProcedureNotFound",
+            &syntax
+        ));
+        let at_runtime = gql(Phase::Runtime, GqlErrorKind::Semantic, "42002");
+        assert!(!error_matches(
+            ErrorType::ProcedureError,
+            ErrorPhase::AnyTime,
+            "ProcedureNotFound",
+            &at_runtime
+        ));
     }
 }

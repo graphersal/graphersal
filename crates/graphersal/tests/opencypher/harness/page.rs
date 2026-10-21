@@ -288,7 +288,7 @@ mod tests {
         };
         let call = Outcome {
             class: Class::Excluded,
-            detail: "excluded:procedures".to_string(),
+            detail: "excluded:upstream-ignore".to_string(),
         };
         let rows = [
             Row {
@@ -306,10 +306,15 @@ mod tests {
             // The excluded table links its docs on the page and prints paths in the report.
             if name == "excluded" {
                 assert!(
-                    text.contains("[gql/refused.md](../gql/refused.md)"),
+                    text.contains(
+                        "[gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope)"
+                    ),
                     "{text}"
                 );
-                assert!(report.contains("`book/src/gql/refused.md`"), "{report}");
+                assert!(
+                    report.contains("`book/src/gql/tck_compliance.md#out-of-scope`"),
+                    "{report}"
+                );
                 continue;
             }
             let text = text.trim_end().trim_end_matches('.');

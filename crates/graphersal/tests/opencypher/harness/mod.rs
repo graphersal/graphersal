@@ -13,6 +13,7 @@ pub mod compare;
 pub mod execute;
 pub mod gherkin;
 pub mod page;
+pub mod procedure;
 pub mod report;
 pub mod scope;
 pub mod state;
