@@ -853,7 +853,7 @@ pub(crate) fn cascade(parts: &DurationParts) -> TemporalResult<Cascaded> {
 /// (`P1M * 0.5` = `P15DT5H14M33S`; a whole factor scales exactly). A zero divisor or a result
 /// outside the fields is [`TemporalError::OutOfRange`] (the caller reports a zero divisor
 /// first).
-#[allow(dead_code, reason = "the GQL temporal functions (3g.T4-T8) call it")]
+#[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn scale_duration(
     duration: Duration,
     factor: Amount,

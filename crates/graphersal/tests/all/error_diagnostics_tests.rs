@@ -7763,6 +7763,41 @@ mod gql {
     }
 
     #[test]
+    fn gql_temporal_arithmetic_help_names_the_forms_and_duration_between() {
+        // Stage 3g.T6: a date minus a date has no meaning; the help names the forms and
+        // duration.between(a, b).
+        let (err, report) = gql_failure(|g| {
+            g.gql("RETURN date('2020-01-02') - date('2020-01-01') AS x")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22G03".to_string())
+        );
+        assert!(
+            report.contains(
+                "A duration is added to or subtracted from a date, a local time, a local \
+                 datetime, a datetime or another duration (x + d, d + x, x - d), and multiplied \
+                 or divided by a number (d * 2, d / 2); the time between two values is \
+                 duration.between(a, b)"
+            ),
+            "{report}"
+        );
+        // A duration divided by zero is 22012 whatever the number, and the help says so.
+        let (err, report) = gql_failure(|g| g.gql("RETURN duration('P1D') / 0.0 AS x").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22012".to_string())
+        );
+        assert!(
+            report.contains(
+                "A duration divided by zero fails whatever the number (d / 0 and d / 0.0)."
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
     fn gql_power_operator_errors_share_the_power_advice() {
         // Stage 3f: `x ^ y` follows the rules of power(x, y), and its advice names it.
         let (err, report) = gql_failure(|g| {

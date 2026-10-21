@@ -4423,6 +4423,9 @@ pub(crate) enum GqlHelpTopic {
     /// An operand whose kind is certain from the query text and that its operator or function
     /// never takes, refused before the query runs (22G03, stage 3f, `gql::eval::kinds`).
     StaticKind,
+    /// Arithmetic with a temporal operand that has no meaning (22G03, stage 3g): what `+`,
+    /// `-`, `*` and `/` take with dates, times and durations.
+    TemporalArithmetic,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -7043,17 +7046,21 @@ fn gql_help(
                 );
             } else if topic == GqlHelpTopic::Subscript {
                 help.push_str(GQL_SUBSCRIPT_ADVICE);
+            } else if topic == GqlHelpTopic::TemporalArithmetic {
+                help.push_str(GQL_TEMPORAL_ARITHMETIC_ADVICE);
             } else if let Some(advice) = gql_data_status_advice(gqlstatus) {
                 help.push_str(advice);
                 help.push(' ');
             }
             help.push_str(GQL_DATA_ADVICE);
             if gqlstatus == crate::gql::eval::status::DIVISION_BY_ZERO {
-                // Stage 3f: only an integer division fails on a zero divisor.
+                // Stage 3f: only an integer division fails on a zero divisor (and, 3g, a
+                // duration's).
                 help.push_str(
                     " Only an integer division (/ or %) fails on a zero divisor: a float one \
                      gives Infinity or NaN (IEEE 754), as in \
-                     g.gql(\"MATCH (p:person) RETURN 100 / toFloat(p.age) AS r\").",
+                     g.gql(\"MATCH (p:person) RETURN 100 / toFloat(p.age) AS r\"). A duration \
+                     divided by zero fails whatever the number (d / 0 and d / 0.0).",
                 );
             }
         }
@@ -7088,6 +7095,18 @@ const GQL_SUBSCRIPT_ADVICE: &str = "x[i] reads the item i of a list, with an int
      toString(k). x[a..b] takes the items from a up to b (excluded) of a list, as in \
      g.gql(\"RETURN [1, 2, 3, 4][1..3] AS xs\"); a text is no list: use substring(s, start, \
      length) for a part of it. ";
+
+/// The advice of temporal arithmetic without a meaning ([`GqlHelpTopic::TemporalArithmetic`],
+/// stage 3g): the forms `+`, `-`, `*` and `/` take, and `duration.between` for the time between
+/// two values.
+#[cfg(feature = "gql")]
+const GQL_TEMPORAL_ARITHMETIC_ADVICE: &str = "A duration is added to or subtracted from a \
+     date, a local time, a local datetime, a datetime or another duration (x + d, d + x, x - d), \
+     and multiplied or divided by a number (d * 2, d / 2); the time between two values is \
+     duration.between(a, b) (or duration.inDays(a, b), duration.inSeconds(a, b)), as in \
+     g.gql(\"RETURN date('2024-01-31') + duration('P1M') AS d, \
+     duration.between(date('2024-01-01'), date('2024-03-15')) AS u\"); \
+     a component such as u.days or d.year is a number to compute with. ";
 
 /// The general advice of an error about an `INSERT` / `CREATE` pattern
 /// ([`GqlHelpTopic::Insert`], stage 3a): what each part of the pattern may carry.
@@ -7633,7 +7652,8 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         | GqlHelpTopic::Percentile
         | GqlHelpTopic::TextAndNumber
         | GqlHelpTopic::Subscript
-        | GqlHelpTopic::StaticKind => {
+        | GqlHelpTopic::StaticKind
+        | GqlHelpTopic::TemporalArithmetic => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \

@@ -32,6 +32,11 @@
 //!   equal decides (`[1, 2] < [1, 3]` TRUE, `[1, 2] >= [3, null]` FALSE), a `NULL` or
 //!   incomparable pair reached first gives `NULL` (`[1, 2] >= [1, null]`), a prefix sorts first
 //!   (`[1, null] >= [1]` TRUE). Maps, elements and paths are not ordered (`NULL`).
+//! - **Temporal values** (stage 3g): one type with itself, a `datetime` by its instant (two
+//!   offsets of one instant are `=`), a duration `=` field by field after its seconds are
+//!   summed (`PT1M10S = PT70S`, `P1DT24H <> P2D`); values of two temporal types are never
+//!   equal. Durations are not ordered (U7, Neo4j and ISO GQL): `<`, `<=`, `>`, `>=` of two
+//!   durations give `NULL`; `ORDER BY` keeps its total order of them.
 //! - **`NaN`** (IEEE 754, the openCypher TCK): `NaN = x` is FALSE and `NaN <> x` TRUE for every
 //!   non-`NULL` `x`, `NaN` itself included; `NaN < 1`, `NaN >= NaN` and the other orderings
 //!   against a number are FALSE; against another kind they are `NULL` (`NaN > 'a'`).
@@ -53,6 +58,10 @@
 //!   numeric type): `1.0 / 0.0` is `Infinity`, `-1 / 0.0` `-Infinity`, `0.0 / 0.0` and
 //!   `1.0 % 0.0` `NaN`.
 //!   `NULL` propagates. Any other operand kind is error 22G03.
+//!   Temporal operands (stage 3g, `functions/temporal/arith.rs`): `x + dur`, `dur + x`,
+//!   `x - dur`, `dur ± dur`, `dur * n`, `n * dur`, `dur / n` and the sign of a duration; a date
+//!   or time ignores the parts of a duration its type lacks (U5); anything else with a
+//!   temporal operand is 22G03 (`duration.between(a, b)` for the time between two values).
 //! - **Concatenation:** `||` joins two strings or two lists. Cypher `+` is its alias on two
 //!   strings and two lists; `+` of a list and one value of another kind appends it (`[1] + 2`
 //!   is `[1, 2]`) or prepends it (`2 + [1]` is `[2, 1]`; stage 3f, the openCypher TCK), a
@@ -149,6 +158,7 @@ use super::parser::{Function, FunctionKind, FunctionSpec, lookup_function};
 use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
 use crate::value::scalar::compare_scalars;
+use crate::value::temporal::Temporal;
 use crate::{CompactString, ElementKind, ElementProperty, PropertyMap};
 
 #[cfg(test)]
@@ -2132,6 +2142,13 @@ pub(crate) enum Order {
 /// a list that is a prefix of the other sorts first), everything else [`Order::Unknown`].
 pub(crate) fn order<E>(a: &Value<E>, b: &Value<E>) -> Order {
     match (a, b) {
+        // Stage 3g (U7): durations are not ordered (Neo4j, ISO GQL): `<` and the others are
+        // NULL; `=` still compares them, and ORDER BY keeps its total order
+        // (`runtime::compare_order`).
+        (
+            Value::Scalar(ElementProperty::Temporal(Temporal::Duration(_))),
+            Value::Scalar(ElementProperty::Temporal(Temporal::Duration(_))),
+        ) => Order::Unknown,
         (Value::Scalar(a), Value::Scalar(b)) => match compare_scalars(a, b) {
             Some(ordering) => Order::Is(ordering),
             None => match (a, b) {

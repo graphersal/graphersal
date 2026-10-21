@@ -117,24 +117,19 @@ fn temporal_values_flow_through_the_evaluator() {
         matches!(&collected, ElementProperty::Array(items) if items.len() == 1),
         "{collected:?}"
     );
-    // Components and arithmetic come in later tasks: 0A000 at run time, never 22G03.
-    for (expr, message) in [
-        ("n.d + n.u", "+ on temporal values"),
-        ("n.u + n.d", "+ on temporal values"),
-        ("n.d - n.u", "- on temporal values"),
-        ("n.u * 2", "* on temporal values"),
-        ("2 * n.u", "* on temporal values"),
-        ("n.u / 2", "/ on temporal values"),
-        ("-n.u", "the sign - of a temporal value"),
+    // The arithmetic of 3g.T6 gives temporal values.
+    for expr in [
+        "n.d + n.u",
+        "n.u + n.d",
+        "n.d - n.u",
+        "n.u * 2",
+        "2 * n.u",
+        "n.u / 2",
+        "-n.u",
     ] {
         let query = format!("MATCH (n:x) RETURN {expr} AS x");
-        let (status, kind, actual, compile_time) = failure(&graph, &query);
-        assert_eq!(status, "0A000", "{query}");
-        assert_eq!(kind, GqlErrorKind::NotYet, "{query}");
-        assert!(!compile_time, "{query}");
-        assert_eq!(
-            actual,
-            format!("{message} is not yet supported in this version"),
+        assert!(
+            matches!(single(&graph, &query), ElementProperty::Temporal(_)),
             "{query}"
         );
     }
@@ -163,19 +158,12 @@ fn temporal_values_flow_through_the_evaluator() {
 #[test]
 fn static_kinds_accept_temporal_results_where_they_will_mean_something() {
     let graph = graph();
-    // No static refusal: a component read, the arithmetic of T6, the sign; each fails only when
-    // a row reaches it (and not at all without rows).
+    // No static refusal: a component read, the arithmetic of T6, the sign; each gives a value
+    // when a row reaches it (and nothing without rows).
     for expr in [
         "date('2020-01-01').year",
         "datetime.truncate('day', n.d).hour",
         "duration.between(n.d, n.d).days",
-    ] {
-        let none = format!("MATCH (n:nothing) RETURN {expr} AS x");
-        assert!(rows(&graph, &none).is_empty(), "{none}");
-        let query = format!("MATCH (n:x) RETURN {expr} AS x");
-        assert_ne!(single(&graph, &query), ElementProperty::Null, "{query}");
-    }
-    for expr in [
         "date() - duration('P1D')",
         "duration('P1D') * 2",
         "duration('P1D') / 2",
@@ -184,9 +172,7 @@ fn static_kinds_accept_temporal_results_where_they_will_mean_something() {
         let none = format!("MATCH (n:nothing) RETURN {expr} AS x");
         assert!(rows(&graph, &none).is_empty(), "{none}");
         let query = format!("MATCH (n:x) RETURN {expr} AS x");
-        let (status, _, _, compile_time) = failure(&graph, &query);
-        assert_eq!(status, "0A000", "{query}");
-        assert!(!compile_time, "{query}");
+        assert_ne!(single(&graph, &query), ElementProperty::Null, "{query}");
     }
     // A temporal result is still no boolean, string, list or number.
     for query in [
@@ -1396,5 +1382,261 @@ fn duration_between_follows_neo4j_over_mixed_operands() {
             "MATCH (n:nothing) RETURN duration.inDays(n.l1, n.r3) AS x"
         )
         .is_empty()
+    );
+}
+
+// ----- 3g.T6: arithmetic and comparison -----
+
+/// The Neo4j text (`toString`) of `expr`, evaluated once.
+fn neo4j_text(graph: &TraversalGraph, expr: &str) -> String {
+    match single(graph, &format!("RETURN toString({expr}) AS x")) {
+        ElementProperty::String(text) => text.to_string(),
+        other => panic!("{expr}: {other:?}"),
+    }
+}
+
+#[test]
+fn durations_add_to_every_type_with_the_neo4j_rules() {
+    let graph = TraversalGraph::new();
+    // Temporal8 at microsecond precision: the TCK's durations without their nanoseconds.
+    let long = "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70})";
+    let mixed = "duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})";
+    let date = "date({year: 1984, month: 10, day: 11})";
+    let local = "localtime({hour: 12, minute: 31, second: 14})";
+    let ldt = "localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14})";
+    let zdt = "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, \
+               timezone: '+01:00'})";
+    for (expr, expected) in [
+        // T8 [1]: a date takes months, days and the whole days of the time part (U5).
+        (format!("{date} + {long}"), "1997-03-25"),
+        (format!("{date} - {long}"), "1972-04-27"),
+        (format!("{date} + {mixed}"), "1984-10-28"),
+        (format!("{date} - {mixed}"), "1984-09-25"),
+        // T8 [2]: a local time takes only the time part and wraps.
+        (format!("{local} + {long}"), "04:44:24"),
+        (format!("{local} - {long}"), "20:18:04"),
+        (format!("{local} + {mixed}"), "04:20:24"),
+        (format!("{local} - {mixed}"), "20:42:04"),
+        // T8 [4] / [5]: months, then days, then the time part.
+        (format!("{ldt} + {long}"), "1997-03-26T04:44:24"),
+        (format!("{ldt} - {long}"), "1972-04-26T20:18:04"),
+        (format!("{ldt} + {mixed}"), "1984-10-29T04:20:24"),
+        (format!("{ldt} - {mixed}"), "1984-09-24T20:42:04"),
+        (format!("{zdt} + {long}"), "1997-03-26T04:44:24+01:00"),
+        (format!("{zdt} - {mixed}"), "1984-09-24T20:42:04+01:00"),
+        // `dur + x` is `x + dur`.
+        (format!("{long} + {date}"), "1997-03-25"),
+        // Whole days of the time part, truncated toward zero (Java's long division).
+        (format!("{date} + duration('PT47H59M')"), "1984-10-12"),
+        (format!("{date} + duration('PT-47H59M')"), "1984-10-10"),
+        (format!("{date} - duration('PT23H')"), "1984-10-11"),
+        // The end of a month clamps the day, as java.time.
+        (
+            "date('2024-01-31') + duration('P1M')".to_string(),
+            "2024-02-29",
+        ),
+        ("localtime('23:00') + duration('PT2H')".to_string(), "01:00"),
+    ] {
+        assert_eq!(neo4j_text(&graph, &expr), expected, "{expr}");
+    }
+}
+
+#[test]
+fn durations_add_subtract_and_scale_part_by_part() {
+    let graph = TraversalGraph::new();
+    let long = "duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70})";
+    let mixed = "duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})";
+    for (expr, expected) in [
+        // Temporal8 [6] at microsecond precision.
+        (format!("{long} + {long}"), "P24Y10M28DT32H26M20S"),
+        (format!("{long} - {long}"), "PT0S"),
+        (format!("{long} + {mixed}"), "P12Y6MT32H2M20S"),
+        (format!("{long} - {mixed}"), "P12Y4M28DT24M"),
+        (format!("{mixed} - {long}"), "P-12Y-4M-28DT-24M"),
+        (format!("{mixed} + {mixed}"), "P2M-28DT31H38M20S"),
+        // Temporal8 [7] at microsecond precision.
+        (format!("{long} * 1"), "P12Y5M14DT16H13M10S"),
+        (format!("{long} / 1"), "P12Y5M14DT16H13M10S"),
+        (format!("{long} * 2"), "P24Y10M28DT32H26M20S"),
+        (format!("{long} / 2"), "P6Y2M22DT13H21M8S"),
+        (format!("{long} * 0.5"), "P6Y2M22DT13H21M8S"),
+        (format!("{long} / 0.5"), "P24Y10M28DT32H26M20S"),
+        (format!("2 * {long}"), "P24Y10M28DT32H26M20S"),
+        // The fraction cascade of a month (U11) and the sign.
+        ("duration('P1M') * 0.5".to_string(), "P15DT5H14M33S"),
+        ("duration('P1D') / 2".to_string(), "PT12H"),
+        ("-duration('P1M2DT3S')".to_string(), "P-1M-2DT-3S"),
+        ("+duration('P1M2DT3S')".to_string(), "P1M2DT3S"),
+        ("-(-duration('PT1S'))".to_string(), "PT1S"),
+    ] {
+        assert_eq!(neo4j_text(&graph, &expr), expected, "{expr}");
+    }
+    // NULL propagates through every form.
+    for expr in [
+        "date() + NULL",
+        "NULL - duration('P1D')",
+        "duration('P1D') * NULL",
+        "NULL / 2",
+        "-NULL",
+    ] {
+        assert_eq!(
+            single(&graph, &format!("RETURN {expr} AS x")),
+            ElementProperty::Null,
+            "{expr}"
+        );
+    }
+}
+
+#[test]
+fn temporal_arithmetic_errors_name_the_forms() {
+    let graph = TraversalGraph::new();
+    for (expr, status, needle) in [
+        (
+            "date('2020-01-02') - date('2020-01-01')",
+            "22G03",
+            "the time between two values is duration.between(a, b)",
+        ),
+        (
+            "localtime('12:00') + localtime('10:00')",
+            "22G03",
+            "+ adds a duration to a temporal value or to a duration, not a local time and a \
+             local time",
+        ),
+        (
+            "duration('P1D') - date('2020-01-01')",
+            "22G03",
+            "- subtracts a duration from a temporal value or a duration, not a date from a \
+             duration",
+        ),
+        ("date('2020-01-01') + 1", "22G03", "not a date and a number"),
+        (
+            "date('2020-01-01') * 2",
+            "22G03",
+            "takes a duration and a number",
+        ),
+        (
+            "2 / duration('P1D')",
+            "22G03",
+            "takes a duration (divided by a number)",
+        ),
+        (
+            "duration('P1D') * duration('P1D')",
+            "22G03",
+            "not a duration and a duration",
+        ),
+        (
+            "-date('2020-01-01')",
+            "22G03",
+            "a sign applies to a number or a duration",
+        ),
+        ("duration('P1D') / 0", "22012", "division by zero"),
+        ("duration('P1D') / 0.0", "22012", "division by zero"),
+        (
+            "date('9999-12-31') + duration('P1D')",
+            "22008",
+            "outside the supported range",
+        ),
+        (
+            "duration('PT1S') / 3",
+            "0A000",
+            "a part below the microsecond",
+        ),
+    ] {
+        let query = format!("RETURN {expr} AS x");
+        let (actual, _, message, compile_time) = failure(&graph, &query);
+        assert_eq!(actual, status, "{query}: {message}");
+        assert!(!compile_time, "{query}");
+        assert!(message.contains(needle), "{query}: {message}");
+    }
+    // The help names the forms and duration.between (rule 6).
+    let error = run(
+        &graph,
+        "RETURN date('2020-01-02') - date('2020-01-01') AS x",
+    )
+    .expect_err("a date minus a date");
+    let help = error.help().unwrap_or_default();
+    assert!(
+        help.contains(
+            "A duration is added to or subtracted from a date, a local time, a local datetime, \
+             a datetime or another duration (x + d, d + x, x - d), and multiplied or divided by \
+             a number (d * 2, d / 2); the time between two values is duration.between(a, b)"
+        ),
+        "{help}"
+    );
+    let error = run(&graph, "RETURN duration('P1D') / 0 AS x").expect_err("a zero divisor");
+    let help = error.help().unwrap_or_default();
+    assert!(
+        help.contains("A duration divided by zero fails whatever the number (d / 0 and d / 0.0)."),
+        "{help}"
+    );
+}
+
+#[test]
+fn temporal_comparison_follows_the_tck() {
+    let graph = TraversalGraph::new();
+    let boolean = ElementProperty::Boolean;
+    for (expr, expected) in [
+        // Temporal7: one type with itself; a datetime by its instant.
+        ("date('1980-12-24') < date('1984-10-11')", boolean(true)),
+        (
+            "localtime('10:35') >= localtime('12:31:14')",
+            boolean(false),
+        ),
+        (
+            "datetime('1980-12-11T12:31:14Z') < datetime('1984-10-11T12:31:14+05:00')",
+            boolean(true),
+        ),
+        (
+            "datetime('2020-01-01T10:00+01:00') = datetime('2020-01-01T09:00Z')",
+            boolean(true),
+        ),
+        // Durations: = after the seconds are summed, days and seconds apart.
+        (
+            "duration({days: 14, hours: 16, minutes: 12, seconds: 70}) = \
+             duration({days: 14, hours: 16, minutes: 13, seconds: 10})",
+            boolean(true),
+        ),
+        (
+            "duration({days: 14, hours: 16}) = duration({days: 13, hours: 40})",
+            boolean(false),
+        ),
+        // U8: different temporal types are never equal.
+        ("duration('P1D') = date('2020-01-01')", boolean(false)),
+        (
+            "date('2020-01-01') <> localdatetime('2020-01-01T00:00')",
+            boolean(true),
+        ),
+        // U7: durations are not ordered.
+        ("duration('P1D') < duration('P2D')", ElementProperty::Null),
+        ("duration('P1D') >= duration('P1D')", ElementProperty::Null),
+        (
+            "[duration('P1D')] < [duration('P2D')]",
+            ElementProperty::Null,
+        ),
+        // Across kinds the ordering is NULL as before.
+        (
+            "date('2020-01-01') < localdatetime('2020-01-01T00:00')",
+            ElementProperty::Null,
+        ),
+    ] {
+        assert_eq!(
+            single(&graph, &format!("RETURN {expr} AS x")),
+            expected,
+            "{expr}"
+        );
+    }
+    // ORDER BY keeps its total order of durations (U7).
+    let ordered = rows(
+        &graph,
+        "FOR d IN [duration('P2D'), duration('PT1H'), duration('P1D')] \
+         RETURN toString(d) AS x ORDER BY d",
+    );
+    let texts: Vec<_> = ordered
+        .iter()
+        .map(|row| column(row, "x"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        ["PT1H", "P1D", "P2D"].map(|t| ElementProperty::String(t.into()))
     );
 }

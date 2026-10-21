@@ -151,26 +151,6 @@ reason = "not yet: time()"
 class = "missing"
 reason = "not yet: a temporal value with a part below the microsecond (values hold microseconds)"
 
-["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::1"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::2"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[11] Sort by a date expression in ascending order::3"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[12] Sort by a date expression in descending order::1"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
-["clauses/with-orderBy/WithOrderBy2.feature::[12] Sort by a date expression in descending order::2"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
 ["clauses/with-orderBy/WithOrderBy2.feature::[13] Sort by a local time expression in ascending order::1"]
 class = "setup"
 reason = "having executed: Step #2 'gql:insert_node([\"B\"], \"{time: localtime({hour: 12, minute: 31, second: 14, nanosecond: …\" (76 chars))' execution failed: not yet: a …"
@@ -1287,10 +1267,6 @@ reason = "not yet: a temporal value with a part below the microsecond (values ho
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12, months: 5, days: 14, hours: 16, minut…\" (102 chars))' execution failed: not…"
 
-["expressions/temporal/Temporal8.feature::[1] Should add or subtract duration to or from date::2"]
-class = "missing"
-reason = "not yet: + on temporal values"
-
 ["expressions/temporal/Temporal8.feature::[1] Should add or subtract duration to or from date::3"]
 class = "setup"
 reason = "having executed: Step #1 'gql:insert_node([\"Duration\"], \"{dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.…\" (114 chars))' execution failed: not…"
@@ -1358,10 +1334,6 @@ reason = "having executed: Step #1 'gql:insert_node([\"Duration1\"], \"{date: du
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::4"]
 class = "setup"
 reason = "having executed: Step #2 'gql:insert_node([\"Duration2\"], \"{date: duration({years: 12, months: 5, days: 14, hours: 16, minu…\" (103 chars))' execution failed: no…"
-
-["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::5"]
-class = "missing"
-reason = "not yet: + on temporal values"
 
 ["expressions/temporal/Temporal8.feature::[6] Should add or subtract durations::6"]
 class = "setup"

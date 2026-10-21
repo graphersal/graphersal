@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **3157** / 3766 | **83.8 %** |
-| Unsupported (not yet or refused) | 609 / 3766 | 16.2 % |
+| **Passed** | **3164** / 3766 | **84.0 %** |
+| Unsupported (not yet or refused) | 602 / 3766 | 16.0 % |
 | **Wrong behaviour of supported constructs** | **0** / 3766 | **0.0 %** |
-| Passed without `expressions/temporal` | 2704 / 2833 | 95.4 % |
+| Passed without `expressions/temporal` | 2709 / 2833 | 95.6 % |
 
-Unsupported = missing 540, setup 69. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
+Unsupported = missing 533, setup 69. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -77,7 +77,7 @@ Per sub-directory of the kit:
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 100.0 % | 14 | 14 | · | · |
 | `clauses/with` | 96.6 % | 28 | 29 | 1 | · |
-| `clauses/with-orderBy` | 80.5 % | 235 | 292 | 57 | · |
+| `clauses/with-orderBy` | 82.2 % | 240 | 292 | 52 | · |
 | `clauses/with-skip-limit` | 77.8 % | 7 | 9 | 2 | · |
 | `clauses/with-where` | 100.0 % | 19 | 19 | · | · |
 | `expressions/aggregation` | 100.0 % | 35 | 35 | · | · |
@@ -96,11 +96,11 @@ Per sub-directory of the kit:
 | `expressions/precedence` | 100.0 % | 121 | 121 | · | · |
 | `expressions/quantifier` | 89.6 % | 541 | 604 | 63 | · |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
-| `expressions/temporal` | 48.6 % | 453 | 933 | 480 | · |
+| `expressions/temporal` | 48.8 % | 455 | 933 | 478 | · |
 | `expressions/typeConversion` | 100.0 % | 47 | 47 | · | · |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **83.8 %** | **3157** | **3766** | 609 | · |
+| **all** | **84.0 %** | **3164** | **3766** | 602 | · |
 <!-- opencypher:end directories -->
 
 ## Out of scope
