@@ -495,10 +495,6 @@ reason = "GQL syntax error at line 2, column 25: comparisons cannot be chained"
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["expressions/list/List4.feature::[2] Concatenating a list with a scalar of same type"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"foo\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list and a b…"
-
 ["expressions/list/List5.feature::[42] Failing when using IN on a non-list literal::1"]
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 1 row(s)"
@@ -606,18 +602,6 @@ reason = "not yet: the exponentiation operator `^`"
 ["expressions/precedence/Precedence2.feature::[4] Numeric unary negative takes precedence over exponentiation"]
 class = "missing"
 reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence3.feature::[1] List element access takes precedence over list appending"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"a\", \"b\", \"c\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list…"
-
-["expressions/precedence/Precedence3.feature::[4] List appending takes precedence over list element containment"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"a\", \"b\", \"c\")' execution failed: GQL data exception at line 1, column 8: + adds two numbers or joins two strings or two lists, not a list…"
-
-["expressions/precedence/Precedence3.feature::[5] List concatenation takes precedence over list element containment"]
-class = "unexpected_error"
-reason = "Step #1 'gql:project(\"a\", \"b\", \"c\", \"d\")' execution failed: GQL data exception at line 3, column 8: + adds two numbers or joins two strings or two lists, not a…"
 
 ["expressions/quantifier/Quantifier1.feature::[8] None quantifier on list containing nodes"]
 class = "unexpected_error"

@@ -49,7 +49,10 @@
 //!   `1.0 % 0.0` `NaN`.
 //!   `NULL` propagates. Any other operand kind is error 22G03.
 //! - **Concatenation:** `||` joins two strings or two lists. Cypher `+` is its alias on two
-//!   strings and two lists. **`+` of a string and a number is refused** (22G03): there is no
+//!   strings and two lists; `+` of a list and one value of another kind appends it (`[1] + 2`
+//!   is `[1, 2]`) or prepends it (`2 + [1]` is `[2, 1]`; stage 3f, the openCypher TCK), a
+//!   `NULL` operand still gives `NULL`; `||` of a list and a non-list stays error 22G03.
+//!   **`+` of a string and a number is refused** (22G03): there is no
 //!   implicit number-to-text conversion (Neo4j converts; Graphersal never turns values into text
 //!   behind the user's back).
 //! - **`CASE`:** simple `CASE` matches a `WHEN` value only when `=` is TRUE, so `NULL` never
@@ -1693,8 +1696,8 @@ fn eval_chain<'a, En: Env>(
     Ok(value)
 }
 
-/// Design F6: `||` (and Cypher `+`) of two strings or two lists asks the row for the result's
-/// size before building it ([`Env::reserve`]).
+/// Design F6: `||` (and Cypher `+`) of two strings or two lists, and `+` of a list and an item,
+/// asks the row for the result's size before building it ([`Env::reserve`]).
 fn reserve_concat<En: Env>(
     left: &Value<En::Element>,
     right: &Value<En::Element>,
@@ -1704,6 +1707,10 @@ fn reserve_concat<En: Env>(
     let bytes = match (left, right) {
         (Value::List(a), Value::List(b)) => {
             functions::list_bytes((a.len() as u64).saturating_add(b.len() as u64))
+        }
+        // `+` of a list and one item (stage 3f).
+        (Value::List(items), item) | (item, Value::List(items)) if !item.is_null() => {
+            functions::list_bytes((items.len() as u64).saturating_add(1))
         }
         _ => match (left.as_str(), right.as_str()) {
             (Some(a), Some(b)) => (a.len() as u64).saturating_add(b.len() as u64),
@@ -2140,6 +2147,19 @@ fn binary<E: Clone + PartialEq>(
             | (Value::List(_), Value::List(_))
             | (Value::Null, _)
             | (_, Value::Null) => concat(left, right, "+", span)?,
+            // Cypher `+` of a list and one other value appends or prepends it (stage 3f).
+            (Value::List(items), item) => {
+                let mut list = Vec::with_capacity(items.len() + 1);
+                list.extend(items.iter().cloned());
+                list.push(item.clone());
+                Value::List(list)
+            }
+            (item, Value::List(items)) => {
+                let mut list = Vec::with_capacity(items.len() + 1);
+                list.push(item.clone());
+                list.extend(items.iter().cloned());
+                Value::List(list)
+            }
             _ => return Err(add_error(left, right, span)),
         },
         BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => match (left, right) {
@@ -2177,7 +2197,8 @@ fn add_error<E>(left: &Value<E>, right: &Value<E>, span: Span) -> EvalError {
         return EvalError::invalid_type(message, span).with_topic(GqlHelpTopic::TextAndNumber);
     }
     let message = format!(
-        "+ adds two numbers or joins two strings or two lists, not {} and {}",
+        "+ adds two numbers, joins two strings or two lists, or adds an item to a list, not {} \
+         and {}",
         left.kind_name(),
         right.kind_name()
     );

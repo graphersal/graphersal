@@ -8728,8 +8728,9 @@ mod gql {
             );
             assert_examples_run(&help);
         }
-        // A list and a number: no text involved, the general advice only.
-        for expr in ["[1] + p.age", "[1] || p.name", "p.age || 1"] {
+        // A map and a number: no text involved, the general advice only (stage 3f: `[1] +
+        // p.age` appends).
+        for expr in ["{a: 1} + p.age", "[1] || p.name", "p.age || 1"] {
             let help = gql_help(&format!("MATCH (p:person) RETURN {expr} AS x"));
             assert!(
                 help.starts_with("A row of the data made the marked expression fail."),

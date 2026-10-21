@@ -92,7 +92,8 @@ Caused by: GQL data exception at line 1, column 25: division by zero
 Help: A row of the data made the marked expression fail. Keep such rows away from it with a WHERE condition or a CASE expression, ...
 ```
 
-Comparisons never fail: comparing values of different kinds, or with `NULL`, is `NULL`
+Comparisons never fail: `=` of values of different kinds is FALSE (`<>` TRUE), an ordering
+`<` of them is `NULL`, and any comparison with `NULL` is `NULL`
 ([Semantics](semantics.md#comparisons-across-types)).
 
 `+` of a string and a number names the explicit conversions in its help:
@@ -678,7 +679,7 @@ give it (or a `"default"` in the schema, to match on other keys only). One raise
 | `22G02` | data | a negative `OFFSET` / `LIMIT` (literal or parameter value) |
 | `22G03` | data | a value of the wrong type: `OFFSET` / `LIMIT` not an integer, `'a' + 1`, `type()` of a vertex, a non-boolean condition, `sum()` / `avg()` of a non-number; a map projection of a value that is no element or map, a list comprehension over a value that is no list; a function argument of the wrong kind (`toFloat(true)`, a float where an integer is required, `toString()` of a vertex, edge or path, `trim(s, x)` with a string `s`); an `INSERT` endpoint that is no node, a node, edge or path as an `INSERT` or `SET` property value; a `SET` / `REMOVE` target that holds no node or edge, a label item on an edge at run time, a right side of `SET n = ..` / `+=` that is no map, node or edge; a `DELETE` target that holds no node, edge or path; a node bound before a `MERGE` that is no node, a node, edge or path as a `MERGE` property value |
 | `G1001` | data | a `DELETE` / `NODETACH DELETE` of a node that still has an edge the same clause does not delete (use `DETACH DELETE`) |
-| `22012` | data | division or `%` by zero, also `mod(a, 0)` |
+| `22012` | data | integer division or `%` by zero (a float one gives `Infinity` or `NaN`), also `mod(a, 0)` |
 | `22003` | data | a numeric result out of range (integer overflow, also of `sum()`, `abs()`, `exp()`, `power()`); a conversion out of range (`toInteger(1.0e19)`, `CAST('1e400' AS FLOAT)`) |
 | `22018` | data | `CAST` of text that is no value of the target type (`CAST('abc' AS INTEGER)`) |
 | `22011` | data | a negative position or length in `substring()`, `left()`, `right()` |

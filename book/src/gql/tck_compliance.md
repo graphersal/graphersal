@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2481** / 3712 | **66.8 %** |
+| **Passed** | **2485** / 3712 | **66.9 %** |
 | Unsupported (not yet or refused) | 1161 / 3712 | 31.3 % |
-| **Wrong behaviour of supported constructs** | **70** / 3712 | **1.9 %** |
-| Passed without `expressions/temporal` | 2481 / 2708 | 91.6 % |
+| **Wrong behaviour of supported constructs** | **66** / 3712 | **1.8 %** |
+| Passed without `expressions/temporal` | 2485 / 2708 | 91.8 % |
 
-Unsupported = missing 1074, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 26, timeout 0, panic 0.
+Unsupported = missing 1074, setup 87. Wrong behaviour = wrong_result 0, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 22, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -86,21 +86,21 @@ Per sub-directory of the kit:
 | `expressions/conditional` | 100.0 % | 13 | 13 | · | · |
 | `expressions/existentialSubqueries` | 100.0 % | 10 | 10 | · | · |
 | `expressions/graph` | 98.0 % | 49 | 50 | · | 1 |
-| `expressions/list` | 91.9 % | 170 | 185 | · | 15 |
+| `expressions/list` | 92.4 % | 171 | 185 | · | 14 |
 | `expressions/literals` | 100.0 % | 131 | 131 | · | · |
 | `expressions/map` | 100.0 % | 38 | 38 | · | · |
 | `expressions/mathematical` | 100.0 % | 6 | 6 | · | · |
 | `expressions/null` | 100.0 % | 44 | 44 | · | · |
 | `expressions/path` | 71.4 % | 5 | 7 | · | 2 |
 | `expressions/pattern` | 90.0 % | 45 | 50 | 1 | 4 |
-| `expressions/precedence` | 92.6 % | 112 | 121 | 6 | 3 |
+| `expressions/precedence` | 95.0 % | 115 | 121 | 6 | · |
 | `expressions/quantifier` | 88.0 % | 521 | 592 | 63 | 8 |
 | `expressions/string` | 100.0 % | 32 | 32 | · | · |
 | `expressions/temporal` | 0.0 % | 0 | 1004 | 1004 | · |
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **66.8 %** | **2481** | **3712** | 1161 | 70 |
+| **all** | **66.9 %** | **2485** | **3712** | 1161 | 66 |
 <!-- opencypher:end directories -->
 
 ## Out of scope

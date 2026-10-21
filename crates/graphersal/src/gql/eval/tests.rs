@@ -350,7 +350,8 @@ fn concatenation_and_string_plus() {
     assert_eq!(status_of("'a' + 1"), "22G03");
     assert_eq!(status_of("1 + 'a'"), "22G03");
     assert_eq!(status_of("'a' || 1"), "22G03");
-    assert_eq!(status_of("[1] + 2"), "22G03");
+    // Stage 3f (U6): `[1] + 2` appends; `||` of a list and a number still fails.
+    assert_eq!(status_of("[1] || 2"), "22G03");
     match eval("'a' + 1") {
         Err(e) => assert!(
             e.message.contains("never turned into text"),
@@ -890,4 +891,36 @@ fn a_long_subscript_chain_evaluates_as_a_loop() {
         "[0]".repeat(depth)
     );
     assert_eq!(value(&expr), int(1));
+}
+
+#[test]
+fn plus_appends_or_prepends_one_item_to_a_list() {
+    // Stage 3f (U6), the openCypher TCK `List4` / `Precedence3`.
+    assert_eq!(value("[1] + 2"), Value::List(vec![int(1), int(2)]));
+    assert_eq!(value("2 + [1]"), Value::List(vec![int(2), int(1)]));
+    assert_eq!(
+        value("[false, true] + false"),
+        Value::List(vec![
+            Value::Scalar(ElementProperty::Boolean(false)),
+            Value::Scalar(ElementProperty::Boolean(true)),
+            Value::Scalar(ElementProperty::Boolean(false)),
+        ])
+    );
+    assert_eq!(value("[1] + 'a'"), Value::List(vec![int(1), string("a")]));
+    assert_eq!(value("[] + n"), Value::List(vec![Value::Element(El::V(1))]));
+    assert_eq!(
+        value("[1] + {a: 2}"),
+        Value::List(vec![int(1), value("{a: 2}")])
+    );
+    // A list item stays one item: `+` of two lists concatenates.
+    assert_eq!(
+        value("[[1]] + [2]"),
+        Value::List(vec![value("[1]"), int(2)])
+    );
+    // NULL still propagates; `||` and `-` keep refusing a list and a scalar.
+    assert_eq!(value("[1] + null"), Value::Null);
+    assert_eq!(value("null + [1]"), Value::Null);
+    assert_eq!(status_of("1 || [1]"), "22G03");
+    assert_eq!(status_of("[1] - 1"), "22G03");
+    assert_eq!(status_of("'a' + 1"), "22G03");
 }

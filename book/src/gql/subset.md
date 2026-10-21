@@ -807,7 +807,7 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | logic | `AND`, `OR`, `XOR`, `NOT` |
 | predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
 | arithmetic | `+`, `-`, `*`, `/`, `%`, unary `-` and `+` |
-| concatenation | `\|\|` on two strings or two lists (Cypher `+`) |
+| concatenation | `\|\|` on two strings or two lists (Cypher `+`); Cypher `+` of a list and one other value appends or prepends it (`[1] + 2` is `[1, 2]`, `0 + [1]` is `[0, 1]`) |
 | conditional | simple `CASE x WHEN v THEN r ... ELSE d END` and searched `CASE WHEN cond THEN r ... END` |
 | conversion | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` ([Conversions](#conversions)) |
 | function calls | `name(args)` ([Functions](#functions)) |
@@ -842,8 +842,14 @@ map projection such as `record {.name}`. A variable named `record` whose project
 starts with a `key: expr` item is back-quoted: `` `record` {k: 1} ``.
 
 Integer arithmetic stays integer (`/` truncates toward zero, `%` takes the sign of the
-dividend); a float operand makes the result a float. An overflow or a division by zero is an
-error, never a wrapped or infinite value ([Errors](errors.md#errors-while-the-query-runs)).
+dividend); a float operand makes the result a float. An overflow or an integer division by zero
+is an error, never a wrapped value ([Errors](errors.md#errors-while-the-query-runs)); a float
+divided by zero follows IEEE 754 (`1.0 / 0.0` is `Infinity`, `0.0 / 0.0` is `NaN`;
+[Semantics](semantics.md#comparisons-across-types)).
+
+```rhai,graph=empty
+g.gql("RETURN [1, 2] + 3 AS a, 0 + [1] AS b, [1] + [2] AS c").to_list()   // #{"a": [1, 2, 3], "b": [0, 1], "c": [1, 2]}
+```
 
 ### Indexing and slicing
 
