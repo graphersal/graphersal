@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2401** / 3712 | **64.7 %** |
+| **Passed** | **2409** / 3712 | **64.9 %** |
 | Unsupported (not yet or refused) | 1162 / 3712 | 31.3 % |
-| **Wrong behaviour of supported constructs** | **149** / 3712 | **4.0 %** |
-| Passed without `expressions/temporal` | 2401 / 2708 | 88.7 % |
+| **Wrong behaviour of supported constructs** | **141** / 3712 | **3.8 %** |
+| Passed without `expressions/temporal` | 2409 / 2708 | 89.0 % |
 
-Unsupported = missing 1074, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 75, timeout 0, panic 0.
+Unsupported = missing 1074, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 0, wrong_error 39, unexpected_error 67, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -71,13 +71,13 @@ Per sub-directory of the kit:
 | `clauses/merge` | 100.0 % | 75 | 75 | · | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
 | `clauses/return` | 93.7 % | 59 | 63 | 2 | 2 |
-| `clauses/return-orderby` | 85.7 % | 30 | 35 | · | 5 |
+| `clauses/return-orderby` | 94.3 % | 33 | 35 | · | 2 |
 | `clauses/return-skip-limit` | 74.2 % | 23 | 31 | 1 | 7 |
 | `clauses/set` | 100.0 % | 52 | 52 | · | · |
 | `clauses/union` | 100.0 % | 12 | 12 | · | · |
 | `clauses/unwind` | 92.9 % | 13 | 14 | · | 1 |
 | `clauses/with` | 89.7 % | 26 | 29 | 1 | 2 |
-| `clauses/with-orderBy` | 75.0 % | 219 | 292 | 65 | 8 |
+| `clauses/with-orderBy` | 76.7 % | 224 | 292 | 65 | 3 |
 | `clauses/with-skip-limit` | 66.7 % | 6 | 9 | 2 | 1 |
 | `clauses/with-where` | 73.7 % | 14 | 19 | · | 5 |
 | `expressions/aggregation` | 62.9 % | 22 | 35 | 13 | · |
@@ -100,7 +100,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 5.3 % | 1 | 19 | · | 18 |
-| **all** | **64.7 %** | **2401** | **3712** | 1162 | 149 |
+| **all** | **64.9 %** | **2409** | **3712** | 1162 | 141 |
 <!-- opencypher:end directories -->
 
 ## Out of scope

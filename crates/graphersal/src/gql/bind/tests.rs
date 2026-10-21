@@ -4626,3 +4626,40 @@ fn a_quantified_edge_over_a_bound_list_of_edges_is_not_yet() {
         );
     }
 }
+
+#[test]
+fn order_by_after_an_aggregation_reads_items_written_inside_a_key() {
+    // TCK ReturnOrderBy6 [1]-[3], WithOrderBy4 [16]-[18], WithOrderBy2 [23].
+    let q = ok("MATCH (a)-->(b) RETURN a.name AS n, count(b) AS c \
+                ORDER BY a.name + toString(count(b)), $p + count(b), n");
+    let keys = &q.order_by;
+    assert_eq!(keys[0].column, None);
+    assert_eq!(keys[0].aliases, vec![0, 1]);
+    assert_eq!(names(&q, &keys[0].bindings), vec!["a", "b"]);
+    assert_eq!(keys[1].aliases, vec![1]);
+    assert_eq!(keys[2].column, Some(0));
+    // An unaliased item is referenced by its text; DISTINCT columns too.
+    let q = ok("MATCH (a)-->(b) RETURN a.name, count(*) ORDER BY size(a.name) - count(*)");
+    assert_eq!(q.order_by[0].aliases, vec![0, 1]);
+    let q = ok("MATCH (a) RETURN DISTINCT a.age AS g ORDER BY -a.age");
+    assert_eq!(q.order_by[0].aliases, vec![0]);
+    // A key that binds as written is left alone (a returned variable, an alias).
+    let q = ok("MATCH (a)-->(b) RETURN a, a.age AS g, count(*) AS c ORDER BY a.age * 2");
+    assert!(q.order_by[0].aliases.is_empty());
+    assert_eq!(names(&q, &q.order_by[0].bindings), vec!["a"]);
+    // A name no column holds, or an aggregate RETURN does not compute, stays refused.
+    let f = fail("MATCH (a)-->(b) RETURN count(b) AS c ORDER BY a.age + count(b)");
+    assert!(
+        f.message
+            .contains("ORDER BY can only use the returned columns"),
+        "{}",
+        f.message
+    );
+    assert_eq!(f.text, "a.age + count(b)");
+    let f = fail("MATCH (a)-->(b) RETURN a.name AS n, count(b) AS c ORDER BY max(b.age)");
+    assert!(
+        f.message.contains("ORDER BY can only use an aggregate"),
+        "{}",
+        f.message
+    );
+}

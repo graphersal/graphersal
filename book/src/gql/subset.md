@@ -620,8 +620,16 @@ g.gql("MATCH (p:person) WHERE count(p) > 1 RETURN p")   // error: an aggregate c
 g.gql("MATCH (p:person) RETURN sum(p.name) AS s")   // error: sum() takes numbers, not a string (22G03)
 ```
 
-After an aggregation `ORDER BY` reads the returned columns only. The groups come out in an
+After an aggregation `ORDER BY` reads the returned columns only: by their names, or written
+again inside an expression, an aggregate call or a property access as an item has it
+(`ORDER BY count(s) + 1`, `ORDER BY p.name + 'x'` when `p.name` is a key). An expression written
+like another item next to an aggregate stays refused, as in Neo4j. The groups come out in an
 unspecified order: write `ORDER BY`.
+
+```rhai,graph=modern
+g.gql("MATCH (p:person)-[:created]->(s) RETURN p.name AS name, count(s) AS n ORDER BY 10 - count(s), p.name").to_list()   // #{"n": 2, "name": "josh"}, #{"n": 1, "name": "marko"}, #{"n": 1, "name": "peter"}
+g.gql("MATCH (p:person)-[:created]->(s) RETURN count(s) AS n ORDER BY p.age + count(s)")   // error: after an aggregation, ORDER BY can only use the returned columns
+```
 
 ## ORDER BY, OFFSET, LIMIT
 

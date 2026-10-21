@@ -254,3 +254,102 @@ fn a_colon_after_the_bar_of_an_edge_label_disjunction_is_allowed() {
         assert_eq!(steps(&graph, cypher), steps(&graph, gql), "{cypher}");
     }
 }
+
+// ----- ORDER BY over expressions of returned aggregates and keys (B7) -----
+
+#[test]
+fn order_by_reads_aggregates_and_keys_written_inside_an_expression() {
+    let graph = modern();
+    // TCK ReturnOrderBy6 [1] / WithOrderBy4 [16]: a constant around the returned aggregate.
+    assert_eq!(
+        ordered(
+            &graph,
+            "MATCH (p:person) RETURN avg(p.age) AS a ORDER BY 1 + avg(p.age) - 1000",
+            &["a"]
+        ),
+        ["30.75"]
+    );
+    // ReturnOrderBy6 [2] / [3]: an alias or a key expression together with the aggregate;
+    // `p.name + toString(count(x))` is the key `n` and the aggregate `c` (peter1, marko3,
+    // josh2 descending).
+    for query in [
+        "MATCH (p:person)-->(x) RETURN p.name AS n, count(x) AS c \
+         ORDER BY p.name + toString(count(x)) DESC",
+        "MATCH (p:person)-->(x) RETURN p.name AS n, count(x) AS c ORDER BY n + toString(c) DESC",
+        "MATCH (p:person)-->(x) WITH p.name AS n, count(x) AS c \
+         ORDER BY n + toString(count(x)) DESC RETURN n, c",
+    ] {
+        assert_eq!(
+            ordered(&graph, query, &["n", "c"]),
+            ["'peter'|1", "'marko'|3", "'josh'|2"],
+            "{query}"
+        );
+    }
+    // WithOrderBy2 [23]: the grouping key `p.name` inside the sort key, with LIMIT.
+    assert_eq!(
+        ordered(
+            &graph,
+            "MATCH (p:person)-->(x) WITH p.name AS n, count(*) AS c \
+             ORDER BY p.name + 'C' DESC LIMIT 1 RETURN n, c",
+            &["n", "c"]
+        ),
+        ["'peter'|1"]
+    );
+    // Unaliased RETURN items, and DISTINCT columns.
+    assert_eq!(
+        ordered(
+            &graph,
+            "MATCH (p:person)-->(x) RETURN p.name, count(*) ORDER BY size(p.name) * 10 - count(*)",
+            &["p.name", "count(*)"]
+        ),
+        ["'josh'|2", "'marko'|3", "'peter'|1"]
+    );
+    assert_eq!(
+        ordered(
+            &graph,
+            "MATCH (p:person) RETURN DISTINCT p.age AS a ORDER BY -p.age",
+            &["a"]
+        ),
+        ["35", "32", "29", "27"]
+    );
+    // What no returned column holds stays refused.
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (p:person)-->(x) RETURN count(*) AS c ORDER BY p.age + count(*)"
+        ),
+        "after an aggregation, ORDER BY can only use the returned columns, and `p` is not one \
+         of them [42002]"
+    );
+    assert_eq!(
+        failure(
+            &graph,
+            "MATCH (p:person) RETURN count(*) AS c ORDER BY max(p.age) + 1"
+        ),
+        "ORDER BY can only use an aggregate that RETURN computes [42002]"
+    );
+}
+
+#[test]
+fn an_order_by_key_written_like_an_item_reads_its_column() {
+    let graph = modern();
+    // The same rows and the same steps as the alias spelling (the rendering keeps the text).
+    let written = "MATCH (p:person)-->(x) RETURN p.name AS n, count(x) AS c \
+                   ORDER BY 1 - count(x), p.name";
+    let aliased = "MATCH (p:person)-->(x) RETURN p.name AS n, count(x) AS c ORDER BY 1 - c, n";
+    assert_eq!(
+        ordered(&graph, written, &["n", "c"]),
+        ["'marko'|3", "'josh'|2", "'peter'|1"]
+    );
+    assert_eq!(
+        ordered(&graph, written, &["n", "c"]),
+        ordered(&graph, aliased, &["n", "c"])
+    );
+    let (w, a) = (steps(&graph, written), steps(&graph, aliased));
+    assert_eq!(w.len(), a.len());
+    assert_eq!(w[..w.len() - 1], a[..a.len() - 1]);
+    assert_eq!(
+        w.last().map(String::as_str),
+        Some("gql:order(\"1 - count(x)\", \"p.name\")")
+    );
+}

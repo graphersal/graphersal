@@ -7453,9 +7453,11 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::Grouping => {
             "A RETURN or WITH with an aggregate groups the rows by its other items (the \
              grouping keys): read a variable outside an aggregate only in such a key, and \
-             after it (as after DISTINCT) only its columns remain, so ORDER BY names a column, \
-             as in g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) AS n ORDER \
-             BY n\"). An aggregate takes no aggregate as its argument; aggregate in two steps \
+             after it (as after DISTINCT) only its columns remain, so ORDER BY names a column \
+             or writes an item again inside an expression, as in g.gql(\"MATCH \
+             (p:person)-[:created]->(s) RETURN p.name, count(s) AS n ORDER BY n\") or \
+             g.gql(\"MATCH (p:person)-[:created]->(s) RETURN p.name, count(s) AS n ORDER BY \
+             count(s) * 10 + size(p.name)\"). An aggregate takes no aggregate as its argument; aggregate in two steps \
              with WITH, as in g.gql(\"MATCH (p:person)-[:created]->(s) WITH p, count(s) AS n \
              RETURN max(n)\")."
         }

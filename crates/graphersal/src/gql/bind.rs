@@ -1681,6 +1681,99 @@ fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     }
 }
 
+/// Replaces every part of `expr` that `column_of` maps to a column by a variable named like
+/// that column (an `ORDER BY` alias reference, [`Binder::column_refs`]), pushing its index onto
+/// `used`. Recursion bounded by the expression's height (`MAX_HEIGHT`); a subquery body is a
+/// scope of its own and stays.
+fn replace_columns(
+    expr: &mut Expr,
+    column_of: &dyn Fn(&Expr) -> Option<usize>,
+    columns: &[Column],
+    used: &mut Vec<usize>,
+) {
+    if let Some(i) = column_of(expr)
+        && let Some(column) = columns.get(i)
+    {
+        expr.kind = ExprKind::Variable(Identifier {
+            name: column.name.clone(),
+            span: expr.span,
+        });
+        used.push(i);
+        return;
+    }
+    let mut each = |e: &mut Expr| replace_columns(e, column_of, columns, used);
+    match &mut expr.kind {
+        ExprKind::Literal(_) | ExprKind::Parameter(_) | ExprKind::Variable(_) => {}
+        ExprKind::List(items) => items.iter_mut().for_each(each),
+        ExprKind::Map(map) => map.entries.iter_mut().for_each(|e| each(&mut e.value)),
+        ExprKind::Property { target, .. } => each(target),
+        ExprKind::Index(index) => {
+            each(&mut index.target);
+            for bound in index.bounds_mut() {
+                each(bound);
+            }
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::IsNull { operand, .. }
+        | ExprKind::IsLabeled { operand, .. } => each(operand),
+        ExprKind::Binary { left, right, .. }
+        | ExprKind::IsEndpoint {
+            operand: left,
+            edge: right,
+            ..
+        } => {
+            each(left);
+            each(right);
+        }
+        ExprKind::Case(case) => {
+            if let Some(operand) = &mut case.operand {
+                each(operand);
+            }
+            for arm in &mut case.whens {
+                each(&mut arm.when);
+                each(&mut arm.then);
+            }
+            if let Some(else_result) = &mut case.else_result {
+                each(else_result);
+            }
+        }
+        ExprKind::FunctionCall { args, .. } => match args {
+            CallArgs::Star(_) => {}
+            CallArgs::Exprs(args) => args.iter_mut().for_each(each),
+            CallArgs::Cast { operand, .. } => each(operand),
+            CallArgs::Trim {
+                character, source, ..
+            } => {
+                if let Some(character) = character {
+                    each(character);
+                }
+                each(source);
+            }
+        },
+        ExprKind::MapProjection(projection) => {
+            each(&mut projection.target);
+            for item in &mut projection.items {
+                if let ProjectionItem::Entry(entry) = item {
+                    each(&mut entry.value);
+                }
+            }
+        }
+        ExprKind::ListComprehension(comprehension) => {
+            if let Some(init) = comprehension.init_mut() {
+                each(init);
+            }
+            each(&mut comprehension.list);
+            if let Some(filter) = &mut comprehension.filter {
+                each(filter);
+            }
+            if let Some(map) = &mut comprehension.map {
+                each(map);
+            }
+        }
+        ExprKind::Subquery(_) | ExprKind::PatternComprehension(_) => {}
+    }
+}
+
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
 fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
     candidates
@@ -6568,14 +6661,35 @@ impl<'q> Binder<'q> {
         };
         let mut keys = Vec::with_capacity(order_by.items.len());
         for item in &order_by.items {
-            let resolved = self.expression(ctx, &item.expr)?;
-            let mut refs = resolved.refs;
             let text = self.query.text(item.expr.span);
-            let column = match (&item.expr.kind, refs.aliases.as_slice()) {
-                (ExprKind::Variable(_), [alias]) => Some(*alias),
-                _ => columns
-                    .iter()
-                    .position(|c| self.query.text(c.written) == text && !text.is_empty()),
+            let whole = columns
+                .iter()
+                .position(|c| self.query.text(c.written) == text && !text.is_empty());
+            // After an aggregation or DISTINCT, a part of the key written like a returned
+            // aggregate or key reads that column (TCK ReturnOrderBy6, WithOrderBy4): only
+            // where the key would be refused otherwise, so other plans stay as they are.
+            let rewritten = match whole {
+                None if (distinct || aggregated)
+                    && self.needs_column_refs(&item.expr, columns, &aliases) =>
+                {
+                    self.column_refs(&item.expr, columns, &aliases)
+                }
+                _ => None,
+            };
+            let (expr, resolved) = match &rewritten {
+                Some((expr, extended)) => {
+                    let ctx = Ctx {
+                        aliases: extended,
+                        ..ctx
+                    };
+                    (expr, self.expression(ctx, expr)?)
+                }
+                None => (&item.expr, self.expression(ctx, &item.expr)?),
+            };
+            let mut refs = resolved.refs;
+            let column = match (&expr.kind, refs.aliases.as_slice()) {
+                (ExprKind::Variable(_), [alias]) if rewritten.is_none() => Some(*alias),
+                _ => whole,
             };
             if column.is_none()
                 && let Some(span) = refs.aggregate
@@ -6646,6 +6760,95 @@ impl<'q> Binder<'q> {
             });
         }
         Ok(keys)
+    }
+
+    /// Whether the `ORDER BY` key `expr` after an aggregation or `DISTINCT` is refused as
+    /// written: it calls an aggregate, or reads a name in scope that no returned column holds.
+    fn needs_column_refs(
+        &self,
+        expr: &Expr,
+        columns: &[Column],
+        aliases: &[(String, usize)],
+    ) -> bool {
+        let returned = |id: &BindingId| columns.iter().any(|c| c.variable == Some(*id));
+        let unreturned = |name: &str| {
+            if aliases.iter().any(|(alias, _)| alias == name) {
+                return false;
+            }
+            match self.scope.get(name) {
+                Some(Symbol::Binding(id)) => !returned(id),
+                Some(Symbol::Value(substitution)) => !substitution.bindings.iter().all(returned),
+                None => false,
+            }
+        };
+        let mut pending = vec![expr];
+        while let Some(e) = pending.pop() {
+            match &e.kind {
+                ExprKind::FunctionCall { name, .. } if is_aggregate(name) => return true,
+                ExprKind::Variable(var) if unreturned(&var.name) => return true,
+                ExprKind::MapProjection(projection) => {
+                    let read = projection.items.iter().any(|item| {
+                        matches!(item, ProjectionItem::Variable(var) if unreturned(&var.name))
+                    });
+                    if read {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            for_each_child(e, &mut |child| pending.push(child));
+        }
+        false
+    }
+
+    /// `expr` with every part written like a returned aggregate call or a returned property
+    /// access (`n.k`) replaced by a reference to that column, with `aliases` extended by the
+    /// columns referenced; `None` when no part is. A part written like another returned
+    /// expression (`a.x + b.y`) stays: Neo4j refuses it next to an aggregate as ambiguous
+    /// (TCK ReturnOrderBy6 [5]).
+    fn column_refs(
+        &self,
+        expr: &Expr,
+        columns: &[Column],
+        aliases: &[(String, usize)],
+    ) -> Option<(Expr, Vec<(String, usize)>)> {
+        let referable = |c: &Column| match &c.expr.kind {
+            ExprKind::FunctionCall { name, .. } => c.aggregate && is_aggregate(name),
+            ExprKind::Property { target, .. } => {
+                !c.aggregate && matches!(target.kind, ExprKind::Variable(_))
+            }
+            _ => false,
+        };
+        let texts: Vec<(&str, usize)> = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.variable.is_none() && referable(c))
+            .map(|(i, c)| (self.query.text(c.written), i))
+            .filter(|(text, _)| !text.is_empty())
+            .collect();
+        let mut used = Vec::new();
+        let mut rewritten = expr.clone();
+        replace_columns(
+            &mut rewritten,
+            &|e: &Expr| {
+                let text = self.query.text(e.span);
+                texts.iter().find(|(t, _)| *t == text).map(|(_, i)| *i)
+            },
+            columns,
+            &mut used,
+        );
+        if used.is_empty() {
+            return None;
+        }
+        let mut extended = aliases.to_vec();
+        for i in used {
+            if let Some(c) = columns.get(i)
+                && !extended.iter().any(|(_, j)| *j == i)
+            {
+                extended.push((c.name.clone(), i));
+            }
+        }
+        Some((rewritten, extended))
     }
 
     fn count(&mut self, clause: Option<&CountClause>, keyword: &str) -> BResult<Option<Count>> {
