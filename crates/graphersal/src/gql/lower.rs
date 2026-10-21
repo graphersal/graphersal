@@ -1679,8 +1679,45 @@ fn prepare<S: GraphStorage>(
 ) -> Result<Lowered<S>, TraverserError> {
     let parsed = parse(query)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
+    if let Some(error) = merge_not_yet(query, &bound) {
+        return Err(error);
+    }
     let plan = plan(&bound, facts, None);
     Lowering::new(query, &bound, &plan, params).run()
+}
+
+/// The error of the first bound `MERGE` of `query` (stage 3e: bound since 3e.T2, planned and
+/// lowered from 3e.T3 on), at its keyword; `None` without one. Checked before the planner.
+fn merge_not_yet(query: &str, bound: &BoundQuery) -> Option<TraverserError> {
+    bound.segments.iter().find_map(|segment| match segment {
+        Segment::Write(write) => match &**write {
+            BoundWrite::Merge(merge) => Some(merge_not_yet_error(query, merge.keyword)),
+            BoundWrite::Insert(_)
+            | BoundWrite::Set(_)
+            | BoundWrite::Remove(_)
+            | BoundWrite::Delete(_) => None,
+        },
+        Segment::Match(_)
+        | Segment::Optional(_)
+        | Segment::With(_)
+        | Segment::For(_)
+        | Segment::Call(_)
+        | Segment::Rows(_) => None,
+    })
+}
+
+/// The "not yet" error of a bound `MERGE` at `keyword`: the Gremlin steps that do it.
+fn merge_not_yet_error(query: &str, keyword: Span) -> TraverserError {
+    GqlErrorBuilder::new(
+        GqlErrorKind::NotYet,
+        keyword.start..keyword.end,
+        "MERGE is not yet supported in this version",
+    )
+    .alternative(
+        "find or create the element with the Gremlin steps merge_v() and merge_e(), for \
+         example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})",
+    )
+    .into_error(query)
 }
 
 /// The data writes the plan of `query` asks the authorization check for (each once, in plan
@@ -2283,6 +2320,8 @@ impl<'q> Lowering<'q> {
                     site,
                 });
             }
+            // `MERGE` (stage 3e): refused before planning (`merge_not_yet`) until 3e.T3.
+            BoundWrite::Merge(merge) => return Err(merge_not_yet_error(self.query, merge.keyword)),
             // `DELETE` (stage 3d): one step on all rows at once (it collects every target, checks
             // `NODETACH`, then removes); it emits the rows unchanged, the site stays.
             BoundWrite::Delete(delete) => {

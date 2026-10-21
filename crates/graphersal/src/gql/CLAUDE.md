@@ -86,7 +86,12 @@ Files appear as their stage lands; this table is the target layout.
   `MERGE` parsed since 3e.T1 (`Stage::Merge(Box<MergeClause>)`: one path pattern in the merge
   form, `check_insert_node` / `check_insert_edge` with `word` `MERGE`: path variable and
   undirected edges allowed; `MergeAction` per `ON CREATE SET` / `ON MATCH SET`, items parsed by
-  `set_item`; `GqlHelpTopic::Merge`).
+  `set_item`; `GqlHelpTopic::Merge`), bound since 3e.T2 (`BoundWrite::Merge(Box<BoundMerge>)`:
+  create template `create: BoundInsert` bound first, then the match child as a synthesized
+  `CALL (*)` body `MATCH <pattern> RETURN <outputs>` (`merge_body`, anonymous elements `#m<k>`),
+  outputs = record column bindings (`ColumnRef` on the MERGE segment), `on_create` / `on_match`
+  via `set_items`); `lower::prepare` refuses a bound MERGE before planning (`merge_not_yet`)
+  until 3e.T3.
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the

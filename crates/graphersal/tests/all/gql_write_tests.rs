@@ -1496,3 +1496,37 @@ fn a_failing_delete_row_changes_nothing() {
         let _ = delete_error(&mut graph, query);
     }
 }
+
+// ----- stage 3e.T2: MERGE parses and binds, refused before the run until 3e.T3 -----
+
+#[test]
+fn bound_merge_is_refused_before_the_run() {
+    for query in [
+        "MERGE (p:person {name: 'marko'})",
+        "MERGE (p:person {name: 'ann'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = 2 RETURN p",
+        "MATCH (a:person {name: 'marko'}), (b:software) MERGE (a)-[r:created]-(b) RETURN r",
+        "MATCH (p:person) CALL (p) { MERGE (p)-[:likes]->(:fruit) } RETURN count(*)",
+        "MERGE path = (:x)-[:t]->(:y) RETURN path",
+        "MATCH (p) WITH p, p.age AS old MERGE (p)-[:had]->(:age {v: old})",
+    ] {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let before = dump(&graph);
+        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
+        match error.root_cause() {
+            TraverserError::Gql {
+                kind,
+                message,
+                gqlstatus,
+                ..
+            } => {
+                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
+                assert_eq!(gqlstatus, "0A000", "{query}");
+                assert_eq!(message, "MERGE is not yet supported in this version");
+                let help = error.help().unwrap_or_default();
+                assert!(help.contains("merge_v("), "{query}: {help}");
+            }
+            other => panic!("{query}: {other:?}"),
+        }
+        assert_eq!(dump(&graph), before, "{query} changed the graph");
+    }
+}

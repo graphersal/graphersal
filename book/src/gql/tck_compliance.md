@@ -45,12 +45,12 @@ edit it by hand.
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **2238** / 3712 | **60.3 %** |
-| Unsupported (not yet or refused) | 1320 / 3712 | 35.6 % |
+| **Passed** | **2242** / 3712 | **60.4 %** |
+| Unsupported (not yet or refused) | 1316 / 3712 | 35.5 % |
 | **Wrong behaviour of supported constructs** | **154** / 3712 | **4.1 %** |
-| Passed without `expressions/temporal` | 2238 / 2708 | 82.6 % |
+| Passed without `expressions/temporal` | 2242 / 2708 | 82.8 % |
 
-Unsupported = missing 1232, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 3, wrong_error 39, unexpected_error 77, timeout 0, panic 0.
+Unsupported = missing 1228, setup 88. Wrong behaviour = wrong_result 30, wrong_columns 5, wrong_side_effects 3, wrong_error 39, unexpected_error 77, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
@@ -69,7 +69,7 @@ Per sub-directory of the kit:
 | `clauses/delete` | 87.8 % | 36 | 41 | 5 | · |
 | `clauses/match` | 97.4 % | 371 | 381 | 2 | 8 |
 | `clauses/match-where` | 97.1 % | 33 | 34 | · | 1 |
-| `clauses/merge` | 9.3 % | 7 | 75 | 68 | · |
+| `clauses/merge` | 14.7 % | 11 | 75 | 64 | · |
 | `clauses/remove` | 100.0 % | 33 | 33 | · | · |
 | `clauses/return` | 88.9 % | 56 | 63 | 2 | 5 |
 | `clauses/return-orderby` | 82.9 % | 29 | 35 | 1 | 5 |
@@ -101,7 +101,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 95.7 % | 45 | 47 | · | 2 |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 5.3 % | 1 | 19 | · | 18 |
-| **all** | **60.3 %** | **2238** | **3712** | 1320 | 154 |
+| **all** | **60.4 %** | **2242** | **3712** | 1316 | 154 |
 <!-- opencypher:end directories -->
 
 ## Out of scope

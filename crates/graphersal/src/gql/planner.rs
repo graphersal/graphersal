@@ -1688,6 +1688,12 @@ impl<'q> Planner<'q> {
                 }
                 self.read_all(reads, at);
             }
+            // `MERGE` (stage 3e): planned from 3e.T3 on; `lower::prepare` refuses a bound
+            // MERGE before planning, so this arm only keeps the pass total.
+            BoundWrite::Merge(merge) => {
+                reads.extend_from_slice(&merge.reads);
+                self.read_all(reads, at);
+            }
         }
     }
 
@@ -2286,6 +2292,8 @@ fn write_created(write: &BoundWrite) -> Vec<BindingId> {
             .collect(),
         // `SET`, `REMOVE` and `DELETE` declare nothing.
         BoundWrite::Set(_) | BoundWrite::Remove(_) | BoundWrite::Delete(_) => Vec::new(),
+        // `MERGE` (stage 3e): its record columns.
+        BoundWrite::Merge(merge) => merge.outputs.clone(),
     }
 }
 

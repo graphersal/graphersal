@@ -8016,6 +8016,14 @@ impl GqlErrorBuilder {
         self
     }
 
+    /// `to` in place of the topic `from` (or of none): an error a shared routine built for one
+    /// clause, reported for another (stage 3e: the INSERT pattern checks inside `MERGE`).
+    pub(crate) fn retopic(&mut self, from: GqlHelpTopic, to: GqlHelpTopic) {
+        if self.topic == from || self.topic == GqlHelpTopic::Kind {
+            self.topic = to;
+        }
+    }
+
     /// [`topic`](Self::topic) unless an earlier stage chose one already.
     pub(crate) fn or_topic(&mut self, topic: GqlHelpTopic) {
         if self.topic == GqlHelpTopic::Kind {

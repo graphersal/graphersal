@@ -292,6 +292,17 @@
 //!   boolean, a map, an arithmetic, comparison or boolean operator, a `FOR` ordinal) is refused
 //!   (42002, design E2); a value whose kind only the run knows is checked there (22G03). What
 //!   the targets read is [`BoundDelete::reads`], all marked read.
+//! - **`MERGE` (stage 3e, design W30-W37)** is a cut ([`BoundMerge`] in a [`Segment::Write`])
+//!   after the W10 materialization. The pattern is bound twice: first as the create template
+//!   in INSERT terms ([`BoundMerge::create`]: the INSERT node rules with the MERGE messages, W36;
+//!   a bound edge variable 42002; a pattern that is a lone bound node 42002, P0 E2; an
+//!   undirected edge from left to right, W33; a path variable a new binding, P0 E3; values
+//!   without aggregates, subqueries "not yet"; a NULL value is no bind-time error, P0 E1), then
+//!   as the match child ([`BoundMerge::body`]), a `CALL (*)` body `MATCH <pattern> RETURN
+//!   <outputs>` over the scope before the clause (anonymous new elements named `#m<k>`). The new
+//!   elements and the path are the record columns ([`BoundMerge::outputs`], column bindings of
+//!   the clause's segment) and enter the scope; the `ON CREATE` / `ON MATCH` items bind like
+//!   `SET` items over the scope before the clause and the outputs.
 //!
 //! The planner plans a write clause as a `Stage::Write` of its pipeline; a `CALL` whose body
 //! ends in `FINISH` or a write is a unit subquery ([`BoundCall::unit`]): the outer row passes
@@ -376,10 +387,10 @@ use super::ast::{
     ComprehensionForm, CountClause, DeleteClause, EdgeDirection, EdgePattern, Expr, ExprKind,
     ForClause, GroupBy, Identifier, InsertClause, LabelExpr, LabelExprKind, LabelItem, LetClause,
     LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral, MapProjection,
-    MatchClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern, PatternStep,
-    ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause,
-    RemoveItemKind, ReturnItem, SetClause, SetItemKind, SortDirection, Stage, SubqueryExpr,
-    SubqueryForm, SubqueryKind, UnionKind, WithClause,
+    MatchClause, MergeClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath, PathPattern,
+    PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator,
+    RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem, SetItemKind,
+    SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -405,10 +416,13 @@ pub(crate) enum BindingKind {
     Value,
 }
 
-/// The column of a materializing `WITH` or of a `FOR` a binding stands for.
+/// The column of a materializing `WITH`, of a `FOR`, of a `CALL` or of a `MERGE` record a binding
+/// stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ColumnRef {
-    /// The [`Segment::With`] or [`Segment::For`] (index into [`BoundQuery::segments`]).
+    /// The [`Segment::With`], [`Segment::For`], [`Segment::Call`] or the [`Segment::Write`] of
+    /// a [`BoundMerge`] (index into [`BoundQuery::segments`]; of a `MERGE` the column is an index
+    /// into [`BoundMerge::outputs`]).
     pub(crate) segment: usize,
     /// The column: an index into [`BoundWith::columns`]; of a `FOR`, [`FOR_ITEM`] or
     /// [`FOR_ORDINAL`].
@@ -453,7 +467,7 @@ pub(crate) struct Binding {
     /// The edge variable of a quantified edge, or a variable of a quantified path pattern's
     /// body (not one quantified by `?`): a group variable (module docs).
     pub(crate) group: bool,
-    /// The materializing `WITH` or `FOR` column it stands for.
+    /// The materializing `WITH`, `FOR`, `CALL` or `MERGE` column it stands for.
     pub(crate) column: Option<ColumnRef>,
     /// The subquery whose body declares it (index into [`BoundQuery::subqueries`]): a local
     /// of that body, invisible outside it; `None` for a binding of the query itself.
@@ -707,7 +721,7 @@ pub(crate) struct BoundRows {
 }
 
 /// A bound write clause (stage 3a, [`Segment::Write`]; module docs, "Writes"). One variant per
-/// write clause; `MERGE` joins in a later stage.
+/// write clause.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BoundWrite {
     /// `INSERT` / Cypher `CREATE`.
@@ -718,6 +732,8 @@ pub(crate) enum BoundWrite {
     Remove(BoundRemove),
     /// `[DETACH | NODETACH] DELETE` (stage 3d).
     Delete(BoundDelete),
+    /// `MERGE` (stage 3e).
+    Merge(Box<BoundMerge>),
 }
 
 impl BoundWrite {
@@ -730,8 +746,57 @@ impl BoundWrite {
             BoundWrite::Set(set) => &set.reads,
             BoundWrite::Remove(remove) => &remove.reads,
             BoundWrite::Delete(delete) => &delete.reads,
+            BoundWrite::Merge(merge) => &merge.reads,
         }
     }
+}
+
+/// A bound `MERGE [p =] pattern [ON CREATE SET ..] [ON MATCH SET ..]` (stage 3e, design
+/// W30-W37; module docs, "Writes"): on every incoming row the pattern is matched as a whole
+/// (the match child, [`BoundMerge::body`]); every match is a record of
+/// [`BoundMerge::outputs`] and gets the `ON MATCH` items; with no match the pattern is created
+/// once ([`BoundMerge::create`]), giving one record of the same columns, which gets the `ON
+/// CREATE` items. The rows after the clause are these records (the row before it stays
+/// readable through its labels, as after a `CALL`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BoundMerge {
+    /// The match child: the synthesized body `MATCH <pattern> RETURN <outputs>` (a `CALL (*)`
+    /// body: the pattern as written, labels as containment, properties as GQL `=`, an
+    /// undirected edge either direction, the clause's trail; every anonymous new element named
+    /// `#m<k>` there, the path variable as written). Its segments are in
+    /// [`BoundQuery::segments`] too; its result columns are the outputs, in order.
+    pub(crate) body: Box<BoundComposite>,
+    /// The bindings declared before the clause that the match child reads (the bound nodes of
+    /// the pattern, what its property values read), sorted, without duplicates.
+    pub(crate) imports: Vec<BindingId>,
+    /// The record columns, new bindings of the clause's segment standing for them
+    /// ([`Binding::column`]): every new element of the pattern in text order (each once), then
+    /// the path variable when written (P0 E3).
+    pub(crate) outputs: Vec<BindingId>,
+    /// The create template in INSERT terms: the new nodes and edges (their bindings are the
+    /// outputs; each edge's ends a new node of the pattern or a node bound before it; an
+    /// undirected edge from the node before it to the node after it, W33, its `direction`
+    /// [`EdgeDirection::Any`] as written); their property values read the scope before the
+    /// clause (a NULL value is a run-time 22004, P0 E1). `reads` and `keyword` are the
+    /// clause's; `cypher` is `false`.
+    pub(crate) create: BoundInsert,
+    /// Every element of the pattern in path order (node, edge, node, ..), bound before or new:
+    /// what the path variable is assembled from.
+    pub(crate) elements: Vec<BindingId>,
+    /// The path variable `p = ...` (the last output), when written.
+    pub(crate) path: Option<BindingId>,
+    /// The `ON CREATE SET` items of every `ON CREATE` part, in written order (W35): targets
+    /// and values over the scope before the clause and the pattern's variables.
+    pub(crate) on_create: Vec<BoundSetItem>,
+    /// The `ON MATCH SET` items, likewise.
+    pub(crate) on_match: Vec<BoundSetItem>,
+    /// The bindings declared before the clause that it reads (the imports, the create
+    /// template's reads, what the `ON` items read), sorted, without duplicates.
+    pub(crate) reads: Vec<BindingId>,
+    /// The `MERGE` keyword as written.
+    pub(crate) keyword: Span,
+    /// The clause.
+    pub(crate) span: Span,
 }
 
 /// A bound `SET item, ..` (stage 3c, design W20-W26): the items run left to right on every
@@ -2565,13 +2630,7 @@ impl<'q> Binder<'q> {
             Stage::Set(clause) => self.set_clause(clause),
             Stage::Remove(clause) => self.remove_clause(clause),
             Stage::Delete(clause) => self.delete_clause(clause),
-            // Parsed since stage 3e.T1, bound from 3e.T2 on.
-            Stage::Merge(clause) => Err(not_yet(
-                clause.keyword,
-                "MERGE",
-                "find or create the element with the Gremlin steps merge_v() and merge_e(), for \
-                 example g.merge_v(#{\"T.label\": \"person\", name: \"marko\"})",
-            )),
+            Stage::Merge(clause) => self.merge_clause(clause),
         }
     }
 
@@ -3766,32 +3825,7 @@ impl<'q> Binder<'q> {
     fn set_clause(&mut self, clause: &SetClause) -> BResult<()> {
         self.write_prelude("SET", clause.keyword)?;
         let mut reads: Vec<BindingId> = Vec::new();
-        let mut items = Vec::with_capacity(clause.items.len());
-        for item in &clause.items {
-            let target = self.write_target("SET", &item.target)?;
-            reads.push(target.binding);
-            let kind = match &item.kind {
-                SetItemKind::Property { key, value } => BoundSetKind::Property {
-                    key: key.clone(),
-                    value: self.write_value(value, &mut reads)?,
-                },
-                SetItemKind::Replace { value } => {
-                    BoundSetKind::Replace(self.write_value(value, &mut reads)?)
-                }
-                SetItemKind::Merge { value } => {
-                    BoundSetKind::Merge(self.write_value(value, &mut reads)?)
-                }
-                SetItemKind::Labels(labels) => {
-                    self.edge_label_item("SET", clause.keyword, &item.target, &target, labels)?;
-                    BoundSetKind::Labels(labels.labels.clone())
-                }
-            };
-            items.push(BoundSetItem {
-                target,
-                kind,
-                span: item.span,
-            });
-        }
+        let items = self.set_items(clause.keyword, &clause.items, &mut reads)?;
         reads.sort_unstable();
         reads.dedup();
         self.mark_read(&reads);
@@ -3802,6 +3836,44 @@ impl<'q> Binder<'q> {
             span: clause.span,
         };
         self.push_write(BoundWrite::Set(set), clause.span)
+    }
+
+    /// The items of a `SET` (or of an `ON CREATE SET` / `ON MATCH SET` of a `MERGE`, stage 3e),
+    /// at `keyword`, over the scope: each target bound, each value without aggregates; the
+    /// targets and what the values read are added to `reads`.
+    fn set_items(
+        &mut self,
+        keyword: Span,
+        written: &[SetItem],
+        reads: &mut Vec<BindingId>,
+    ) -> BResult<Vec<BoundSetItem>> {
+        let mut items = Vec::with_capacity(written.len());
+        for item in written {
+            let target = self.write_target("SET", &item.target)?;
+            reads.push(target.binding);
+            let kind = match &item.kind {
+                SetItemKind::Property { key, value } => BoundSetKind::Property {
+                    key: key.clone(),
+                    value: self.write_value(value, reads)?,
+                },
+                SetItemKind::Replace { value } => {
+                    BoundSetKind::Replace(self.write_value(value, reads)?)
+                }
+                SetItemKind::Merge { value } => {
+                    BoundSetKind::Merge(self.write_value(value, reads)?)
+                }
+                SetItemKind::Labels(labels) => {
+                    self.edge_label_item("SET", keyword, &item.target, &target, labels)?;
+                    BoundSetKind::Labels(labels.labels.clone())
+                }
+            };
+            items.push(BoundSetItem {
+                target,
+                kind,
+                span: item.span,
+            });
+        }
+        Ok(items)
     }
 
     /// `REMOVE item, ..` (stage 3c, module docs "Writes"): a cut like `SET`.
@@ -4000,6 +4072,266 @@ impl<'q> Binder<'q> {
                 DeleteKind::Unknown
             }
         })
+    }
+
+    // ----- MERGE (stage 3e) -----
+
+    /// `MERGE [p =] pattern [ON CREATE SET ..] [ON MATCH SET ..]` (stage 3e, module docs
+    /// "Writes"): a cut ([`Segment::Write`] of a [`BoundMerge`]) after the W10 materialization.
+    /// The create template is bound first (its checks give the MERGE messages), then the match
+    /// child as a `CALL (*)` body over the scope before the clause, then the `ON` items over
+    /// that scope and the pattern's variables.
+    #[inline(never)]
+    fn merge_clause(&mut self, clause: &MergeClause) -> BResult<()> {
+        self.write_prelude("MERGE", clause.keyword)?;
+        let outer = Rc::new(self.scope.clone());
+        let names = self.merge_names(&clause.pattern);
+        let first = self.bindings.len();
+        let template = self.merge_template(clause, first).map_err(|mut e| {
+            e.retopic(GqlHelpTopic::Insert, GqlHelpTopic::Merge);
+            e
+        })?;
+        // The match child: `MATCH <pattern> RETURN <outputs>`, every new element named.
+        let body = merge_body(clause, &names, &template.columns);
+        self.enter_body(clause.span)?;
+        let marks = self.marks();
+        self.calls.push(Rc::clone(&outer));
+        let scope = CallScope::All(clause.keyword);
+        let bound = self.composite(
+            &body,
+            Entry::Call {
+                scope: &scope,
+                outer: &outer,
+            },
+        );
+        self.calls.pop();
+        self.body_depth = self.body_depth.saturating_sub(1);
+        let (body, _) = bound?;
+        if body.last().first.columns.len() != template.outputs.len() {
+            return Err(Box::new(semantic(
+                clause.span,
+                "internal error: the MERGE match child returns other columns than the template",
+            )));
+        }
+        let imports = self.reads_since(marks, &body);
+        self.mark_read_here(&imports);
+        // The record columns of the clause's segment.
+        let segment = self.segments.len();
+        for (column, id) in template.outputs.iter().enumerate() {
+            if let Some(binding) = self.bindings.get_mut(id.0) {
+                binding.segment = segment;
+                binding.column = Some(ColumnRef { segment, column });
+            }
+        }
+        // The ON items: over the scope before the clause and the pattern's variables.
+        let mut on_reads: Vec<BindingId> = Vec::new();
+        let mut on_create = Vec::new();
+        let mut on_match = Vec::new();
+        for action in &clause.actions {
+            let items = self
+                .set_items(action.keyword, &action.items, &mut on_reads)
+                .map_err(merge_topic)?;
+            if action.on_create {
+                on_create.extend(items);
+            } else {
+                on_match.extend(items);
+            }
+        }
+        on_reads.sort_unstable();
+        on_reads.dedup();
+        self.mark_read(&on_reads);
+        let mut reads = template.reads.clone();
+        reads.extend_from_slice(&imports);
+        reads.extend(on_reads.iter().copied().filter(|id| id.0 < first));
+        reads.sort_unstable();
+        reads.dedup();
+        let create = BoundInsert {
+            nodes: template.nodes,
+            edges: template.edges,
+            reads: template.reads,
+            cypher: false,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        let merge = BoundMerge {
+            body,
+            imports,
+            outputs: template.outputs,
+            create,
+            elements: template.elements,
+            path: template.path,
+            on_create,
+            on_match,
+            reads,
+            keyword: clause.keyword,
+            span: clause.span,
+        };
+        self.push_numbered(
+            Segment::Write(Box::new(BoundWrite::Merge(Box::new(merge)))),
+            segment,
+            clause.span,
+        )?;
+        self.open = None;
+        Ok(())
+    }
+
+    /// The name each element of a `MERGE` pattern has in the match child, in path order (node,
+    /// edge, node, ..): its variable, or for an anonymous one `#m<k>` (`k` its position), with
+    /// more `#` until the name is no name in scope and no variable of the pattern.
+    fn merge_names(&self, path: &PathPattern) -> Vec<String> {
+        let written: HashSet<&str> = path
+            .element_variables()
+            .map(|v| v.name.as_str())
+            .chain(path.variable.iter().map(|v| v.name.as_str()))
+            .collect();
+        let elements = std::iter::once((path.start.variable.as_ref(), 0)).chain(
+            path.steps.iter().enumerate().flat_map(|(i, step)| {
+                [
+                    (step.edge.variable.as_ref(), 2 * i + 1),
+                    (step.node.variable.as_ref(), 2 * i + 2),
+                ]
+            }),
+        );
+        elements
+            .map(|(variable, k)| match variable {
+                Some(v) => v.name.clone(),
+                None => {
+                    let mut name = format!("#m{k}");
+                    while written.contains(name.as_str()) || self.scope.get(&name).is_some() {
+                        name.insert(0, '#');
+                    }
+                    name
+                }
+            })
+            .collect()
+    }
+
+    /// The create template of a `MERGE` (design W30, W33, W36, P0 E2, E3): the pattern bound as
+    /// an `INSERT` pattern, every new element (and the path variable) a new binding that
+    /// enters the scope, `first` the first of them.
+    fn merge_template(&mut self, clause: &MergeClause, first: usize) -> BResult<MergeTemplate> {
+        const WORD: &str = "MERGE";
+        let path = &clause.pattern;
+        let mut nodes: Vec<(InsertNode, Option<&MapLiteral>)> = Vec::new();
+        let mut edges: Vec<(InsertEdge, Option<&MapLiteral>)> = Vec::new();
+        let mut outputs: Vec<BindingId> = Vec::new();
+        let mut columns: Vec<usize> = Vec::new();
+        let mut elements: Vec<BindingId> = Vec::new();
+        let (start, created) =
+            self.insert_node(WORD, clause.keyword, first, &path.start, &mut nodes)?;
+        if path.steps.is_empty() && !created {
+            return Err(merges_nothing(&path.start, self.query.text(path.span)));
+        }
+        elements.push(start);
+        if created {
+            outputs.push(start);
+            columns.push(0);
+        }
+        let mut before = start;
+        for (i, step) in path.steps.iter().enumerate() {
+            let edge = self.merge_edge(&step.edge)?;
+            elements.push(edge);
+            outputs.push(edge);
+            columns.push(2 * i + 1);
+            let (node, created) =
+                self.insert_node(WORD, clause.keyword, first, &step.node, &mut nodes)?;
+            elements.push(node);
+            if created {
+                outputs.push(node);
+                columns.push(2 * i + 2);
+            }
+            // An undirected edge is created from the node before it (W33).
+            let (source, target) = match step.edge.direction {
+                EdgeDirection::Right | EdgeDirection::Any => (before, node),
+                EdgeDirection::Left => (node, before),
+            };
+            edges.push(edge_of(edge, source, target, &step.edge)?);
+            before = node;
+        }
+        let path_binding = match &path.variable {
+            Some(variable) => {
+                let id =
+                    self.declare_path(self.clause, variable, path.span, self.segments.len())?;
+                outputs.push(id);
+                columns.push(usize::MAX);
+                Some(id)
+            }
+            None => None,
+        };
+        // The property values read the scope before the clause (design W8).
+        let declared = first..self.bindings.len();
+        let mut reads: Vec<BindingId> = Vec::new();
+        for (node, map) in &mut nodes {
+            check_merge_values(*map)?;
+            node.properties =
+                self.insert_properties(WORD, IN_MERGE, *map, &declared, &mut reads)?;
+        }
+        for (edge, map) in &mut edges {
+            check_merge_values(*map)?;
+            edge.properties =
+                self.insert_properties(WORD, IN_MERGE, *map, &declared, &mut reads)?;
+        }
+        reads.extend(
+            edges
+                .iter()
+                .flat_map(|(e, _)| [e.source, e.target])
+                .filter(|id| id.0 < first),
+        );
+        reads.retain(|id| id.0 < first);
+        reads.sort_unstable();
+        reads.dedup();
+        self.mark_read(&reads);
+        Ok(MergeTemplate {
+            nodes: nodes.into_iter().map(|(n, _)| n).collect(),
+            edges: edges.into_iter().map(|(e, _)| e).collect(),
+            outputs,
+            columns,
+            elements,
+            path: path_binding,
+            reads,
+        })
+    }
+
+    /// The binding of one edge pattern of a `MERGE` (design W36): always new; a variable bound
+    /// before is refused (42002).
+    fn merge_edge(&mut self, edge: &EdgePattern) -> BResult<BindingId> {
+        if let Some(var) = &edge.variable
+            && self.scope.get(&var.name).is_some()
+        {
+            let name = &var.name;
+            let label = edge
+                .labels
+                .as_ref()
+                .map(label_names)
+                .and_then(|names| names.into_iter().next())
+                .map_or_else(|| "T".to_string(), |l| crate::error::gql_key(&l.name));
+            return Err(semantic(
+                var.span,
+                format!(
+                    "the variable `{name}` is already bound; MERGE finds or creates the edge \
+                     itself, so its variable must be a new name"
+                ),
+            )
+            .alternative(format!(
+                "give the edge its own name, as in -[{name}2:{label}]->, or test the bound edge \
+                 with a WHERE or FILTER"
+            ))
+            .topic(GqlHelpTopic::Merge)
+            .into());
+        }
+        let site = Site {
+            clause: self.clause,
+            segment: self.segments.len(),
+            kind: BindingKind::Edge,
+            group: false,
+        };
+        Ok(self.new_binding(
+            site,
+            edge.variable.as_ref(),
+            edge.span,
+            edge.labels.as_ref(),
+            None,
+        ))
     }
 
     /// A label item on a target the binder knows is an edge (design W26, P0 C1, 42002): an edge
@@ -6683,6 +7015,138 @@ fn creates_nothing(word: &str, node: &NodePattern, text: &str) -> Box<GqlErrorBu
     )
 }
 
+/// The create template of a `MERGE` as [`Binder::merge_template`] binds it.
+struct MergeTemplate {
+    nodes: Vec<InsertNode>,
+    edges: Vec<InsertEdge>,
+    /// The new elements in text order, then the path variable ([`BoundMerge::outputs`]).
+    outputs: Vec<BindingId>,
+    /// For each output its position in the pattern (node, edge, node, ..; `usize::MAX`: the
+    /// path variable), to name the match child's columns.
+    columns: Vec<usize>,
+    elements: Vec<BindingId>,
+    path: Option<BindingId>,
+    reads: Vec<BindingId>,
+}
+
+/// The match child of a `MERGE` (stage 3e): `MATCH <pattern> RETURN <columns>`, every element
+/// named as `names` says (path order), the columns the elements at the positions `columns`
+/// (`usize::MAX`: the path variable), each aliased by its name.
+fn merge_body(clause: &MergeClause, names: &[String], columns: &[usize]) -> CompositeQuery {
+    let span = clause.pattern.span;
+    let mut pattern = clause.pattern.clone();
+    let name = |k: usize, at: Span| Identifier {
+        name: names.get(k).cloned().unwrap_or_default(),
+        span: at,
+    };
+    if pattern.start.variable.is_none() {
+        pattern.start.variable = Some(name(0, pattern.start.span));
+    }
+    for (i, step) in pattern.steps.iter_mut().enumerate() {
+        if step.edge.variable.is_none() {
+            step.edge.variable = Some(name(2 * i + 1, step.edge.span));
+        }
+        if step.node.variable.is_none() {
+            step.node.variable = Some(name(2 * i + 2, step.node.span));
+        }
+    }
+    let items = columns
+        .iter()
+        .map(|&k| {
+            let variable = if k == usize::MAX {
+                pattern.variable.clone().unwrap_or_else(|| name(k, span))
+            } else {
+                name(k, span)
+            };
+            ReturnItem {
+                expr: Expr {
+                    kind: ExprKind::Variable(variable.clone()),
+                    span: variable.span,
+                },
+                alias: Some(variable),
+                span,
+            }
+        })
+        .collect();
+    let linear = LinearQuery {
+        matches: vec![MatchClause {
+            optional: false,
+            patterns: vec![pattern],
+            where_clause: None,
+            span,
+        }],
+        stages: vec![Stage::Match(0)],
+        ret: ReturnClause {
+            distinct: false,
+            star: None,
+            items,
+            group_by: None,
+            span,
+        },
+        order_by: None,
+        offset: None,
+        limit: None,
+        importing: None,
+        span,
+    };
+    CompositeQuery {
+        first: QueryBlock {
+            first: linear,
+            unions: Vec::new(),
+            span,
+        },
+        next: Vec::new(),
+        span,
+    }
+}
+
+/// A subquery or pattern comprehension in a `MERGE` property value is not yet supported (it
+/// would be matched and created from two copies of the subquery).
+fn check_merge_values(map: Option<&MapLiteral>) -> BResult<()> {
+    let Some(entry) = map.and_then(|m| m.entries.iter().find(|e| holds_subquery(&e.value))) else {
+        return Ok(());
+    };
+    let key = crate::error::gql_key(&entry.key.name);
+    let mut error = not_yet(
+        entry.value.span,
+        "a subquery in a MERGE property value",
+        &format!(
+            "compute the value first and merge on the variable, as in LET v = COUNT {{ MATCH \
+             (p:person) }} MERGE (n:stats {{{key}: v}})"
+        ),
+    );
+    error.or_topic(GqlHelpTopic::Merge);
+    Err(error)
+}
+
+/// The error of a `MERGE` pattern that is a lone node bound before (P0 E2, 42002, TCK Merge1
+/// [15]): there is nothing to find or create.
+fn merges_nothing(node: &NodePattern, text: &str) -> Box<GqlErrorBuilder> {
+    let name = node.variable.as_ref().map_or("n", |v| v.name.as_str());
+    let key = crate::error::gql_key(name);
+    Box::new(
+        semantic(
+            node.span,
+            format!(
+                "MERGE {text} with `{name}` bound earlier has nothing to find or create: the \
+                 node exists already"
+            ),
+        )
+        .alternative(format!(
+            "to find or create a connection, give the pattern an edge, as in MERGE \
+             ({key})-[:T]->(:Label); to find or create another node, give it its own name, as \
+             in MERGE ({key}2:Label)"
+        ))
+        .topic(GqlHelpTopic::Merge),
+    )
+}
+
+/// [`GqlHelpTopic::Merge`] for an error inside a `MERGE` clause, unless set already.
+fn merge_topic(mut error: Box<GqlErrorBuilder>) -> Box<GqlErrorBuilder> {
+    error.or_topic(GqlHelpTopic::Merge);
+    error
+}
+
 /// The error of a group variable (a list of elements) written as an end of an inserted edge.
 fn group_as_end(word: &str, var: &Identifier) -> Box<GqlErrorBuilder> {
     let name = &var.name;
@@ -6807,6 +7271,9 @@ const IN_CREATE: &str = "in CREATE";
 
 /// The place of an aggregate inside a `SET` value (refused, design W8).
 const IN_SET: &str = "in SET";
+
+/// The place of an aggregate inside a `MERGE` property map (refused, design W8, stage 3e).
+const IN_MERGE: &str = "in MERGE";
 
 /// The place of an aggregate inside a `DELETE` target (refused, design W8).
 const IN_DELETE: &str = "in DELETE";

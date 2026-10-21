@@ -646,6 +646,7 @@ fn segment_shapes(q: &BoundQuery) -> Vec<String> {
                 BoundWrite::Set(set) => format!("set{}", set.items.len()),
                 BoundWrite::Remove(remove) => format!("remove{}", remove.items.len()),
                 BoundWrite::Delete(delete) => format!("delete{}", delete.targets.len()),
+                BoundWrite::Merge(merge) => format!("merge{}", merge.outputs.len()),
             },
         })
         .collect()
@@ -4292,4 +4293,300 @@ fn delete_errors() {
     let f = fail("MATCH (n) DELETE head(collect(n))");
     assert_eq!(f.text, "collect");
     assert!(f.message.contains("in DELETE"), "{}", f.message);
+}
+
+// ----- stage 3e.T2: MERGE -----
+
+fn merge_of(q: &BoundQuery, segment: usize) -> &BoundMerge {
+    match q.segments.get(segment) {
+        Some(Segment::Write(write)) => match &**write {
+            BoundWrite::Merge(merge) => merge,
+            other => panic!("segment {segment} is no MERGE: {other:?}"),
+        },
+        other => panic!("segment {segment} is no write: {other:?}"),
+    }
+}
+
+/// The last segment of `q` as a MERGE.
+fn last_merge(q: &BoundQuery) -> &BoundMerge {
+    merge_of(q, q.segments.len() - 1)
+}
+
+/// The column names of a MERGE's match child.
+fn merge_columns(merge: &BoundMerge) -> Vec<&str> {
+    merge
+        .body
+        .last()
+        .first
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// The help of the binder error of `query`.
+fn bind_help(query: &str) -> String {
+    let parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+    match bind(&parsed) {
+        Ok(bound) => panic!("{query:?} bound: {bound:?}"),
+        Err(e) => crate::error::DiagnosticError::help(&e).unwrap_or_default(),
+    }
+}
+
+#[test]
+fn merge_binds_the_template_the_match_child_and_the_on_items() {
+    let query = "MATCH (a:person) MERGE (a)-[r:knows]->(b:person {name: a.name}) \
+                 ON CREATE SET b.new = true ON MATCH SET r.seen = 1, b += {n: a.age} RETURN b, r";
+    let q = ok(query);
+    // The MATCH, the match child's MATCH, the MERGE (W9: a cut).
+    assert_eq!(segment_shapes(&q), ["match[0]", "match[1]", "merge2"]);
+    assert!(q.writes());
+    assert_eq!(q.end, QueryEnd::Return);
+    let (a, r, b) = (id(&q, "a"), id(&q, "r"), id(&q, "b"));
+    let merge = merge_of(&q, 2);
+    assert_eq!(query[merge.keyword.start..merge.keyword.end], *"MERGE");
+    assert!(query[merge.span.start..merge.span.end].ends_with("b += {n: a.age}"));
+    // The record: the new elements in text order; each a column of the MERGE segment.
+    assert_eq!(merge.outputs, [r, b]);
+    assert_eq!(merge_columns(merge), ["r", "b"]);
+    for (column, output) in merge.outputs.iter().enumerate() {
+        let binding = &q.bindings[output.0];
+        assert_eq!(binding.segment, 2);
+        assert_eq!(binding.column, Some(ColumnRef { segment: 2, column }));
+    }
+    assert_eq!(q.bindings[r.0].kind, BindingKind::Edge);
+    assert_eq!(q.bindings[b.0].kind, BindingKind::Node);
+    assert_eq!(merge.elements, [a, r, b]);
+    assert_eq!(merge.path, None);
+    // The bound node is imported by the match child and read by the clause.
+    assert_eq!(merge.imports, [a]);
+    assert_eq!(merge.reads, [a]);
+    // The create template in INSERT terms.
+    let create = &merge.create;
+    assert_eq!(create.nodes.len(), 1);
+    assert_eq!(create.nodes[0].binding, b);
+    assert_eq!(label_texts(&create.nodes[0].labels), ["person"]);
+    assert_eq!(create.nodes[0].properties[0].key.name, "name");
+    assert_eq!(create.nodes[0].properties[0].bindings, [a]);
+    assert_eq!(create.edges.len(), 1);
+    let edge = &create.edges[0];
+    assert_eq!((edge.binding, edge.source, edge.target), (r, a, b));
+    assert_eq!(edge.label.name, "knows");
+    assert_eq!(edge.direction, EdgeDirection::Right);
+    assert_eq!(create.reads, [a]);
+    assert!(!create.cypher);
+    // The ON items in written order, over the pattern's variables and the earlier ones.
+    assert_eq!(merge.on_create.len(), 1);
+    assert_eq!(merge.on_create[0].target.binding, b);
+    assert_eq!(merge.on_match.len(), 2);
+    assert_eq!(merge.on_match[0].target.binding, r);
+    assert!(matches!(
+        merge.on_match[0].target.kind,
+        TargetKind::Edge { .. }
+    ));
+    match &merge.on_match[1].kind {
+        BoundSetKind::Merge(value) => assert_eq!(value.bindings, [a]),
+        other => panic!("{other:?}"),
+    }
+    // The new variables are in scope after the clause.
+    assert_eq!(q.columns.len(), 2);
+}
+
+#[test]
+fn merge_names_anonymous_elements_and_binds_the_path() {
+    // P0 E3: `p =` is a new binding, the last output; anonymous elements are `#m<k>` in the
+    // match child. W33: an undirected edge is created from left to right.
+    let q = ok("MERGE p = (:A {k: 1})-[:T]-(x) RETURN p, x");
+    let merge = last_merge(&q);
+    let (p, x) = (id(&q, "p"), id(&q, "x"));
+    assert_eq!(merge.outputs.len(), 4);
+    assert_eq!(merge.outputs[2..], [x, p]);
+    assert_eq!(merge.path, Some(p));
+    assert_eq!(q.bindings[p.0].kind, BindingKind::Path);
+    assert_eq!(merge_columns(merge), ["#m0", "#m1", "x", "p"]);
+    assert_eq!(merge.elements, merge.outputs[..3]);
+    let edge = &merge.create.edges[0];
+    assert_eq!(edge.direction, EdgeDirection::Any);
+    assert_eq!((edge.source, edge.target), (merge.outputs[0], x));
+    assert!(merge.imports.is_empty());
+    // A name in scope is never reused for an anonymous element.
+    let q = ok("WITH 1 AS `#m0` MERGE (:A)-[:T]->(:B) RETURN `#m0`");
+    assert_eq!(merge_columns(last_merge(&q)), ["##m0", "#m1", "#m2"]);
+    // Left direction: the edge enters the bound node.
+    let q = ok("MATCH (a) MERGE (a)<-[e:T]-(b)");
+    let merge = last_merge(&q);
+    let edge = &merge.create.edges[0];
+    assert_eq!((edge.source, edge.target), (id(&q, "b"), id(&q, "a")));
+    assert_eq!(edge.direction, EdgeDirection::Left);
+    assert_eq!(q.end, QueryEnd::Write);
+    // A new node written twice is one output; the edge a self-loop.
+    let q = ok("MERGE (a:A)-[:T]->(a)");
+    let merge = last_merge(&q);
+    let a = id(&q, "a");
+    assert_eq!(merge.outputs.len(), 2);
+    assert_eq!(merge.outputs[0], a);
+    assert_eq!(merge.elements, [a, merge.outputs[1], a]);
+    let edge = &merge.create.edges[0];
+    assert_eq!((edge.source, edge.target), (a, a));
+    // Both ends bound before (TCK Merge5 [1]-[21]): only the edge is new.
+    let q = ok("MATCH (a:person), (b:software) MERGE (a)-[r:made]->(b) RETURN r");
+    let merge = last_merge(&q);
+    assert_eq!(merge.outputs, [id(&q, "r")]);
+    assert_eq!(merge.imports, [id(&q, "a"), id(&q, "b")]);
+    assert!(merge.create.nodes.is_empty());
+}
+
+#[test]
+fn merge_scope_new_variables_and_earlier_values() {
+    // After `WITH a AS x`, `a` is a new name (TCK Merge5 [18], [19]).
+    // (`x` substitutes the first `a`, the binding the match child imports.)
+    let q = ok("MATCH (a) WITH a AS x MERGE (a)-[:T]->(x) RETURN a, x");
+    let merge = last_merge(&q);
+    let first_a = id(&q, "a");
+    assert_eq!(merge.imports, [first_a]);
+    assert_eq!(merge.outputs.len(), 2);
+    assert_ne!(merge.outputs[1], first_a);
+    assert_eq!(merge.elements[2], first_a);
+    // The values read FOR items and parameters; the ON items read them too.
+    let q = ok("FOR v IN [1, 1] MERGE (n:N {v: v, p: $p}) ON CREATE SET n.w = v RETURN n");
+    let merge = last_merge(&q);
+    let v = id(&q, "v");
+    assert_eq!(merge.imports, [v]);
+    assert_eq!(merge.reads, [v]);
+    assert_eq!(merge.create.reads, [v]);
+    assert_eq!(q.parameters.len(), 2);
+    // A FOR item may be a bound end (design E3 of stage 2a).
+    let q = ok("MATCH (s:software) WITH collect_list(s) AS l FOR x IN l MERGE (x)-[:T]->(:Y)");
+    assert_eq!(last_merge(&q).imports.len(), 1);
+    // Several MERGEs: the second reads the first's records (TCK Merge5 [9], Merge9 [2]).
+    let q = ok("MERGE (a:A) MERGE (b:B) MERGE (a)-[r:T]->(b) RETURN r");
+    let merge = last_merge(&q);
+    assert_eq!(merge.imports, [id(&q, "a"), id(&q, "b")]);
+    // A MERGE in a CALL body imports what the body imports.
+    let q = ok("MATCH (n) CALL (n) { MERGE (n)-[:T]->(m:X) RETURN m } RETURN m");
+    let merge = q
+        .segments
+        .iter()
+        .find_map(|s| match s {
+            Segment::Write(write) => match &**write {
+                BoundWrite::Merge(merge) => Some(merge),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a MERGE");
+    assert_eq!(merge.imports, [id(&q, "n")]);
+}
+
+#[test]
+fn merge_materializes_values_that_read_the_graph() {
+    // Design W10, TCK Merge1 [9]: `x` is materialized before the MERGE.
+    let q = ok("MATCH (f) WITH f.x AS x MERGE (:N {x: x})");
+    let shapes = segment_shapes(&q);
+    assert_eq!(shapes.len(), 4, "{shapes:?}");
+    assert!(shapes[1].starts_with("with"), "{shapes:?}");
+    assert!(shapes[3].starts_with("merge"), "{shapes:?}");
+    // A constant stays a substitution: nothing materialized.
+    let q = ok("WITH 42 AS var MERGE (c:N {var: var}) RETURN c");
+    assert_eq!(segment_shapes(&q), ["match[0]", "merge1"]);
+}
+
+#[test]
+fn merge_binding_errors() {
+    for (query, text, message) in [
+        // P0 E2 (TCK Merge1 [15]).
+        (
+            "MATCH (a) MERGE (a)",
+            "(a)",
+            "MERGE (a) with `a` bound earlier has nothing to find or create",
+        ),
+        (
+            "MATCH (a) MERGE p = (a)",
+            "(a)",
+            "MERGE p = (a) with `a` bound earlier has nothing to find or create",
+        ),
+        // W36 (TCK Merge5 [22], [26]).
+        (
+            "MATCH (a) MERGE (a:X)",
+            "a",
+            "the variable `a` is already bound; MERGE refers to a bound node only as (a)",
+        ),
+        (
+            "MATCH (a) MERGE (a {k: 1})-[:T]->(b)",
+            "a",
+            "the variable `a` is already bound; MERGE refers to a bound node only as (a)",
+        ),
+        (
+            "MATCH (a)-[r]->(b) MERGE (a)-[r:T]->(b)",
+            "r",
+            "the variable `r` is already bound; MERGE finds or creates the edge itself",
+        ),
+        (
+            "MERGE (a:A)-[:T]->(a:B)",
+            "a",
+            "the node `a` is created earlier in this MERGE",
+        ),
+        (
+            "MATCH p = (a)-->(b) MERGE p = (a)-[:T]->(b)",
+            "p",
+            "the path variable `p` is already bound",
+        ),
+        ("MATCH (a)-[r]->(b) MERGE (r)-[:T]->(b)", "r", "`r`"),
+        ("WITH 1 AS x MERGE (x)-[:T]->(b)", "x", "`x`"),
+        // ON items: an unknown name (TCK Merge2 [6], Merge3 [5]), an aggregate, edge labels.
+        (
+            "MERGE (a) ON CREATE SET x.k = 1",
+            "x",
+            "the variable `x` is not defined",
+        ),
+        (
+            "MERGE (a) ON MATCH SET a.k = count(*)",
+            "count",
+            "the aggregate function count() cannot be used in SET",
+        ),
+        (
+            "MERGE (a)-[r:T]->(b) ON CREATE SET r:X",
+            ":X",
+            "`r` is an edge",
+        ),
+        // Property values: no aggregate (W8).
+        (
+            "MERGE (a {k: count(*)})",
+            "count",
+            "the aggregate function count() cannot be used in MERGE",
+        ),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.gqlstatus, "42002", "{query}");
+        assert_eq!(f.text, text, "{query}: {f:?}");
+        assert!(f.message.contains(message), "{query}: {}", f.message);
+    }
+    // The MERGE advice on the pattern errors.
+    for query in [
+        "MATCH (a) MERGE (a)",
+        "MATCH (a) MERGE (a:X)",
+        "MATCH (a)-[r]->(b) MERGE (a)-[r:T]->(b)",
+        "MERGE (a) ON CREATE SET x.k = 1",
+    ] {
+        let help = bind_help(query);
+        assert!(
+            help.contains("MERGE looks for its whole pattern"),
+            "{query}: {help}"
+        );
+    }
+    // Not yet: a value reading an element the same MERGE creates, a subquery in a value.
+    for (query, text) in [
+        ("MERGE (a {x: 1})-[:T]->(b {y: a.x})", "a.x"),
+        (
+            "MERGE (a {k: COUNT { MATCH (b) RETURN b }})",
+            "COUNT { MATCH (b) RETURN b }",
+        ),
+    ] {
+        let f = failure_of(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    // A NULL property is no bind-time error (P0 E1: 22004 at run time, TCK Merge1 [17]).
+    ok("MERGE (a {num: null})");
+    ok("FOR x IN [NULL] MERGE (a)-[:T {k: x}]->(b)");
 }
