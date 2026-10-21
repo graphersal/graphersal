@@ -2168,7 +2168,7 @@ mod gql {
             "MATCH (a)-[e]-(b) RETURN element_id(e), labels(a), type(e)",
             // Write clauses not yet supported fail before anything is asked of the data.
             "MATCH (p) FOREACH (x IN [1] | SET p.age = x) RETURN p",
-            "MATCH (p) DETACH DELETE p",
+            "MATCH (p) FOREACH (x IN [1] | DELETE p)",
         ] {
             let recorder = Arc::new(Recorder::default());
             let script = format!("g.gql({query:?}).toList()");
@@ -3331,5 +3331,126 @@ mod gql {
             .ok(),
             Some(4)
         );
+    }
+
+    /// Stage 3d: `DELETE` asks `Delete` on the data of each target exactly like its `drop()`
+    /// twin (design C3): a node `Data(vertex)`, an edge of a stated label `Data(edge "label")`,
+    /// a path, a list or a value whose kind only the run knows `Data`; `DETACH` asks nothing
+    /// more (as `drop()` of a vertex).
+    #[test]
+    fn gql_delete_asks_delete_like_its_drop_twin() {
+        for (query, twin) in [
+            (
+                r#"g.gql("MATCH (p:person) DETACH DELETE p").iterate()"#,
+                r#"g.v().has_label("person").drop().iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (p:person)-[e]-() DELETE p, e").iterate()"#,
+                r#"g.v().has_label("person").side_effect(__.both_e().drop()).drop().iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH ()-[e:knows]->() DELETE e").iterate()"#,
+                r#"g.v().out_e("knows").drop().iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH ()-[e]->() DELETE e").iterate()"#,
+                r#"g.v().out_e().drop().iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH x = (p {name: 'vadas'})<--() DETACH DELETE x").iterate()"#,
+                r#"g.v().has("name", "vadas").in().path().unfold().drop().iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (s:software) WITH collect(s) AS l DETACH DELETE l").iterate()"#,
+                r#"g.v().has_label("software").fold().unfold().drop().iterate()"#,
+            ),
+        ] {
+            let mut gql = requests(&modern(), query);
+            let mut gremlin = requests(&modern(), twin);
+            gql.sort();
+            gql.dedup();
+            gremlin.sort();
+            gremlin.dedup();
+            assert_eq!(gql, gremlin, "{query}");
+        }
+        assert_eq!(
+            requests(
+                &modern(),
+                r#"g.gql("MATCH (p:person)-[e:knows|created]->(x) DELETE e DETACH DELETE p, [x]").iterate()"#
+            ),
+            [
+                "Read Data(vertex)",
+                "Read Data(edge)",
+                "Delete Data(edge \"knows\")",
+                "Delete Data(edge \"created\")",
+                "Delete Data(vertex)",
+                "Delete Data",
+            ]
+        );
+    }
+
+    /// A denied `Delete` refuses a GQL `DELETE` before it runs, with the same request as the
+    /// `drop()` twin; an edge label the policy allows lets the edge delete through.
+    #[test]
+    fn a_denied_delete_refuses_gql_delete_like_its_drop_twin() {
+        let graph = modern();
+        let no_delete = || AccessPolicy::allow_all().deny(ActionKind::Delete, ResourceKind::Data);
+        for (script, step) in [
+            (r#"g.v().has_label("person").drop().iterate()"#, "drop"),
+            (
+                r#"g.gql("MATCH (p:person) DETACH DELETE p").iterate()"#,
+                "gql:delete",
+            ),
+            (
+                r#"g.gql("MATCH (p) CALL (p) { DETACH DELETE p } RETURN 1").toList()"#,
+                "gql:delete",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, no_delete()),
+                step,
+                "Delete Data(vertex)",
+            );
+            assert_denied(run(&graph, script, NoSecret), step, "Delete Data(vertex)");
+            assert_denied(
+                run(&graph, script, AccessPolicy::read_only()),
+                step,
+                "Delete Data(vertex)",
+            );
+        }
+        for (script, step) in [
+            (r#"g.e().has_label("secret").drop().iterate()"#, "drop"),
+            (
+                r#"g.gql("MATCH ()-[e:secret]->() DELETE e").iterate()"#,
+                "gql:delete",
+            ),
+        ] {
+            assert_denied(
+                run(&graph, script, NoSecret),
+                step,
+                "Delete Data(edge \"secret\")",
+            );
+        }
+        assert_denied(
+            run(
+                &graph,
+                r#"g.gql("MATCH x = ()-[:knows]->() DETACH DELETE x").iterate()"#,
+                NoSecret,
+            ),
+            "gql:delete",
+            "Delete Data",
+        );
+        assert_eq!(count(&graph), 6);
+        assert_eq!(graph.read().edge_count(), 6);
+        // Label-level: an edge whose pattern states its label asks for that label only.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MATCH ()-[e:knows]->() DELETE e").iterate()"#,
+                NoSecret,
+            )
+            .is_ok()
+        );
+        assert_eq!(graph.read().edge_count(), 4);
     }
 }

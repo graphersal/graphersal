@@ -6,7 +6,10 @@
 //! were (a plan dump guard against the plans before stage 3a). Stage 3c: `SET` / `REMOVE`
 //! twins against `property()`, `remove_property()`, `add_label()`, `drop_label()` and
 //! `property(map)`, values read across a write (W10), one evaluation per row (W15),
-//! read-after-write (an index included), the schema, `CALL` bodies and saved queries.
+//! read-after-write (an index included), the schema, `CALL` bodies and saved queries. Stage 3d:
+//! `DELETE` / `DETACH DELETE` twins against `drop()`, the NODETACH check per clause (G1001,
+//! nothing removed), paths, lists, `NULL`, twice, `count(n)` after a DELETE, reads and returns
+//! of a deleted element (W27 / W28), `CALL` bodies and saved queries.
 #![cfg(feature = "gql")]
 
 use graphersal::error::GqlErrorKind;
@@ -930,6 +933,105 @@ mod script {
             "{lines:?}"
         );
     }
+
+    /// Stage 3d: `DELETE` / `DETACH DELETE` leave the graph their `drop()` twins leave.
+    #[test]
+    fn delete_leaves_the_graph_its_drop_twin_leaves() {
+        for (query, gremlin) in [
+            (
+                "MATCH (n:person {name: 'marko'}) DETACH DELETE n",
+                r#"g.v().has("name", "marko").drop()"#,
+            ),
+            (
+                "MATCH (n:software) DETACH DELETE n",
+                r#"g.v().has_label("software").drop()"#,
+            ),
+            (
+                "MATCH ()-[r:knows]->() DELETE r",
+                r#"g.e().has_label("knows").drop()"#,
+            ),
+            (
+                "MATCH (n {name: 'vadas'})-[r]-() DELETE r, n",
+                r#"g.v().has("name", "vadas").side_effect(__.both_e().drop()).drop()"#,
+            ),
+            (
+                "MATCH (n)-[r]-() DELETE n, r",
+                r#"g.v().side_effect(__.both_e().drop()).drop()"#,
+            ),
+            (
+                "MATCH p = (:person {name: 'vadas'})<-[]-() DETACH DELETE p",
+                r#"g.v().has("name", "vadas").in_e().out_v().path().unfold().drop()"#,
+            ),
+            (
+                "MATCH (s:software) WITH collect(s) AS l DETACH DELETE l",
+                r#"g.v().has_label("software").fold().unfold().drop()"#,
+            ),
+            (
+                "MATCH (p:person) CALL (p) { MATCH (p)-[e:created]->() DELETE e } RETURN p",
+                r#"g.v().has_label("person").out_e("created").drop()"#,
+            ),
+        ] {
+            twin(query, gremlin);
+        }
+    }
+
+    #[test]
+    fn a_gql_delete_is_mutating() {
+        for query in [
+            "MATCH (p) DETACH DELETE p",
+            "MATCH (p) DELETE p RETURN count(p)",
+            "MATCH ()-[e]->() DELETE e",
+            "MATCH (p) CALL (p) { DETACH DELETE p } RETURN 1",
+            "MATCH (p) DELETE NULL",
+        ] {
+            let traversal = eval_value(modern(), &format!("g.gql({query:?})"))
+                .unwrap()
+                .cast::<ScriptGraphTraversalSource>();
+            assert!(traversal.is_mutating(), "{query}");
+        }
+    }
+
+    /// A saved GQL query with `DELETE` writes (dialect `/2`) with `Delete` effects, those of its
+    /// `drop()` twin.
+    #[test]
+    fn a_saved_gql_query_with_delete_writes_with_delete_effects() {
+        use graphersal::catalog::GQL_WRITING_QUERY_DIALECT;
+        let graph = modern();
+        let text = |script: &str| {
+            eval_value(graph.clone(), script)
+                .unwrap_or_else(|e| panic!("{script}: {e}"))
+                .to_string()
+        };
+        let _ = text(
+            r#"g.define_query(#{name: "forget", language: "gql", params: #{n: "string"},
+                   body: "MATCH (p:person {name: $n}) DETACH DELETE p"});
+               g.define_query(#{name: "unlink", language: "gql",
+                   body: "MATCH ()-[e:knows]->() DELETE e RETURN count(*) AS c"});
+               g.define_query(#{name: "drop_people", body: `fn drop_people() { g.v().has_label("person").drop() }`})"#,
+        );
+        assert_eq!(
+            text(r#"g.get_query("forget").dialect"#),
+            GQL_WRITING_QUERY_DIALECT
+        );
+        assert_eq!(text(r#"g.get_query("forget").writes"#), "true");
+        assert_eq!(
+            text(r#"g.get_query("forget").effects.map(|e| e.text)"#),
+            r#"["Delete Data(vertex)"]"#
+        );
+        assert_eq!(
+            text(r#"g.get_query("drop_people").effects.map(|e| e.text)"#),
+            r#"["Delete Data(vertex)"]"#
+        );
+        assert_eq!(
+            text(r#"g.get_query("unlink").effects.map(|e| e.text)"#),
+            r#"["Delete Data(edge \"knows\")"]"#
+        );
+        assert_eq!(text(r#"g.query("unlink").select("c").to_list()"#), "[2]");
+        let _ = text(r#"g.query("forget", #{n: "marko"}).iterate()"#);
+        let read = graph.read();
+        // marko's `knows` edges went with `unlink`, his `created` edge with him.
+        assert_eq!((read.vertex_count(), read.edge_count()), (5, 3));
+    }
 }
 
 // ----- stage 3c: SET / REMOVE -----
@@ -1187,48 +1289,210 @@ fn a_failing_set_row_changes_nothing() {
     }
 }
 
-// ----- stage 3d.T1: DELETE parses and binds, refused at the lowering until 3d.T3 -----
+// ----- stage 3d: DELETE / DETACH DELETE -----
+
+/// The root cause of the failed `query` on `graph` (the graph left as it was is checked).
+fn delete_error(graph: &mut TraversalGraph, query: &str) -> Box<TraverserError> {
+    let before = dump(graph);
+    let error = graph.traversal_mut().gql(query).to_list().expect_err(query);
+    assert_eq!(dump(graph), before, "{query} changed the graph");
+    error
+}
 
 #[test]
-fn bound_delete_is_refused_before_the_run() {
-    for (query, words) in [
-        ("MATCH (p:person) DELETE p", "DELETE"),
-        (
-            "MATCH (p:person) DETACH DELETE p RETURN count(*)",
-            "DETACH DELETE",
-        ),
-        ("MATCH (p) NODETACH DELETE p", "NODETACH DELETE"),
-        ("MATCH path = (p)-->() DELETE path, [p], NULL", "DELETE"),
-        (
-            "MATCH (p) CALL (p) { DETACH DELETE p } RETURN 1",
-            "DETACH DELETE",
-        ),
-        (
-            "MATCH (p) WITH p, p.age AS old DELETE p RETURN old",
-            "DELETE",
-        ),
+fn detach_delete_of_a_hub_takes_its_edges_and_returns_no_row() {
+    let (graph, rows) = after("MATCH (n:person {name: 'marko'}) DETACH DELETE n");
+    assert!(rows.is_empty());
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (5, 3));
+    assert_eq!(count_edges(&graph, "knows"), 0);
+    // A node without edges goes with a plain DELETE (NODETACH is the default).
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    write(&mut graph, "INSERT (:Lonely), (:Lonely)");
+    write(&mut graph, "MATCH (n:Lonely) DELETE n");
+    write(&mut graph, "INSERT (:Lonely)");
+    write(&mut graph, "MATCH (n:Lonely) NODETACH DELETE n");
+    assert_eq!(dump(&graph), dump(&TraversalGraph::tinkerpop_modern()));
+}
+
+/// Design W29: the NODETACH check is per clause, so an edge and its ends go in one clause; a
+/// node with an edge the clause does not delete is G1001 and nothing is removed.
+#[test]
+fn the_nodetach_check_is_per_clause_and_a_failure_leaves_nothing() {
+    let (graph, _) = after("MATCH (n)-[r]-() DELETE n, r");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (0, 0));
+    let (graph, rows) = after("MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c");
+    assert_eq!(column(&rows, "c"), ["12"]);
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (0, 0));
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    for query in [
+        "MATCH (n:person {name: 'marko'}) DELETE n",
+        "MATCH (n:software) DELETE n RETURN count(*) AS c",
+        "MATCH (n {name: 'marko'})-[r:knows]->() DELETE n, r",
+        // Deleting the edges in a later clause does not help (the check is per clause).
+        "MATCH (n {name: 'vadas'})-[r]-() DELETE n DELETE r",
+        "MATCH p = (:person {name: 'marko'})-[:knows]->() DELETE p",
     ] {
-        let mut graph = TraversalGraph::tinkerpop_modern();
-        let before = dump(&graph);
-        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
+        let error = delete_error(&mut graph, query);
         match error.root_cause() {
             TraverserError::Gql {
-                kind,
-                message,
-                gqlstatus,
-                ..
+                kind, gqlstatus, ..
             } => {
-                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
-                assert_eq!(gqlstatus, "0A000", "{query}");
-                assert_eq!(
-                    *message,
-                    format!("{words} is not yet supported in this version")
-                );
-                let help = error.help().unwrap_or_default();
-                assert!(help.contains(".drop()"), "{query}: {help}");
+                assert_eq!(*kind, GqlErrorKind::Data, "{query}");
+                assert_eq!(gqlstatus, "G1001", "{query}");
             }
-            other => panic!("{query}: {other}"),
+            other => panic!("{query}: {other:?}"),
         }
-        assert_eq!(dump(&graph), before, "{query} changed the graph");
+        let help = error.help().unwrap_or_default();
+        assert!(help.contains("DETACH DELETE"), "{query}: {help}");
+    }
+}
+
+#[test]
+fn delete_takes_paths_lists_and_ignores_null_and_removed_targets() {
+    let (graph, _) = after("MATCH p = (:person {name: 'vadas'})<-[]-() DETACH DELETE p");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (4, 3));
+    let mut graph = TraversalGraph::new();
+    write(&mut graph, "INSERT (:A)-[:R]->(:B)-[:R]->(:C)");
+    write(&mut graph, "MATCH p = (:A)-->()-->(:C) DELETE p");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (0, 0));
+    // Lists, nested lists and NULL items.
+    let (graph, _) = after("MATCH (s:software) WITH collect(s) AS l DETACH DELETE l");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (4, 2));
+    let (graph, _) =
+        after("MATCH (s:software {name: 'lop'}) DETACH DELETE [[s], NULL, [NULL, [s]]]");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (5, 3));
+    // NULL targets are no-ops; the row still comes out.
+    let (graph, rows) = after("OPTIONAL MATCH (n:Nothing) DELETE n RETURN n");
+    assert_eq!(column(&rows, "n"), ["null"]);
+    assert_eq!(dump(&graph), dump(&TraversalGraph::tinkerpop_modern()));
+    let (graph, _) = after("MATCH (n) DELETE NULL");
+    assert_eq!(dump(&graph), dump(&TraversalGraph::tinkerpop_modern()));
+    // Twice: in several rows, twice in one clause, again in a later clause.
+    for query in [
+        "MATCH (n:software), (m:person) DETACH DELETE n",
+        "MATCH (n:software) DETACH DELETE n, n",
+        "MATCH (n:software) DETACH DELETE n DETACH DELETE n",
+        "MATCH (n:software)<-[r]-() DELETE r DETACH DELETE n",
+    ] {
+        let (graph, _) = after(query);
+        assert_eq!(
+            (graph.vertex_count(), graph.edge_count()),
+            (4, 2),
+            "{query}"
+        );
+        assert_eq!(count_label(&graph, "software"), 0, "{query}");
+    }
+}
+
+/// `count(n)` and `n IS NULL` of a deleted node still work; the rows after a DELETE are the
+/// rows before it, also under `LIMIT 0` (W13), and a value read across it is the value from
+/// before it (W10, TCK Delete6).
+#[test]
+fn rows_pass_a_delete_and_values_read_before_it_survive() {
+    let (graph, rows) =
+        after("MATCH (n:software) DETACH DELETE n RETURN count(n) AS c, n IS NULL AS z");
+    assert_eq!(column(&rows, "c"), ["2"]);
+    assert_eq!(column(&rows, "z"), ["false"]);
+    assert_eq!(graph.vertex_count(), 4);
+    let (graph, rows) = after("MATCH (n:software) DETACH DELETE n RETURN 42 AS num LIMIT 0");
+    assert!(rows.is_empty());
+    assert_eq!(graph.vertex_count(), 4);
+    let (graph, rows) = after(
+        "MATCH (n:software) WITH n, n.name AS name DETACH DELETE n RETURN name ORDER BY name",
+    );
+    assert_eq!(column(&rows, "name"), ["\"lop\"", "\"ripple\""]);
+    assert_eq!(graph.vertex_count(), 4);
+    let (_, rows) =
+        after("MATCH (n:person) WITH n, n.age AS age DETACH DELETE n RETURN sum(age) AS s");
+    assert_eq!(column(&rows, "s"), ["123"]);
+    // A later MATCH no longer finds the deleted elements.
+    let (_, rows) = after(
+        "MATCH (n:software) DETACH DELETE n WITH count(*) AS c MATCH (m) RETURN count(m) AS m",
+    );
+    assert_eq!(column(&rows, "m"), ["4"]);
+}
+
+/// Design W27 / W28 (user decision 5): reading or returning an element deleted earlier in the
+/// query is an error with the root cause `ElementRemoved` and a GQL help; `type(r)` of a
+/// deleted edge reads its label (E3, TCK Return2 [14]).
+#[test]
+fn reading_or_returning_a_deleted_element_is_an_error() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    for query in [
+        "MATCH (n:software) DETACH DELETE n RETURN n.name",
+        "MATCH (n:software) DETACH DELETE n RETURN labels(n)",
+        "MATCH (n:software) DETACH DELETE n RETURN element_id(n)",
+        "MATCH (n:software) DETACH DELETE n RETURN properties(n)",
+        "MATCH ()-[r:created]->() DELETE r RETURN r.weight",
+        "MATCH (n:software) DETACH DELETE n SET n.k = 1",
+        // W28: the element itself, also inside a list or a path, also after a WITH.
+        "MATCH (n:software) DETACH DELETE n RETURN n",
+        "MATCH (n:software) DETACH DELETE n RETURN [n] AS l",
+        "MATCH ()-[r:created]->() DELETE r RETURN r",
+        "MATCH p = (:software)<--() DETACH DELETE p RETURN p",
+        "MATCH (n:software) DETACH DELETE n WITH n RETURN n",
+    ] {
+        let error = delete_error(&mut graph, query);
+        assert!(
+            matches!(
+                error.root_cause(),
+                TraverserError::Graph(GraphError::ElementRemoved { .. })
+            ),
+            "{query}: {error:?}"
+        );
+        let help = error.help().unwrap_or_default();
+        assert!(
+            help.contains("WITH n, properties(n) AS p DETACH DELETE n RETURN p"),
+            "{query}: {help}"
+        );
+    }
+    let (_, rows) = after("MATCH ()-[r:created]->() DELETE r RETURN type(r) AS t");
+    assert_eq!(column(&rows, "t"), ["\"created\""; 4]);
+    let (_, rows) = after(
+        "MATCH (n:software) WITH n, properties(n) AS p DETACH DELETE n RETURN p.name AS m \
+         ORDER BY m",
+    );
+    assert_eq!(column(&rows, "m"), ["\"lop\"", "\"ripple\""]);
+}
+
+#[test]
+fn delete_lowers_to_one_step_per_clause_after_the_materialization() {
+    assert_eq!(
+        write_plan("MATCH (n:software) DETACH DELETE n", &[]),
+        "v(labels: [\"software\"])\ngql:delete(\"DETACH DELETE n\")\ndiscard()\n"
+    );
+    assert_eq!(
+        write_plan(
+            "MATCH (a)-[r:knows]->(b) DELETE r DETACH DELETE a, b RETURN count(*) AS c",
+            &[]
+        ),
+        "v()\nas(\"a\") [path: labels(a)]\nout_e(\"knows\") [path: labels(a)]\n\
+         as(\"r\") [path: labels(a,r)]\nin_v() [path: labels(a,r)]\n\
+         gql:delete(\"DELETE r\") [path: labels(a)]\ngql:delete(\"DETACH DELETE a, b\")\n\
+         gql:aggregate([], [\"count(*)\"], [\"c\"])\n"
+    );
+}
+
+#[test]
+fn delete_inside_a_call_body_runs_per_row_and_the_rows_pass_on() {
+    let (graph, rows) = after(
+        "MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) DETACH DELETE s } \
+         RETURN p.name AS n ORDER BY n",
+    );
+    assert_eq!(column(&rows, "n").len(), 4);
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (4, 2));
+    let (graph, _) = after("MATCH (p:person {name: 'vadas'}) CALL (p) { DETACH DELETE p }");
+    assert_eq!((graph.vertex_count(), graph.edge_count()), (5, 5));
+}
+
+#[test]
+fn a_failing_delete_row_changes_nothing() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    for query in [
+        "MATCH (p:person) DETACH DELETE p RETURN 100 / (p.age - 35)",
+        "MATCH (p:person) WITH p, 1 / (p.age - 35) AS x DETACH DELETE p",
+        "MATCH (p:person) WITH p.name AS x DELETE x",
+    ] {
+        let _ = delete_error(&mut graph, query);
     }
 }

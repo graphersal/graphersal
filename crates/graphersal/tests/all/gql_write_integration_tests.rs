@@ -4,7 +4,8 @@
 //! (`none`, `open` with write-time coercion, `closed` with `required` and `default`), the error
 //! of a read source (the same as a Gremlin write on it), the Store (reopen and recovery after
 //! GQL writes, feature `persist`) and, with feature `script`, per-traversal units in a Rhai
-//! script and saved queries whose body calls `g.gql("INSERT ...")`.
+//! script and saved queries whose body calls `g.gql("INSERT ...")`. Stage 3d: the change set,
+//! dry run, veto and statistics of a `DELETE`, and its journal (WAL replay, reopen).
 #![cfg(feature = "gql")]
 
 use std::sync::{Arc, Mutex};
@@ -235,6 +236,97 @@ fn the_statistics_stay_exact_after_inserts() {
     assert_eq!(graph.statistics(), Some(&kept));
 }
 
+// ----- stage 3d: DELETE in the unit machinery -----
+
+/// The change set of a GQL `DETACH DELETE` is the one of its `drop()` twin (every incident edge
+/// first, then the vertex); a dry run previews it, a veto leaves nothing.
+#[test]
+fn a_gql_delete_records_the_change_set_of_its_drop_twin() {
+    let changes = |gql: bool| {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        let (_, changes) = graph
+            .dry_run(|g| {
+                if gql {
+                    g.traversal_mut()
+                        .gql("MATCH (n:person {name: 'marko'}) DETACH DELETE n")
+                        .to_list()
+                } else {
+                    g.traversal_mut().v("1").drop().to_list()
+                }
+            })
+            .unwrap();
+        assert_eq!(dump(&graph), modern_dump(), "a dry run leaves the graph");
+        changes
+            .mutations()
+            .iter()
+            .map(|m| match m {
+                Mutation::DropVertex { id, .. } => format!("-V {id}"),
+                Mutation::DropEdge { id, .. } => format!("-E {id}"),
+                other => format!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let deleted = changes(true);
+    assert_eq!(deleted, changes(false));
+    assert_eq!(deleted, ["-E 2", "-E 1", "-E 0", "-V 1"]);
+
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let probe = Probe::default();
+    graph.register_commit_hook(Box::new(probe.clone())).unwrap();
+    *probe.veto.lock().unwrap() = true;
+    let seq = graph.last_commit_seq();
+    let err = gql(&mut graph, "MATCH (n:software) DETACH DELETE n").unwrap_err();
+    assert!(
+        format_diagnostic(&err).contains("refused by the probe"),
+        "{err}"
+    );
+    assert_eq!(dump(&graph), modern_dump());
+    assert_eq!(graph.last_commit_seq(), seq);
+    *probe.veto.lock().unwrap() = false;
+    ok(&mut graph, "MATCH (n:software) DETACH DELETE n");
+    assert_eq!(graph.last_commit_seq(), seq + 1);
+    let seen = probe.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].mutations().len(), 6, "4 edges, 2 vertices");
+}
+
+#[test]
+fn the_statistics_stay_exact_after_deletes() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    ok(&mut graph, "MATCH (n:software) DETACH DELETE n");
+    ok(&mut graph, "MATCH ()-[r:knows]->() DELETE r");
+    let kept = graph
+        .statistics()
+        .expect("TraversalGraph keeps statistics")
+        .clone();
+    assert_eq!(kept, GraphStatistics::from_storage(&graph));
+    assert_eq!((kept.vertex_count(), kept.edge_count()), (4, 0));
+    assert_eq!(kept.vertex_label_count("software"), 0);
+    assert_eq!(kept.vertex_label_count("person"), 4);
+    assert_eq!(kept.edge_label_count("created"), 0);
+    assert_eq!(kept.edge_label_count("knows"), 0);
+    // The same as after the Gremlin twin.
+    let mut twin = TraversalGraph::tinkerpop_modern();
+    twin.traversal_mut()
+        .v(None::<()>)
+        .has_label("software")
+        .drop()
+        .to_list()
+        .unwrap();
+    twin.traversal_mut()
+        .e(None::<()>)
+        .has_label("knows")
+        .drop()
+        .to_list()
+        .unwrap();
+    assert_eq!(twin.statistics(), Some(&kept));
+    // A failed delete (NODETACH) leaves the statistics as they were.
+    ok(&mut graph, "INSERT (:A)-[:R]->(:B)");
+    let kept = graph.statistics().unwrap().clone();
+    let _ = gql(&mut graph, "MATCH (a:A) DELETE a").unwrap_err();
+    assert_eq!(graph.statistics(), Some(&kept));
+}
+
 // ----- the schema -----
 
 #[test]
@@ -441,6 +533,42 @@ mod store {
         // The reopened store goes on writing.
         write(&reopened, "INSERT (:person {name: 'cy'})").unwrap();
         assert_eq!(reopened.graph().read().last_commit_seq(), seq + 1);
+    }
+
+    /// Stage 3d: a GQL `DELETE` / `DETACH DELETE` is journaled like `drop()`: the WAL replays
+    /// it after a crash and a reopen keeps it; a refused NODETACH delete appends nothing.
+    #[test]
+    fn gql_deletes_survive_a_reopen_and_a_crash() {
+        let dir = MemDir::named("memory:gql-delete");
+        let store = Store::create(&dir, StoreOptions::new()).unwrap();
+        write(
+            &store,
+            "INSERT (a:person {name: 'ann'})-[:knows]->(b:person {name: 'bob'}), \
+             (b)-[:knows]->(:person {name: 'cy'}), (:Tmp)",
+        )
+        .unwrap();
+        write(&store, "MATCH (t:Tmp) DELETE t").unwrap();
+        let seq = store.graph().read().last_commit_seq();
+        assert!(write(&store, "MATCH (p {name: 'ann'}) DELETE p").is_err());
+        assert_eq!(store.graph().read().last_commit_seq(), seq);
+        write(&store, "MATCH (p {name: 'bob'}) DETACH DELETE p").unwrap();
+        write(&store, "MATCH (p:person) DELETE p").unwrap();
+        let seq = seq + 2;
+        assert_eq!(store.graph().read().last_commit_seq(), seq);
+        let before = dump(&*store.graph().read());
+        assert!(before.is_empty(), "{before:?}");
+
+        let crashed = dir.deep_copy();
+        let recovered = Store::open(&crashed, StoreOptions::new()).unwrap();
+        assert!(!recovered.open_report().clean_close);
+        assert_eq!(recovered.open_report().commit_seq, seq);
+        assert_eq!(dump(&*recovered.graph().read()), before);
+        drop(recovered);
+
+        store.close().unwrap();
+        let reopened = Store::open(&dir, StoreOptions::new()).unwrap();
+        assert!(reopened.open_report().clean_close);
+        assert_eq!(dump(&*reopened.graph().read()), before);
     }
 }
 

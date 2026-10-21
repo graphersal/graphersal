@@ -478,15 +478,15 @@ missing `required` property names the `INSERT` map and `coalesce()`, a type mism
 conversion function (`toInteger()`, ...) with a `$parameter` example
 ([Writing with GQL](writes.md#schema)). A bound node written with labels or properties
 (`MATCH (p:person) INSERT (p:admin)`) gets the `SET` that changes it, built from the query, as in
-`g.gql("MATCH (p:person) SET p:admin")`, beside the Gremlin steps. The write clauses that are not supported yet (`DELETE`,
-`MERGE`, `FOREACH`) are `0A000` with a help line naming the Gremlin step or the GQL form:
+`g.gql("MATCH (p:person) SET p:admin")`, beside the Gremlin steps. The write clauses that are not supported yet (`MERGE`,
+`FOREACH`) are `0A000` with a help line naming the Gremlin step or the GQL form:
 
 ```rhai,graph=modern
-g.gql("MATCH (p) DETACH DELETE p")   // error: DETACH DELETE is not yet supported in this version
+g.gql("MERGE (p:person {name: 'ann'})")   // error: MERGE is not yet supported in this version
 ```
 
 ```text
-Help: remove the elements with the Gremlin step drop(), which removes a vertex with its edges, for example g.v().has_label("person").has("name", "marko").drop(). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
+Help: find or create the element with the Gremlin steps merge_v() and merge_e(), for example g.merge_v(#{"T.label": "person", name: "marko"}). This construct comes in a later version of gql(); until then, write the query without it or as Gremlin steps.
 ```
 
 ## SET and REMOVE

@@ -278,7 +278,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// `detach` for `DETACH DELETE`), the targets reading the variable slots `bindings` and
     /// hosting the subqueries `children` (child `i` answers the targets' subquery `i`); see
     /// [`StepGqlDelete`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
     pub(crate) fn gql_delete(
         self,
         query: Arc<str>,
@@ -297,7 +296,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:delete(targets)` (a `DELETE` in a `CALL { }` body); see
     /// [`GraphTraversalSource::gql_delete`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
     pub(crate) fn gql_delete(
         self,
         query: Arc<str>,

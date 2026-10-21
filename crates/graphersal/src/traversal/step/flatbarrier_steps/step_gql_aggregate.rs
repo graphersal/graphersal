@@ -296,7 +296,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:aggregate(..)` as the `RETURN` that ends the query: like
     /// [`Self::gql_aggregate_hosted`], and a column holding an element a `DELETE` removed
     /// earlier in the query is the W28 error; see [`StepGqlAggregate`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
     pub(crate) fn gql_aggregate_returning(
         self,
         query: Arc<str>,
@@ -322,7 +321,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:aggregate(..)` as the `RETURN` that ends the query (a `UNION` operand or
     /// the query after `NEXT`); see [`GraphTraversalSource::gql_aggregate_returning`].
-    #[cfg_attr(not(test), allow(dead_code, reason = "lowered since 3d.T3"))]
     pub(crate) fn gql_aggregate_returning(
         self,
         query: Arc<str>,

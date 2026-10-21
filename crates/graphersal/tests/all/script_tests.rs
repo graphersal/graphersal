@@ -787,6 +787,65 @@ mod tests {
         assert_eq!(graph.read().vertex_count(), 6);
     }
 
+    /// Rule 3: a GQL `DELETE` / `DETACH DELETE` (stage 3d) mutates through the DSL: with a
+    /// terminal, with parameters, returning a count, as a bare (rendered) traversal, followed by
+    /// camelCase steps, in a saved GQL query, and persisting across evaluations; a refused
+    /// NODETACH delete leaves the graph.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_script_eval_gql_delete_mutations() {
+        let graph = Arc::new(GraphSource::tinkerpop_modern());
+        let script = r#"
+            g.gql("MATCH ()-[r:knows]->() DELETE r").iterate();
+            let c = g.gql("MATCH (p {name: $n}) DETACH DELETE p RETURN count(p) AS c", #{n: "josh"}).select("c").next();
+            g.V().count().next() * 1000 + g.E().count().next() * 10 + c
+        "#;
+        assert_eq!(
+            eval_value(graph.clone(), script).unwrap().as_int().ok(),
+            Some(5021)
+        );
+        // A NODETACH delete of a node with edges fails and changes nothing.
+        let err = eval_value(
+            graph.clone(),
+            r#"g.gql("MATCH (p:software) DELETE p").iterate()"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("G1001"), "{err}");
+        assert_eq!(graph.read().vertex_count(), 5);
+        // A bare writing traversal as the last statement is executed by the visualizer.
+        eval(
+            graph.clone(),
+            r#"g.gql("MATCH (s:software {name: 'ripple'}) DETACH DELETE s")"#,
+        )
+        .expect("bare GQL DELETE must run");
+        assert_eq!(graph.read().vertex_count(), 4);
+        // camelCase steps after a GQL delete.
+        let out = eval_value(
+            graph.clone(),
+            r#"g.gql("MATCH ()-[e:created]->(s) DELETE e RETURN s").select("s").property("k", 2).iterate();
+               g.V().has("k", 2).count().next() * 10 + g.E().count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(out.as_int().ok(), Some(10));
+        // A saved GQL query with DELETE writes when called.
+        eval(
+            graph.clone(),
+            r#"g.defineQuery(#{name: "forget", language: "gql", params: #{n: "string"},
+                   body: "MATCH (p {name: $n}) DETACH DELETE p"});
+               g.query("forget", #{n: "lop"}).iterate()"#,
+        )
+        .expect("saved GQL DELETE must run");
+        // The deletes persist across evaluations.
+        assert_eq!(
+            eval_value(graph.clone(), r#"g.V().values("name").order().toList()"#)
+                .unwrap()
+                .to_string(),
+            r#"["marko", "peter", "vadas"]"#
+        );
+        assert_eq!(graph.read().edge_count(), 0);
+    }
+
     /// A mutating `by()` child traversal makes the plan mutating (behaviour change: it used to
     /// fail with "Cannot mutate immutable graph reference"): the child's writes reach the graph,
     /// once per evaluated traverser, also when nested deeper than one level.

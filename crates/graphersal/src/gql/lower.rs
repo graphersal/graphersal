@@ -114,8 +114,8 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundDelete, BoundInsert, BoundLinear, BoundQuery,
-    BoundRemoveKind, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count,
+    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundQuery, BoundRemoveKind,
+    BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef, Conjunct, Count, DeleteKind,
     InsertProperty, Predicate, Segment, SortKey, TargetKind, WriteTarget, bind_with_parameters,
 };
 use super::eval::{Scope, Value, compile};
@@ -428,18 +428,22 @@ enum Instr<S: GraphStorage> {
         ordinal: Option<GqlOrdinal>,
         subqueries: Bodies<S>,
     },
-    /// `gql:project(columns)` at `site`.
+    /// `gql:project(columns)` at `site`; `returning` for the `RETURN` that ends a query
+    /// holding a `DELETE` (a column holding a removed element is the W28 error, stage 3d).
     Project {
         columns: Vec<GqlColumn<S>>,
         site: Site,
         subqueries: Bodies<S>,
+        returning: bool,
     },
-    /// `gql:aggregate(keys, aggregates, columns)` at `site`: an aggregating `RETURN` / `WITH`.
+    /// `gql:aggregate(keys, aggregates, columns)` at `site`: an aggregating `RETURN` / `WITH`;
+    /// `returning` as for [`Instr::Project`].
     Aggregate {
         columns: Vec<GqlAggregateColumn<S>>,
         calls: Vec<AggregateCall<GqlElement<S>>>,
         site: Site,
         subqueries: Bodies<S>,
+        returning: bool,
     },
     /// `gql:distinct()` (GQL equality, decision C3).
     Distinct,
@@ -556,6 +560,16 @@ enum Instr<S: GraphStorage> {
         items: Vec<GqlRemoveItem>,
         targets: Vec<BindingId>,
         site: Site,
+    },
+    /// `gql:delete(targets)` at `site` (stage 3d): one `DELETE` clause (`keyword` its keywords
+    /// as written, `detach` for `DETACH`) on all rows at once, its targets read at `site`,
+    /// hosting the subqueries they hold; the rows pass on unchanged.
+    Delete {
+        keyword: Span,
+        detach: bool,
+        targets: Vec<GqlDeleteTarget<S>>,
+        site: Site,
+        subqueries: Bodies<S>,
     },
     /// `discard()`: the end of a pipeline ending in `FINISH` or a write clause (stage 3a, design
     /// W2): every row has done its work, none is returned.
@@ -834,7 +848,19 @@ impl<S: GraphStorage> Lowered<S> {
                     columns,
                     site,
                     subqueries,
+                    returning: false,
                 } => g.gql_project(
+                    Arc::clone(&self.query),
+                    columns,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
+                Instr::Project {
+                    columns,
+                    site,
+                    subqueries,
+                    returning: true,
+                } => g.gql_project_returning(
                     Arc::clone(&self.query),
                     columns,
                     self.bindings(site),
@@ -859,7 +885,21 @@ impl<S: GraphStorage> Lowered<S> {
                     calls,
                     site,
                     subqueries,
+                    returning: false,
                 } => g.gql_aggregate(
+                    Arc::clone(&self.query),
+                    columns,
+                    calls,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
+                Instr::Aggregate {
+                    columns,
+                    calls,
+                    site,
+                    subqueries,
+                    returning: true,
+                } => g.gql_aggregate_returning(
                     Arc::clone(&self.query),
                     columns,
                     calls,
@@ -1013,6 +1053,20 @@ impl<S: GraphStorage> Lowered<S> {
                     }
                     g.gql_remove(Arc::clone(&self.query), items)
                 }
+                Instr::Delete {
+                    keyword,
+                    detach,
+                    targets,
+                    site,
+                    subqueries,
+                } => g.gql_delete(
+                    Arc::clone(&self.query),
+                    keyword,
+                    detach,
+                    targets,
+                    self.bindings(site),
+                    self.children(subqueries),
+                ),
                 Instr::Discard => g.discard(),
             };
         }
@@ -1240,6 +1294,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::InsertEdge { .. }
             | Instr::Set { .. }
             | Instr::Remove { .. }
+            | Instr::Delete { .. }
             | Instr::Discard => t,
         }
     }
@@ -1328,7 +1383,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     /// `gql:delete(targets)`: one `DELETE` clause (stage 3d); `keyword` the clause keyword(s)
     /// as written (`DELETE`, `DETACH DELETE`, `NODETACH DELETE`), `detach` for `DETACH`; the
     /// targets read the slots `bindings` and host the subqueries `children`.
-    #[allow(dead_code, reason = "lowered since 3d.T3")]
     #[allow(clippy::too_many_arguments)]
     fn gql_delete(
         self,
@@ -1341,7 +1395,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     ) -> Self;
     /// `gql:project(columns)` as the `RETURN` that ends the query: a column holding an element
     /// a `DELETE` removed earlier is the W28 error (stage 3d).
-    #[allow(dead_code, reason = "lowered since 3d.T3")]
     fn gql_project_returning(
         self,
         query: Arc<str>,
@@ -1350,7 +1403,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
     /// `gql:aggregate(..)` as the `RETURN` that ends the query (W28, stage 3d).
-    #[allow(dead_code, reason = "lowered since 3d.T3")]
     fn gql_aggregate_returning(
         self,
         query: Arc<str>,
@@ -1949,7 +2001,17 @@ impl<'q> Lowering<'q> {
     fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
         let bound = self.bound;
-        self.composite(&self.plan.body, &bound.body, Start::Query, &mut instrs)?;
+        // The `RETURN` ending a query that deletes checks for removed elements (W28).
+        let returning = bound.segments.iter().any(|segment| {
+            matches!(segment, Segment::Write(write) if matches!(**write, BoundWrite::Delete(_)))
+        });
+        self.composite(
+            &self.plan.body,
+            &bound.body,
+            Start::Query,
+            returning,
+            &mut instrs,
+        )?;
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
@@ -1993,15 +2055,18 @@ impl<'q> Lowering<'q> {
     /// first block of the query, a mid-traversal `union()` after `NEXT` or in a `CALL` body,
     /// whose operands each read every record of the block before, or the incoming row: the
     /// children of `union()` see the whole input), then `gql:distinct()` for `UNION` /
-    /// `UNION DISTINCT`.
+    /// `UNION DISTINCT`. `returning`: the `RETURN` of its last block ends a query that deletes
+    /// (its operands' result pipelines use the returning builders, W28 of stage 3d).
     #[inline(never)]
     fn composite<S: GraphStorage>(
         &self,
         plan: &'q CompositePlan,
         bound: &'q BoundComposite,
         start: Start,
+        returning: bool,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<(), TraverserError> {
+        let last = bound.next.len();
         let blocks = std::iter::once(&bound.first).chain(&bound.next);
         if plan.blocks().count() != bound.next.len() + 1 {
             return Err(self.unlowered());
@@ -2016,13 +2081,14 @@ impl<'q> Lowering<'q> {
             } else {
                 Start::At(Site::default())
             };
+            let returning = returning && k == last;
             if block_plan.unions.is_empty() {
-                self.linear(&block_plan.first, &block.first, start, instrs)?;
+                self.linear(&block_plan.first, &block.first, start, returning, instrs)?;
             } else {
                 let mut branches = Vec::with_capacity(block_plan.unions.len() + 1);
                 for (pipeline, linear) in block_plan.operands().zip(block.operands()) {
                     let mut branch = Vec::new();
-                    self.linear(pipeline, linear, start, &mut branch)?;
+                    self.linear(pipeline, linear, start, returning, &mut branch)?;
                     branches.push(branch);
                 }
                 instrs.push(Instr::Union(branches));
@@ -2035,12 +2101,13 @@ impl<'q> Lowering<'q> {
     }
 
     /// Lowers one linear query: its match pipeline, its later stages, its result pipeline,
-    /// from `start` (see [`Start`]).
+    /// from `start` (see [`Start`]); `returning` as for [`Self::composite`].
     fn linear<S: GraphStorage>(
         &self,
         plan: &'q PipelinePlan,
         linear: &BoundLinear,
         start: Start,
+        returning: bool,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<(), TraverserError> {
         let site = match start {
@@ -2087,6 +2154,7 @@ impl<'q> Lowering<'q> {
                 &linear.columns,
                 &linear.order_by,
                 (site, self.result_of(linear)),
+                returning,
                 instrs,
             )?;
         } else {
@@ -2211,34 +2279,39 @@ impl<'q> Lowering<'q> {
                     site,
                 });
             }
-            // Bound since stage 3d.T1, lowered from 3d.T3 on: refused before the run.
-            BoundWrite::Delete(delete) => return Err(self.delete_not_yet(delete)),
+            // `DELETE` (stage 3d): one step on all rows at once (it collects every target, checks
+            // `NODETACH`, then removes); it emits the rows unchanged, the site stays.
+            BoundWrite::Delete(delete) => {
+                let hooks = Hooks::default();
+                let mut targets = Vec::with_capacity(delete.targets.len());
+                for target in &delete.targets {
+                    let (element, labels) = match &target.kind {
+                        DeleteKind::Node => (Some(ElementKind::Vertex), Vec::new()),
+                        DeleteKind::Edge { labels } => (
+                            Some(ElementKind::Edge),
+                            labels.as_deref().map(label_names).unwrap_or_default(),
+                        ),
+                        DeleteKind::Path
+                        | DeleteKind::List
+                        | DeleteKind::Null
+                        | DeleteKind::Unknown => (None, Vec::new()),
+                    };
+                    targets.push(GqlDeleteTarget {
+                        value: self.compile_in(&target.value.expr, None, &[], Some(&hooks))?,
+                        element,
+                        labels,
+                    });
+                }
+                instrs.push(Instr::Delete {
+                    keyword: delete.keyword,
+                    detach: delete.detach,
+                    targets,
+                    site,
+                    subqueries: self.bodies(hooks, site)?,
+                });
+            }
         }
         Ok(site)
-    }
-
-    /// The error of a bound `DELETE` the lowering does not emit yet (until stage 3d.T3), at
-    /// its keywords: the Gremlin step that does it.
-    fn delete_not_yet(&self, delete: &BoundDelete) -> TraverserError {
-        let keyword = delete.keyword;
-        let word = self
-            .query
-            .get(keyword.start..keyword.end)
-            .unwrap_or("DELETE")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_uppercase();
-        GqlErrorBuilder::new(
-            GqlErrorKind::NotYet,
-            keyword.start..keyword.end,
-            format!("{word} is not yet supported in this version"),
-        )
-        .alternative(
-            "remove the elements with the Gremlin step drop(), which removes a vertex with its \
-             edges, for example g.v().has_label(\"person\").has(\"name\", \"marko\").drop()",
-        )
-        .into_error(self.query)
     }
 
     /// The target of a `SET` / `REMOVE` item with the static facts the access requests are
@@ -2337,7 +2410,13 @@ impl<'q> Lowering<'q> {
             return Err(self.unlowered());
         };
         let mut body = Vec::new();
-        self.composite(&call.plan, &bound_call.body, Start::At(site), &mut body)?;
+        self.composite(
+            &call.plan,
+            &bound_call.body,
+            Start::At(site),
+            false,
+            &mut body,
+        )?;
         if bound_call.unit() {
             // A unit subquery (stage 3a, design W3): the body (ending in `discard()`) runs per
             // row, and the row passes on unchanged: `optional(__.<body>.discard())`, also for
@@ -2609,6 +2688,7 @@ impl<'q> Lowering<'q> {
             &with.columns,
             &with.order_by,
             (site, m.segment),
+            false,
             instrs,
         )?;
         let row = Site::row(m.segment);
@@ -3023,7 +3103,7 @@ impl<'q> Lowering<'q> {
         let mut body = Vec::new();
         let end = match (&body_plan.query, sub.query.as_deref()) {
             (Some(plan), Some(query)) => {
-                self.composite(plan, query, Start::At(site), &mut body)?;
+                self.composite(plan, query, Start::At(site), false, &mut body)?;
                 None
             }
             (None, None) => Some(self.ops(&body_plan.ops, site, &mut body)?),
@@ -3170,6 +3250,7 @@ impl<'q> Lowering<'q> {
         columns: &[Column],
         order_by: &[SortKey],
         (site, result): (Site, usize),
+        returning: bool,
         instrs: &mut Vec<Instr<S>>,
     ) -> Result<bool, TraverserError> {
         let n = self.bound.bindings.len();
@@ -3190,6 +3271,7 @@ impl<'q> Lowering<'q> {
                         columns: compiled,
                         site,
                         subqueries: self.bodies(hooks, site)?,
+                        returning,
                     });
                 }
                 ResultOp::Aggregate => {
@@ -3213,6 +3295,7 @@ impl<'q> Lowering<'q> {
                         calls,
                         site,
                         subqueries: self.bodies(hooks, site)?,
+                        returning,
                     });
                 }
                 ResultOp::Distinct => instrs.push(Instr::Distinct),
@@ -3308,6 +3391,9 @@ impl<'q> Lowering<'q> {
                     site, subqueries, ..
                 }
                 | Instr::Set {
+                    site, subqueries, ..
+                }
+                | Instr::Delete {
                     site, subqueries, ..
                 } => {
                     site.ordered = Some(result);
@@ -3966,6 +4052,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 columns,
                 site,
                 subqueries,
+                ..
             } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
@@ -3992,6 +4079,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 calls,
                 site,
                 subqueries,
+                ..
             } => {
                 for column in columns {
                     column.expr.variables(&mut slots);
@@ -4076,6 +4164,18 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
                 slots.extend(targets.iter().map(|id| id.0));
                 marks.read(&mut slots, *site);
             }
+            Instr::Delete {
+                targets,
+                site,
+                subqueries,
+                ..
+            } => {
+                for target in targets {
+                    target.value.variables(&mut slots);
+                }
+                marks.read(&mut slots, *site);
+                subqueries.iter().for_each(|body| mark_reads(body, marks));
+            }
             Instr::Hop(hop) => mark_reads(&hop.steps, marks),
             Instr::Optional(part)
             | Instr::Exists { body: part, .. }
@@ -4133,6 +4233,9 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
                 site, subqueries, ..
             }
             | Instr::Set {
+                site, subqueries, ..
+            }
+            | Instr::Delete {
                 site, subqueries, ..
             } => {
                 site.part = Some(segment);

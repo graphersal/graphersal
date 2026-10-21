@@ -2,9 +2,10 @@
 
 `gql()` writes too. This version supports **`INSERT`** (Cypher `CREATE` is its
 [alias](aliases.md)), which creates nodes and edges, and **`SET`** and **`REMOVE`**, which change
-the properties and labels of existing ones; each runs once for each row that reaches it.
-`DELETE` and `MERGE` come in later versions; until then they fail before the run with GQLSTATUS
-`0A000` and a help line naming the Gremlin step that does the same ([Not yet](#not-yet)).
+the properties and labels of existing ones, and **`DELETE`** / **`DETACH DELETE`**, which remove
+them; each runs once for each row that reaches it. `MERGE` comes in a later version; until then
+it fails before the run with GQLSTATUS `0A000` and a help line naming the Gremlin step that does
+the same ([Not yet](#not-yet)).
 
 A writing query is one unit, like every traversal: it commits when it succeeds, and a query that
 fails, on any row, changes nothing ([Units](#one-query-is-one-unit)).
@@ -356,14 +357,12 @@ g.gql("MATCH (p:person {name: 'marko'}) SET p.age = 1 RETURN p").profile()
 
 | Construct | Until then |
 |---|---|
-| `DELETE n`, `DETACH DELETE n`, `NODETACH DELETE n` | Gremlin `drop()` |
 | `MERGE` | Gremlin `merge_v()`, `merge_e()` |
 | `FOREACH (x IN list \| ...)` | `FOR x IN list INSERT ...` |
 | a write in a `UNION` operand, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | a deeper `SET` / `REMOVE` target (`n.a.b`, `head(l).k`), Cypher's dynamic `n[key]` | name the element with `WITH .. AS x` and write the item on `x`; for a nested value Gremlin `property()` with a [jpath key](../users_guide/jpath_keys.md) |
 
 ```rhai,graph=modern
-g.gql("MATCH (n) DETACH DELETE n")   // error: DETACH DELETE is not yet supported in this version
 g.gql("MERGE (n:person {name: 'ann'})")   // error: MERGE is not yet supported in this version
 g.gql("MATCH (p:person {name: 'marko'}) SET p.address.city = 'Rome'")   // error: `p.address.city` as a SET target is not yet supported
 ```
