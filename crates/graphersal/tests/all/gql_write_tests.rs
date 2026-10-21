@@ -9,7 +9,11 @@
 //! read-after-write (an index included), the schema, `CALL` bodies and saved queries. Stage 3d:
 //! `DELETE` / `DETACH DELETE` twins against `drop()`, the NODETACH check per clause (G1001,
 //! nothing removed), paths, lists, `NULL`, twice, `count(n)` after a DELETE, reads and returns
-//! of a deleted element (W27 / W28), `CALL` bodies and saved queries.
+//! of a deleted element (W27 / W28), `CALL` bodies and saved queries. Stage 3e: `MERGE` twins
+//! against `merge_v()` / `merge_e()`, the `coalesce()` idioms and the pure-GQL form
+//! `CALL { FILTER NOT EXISTS { .. } INSERT .. }`, bound ends (`WITH` columns, NULL), ON items in
+//! written order, NULL property values (E1), several MERGEs in one query, an index-served match,
+//! `CALL` bodies, the create time and saved queries.
 #![cfg(feature = "gql")]
 
 use graphersal::error::GqlErrorKind;
@@ -1032,6 +1036,197 @@ mod script {
         // marko's `knows` edges went with `unlink`, his `created` edge with him.
         assert_eq!((read.vertex_count(), read.edge_count()), (5, 3));
     }
+    /// The GQL `query` and the Gremlin `gremlin` leave the same graph (a MERGE that only
+    /// matches may leave the graph as it was).
+    fn same_state(query: &str, gremlin: &str) {
+        let gql = state(&format!("g.gql({query:?}).iterate()"));
+        let twin = state(&format!("{gremlin}.iterate()"));
+        assert_eq!(gql, twin, "{query}\nvs {gremlin}");
+    }
+
+    /// Stage 3e: MERGE leaves the graph its Gremlin twins leave where label and equality
+    /// semantics agree: `merge_v()` over injected maps (per traverser, W34), `merge_v(map)` with
+    /// `Merge.onMatch` / `Merge.onCreate` (an `onCreate` map holding only new keys adds them, as
+    /// `ON CREATE SET`), `merge_e()` between bound ends (`Merge.outV` / `Merge.inV`), the
+    /// `fold().coalesce(__.unfold(), __.add_v(..))` idiom and its per-row form
+    /// `coalesce(.. where(P.eq("x")).by("k").by(), add_v(..))`, and an undirected match through
+    /// `both_e()` + `other_v()`.
+    #[test]
+    fn merge_leaves_the_graph_its_gremlin_twins_leave() {
+        for (query, gremlin) in [
+            (
+                "FOR x IN [1, 1, 2] MERGE (:n {k: x})",
+                r#"g.inject(#{"T.label": "n", k: 1}, #{"T.label": "n", k: 1}, #{"T.label": "n", k: 2}).merge_v()"#,
+            ),
+            (
+                "MERGE (p:person {name: 'marko'}) ON MATCH SET p.age = 30",
+                r#"g.merge_v(#{"T.label": "person", name: "marko"}).option(Merge.onMatch, #{age: 30})"#,
+            ),
+            (
+                "MERGE (p:person {name: 'q'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = 2",
+                r#"g.merge_v(#{"T.label": "person", name: "q"}).option(Merge.onCreate, #{age: 1}).option(Merge.onMatch, #{age: 2})"#,
+            ),
+            (
+                "MERGE (p:person) ON MATCH SET p.seen = true",
+                r#"g.merge_v(#{"T.label": "person"}).option(Merge.onMatch, #{seen: true})"#,
+            ),
+            (
+                "MATCH (a {name: 'marko'}), (b {name: 'lop'}) MERGE (a)-[:likes]->(b)",
+                r#"g.v("1").as("a").v("3").as("b").merge_e(#{"T.label": "likes", "Direction.OUT": Merge.outV, "Direction.IN": Merge.inV}).option(Merge.outV, __.select("a")).option(Merge.inV, __.select("b"))"#,
+            ),
+            (
+                "MATCH (a {name: 'marko'}), (b {name: 'lop'}) MERGE (a)-[e:created {weight: 0.4}]->(b) \
+                 ON MATCH SET e.w = 2",
+                r#"g.v("1").as("a").v("3").as("b").merge_e(#{"T.label": "created", weight: 0.4, "Direction.OUT": Merge.outV, "Direction.IN": Merge.inV}).option(Merge.outV, __.select("a")).option(Merge.inV, __.select("b")).option(Merge.onMatch, #{w: 2})"#,
+            ),
+            (
+                "MATCH (a {name: 'josh'}), (b {name: 'marko'}) MERGE (a)-[e:knows]->(b) \
+                 ON CREATE SET e.w = 1 ON MATCH SET e.w = 2",
+                r#"g.v("4").as("a").v("1").as("b").merge_e(#{"T.label": "knows", "Direction.OUT": Merge.outV, "Direction.IN": Merge.inV}).option(Merge.outV, __.select("a")).option(Merge.inV, __.select("b")).option(Merge.onCreate, #{w: 1}).option(Merge.onMatch, #{w: 2})"#,
+            ),
+            (
+                "MERGE (:person {name: 'marko'})",
+                r#"g.v().has("person", "name", "marko").fold().coalesce(__.unfold(), __.add_v("person").property("name", "marko"))"#,
+            ),
+            (
+                "MERGE (:person {name: 'zed'})",
+                r#"g.v().has("person", "name", "zed").fold().coalesce(__.unfold(), __.add_v("person").property("name", "zed"))"#,
+            ),
+            (
+                "FOR x IN [1, 1, 2] MERGE (:n {k: x})",
+                r#"g.inject(1, 1, 2).as("x").coalesce(__.v().has_label("n").where(P.eq("x")).by("k").by(), __.add_v("n").property("k", __.select("x")))"#,
+            ),
+            (
+                "MATCH (a {name: 'josh'}), (b {name: 'marko'}) MERGE (a)-[:knows]-(b)",
+                r#"g.v("4").as("a").v("1").as("b").coalesce(__.select("a").both_e("knows").where(__.other_v().as("b")), __.add_e("knows").from("a").to("b"))"#,
+            ),
+            (
+                "MATCH (a {name: 'josh'}), (b {name: 'vadas'}) MERGE (a)-[:knows]-(b)",
+                r#"g.v("4").as("a").v("2").as("b").coalesce(__.select("a").both_e("knows").where(__.other_v().as("b")), __.add_e("knows").from("a").to("b"))"#,
+            ),
+        ] {
+            same_state(query, gremlin);
+        }
+        // The creating rows change the graph (the twins above are no empty comparison).
+        twin(
+            "FOR x IN [1, 1, 2] MERGE (:n {k: x})",
+            r#"g.inject(#{"T.label": "n", k: 1}, #{"T.label": "n", k: 1}, #{"T.label": "n", k: 2}).merge_v()"#,
+        );
+        twin(
+            "MATCH (a {name: 'josh'}), (b {name: 'vadas'}) MERGE (a)-[:knows]-(b)",
+            r#"g.v("4").as("a").v("2").as("b").add_e("knows").from("a").to("b")"#,
+        );
+    }
+
+    #[test]
+    fn a_gql_merge_is_mutating() {
+        for query in [
+            "MERGE (n:N)",
+            "MERGE (p:person {name: 'marko'}) RETURN p",
+            "MATCH (a), (b) MERGE (a)-[:r]->(b)",
+            "MERGE (p:person) ON MATCH SET p.k = 1",
+            "MATCH (p) CALL (p) { MERGE (p)-[:r]->(:x) } RETURN p",
+        ] {
+            let traversal = eval_value(modern(), &format!("g.gql({query:?})"))
+                .unwrap()
+                .cast::<ScriptGraphTraversalSource>();
+            assert!(traversal.is_mutating(), "{query}");
+        }
+    }
+
+    /// A saved GQL query with MERGE writes (dialect `/2`) with the `Create` effects of what its
+    /// pattern can create and, with ON items, their `Update` effects.
+    #[test]
+    fn a_saved_gql_query_with_merge_writes_with_create_and_update_effects() {
+        use graphersal::catalog::GQL_WRITING_QUERY_DIALECT;
+        let graph = modern();
+        let text = |script: &str| {
+            eval_value(graph.clone(), script)
+                .unwrap_or_else(|e| panic!("{script}: {e}"))
+                .to_string()
+        };
+        let _ = text(
+            r#"g.define_query(#{name: "visit", language: "gql", params: #{n: "string"},
+                   body: "MERGE (p:person {name: $n}) ON CREATE SET p.visits = 1 ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.visits AS v"});
+               g.define_query(#{name: "link", language: "gql", params: #{a: "string", b: "string"},
+                   body: "MATCH (x:person {name: $a}), (y:person {name: $b}) MERGE (x)-[:knows]->(y)"})"#,
+        );
+        assert_eq!(
+            text(r#"g.get_query("visit").dialect"#),
+            GQL_WRITING_QUERY_DIALECT
+        );
+        assert_eq!(text(r#"g.get_query("visit").writes"#), "true");
+        assert_eq!(
+            text(r#"g.get_query("visit").effects.map(|e| e.text)"#),
+            r#"["Create Data(vertex \"person\")", "Update Data(vertex)"]"#
+        );
+        assert_eq!(
+            text(r#"g.get_query("link").effects.map(|e| e.text)"#),
+            r#"["Create Data(edge \"knows\")"]"#
+        );
+        assert_eq!(
+            text(r#"g.query("visit", #{n: "zed"}).select("v").to_list()"#),
+            "[1]"
+        );
+        assert_eq!(
+            text(r#"g.query("visit", #{n: "zed"}).select("v").to_list()"#),
+            "[2]"
+        );
+        let _ = text(r#"g.query("link", #{a: "marko", b: "josh"}).iterate()"#);
+        let _ = text(r#"g.query("link", #{a: "josh", b: "marko"}).iterate()"#);
+        let read = graph.read();
+        assert_eq!((read.vertex_count(), read.edge_count()), (7, 7));
+    }
+
+    /// Elements a MERGE creates (top level and in a `CALL` body) carry the evaluation time of
+    /// the script (`defaultFunction: now`), as INSERT does; a match creates nothing.
+    #[test]
+    fn merged_elements_carry_the_evaluation_time() {
+        use crate::script_host::{engine_with_options, graph_scope_with_options};
+        use graphersal::temporal::{DateTime, Temporal};
+        let schema = GraphSchema::from_json(
+            r#"{"mode": "open", "vertices": {"event": {"schema": {"type": "object", "properties": {
+                 "at": {"type": "string", "format": "date-time", "defaultFunction": "now"}}}}},
+               "edges": {"next": {"schema": {"type": "object", "properties": {
+                 "at": {"type": "string", "format": "date-time", "defaultFunction": "now"}}}}}}"#,
+        )
+        .unwrap();
+        let graph = Arc::new(Graph::new(TraversalGraph::new()));
+        graphersal::storage::AnyGraph::set_schema(&*graph, schema).unwrap();
+        let pinned: DateTime = "2023-08-02T23:30:00-07:00".parse().unwrap();
+        let mut engine = engine_with_options(&Default::default(), &[]);
+        graphersal::script::pin_now(&mut engine, Some(pinned));
+        let mut scope = graph_scope_with_options(graph.clone(), &[]);
+        let _ = engine
+            .eval_with_scope::<graphersal::script::rhai::Dynamic>(
+                &mut scope,
+                r#"g.gql("FOR i IN [1, 2, 1] MERGE (:event {i: i})-[:next]->(:event {j: i})").iterate();
+                   g.gql("MATCH (e:event {i: 1}) CALL (e) { MERGE (e)-[:next]->(:event {k: 1}) } RETURN e", #{}).iterate()"#,
+            )
+            .unwrap();
+        graphersal::script::pin_now(&mut engine, None);
+        let read = graph.read();
+        let mut stamps = 0;
+        for v in read.vertices() {
+            let at = read.vertex_properties(v).and_then(|p| p.get("at")).cloned();
+            assert_eq!(
+                at,
+                Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
+            );
+            stamps += 1;
+        }
+        for e in read.edges() {
+            let at = read.edge_properties(e).and_then(|p| p.get("at")).cloned();
+            assert_eq!(
+                at,
+                Some(ElementProperty::Temporal(Temporal::DateTime(pinned)))
+            );
+            stamps += 1;
+        }
+        // Rows 1 and 2 create two events and an edge each, row 3 matches; the CALL body adds
+        // one event and one edge.
+        assert_eq!(stamps, 8);
+    }
 }
 
 // ----- stage 3c: SET / REMOVE -----
@@ -1697,4 +1892,300 @@ fn merge_in_a_call_body_and_through_an_index_lookup() {
     assert_eq!(write(&mut indexed, q), write(&mut plain, q));
     assert_eq!(column(&plain_rows, "n").len(), 3);
     assert_eq!(dump(&indexed), dump(&plain));
+}
+
+// ----- stage 3e: MERGE against its twins and in the corners (3e.T5) -----
+
+/// The modern graph after `setup` (when not empty) and `query`; a failure panics.
+fn state_after(setup: &str, query: &str) -> Vec<String> {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    if !setup.is_empty() {
+        write(&mut graph, setup);
+    }
+    write(&mut graph, query);
+    dump(&graph)
+}
+
+/// The GQL error of `query` on `graph`: its GQLSTATUS.
+fn gql_status(graph: &mut TraversalGraph, query: &str) -> String {
+    let err = graph
+        .traversal_mut()
+        .gql(query)
+        .to_list()
+        .expect_err("the query must fail");
+    match err.root_cause() {
+        TraverserError::Gql { gqlstatus, .. } => gqlstatus.to_string(),
+        other => panic!("{query}: not a GQL error: {other:?}"),
+    }
+}
+
+/// MERGE leaves the graph its pure-GQL twin leaves: per row, a unit `CALL` body that inserts
+/// the pattern only when `NOT EXISTS` finds it (rows see the earlier rows' creations, W34).
+/// Running the MERGE a second time changes nothing.
+#[test]
+fn merge_leaves_the_graph_its_conditional_insert_twin_leaves() {
+    for (setup, merge, twin) in [
+        (
+            "",
+            "FOR x IN [1, 1, 2] MERGE (:N {k: x})",
+            "FOR x IN [1, 1, 2] CALL (x) { FILTER NOT EXISTS { MATCH (n:N {k: x}) } \
+             INSERT (:N {k: x}) }",
+        ),
+        // Label sets are containment: an `:A` node is no `:A:B` node (W31).
+        (
+            "INSERT (:A {k: 1}), (:A&B&C {k: 2})",
+            "FOR x IN [1, 2, 3] MERGE (:A:B {k: x})",
+            "FOR x IN [1, 2, 3] CALL (x) { FILTER NOT EXISTS { MATCH (n:A&B {k: x}) } \
+             INSERT (:A&B {k: x}) }",
+        ),
+        // GQL `=`: 1 = 1.0 matches.
+        (
+            "INSERT (:N {k: 1.0})",
+            "FOR x IN [1, 2] MERGE (:N {k: x})",
+            "FOR x IN [1, 2] CALL (x) { FILTER NOT EXISTS { MATCH (n:N {k: x}) } \
+             INSERT (:N {k: x}) }",
+        ),
+        (
+            "",
+            "MATCH (a:person), (b:software) MERGE (a)-[:created]->(b)",
+            "MATCH (a:person), (b:software) CALL (a, b) { \
+             FILTER NOT EXISTS { MATCH (a)-[:created]->(b) } INSERT (a)-[:created]->(b) }",
+        ),
+        (
+            "",
+            "MATCH (p:person) MERGE (p)-[:likes]->(:fruit {name: p.name})",
+            "MATCH (p:person) CALL (p) { \
+             FILTER NOT EXISTS { MATCH (p)-[:likes]->(:fruit {name: p.name}) } \
+             INSERT (p)-[:likes]->(:fruit {name: p.name}) }",
+        ),
+        // A new node between two bound ends; the rows repeat each pair twice.
+        (
+            "",
+            "MATCH (a:person), (b:software) FOR i IN [1, 2] \
+             MERGE (a)-[:x]->(:mid {by: a.name, of: b.name})<-[:y]-(b)",
+            "MATCH (a:person), (b:software) FOR i IN [1, 2] CALL (a, b) { \
+             FILTER NOT EXISTS { MATCH (a)-[:x]->(:mid {by: a.name, of: b.name})<-[:y]-(b) } \
+             INSERT (a)-[:x]->(:mid {by: a.name, of: b.name})<-[:y]-(b) }",
+        ),
+        // A DELETE before it: the match does not see the deleted node.
+        (
+            "",
+            "MATCH (s:software {name: 'lop'}) DETACH DELETE s FOR x IN ['lop', 'lop'] \
+             MERGE (:software {name: x})",
+            "MATCH (s:software {name: 'lop'}) DETACH DELETE s FOR x IN ['lop', 'lop'] \
+             CALL (x) { FILTER NOT EXISTS { MATCH (n:software {name: x}) } \
+             INSERT (:software {name: x}) }",
+        ),
+    ] {
+        let merged = state_after(setup, merge);
+        assert_eq!(merged, state_after(setup, twin), "{merge}\nvs {twin}");
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        if !setup.is_empty() {
+            write(&mut graph, setup);
+        }
+        write(&mut graph, merge);
+        let once = dump(&graph);
+        // The DELETE case deletes again on the second run: only the others are idempotent.
+        if !merge.contains("DELETE") {
+            write(&mut graph, merge);
+            assert_eq!(dump(&graph), once, "{merge} twice");
+        }
+    }
+}
+
+#[test]
+fn several_on_items_run_in_the_written_order() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = "MERGE (n:N {k: 1}) ON MATCH SET n.a = 1 ON CREATE SET n.c = 1 \
+             ON CREATE SET n.c = n.c + 1, n.d = n.c ON MATCH SET n.a = n.a + 10, n:Seen \
+             RETURN n.a AS a, n.c AS c, n.d AS d";
+    let rows = write(&mut graph, q);
+    assert_eq!(
+        (column(&rows, "a"), column(&rows, "c"), column(&rows, "d")),
+        (vec!["null".into()], vec!["2".into()], vec!["2".into()])
+    );
+    let rows = write(&mut graph, q);
+    assert_eq!(
+        (column(&rows, "a"), column(&rows, "c"), column(&rows, "d")),
+        (vec!["11".into()], vec!["2".into()], vec!["2".into()])
+    );
+    assert_eq!(count_label(&graph, "Seen"), 1);
+    // ON MATCH runs on every matched record, ON CREATE on none of them.
+    let rows = write(
+        &mut graph,
+        "MERGE (p:person) ON CREATE SET p.new = true ON MATCH SET p.seen = p.name \
+         RETURN p.seen AS s, p.new AS n",
+    );
+    assert_eq!(rows.len(), 4);
+    assert!(column(&rows, "n").iter().all(|n| n == "null"), "{rows:?}");
+    assert_eq!(
+        write(&mut graph, "MATCH (p) WHERE p.seen = p.name RETURN p").len(),
+        4
+    );
+}
+
+/// A NULL property value (E1) and a NULL bound end fail the query with 22004 on the row that
+/// meets them, after earlier rows created elements: the graph is left as it was.
+#[test]
+fn a_null_in_a_merge_fails_and_leaves_nothing() {
+    let modern = dump(&TraversalGraph::tinkerpop_modern());
+    for query in [
+        "FOR x IN [1, 2, NULL] MERGE (:N {k: x})",
+        "MATCH (p:person) MERGE (:N {k: p.name, l: p.age, m: p.lang})",
+        "MATCH (p:person) MERGE (p)-[:r {w: p.age}]->(:N {k: p.name, l: p.lang})",
+        "MATCH (p:person) MERGE (p)-[:r]->(:N {k: p.name}) ON CREATE SET p.x = 1 \
+         WITH p MERGE (:M {k: p.lang})",
+        // The bound end of the last rows is NULL: the edge has no end.
+        "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) MERGE (p)-[:r]->(s)",
+        "MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s) MERGE (s)<-[:r]-(:N {k: 1})",
+    ] {
+        let mut graph = TraversalGraph::tinkerpop_modern();
+        assert_eq!(gql_status(&mut graph, query), "22004", "{query}");
+        assert_eq!(dump(&graph), modern, "{query}");
+    }
+    // The message names the pattern map with its NULL.
+    let err = TraversalGraph::tinkerpop_modern()
+        .traversal_mut()
+        .gql("FOR x IN [1, NULL] MERGE (:N {k: x})")
+        .to_list()
+        .unwrap_err();
+    let text = format_diagnostic(&err);
+    assert!(
+        text.contains("MERGE cannot match or create `{k: NULL}`: a property value is NULL"),
+        "{text}"
+    );
+}
+
+/// A bound end held as a `WITH` column (the row no longer runs on the element): the edge, the
+/// path and its value read alike to a later `MATCH p = ..`.
+#[test]
+fn merge_from_bound_ends_held_as_with_columns() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let matched = write(
+        &mut graph,
+        "MATCH (a:person {name: 'marko'}), (b:software {name: 'lop'}) WITH a, b, count(*) AS c \
+         MERGE p = (a)-[:created]->(b) RETURN p",
+    );
+    let read = write(
+        &mut graph,
+        "MATCH p = (a:person {name: 'marko'})-[:created]->(b:software {name: 'lop'}) RETURN p",
+    );
+    assert_eq!(matched, read);
+    assert_eq!(count_edges(&graph, "created"), 4);
+    // Created between two columns, then matched, both directions written.
+    let q = "MATCH (a:person {name: 'vadas'}), (b:software {name: 'ripple'}) \
+             WITH b AS y, a AS x MERGE p = (y)<-[:used]-(x) RETURN p";
+    let created = write(&mut graph, q);
+    assert_eq!(created, write(&mut graph, q));
+    assert_eq!(
+        created,
+        write(
+            &mut graph,
+            "MATCH p = (y {name: 'ripple'})<-[:used]-(x) RETURN p"
+        )
+    );
+    assert_eq!(edge_names(&graph, "used"), ["vadas-used->ripple"]);
+    // Both ends the same column: a self-loop.
+    let q = "MATCH (a:person {name: 'peter'}) WITH a AS x, a AS y MERGE (x)-[:me]->(y)";
+    write(&mut graph, q);
+    write(&mut graph, q);
+    assert_eq!(edge_names(&graph, "me"), ["peter-me->peter"]);
+}
+
+/// Several MERGE clauses in one query, a CALL body with one and a MATCH after them: every
+/// record column (`#m<k>`, `#c<k>`) keeps its own name.
+#[test]
+fn several_merges_in_one_query_keep_their_columns_apart() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = "FOR x IN [1, 2, 1] MERGE (n:N {k: x}) MERGE (m:M {k: x * 10}) \
+             MERGE (n)-[t:t]->(m) MERGE (m)-[u:u]->(n) \
+             CALL (n) { MERGE (n)-[:v]->(w:W) RETURN w } \
+             MATCH (p:person {name: 'marko'}) \
+             RETURN n.k AS n, m.k AS m, type(t) AS t, type(u) AS u, labels(w) AS w, p.name AS p";
+    let rows = write(&mut graph, q);
+    assert_eq!(column(&rows, "n"), ["1", "2", "1"]);
+    assert_eq!(column(&rows, "m"), ["10", "20", "10"]);
+    assert_eq!(column(&rows, "t"), ["\"t\""; 3]);
+    assert_eq!(column(&rows, "u"), ["\"u\""; 3]);
+    assert_eq!(column(&rows, "w"), ["[\"W\"]"; 3]);
+    assert_eq!(column(&rows, "p"), ["\"marko\""; 3]);
+    let before = dump(&graph);
+    assert_eq!(
+        (
+            count_label(&graph, "N"),
+            count_label(&graph, "M"),
+            count_label(&graph, "W")
+        ),
+        (2, 2, 2)
+    );
+    assert_eq!(
+        (
+            count_edges(&graph, "t"),
+            count_edges(&graph, "u"),
+            count_edges(&graph, "v")
+        ),
+        (2, 2, 2)
+    );
+    assert_eq!(write(&mut graph, q), rows);
+    assert_eq!(dump(&graph), before);
+}
+
+/// On a larger graph the match child of a MERGE on an indexed property reads the index (the
+/// profile names it); the rows and the graph are those of the scan without the index.
+#[test]
+fn an_indexed_merge_equals_the_scan_on_a_larger_graph() {
+    let fixture = || {
+        let mut graph = TraversalGraph::new();
+        write(
+            &mut graph,
+            "FOR i IN range(1, 2000) INSERT (:person {name: 'p' + toString(i), i: i})",
+        );
+        graph
+    };
+    let q = "FOR x IN ['p7', 'zed', 'p1999', 'zed', 'p7'] MERGE (n:person {name: x}) \
+             ON CREATE SET n.i = 0 ON MATCH SET n.hits = coalesce(n.hits, 0) + 1 \
+             RETURN n.i AS i";
+    let indexed_fixture = || {
+        let mut graph = fixture();
+        graph
+            .traversal_mut()
+            .create_index(
+                "person_name",
+                graphersal::catalog::PropertyIndexDefinition::new(
+                    graphersal::storage::ElementKind::Vertex,
+                    "person",
+                    "name",
+                ),
+            )
+            .unwrap();
+        graph
+    };
+    let mut plain = fixture();
+    let mut indexed = indexed_fixture();
+    // The profile runs the query: on a graph of its own.
+    let profile = indexed_fixture()
+        .traversal_mut()
+        .gql(q)
+        .profile()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string();
+    assert!(
+        profile.contains("gql:lookup(") && profile.contains("[index: vertex person.name]"),
+        "{profile}"
+    );
+    let rows = write(&mut indexed, q);
+    assert_eq!(column(&rows, "i"), ["7", "0", "1999", "0", "7"]);
+    assert_eq!(rows, write(&mut plain, q));
+    assert_eq!(dump(&indexed), dump(&plain));
+    assert_eq!(indexed.vertex_count(), 2001);
+    assert_eq!(
+        column(
+            &write(
+                &mut indexed,
+                "MATCH (n:person) WHERE n.hits > 0 RETURN n.hits AS h ORDER BY h"
+            ),
+            "h"
+        ),
+        ["1", "1", "2"]
+    );
 }

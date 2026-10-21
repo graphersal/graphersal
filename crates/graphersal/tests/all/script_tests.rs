@@ -846,6 +846,63 @@ mod tests {
         assert_eq!(graph.read().edge_count(), 0);
     }
 
+    /// Rule 3: a GQL `MERGE` (stage 3e) mutates through the DSL: with a terminal, with
+    /// parameters, returning the merged rows, with ON CREATE / ON MATCH items, as a bare
+    /// (rendered) traversal, followed by camelCase steps, in a saved GQL query, and persisting
+    /// across evaluations; a second run only matches.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn test_script_eval_gql_merge_mutations() {
+        let graph = Arc::new(GraphSource::tinkerpop_modern());
+        let script = r#"
+            g.gql("FOR x IN ['ann', 'bob', 'ann'] MERGE (:person {name: x})").iterate();
+            let rows = g.gql("MERGE (p:person {name: $n}) ON CREATE SET p.new = true ON MATCH SET p.age = 30 RETURN p.age AS a", #{n: "marko"}).select("a").toList();
+            g.gql("MATCH (a:person {name: 'ann'}), (b:person {name: 'bob'}) MERGE (a)-[:knows]->(b)").iterate();
+            g.V().hasLabel("person").count().next() * 1000
+                + g.E().hasLabel("knows").count().next() * 100
+                + g.V().has("new", true).count().next() * 10
+                + rows[0] - 30
+        "#;
+        assert_eq!(
+            eval_value(graph.clone(), script).unwrap().as_int().ok(),
+            Some(6300)
+        );
+        // A bare writing traversal as the last statement is executed by the visualizer.
+        eval(graph.clone(), r#"g.gql("MERGE (:fruit {name: 'apple'})")"#)
+            .expect("bare GQL MERGE must run");
+        assert_eq!(graph.read().vertex_count(), 9);
+        // camelCase steps after a GQL merge.
+        let out = eval_value(
+            graph.clone(),
+            r#"g.gql("MERGE (f:fruit {name: 'apple'}) RETURN f").select("f").property("k", 2).iterate();
+               g.V().has("k", 2).count().next() * 10 + g.V().hasLabel("fruit").count().next()"#,
+        )
+        .unwrap();
+        assert_eq!(out.as_int().ok(), Some(11));
+        // A saved GQL query with MERGE writes when called, once per new name.
+        eval(
+            graph.clone(),
+            r#"g.defineQuery(#{name: "tag", language: "gql", params: #{n: "string"},
+                   body: "MERGE (t:tag {name: $n}) ON MATCH SET t.hits = coalesce(t.hits, 0) + 1"});
+               g.query("tag", #{n: "x"}).iterate();
+               g.query("tag", #{n: "x"}).iterate();
+               g.query("tag", #{n: "y"}).iterate()"#,
+        )
+        .expect("saved GQL MERGE must run");
+        // The writes persist across evaluations.
+        assert_eq!(
+            eval_value(
+                graph.clone(),
+                r#"g.V().hasLabel("tag").order().by("name").values("name", "hits").toList()"#
+            )
+            .unwrap()
+            .to_string(),
+            r#"["x", 1, "y"]"#
+        );
+        assert_eq!(graph.read().vertex_count(), 11);
+        assert_eq!(graph.read().edge_count(), 7);
+    }
+
     /// A mutating `by()` child traversal makes the plan mutating (behaviour change: it used to
     /// fail with "Cannot mutate immutable graph reference"): the child's writes reach the graph,
     /// once per evaluated traverser, also when nested deeper than one level.

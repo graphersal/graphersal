@@ -445,12 +445,10 @@ g.gql("MATCH (p:person {name: 'marko'}) SET p.age = 1 RETURN p").profile()
 
 | Construct | Until then |
 |---|---|
-| `MERGE` | Gremlin `merge_v()`, `merge_e()` |
 | `FOREACH (x IN list \| ...)` | `FOR x IN list INSERT ...` |
 | a write in a `UNION` operand, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | a deeper `SET` / `REMOVE` target (`n.a.b`, `head(l).k`), Cypher's dynamic `n[key]` | name the element with `WITH .. AS x` and write the item on `x`; for a nested value Gremlin `property()` with a [jpath key](../users_guide/jpath_keys.md) |
 
 ```rhai,graph=modern
-g.gql("MERGE (n:person {name: 'ann'})")   // error: MERGE is not yet supported in this version
 g.gql("MATCH (p:person {name: 'marko'}) SET p.address.city = 'Rome'")   // error: `p.address.city` as a SET target is not yet supported
 ```

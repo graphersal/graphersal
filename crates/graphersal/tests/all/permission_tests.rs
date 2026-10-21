@@ -3453,4 +3453,176 @@ mod gql {
         );
         assert_eq!(graph.read().edge_count(), 4);
     }
+
+    /// Stage 3e (design C7): MERGE asks `Read` for its match child, `Create` per label of each
+    /// element its pattern can create (as `INSERT`) and `Update` for its ON items (as `SET`):
+    /// the requests of its pure-GQL twin `CALL { FILTER NOT EXISTS { MATCH .. } INSERT .. }`
+    /// plus the ON items. Unlike `merge_v()` (always `Create` + `Update` on `Data(vertex)`) it
+    /// asks no `Update` without ON items. The step's own requests come before the ones of its
+    /// children (the match child's reads).
+    #[test]
+    fn gql_merge_asks_read_create_and_the_updates_of_its_on_items() {
+        for (query, twin) in [
+            (
+                r#"g.gql("FOR x IN [1, 2] MERGE (:N {k: x})").iterate()"#,
+                r#"g.gql("FOR x IN [1, 2] CALL (x) { FILTER NOT EXISTS { MATCH (n:N {k: x}) } INSERT (:N {k: x}) }").iterate()"#,
+            ),
+            (
+                r#"g.gql("MERGE (:A:B)").iterate()"#,
+                r#"g.gql("CALL { FILTER NOT EXISTS { MATCH (n:A&B) } INSERT (:A&B) }").iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (a:person), (b:software) MERGE (a)-[:uses]->(b)").iterate()"#,
+                r#"g.gql("MATCH (a:person), (b:software) CALL (a, b) { FILTER NOT EXISTS { MATCH (a)-[:uses]->(b) } INSERT (a)-[:uses]->(b) }").iterate()"#,
+            ),
+            (
+                r#"g.gql("MATCH (a:person) MERGE (a)-[:likes]->(:fruit {by: a.name})").iterate()"#,
+                r#"g.gql("MATCH (a:person) CALL (a) { FILTER NOT EXISTS { MATCH (a)-[:likes]->(:fruit {by: a.name}) } INSERT (a)-[:likes]->(:fruit {by: a.name}) }").iterate()"#,
+            ),
+        ] {
+            let mut gql = requests(&modern(), query);
+            let mut pure = requests(&modern(), twin);
+            gql.sort();
+            gql.dedup();
+            pure.sort();
+            pure.dedup();
+            assert_eq!(gql, pure, "{query}");
+        }
+        assert_eq!(
+            requests(&modern(), r#"g.gql("MERGE (n:N {k: 1})").iterate()"#),
+            ["Create Data(vertex \"N\")", "Read Data(vertex)"]
+        );
+        assert_eq!(
+            requests(
+                &modern(),
+                r#"g.gql("MERGE (n:N {k: 1}) ON CREATE SET n.a = 1 ON MATCH SET n:Seen").iterate()"#
+            ),
+            [
+                "Create Data(vertex \"N\")",
+                "Update Data(vertex)",
+                "Read Data(vertex)"
+            ]
+        );
+        assert_eq!(
+            requests(
+                &modern(),
+                r#"g.gql("MATCH (a {name: 'marko'}) MERGE (a)-[e:likes]->(f) ON MATCH SET e.w = 1, f.seen = true").iterate()"#
+            ),
+            [
+                "Read Data(vertex)",
+                "Create Data(vertex)",
+                "Create Data(edge \"likes\")",
+                "Update Data(edge \"likes\")",
+                "Update Data(vertex)",
+                "Read Data(edge)"
+            ]
+        );
+        // The Gremlin twin asks Update without onMatch / onCreate options too.
+        let twin = requests(&modern(), r#"g.merge_v(#{"T.label": "N", k: 1}).iterate()"#);
+        assert!(twin.iter().any(|r| r == "Update Data(vertex)"), "{twin:?}");
+    }
+
+    /// A denial refuses a MERGE before it runs: a read inside the match child (`Read`), the
+    /// create part also when every row would only match (`Create`, a label the policy protects
+    /// included), the ON items (`Update`); a CALL body with a MERGE the same.
+    #[test]
+    fn a_denied_read_create_or_update_refuses_a_gql_merge() {
+        let graph = modern();
+        // The match child reads edges.
+        for (script, step) in [
+            // The match child starts at the current element `b`.
+            (
+                r#"g.gql("MATCH (a {name: 'marko'}), (b {name: 'josh'}) MERGE (a)-[:knows]->(b)").iterate()"#,
+                "in_e",
+            ),
+            (
+                r#"g.gql("MATCH (a:person) CALL (a) { MERGE (a)-[:knows]->(:person) } RETURN a").toList()"#,
+                "out_e",
+            ),
+        ] {
+            assert_denied(run(&graph, script, NoEdges), step, "Read Data(edge)");
+        }
+        // A node MERGE reads vertices only: allowed under NoEdges.
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MERGE (p:person {name: 'marko'})").iterate()"#,
+                NoEdges
+            )
+            .is_ok()
+        );
+        let no_create = || AccessPolicy::allow_all().deny(ActionKind::Create, ResourceKind::Data);
+        for (script, request) in [
+            (
+                r#"g.gql("MERGE (p:person {name: 'marko'})").iterate()"#,
+                "Create Data(vertex \"person\")",
+            ),
+            (
+                r#"g.gql("MATCH (a {name: 'marko'}), (b {name: 'josh'}) MERGE (a)-[:knows]->(b)").iterate()"#,
+                "Create Data(edge \"knows\")",
+            ),
+            (
+                r#"g.gql("MATCH (a:person) CALL (a) { MERGE (a)-[:x]->(:y) } RETURN a").toList()"#,
+                "Create Data(vertex \"y\")",
+            ),
+        ] {
+            assert_denied(run(&graph, script, no_create()), "gql:merge", request);
+            assert_denied(
+                run(&graph, script, AccessPolicy::read_only()),
+                "gql:merge",
+                request,
+            );
+        }
+        // A protected label: the MERGE of a secret node is refused, others pass.
+        for script in [
+            r#"g.gql("MERGE (:secret)").iterate()"#,
+            r#"g.gql("MERGE (:public&secret {k: 1})").iterate()"#,
+        ] {
+            assert_denied(
+                run(&graph, script, NoSecret),
+                "gql:merge",
+                "Create Data(vertex \"secret\")",
+            );
+        }
+        assert_denied(
+            run(
+                &graph,
+                r#"g.gql("MATCH (a {name: 'marko'}) MERGE (a)-[:secret]->(:public)").iterate()"#,
+                NoSecret,
+            ),
+            "gql:merge",
+            "Create Data(edge \"secret\")",
+        );
+        assert!(run(&graph, r#"g.gql("MERGE (:public)").iterate()"#, NoSecret).is_ok());
+        // ON items: Update, even when the row only matches.
+        let no_update = || AccessPolicy::allow_all().deny(ActionKind::Update, ResourceKind::Data);
+        for script in [
+            r#"g.gql("MERGE (p:person {name: 'marko'}) ON MATCH SET p.age = 1").iterate()"#,
+            r#"g.gql("MERGE (p:person {name: 'zed'}) ON CREATE SET p:New").iterate()"#,
+        ] {
+            assert_denied(
+                run(&graph, script, no_update()),
+                "gql:merge",
+                "Update Data(vertex)",
+            );
+        }
+        assert!(
+            run(
+                &graph,
+                r#"g.gql("MERGE (p:person {name: 'marko'})").iterate()"#,
+                no_update()
+            )
+            .is_ok()
+        );
+        // Only the allowed MERGEs ran: one `public` node, nothing else.
+        assert_eq!(count(&graph), 7);
+        assert_eq!(graph.read().edge_count(), 6);
+        let ages = run(
+            &graph,
+            r#"g.v().has("name", "marko").values("age").toList()"#,
+            AllowAll,
+        )
+        .unwrap();
+        assert_eq!(ages.to_string(), "[29]");
+    }
 }
