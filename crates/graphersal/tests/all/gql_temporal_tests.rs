@@ -84,11 +84,6 @@ fn every_temporal_function_parses_binds_and_is_not_yet_at_run_time() {
         ("datetime.transaction()", "datetime.transaction()"),
         ("localtime.statement()", "localtime.statement()"),
         ("localdatetime.transaction()", "localdatetime.transaction()"),
-        ("date.truncate('month', n.d)", "date.truncate()"),
-        (
-            "localdatetime.truncate('day', n.d)",
-            "localdatetime.truncate()",
-        ),
         ("datetime.fromepoch(1, 0)", "datetime.fromepoch()"),
         ("datetime.fromepochmillis(1)", "datetime.fromepochmillis()"),
         ("duration.between(n.d, n.d)", "duration.between()"),
@@ -271,4 +266,186 @@ fn names_like_temporal_functions_stay_variables_and_properties() {
     assert_eq!(kind, GqlErrorKind::Refused);
     assert!(message.contains("namespaced functions"), "{message}");
     assert!(compile_time);
+}
+
+/// 3g.T7: a vertex `t` holding one value of each type: `d` = 1984-10-11, `l` =
+/// 1984-10-11T12:31:14.645876, `z` = the same wall clock at -01:00, `t` = 12:31:14.645876, `y` =
+/// 1984-01-01 (ISO week-year 1983), `u` = a duration.
+fn truncation_graph() -> TraversalGraph {
+    use graphersal::temporal::{DateTime, LocalDateTime, Time};
+    let mut graph = TraversalGraph::new();
+    let day = Date::from_ymd(1984, 10, 11).expect("a date");
+    let time = Time::from_hms_micro(12, 31, 14, 645_876).expect("a time");
+    let local = LocalDateTime::new(day, time);
+    let zoned = DateTime::from_local(local, -3600).expect("a datetime");
+    let value = |t: Temporal| ElementProperty::Temporal(t);
+    graph
+        .traversal_mut()
+        .add_v("t")
+        .property("d", value(Temporal::Date(day)))
+        .property("l", value(Temporal::LocalDateTime(local)))
+        .property("z", value(Temporal::DateTime(zoned)))
+        .property("t", value(Temporal::Time(time)))
+        .property(
+            "y",
+            value(Temporal::Date(Date::from_ymd(1984, 1, 1).expect("a date"))),
+        )
+        .property("u", value(Temporal::Duration(Duration::new(1, 0, 0))))
+        .iterate()
+        .expect("the vertex");
+    graph
+}
+
+/// The engine text of the single result of `expr` on the `t` vertex.
+fn truncated(graph: &TraversalGraph, expr: &str) -> String {
+    let query = format!("MATCH (n:t) RETURN {expr} AS x");
+    match single(graph, &query) {
+        ElementProperty::Temporal(value) => value.to_string(),
+        other => panic!("{query}: {other:?}"),
+    }
+}
+
+#[test]
+fn truncate_follows_the_tck_units_and_projections() {
+    let graph = truncation_graph();
+    for (expr, expected) in [
+        // Millennium and century as Neo4j (U4), not PostgreSQL's 2001 / 1901.
+        ("date.truncate('millennium', n.d)", "1000-01-01"),
+        ("date.truncate('century', n.d)", "1900-01-01"),
+        ("date.truncate('decade', n.d)", "1980-01-01"),
+        ("date.truncate('year', n.l)", "1984-01-01"),
+        ("date.truncate('weekYear', n.y)", "1983-01-03"),
+        ("date.truncate('weekYear', n.y, {day: 5})", "1983-01-05"),
+        ("date.truncate('quarter', n.z)", "1984-10-01"),
+        ("date.truncate('month', n.d, {day: 2})", "1984-10-02"),
+        ("date.truncate('week', n.d)", "1984-10-08"),
+        ("date.truncate('week', n.d, {dayOfWeek: 2})", "1984-10-09"),
+        ("date.truncate('day', n.z)", "1984-10-11"),
+        (
+            "localdatetime.truncate('century', n.d)",
+            "1900-01-01T00:00:00",
+        ),
+        ("localdatetime.truncate('hour', n.z)", "1984-10-11T12:00:00"),
+        (
+            "localdatetime.truncate('millisecond', n.l)",
+            "1984-10-11T12:31:14.645",
+        ),
+        ("localtime.truncate('day', n.l)", "00:00:00"),
+        ("localtime.truncate('minute', n.t)", "12:31:00"),
+        ("localtime.truncate('second', n.z)", "12:31:14"),
+        (
+            "localtime.truncate('millisecond', n.t, {microsecond: 7})",
+            "12:31:14.645007",
+        ),
+        ("localtime.truncate('nanosecond', n.t)", "12:31:14.645876"),
+        // A datetime keeps its offset; a value without one is UTC; a zone in the map keeps the
+        // wall clock and gives the zone's offset at that time (U3).
+        (
+            "datetime.truncate('hour', n.z)",
+            "1984-10-11T12:00:00-01:00",
+        ),
+        ("datetime.truncate('year', n.d)", "1984-01-01T00:00:00Z"),
+        ("datetime.truncate('day', n.l)", "1984-10-11T00:00:00Z"),
+        (
+            "datetime.truncate('hour', n.z, {timezone: 'Europe/Stockholm'})",
+            "1984-10-11T12:00:00+01:00",
+        ),
+        (
+            "datetime.truncate('month', n.d, {timezone: '+05:00'})",
+            "1984-10-01T00:00:00+05:00",
+        ),
+    ] {
+        assert_eq!(truncated(&graph, expr), expected, "{expr}");
+    }
+}
+
+#[test]
+fn truncate_errors_and_null() {
+    let graph = truncation_graph();
+    for (expr, status, needle) in [
+        (
+            "date.truncate('hour', n.d)",
+            "22023",
+            "the unit hour is not defined for a date",
+        ),
+        (
+            "localtime.truncate('month', n.t)",
+            "22023",
+            "not defined for a local time",
+        ),
+        (
+            "date.truncate('fortnight', n.d)",
+            "22023",
+            "unknown unit 'fortnight'",
+        ),
+        (
+            "date.truncate('day', n.t)",
+            "22G03",
+            "takes a value with a date, not a local time",
+        ),
+        (
+            "localtime.truncate('hour', n.d)",
+            "22G03",
+            "with a time of day, not a date",
+        ),
+        ("datetime.truncate('day', n.u)", "22G03", "not a duration"),
+        ("date.truncate(1, n.d)", "22G03", "takes a unit name"),
+        ("date.truncate('day', 1)", "22G03", "takes a temporal value"),
+        (
+            "date.truncate('day', n.d, {hour: 1})",
+            "22007",
+            "hour is not a field of a date",
+        ),
+        (
+            "date.truncate('day', n.d, {day: 1, week: 2})",
+            "22007",
+            "the date fields conflict",
+        ),
+        (
+            "date.truncate('month', n.d, {day: 32})",
+            "22008",
+            "the field day cannot be 32",
+        ),
+        (
+            "datetime.truncate('day', n.z, {timezone: 'Mars/Olympus'})",
+            "22007",
+            "unknown time zone",
+        ),
+        (
+            "localtime.truncate('second', n.t, {nanosecond: 2})",
+            "0A000",
+            "below the microsecond",
+        ),
+    ] {
+        let query = format!("MATCH (n:t) RETURN {expr} AS x");
+        let (actual, _, message, compile_time) = failure(&graph, &query);
+        assert_eq!(actual, status, "{query}: {message}");
+        assert!(message.contains(needle), "{query}: {message}");
+        assert!(!compile_time, "{query}");
+    }
+    for expr in [
+        "date.truncate('day', NULL)",
+        "date.truncate(NULL, n.d)",
+        "date.truncate('day', n.missing)",
+        "date.truncate('day', n.d, NULL)",
+        "date.truncate('day', n.d, {day: NULL})",
+    ] {
+        let query = format!("MATCH (n:t) RETURN {expr} AS x");
+        assert_eq!(single(&graph, &query), ElementProperty::Null, "{query}");
+    }
+    // The Rhai / Gremlin date_trunc keeps PostgreSQL's millennium and century (1001, 1901).
+    for (unit, expected) in [(DT::Millennium, "1001-01-01"), (DT::Century, "1901-01-01")] {
+        let values = graph
+            .traversal()
+            .v(None)
+            .has_label("t")
+            .values("d")
+            .date_trunc(unit)
+            .to_list()
+            .expect("the date");
+        match values.as_slice() {
+            [ElementProperty::Temporal(value)] => assert_eq!(value.to_string(), expected),
+            other => panic!("{other:?}"),
+        }
+    }
 }
