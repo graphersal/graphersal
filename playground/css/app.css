@@ -843,6 +843,56 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
 .editor-host .cm-editor { height: 100%; background: var(--code-bg); color: var(--syn-var); }
 .editor-host .cm-scroller { font-family: var(--font-mono); font-size: 13.5px; line-height: 1.55; }
 .editor-host .cm-editor.cm-focused { outline: none; }
+/* A GQL tab: the error span the engine reported, and the Parameters field under the editor. */
+.editor-host .cm-gql-error { text-decoration: wavy underline var(--danger); text-underline-offset: 3px; background: var(--danger-soft); }
+.gql-params {
+  flex: 0 1 auto;
+  max-height: 45%; /* the editor keeps the larger part of a short panel */
+  overflow: auto;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.gql-params-label { padding-top: 4px; color: var(--text-muted); font-weight: 600; }
+.gql-params-input {
+  width: 100%;
+  min-height: 2.4em;
+  max-height: 9em;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.gql-params-input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.gql-params-input.invalid { border-color: var(--danger); }
+.gql-params-note { grid-column: 2 / 4; color: var(--text-muted); overflow-wrap: anywhere; }
+.gql-params-note:empty { display: none; }
+.gql-params-note.error { color: var(--danger); }
+@container (max-width: 520px) {
+  .gql-params { padding: 4px 8px; gap: 4px 6px; }
+  .lang-switch .seg-btn { padding: 0 6px; }
+  .gql-params .hide-narrow { display: none; }
+}
+.qtab-lang {
+  flex: none;
+  padding: 0 3px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 12px;
+  letter-spacing: .03em;
+}
 /* The status bar stays ONE line at any width: the hints shrink (and then hide) first, the run
    status truncates with an ellipsis, the cursor position turns compact in a narrow panel (the
    .panel is the size container). */

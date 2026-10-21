@@ -9,18 +9,23 @@
 // holding a GQL query becomes the script g.gql(`...`) that runs it (js/editor/gql-wrap.js).
 // An AI Chat tab (tab kind 'ai') shows the chat (ai-chat.js) in place of the editor; the editor
 // view stays mounted (hidden) so the query tabs keep their editor states.
+// A GQL tab (tab language 'gql', js/gql-tab.js) swaps the language compartment: GQL highlighting
+// (editor/gql-language.js) and the GQL completion (editor/gql-completion.js: keywords by
+// position, functions, labels and keys of the graph, variables, $parameters); a Parameters field
+// (a JSON map) sits under its editor, and an error's GQL span is underlined in the text.
 
 import { ref, computed, watch, onMounted, onBeforeUnmount, markRaw } from 'vue';
-import { EditorState, Prec } from '@codemirror/state';
+import { EditorState, Prec, Compartment, StateField, StateEffect } from '@codemirror/state';
 import {
-  EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, placeholder,
+  EditorView, Decoration, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, placeholder,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
-import { bracketMatching, indentOnInput } from '@codemirror/language';
+import { bracketMatching, indentOnInput, language as languageFacet } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import {
   state, run, runAllTabs, stopRun, saveScript, openScript, clearHistory, setRunOption, loadGraph,
+  setTabLanguage, saveParams, addQueryParams, gqlVocabulary, toast,
 } from '../store.js';
 import { formatMs, modKey } from '../util.js';
 import { EXAMPLES } from '../config.js';
@@ -31,6 +36,10 @@ import { floatingTooltips } from '../editor/tooltips.js';
 import { runStatusText, cursorTexts } from '../editor/editor-status.js';
 import { runText } from '../editor/run-selection.js';
 import { wrapGql } from '../editor/gql-wrap.js';
+import { gqlLanguage } from '../editor/gql-language.js';
+import { gqlCompletionSource } from '../editor/gql-completion.js';
+import { parseParams, paramsErrorText, spanRange } from '../gql-tab.js';
+import { gqlParamNames } from '../editor/gql-tokens.js';
 import { PanelFrame } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
 import { ExamplesPanel } from './examples-panel.js';
@@ -59,6 +68,27 @@ export const editorTheme = EditorView.theme({
   '.cm-panels input, .cm-panels button': { color: 'var(--text)' },
 });
 
+/** Sets (or clears, with null) the underlined error span `{from, to}` of the editor. */
+const setErrorSpan = StateEffect.define();
+const errorMark = Decoration.mark({ class: 'cm-gql-error', attributes: { title: 'The engine reported the error here' } });
+/** The underline of a GQL error span: kept until the text changes. */
+const errorSpanField = StateField.define({
+  create: () => Decoration.none,
+  update(marks, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setErrorSpan)) {
+        const r = e.value;
+        return r && r.to > r.from && r.to <= tr.state.doc.length ? Decoration.set([errorMark.range(r.from, r.to)]) : Decoration.none;
+      }
+    }
+    return tr.docChanged ? Decoration.none : marks;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+const RHAI_PLACEHOLDER = 'g.v().has_label("person").values("name")   or GQL:   g.gql("MATCH (p:person) RETURN p.name AS name")';
+const GQL_PLACEHOLDER = 'MATCH (p:person) WHERE p.age > $min RETURN p.name AS name   (GQL; parameters below)';
+
 export const QueryEditor = {
   components: { PanelFrame, DropMenu, ExamplesPanel, QueryTabs, AiChat },
   setup(props, { expose }) {
@@ -76,6 +106,20 @@ export const QueryEditor = {
     const editorStates = new Map();
     let shownTabId = null;
     let extensions = [];
+    // The language of the shown tab: Rhai (DSL highlighting) or GQL, with its placeholder.
+    const langConf = new Compartment();
+    const langExtension = (lang) => (lang === 'gql'
+      ? [gqlLanguage, placeholder(GQL_PLACEHOLDER)]
+      : [dslLanguage, placeholder(RHAI_PLACEHOLDER)]);
+    const isGqlState = (st) => st.facet(languageFacet) === gqlLanguage;
+    const dslSource = dslCompletionSource(() => completionData.value, () => state.savedQueries);
+    // The $parameters offered first: the keys of the shown tab's Parameters field.
+    const gqlSource = gqlCompletionSource(gqlVocabulary, () => {
+      const tab = state.tabs.find((t) => t.id === shownTabId);
+      const parsed = tab ? parseParams(tab.params) : null;
+      return parsed && parsed.ok ? parsed.names.map((name) => ({ name, detail: 'Parameters field' })) : [];
+    });
+    const completionSource = (ctx) => (isGqlState(ctx.state) ? gqlSource(ctx) : dslSource(ctx));
 
     function setDoc(text, focus = true) {
       if (!view) return;
@@ -122,8 +166,25 @@ export const QueryEditor = {
       return true;
     }
 
-    function makeState(doc) {
-      return EditorState.create({ doc, extensions });
+    function makeState(doc, lang = 'rhai') {
+      return EditorState.create({ doc, extensions: [...extensions, langConf.of(langExtension(lang))] });
+    }
+
+    /** Makes the editor's language that of `lang` (a tab switched, or a state of the other language). */
+    function syncLanguage(lang) {
+      if (!view || isGqlState(view.state) === (lang === 'gql')) return;
+      view.dispatch({ effects: langConf.reconfigure(langExtension(lang)) });
+      if (lang === 'gql') gqlVocabulary();
+    }
+
+    /** Underlines the GQL span of the shown tab's last error (when its text still is what ran). */
+    function showErrorSpan() {
+      if (!view) return;
+      const tab = state.tabs.find((t) => t.id === shownTabId);
+      const err = tab && tab.language === 'gql' && tab.result && tab.result.execution && tab.result.execution.error;
+      const span = err && err.span;
+      const range = span ? spanRange(view.state.doc.toString(), span, span.offset) : null;
+      view.dispatch({ effects: setErrorSpan.of(range) });
     }
 
     /** Shows the active tab: keeps the outgoing tab's editor state, restores (or creates) the incoming one's. */
@@ -134,16 +195,22 @@ export const QueryEditor = {
       if (shownTabId !== tab.id) {
         if (shownTabId !== null) editorStates.set(shownTabId, view.state);
         const saved = editorStates.get(tab.id);
-        view.setState(saved && saved.doc.toString() === tab.script ? saved : makeState(tab.script));
+        view.setState(saved && saved.doc.toString() === tab.script ? saved : makeState(tab.script, tab.language));
         shownTabId = tab.id;
+        syncLanguage(tab.language);
+        showErrorSpan();
         hasSelection.value = selectionOf(view.state);
         historyIndex = -1;
         const pos = view.state.selection.main.head;
         const line = view.state.doc.lineAt(pos);
         cursor.value = { line: line.number, col: pos - line.from + 1 };
-      } else if (tab.script !== view.state.doc.toString()) {
-        // The text changed outside the editor (an example, a history entry): one undoable change.
-        setDoc(tab.script, false);
+      } else {
+        syncLanguage(tab.language);
+        if (tab.script !== view.state.doc.toString()) {
+          // The text changed outside the editor (an example, a history entry, the Rhai / GQL
+          // switch): one undoable change.
+          setDoc(tab.script, false);
+        }
       }
     }
 
@@ -165,15 +232,14 @@ export const QueryEditor = {
             closeBrackets(),
             highlightActiveLine(),
             highlightSelectionMatches(),
-            placeholder('g.v().has_label("person").values("name")   or GQL:   g.gql("MATCH (p:person) RETURN p.name AS name")'),
             floatingTooltips(host.value),
+            errorSpanField,
             autocompletion({
-              override: [dslCompletionSource(() => completionData.value, () => state.savedQueries)],
+              override: [completionSource],
               activateOnTyping: true,
               icons: true,
             }),
             keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...completionKeymap]),
-            dslLanguage,
             dslHighlight,
             editorTheme,
             EditorView.lineWrapping,
@@ -190,7 +256,8 @@ export const QueryEditor = {
       ];
       const first = state.tab.kind === 'ai' ? state.tabs.find((t) => t.kind !== 'ai') : state.tab;
       shownTabId = first ? first.id : null;
-      view = markRaw(new EditorView({ parent: host.value, state: makeState(first ? first.script : '') }));
+      view = markRaw(new EditorView({ parent: host.value, state: makeState(first ? first.script : '', first ? first.language : 'rhai') }));
+      if (first && first.language === 'gql') gqlVocabulary();
       if (!isChat.value) view.focus();
       completionData.value = markRaw(await loadCompletionData(state.engine));
     });
@@ -202,7 +269,11 @@ export const QueryEditor = {
 
     // Switching tabs swaps the editor state; a text changed outside the editor (an example, a
     // history entry, the Profile panel's example) is put into the editor.
-    watch(() => [state.activeId, state.tab.script], showActiveTab);
+    watch(() => [state.activeId, state.tab.script, state.tab.language], showActiveTab);
+    // A finished run of the shown tab: underline its GQL error span (or clear the old one).
+    watch(() => state.tab.result, () => {
+      if (state.tab.id === shownTabId) showErrorSpan();
+    });
     // Forget the editor states of closed tabs.
     watch(() => state.tabs.map((t) => t.id).join(','), () => {
       const ids = new Set(state.tabs.map((t) => t.id));
@@ -251,7 +322,15 @@ export const QueryEditor = {
           await loadGraph({ kind: ex.graph });
         }
       }
-      openScript({ title: ex.title, script: ex.script });
+      // An example of the GQL group with `lang: "gql"` opens as a GQL tab, its `params` (a JSON
+      // map) in the Parameters field.
+      const gqlExample = ex.lang === 'gql';
+      openScript({
+        title: ex.title,
+        script: ex.script,
+        language: gqlExample ? 'gql' : 'rhai',
+        params: gqlExample && ex.params ? JSON.stringify(ex.params, null, 2) : '',
+      });
       if (view) view.focus();
     }
     /**
@@ -260,6 +339,10 @@ export const QueryEditor = {
      */
     function wrapAsGql() {
       if (!view) return;
+      if (state.tab.language === 'gql') {
+        toast('This tab is a GQL tab: write the GQL query as it is (switch to Rhai to get g.gql(…)).', 'info', 5000);
+        return;
+      }
       const doc = view.state.doc.toString();
       const { from, to } = view.state.selection.main;
       const picked = to > from && doc.slice(from, to).trim() !== '';
@@ -271,7 +354,7 @@ export const QueryEditor = {
     /** A history entry follows the same rule as an example (the reused tab keeps its name). */
     function useHistory(h) {
       historyIndex = -1;
-      openScript({ script: h.script });
+      openScript({ script: h.script, language: h.language, params: h.params || '' });
       if (view) view.focus();
     }
     function oneLine(s) {
@@ -282,17 +365,43 @@ export const QueryEditor = {
       ? `Run the selection (${modKey}+Enter): only the selected text runs; with several selections the main one`
       : `Run the query (${modKey}+Enter); select a part of the script to run only that part`));
 
+    const isGql = computed(() => state.tab.kind !== 'ai' && state.tab.language === 'gql');
+    /** The Rhai / GQL switch: the text is rewritten (js/gql-tab.js `switchTabLanguage`). */
+    function switchLanguage(lang) {
+      if (state.tab.language === lang) return;
+      if (view && shownTabId === state.tab.id) saveScript(view.state.doc.toString(), shownTabId);
+      if (setTabLanguage(lang) && view) view.focus();
+    }
+    // The Parameters field: its validation and the $names the query reads that it lacks.
+    const paramsCheck = computed(() => (isGql.value ? parseParams(state.tab.params) : { ok: true, names: [] }));
+    const paramsError = computed(() => paramsErrorText(paramsCheck.value));
+    const missingParams = computed(() => {
+      if (!isGql.value) return [];
+      const have = paramsCheck.value.ok ? paramsCheck.value.names : [];
+      return gqlParamNames(state.tab.script).filter((n) => !have.includes(n));
+    });
+    function onParams(e) {
+      saveParams(e.target.value, state.tab.id);
+    }
+
     expose({ focus: () => view && view.focus() });
 
     return {
       state, host, cursorText, status, runningHere, isChat, runningText, examples: EXAMPLES, modKey, setRunOption, stopRun,
       useExample, useHistory, wrapAsGql, oneLine, clearHistory, runNow, hasSelection, runTitle,
+      isGql, switchLanguage, paramsError, missingParams, onParams, addQueryParams,
     };
   },
   template: `
   <panel-frame title="Query">
     <template #actions>
       <template v-if="!isChat">
+      <span class="segmented lang-switch" role="group" aria-label="Query language of this tab">
+        <button type="button" class="seg-btn" :class="{ active: !isGql }" :aria-pressed="String(!isGql)" @click="switchLanguage('rhai')"
+                title="Rhai: the Gremlin DSL (g.v()…); a tab holding plain GQL becomes g.gql(…, #{…})">Rhai</button>
+        <button type="button" class="seg-btn" :class="{ active: isGql }" :aria-pressed="String(isGql)" @click="switchLanguage('gql')"
+                title="GQL: write the query itself (MATCH … RETURN …) with its parameters below; a tab holding one g.gql(…) call becomes its query">GQL</button>
+      </span>
       <button class="btn primary small run-btn" @click="runNow()" :disabled="state.running"
               :title="runTitle" :aria-label="hasSelection ? 'Run the selection' : 'Run the query'">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z" fill="currentColor"/></svg>
@@ -335,6 +444,16 @@ export const QueryEditor = {
       <query-tabs></query-tabs>
       <ai-chat v-if="isChat" :key="state.tab.id" :tab="state.tab"></ai-chat>
       <div class="editor-host" ref="host" v-show="!isChat" style="flex:1;min-height:0"></div>
+      <div v-if="isGql" class="gql-params">
+        <label class="gql-params-label" for="gql-params-input" title="A JSON map: $name in the query reads the value of &quot;name&quot;">Parameters</label>
+        <textarea id="gql-params-input" class="gql-params-input mono" rows="1" spellcheck="false"
+                  :class="{ invalid: !!paramsError }" :value="state.tab.params" @input="onParams"
+                  placeholder='{"min": 30}' aria-describedby="gql-params-note"></textarea>
+        <button type="button" class="btn small gql-params-add" @click="addQueryParams()" :disabled="!missingParams.length"
+                :title="missingParams.length ? 'Add ' + missingParams.map((n) => '$' + n).join(', ') + ' to the map (null, to be filled in)' : 'The map holds every $parameter of the query'"
+                aria-label="Add the $parameters the query reads">+ <span class="hide-narrow">Add </span>$parameters</button>
+        <div id="gql-params-note" class="gql-params-note" :class="{ error: !!paramsError }" role="status">{{ paramsError || (missingParams.length ? 'The query reads ' + missingParams.map((n) => '$' + n).join(', ') + ', missing from the map.' : '') }}</div>
+      </div>
       <div class="editor-status" v-show="!isChat">
         <span class="status-run" :title="runningHere ? runningText : status">
           <span v-if="runningHere" class="running-dot" aria-hidden="true"></span>

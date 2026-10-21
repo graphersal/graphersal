@@ -52,6 +52,24 @@ answers questions by querying the served graph. In the WebAssembly playground th
   active tab (or its selection, see **Run** below), `Ctrl`/`⌘`+`Shift`+`Enter` runs all tabs, `Alt`+`N` opens and `Alt`+`W` closes a tab,
   `Alt`+`[` / `Alt`+`]` switch to the previous / next tab and `Alt`+`Shift`+`1`…`9` to tab 1…8 or
   the last one (the browser keeps `Ctrl`/`⌘`+`T`, `W` and `1`…`9` for its own tabs).
+- **GQL query tabs**: a query tab is in Rhai (the Gremlin DSL, the default) or in
+  [GQL](../gql/index.md). Open one with **+ ▸ GQL query** (marked `GQL` in the tab strip), or switch
+  the tab with the **Rhai / GQL** switch in the Query panel's header; nothing is detected from the
+  text. In a GQL tab you write the query itself, `MATCH (p:person) WHERE p.age > $min RETURN p.name`,
+  with GQL highlighting and completion: the keywords that fit the position (after `MATCH` a pattern's
+  `WHERE`, `RETURN` and the next clauses, after `RETURN` `AS`, `ORDER BY`, `LIMIT`, ...), the GQL
+  functions with a short description, the graph's labels after `:` (edge types inside `[..]`), the
+  property keys after `n.` (those of `n`'s labels), the variables the query binds, and the
+  parameters after `$`. Under the editor the **Parameters** field holds the parameter map as JSON,
+  `{"min": 30}` (checked as you type; a fault names its line and column); **+ Add $parameters**
+  adds every `$name` the query reads that the map lacks. Run, Run selection, Stop, Profile, the
+  history and the results work as in a Rhai tab: the tab runs `g.gql("<query>", #{min: 30})`, and
+  an error's GQLSTATUS stays in its message while the part of the query it names is underlined in
+  the editor (**Go to line** jumps there). Switching a tab that holds exactly one
+  `` g.gql(`...`, #{..}) `` call to GQL takes its query and its literal parameters out of it;
+  switching back writes them as that call again; any other text is kept as it is. GQL examples of
+  the Examples menu open as GQL tabs. **Save as query…** of a GQL tab saves a GQL query with its
+  `$parameters`, typed and defaulted by the Parameters field.
 - **Statistics**, a tab of the Profile panel (next to Steps and Text), shows two sources
   side by side: the graph's data (`g.statistics()`: vertex and edge totals, the counts per vertex
   label, also as primary label, and per edge label; at most 50 labels per kind, largest first) with
@@ -128,6 +146,7 @@ small graph the link carries itself:
 ```text
 https://play.graphersal.dev/#/play?graph=modern&q=g.v().has_label(%22person%22).values(%22name%22)&run=1
 https://play.graphersal.dev/#/play?v=1&data=xZWxboMwEIb3PoZnFIFtSMOUoR36Al...&q=g.v().count()&run=1
+https://play.graphersal.dev/#/play?graph=modern&q=MATCH%20(p%3Aperson)%20WHERE%20p.age%20%3E%20%24min%20RETURN%20p.name&lang=gql&params=%7B%22min%22%3A30%7D&run=1
 ```
 
 | Parameter | Meaning |
@@ -137,6 +156,8 @@ https://play.graphersal.dev/#/play?v=1&data=xZWxboMwEIb3PoZnFIFtSMOUoR36Al...&q=
 | `schema` | with `data` only: the graph's schema (the [schema format](schema_enforcement.md)), encoded the same way |
 | `v` | the format of `data` and `schema`; `1` (the default) is the only one so far |
 | `q` | the query, percent-encoded (`encodeURIComponent`; a literal `+` must be `%2B`) |
+| `lang` | `gql`: `q` is a plain GQL query and opens in a GQL tab (absent: a Rhai script) |
+| `params` | with `lang=gql`: the GQL tab's Parameters field, a JSON map, percent-encoded (optional) |
 | `title` | the name of the query tab (optional) |
 | `run` | `1` runs the query once it is in the editor |
 
@@ -333,10 +354,14 @@ WebAssembly playground and on the [dev server](../persistence/dev_server.md) ali
   reads must be a declared parameter and every parameter must be read (**+ Add $parameters of
   the query** declares the missing ones as strings). Switching a `` g.gql(`...`) `` body to GQL keeps
   its query; switching a GQL query to Rhai wraps it into `` g.gql(`...`, #{p: p}) ``.
-- **Save as query…** in a query tab's **⋯** menu opens the editor on the tab's text. A tab holding
-  exactly one `` g.gql(`...`) `` call (as **Wrap as GQL** writes it) becomes a GQL query of the inner
-  text with every `$name` as a parameter, typed and defaulted by the values the tab passes in its
+- **Save as query…** in a query tab's **⋯** menu opens the editor on the tab's text. A GQL tab
+  becomes a GQL query with every `$name` as a parameter, typed and defaulted by its Parameters
+  field. A Rhai tab holding exactly one `` g.gql(`...`) `` call (as **Wrap as GQL** writes it)
+  becomes a GQL query of the inner text the same way, typed by the values the tab passes in its
   `#{..}` map; any other tab becomes a Rhai query whose body is the tab's text.
+- The body editor completes the declared parameters: in a Rhai body their names (the function's
+  arguments), shown with their type above the DSL's own names; in a GQL query `$name` after `$`. A
+  parameter added, renamed or removed in the list is offered at once.
 - Clicking a query opens its **run form**, built from the parameter schemas: a number field with
   its minimum and maximum, a list for allowed values, a checkbox for a boolean, UUID text that is
   checked, one line per item for a list; defaults are prefilled and required fields marked with

@@ -9,9 +9,12 @@
 //
 // A tab has a kind: 'query' (the default: the editor) or 'ai' (an AI Chat tab, js/ai-chat.js:
 // its transcript and conversation id persist with it; it has no script and never takes an
-// example).
+// example). A query tab has a language: 'rhai' (the default) or 'gql' (its script is plain GQL
+// and `params` the JSON text of its Parameters field; js/gql-tab.js). Both persist with the tab
+// (a Rhai tab writes neither, so older playgrounds read the tabs as before).
 
 import { createChat, serializeChat } from './ai-chat.js';
+import { tabLanguage } from './gql-tab.js';
 
 export const DEFAULT_SCRIPT = 'g.v().has_label("person").values("name")';
 export const DEFAULT_RUN_OPTIONS = Object.freeze({ profile: true, memory: false });
@@ -21,11 +24,16 @@ export const MAX_NAME = 40;
 export const TAB_KINDS = Object.freeze(['query', 'ai']);
 
 /** A fresh tab (runtime fields included). */
-export function createTab(id, { name, script = '', example = null, runOptions, autoName = true, kind = 'query', chat = null } = {}) {
+export function createTab(id, {
+  name, script = '', example = null, runOptions, autoName = true, kind = 'query', chat = null, language = 'rhai', params = '',
+} = {}) {
   const isChat = kind === 'ai';
+  const lang = isChat ? 'rhai' : tabLanguage(language);
   return {
     id,
     kind: isChat ? 'ai' : 'query',
+    language: lang, // 'rhai' | 'gql' (js/gql-tab.js)
+    params: lang === 'gql' && typeof params === 'string' ? params : '', // a GQL tab's Parameters field (JSON text)
     name: name || `${isChat ? 'Chat' : 'Query'} ${id}`,
     autoName, // true until the user renames the tab: an example may then rename it
     script,
@@ -81,6 +89,8 @@ export function restoreTabs(saved, legacy = {}) {
       autoName: raw.autoName !== false,
       kind: raw.kind === 'ai' ? 'ai' : 'query',
       chat: raw.kind === 'ai' ? raw.chat : null,
+      language: raw.language,
+      params: raw.params,
     }));
   }
   if (!ts.tabs.length) {
@@ -101,6 +111,9 @@ export function serializeTabs(ts) {
       if (t.kind === 'ai') {
         out.kind = 'ai';
         out.chat = serializeChat(t.chat);
+      } else if (t.language === 'gql') {
+        out.language = 'gql';
+        out.params = t.params;
       }
       return out;
     }),
@@ -149,6 +162,8 @@ export function duplicateTab(ts, id) {
   return addTab(ts, {
     name: name.slice(0, MAX_NAME), autoName: false, script: src.script, example: src.example, runOptions: src.runOptions,
     kind: src.kind,
+    language: src.language,
+    params: src.params,
     chat: src.kind === 'ai' ? { items: serializeChat(src.chat).items } : null,
   });
 }
@@ -226,22 +241,48 @@ export function setScript(ts, id, script) {
   if (tab) tab.script = script;
 }
 
+/** The Parameters field of a GQL tab changed. */
+export function setParams(ts, id, params) {
+  const tab = findTab(ts, id);
+  if (tab && tab.language === 'gql') tab.params = String(params ?? '');
+}
+
+/**
+ * Switches a query tab's language with its rewritten text and parameters (`switchTabLanguage`
+ * of js/gql-tab.js gives them). The tab keeps its example provenance only while its text is
+ * still the example's.
+ */
+export function setLanguage(ts, id, language, { script, params = '' }) {
+  const tab = findTab(ts, id);
+  if (!tab || tab.kind === 'ai') return;
+  tab.language = tabLanguage(language);
+  tab.script = script;
+  tab.params = tab.language === 'gql' ? params : '';
+  if (tab.example && tab.example.script !== script) tab.example = null;
+}
+
 /**
  * Opens an example: in the active tab when it is empty or still holds an unmodified example,
  * otherwise in a new tab, so user text is never overwritten. A tab that the user did not rename
- * takes the example's title as its name. Returns `{tab, reused}` (tab is null at MAX_TABS).
+ * takes the example's title as its name. `ex.language` 'gql' opens it as a GQL tab with
+ * `ex.params` (the JSON text of its Parameters field); a reused tab takes the example's language.
+ * Returns `{tab, reused}` (tab is null at MAX_TABS).
  */
 export function openExample(ts, ex) {
   const current = activeTab(ts);
+  const language = tabLanguage(ex.language);
+  const params = language === 'gql' && typeof ex.params === 'string' ? ex.params : '';
   const example = { title: String(ex.title || ''), script: ex.script };
   const name = example.title ? example.title.slice(0, MAX_NAME) : undefined;
   if (current && current.kind !== 'ai' && holdsNoUserText(current)) {
     current.script = ex.script;
     current.example = example;
+    current.language = language;
+    current.params = params;
     if (current.autoName && name) current.name = name;
     return { tab: current, reused: true };
   }
-  const tab = addTab(ts, { script: ex.script, example, name, autoName: true });
+  const tab = addTab(ts, { script: ex.script, example, name, autoName: true, language, params });
   return { tab, reused: false };
 }
 
