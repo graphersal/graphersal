@@ -924,3 +924,24 @@ fn plus_appends_or_prepends_one_item_to_a_list() {
     assert_eq!(status_of("[1] - 1"), "22G03");
     assert_eq!(status_of("'a' + 1"), "22G03");
 }
+
+#[test]
+fn power_is_a_float_with_the_rules_of_power() {
+    // Stage 3f (U14), the openCypher TCK `Precedence2`.
+    assert_eq!(value("2 ^ 10"), float(1024.0));
+    assert_eq!(value("4 ^ 3 * 2 ^ 3"), float(512.0));
+    assert_eq!(value("4 ^ 3 % 2 ^ 3"), float(0.0));
+    assert_eq!(value("4 ^ 3 - 2 ^ 3"), float(56.0));
+    assert_eq!(value("-3 ^ 2"), float(9.0));
+    assert_eq!(value("-(3 ^ 2)"), float(-9.0));
+    assert_eq!(value("2 ^ 3 ^ 2"), float(64.0));
+    assert_eq!(value("2 ^ -1"), float(0.5));
+    assert_eq!(value("4 ^ 0.5"), float(2.0));
+    assert_eq!(value("null ^ 2"), Value::Null);
+    assert_eq!(value("2 ^ n.missing"), Value::Null);
+    assert_eq!(status_of("0 ^ -1"), "2201F");
+    assert_eq!(status_of("(-8) ^ 0.5"), "2201F");
+    assert_eq!(status_of("10 ^ 1000"), "22003");
+    assert_eq!(status_of("'a' ^ 2"), "22G03");
+    assert_eq!(status_of("[2] ^ 2"), "22G03");
+}

@@ -164,7 +164,7 @@
 //!   the older rows, so the "did you mean" of a misspelt older name is unchanged. Names of
 //!   functions outside the support get a targeted error from [`NOT_YET_FUNCTIONS`] (reason and
 //!   alternative; `rand()` / `randomUUID()` are refused for good) instead of "unknown
-//!   function"; Cypher's `^` operator is "not yet" naming `power(x, y)`.
+//!   function". Cypher's `^` operator is `BinaryOp::Pow` (stage 3f, binding power `BP_POW`).
 //! - **Special argument forms** (design K2): `CAST` and `TRIM` are ordinary [`FUNCTIONS`] rows
 //!   whose arguments are read differently. `CAST(x AS type)` takes the type names of
 //!   `CAST_TYPES` (one or two contextual words, `SIGNED INTEGER`, `DOUBLE PRECISION`, `CHAR
@@ -323,7 +323,7 @@ use super::ast::{
     SubqueryExpr, SubqueryForm, SubqueryKind, Subscript, TrimSide, UnaryOp, UnionKind,
     UnionOperand, WithClause,
 };
-use super::lexer::{Keyword, LexError, LexErrorKind, Span, Token, TokenKind, tokenize};
+use super::lexer::{Keyword, LexError, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
 
 /// The deepest nesting accepted: recursion levels of the parser (parentheses, `NOT`, unary
@@ -739,15 +739,6 @@ pub(crate) fn parse(query: &str) -> Result<Query, TraverserError> {
 }
 
 fn lex_error(e: LexError) -> GqlErrorBuilder {
-    if e.kind == LexErrorKind::UnexpectedChar('^') {
-        // Cypher's exponentiation operator.
-        return GqlErrorBuilder::new(
-            GqlErrorKind::NotYet,
-            e.span.start..e.span.end,
-            "the exponentiation operator `^` is not yet supported in this version",
-        )
-        .alternative("use power(x, y), as in power(2, 10)");
-    }
     GqlErrorBuilder::new(GqlErrorKind::Syntax, e.span.start..e.span.end, e.message())
 }
 
@@ -766,7 +757,9 @@ const BP_COMPARE: u8 = 5;
 const BP_PREDICATE: u8 = 6;
 const BP_ADD: u8 = 7;
 const BP_MUL: u8 = 8;
-const BP_UNARY: u8 = 9;
+/// Cypher `^` (stage 3f): tighter than `*`, looser than a unary minus (`-3 ^ 2` is `9.0`).
+const BP_POW: u8 = 9;
+const BP_UNARY: u8 = 10;
 
 /// What follows an operand in an expression.
 #[derive(Clone, Copy)]
@@ -4179,6 +4172,7 @@ impl<'a> Parser<'a> {
             TokenKind::Star => binary(BinaryOp::Mul, BP_MUL),
             TokenKind::Slash => binary(BinaryOp::Div, BP_MUL),
             TokenKind::Percent => binary(BinaryOp::Mod, BP_MUL),
+            TokenKind::Caret => binary(BinaryOp::Pow, BP_POW),
             _ => None,
         }
     }
@@ -6483,7 +6477,8 @@ fn starts_operand(token: &Token<'_>) -> bool {
         | TokenKind::Concat
         | TokenKind::Star
         | TokenKind::Slash
-        | TokenKind::Percent => false,
+        | TokenKind::Percent
+        | TokenKind::Caret => false,
         TokenKind::Keyword(keyword) => !matches!(
             keyword,
             Keyword::And

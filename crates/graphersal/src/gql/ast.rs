@@ -1149,6 +1149,9 @@ pub(crate) enum BinaryOp {
     Div,
     /// `%`.
     Mod,
+    /// `^` (Cypher power, stage 3f: always a float, left-associative, binds tighter than `*`
+    /// and looser than a unary minus).
+    Pow,
     /// `||` (string concatenation).
     Concat,
     /// `IN`.

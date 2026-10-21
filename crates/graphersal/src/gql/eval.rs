@@ -40,6 +40,9 @@
 //!   A right operand that is `NULL` or not a list gives `NULL`.
 //! - **`STARTS WITH` / `ENDS WITH` / `CONTAINS`:** strings only; a `NULL` or non-string operand
 //!   gives `NULL`.
+//! - **Power** `x ^ y` (Cypher, stage 3f): always a float, left-associative (`2 ^ 3 ^ 2` is
+//!   `64.0`), tighter than `* / %` and looser than a unary minus (`-3 ^ 2` is `9.0`); the rules
+//!   of `power(x, y)` (2201F, 22003), `NULL` propagates, another kind is 22G03.
 //! - **Arithmetic** `+ - * / %`: integer with integer stays integer (division truncates toward
 //!   zero, `%` takes the dividend's sign); any float operand makes it float. Overflow is error
 //!   22003 (numeric value out of range), never a wrap; a float result that is not finite from
@@ -2162,23 +2165,25 @@ fn binary<E: Clone + PartialEq>(
             }
             _ => return Err(add_error(left, right, span)),
         },
-        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => match (left, right) {
-            (Value::Null, _) | (_, Value::Null) => Value::Null,
-            (
-                Value::Scalar(ElementProperty::Number(a)),
-                Value::Scalar(ElementProperty::Number(b)),
-            ) => arithmetic(op, a, b, span)?,
-            _ => {
-                return Err(EvalError::invalid_type(
-                    format!(
-                        "arithmetic needs two numbers, not {} and {}",
-                        left.kind_name(),
-                        right.kind_name()
-                    ),
-                    span,
-                ));
+        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
+            match (left, right) {
+                (Value::Null, _) | (_, Value::Null) => Value::Null,
+                (
+                    Value::Scalar(ElementProperty::Number(a)),
+                    Value::Scalar(ElementProperty::Number(b)),
+                ) => arithmetic(op, a, b, span)?,
+                _ => {
+                    return Err(EvalError::invalid_type(
+                        format!(
+                            "arithmetic needs two numbers, not {} and {}",
+                            left.kind_name(),
+                            right.kind_name()
+                        ),
+                        span,
+                    ));
+                }
             }
-        },
+        }
     })
 }
 
@@ -2281,6 +2286,9 @@ fn concat<E: Clone>(
 }
 
 fn arithmetic<E>(op: BinaryOp, a: &Number, b: &Number, span: Span) -> Result<Value<E>, EvalError> {
+    if op == BinaryOp::Pow {
+        return power(float(a), float(b), span);
+    }
     match (&a.n, &b.n) {
         (N::NegInt(a), N::NegInt(b)) => {
             let (a, b) = (*a, *b);
@@ -2319,6 +2327,38 @@ fn arithmetic<E>(op: BinaryOp, a: &Number, b: &Number, span: Span) -> Result<Val
             ))))
         }
     }
+}
+
+/// Cypher `x ^ y` (stage 3f): always a float, with the rules of `power(x, y)`: 0 to a negative
+/// exponent and a negative base to a non-integer exponent are error 2201F, a result that is
+/// not finite from finite operands 22003.
+fn power<E>(x: f64, y: f64, span: Span) -> Result<Value<E>, EvalError> {
+    if x == 0.0 && y < 0.0 {
+        return Err(EvalError::new(
+            status::POWER,
+            format!(
+                "^ raises 0 to a negative exponent ({})",
+                Number::from_f64(y)
+            ),
+            span,
+        ));
+    }
+    if x < 0.0 && y.is_finite() && y.fract() != 0.0 {
+        return Err(EvalError::new(
+            status::POWER,
+            format!(
+                "^ raises a negative base ({}) to a non-integer exponent ({})",
+                Number::from_f64(x),
+                Number::from_f64(y)
+            ),
+            span,
+        ));
+    }
+    let result = x.powf(y);
+    if !result.is_finite() && x.is_finite() && y.is_finite() {
+        return Err(EvalError::out_of_range(span));
+    }
+    Ok(Value::float(result))
 }
 
 /// A number as a float.

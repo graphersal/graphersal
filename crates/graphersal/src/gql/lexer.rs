@@ -195,6 +195,8 @@ pub(crate) enum TokenKind {
     Bang,
     /// `%`
     Percent,
+    /// `^` (the Cypher power operator, stage 3f)
+    Caret,
     /// `?` (the GQL quantifier `{0,1}` after a parenthesized path pattern)
     Question,
     /// `*`
@@ -258,6 +260,7 @@ impl TokenKind {
             TokenKind::Ampersand => "`&`",
             TokenKind::Bang => "`!`",
             TokenKind::Percent => "`%`",
+            TokenKind::Caret => "`^`",
             TokenKind::Question => "`?`",
             TokenKind::Star => "`*`",
             TokenKind::Plus => "`+`",
@@ -317,6 +320,7 @@ impl Token<'_> {
             | TokenKind::Ampersand
             | TokenKind::Bang
             | TokenKind::Percent
+            | TokenKind::Caret
             | TokenKind::Question
             | TokenKind::Star
             | TokenKind::Plus
@@ -638,6 +642,7 @@ impl<'a> Lexer<'a> {
             ';' => TokenKind::Semicolon,
             '&' => TokenKind::Ampersand,
             '%' => TokenKind::Percent,
+            '^' => TokenKind::Caret,
             '?' => TokenKind::Question,
             '*' => TokenKind::Star,
             '+' => TokenKind::Plus,
@@ -1240,10 +1245,11 @@ mod tests {
         );
         let tokens = tokenize("a<>b!=c").unwrap();
         assert_eq!((tokens[1].text, tokens[3].text), ("<>", "!="));
-        let e = err("RETURN 1 ^ 2");
-        assert_eq!(e.kind, LexErrorKind::UnexpectedChar('^'));
+        // Stage 3f: `^` is the power operator; `@` stays an unexpected character.
+        let e = err("RETURN 1 @ 2");
+        assert_eq!(e.kind, LexErrorKind::UnexpectedChar('@'));
         assert_eq!((e.span.start, e.span.end), (9, 10));
-        assert!(e.message().contains('^'));
+        assert!(e.message().contains('@'));
         assert_eq!(err("€").span.end, 3);
         for kind in kinds("{ } [ ] : , . .. ; | & ! % * + / = <> < <= > >= || - -> <- ~ ~> <~") {
             assert!(!kind.describe().is_empty());
@@ -1279,7 +1285,7 @@ mod tests {
     #[test]
     fn every_error_has_a_message() {
         for src in [
-            "^",
+            "@",
             "'a",
             "`a",
             "``",

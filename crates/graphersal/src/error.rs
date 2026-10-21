@@ -7431,7 +7431,8 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
         // Invalid argument for power function.
         "2201F" => {
             "sqrt(x) takes a number >= 0, and power(x, y) cannot raise 0 to a negative power \
-             or a negative number to a power that is not an integer; keep other rows away, as in \
+             or a negative number to a power that is not an integer (nor can x ^ y); keep other \
+             rows away, as in \
              g.gql(\"MATCH (p:person) RETURN CASE WHEN p.age >= 0 THEN sqrt(p.age) END AS r\")."
         }
         // Invalid parameter value.

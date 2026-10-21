@@ -67,10 +67,6 @@ reason = "expected SyntaxError at runtime, got 22G03 at compile time: GQL semant
 class = "unexpected_error"
 reason = "GQL semantic error at line 2, column 14: LIMIT must be a non-negative integer or a parameter, not an expression"
 
-["clauses/return/Return2.feature::[1] Arithmetic expressions should propagate null values"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
 ["clauses/return/Return6.feature::[15] Using `rand()` in aggregations"]
 class = "missing"
 reason = "refused: rand()"
@@ -578,30 +574,6 @@ reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s
 ["expressions/pattern/Pattern2.feature::[7] Use a pattern comprehension inside a list comprehension"]
 class = "missing"
 reason = "not yet: reading the comprehension variable `x` inside a subquery"
-
-["expressions/precedence/Precedence2.feature::[2] Exponentiation takes precedence over numeric multiplicative operations::1"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence2.feature::[2] Exponentiation takes precedence over numeric multiplicative operations::2"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence2.feature::[2] Exponentiation takes precedence over numeric multiplicative operations::3"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence2.feature::[3] Exponentiation takes precedence over numeric additive operations::1"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence2.feature::[3] Exponentiation takes precedence over numeric additive operations::2"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
-
-["expressions/precedence/Precedence2.feature::[4] Numeric unary negative takes precedence over exponentiation"]
-class = "missing"
-reason = "not yet: the exponentiation operator `^`"
 
 ["expressions/quantifier/Quantifier1.feature::[8] None quantifier on list containing nodes"]
 class = "unexpected_error"

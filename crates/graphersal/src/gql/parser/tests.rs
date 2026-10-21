@@ -126,6 +126,7 @@ fn sexp(e: &Expr) -> String {
                 BinaryOp::Mul => "*",
                 BinaryOp::Div => "/",
                 BinaryOp::Mod => "%",
+                BinaryOp::Pow => "^",
                 BinaryOp::Concat => "||",
                 BinaryOp::In => "in",
                 BinaryOp::StartsWith => "starts",
@@ -794,8 +795,9 @@ fn lexer_errors_are_gql_syntax_errors() {
     assert!(f.message.contains("unterminated string"), "{}", f.message);
     let f = fail("MATCH (n) RETURN 007");
     assert!(f.message.contains("leading zero"), "{}", f.message);
-    let f = fail("MATCH (n) RETURN n ^ 2");
-    assert_eq!(f.text, "^");
+    // Stage 3f: `^` is the power operator; `@` stays an unexpected character.
+    let f = fail("MATCH (n) RETURN n @ 2");
+    assert_eq!(f.text, "@");
 }
 
 // ----- refused and not yet supported constructs -----
@@ -2172,10 +2174,8 @@ fn not_yet_functions_name_the_reason_and_the_alternative() {
             .contains("n.p IS NOT NULL"),
         "exists(n.x)"
     );
-    let f = fail("MATCH (n) RETURN 2 ^ 10");
-    assert_eq!(f.kind, GqlErrorKind::NotYet);
-    assert_eq!(f.text, "^");
-    assert!(f.alternative.unwrap_or_default().contains("power(x, y)"));
+    // Stage 3f: `^` is supported (it was "not yet" naming power(x, y)).
+    assert!(parse("MATCH (n) RETURN 2 ^ 10").is_ok());
 }
 
 #[test]
@@ -6029,4 +6029,22 @@ fn a_colon_after_a_label_bar_is_the_cypher_disjunction() {
     // Mixed with the `:A:B` conjunction it stays an error.
     let f = fail("MATCH (a:A|:B:C) RETURN a");
     assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
+}
+
+#[test]
+fn power_binds_between_multiplication_and_unary_minus() {
+    // Stage 3f: Cypher `^`, left-associative (the openCypher TCK `Precedence2` [2]-[4]).
+    for (src, tree) in [
+        ("2 ^ 3", "(^ 2 3)"),
+        ("4 ^ 3 * 2 ^ 3", "(* (^ 4 3) (^ 2 3))"),
+        ("4 ^ 3 + 2 ^ 3", "(+ (^ 4 3) (^ 2 3))"),
+        ("2 ^ 3 ^ 2", "(^ (^ 2 3) 2)"),
+        ("-3 ^ 2", "(^ -3 2)"),
+        ("-x ^ 2", "(^ (- x) 2)"),
+        ("x[0] ^ 2", "(^ (at x 0) 2)"),
+        ("x.a ^ 2 = 4", "(= (^ x.a 2) 4)"),
+    ] {
+        assert_eq!(expr(src), tree, "{src}");
+    }
+    assert!(parse("RETURN 2 ^").is_err());
 }

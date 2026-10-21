@@ -806,7 +806,7 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | comparison | `=`, `<>` (Cypher `!=`), `<`, `<=`, `>`, `>=`; not chainable (`a < b < c` is an error) |
 | logic | `AND`, `OR`, `XOR`, `NOT` |
 | predicates | `IS [NOT] NULL`, `IN [list]`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS [NOT] LABELED`, `IS [NOT] SOURCE OF e`, `IS [NOT] DESTINATION OF e` |
-| arithmetic | `+`, `-`, `*`, `/`, `%`, unary `-` and `+` |
+| arithmetic | `+`, `-`, `*`, `/`, `%`, `^` (Cypher power, always a float: `2 ^ 10` is `1024.0`), unary `-` and `+` |
 | concatenation | `\|\|` on two strings or two lists (Cypher `+`); Cypher `+` of a list and one other value appends or prepends it (`[1] + 2` is `[1, 2]`, `0 + [1]` is `[0, 1]`) |
 | conditional | simple `CASE x WHEN v THEN r ... ELSE d END` and searched `CASE WHEN cond THEN r ... END` |
 | conversion | `CAST(x AS INTEGER \| FLOAT \| STRING \| BOOLEAN)` ([Conversions](#conversions)) |
@@ -816,8 +816,10 @@ g.gql("MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) MERGE (a)-[e:
 | pattern comprehension | `[(p)-[:knows]->(f) WHERE cond \| expr]` (Cypher) |
 
 Precedence, loosest first: `OR`, `XOR`, `AND`, `NOT`, comparison, the predicates (`IS NULL`,
-`IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, unary minus, property access and subscripts
-(`x[i]`, `x[a..b]`, left to right: `[1, 2][0] + 1` is `2`).
+`IN`, `STARTS WITH`, ...), `+ - ||`, `* / %`, `^` (left to right: `2 ^ 3 ^ 2` is `64.0`), unary
+minus (`-3 ^ 2` is `9.0`), property access and subscripts (`x[i]`, `x[a..b]`, left to right:
+`[1, 2][0] + 1` is `2`). `x ^ y` follows the rules of `power(x, y)`: `0 ^ -1` and `(-8) ^ 0.5`
+are errors (`2201F`), an overflow is error `22003`.
 
 ```rhai,graph=modern
 g.gql("MATCH (n:person) WHERE n.age IN [27, 35] RETURN n.name AS name ORDER BY name").to_list()   // #{"name": "peter"}, #{"name": "vadas"}
@@ -1242,7 +1244,6 @@ construct and the alternative.
 | `NULLS FIRST` / `NULLS LAST` | the fixed order: `NULL` last ascending, first descending |
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
-| the exponentiation operator `^` | `power(x, y)` |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | date and time functions (`date()`, `datetime()`, `duration()`, ...) | ISO-8601 strings compare correctly as text; dates come in version 0.2.0 |
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |

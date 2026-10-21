@@ -131,7 +131,6 @@ alternative instead of "unknown function", and a misspelt name a suggestion:
 ```rhai,graph=modern
 g.gql("MATCH (n:person) RETURN sin(n.age) AS x")   // error: sin() (a trigonometric function) is not yet supported
 g.gql("MATCH (n:person) RETURN rand() AS x")   // refused: rand() is not supported: a non-deterministic function
-g.gql("MATCH (n:person) RETURN n.age ^ 2 AS x")   // error: the exponentiation operator `^` is not yet supported
 g.gql("MATCH (n:person) RETURN toInt(n.age) AS x")   // error: unknown function toInt(), did you mean toInteger()
 ```
 

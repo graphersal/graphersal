@@ -7763,6 +7763,32 @@ mod gql {
     }
 
     #[test]
+    fn gql_power_operator_errors_share_the_power_advice() {
+        // Stage 3f: `x ^ y` follows the rules of power(x, y), and its advice names it.
+        let (err, report) = gql_failure(|g| {
+            g.gql("MATCH (p:person) RETURN (p.age - 29) ^ -1 AS r")
+                .to_list()
+        });
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "2201F".to_string())
+        );
+        assert!(
+            report.contains("^ raises 0 to a negative exponent (-1)"),
+            "{report}"
+        );
+        let help = err.help().expect("help");
+        assert!(help.contains("(nor can x ^ y)"), "{help}");
+        let graph = GraphSource::tinkerpop_modern();
+        let rows = graph
+            .read()
+            .traversal()
+            .gql("MATCH (p:person {name: 'marko'}) RETURN p.age ^ 2 AS r")
+            .to_list();
+        assert_eq!(rows.map(|rows| rows.len()).ok(), Some(1));
+    }
+
+    #[test]
     fn gql_bad_limit_parameter_names_a_runnable_value() {
         let (err, report) = gql_failure(|g| {
             g.gql_with("MATCH (p:person) RETURN p.name LIMIT $n", [("n", -1)])
@@ -8893,12 +8919,6 @@ mod gql {
                 GqlErrorKind::NotYet,
                 "percentileCont() (a statistical aggregate function) is not yet supported",
                 "collect the values with collect_list(x) and compute it after gql().",
-            ),
-            (
-                "p.age ^ 2",
-                GqlErrorKind::NotYet,
-                "the exponentiation operator `^` is not yet supported",
-                "use power(x, y), as in power(2, 10).",
             ),
             (
                 "exists(p.age)",
