@@ -5,7 +5,8 @@
 //! DELETE`) is turned into an ordinary traversal plan: it runs through the same optimizer,
 //! profile, limits, permissions and storages as a Gremlin traversal. ISO GQL is the normative
 //! spelling; common Cypher spellings are accepted as aliases. Since stage 3e the Cypher
-//! compatibility form `MERGE` is parsed (bound and run in later steps of the stage).
+//! compatibility form `MERGE` (find or create a pattern, `ON CREATE SET` / `ON MATCH SET`)
+//! runs too.
 //!
 //! The entry points are [`GraphTraversalSource::gql`](crate::GraphTraversalSource::gql) and
 //! [`GraphTraversalSource::gql_with`](crate::GraphTraversalSource::gql_with) (in `lower.rs`).
@@ -47,7 +48,6 @@ pub(crate) mod eval;
 pub(crate) mod functions;
 pub(crate) mod lexer;
 pub(crate) mod lower;
-pub(crate) mod merge_stand_in;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod planner;

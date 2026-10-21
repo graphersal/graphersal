@@ -121,7 +121,6 @@ use super::bind::{
 };
 use super::eval::{Scope, Value, compile};
 use super::lexer::Span;
-use super::merge_stand_in::GqlMergeSpec;
 use super::parser::parse;
 use super::plan::{
     CallStage, CompositePlan, ElementFilters, Expand, ForStage, GroupExpand, LogicalPlan, Lookup,
@@ -129,9 +128,7 @@ use super::plan::{
     SubqueryUse, UnionPlan, WriteStage, and_factors, exists_conjunct, label_disjuncts,
 };
 use super::planner::{StorageFacts, plan};
-use super::runtime::{
-    Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, SubqueryHost, eval_error,
-};
+use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 use crate::graph::GraphStorage;
 use crate::traversal::step::GraphStep;
@@ -144,6 +141,7 @@ use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLooku
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_edge::GqlEndpoint;
 use crate::traversal::step::sideeffect_steps::step_gql_insert_node::GqlInsertProperty;
+use crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge;
 use crate::traversal::step::sideeffect_steps::step_gql_remove::GqlRemoveItem;
 use crate::traversal::step::sideeffect_steps::step_gql_set::{GqlSetItem, GqlWriteTarget};
 use crate::value::{Number, P, PValue};
@@ -630,8 +628,6 @@ struct Upsert<S: GraphStorage> {
     record: Site,
     /// The bodies of the subqueries the `ON` items' values hold, lowered from the record.
     subqueries: Bodies<S>,
-    /// The `MERGE` keyword as written.
-    keyword: Span,
     /// The path pattern as written.
     pattern: Span,
     /// Every element the create child can make, as an access request names it (P0 C7).
@@ -1162,7 +1158,6 @@ impl<S: GraphStorage> Lowered<S> {
             on_match_targets,
             record,
             subqueries,
-            keyword,
             pattern,
             create_labels,
         } = upsert;
@@ -1170,16 +1165,19 @@ impl<S: GraphStorage> Lowered<S> {
         self.set_targets(&mut on_match, &on_match_targets, record);
         let matcher = self.emit_into(AnonymousTraversal::new(), matcher);
         let creator = self.emit_into(AnonymousTraversal::new(), creator);
-        let spec = GqlMergeSpec {
+        g.gql_merge(GqlMerge {
             query: Arc::clone(&self.query),
-            keyword,
             pattern,
-            create_labels,
+            matcher,
+            creator,
+            checks,
             check_bindings: self.bindings(site),
-            bindings: self.bindings(record),
-            hosts: SubqueryHost::new(self.children(subqueries)),
-        };
-        g.gql_merge(matcher, creator, checks, on_create, on_match, spec)
+            on_create,
+            on_match,
+            item_bindings: self.bindings(record),
+            item_children: self.children(subqueries),
+            creates: create_labels,
+        })
     }
 
     /// Sets the row binding of every item's target (`targets`, item order) read at `site`.
@@ -1516,17 +1514,6 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
         bindings: Arc<[Binding]>,
         children: Vec<AnonymousTraversal<'g, S>>,
     ) -> Self;
-    /// `gql:merge(..)`: one `MERGE` clause (stage 3e; the stand-in until 3e.T4, see
-    /// `gql::merge_stand_in`).
-    fn gql_merge(
-        self,
-        matcher: AnonymousTraversal<'g, S>,
-        creator: AnonymousTraversal<'g, S>,
-        checks: Vec<GqlInsertProperty<S>>,
-        on_create: Vec<GqlSetItem<S>>,
-        on_match: Vec<GqlSetItem<S>>,
-        spec: GqlMergeSpec<'g, S>,
-    ) -> Self;
     /// `gql:project(columns)` as the `RETURN` that ends the query: a column holding an element
     /// a `DELETE` removed earlier is the W28 error (stage 3d).
     fn gql_project_returning(
@@ -1573,11 +1560,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     fn push_step(self, step: GraphStep<'g, S>) -> Self;
     /// `gql:merge(..)`: one `MERGE` clause (stage 3e): its match and create children, the
     /// E1 checks and the `ON` items.
-    #[allow(dead_code, reason = "the MERGE lowering (3e.T3) calls it")]
-    fn gql_merge(
-        self,
-        merge: crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge<'g, S>,
-    ) -> Self;
+    fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self;
 }
 
 /// [`Sink`] for a traversal type with the builders of the same names (inherent methods take
@@ -1707,18 +1690,6 @@ macro_rules! sink {
             ) -> Self {
                 self.gql_delete(query, keyword, detach, targets, bindings, children)
             }
-            fn gql_merge(
-                self,
-                matcher: AnonymousTraversal<'g, S>,
-                creator: AnonymousTraversal<'g, S>,
-                checks: Vec<GqlInsertProperty<S>>,
-                on_create: Vec<GqlSetItem<S>>,
-                on_match: Vec<GqlSetItem<S>>,
-                spec: GqlMergeSpec<'g, S>,
-            ) -> Self {
-                // TEMPORARY (3e.T3): the stand-in until the step lands (3e.T4: `gql_merge`).
-                self.gql_merge_stand_in(matcher, creator, checks, on_create, on_match, spec)
-            }
             fn gql_project_returning(
                 self,
                 query: Arc<str>,
@@ -1804,10 +1775,7 @@ macro_rules! sink {
             fn push_step(self, step: GraphStep<'g, S>) -> Self {
                 self.push_step(step)
             }
-            fn gql_merge(
-                self,
-                merge: crate::traversal::step::sideeffect_steps::step_gql_merge::GqlMerge<'g, S>,
-            ) -> Self {
+            fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self {
                 self.gql_merge(merge)
             }
         }
@@ -2627,7 +2595,6 @@ impl<'q> Lowering<'q> {
             on_match_targets,
             record,
             subqueries: self.bodies(hooks, record)?,
-            keyword: merge.keyword,
             // The synthesized body's span is the pattern's.
             pattern: merge.body.first.first.span,
             create_labels,
@@ -4844,7 +4811,7 @@ fn rename_aliases(expr: &mut Expr, within: Span, renames: &[(&str, String)]) {
 #[cfg(test)]
 mod merge_tests;
 
-/// One lowered `MERGE` as text (stage 3e, for the tests until the step runs).
+/// One lowered `MERGE` as text (stage 3e, for the lowering tests).
 #[cfg(test)]
 struct MergeText {
     /// The match child.
@@ -4859,8 +4826,8 @@ struct MergeText {
     create_labels: Vec<(ElementKind, Option<CompactString>)>,
 }
 
-/// The lowering of `query` on `graph` (stage 3e, for the tests until the step runs): the
-/// whole traversal as text (the stand-in shows as the `gql:error` marker), and every `MERGE`
+/// The lowering of `query` on `graph` (stage 3e, for the lowering tests): the whole
+/// traversal as text (each `gql:merge` without its children), and every `MERGE`
 /// (text order, `CALL` bodies included) as [`MergeText`].
 #[cfg(test)]
 fn merge_lowering(
@@ -4868,7 +4835,9 @@ fn merge_lowering(
     graph: &crate::TraversalGraph,
 ) -> Result<(String, Vec<MergeText>), TraverserError> {
     type G = crate::TraversalGraph;
-    fn collect(instrs: &mut [Instr<G>], out: &mut Vec<(Vec<Instr<G>>, Vec<Instr<G>>, MergeText)>) {
+    /// The children of one `MERGE` (match, create) and its text so far.
+    type Found = (Vec<Instr<G>>, Vec<Instr<G>>, MergeText);
+    fn collect(instrs: &mut [Instr<G>], out: &mut Vec<Found>) {
         for instr in instrs {
             match instr {
                 Instr::Upsert(upsert) => {

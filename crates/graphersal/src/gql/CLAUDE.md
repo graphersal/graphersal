@@ -90,8 +90,15 @@ Files appear as their stage lands; this table is the target layout.
   create template `create: BoundInsert` bound first, then the match child as a synthesized
   `CALL (*)` body `MATCH <pattern> RETURN <outputs>` (`merge_body`, anonymous elements `#m<k>`),
   outputs = record column bindings (`ColumnRef` on the MERGE segment), `on_create` / `on_match`
-  via `set_items`); `lower::prepare` refuses a bound MERGE before planning (`merge_not_yet`)
-  until 3e.T3.
+  via `set_items`); planned and lowered since 3e.T3 (`plan::WriteStage::merge`: the match
+  child planned like a `CALL` body by `Planner::merge`, position pass `merge_positions`, row
+  label `#m<k>`, every pattern element labelled under a path variable; `lower::Instr::Upsert`
+  built by `Lowering::merge`: the match child lowered like a `CALL` body ending in its
+  `gql:project`, the create child the 3a insert chain (`insert_chain`) at `Site::creating`
+  (record columns read through their own labels, the path from `Lowered::created_paths`)
+  ending in a `gql:project` of the same columns, the checks, the `ON` items via
+  `Lowering::set_items` on the record; tests `lower/merge_tests.rs`, planner tests, end to end
+  in `gql_write_tests.rs`).
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the

@@ -249,7 +249,6 @@ fn stamp<'g, S: GraphStorage + 'g>(
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// Appends `gql:merge(..)`: one `MERGE` clause; see [`StepGqlMerge`].
-    #[allow(dead_code, reason = "the MERGE lowering (3e.T3) calls it")]
     pub(crate) fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self {
         self.push_step(GraphStep::SideEffectMut(
             "gql:merge",
@@ -260,7 +259,6 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
 
 impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
     /// Appends `gql:merge(..)`; see [`StepGqlMerge`].
-    #[allow(dead_code, reason = "the MERGE lowering (3e.T3) calls it")]
     pub(crate) fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self {
         self.push_step(GraphStep::SideEffectMut(
             "gql:merge",

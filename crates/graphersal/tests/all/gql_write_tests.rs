@@ -1497,36 +1497,204 @@ fn a_failing_delete_row_changes_nothing() {
     }
 }
 
-// ----- stage 3e.T2: MERGE parses and binds, refused before the run until 3e.T3 -----
+// ----- stage 3e: MERGE end to end (3e.T3 lowering, 3e.T4 step) -----
+
+/// The edges of `graph` as `out-label->in` by name, sorted.
+fn edge_names(graph: &TraversalGraph, label: &str) -> Vec<String> {
+    let name = |v| {
+        graph
+            .vertex_properties(v)
+            .and_then(|map| {
+                map.iter()
+                    .find(|(k, _)| k.as_str() == "name")
+                    .map(|(_, n)| format!("{n:?}").trim_matches('"').to_string())
+            })
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let mut out: Vec<String> = graph
+        .edges()
+        .filter(|&e| graph.edge_label(e) == Some(label))
+        .filter_map(|e| graph.edge_endpoints(e))
+        .map(|(a, b)| format!("{}-{label}->{}", name(a), name(b)))
+        .collect();
+    out.sort();
+    out
+}
 
 #[test]
-fn bound_merge_is_refused_before_the_run() {
-    for query in [
-        "MERGE (p:person {name: 'marko'})",
-        "MERGE (p:person {name: 'ann'}) ON CREATE SET p.age = 1 ON MATCH SET p.age = 2 RETURN p",
-        "MATCH (a:person {name: 'marko'}), (b:software) MERGE (a)-[r:created]-(b) RETURN r",
-        "MATCH (p:person) CALL (p) { MERGE (p)-[:likes]->(:fruit) } RETURN count(*)",
-        "MERGE path = (:x)-[:t]->(:y) RETURN path",
-        "MATCH (p) WITH p, p.age AS old MERGE (p)-[:had]->(:age {v: old})",
-    ] {
-        let mut graph = TraversalGraph::tinkerpop_modern();
-        let before = dump(&graph);
-        let error = graph.traversal_mut().gql(query).to_list().unwrap_err();
-        match error.root_cause() {
-            TraverserError::Gql {
-                kind,
-                message,
-                gqlstatus,
-                ..
-            } => {
-                assert_eq!(*kind, GqlErrorKind::NotYet, "{query}");
-                assert_eq!(gqlstatus, "0A000", "{query}");
-                assert_eq!(message, "MERGE is not yet supported in this version");
-                let help = error.help().unwrap_or_default();
-                assert!(help.contains("merge_v("), "{query}: {help}");
-            }
-            other => panic!("{query}: {other:?}"),
-        }
-        assert_eq!(dump(&graph), before, "{query} changed the graph");
-    }
+fn merge_creates_once_and_later_rows_and_runs_match_it() {
+    let q = "FOR x IN [1, 1, 2] MERGE (n:N {k: x}) RETURN n.k AS k";
+    let (mut graph, rows) = after(q);
+    assert_eq!(column(&rows, "k"), ["1", "1", "2"]);
+    // W34: the second row matches the first row's creation.
+    assert_eq!(count_label(&graph, "N"), 2);
+    let before = dump(&graph);
+    assert_eq!(column(&write(&mut graph, q), "k"), ["1", "1", "2"]);
+    assert_eq!(dump(&graph), before, "a second run only matches");
+    // Every match is a row (W31).
+    let rows = write(&mut graph, "MERGE (p:person) RETURN p.name AS name");
+    assert_eq!(rows.len(), 4);
+}
+
+#[test]
+fn merge_between_bound_ends_matches_the_direction_written() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = |from: &str, to: &str| {
+        format!(
+            "MATCH (a:person {{name: '{from}'}}), (b:person {{name: '{to}'}}) \
+             MERGE (a)-[r:knows]->(b) RETURN startNode(r).name AS s"
+        )
+    };
+    assert_eq!(
+        column(&write(&mut graph, &q("marko", "josh")), "s"),
+        ["\"marko\""]
+    );
+    assert_eq!(count_edges(&graph, "knows"), 2);
+    assert_eq!(
+        column(&write(&mut graph, &q("josh", "marko")), "s"),
+        ["\"josh\""]
+    );
+    assert_eq!(
+        edge_names(&graph, "knows"),
+        [
+            "josh-knows->marko",
+            "marko-knows->josh",
+            "marko-knows->vadas"
+        ]
+    );
+    // An incoming edge pattern, and a new node between two bound ends.
+    write(
+        &mut graph,
+        "MATCH (a:person {name: 'vadas'}), (b:person {name: 'marko'}) MERGE (a)<-[:knows]-(b)",
+    );
+    assert_eq!(count_edges(&graph, "knows"), 3);
+    let q = "MATCH (a:person {name: 'marko'}), (b:person {name: 'josh'}) \
+             MERGE (a)-[:x]->(m:mid)<-[:y]-(b) RETURN m";
+    write(&mut graph, q);
+    write(&mut graph, q);
+    assert_eq!(count_label(&graph, "mid"), 1);
+    assert_eq!(edge_names(&graph, "y"), ["josh-y->?"]);
+}
+
+#[test]
+fn merge_undirected_matches_either_direction_and_creates_left_to_right() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = |from: &str, to: &str| {
+        format!(
+            "MATCH (a:person {{name: '{from}'}}), (b:person {{name: '{to}'}}) \
+             MERGE (a)-[r:knows]-(b) RETURN startNode(r).name AS s, endNode(r).name AS t"
+        )
+    };
+    // marko-knows->josh exists: matched from either end (W33).
+    let rows = write(&mut graph, &q("josh", "marko"));
+    assert_eq!(column(&rows, "s"), ["\"marko\""]);
+    assert_eq!(count_edges(&graph, "knows"), 2);
+    // None between josh and vadas: created from the node written first.
+    let rows = write(&mut graph, &q("josh", "vadas"));
+    assert_eq!(column(&rows, "s"), ["\"josh\""]);
+    assert_eq!(column(&rows, "t"), ["\"vadas\""]);
+    let rows = write(&mut graph, &q("vadas", "josh"));
+    assert_eq!(column(&rows, "s"), ["\"josh\""]);
+    assert_eq!(count_edges(&graph, "knows"), 3);
+    // Edges both ways: each one is a match, a self-loop matches once.
+    write(
+        &mut graph,
+        "MATCH (a:person {name: 'vadas'}), (b:person {name: 'marko'}) INSERT (a)-[:knows]->(b)",
+    );
+    assert_eq!(write(&mut graph, &q("marko", "vadas")).len(), 2);
+    let loop_q = "MATCH (a:person {name: 'peter'}) MERGE (a)-[r:self]-(a) RETURN r";
+    write(&mut graph, loop_q);
+    assert_eq!(write(&mut graph, loop_q).len(), 1);
+    assert_eq!(count_edges(&graph, "self"), 1);
+}
+
+#[test]
+fn merge_path_variable_reads_alike_created_and_matched() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = "MERGE p = (:x {k: 1})-[:t]->(:y) RETURN p";
+    let created = write(&mut graph, q);
+    let matched = write(&mut graph, q);
+    assert_eq!(created, matched);
+    // Node, edge, node.
+    let path = |rows: &[ElementProperty]| column(rows, "p")[0].clone();
+    let text = path(&created);
+    assert!(
+        text.starts_with('[') && text.matches(", ").count() == 2,
+        "{text}"
+    );
+    assert!(text.contains("-t->"), "{text}");
+    // From a bound end, also one a `WITH` column holds.
+    let q = "MATCH (a:person {name: 'marko'}) WITH a, count(*) AS c \
+             MERGE p = (a)-[:k]->(b:z) RETURN p";
+    let created = write(&mut graph, q);
+    assert_eq!(created, write(&mut graph, q));
+    let text = path(&created);
+    assert!(
+        text.matches(", ").count() == 2 && text.contains("-k->"),
+        "{text}"
+    );
+    assert_eq!(count_label(&graph, "z"), 1);
+}
+
+#[test]
+fn merge_on_items_run_on_the_record_and_read_earlier_bindings() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = "MATCH (a:person {name: 'marko'}) MERGE (a)-[:likes]->(f:fruit {name: 'apple'}) \
+             ON CREATE SET f.by = a.name ON MATCH SET f.again = true, a.fan = true \
+             RETURN f.by AS by, f.again AS again";
+    let rows = write(&mut graph, q);
+    assert_eq!(column(&rows, "by"), ["\"marko\""]);
+    assert_eq!(column(&rows, "again"), ["null"]);
+    let rows = write(&mut graph, q);
+    assert_eq!(column(&rows, "again"), ["true"]);
+    let fans = write(
+        &mut graph,
+        "MATCH (a:person) WHERE a.fan RETURN a.name AS n",
+    );
+    assert_eq!(column(&fans, "n"), ["\"marko\""]);
+    // A record column read after a later stage left the record (`#m<k>`).
+    let rows = write(
+        &mut graph,
+        "MERGE (n:x {k: 1}) MATCH (m:person {name: 'josh'}) RETURN n.k AS k, m.name AS m",
+    );
+    assert_eq!(column(&rows, "k"), ["1"]);
+    assert_eq!(column(&rows, "m"), ["\"josh\""]);
+}
+
+#[test]
+fn merge_in_a_call_body_and_through_an_index_lookup() {
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let q = "MATCH (p:person) CALL (p) { MERGE (p)-[:likes]->(:fruit) } RETURN count(*) AS n";
+    assert_eq!(column(&write(&mut graph, q), "n"), ["4"]);
+    write(&mut graph, q);
+    assert_eq!(count_edges(&graph, "likes"), 4);
+    assert_eq!(count_label(&graph, "fruit"), 4);
+    // With an index on `person.name` the match child is a lookup per row; same results.
+    let q = "FOR x IN ['marko', 'zed', 'zed'] MERGE (n:person {name: x}) RETURN n.name AS n";
+    let (plain, plain_rows) = after(q);
+    let mut indexed = TraversalGraph::tinkerpop_modern();
+    indexed
+        .traversal_mut()
+        .create_index(
+            "person_name",
+            graphersal::catalog::PropertyIndexDefinition::new(
+                graphersal::storage::ElementKind::Vertex,
+                "person",
+                "name",
+            ),
+        )
+        .unwrap();
+    // The profile runs the query once: the same writes as without the index.
+    let profile = indexed
+        .traversal_mut()
+        .gql(q)
+        .profile()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string();
+    assert!(profile.contains("gql:lookup("), "{profile}");
+    assert_eq!(dump(&indexed), dump(&plain));
+    let mut plain = plain;
+    assert_eq!(write(&mut indexed, q), write(&mut plain, q));
+    assert_eq!(column(&plain_rows, "n").len(), 3);
+    assert_eq!(dump(&indexed), dump(&plain));
 }
