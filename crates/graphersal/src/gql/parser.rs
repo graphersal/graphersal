@@ -46,7 +46,7 @@
 //! quantifier := '{' int '}' | '{' int? ',' int? '}' | '*' | '+'
 //! cypher_len := '*' int? ('..' int?)?            -- edges only, inside the brackets
 //! labels     := label_or (':' name)*          -- Cypher `:A:B`, plain names only
-//! label_or   := label_and ('|' label_and)*
+//! label_or   := label_and ('|' ':'? label_and)*  -- Cypher `:A|:B` is `:A|B`
 //! label_and  := label_not ('&' label_not)*
 //! label_not  := '!' label_not | name | '%' | '(' label_or ')'
 //! return     := RETURN projection group_by?
@@ -1860,7 +1860,7 @@ impl<'a> Parser<'a> {
         if self.eat(&TokenKind::RParen).is_none() {
             loop {
                 match self.peek().kind {
-                    TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+                    _ if self.peek().is_variable_name() => {
                         let name = self.peek().name().unwrap_or("").to_string();
                         let span = self.advance().span;
                         variables.push(Identifier { name, span });
@@ -2060,7 +2060,7 @@ impl<'a> Parser<'a> {
         let mut bindings = Vec::new();
         loop {
             let variable = match self.peek().kind {
-                TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+                _ if self.peek().is_variable_name() => {
                     let name = self.peek().name().unwrap_or("").to_string();
                     let span = self.advance().span;
                     if !self.variables.contains(&name) {
@@ -2147,7 +2147,7 @@ impl<'a> Parser<'a> {
     /// The new variable of a `FOR` clause (or of its ordinal).
     fn for_variable(&mut self) -> PResult<Identifier> {
         match self.peek().kind {
-            TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+            _ if self.peek().is_variable_name() => {
                 let name = self.peek().name().unwrap_or("").to_string();
                 let span = self.advance().span;
                 if !self.variables.contains(&name) {
@@ -2201,10 +2201,7 @@ impl<'a> Parser<'a> {
         } else {
             "ORDINALITY"
         };
-        if !matches!(
-            self.peek().kind,
-            TokenKind::Ident | TokenKind::QuotedIdent(_)
-        ) {
+        if !self.peek().is_variable_name() {
             let token = self.peek();
             let mut alternative = format!(
                 "name the position, for example FOR x IN ['a', 'b'] WITH {spelled} i RETURN x, i"
@@ -2238,7 +2235,7 @@ impl<'a> Parser<'a> {
     fn ordinality_form(&self) -> bool {
         let after = self.nth(2);
         match &after.kind {
-            TokenKind::Ident | TokenKind::QuotedIdent(_) => true,
+            _ if after.is_variable_name() => true,
             TokenKind::Eof | TokenKind::Semicolon => !self.declared(self.nth(1).text),
             TokenKind::Keyword(keyword) => {
                 matches!(
@@ -3201,7 +3198,7 @@ impl<'a> Parser<'a> {
             TokenKind::LParen if self.group_ahead() => {
                 Err(self.group_not_yet(GroupNotYet::Nested, token.span))
             }
-            TokenKind::Ident | TokenKind::QuotedIdent(_) if self.nth(1).kind == TokenKind::Eq => {
+            _ if token.is_variable_name() && self.nth(1).kind == TokenKind::Eq => {
                 Err(self.group_not_yet(GroupNotYet::PathVariable, token.span.to(self.nth(1).span)))
             }
             TokenKind::Ident if self.prefix_word_at(0) => {
@@ -3329,9 +3326,7 @@ impl<'a> Parser<'a> {
     /// The path variable of `p = ...` with its `=`, if written.
     fn path_variable(&mut self) -> Option<Identifier> {
         let token = self.peek();
-        if !matches!(token.kind, TokenKind::Ident | TokenKind::QuotedIdent(_))
-            || self.nth(1).kind != TokenKind::Eq
-        {
+        if !token.is_variable_name() || self.nth(1).kind != TokenKind::Eq {
             return None;
         }
         let name = token.name().unwrap_or("").to_string();
@@ -3502,7 +3497,7 @@ impl<'a> Parser<'a> {
     fn pattern_variable(&mut self) -> PResult<Option<Identifier>> {
         let token = self.peek();
         match &token.kind {
-            TokenKind::Ident | TokenKind::QuotedIdent(_) => {
+            _ if token.is_variable_name() => {
                 let name = token.name().unwrap_or("").to_string();
                 let span = self.advance().span;
                 if !self.variables.contains(&name) {
@@ -3766,6 +3761,9 @@ impl<'a> Parser<'a> {
     fn label_or(&mut self) -> PResult<(LabelExpr, usize)> {
         let (mut expr, mut height) = self.label_and()?;
         while self.bar_ends != Some(self.open) && self.eat(&TokenKind::Pipe).is_some() {
+            // Cypher spells a disjunction of edge types `:A|:B`: the colon after `|` is
+            // optional (TCK Match3 [8]).
+            self.eat(&TokenKind::Colon);
             let (right, right_height) = self.label_and()?;
             let span = expr.span.to(right.span);
             height = self.height(height.max(right_height), span)?;
@@ -4458,7 +4456,7 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::True) => ExprKind::Literal(Literal::Bool(true)),
             TokenKind::Keyword(Keyword::False) => ExprKind::Literal(Literal::Bool(false)),
             TokenKind::Keyword(Keyword::Null) => ExprKind::Literal(Literal::Null),
-            TokenKind::Ident | TokenKind::QuotedIdent(_) => ExprKind::Variable(Identifier {
+            _ if token.is_variable_name() => ExprKind::Variable(Identifier {
                 name: token.name().unwrap_or("").to_string(),
                 span,
             }),
@@ -4789,7 +4787,8 @@ impl<'a> Parser<'a> {
         let token = self.nth(1);
         match &token.kind {
             TokenKind::LParen | TokenKind::RParen => true,
-            TokenKind::Ident | TokenKind::QuotedIdent(_) => self.nth(2).kind == TokenKind::Eq,
+            _ if token.is_variable_name() && self.nth(2).kind == TokenKind::Eq => true,
+            TokenKind::Ident | TokenKind::QuotedIdent(_) => false,
             TokenKind::Keyword(k) => matches!(
                 k,
                 Keyword::Match
@@ -4874,10 +4873,7 @@ impl<'a> Parser<'a> {
                 return Err(e);
             }
             self.check_match_prefix()?;
-            let path_variable = matches!(
-                self.peek().kind,
-                TokenKind::Ident | TokenKind::QuotedIdent(_)
-            ) && self.nth(1).kind == TokenKind::Eq;
+            let path_variable = self.peek().is_variable_name() && self.nth(1).kind == TokenKind::Eq;
             if !self.at(&TokenKind::LParen) && !path_variable {
                 return Err(self.unexpected(&["MATCH", "`(`"]));
             }
@@ -5093,10 +5089,7 @@ impl<'a> Parser<'a> {
                     items.push(ProjectionItem::Property(key));
                 }
             } else {
-                let variable = matches!(
-                    self.peek().kind,
-                    TokenKind::Ident | TokenKind::QuotedIdent(_)
-                );
+                let variable = self.peek().is_variable_name();
                 let key = self.expect_name(&["`.`", "a variable", "a key"])?;
                 if self.eat(&TokenKind::Colon).is_some() {
                     let (value, value_height) = self.expr_bp(0)?;
@@ -5118,10 +5111,7 @@ impl<'a> Parser<'a> {
 
     /// At `[`: whether a list comprehension starts (a name, then `IN`).
     fn list_comprehension_ahead(&self) -> bool {
-        matches!(
-            self.nth(1).kind,
-            TokenKind::Ident | TokenKind::QuotedIdent(_)
-        ) && self.nth(2).keyword() == Some(Keyword::In)
+        self.nth(1).is_variable_name() && self.nth(2).keyword() == Some(Keyword::In)
     }
 
     /// `[x IN list WHERE cond | expr]`, at `[`.
@@ -5194,10 +5184,8 @@ impl<'a> Parser<'a> {
     /// `p =`) by the pattern-predicate lookahead, whose end is followed by `WHERE` or `|`.
     fn pattern_comprehension_ahead(&self) -> bool {
         let mut i = self.pos.saturating_add(1);
-        if matches!(
-            self.token_at(i).kind,
-            TokenKind::Ident | TokenKind::QuotedIdent(_)
-        ) && self.token_at(i.saturating_add(1)).kind == TokenKind::Eq
+        if self.token_at(i).is_variable_name()
+            && self.token_at(i.saturating_add(1)).kind == TokenKind::Eq
         {
             i = i.saturating_add(2);
         }
@@ -5561,10 +5549,7 @@ impl<'a> Parser<'a> {
 
     /// The local variable of a list function: a plain or back-quoted name.
     fn local_variable(&mut self) -> PResult<Identifier> {
-        if !matches!(
-            self.peek().kind,
-            TokenKind::Ident | TokenKind::QuotedIdent(_)
-        ) {
+        if !self.peek().is_variable_name() {
             return Err(self.unexpected(&["a variable"]));
         }
         let token = self.advance();

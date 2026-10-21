@@ -3343,6 +3343,9 @@ impl<'q> Binder<'q> {
         let existing = variable.and_then(|v| self.scope.get(&v.name).cloned());
         let (var, id) = match (variable, existing) {
             (Some(var), Some(Symbol::Binding(id))) => (var, id),
+            (Some(var), Some(Symbol::Value(_))) if site.group => {
+                return Err(bound_edge_list(var));
+            }
             (Some(var), Some(Symbol::Value(_))) => {
                 return Err(value_as_element(var, site.kind));
             }
@@ -3361,6 +3364,9 @@ impl<'q> Binder<'q> {
         };
         if for_column == Some(FOR_ORDINAL) {
             return Err(ordinal_as_element(var, site.kind));
+        }
+        if site.group && binding.kind == BindingKind::Value && for_column.is_none() {
+            return Err(bound_edge_list(var));
         }
         // A FOR item written as a node or edge takes that kind (design E3); as the edge of a
         // quantified edge it is refused below (a group variable is always a new name).
@@ -6204,7 +6210,9 @@ impl<'q> Binder<'q> {
         let mut columns = Vec::new();
         let mut names = Vec::new();
         if let Some(star) = star {
-            if self.scope.entries.is_empty() {
+            // `WITH *` with nothing in scope passes the rows on (TCK Create3 [2] / [3]); a
+            // `RETURN *` would return rows without columns.
+            if self.scope.entries.is_empty() && clause != "WITH" {
                 return Err(semantic(
                     star,
                     format!(
@@ -6816,6 +6824,21 @@ fn kind_conflict(var: &Identifier, here: BindingKind, there: BindingKind) -> Box
         ),
     };
     Box::new(semantic(var.span, message).topic(GqlHelpTopic::PatternVariable))
+}
+
+/// The "not yet" of a quantified edge whose variable is a list of edges bound before
+/// (`WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`, the Cypher form that walks exactly those edges).
+fn bound_edge_list(var: &Identifier) -> Box<GqlErrorBuilder> {
+    let alternative = format!(
+        "give the quantified edge a new name and compare it with the list in WHERE, as in \
+         MATCH (a)-[{name}2*]->(b) WHERE {name}2 = {name}",
+        name = var.name
+    );
+    not_yet(
+        var.span,
+        "a quantified edge over a list of edges bound before",
+        &alternative,
+    )
 }
 
 /// The error of a `LET` / `WITH` value name written as a pattern element.

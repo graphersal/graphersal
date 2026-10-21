@@ -4590,3 +4590,39 @@ fn merge_binding_errors() {
     ok("MERGE (a {num: null})");
     ok("FOR x IN [NULL] MERGE (a)-[:T {k: x}]->(b)");
 }
+
+#[test]
+fn a_quantified_edge_over_a_bound_list_of_edges_is_not_yet() {
+    // TCK Match4 [8], Match9 [6] / [7]: Cypher walks exactly the edges of the list.
+    for (query, text) in [
+        (
+            "MATCH ()-[r1]->()-[r2]->() WITH [r1, r2] AS rs LIMIT 1 \
+             MATCH (first)-[rs*]->(second) RETURN first, second",
+            "rs",
+        ),
+        (
+            "MATCH ()-[r1]->()-[r2]->() WITH [r1, r2] AS rs \
+             MATCH (a)-[rs*1..2]->(b) RETURN a",
+            "rs",
+        ),
+        ("LET rs = [] MATCH (a)-[rs*]->(b) RETURN a", "rs"),
+    ] {
+        let parsed = parse(query).unwrap();
+        let f = failure(query, bind(&parsed));
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.gqlstatus, "0A000", "{query}");
+        assert_eq!(f.text, text, "{query}");
+        assert!(
+            f.message
+                .contains("a quantified edge over a list of edges bound before"),
+            "{}",
+            f.message
+        );
+        assert!(
+            f.alternative
+                .as_deref()
+                .is_some_and(|a| a.contains("WHERE rs2 = rs")),
+            "{f:?}"
+        );
+    }
+}

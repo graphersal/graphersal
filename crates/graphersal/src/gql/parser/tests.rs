@@ -5833,10 +5833,10 @@ fn merge_form_errors() {
             "{query}: {help}"
         );
     }
-    // Cypher's `:A|:B` (TCK Merge5 [25]) is no label expression of GQL: a syntax error at `:`.
+    // Cypher's `:A|:B` (TCK Merge5 [25]) is the label expression `A|B`: a syntax error under it.
     let f = fail("MERGE (a)-[:A|:B]->(b)");
     assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
-    assert_eq!(f.text, ":");
+    assert_eq!(f.text, "A|:B");
     // A parameter as the property map (TCK Merge1 [16], Merge5 [27]): the existing 42001.
     for query in [
         "MERGE (n $param)",
@@ -5975,4 +5975,58 @@ fn malformed_subscripts_are_syntax_errors() {
         "]".repeat(n)
     ));
     assert_eq!(f.kind, GqlErrorKind::Limit);
+}
+
+#[test]
+fn non_reserved_words_name_variables() {
+    // ISO GQL non-reserved words (FIRST, LAST, LABELED, SHORTEST) are names wherever a
+    // variable can stand (TCK Unwind1 [3], Match4 [8]); their keyword meaning stays.
+    for query in [
+        "WITH [1, 2] AS first RETURN first",
+        "MATCH (first)-[last]->(shortest) RETURN first, last, shortest",
+        "MATCH labeled = (a)-->(b) RETURN labeled",
+        "LET first = 1 RETURN first + 1 AS x",
+        "FOR last IN [1, 2] WITH ORDINALITY first RETURN last, first",
+        "UNWIND [1] AS first RETURN [first IN [first] | first] AS l",
+        "MATCH (n) RETURN all(last IN [n] WHERE last IS NOT NULL) AS b",
+        "MATCH (first) CALL (first) { RETURN 1 AS one } RETURN first, one",
+        "MATCH (first) RETURN first { .name } AS m",
+    ] {
+        ok(query);
+    }
+    let q = ok("WITH [1, 2] AS first RETURN first");
+    assert!(matches!(
+        &q.ret.items[0].expr.kind,
+        ExprKind::Variable(var) if var.name == "first"
+    ));
+    // The keyword forms keep their meaning.
+    for (query, text) in [
+        ("MATCH (n) RETURN n ORDER BY n.x NULLS FIRST", "NULLS"),
+        ("MATCH ANY SHORTEST (a)-->(b) RETURN a", "ANY SHORTEST"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::NotYet, "{query}: {f:?}");
+        assert_eq!(f.text, text, "{query}");
+    }
+    ok("MATCH (n) WHERE n IS LABELED person RETURN n");
+}
+
+#[test]
+fn a_colon_after_a_label_bar_is_the_cypher_disjunction() {
+    // TCK Match3 [8]: `[:T|:T]` reads as `[:T|T]`.
+    for (query, expected) in [
+        ("MATCH (a)-[:T|:U]->(b) RETURN b", "(| T U)"),
+        ("MATCH (a)-[e:T|:U|V]->(b) RETURN b", "(| (| T U) V)"),
+    ] {
+        let q = ok(query);
+        let edge = &q.matches[0].patterns[0].steps[0].edge;
+        assert_eq!(
+            edge.labels.as_ref().map(label),
+            Some(expected.to_string()),
+            "{query}"
+        );
+    }
+    // Mixed with the `:A:B` conjunction it stays an error.
+    let f = fail("MATCH (a:A|:B:C) RETURN a");
+    assert_eq!(f.kind, GqlErrorKind::Syntax, "{f:?}");
 }

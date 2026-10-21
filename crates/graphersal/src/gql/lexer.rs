@@ -128,6 +128,16 @@ keywords! {
 }
 
 impl Keyword {
+    /// Whether ISO GQL lists this word as a non-reserved word (ISO/IEC 39075 21.3
+    /// `<non-reserved word>`): it keeps its keyword meaning where the grammar expects it
+    /// (`NULLS FIRST`, `SHORTEST`, `LABELED`) and is a name everywhere a variable can stand.
+    pub(crate) fn non_reserved(self) -> bool {
+        matches!(
+            self,
+            Keyword::First | Keyword::Last | Keyword::Labeled | Keyword::Shortest
+        )
+    }
+
     /// The keyword spelled `word` (ASCII case-insensitive), if any.
     pub(crate) fn from_word(word: &str) -> Option<Keyword> {
         Keyword::ALL
@@ -333,6 +343,17 @@ impl Token<'_> {
         match self.kind {
             TokenKind::Keyword(k) => Some(k),
             _ => None,
+        }
+    }
+
+    /// Whether this token can name a variable: a plain or back-quoted identifier, or a keyword
+    /// ISO GQL lists as non-reserved ([`Keyword::non_reserved`]), so `WITH [1, 2] AS first
+    /// RETURN first` and `MATCH (first)-->(last)` work.
+    pub(crate) fn is_variable_name(&self) -> bool {
+        match self.kind {
+            TokenKind::Ident | TokenKind::QuotedIdent(_) => true,
+            TokenKind::Keyword(k) => k.non_reserved(),
+            _ => false,
         }
     }
 }

@@ -3,14 +3,6 @@
 #   OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
 # Review diffs like code. Removing an entry means "this case passes now".
 
-["clauses/create/Create3.feature::[2] WITH-CREATE"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 6: WITH * needs at least one named variable, and this query has none"
-
-["clauses/create/Create3.feature::[3] MATCH-CREATE-WITH-CREATE"]
-class = "unexpected_error"
-reason = "GQL semantic error at line 3, column 6: WITH * needs at least one named variable, and this query has none"
-
 ["clauses/create/Create5.feature::[5] Create a pattern with multiple hops and varying directions"]
 class = "wrong_columns"
 reason = "control query: columns differ: expected [\"a\", \"b\", \"c\", \"r1\", \"r2\"], actual [\"a\", \"r1\", \"b\", \"r2\", \"c\"]"
@@ -19,17 +11,13 @@ reason = "control query: columns differ: expected [\"a\", \"b\", \"c\", \"r1\", 
 class = "wrong_error"
 reason = "expected SyntaxError at compile time, the query succeeded with 0 row(s)"
 
-["clauses/match/Match3.feature::[8] Matching using relationship predicate with multiples of the same type"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 1, column 15: unexpected `:`"
-
 ["clauses/match/Match4.feature::[4] Matching longer variable length paths"]
 class = "setup"
 reason = "having executed: having executed: GQL semantic error at line 8, column 9: the variable `n1` is used as a node here but holds a value computed by WITH, not a no…"
 
 ["clauses/match/Match4.feature::[8] Matching relationships into a list and matching variable length using the list"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 4, column 8: unexpected keyword first"
+class = "missing"
+reason = "not yet: a quantified edge over a list of edges bound before"
 
 ["clauses/match/Match5.feature::[11] Handling upper and lower bounded variable length match, empty interval 1"]
 class = "unexpected_error"
@@ -48,12 +36,12 @@ class = "unexpected_error"
 reason = "GQL semantic error at line 5, column 8: `x` is a value defined by LET or WITH, not a node; a pattern variable is a new name or a node or edge variable"
 
 ["clauses/match/Match9.feature::[6] Matching relationships into a list and matching variable length using the list, with bound nodes"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 4, column 8: unexpected keyword first"
+class = "missing"
+reason = "not yet: a quantified edge over a list of edges bound before"
 
 ["clauses/match/Match9.feature::[7] Matching relationships into a list and matching variable length using the list, with bound nodes, wrong direction"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 4, column 8: unexpected keyword first"
+class = "missing"
+reason = "not yet: a quantified edge over a list of edges bound before"
 
 ["clauses/return-orderby/ReturnOrderBy1.feature::[11] ORDER BY should order distinct types in the expected order"]
 class = "unexpected_error"
@@ -126,10 +114,6 @@ reason = "columns differ: expected [\"a\", \"b\", \"p\"], actual [\"p\", \"a\", 
 ["clauses/unwind/Unwind1.feature::[13] Multiple unwinds after each other"]
 class = "wrong_columns"
 reason = "columns differ: expected [\"x\", \"xs\", \"y\", \"ys\", \"z\", \"zs\"], actual [\"xs\", \"ys\", \"zs\", \"x\", \"y\", \"z\"]"
-
-["clauses/unwind/Unwind1.feature::[3] Unwinding a concatenation of lists"]
-class = "unexpected_error"
-reason = "GQL syntax error at line 2, column 9: unexpected keyword first"
 
 ["clauses/with-orderBy/WithOrderBy1.feature::[11] Sort dates in ascending order"]
 class = "missing"

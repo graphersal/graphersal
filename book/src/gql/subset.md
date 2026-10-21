@@ -45,7 +45,9 @@ finds or creates them; a query whose last clause writes may end there and return
 ([Writing with GQL](writes.md)).
 
 Keywords are case-insensitive (`match`, `Match`, `MATCH`); variables, labels and property keys
-are case-sensitive. Line breaks are whitespace, so a query may span lines. Comments are `// ...`,
+are case-sensitive. The words ISO GQL lists as non-reserved (`FIRST`, `LAST`, `LABELED`,
+`SHORTEST`) keep their meaning where the grammar expects them (`NULLS FIRST`, `IS LABELED`) and
+are names everywhere a variable can stand: `WITH [1, 2] AS first RETURN first`. Line breaks are whitespace, so a query may span lines. Comments are `// ...`,
 `/* ... */` and the GQL `-- ...` ([the `--` rule](rhai_strings.md#comments)).
 
 ```rhai,graph=modern
@@ -467,7 +469,8 @@ A `LET` name may not be bound again, and a `LET` item may not read a name define
 ## WITH
 
 `WITH` (Cypher; GQL's linear statements express the same) ends one part of the query and passes
-only its items on: the next clauses see only the names `WITH` lists (`WITH *` keeps all). An item
+only its items on: the next clauses see only the names `WITH` lists (`WITH *` keeps all; with
+nothing in scope it passes the rows on, as in `MATCH () CREATE () WITH * CREATE ()`). An item
 that is not a plain variable needs `AS`. `WITH` may take `DISTINCT`, an aggregate,
 `ORDER BY`, `OFFSET` / `SKIP`, `LIMIT` and a `WHERE`, in this order; the `WHERE` filters **after**
 `LIMIT` (Cypher's order of the sub-clauses).
@@ -1207,6 +1210,7 @@ construct and the alternative.
 | a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`, a computed key `n[k] = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
+| a quantified edge over a list of edges bound before, Cypher's `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` | a new name compared in `WHERE`: `MATCH (a)-[rs2*]->(b) WHERE rs2 = rs` |
 | a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |
 | path search prefixes and match modes (`ANY SHORTEST`, `TRAIL`, `DIFFERENT EDGES` written out) | Gremlin `path()`, `repeat()` |
 | `EXCEPT`, `INTERSECT`, `OTHERWISE` | `NOT EXISTS { }` / `EXISTS { }` on the rows of the first query, or `NEXT` |

@@ -17,6 +17,7 @@ spelling is either not supported yet or [refused](refused.md).
 | `a != b` | `a <> b` | |
 | `s1 + s2` on two strings | `s1 \|\| s2` | also on two lists; `+` of a string and a number is an error (no implicit conversion: write `s + toString(n)` or `s \|\| CAST(n AS STRING)`) |
 | `(n:A:B)` | `(n:A&B)` | plain names only; mixing `:A:B` with `\|`, `&` or `!` is an error (write it with `&`) |
+| `-[:A\|:B]->` | `-[:A\|B]->` | a colon after the `\|` of a label disjunction |
 | `n:A` in an expression | `n IS LABELED A` | |
 | `-->` | `->` | abbreviated edge pointing right |
 | `<--` | `<-` | abbreviated edge pointing left |
