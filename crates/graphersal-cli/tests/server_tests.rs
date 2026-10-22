@@ -4420,6 +4420,7 @@ mod ai_chat {
             "# Graphersal DSL reference",
             "6 vertices, 6 edges",
             "person (4)",
+            "CALL folder.name(args) YIELD col",
         ] {
             assert!(
                 system.contains(part),

@@ -160,7 +160,7 @@ fn excluded_counts<'a>(excluded: &[Row<'a>]) -> Vec<(&'static scope::Exclusion, 
         .collect()
 }
 
-/// `3846 in-scope test cases; 185 excluded (procedures 52, ...)`.
+/// `3846 in-scope test cases; 133 excluded (upstream-ignore 1, ...)`.
 fn scope_line(in_scope: usize, excluded: &[Row<'_>]) -> String {
     let parts: Vec<String> = excluded_counts(excluded)
         .iter()
@@ -567,7 +567,7 @@ mod tests {
             "GQL construct not supported yet at line 1, column 1: MERGE is not yet supported",
         );
         let wrong = outcome(Class::WrongResult, "rows differ");
-        let excluded = outcome(Class::Excluded, "excluded:procedures");
+        let excluded = outcome(Class::Excluded, "excluded:upstream-ignore");
         let rows = [
             Row {
                 id: "clauses/match/Match1.feature::[1] a",
@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(rows[2].dir(), "expressions/temporal");
         assert_eq!(
             scope_markdown(&rows),
-            "3 in-scope test cases; 1 excluded (procedures 1).\n"
+            "3 in-scope test cases; 1 excluded (upstream-ignore 1).\n"
         );
         let headline = headline_markdown(&rows);
         assert!(

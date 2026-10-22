@@ -58,3 +58,15 @@ test('never fails: unterminated text and stray characters still give tokens', ()
     assert.ok(Array.isArray(gqlTokens(text)), text);
   }
 });
+
+test('the name of a called saved query after CALL, segment by segment', () => {
+  assert.deepEqual(types('CALL people.older(30) YIELD name'), [
+    ['CALL', 'keyword'], ['people', 'procedure'], ['.', 'punctuation'], ['older', 'procedure'], ['(', 'punctuation'],
+    ['30', 'number'], [')', 'punctuation'], ['YIELD', 'keyword'], ['name', 'variable'],
+  ]);
+  assert.deepEqual(types('CALL `my reports`.top()').slice(0, 4).map(([, t]) => t), ['keyword', 'procedure', 'punctuation', 'procedure']);
+  assert.deepEqual(types('CALL names').map(([, t]) => t), ['keyword', 'procedure']);
+  // A subquery is no procedure; after the name the usual rules apply again.
+  assert.deepEqual(types('CALL (p) { RETURN p.name }').filter(([, t]) => t === 'procedure'), []);
+  assert.deepEqual(types('CALL q() YIELD x RETURN x.k')[9], ['k', 'property']);
+});

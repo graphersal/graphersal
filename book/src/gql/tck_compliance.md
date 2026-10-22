@@ -39,31 +39,38 @@ checked by every test run (see [Running and regenerating](#running-and-regenerat
 edit it by hand.
 
 <!-- opencypher:begin scope -->
-3766 in-scope test cases; 131 excluded (procedures 52, upstream-ignore 1, w21-property-kinds 1, parameter-at-compile-time 6, zone-name-not-kept 69, year-range 2).
+3818 in-scope test cases; 79 excluded (upstream-ignore 1, w21-property-kinds 1, parameter-at-compile-time 6, zone-name-not-kept 69, year-range 2).
 <!-- opencypher:end scope -->
 
 <!-- opencypher:begin headline -->
 | | Test cases | Share |
 |---|---:|---:|
-| **Passed** | **3164** / 3766 | **84.0 %** |
-| Unsupported (not yet or refused) | 602 / 3766 | 16.0 % |
-| **Wrong behaviour of supported constructs** | **0** / 3766 | **0.0 %** |
-| Passed without `expressions/temporal` | 2709 / 2833 | 95.6 % |
+| **Passed** | **3216** / 3818 | **84.2 %** |
+| Unsupported (not yet or refused) | 602 / 3818 | 15.8 % |
+| **Wrong behaviour of supported constructs** | **0** / 3818 | **0.0 %** |
+| Passed without `expressions/temporal` | 2761 / 2885 | 95.7 % |
 
 Unsupported = missing 533, setup 69. Wrong behaviour = wrong_result 0, wrong_columns 0, wrong_side_effects 0, wrong_error 0, unexpected_error 0, timeout 0, panic 0.
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
-are not yet supported in GQL, and `expressions/temporal` is about a quarter of the kit, so the
-headline also shows the share without it. The write clauses (`CREATE`, `SET`, `REMOVE`,
-`DELETE`, `MERGE`) pass; `rand()` is refused by design ([Refused Constructs](refused.md)). The
-ranking with counts is in the report.
+are supported with the differences listed on [Semantics](semantics.md#where-dates-and-times-differ-from-neo4j)
+(zoned `time()` not yet), and `expressions/temporal` is about a quarter of the kit and its least
+covered part, so the headline also shows the share without it. The write clauses (`CREATE`,
+`SET`, `REMOVE`, `DELETE`, `MERGE`) pass, and so do the procedure calls of `clauses/call`: the
+kit declares each procedure it calls with its signature and a table of rows, and the harness
+saves it as a saved GQL query before the case runs (`test.my.proc` is the query `proc` of the
+folder `test/my`, its parameters typed from the signature, its body returning the table's rows
+that match the arguments), which the query then calls with `CALL test.my.proc(..)`
+([Calling saved queries](subset.md#calling-saved-queries)). `rand()` is refused by design
+([Refused Constructs](refused.md)). The ranking with counts is in the report.
 
 Per sub-directory of the kit:
 
 <!-- opencypher:begin directories -->
 | Directory | Pass % | Passed | Total | Unsupported | Wrong |
 |---|---:|---:|---:|---:|---:|
+| `clauses/call` | 100.0 % | 52 | 52 | · | · |
 | `clauses/create` | 100.0 % | 78 | 78 | · | · |
 | `clauses/delete` | 100.0 % | 41 | 41 | · | · |
 | `clauses/match` | 99.2 % | 378 | 381 | 3 | · |
@@ -100,7 +107,7 @@ Per sub-directory of the kit:
 | `expressions/typeConversion` | 100.0 % | 47 | 47 | · | · |
 | `useCases/countingSubgraphMatches` | 100.0 % | 11 | 11 | · | · |
 | `useCases/triadicSelection` | 100.0 % | 19 | 19 | · | · |
-| **all** | **84.0 %** | **3164** | **3766** | 602 | · |
+| **all** | **84.2 %** | **3216** | **3818** | 602 | · |
 <!-- opencypher:end directories -->
 
 ## Out of scope
@@ -114,17 +121,14 @@ excluded: they stay `missing`, the backlog.
 <!-- opencypher:begin excluded -->
 | Code | Why | Docs | Test cases |
 |---|---|---|---:|
-| `procedures` | vendor procedures: the scenarios register test procedures and CALL them; procedure calls are vendor extensions, not GQL, and refused for good | [gql/refused.md](../gql/refused.md) | 52 |
 | `upstream-ignore` | marked @ignore by the TCK itself ("does not work in Cypher") | [gql/tck_compliance.md#out-of-scope](../gql/tck_compliance.md#out-of-scope) | 1 |
 | `w21-property-kinds` | a list of maps is a valid property value (maps and lists of any kinds are stored as given); Neo4j raises a TypeError (deliberate deviation) | [gql/semantics.md#writes](../gql/semantics.md#writes) | 1 |
 | `parameter-at-compile-time` | parameters are bound when the query is compiled: a negative or non-integer SKIP / LIMIT parameter is refused then (22G02 / 22G03), not at runtime (deliberate deviation) | [gql/semantics.md#parameters-are-bound-when-the-query-is-compiled](../gql/semantics.md#parameters-are-bound-when-the-query-is-compiled) | 6 |
 | `zone-name-not-kept` | a datetime keeps its UTC offset, not the zone name: a zone name resolves to its offset at that time, so the value prints +01:00, not +01:00[Europe/Stockholm], and a later change of the date keeps the offset (no daylight saving step) (deliberate deviation) | [gql/semantics.md#where-dates-and-times-differ-from-neo4j](../gql/semantics.md#where-dates-and-times-differ-from-neo4j) | 69 |
 | `year-range` | temporal values hold the years -9999 to 9999; a year beyond them is a data error (22008), Neo4j reads years up to 999999999 (deliberate deviation) | [gql/semantics.md#where-dates-and-times-differ-from-neo4j](../gql/semantics.md#where-dates-and-times-differ-from-neo4j) | 2 |
-| **all** | | | **131** |
+| **all** | | | **79** |
 <!-- opencypher:end excluded -->
 
-- **`procedures`:** the `clauses/call` scenarios register test procedures and call them.
-  Procedure calls are vendor extensions, not part of GQL, and refused for good.
 - **`upstream-ignore`:** the one scenario that the kit itself marks `@ignore`.
 - **`w21-property-kinds`** (a deliberate deviation, user decision): a list of maps is a valid
   property value in Graphersal, where Neo4j raises a `TypeError`
@@ -190,7 +194,7 @@ The test fails when:
 - a case that is not in the baseline does not pass (a regression);
 - a case in the baseline passes now, no longer exists or is excluded (the entry is stale; remove
   it in the same change);
-- an id of the scope table does not exist, a procedure or `@ignore` case is not in it, or a
+- an id of the scope table does not exist, an `@ignore` case is not in it, or a
   deliberate deviation passes now (`scope_table_is_consistent`, `deviation_cases_still_deviate`);
 - a generated block of this page (`scope`, `headline`, `directories`, `excluded`) differs from
   what the run computes. Only trailing whitespace is ignored.

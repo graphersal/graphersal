@@ -292,7 +292,17 @@
 //!   starts with `WITH` of plain variables, or `*` alone, and nothing else) moves into
 //!   [`LinearQuery::importing`]; any other first `WITH` stays a clause (the binder finds its
 //!   unknown names). `IN [n CONCURRENT] TRANSACTIONS` after the body is refused (a batched
-//!   write; one gql() query is one unit); `CALL name(..)` stays a refused vendor procedure.
+//!   write; one gql() query is one unit). `CALL folder.name(..)` is a call of a saved query
+//!   (stage 3h, below); the vendor namespaces `db`, `dbms`, `apoc` and `gds` stay refused at
+//!   `CALL`.
+//! - **Calls of saved queries** (stage 3h, [`ProcedureCall`]): `[OPTIONAL] CALL a.b.name(args)
+//!   [YIELD * | YIELD col [AS alias], .. [WHERE cond]]`, wherever a clause stands. `CALL`
+//!   followed by `(` or `{` is a subquery, by a name a call (one token of lookahead: a name
+//!   that can name a variable first, any name after a `.`; at most
+//!   [`MAX_PROCEDURE_SEGMENTS`] segments). Without parentheses the arguments are implicit.
+//!   `YIELD .. WHERE cond` is the call followed by a `FILTER`. A call that is the whole query
+//!   (no other clause, no `RETURN`) is standalone ([`ProcedureCall::standalone`]): its linear
+//!   query gets `RETURN *` until the resolution (`procedure.rs`) writes its columns out.
 //!   Each body is one [`MAX_DEPTH`] level.
 //! - **`COUNT { }`, `COLLECT { }` and whole-query bodies** (stage 2d, user decision D23; openCypher
 //!   compatibility forms): `COUNT` / `COLLECT` before `{` (contextual words, any case) start a
@@ -319,11 +329,11 @@ use super::ast::{
     InsertClause, LabelExpr, LabelExprKind, LabelItem, LetBinding, LetClause, LinearQuery,
     ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral, MapProjection, MatchClause,
     MergeAction, MergeClause, NextBlock, NodePattern, OrderBy, Ordinal, OrdinalKind,
-    ParenthesizedPath, PathPattern, PatternComprehension, PatternStep, ProjectionItem, Quantifier,
-    Query, QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause, RemoveItem, RemoveItemKind,
-    ReturnClause, ReturnItem, SetClause, SetItem, SetItemKind, SortDirection, SortItem, Stage,
-    SubqueryExpr, SubqueryForm, SubqueryKind, Subscript, TrimSide, UnaryOp, UnionKind,
-    UnionOperand, WithClause,
+    ParenthesizedPath, PathPattern, PatternComprehension, PatternStep, ProcedureCall,
+    ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd, ReduceAccumulator, RemoveClause,
+    RemoveItem, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem, SetItemKind,
+    SortDirection, SortItem, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, Subscript, TrimSide,
+    UnaryOp, UnionKind, UnionOperand, WithClause, YieldClause, YieldItem,
 };
 use super::lexer::{Keyword, LexError, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
@@ -338,6 +348,15 @@ pub(crate) const MAX_HEIGHT: usize = 512;
 
 /// The clauses that may follow a clause of the pipeline, in the order the expected tokens
 /// name them; a query may start with any of them too (stage 2a, design E4).
+/// The namespaces of vendor procedures (`CALL db.labels()`): refused at `CALL` like every
+/// vendor extension (user decision A1 of 3h.P0), never looked up in the catalog.
+const VENDOR_NAMESPACES: [&str; 4] = ["db", "dbms", "apoc", "gds"];
+
+/// The most segments of a saved query's qualified name in `CALL` (stage 3h): a folder holds at
+/// most [`MAX_FOLDER_SEGMENTS`](crate::graph::definition::MAX_FOLDER_SEGMENTS) segments, then
+/// the name.
+pub(crate) const MAX_PROCEDURE_SEGMENTS: usize = crate::graph::definition::MAX_FOLDER_SEGMENTS + 1;
+
 const NEXT_CLAUSES: [&str; 9] = [
     "MATCH",
     "OPTIONAL MATCH",
@@ -1376,7 +1395,9 @@ impl<'a> Parser<'a> {
             Keyword::Call | Keyword::Yield => refused(
                 format!("{text}: procedure calls are vendor extensions, not part of GQL"),
                 "write what the procedure does as Gremlin steps, for example \
-                 g.v().label().dedup() instead of CALL db.labels()",
+                 g.v().label().dedup() instead of CALL db.labels(), or save it as a query in \
+                 GQL and call that one, CALL folder.name(args), which runs a saved query of \
+                 the graph's catalog",
             ),
             Keyword::Show => refused(
                 "SHOW commands are vendor extensions, not part of GQL".into(),
@@ -1799,13 +1820,48 @@ impl<'a> Parser<'a> {
         if self.at_kw(Keyword::Return) {
             return self.result_statement(start, matches, stages);
         }
+        if let Some(standalone) = self.standalone_call(ctx, &matches, &mut stages) {
+            // Its result is every yielded column: `RETURN *` until the resolution writes the
+            // columns out (or `FINISH` for a saved query without columns).
+            let mut linear = self.without_result(start, matches, stages, None);
+            linear.ret.star = Some(standalone);
+            linear.ret.span = standalone;
+            return Ok(linear);
+        }
         if !matches!(ctx, Body::Subquery(_)) && is_word(self.peek(), "FINISH") {
             return self.finish_statement(start, matches, stages, ctx);
         }
         if last_writes && self.at_query_end(ctx) {
             return Ok(self.without_result(start, matches, stages, None));
         }
+        if let Some(call) = self.void_call_end(ctx, &mut stages) {
+            // `RETURN *` until the resolution writes `FINISH` for the VOID saved query.
+            let mut linear = self.without_result(start, matches, stages, None);
+            linear.ret.star = Some(call);
+            linear.ret.span = call;
+            return Ok(linear);
+        }
         Err(self.missing_clause(ctx, &stages, &matches, other))
+    }
+
+    /// A last clause that is a call of a saved query without `YIELD` (stage 3h) at the end of
+    /// the query or of a `CALL { }` body: like a last clause that writes (design W2), it may
+    /// end the query without a result statement, as in Neo4j. Marks the call
+    /// [`ProcedureCall::ends_query`] and returns its span; only a VOID call (of a saved query
+    /// without `RETURN`) can end a query, which the resolution checks.
+    #[inline(never)]
+    fn void_call_end(&self, ctx: Body, stages: &mut [Stage]) -> Option<Span> {
+        if !matches!(ctx, Body::Top | Body::Call) || !self.at_query_end(ctx) {
+            return None;
+        }
+        let Some(Stage::Procedure(call)) = stages.last_mut() else {
+            return None;
+        };
+        if call.yields.is_some() {
+            return None;
+        }
+        call.ends_query = true;
+        Some(call.span)
     }
 
     /// Whether the current token ends a query or body of `ctx`: the end of input or `;` at the
@@ -1894,6 +1950,10 @@ impl<'a> Parser<'a> {
                 span = span.to(self.nth(1).span);
             }
             *other = Some(span);
+        }
+        if call && self.procedure_ahead() {
+            self.procedure_stages(stages)?;
+            return Ok(true);
         }
         let stage = match keyword {
             _ if call => Stage::Call(Box::new(self.call_clause()?)),
@@ -2063,6 +2123,177 @@ impl<'a> Parser<'a> {
         Box::new(b)
     }
 
+    /// A call of a saved query (stage 3h) as the next stage, and the `WHERE` of its `YIELD` as a
+    /// `FILTER` after it. Out of line: the recursive frames above it stay small.
+    #[inline(never)]
+    fn procedure_stages(&mut self, stages: &mut Vec<Stage>) -> PResult<()> {
+        let (call, filter) = self.procedure_call()?;
+        stages.push(Stage::Procedure(call));
+        if let Some(filter) = filter {
+            stages.push(Stage::Filter(filter));
+        }
+        Ok(())
+    }
+
+    /// A standalone procedure call (stage 3h): at the end of the whole query, a linear query
+    /// whose only clause is a call of a saved query. Marks the call [`ProcedureCall::standalone`]
+    /// and returns its span (the span of the `RETURN *` standing for its columns until the
+    /// resolution writes them out); `None` otherwise.
+    #[inline(never)]
+    fn standalone_call(
+        &self,
+        ctx: Body,
+        matches: &[MatchClause],
+        stages: &mut [Stage],
+    ) -> Option<Span> {
+        if ctx != Body::Top || !matches.is_empty() || !self.at_query_end(ctx) {
+            return None;
+        }
+        let [Stage::Procedure(call)] = stages else {
+            return None;
+        };
+        if call.optional.is_some() {
+            return None;
+        }
+        call.standalone = true;
+        Some(call.span)
+    }
+
+    /// Whether the `CALL` at the current token (after `OPTIONAL`) calls a saved query (stage
+    /// 3h): a name that can name a variable follows it (an identifier, a back-quoted name or a
+    /// non-reserved keyword), not `(` or `{`; the later segments may be any name. The vendor namespaces `db`, `dbms`, `apoc` and
+    /// `gds` stay refused at `CALL` (user decision A1 of 3h.P0).
+    #[inline(never)]
+    fn procedure_ahead(&self) -> bool {
+        let at = if self.at_kw(Keyword::Optional) { 2 } else { 1 };
+        let name = self.nth(at);
+        if !name.is_variable_name() {
+            return false;
+        }
+        let vendor = matches!(name.kind, TokenKind::Ident)
+            && VENDOR_NAMESPACES
+                .iter()
+                .any(|v| name.text.eq_ignore_ascii_case(v))
+            && self.nth(at + 1).kind == TokenKind::Dot;
+        !vendor
+    }
+
+    /// `[OPTIONAL] CALL a.b.name[(args)] [YIELD * | YIELD item [AS alias], .. [WHERE cond]]`
+    /// (stage 3h), at `OPTIONAL` or `CALL`: the call and the `WHERE` of its `YIELD` as a
+    /// `FILTER` clause.
+    #[inline(never)]
+    fn procedure_call(&mut self) -> PResult<(Box<ProcedureCall>, Option<FilterClause>)> {
+        let optional = self.eat_kw(Keyword::Optional);
+        let keyword = self.advance().span;
+        let mut name = Vec::new();
+        loop {
+            let segment = self.expect_name(&["a saved query name"])?;
+            name.push(segment);
+            if name.len() > MAX_PROCEDURE_SEGMENTS {
+                return Err(Box::new(
+                    err(
+                        GqlErrorKind::Syntax,
+                        self.last,
+                        format!(
+                            "a saved query name has at most {MAX_PROCEDURE_SEGMENTS} segments \
+                             (a folder of at most {} segments, then the name)",
+                            MAX_PROCEDURE_SEGMENTS - 1
+                        ),
+                    )
+                    .topic(GqlHelpTopic::Procedure),
+                ));
+            }
+            if self.eat(&TokenKind::Dot).is_none() {
+                break;
+            }
+        }
+        let args = if self.at(&TokenKind::LParen) {
+            Some(self.procedure_args()?)
+        } else {
+            None
+        };
+        let mut span = optional.unwrap_or(keyword).to(self.last);
+        let mut filter = None;
+        let yields = match self.eat_kw(Keyword::Yield) {
+            Some(word) => {
+                let yields = self.yield_clause(word)?;
+                span = span.to(yields.span);
+                if let Some(word) = self.eat_kw(Keyword::Where) {
+                    let condition = self.expr()?;
+                    filter = Some(FilterClause {
+                        condition,
+                        span: word.to(self.last),
+                    });
+                }
+                Some(yields)
+            }
+            None => None,
+        };
+        let call = ProcedureCall {
+            optional,
+            keyword,
+            name,
+            args,
+            yields,
+            standalone: false,
+            ends_query: false,
+            span,
+        };
+        Ok((Box::new(call), filter))
+    }
+
+    /// The arguments `(expr, ..)` of a procedure call, at `(`.
+    fn procedure_args(&mut self) -> PResult<Vec<Expr>> {
+        self.advance();
+        let mut args = Vec::new();
+        if self.eat(&TokenKind::RParen).is_some() {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.expr()?);
+            if self.eat(&TokenKind::Comma).is_none() {
+                self.expect(&TokenKind::RParen, &["`,`", "`)`"])?;
+                return Ok(args);
+            }
+        }
+    }
+
+    /// The items of `YIELD` (after the word `word`): `*`, or `column [AS alias], ..`.
+    fn yield_clause(&mut self, word: Span) -> PResult<YieldClause> {
+        if let Some(star) = self.eat(&TokenKind::Star) {
+            return Ok(YieldClause {
+                star: Some(star),
+                items: Vec::new(),
+                span: word.to(star),
+            });
+        }
+        let mut items = Vec::new();
+        loop {
+            let column = self.yield_name()?;
+            let alias = match self.eat_kw(Keyword::As) {
+                Some(_) => Some(self.yield_name()?),
+                None => None,
+            };
+            items.push(YieldItem { column, alias });
+            if self.eat(&TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+        Ok(YieldClause {
+            star: None,
+            items,
+            span: word.to(self.last),
+        })
+    }
+
+    /// A column or alias name of `YIELD`.
+    fn yield_name(&mut self) -> PResult<Identifier> {
+        if !self.peek().is_variable_name() {
+            return Err(self.unexpected(&["a column name", "`*`"]));
+        }
+        self.expect_name(&["a column name"])
+    }
+
     /// `[OPTIONAL] CALL [(vars) | (*)] { query } [IN TRANSACTIONS ..]`, at `OPTIONAL` or `CALL`.
     fn call_clause(&mut self) -> PResult<CallClause> {
         let optional = self.eat_kw(Keyword::Optional);
@@ -2102,6 +2333,7 @@ impl<'a> Parser<'a> {
             scope,
             body,
             span,
+            procedure: None,
         })
     }
 
@@ -2234,6 +2466,10 @@ impl<'a> Parser<'a> {
                 vec!["ON CREATE SET", "ON MATCH SET"]
             }
             Some(Stage::Merge(_)) => vec!["`,`", "ON CREATE SET", "ON MATCH SET"],
+            // After the name `(`, after the arguments `YIELD` (stage 3h).
+            Some(Stage::Procedure(call)) if call.yields.is_some() => vec!["`,`", "AS", "WHERE"],
+            Some(Stage::Procedure(call)) if call.args.is_none() => vec!["`.`", "`(`", "YIELD"],
+            Some(Stage::Procedure(_)) => vec!["YIELD"],
             Some(Stage::Filter(_) | Stage::For(_) | Stage::Call(_)) | None => Vec::new(),
         };
         expected.extend(NEXT_CLAUSES);

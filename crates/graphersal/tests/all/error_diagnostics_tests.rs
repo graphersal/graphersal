@@ -11996,4 +11996,222 @@ mod gql {
             assert_examples_run(&help);
         }
     }
+
+    /// Stage 3h (rule 6): the errors of a GQL call of a saved query point at the call and name
+    /// the fix, and the examples of their advice run.
+    mod call {
+        use super::*;
+        use graphersal::catalog::{Definition, GQL_QUERY_DIALECT, QueryDefinition, QueryParam};
+        use graphersal::schema::{JsonType, PropertySchema};
+        use graphersal::storage::GraphStorage;
+
+        /// The modern graph with `people/adults($min)` (GQL) and `rhai_names()` (Rhai).
+        fn fixture() -> TraversalGraph {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            graph
+                .set_definition(Definition::query(
+                    "adults",
+                    QueryDefinition::new(
+                        "MATCH (p:person) WHERE p.age >= $min RETURN p.name AS name",
+                    )
+                    .with_folder("people")
+                    .with_dialect(GQL_QUERY_DIALECT)
+                    .with_param(
+                        "min",
+                        QueryParam::new(PropertySchema::of(JsonType::Integer)),
+                    ),
+                ))
+                .unwrap();
+            graph
+                .set_definition(Definition::query(
+                    "rhai_names",
+                    QueryDefinition::new("fn rhai_names() { g.v().values(\"name\") }"),
+                ))
+                .unwrap();
+            graph
+        }
+
+        fn failure(query: &str) -> (Box<TraverserError>, String) {
+            let graph = fixture();
+            let err = graph
+                .traversal()
+                .gql(query)
+                .to_list()
+                .expect_err("the call must fail");
+            let report = format_diagnostic(&err);
+            (err, report)
+        }
+
+        /// The example of the general advice of a call, a Rhai script.
+        const EXAMPLE: &str = "g.define_query(#{name: \"adults\", folder: \"people\", language: \
+             \"gql\", body: \"MATCH (p:person) WHERE p.age >= $min RETURN p.name AS name\", \
+             params: #{min: \"integer\"}}); g.gql(\"CALL people.adults(30) YIELD name RETURN name \
+             ORDER BY name\")";
+
+        #[test]
+        fn a_call_of_an_unknown_saved_query_points_at_its_name() {
+            let (err, report) = failure("MATCH (n) CALL people.minors(18) YIELD name RETURN name");
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Semantic, "42002".to_string())
+            );
+            assert!(
+                report.contains("there is no saved query `minors` in the folder `people`"),
+                "{report}"
+            );
+            // The caret under the qualified name.
+            let caret = format!(
+                "  query:     MATCH (n) CALL people.minors(18) YIELD name RETURN name\n{}{}\n",
+                " ".repeat(13 + 15),
+                "^".repeat(13)
+            );
+            assert!(report.contains(&caret), "{report}");
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "save it first with g.define_query(#{name: \"minors\", folder: \"people\", \
+                     language: \"gql\", body: \"..\"}); g.queries() lists the saved queries. \
+                     CALL folder.name(args) runs the saved query"
+                ),
+                "{help}"
+            );
+            assert!(help.contains(EXAMPLE), "{help}");
+            #[cfg(feature = "script")]
+            {
+                let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+                let names = graphersal::script::eval_value(
+                    graph,
+                    &format!("{EXAMPLE}.select(\"name\").to_list()"),
+                )
+                .unwrap_or_else(|e| panic!("{EXAMPLE}: {e}"));
+                assert_eq!(names.to_string(), r#"["josh", "peter"]"#);
+            }
+        }
+
+        #[test]
+        fn a_call_in_another_folder_suggests_the_right_one() {
+            let (err, report) = failure("CALL adults(30)");
+            assert!(
+                report.contains("  did you mean: CALL people.adults"),
+                "{report}"
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with("Did you mean CALL people.adults?"),
+                "{help}"
+            );
+        }
+
+        #[test]
+        fn a_wrong_argument_names_the_parameter_and_its_type() {
+            let (err, report) = failure("CALL people.adults('thirty')");
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Data, "22G03".to_string())
+            );
+            assert!(
+                report.contains(
+                    "the argument for `min` of CALL people.adults must be integer: Type mismatch \
+                     on query 'adults.min': expected int64, got string"
+                ),
+                "{report}"
+            );
+            assert!(report.contains("^^^^^^^^"), "{report}");
+            assert!(err.help().unwrap().contains(EXAMPLE));
+            let (_, report) = failure("CALL people.adults(1, 2)");
+            assert!(
+                report.contains(
+                    "too many arguments: people.adults(min :: integer) takes 1 argument, 2 given"
+                ),
+                "{report}"
+            );
+        }
+
+        #[test]
+        fn a_rhai_saved_query_names_g_query() {
+            let (err, _) = failure("CALL rhai_names()");
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::NotYet, "0A000".to_string())
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "run it from the DSL with g.query(\"rhai_names\", #{..}), or save it again in \
+                     GQL (language: \"gql\")."
+                ),
+                "{help}"
+            );
+        }
+
+        #[test]
+        fn a_too_deep_chain_of_calls_names_the_bound_and_the_fix() {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            graph
+                .set_definition(Definition::query(
+                    "q0",
+                    QueryDefinition::new("RETURN 1 AS x").with_dialect(GQL_QUERY_DIALECT),
+                ))
+                .unwrap();
+            for i in 1..=17 {
+                graph
+                    .set_definition(Definition::query(
+                        format!("q{i}"),
+                        QueryDefinition::new(format!("CALL q{}() YIELD x RETURN x", i - 1))
+                            .with_dialect(GQL_QUERY_DIALECT),
+                    ))
+                    .unwrap();
+            }
+            let err = graph
+                .traversal()
+                .gql("CALL q17()")
+                .to_list()
+                .expect_err("the chain is too deep");
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Limit, "54001".to_string())
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "Saved queries called with CALL nest at most 16 levels deep, and one query \
+                     and the saved queries it calls hold at most 1024 calls in all. Call an \
+                     inner saved query directly"
+                ),
+                "{help}"
+            );
+        }
+
+        #[test]
+        fn a_vendor_procedure_names_calls_of_saved_queries() {
+            let (_, report) = failure("CALL db.labels()");
+            assert!(
+                report.contains(
+                    "or save it as a query in GQL and call that one, CALL folder.name(args), \
+                     which runs a saved query of the graph's catalog"
+                ),
+                "{report}"
+            );
+        }
+
+        #[cfg(feature = "script")]
+        #[test]
+        fn a_saved_query_on_incoming_traversers_names_gql_call() {
+            let graph = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+            let err = graphersal::script::eval_value(
+                graph,
+                r#"g.define_query(#{name: "x", body: "fn x() { 1 }"}); g.v().query("x")"#,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains(
+                    "A saved query written in GQL also runs once per row of a GQL query, with \
+                     CALL and its folder, as in g.gql(\"MATCH (s:software) CALL x() YIELD x \
+                     RETURN s.name, x\")"
+                ),
+                "{err}"
+            );
+        }
+    }
 }

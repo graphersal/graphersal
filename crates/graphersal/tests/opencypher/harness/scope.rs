@@ -5,12 +5,9 @@
 //! silently: an upgrade that renames a case makes the table name an id that does not exist,
 //! which the target's `scope_table_is_consistent` test fails on. The families:
 //!
-//! 1. **Vendor procedures** (`procedures`): the `clauses/call` scenarios, which register test
-//!    procedures with `And there exists a procedure ...` and call them. Procedure calls are vendor
-//!    extensions, not GQL, and refused for good (`book/src/gql/refused.md`).
-//! 2. **Upstream `@ignore`** (`upstream-ignore`): the one scenario the TCK itself marks as not
+//! 1. **Upstream `@ignore`** (`upstream-ignore`): the one scenario the TCK itself marks as not
 //!    run.
-//! 3. **Deliberate deviations decided by the user** (rule 18: documented on the item, on the
+//! 2. **Deliberate deviations decided by the user** (rule 18: documented on the item, on the
 //!    book page of the feature and on the compliance page):
 //!    - `w21-property-kinds` (user decision 4, design W21): a list of maps (and any map or mixed
 //!      list) is a valid property value in Graphersal; Neo4j raises a `TypeError`.
@@ -35,6 +32,10 @@
 //!    `InvalidArgumentType`) passes since stage 3f (user decision U9, the static kind checks of
 //!    `gql/eval/kinds.rs`) and is gone; the run-time remainder (kinds not certain from the query
 //!    text) has no case in the pinned tree.
+//!
+//!    The former family `procedures` (the `clauses/call` scenarios) is gone since stage 3h: the
+//!    harness registers each test procedure as a saved GQL query (`procedure.rs`), which GQL's
+//!    `CALL folder.name(..)` calls.
 //!
 //!    D15 (`id()`) and W26 / W28 have no case in the pinned tree: `id()` does not occur, no case
 //!    sets a label on a relationship, and no case returns a deleted element itself.
@@ -65,14 +66,6 @@ pub struct Exclusion {
 
 /// Every exclusion, in report order.
 pub const EXCLUSIONS: &[Exclusion] = &[
-    Exclusion {
-        code: "procedures",
-        reason: "vendor procedures: the scenarios register test procedures and CALL them; \
-                 procedure calls are vendor extensions, not GQL, and refused for good",
-        docs: "gql/refused.md",
-        deviation: false,
-        ids: PROCEDURES,
-    },
     Exclusion {
         code: "upstream-ignore",
         reason: "marked @ignore by the TCK itself (\"does not work in Cypher\")",
@@ -220,62 +213,6 @@ pub fn code_of_detail(detail: &str) -> Option<&str> {
     detail.strip_prefix(DETAIL_PREFIX)
 }
 
-/// The `clauses/call` cases (all of them use vendor procedures).
-const PROCEDURES: &[&str] = &[
-    "clauses/call/Call1.feature::[10] In-query call to procedure should fail if too many explicit argument are given",
-    "clauses/call/Call1.feature::[11] Standalone call to procedure should fail if implicit argument is missing",
-    "clauses/call/Call1.feature::[12] In-query call to procedure that has outputs fails if no outputs are yielded",
-    "clauses/call/Call1.feature::[13] Standalone call to unknown procedure should fail",
-    "clauses/call/Call1.feature::[14] In-query call to unknown procedure should fail",
-    "clauses/call/Call1.feature::[15] In-query procedure call should fail if shadowing an already bound variable",
-    "clauses/call/Call1.feature::[16] In-query procedure call should fail if one of the argument expressions uses an aggregation function",
-    "clauses/call/Call1.feature::[1] Standalone call to procedure that takes no arguments and yields no results",
-    "clauses/call/Call1.feature::[2] Standalone call to procedure that takes no arguments and yields no results, called with implicit arguments",
-    "clauses/call/Call1.feature::[3] In-query call to procedure that takes no arguments and yields no results",
-    "clauses/call/Call1.feature::[4] In-query call to procedure that takes no arguments and yields no results and consumes no rows",
-    "clauses/call/Call1.feature::[5] Standalone call to STRING procedure that takes no arguments",
-    "clauses/call/Call1.feature::[6] In-query call to STRING procedure that takes no arguments",
-    "clauses/call/Call1.feature::[7] Standalone call to procedure should fail if explicit argument is missing",
-    "clauses/call/Call1.feature::[8] In-query call to procedure should fail if explicit argument is missing",
-    "clauses/call/Call1.feature::[9] Standalone call to procedure should fail if too many explicit argument are given",
-    "clauses/call/Call2.feature::[1] In-query call to procedure with explicit arguments",
-    "clauses/call/Call2.feature::[2] Standalone call to procedure with explicit arguments",
-    "clauses/call/Call2.feature::[3] Standalone call to procedure with implicit arguments",
-    "clauses/call/Call2.feature::[4] In-query call to procedure that takes arguments fails when trying to pass them implicitly",
-    "clauses/call/Call2.feature::[5] Standalone call to procedure should fail if input type is wrong",
-    "clauses/call/Call2.feature::[6] In-query call to procedure should fail if input type is wrong",
-    "clauses/call/Call3.feature::[1] Standalone call to procedure with argument of type NUMBER accepts value of type INTEGER",
-    "clauses/call/Call3.feature::[2] In-query call to procedure with argument of type NUMBER accepts value of type INTEGER",
-    "clauses/call/Call3.feature::[3] Standalone call to procedure with argument of type NUMBER accepts value of type FLOAT",
-    "clauses/call/Call3.feature::[4] In-query call to procedure with argument of type NUMBER accepts value of type FLOAT",
-    "clauses/call/Call3.feature::[5] Standalone call to procedure with argument of type FLOAT accepts value of type INTEGER",
-    "clauses/call/Call3.feature::[6] In-query call to procedure with argument of type FLOAT accepts value of type INTEGER",
-    "clauses/call/Call4.feature::[1] Standalone call to procedure with null argument",
-    "clauses/call/Call4.feature::[2] In-query call to procedure with null argument",
-    "clauses/call/Call5.feature::[1] Explicit procedure result projection",
-    "clauses/call/Call5.feature::[2] Explicit procedure result projection with RETURN *",
-    "clauses/call/Call5.feature::[3] The order of yield items is irrelevant::1",
-    "clauses/call/Call5.feature::[3] The order of yield items is irrelevant::2",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::1",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::10",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::11",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::2",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::3",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::4",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::5",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::6",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::7",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::8",
-    "clauses/call/Call5.feature::[4] Rename outputs to unbound variable names::9",
-    "clauses/call/Call5.feature::[5] Fail on renaming to an already bound variable name",
-    "clauses/call/Call5.feature::[6] Fail on renaming all outputs to the same variable name",
-    "clauses/call/Call5.feature::[7] Fail on in-query call to procedure with YIELD *",
-    "clauses/call/Call5.feature::[8] Allow standalone call to procedure with YIELD *",
-    "clauses/call/Call6.feature::[1] Calling the same STRING procedure twice using the same outputs in each call",
-    "clauses/call/Call6.feature::[2] Project procedure results between query scopes with WITH clause",
-    "clauses/call/Call6.feature::[3] Project procedure results between query scopes with WITH clause and rename the projection",
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,7 +229,6 @@ mod tests {
                 assert!(ids.insert(*id), "{id} is listed twice");
             }
         }
-        assert_eq!(PROCEDURES.len(), 52);
     }
 
     #[test]
@@ -300,8 +236,8 @@ mod tests {
         let id = "expressions/graph/Graph5.feature::[2] Single-labels expression on relationships";
         assert_eq!(exclusion(id).map(|e| e.code), Some("upstream-ignore"));
         assert_eq!(exclusion("nope"), None);
-        assert_eq!(by_code("procedures").map(|e| e.ids.len()), Some(52));
-        assert_eq!(code_of_detail("excluded:procedures"), Some("procedures"));
+        assert_eq!(by_code("year-range").map(|e| e.ids.len()), Some(2));
+        assert_eq!(code_of_detail("excluded:year-range"), Some("year-range"));
         assert_eq!(code_of_detail("procedures"), None);
     }
 }

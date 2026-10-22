@@ -55,7 +55,7 @@ impl ScriptGraphTraversalSource {
             }
         }
         #[cfg(feature = "gql")]
-        let (graph, start) = self.gql_start(graph);
+        let (graph, start) = self.gql_start(graph, None);
         #[cfg(not(feature = "gql"))]
         let start = AnonymousTraversal::new();
         graph.adopt_lowered(self.lower_onto(true, start))
@@ -68,10 +68,14 @@ impl ScriptGraphTraversalSource {
     /// of a GQL write (`gql:insert_node`, `gql:insert_edge`, in `CALL` bodies too) carries the
     /// evaluation's `now()` like `add_v` (design C8 of stage 3a), and the source is pinned to
     /// it (`with_now`), so the GQL clocks read the same instant (3g.T10).
+    ///
+    /// `catalog` overrides where its calls of saved queries are looked up (stage 3h; `None`:
+    /// the storage's own catalog).
     #[cfg(feature = "gql")]
     pub(super) fn gql_start<'g, S: GraphStorage + 'g>(
         &self,
         mut graph: GraphTraversalSource<'g, S>,
+        catalog: Option<&dyn crate::gql::procedure::Procedures>,
     ) -> (GraphTraversalSource<'g, S>, AnonymousTraversal<'g, S>) {
         let mut start = AnonymousTraversal::new();
         if let Some((query, params)) = self.leading_gql() {
@@ -81,7 +85,7 @@ impl ScriptGraphTraversalSource {
             if let Some(now) = self.now {
                 graph = graph.with_now(now);
             }
-            graph = graph.gql_with(query.as_str(), params.iter().cloned());
+            graph = graph.gql_in_catalog(query.as_str(), params, catalog);
             start.steps = std::mem::take(&mut graph.steps);
             if let Some(now) = self.now {
                 stamp_create_times(&mut start.steps, now);

@@ -101,7 +101,7 @@ It is also part of the plain `cargo test --package graphersal --features script,
   ```bash
   OPENCYPHER_UPDATE_BASELINE=1 cargo test --package graphersal --features script,io,display,serde,persist,gql --test opencypher_tck
   ```
-- **Scope.** `harness/scope.rs` lists the excluded case ids by reason (vendor procedures, the
+- **Scope.** `harness/scope.rs` lists the excluded case ids by reason (the
   upstream `@ignore`, deliberate deviations decided by the user); the compliance page shows the
   table with the reasons.
 - **Report.** Every run writes `target/opencypher-report.md` (headline Unsupported vs Wrong

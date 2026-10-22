@@ -632,6 +632,20 @@
     "expect": "error"
   },
   {
+    "group": "GQL",
+    "subgroup": "Saved queries (CALL)",
+    "graph": "modern",
+    "title": "CALL a saved GQL query with YIELD",
+    "script": "// A saved query written in GQL is a procedure: CALL folder.name(args) runs it once per row, its\n// arguments in the order its body first reads its parameters; YIELD names the columns read after it.\n// (Catalog ▾ ▸ Saved queries lists the saved queries; in a GQL tab, CALL completes their names.)\ng.define_query(#{\n    name: \"older\",\n    folder: \"people\",\n    language: \"gql\",\n    params: #{min: #{schema: #{type: \"integer\"}, default: 30}},\n    body: \"MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age\"\n});\ng.gql(\"MATCH (s:software) CALL people.older(26) YIELD name AS who, age WHERE age < 35 RETURN s.name AS software, who ORDER BY software, who\")"
+  },
+  {
+    "group": "GQL",
+    "subgroup": "Saved queries (CALL)",
+    "graph": "modern",
+    "title": "A standalone CALL and a saved query that writes",
+    "script": "// A call alone is a whole query: it returns every column of the saved query. A saved query\n// without RETURN (VOID) may write: its writes are part of the calling query's one transaction,\n// and a query that calls it is saved as one that writes (its effects include the callee's).\ng.define_query(#{\n    name: \"hire\",\n    folder: \"staff\",\n    language: \"gql\",\n    params: #{name: \"string\"},\n    body: \"MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)\"\n});\ng.define_query(#{\n    name: \"team\",\n    folder: \"staff\",\n    language: \"gql\",\n    body: \"MATCH (p:person)-[:created]->(:software {name: 'lop'}) RETURN p.name AS name ORDER BY name\"\n});\ng.gql(\"CALL staff.hire('ann') FINISH\").iterate();\ng.gql(\"CALL staff.team()\")"
+  },
+  {
     "group": "Generated test data (Fake)",
     "graph": "any",
     "title": "Fake(seed): a table of reproducible test people",

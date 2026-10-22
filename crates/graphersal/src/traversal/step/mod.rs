@@ -403,6 +403,9 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
     ///   asked `Read` for), like the `has()` / `values()` they stand for, so a GQL query asks
     ///   exactly what its Gremlin equivalent asks. `gql:lookup` reaches vertices of the graph
     ///   (a component found by id or index): `Read` on vertices, like the `v()` it replaces.
+    ///   `gql:call_query` (a GQL `CALL` of a saved query, stage 3h) asks `Execute` on
+    ///   `Definition { query, name }`, what `g.query(name)` asks first; the called query's
+    ///   own reads and writes are its child traversal's, asked of the caller's authorizer.
     ///   A subquery (`EXISTS`, a pattern comprehension) a `gql:*` step evaluates is a child
     ///   traversal of that step, walked like any child (`child_traversals_mut`).
     ///
@@ -565,6 +568,19 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
             GraphStep::Barrier("infer_schema", _) => {
                 visit(AccessRequest::new(Action::Read, Resource::Schema))
             }
+            // A GQL call of a saved query (stage 3h) asks `Execute` on it, what `g.query(name)`
+            // asks first; its body's requests are its child's, asked by the walk.
+            #[cfg(feature = "gql")]
+            GraphStep::FlatMap("gql:call_query", step) => match step.saved_query() {
+                Some(name) => visit(AccessRequest::new(
+                    Action::Execute,
+                    Resource::definition(
+                        Some(crate::graph::definition::DefinitionKind::QUERY),
+                        Some(name),
+                    ),
+                )),
+                None => Ok(()),
+            },
             // `gql:lookup` (a GQL component started at the vertices one equality finds) reads
             // vertices like the `v()` it stands for.
             GraphStep::Init("v", _)
@@ -1721,6 +1737,13 @@ pub(crate) trait GraphStepFlatMap<'g, S: GraphStorage + 'g>:
         _downstream: &crate::traversal::optimizer::path_analysis::PathRequirement,
     ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
+    }
+    /// The saved query this step runs (`gql:call_query`, stage 3h): `Execute` on it is the
+    /// step's own request ([`GraphStep::for_each_access`]). `None` by default; only with the
+    /// `gql` feature.
+    #[cfg(feature = "gql")]
+    fn saved_query(&self) -> Option<&str> {
+        None
     }
     /// Whether each output object is a new path position. Branching steps (`union()`,
     /// `coalesce()`, `optional()`) override it with `false`: their children already extended it.

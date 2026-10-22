@@ -12,7 +12,7 @@ syntax error whose help shows the query without it ([Aggregation](subset.md#aggr
 | undirected edges `~[e]~`, `<~[e]~`, `~[e]~>`, `~`, `<~`, `~>` | Graphersal edges are always directed; there is no undirected edge to match | `-[e]-`, an edge in either direction |
 | catalog commands `CREATE INDEX`, `CREATE CONSTRAINT`, `CREATE GRAPH`, `CREATE DATABASE` | not part of a query: indexes, schemas and graphs are the host's | `g.create_index(..)`, `g.set_schema(..)`, opening another graph |
 | `LOAD CSV` | a vendor extension, not GQL | the host's import (GraphSON, GraphML), or the rows as a list parameter: `FOR row IN $rows INSERT (..)` |
-| vendor procedures: `CALL db.labels()`, `CALL apoc.*`, `YIELD` | vendor extensions, not GQL (an inline `CALL { }` subquery is [supported](subset.md#call-subqueries)) | the Gremlin steps that do the same, such as `g.v().label().dedup()` |
+| vendor procedures: the namespaces `db`, `dbms`, `apoc` and `gds` (`CALL db.labels()`, `CALL apoc.*`) | vendor extensions, not GQL (an inline `CALL { }` subquery is [supported](subset.md#call-subqueries), and any other `CALL folder.name(..)` [calls a saved query](subset.md#calling-saved-queries)) | the Gremlin steps that do the same, such as `g.v().label().dedup()`, or a saved GQL query that does it |
 | `CALL { ... } IN TRANSACTIONS` | commits the writes of a subquery in batches; a `gql()` query is one unit, which commits at once or not at all | the same `CALL` without `IN TRANSACTIONS` |
 | `SHOW ...` | a vendor command, not GQL | the catalog steps (`indexes()`, `queries()`, `get_schema()`, `statistics()`) |
 | vendor path search `*BFS`, `*WSHORTEST`, `*ALLSHORTEST` | vendor extensions, not GQL | Gremlin `repeat()` |
@@ -24,7 +24,7 @@ syntax error whose help shows the query without it ([Aggregation](subset.md#aggr
 
 ```rhai,graph=modern
 g.gql("MATCH (a)~[e]~(b) RETURN a")   // refused: undirected edges (`~`) are not supported
-g.gql("CALL db.labels() YIELD label RETURN label")   // refused: procedure calls are vendor extensions
+g.gql("CALL db.labels() YIELD label RETURN label")   // refused: the vendor procedures of db, dbms, apoc and gds are vendor extensions
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw } IN TRANSACTIONS RETURN sw")   // refused: CALL { } IN TRANSACTIONS commits writes in batches
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) RETURN s.name AS sw } RETURN sw ORDER BY sw").to_list()   // lop, lop, lop, ripple
 g.gql("SHOW INDEXES")   // refused: SHOW commands are vendor extensions

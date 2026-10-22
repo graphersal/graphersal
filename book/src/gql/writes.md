@@ -501,7 +501,9 @@ A saved query may be written in GQL itself ([Saved queries in
 GQL](../users_guide/saved_queries.md#saved-queries-in-gql)): the body is the plain query text,
 its `$parameters` are the declared ones, and an `INSERT`, `SET`, `REMOVE`, `DELETE` or `MERGE` makes it
 a query that writes, whose `effects` name what its plan creates, changes and deletes. A call
-writes in one unit and returns the rows:
+writes in one unit and returns the rows. A GQL query calls it with `CALL hire('lop', 'ann')
+YIELD name` (the arguments in the order the body first reads them: `$company`, then `$name`); its writes then belong to the calling query's unit ([Calling saved
+queries](subset.md#calling-saved-queries)):
 
 ```rhai,graph=modern,script
 g.define_query(#{name: "hire", language: "gql", params: #{name: "string", company: "string"},

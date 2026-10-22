@@ -10,20 +10,40 @@
 //! `params` and every declared parameter is read. Its effects are the data writes of the plan,
 //! exact per label, so the dialect, the `writes` / `effects` of `g.queries()` and the call's
 //! authorization come from the same mapping the authorization check of the traversal uses.
+//! A body that calls saved queries (`CALL folder.name(..)`, stage 3h) lists them as its calls,
+//! so their effects are added transitively like those of a Rhai body's `g.query(..)`; when the
+//! query is saved its calls are checked against the graph's catalog too (3h.P0 D12).
 //!
 //! A call runs no Rhai: `saved_query.rs` builds the traversal `g.gql(body, params)` on the
 //! caller's graph under the call's access (read-only, or the query's effects inside one unit)
 //! and returns it like `g.gql()` returns it, so Gremlin steps may continue it.
 
 use crate::error::{ScriptError, TraverserError};
-use crate::graph::AccessRequestBuf;
+use crate::gql::procedure::Procedures;
+use crate::graph::definition::{DefinitionKind, QueryDefinition};
+use crate::graph::{AccessRequestBuf, AnyGraph};
 
 /// A checked GQL body.
 pub(super) struct GqlBody {
     /// The parameters the query reads, each once, in the order of their first `$name`.
     pub(super) parameters: Vec<String>,
-    /// The data writes of its plan (empty for a query that only reads).
+    /// The data writes of its plan (empty for a query that only reads), without those of the
+    /// saved queries it calls.
     pub(super) writes: Vec<AccessRequestBuf>,
+    /// The saved queries it calls (`CALL folder.name(..)`, stage 3h), each once: their effects
+    /// are its effects too ([`super::effects::transitive`]).
+    pub(super) calls: Vec<String>,
+}
+
+/// The catalog of a script's graph, where a GQL body's `CALL`s are looked up (stage 3h).
+pub(super) struct GraphCatalog<'a>(pub(super) &'a dyn AnyGraph);
+
+impl Procedures for GraphCatalog<'_> {
+    fn saved_query(&self, name: &str) -> Option<QueryDefinition> {
+        self.0
+            .definition(DefinitionKind::QUERY, name)
+            .and_then(|d| d.as_query().cloned())
+    }
 }
 
 /// Why a GQL body cannot be a saved query.
@@ -52,10 +72,27 @@ impl GqlBodyError {
 }
 
 /// Checks the GQL body `source` of the saved query `name` whose declared parameters are
-/// `declared` (module docs).
-pub(super) fn check(name: &str, source: &str, declared: &[&str]) -> Result<GqlBody, GqlBodyError> {
-    let (parameters, writes) = crate::gql::lower::saved_query_plan(source)
+/// `declared` (module docs); with `catalog` (when it is saved) its calls of saved queries are
+/// checked against it too.
+pub(super) fn check(
+    name: &str,
+    source: &str,
+    declared: &[&str],
+    catalog: Option<&dyn Procedures>,
+) -> Result<GqlBody, GqlBodyError> {
+    let plan = crate::gql::lower::saved_query_plan(source, catalog)
         .map_err(|error| GqlBodyError::Gql(Box::new(error)))?;
+    let (mut parameters, writes, calls) = (plan.parameters, plan.writes, plan.calls);
+    // Checked without the catalog, a standalone call without parentheses reads parameters the
+    // plan cannot name: the declared ones it may read count as read (they were checked against
+    // the catalog when the query was saved).
+    if plan.unknown_parameters {
+        for declared in declared {
+            if !parameters.iter().any(|p| p == declared) {
+                parameters.push(declared.to_string());
+            }
+        }
+    }
     if let Some(parameter) = parameters.iter().find(|p| !declared.contains(&p.as_str())) {
         return Err(GqlBodyError::Parameters(
             ScriptError::UndeclaredQueryParameter {
@@ -76,5 +113,9 @@ pub(super) fn check(name: &str, source: &str, declared: &[&str]) -> Result<GqlBo
             },
         ));
     }
-    Ok(GqlBody { parameters, writes })
+    Ok(GqlBody {
+        parameters,
+        writes,
+        calls,
+    })
 }

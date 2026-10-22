@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  gqlCompletionContext, gqlVariables, gqlParamChoices, paramToken, keysBySchema, keysFor,
+  gqlCompletionContext, gqlVariables, gqlParamChoices, gqlProcedureChoices, paramToken, keysBySchema, keysFor,
 } from '../js/editor/gql-complete.js';
 import { gqlCompletionSource } from '../js/editor/gql-completion.js';
 import { GQL_FUNCTIONS, gqlFunctionSpellings } from '../js/editor/gql-functions.js';
@@ -160,4 +160,39 @@ test('every GQL function of the engine is listed, and nothing else (parser.rs FU
   assert.deepEqual(ours.filter((n) => !engine.has(n)), [], 'not a function of the engine');
   assert.equal(new Set(ours).size, ours.length, 'each spelling once');
   for (const f of GQL_FUNCTIONS) assert.ok(f.doc && f.call.startsWith('('), f.name);
+});
+
+const QUERIES = [
+  { name: 'older', folder: 'people', language: 'gql', params: [{ name: 'min' }] },
+  { name: 'top', folder: 'my reports/sales', language: 'gql', params: [] },
+  { name: 'names', folder: null, language: 'gql', params: [] },
+  { name: 'rhai_only', folder: 'people', language: 'rhai', params: [] },
+  { name: 'broken', folder: null, language: 'gql', status: 'error', params: [] },
+];
+
+test('saved queries written in GQL after CALL, by their dotted folder name', () => {
+  assert.deepEqual(at('CALL ‸'), { kind: 'procedure', from: 5, prefix: '' });
+  assert.deepEqual(at('MATCH (n) CALL peo‸'), { kind: 'procedure', from: 15, prefix: 'peo' });
+  assert.deepEqual(at('CALL people.ol‸'), { kind: 'procedure', from: 5, prefix: 'people.ol' });
+  assert.deepEqual(at('OPTIONAL CALL people.‸'), { kind: 'procedure', from: 14, prefix: 'people.' });
+  // A subquery is no procedure; after the call its keywords come, YIELD first.
+  assert.notEqual(at('CALL (‸').kind, 'procedure');
+  assert.notEqual(at('CALL {‸').kind, 'procedure');
+  assert.equal(at('CALL people.older(30) ‸').keywords[0], 'YIELD');
+  assert.ok(at('CALL people.older(30) YIELD name ‸').keywords.includes('RETURN'));
+  assert.deepEqual(gqlProcedureChoices(QUERIES).map((q) => q.text), ['`my reports`.sales.top', 'names', 'people.older']);
+  const source = gqlCompletionSource(() => VOCAB, () => [], () => QUERIES);
+  const result = source(cmContext('CALL people.o‸'));
+  assert.equal(result.from, 5);
+  assert.deepEqual(result.options.map((o) => [o.label, o.detail]), [
+    ['`my reports`.sales.top', 'saved query ()'], ['names', 'saved query ()'], ['people.older', 'saved query (min)'],
+  ]);
+  assert.ok(result.validFor.test('people.ol'));
+  assert.equal(gqlCompletionSource(() => VOCAB)(cmContext('CALL ‸')), null);
+});
+
+test('YIELD binds its columns, or their AS names, as variables', () => {
+  const vars = gqlVariables('CALL people.older(30) YIELD name, age AS years RETURN ').map((v) => v.name);
+  assert.deepEqual(vars, ['name', 'years']);
+  assert.deepEqual(at('CALL people.older(30) YIELD name RETURN n‸').variables.map((v) => v.name), ['name']);
 });

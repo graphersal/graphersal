@@ -398,14 +398,14 @@ fn compile_uncached(
     #[cfg(feature = "gql")]
     if query.dialect() == GQL_QUERY_DIALECT || query.dialect() == GQL_WRITING_QUERY_DIALECT {
         let declared: Vec<&str> = query.params().iter().map(|(p, _)| p.as_str()).collect();
-        let checked = saved_query_gql::check(name, query.source(), &declared)
+        let checked = saved_query_gql::check(name, query.source(), &declared, None)
             .map_err(|error| error.reason())?;
         return Ok(Compiled {
             body: Body::Gql,
             signature: declared.iter().map(ToString::to_string).collect(),
             effects: Ok(BodyEffects {
                 writes: checked.writes,
-                calls: Vec::new(),
+                calls: checked.calls,
                 dynamic: None,
             }),
         });
@@ -844,16 +844,23 @@ fn gql_definition(
     name: &str,
     body: String,
     declared: Option<rhai::Map>,
+    graph: Option<&dyn AnyGraph>,
 ) -> Result<QueryDefinition, Box<EvalAltResult>> {
     let names: Vec<String> = declared
         .as_ref()
         .map(|map| map.keys().map(ToString::to_string).collect())
         .unwrap_or_default();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let checked = saved_query_gql::check(name, &body, &names).map_err(|error| match error {
-        saved_query_gql::GqlBodyError::Gql(error) => in_saved_query(*script_error(error), name),
-        saved_query_gql::GqlBodyError::Parameters(error) => fail(error),
-    })?;
+    // Its calls of saved queries are checked against the graph's catalog (stage 3h).
+    let catalog = graph.map(saved_query_gql::GraphCatalog);
+    let catalog = catalog
+        .as_ref()
+        .map(|c| c as &dyn crate::gql::procedure::Procedures);
+    let checked =
+        saved_query_gql::check(name, &body, &names, catalog).map_err(|error| match error {
+            saved_query_gql::GqlBodyError::Gql(error) => in_saved_query(*script_error(error), name),
+            saved_query_gql::GqlBodyError::Parameters(error) => fail(error),
+        })?;
     let params = params_of(ctx, name, &checked.parameters, declared)?;
     let mut query = QueryDefinition::new(body).with_dialect(GQL_QUERY_DIALECT);
     for (parameter, param) in params {
@@ -1145,7 +1152,7 @@ impl ScriptGraphTraversalSource {
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
         #[cfg(feature = "gql")]
         if gql {
-            let query = gql_definition(&ctx, &name, body, declared)?;
+            let query = gql_definition(&ctx, &name, body, declared, this.g.as_deref())?;
             let query = match folder {
                 Some(folder) => query.with_folder(folder),
                 None => query,

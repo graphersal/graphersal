@@ -764,3 +764,28 @@ fn script_value_to_property_inverts_the_terminal_conversion() {
         ElementProperty::from(6i64)
     );
 }
+
+/// Stage 3h: `gql:call_query` holds the called query's plan as its one child.
+#[cfg(feature = "gql")]
+#[test]
+fn gql_call_query_holds_the_called_query_as_child_0() {
+    let metrics = eval_value(
+        modern(),
+        r#"g.define_query(#{name: "people", language: "gql",
+               body: "MATCH (p:person) RETURN p.name AS name"});
+           g.gql("MATCH (s:software) CALL people() YIELD name RETURN name").profile()"#,
+    )
+    .unwrap()
+    .cast::<TraversalMetrics>();
+    let all = ids(&metrics);
+    let call = all
+        .iter()
+        .position(|(_, name)| name.starts_with("gql:call_query(\"people\""))
+        .unwrap_or_else(|| panic!("{all:?}"));
+    let id = &all[call].0;
+    assert_eq!(
+        all[call + 1],
+        (format!("{id}.0.0"), r#"v(labels: ["person"])"#.to_string()),
+        "{all:?}"
+    );
+}

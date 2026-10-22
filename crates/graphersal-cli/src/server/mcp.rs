@@ -449,7 +449,8 @@ traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries 
 see its description), `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
-stored in the graph (written in Rhai or, `language: \"gql\"`, in GQL); run one with `run_saved_query` {name, params} instead of writing it again. \
+stored in the graph (written in Rhai or, `language: \"gql\"`, in GQL); run one with `run_saved_query` {name, params} instead of writing it again \
+(a GQL query calls one written in GQL as `CALL folder.name(args) YIELD col`). \
 Saved queries marked `writes: true` change data (their `effects` say what); run them only when \
 the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept \
 compressed in memory with a compression rule: `list_compressions`, `estimate_compression` \
@@ -602,7 +603,7 @@ them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is ex
 subset and answers may still change between versions); the query tool with Gremlin stays the \
 complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c, 3d and 3e): MATCH with comma-separated patterns of node patterns \
+Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c, 3d, 3e, 3g and 3h): MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
@@ -697,6 +698,13 @@ created or matched, e.g. FOR n IN $names MERGE (p:person {name: n}) ON CREATE SE
 ON MATCH SET p.visits = coalesce(p.visits, 0) + 1 RETURN p.name AS name, p.visits AS visits; \
 an edge without a direction -[:T]- matches either direction and is created from left to right; \
 a NULL property value in the pattern fails the query (22004); \
+saved queries as procedures: CALL folder.name(args) YIELD col [AS x], .. [WHERE cond] runs the \
+saved query `name` (written in GQL, see list_saved_queries) of the folder `folder` (CALL name() \
+for the root folder) once per incoming row, its arguments constants or $params in the order its \
+body first reads its parameters (trailing ones left out take their defaults); YIELD names the \
+RETURN columns read after it, e.g. CALL people.adults(30) YIELD name RETURN name ORDER BY name; \
+a call alone is the whole query and returns every column (YIELD * the same); a saved query \
+without RETURN keeps each row once; its writes are part of the query's one transaction; \
 each clause sees every write of the clauses before it; a query may \
 end with its write clause or FINISH (no rows), or RETURN what it wrote. \
 String literals use single quotes. A missing property is NULL. Edges in one match are distinct \
@@ -704,8 +712,9 @@ String literals use single quotes. A missing property is NULL. Edges in one matc
 label, properties}. Rows come in no defined order unless the query has ORDER BY: add one when \
 the order matters. Not yet supported (refused with a GQLSTATUS error and a Help line): \
 a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filter the first query's \
-rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS and vendor \
-procedures (CALL db.labels()), non-deterministic functions (rand, randomUUID, date.realtime()), trigonometry, \
+rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS, vendor \
+procedures (CALL db.labels(), apoc.*), a CALL of a saved query written in Rhai (run it with \
+run_saved_query) or with an argument that reads the row, non-deterministic functions (rand, randomUUID, date.realtime()), trigonometry, \
 Cypher's zoned time() (use localtime() or datetime()), a temporal value below the microsecond, and the write \
 FOREACH (write FOR x IN list INSERT .. instead); use the query tool with Gremlin for the rest, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
@@ -785,7 +794,9 @@ fn all_tools() -> Vec<Tool> {
              (missing required, wrong type, violated constraint: an error with a Help line), \
              defaults fill the omitted ones, and the answer is bounded like query's. A query \
              listed with language: \"gql\" runs the same way (its parameters become the $name \
-             values of its GQL text) and answers rows like the gql tool. A query \
+             values of its GQL text) and answers rows like the gql tool; inside a GQL query \
+             the gql tool calls it as CALL folder.name(args) YIELD col (the arguments in the \
+             order its text first reads them). A query \
              listed with writes: true changes data (only what its effects name, as one \
              transaction): run it only when the user asked for that change.",
             json!({
@@ -2307,6 +2318,22 @@ mod tests {
             assert!(GQL_DESCRIPTION.contains(named), "{named}");
         }
         assert!(INSTRUCTIONS.contains("`gql`"));
+        assert!(INSTRUCTIONS.contains("CALL folder.name(args) YIELD col"));
+    }
+
+    /// Stage 3h: run_saved_query names the GQL call of a saved query.
+    #[test]
+    fn run_saved_query_names_the_gql_call() {
+        let tool = all_tools()
+            .into_iter()
+            .find(|t| t.name == "run_saved_query")
+            .expect("run_saved_query listed");
+        assert!(
+            tool.description
+                .contains("the gql tool calls it as CALL folder.name(args) YIELD col"),
+            "{}",
+            tool.description
+        );
     }
 
     /// The gql tool's description lists the stage 1b, 1c, 2a, 2b, 2c, 2d and 2e subset as supported,
@@ -2396,6 +2423,9 @@ mod tests {
             "coalesce(p.visits, 0) + 1",
             "created from left to right",
             "22004",
+            "CALL folder.name(args) YIELD col",
+            "CALL people.adults(30) YIELD name RETURN name ORDER BY name",
+            "YIELD * the same",
         ] {
             assert!(supported.contains(named), "{named}");
         }
@@ -2406,6 +2436,8 @@ mod tests {
             "randomUUID",
             "FOREACH",
             "use the query tool",
+            "CALL db.labels()",
+            "saved query written in Rhai",
         ] {
             assert!(refused.contains(named), "{named}");
         }

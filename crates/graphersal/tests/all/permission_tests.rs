@@ -3626,6 +3626,119 @@ mod gql {
         .unwrap();
         assert_eq!(ages.to_string(), "[29]");
     }
+
+    /// Denies creating vertices labelled `fruit`, allows everything else.
+    struct NoFruit;
+
+    impl Authorizer for NoFruit {
+        fn authorize(&self, request: &AccessRequest<'_>) -> Result<(), Denied> {
+            match (request.action, request.resource) {
+                (
+                    Action::Create,
+                    Resource::Data {
+                        label: Some("fruit"),
+                        ..
+                    },
+                ) => Err(Denied::new("no fruit")),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// The modern graph with `t/people()` (reads) and `plant($n)` (writes a fruit), saved in GQL.
+    fn with_saved() -> Arc<Graph> {
+        let graph = modern();
+        let _ = run(
+            &graph,
+            r#"g.define_query(#{name: "people", folder: "t", language: "gql",
+                   body: "MATCH (p:person) RETURN p.name AS name"});
+               g.define_query(#{name: "plant", language: "gql", params: #{n: "string"},
+                   body: "INSERT (:fruit {name: $n})"})"#,
+            AllowAll,
+        )
+        .unwrap();
+        graph
+    }
+
+    /// A GQL `CALL` of a saved query (stage 3h) asks `Execute` on it, then the called query's
+    /// own requests of the caller's authorizer: a denied `Execute`, a denied read and a denied
+    /// write refuse the whole query before anything runs.
+    #[test]
+    fn a_gql_call_asks_execute_and_the_called_query_requests() {
+        let graph = with_saved();
+        let seen = requests(
+            &graph,
+            r#"g.gql("CALL t.people() YIELD name RETURN name").toList()"#,
+        );
+        assert_eq!(
+            seen,
+            [
+                r#"Execute Definition(query "people")"#.to_string(),
+                "Read Data(vertex)".to_string(),
+            ],
+            "{seen:?}"
+        );
+        let err = run(
+            &graph,
+            r#"g.gql("CALL t.people()").toList()"#,
+            AccessPolicy::allow_all().deny(ActionKind::Execute, ResourceKind::Definition),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Permission denied for 'gql:call_query'")
+                && err.contains(r#"(Execute Definition(query "people")"#),
+            "{err}"
+        );
+        let err = run(
+            &graph,
+            r#"g.gql("CALL t.people()").toList()"#,
+            AccessPolicy::allow_all().deny(ActionKind::Read, ResourceKind::Data),
+        )
+        .unwrap_err();
+        assert!(err.contains("(Read Data(vertex)"), "{err}");
+        // A writing callee: the caller's write rights decide, nothing is written.
+        let err = run(&graph, r#"g.gql("CALL plant('fig')").iterate()"#, NoFruit).unwrap_err();
+        assert!(err.contains(r#"(Create Data(vertex "fruit")"#), "{err}");
+        let err = run(
+            &graph,
+            r#"g.gql("CALL plant('fig')").iterate()"#,
+            AccessPolicy::read_only(),
+        )
+        .unwrap_err();
+        assert!(err.contains("Permission denied"), "{err}");
+        assert_eq!(count(&graph), 6);
+        // Allowed: it writes.
+        let _ = run(&graph, r#"g.gql("CALL plant('fig')").iterate()"#, AllowAll).unwrap();
+        assert_eq!(count(&graph), 7);
+    }
+
+    /// A read-only saved query (a Rhai body) whose body runs a GQL `CALL` of a writing query
+    /// runs it under the read-only restriction: denied, nothing written.
+    #[test]
+    fn a_read_only_saved_query_cannot_write_through_a_gql_call() {
+        let graph = with_saved();
+        let _ = run(
+            &graph,
+            r#"g.define_query(#{name: "names", body: "fn names() { g.gql(\"CALL t.people()\") }"})"#,
+            AllowAll,
+        )
+        .unwrap();
+        let names = run(
+            &graph,
+            r#"g.query("names").select("name").toList()"#,
+            AllowAll,
+        )
+        .unwrap();
+        assert_eq!(names.to_string(), r#"["marko", "vadas", "josh", "peter"]"#);
+        // The traversal a read-only query returns keeps its restriction.
+        let err = run(
+            &graph,
+            r#"g.query("names").flat_map(__.gql("CALL plant('x')")).iterate()"#,
+            AllowAll,
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert_eq!(count(&graph), 6);
+    }
 }
 
 /// A merge searches before it writes: `merge_v` / `merge_e` ask `Read` on what they look up, so

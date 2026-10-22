@@ -6,14 +6,14 @@
 //!
 //! # Flow
 //!
-//! 1. A case out of scope (`scope.rs`: vendor procedures, `@ignore`, deliberate deviations; ids
-//!    only) is never handed to [`run`]: the runner classifies it `excluded` without running it.
+//! 1. A case out of scope (`scope.rs`: `@ignore`, deliberate deviations; ids only) is never handed to [`run`]: the runner classifies it `excluded` without running it.
 //! 2. On a worker thread, a **fresh empty graph** per case, on the storage selected by
 //!    `GRAPHERSAL_TEST_STORAGE` (`storage.rs`): `TraversalGraph`, or `Forwarding` over one.
 //!    `Given an empty graph` and `Given any graph` both start from it; `Given the <name> graph`
 //!    runs `graphs/<name>/<name>.cypher` through `gql()` (design T7, its trailing `;` dropped).
 //! 3. The steps in order: every `having executed` query through `gql()`; parameters through
-//!    the value notation (`values::parse_value`, `values::to_element_property`); a failure of any setup step is
+//!    the value notation (`values::parse_value`, `values::to_element_property`); every
+//!    `there exists a procedure` as a saved GQL query (`procedure.rs`); a failure of any setup step is
 //!    [`RawOutcome::Setup`] with its reason. Then the state is snapshotted, the query runs with
 //!    the parameters (`gql_with`), the state is snapshotted again and the side effects are
 //!    their diff (`state.rs`, design T8); every control query runs after it on the same graph.
@@ -363,12 +363,17 @@ fn execute_on<S: GraphStorage>(mut graph: S, case: &Case) -> RawOutcome {
                     }
                 }
             }
-            // Procedure scenarios are excluded by id (`scope.rs`); one that is not listed fails
-            // its setup instead of being skipped silently.
-            Step::Procedure { .. } => {
-                return RawOutcome::Setup(
-                    "vendor procedure: the harness registers no procedures".to_string(),
-                );
+            // A test procedure is a saved GQL query of the catalog (`procedure.rs`), registered
+            // before the query under test runs.
+            Step::Procedure { signature, table } => {
+                let registered = super::procedure::definition(signature, table).and_then(|d| {
+                    GraphTraversalSource::new(&mut graph)
+                        .set_definition(d)
+                        .map_err(|e| e.to_string())
+                });
+                if let Err(e) = registered {
+                    return RawOutcome::Setup(format!("procedure {signature}: {e}"));
+                }
             }
             Step::ExecutingQuery(query) => {
                 let before = state::snapshot(&graph);

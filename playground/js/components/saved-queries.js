@@ -86,7 +86,7 @@ export const SavedQueryDialog = {
           gqlLanguage,
           floatingTooltips(host.value),
           autocompletion({
-            override: [gqlCompletionSource(gqlVocabulary, params)],
+            override: [gqlCompletionSource(gqlVocabulary, params, () => state.savedQueries)],
             activateOnTyping: true,
             icons: true,
           }),

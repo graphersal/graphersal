@@ -23,6 +23,11 @@
 //!    its module docs are the grammar of the supported subset; its expressions
 //!    compile into the three-valued evaluator (`eval.rs`), which runs them per row, with the
 //!    stage 1c scalar functions in `functions/` (one file per family);
+//!    stage 3h: **resolution** (`procedure.rs`) between parser and binder: every call of a
+//!    saved query, `CALL folder.name(args) [YIELD ..]`, looked up in the catalog, its constant
+//!    arguments checked against the saved query's parameters, the saved query compiled as a
+//!    query of its own, the call replaced by a `CALL () { }` of the call's shape (lowered as
+//!    `gql:call_query`);
 //! 3. **binder** (`bind.rs`): variables, scopes, parameter references and column names, with GQLSTATUS codes
 //!    for semantic errors;
 //! 4. **plan** (`plan.rs`): the logical plan, per connected component of the pattern graph a scan
@@ -51,4 +56,5 @@ pub(crate) mod lower;
 pub(crate) mod parser;
 pub(crate) mod plan;
 pub(crate) mod planner;
+pub(crate) mod procedure;
 pub(crate) mod runtime;

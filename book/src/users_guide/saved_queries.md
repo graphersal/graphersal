@@ -413,11 +413,161 @@ g.get_query("birthday")["effects"].map(|e| e.text)
 ```
 
 - A Rhai query may call a GQL query (`g.query("hire", #{..})` in its body); its effects then
-  include those of the GQL query, as with any called query.
+  include those of the GQL query, as with any called query. A GQL query calls one with
+  `CALL folder.name(args)` ([Calling saved queries from GQL](#calling-saved-queries-from-gql)).
 - `get_query` and `queries()` show `language: "gql"` and the dialect; the body is the query text.
 - `g.define_queries(folder, source)` stays Rhai only: define GQL queries one by one.
 - Every front end below works with GQL queries: the playground's editor has a **Rhai / GQL**
   switch, MCP and Python list them with their `language` and call them like any other.
+
+## Calling saved queries from GQL
+
+A GQL query calls a saved query written in GQL with `CALL folder.name(args)`, the procedure call
+of GQL and Cypher: the segments before the name are the query's folder (joined by `/`, so
+`CALL people.older()` calls `older` of the folder `people`, and `CALL older()` one of the root
+folder), the arguments are its parameters in order, and `YIELD` names the columns of its
+`RETURN` that the query reads after the call:
+
+```rhai,graph=modern,script
+g.define_query(#{
+    name: "older",
+    folder: "people",
+    language: "gql",
+    params: #{min: #{schema: #{type: "integer"}, default: 30}},
+    body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"
+});
+g.gql("CALL people.older(26) YIELD name RETURN name ORDER BY name").to_list();
+// [#{"name": "josh"}, #{"name": "marko"}, #{"name": "peter"}, #{"name": "vadas"}]
+g.gql("CALL people.older(26) YIELD name AS who, age WHERE age < 35 RETURN who ORDER BY who").to_list();
+// [#{"who": "josh"}, #{"who": "marko"}, #{"who": "vadas"}]
+g.gql("CALL people.older(26) YIELD age RETURN count(age) AS n, max(age) AS oldest").to_list();
+// [#{"n": 4, "oldest": 35}]
+g.gql("MATCH (s:software) CALL people.older($min) YIELD name RETURN s.name AS sw, name ORDER BY sw, name", #{min: 33}).to_list();
+// [#{"name": "peter", "sw": "lop"}, #{"name": "peter", "sw": "ripple"}]: the call runs once per row
+```
+
+- **Arguments** are constants or the caller's `$parameters` (also lists, maps and arithmetic of
+  them), evaluated once when the query is compiled; an argument that reads the row
+  (`CALL people.older(s.age)`) is not supported yet. They bind the saved query's parameters
+  **in the order its query first reads them** (`g.get_query(name)["params"]` lists that order):
+  a query `RETURN $a AS a, $b AS b` takes `a` first. Trailing parameters left out take their
+  defaults (`CALL people.older()` is `min: 30`). Each argument is checked against its
+  parameter's schema like an argument of `g.query(..)`, with its write coercion (an integer for
+  a `number` parameter arrives as a float: `42` becomes `42.0`); a value that does not fit is
+  an error before the run.
+- **`YIELD`** names columns of the saved query's `RETURN`: `YIELD a AS x` renames one, every
+  yielded name must be new in the query, and `YIELD .. WHERE <condition>` filters the rows.
+  Inside a query a call of a saved query that returns columns needs `YIELD`.
+- **Standalone:** a call that is the whole query returns every column of the saved query, in
+  its order, with no `YIELD` or with `YIELD *`; without parentheses it reads its arguments from
+  the query's parameters of the same names (a missing one takes its default):
+
+```rhai,graph=modern,script
+g.define_query(#{
+    name: "older",
+    folder: "people",
+    language: "gql",
+    params: #{min: #{schema: #{type: "integer"}, default: 30}},
+    body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"
+});
+g.gql("CALL people.older()").to_list();
+// [#{"age": 32, "name": "josh"}, #{"age": 35, "name": "peter"}]
+g.gql("CALL people.older YIELD *", #{min: 33}).to_list();
+// [#{"age": 35, "name": "peter"}]
+```
+
+- **VOID:** a saved query without `RETURN` (one that ends in a write or in `FINISH`) returns no
+  columns. Called alone it returns no rows; inside a query it runs once per row and keeps each
+  row once, so the query goes on after it. A saved query that writes is called like any other;
+  its writes are part of the calling query, which is ONE unit (a failure anywhere leaves
+  nothing):
+
+```rhai,graph=modern,script
+g.define_query(#{
+    name: "hire",
+    folder: "staff",
+    language: "gql",
+    params: #{name: "string"},
+    body: "MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)"
+});
+g.gql("CALL staff.hire('ann')").to_list();   // [] (VOID), and ann is created
+g.gql("FOR n IN ['bob', 'cy'] CALL staff.hire('temp') RETURN n").to_list();
+// [#{"n": "bob"}, #{"n": "cy"}]: two persons named temp, one per row
+g.gql("FOR n IN ['bob', 'cy'] CALL staff.hire('tmp')").to_list();
+// []: like a last clause that writes, a VOID call may end the query (zero rows)
+```
+
+- **Yielded nodes and edges** keep their properties and labels, and a later pattern may start at
+  one (`CALL sw() YIELD s MATCH (s)-->(x) ..`); the kind is checked when a row reaches the
+  pattern: `NULL` gives no row, any other value that is not a node (or edge) is `22G03`.
+- **A body that is only a call** without parentheses (`body: "CALL people.older"`) reads the
+  called query's parameters by name: declare them in the calling query's `params`.
+
+- **Effects are transitive:** a saved GQL query that calls another is checked against the
+  catalog when it is saved (the called query must exist, its arguments fit), and its dialect
+  and effects include those of the queries it calls. A query that only reads but calls one
+  that writes is saved as a query that writes (`graphersal-gql/2`):
+
+```rhai,graph=modern,script
+g.define_query(#{
+    name: "hire",
+    folder: "staff",
+    language: "gql",
+    params: #{name: "string"},
+    body: "MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)"
+});
+g.define_query(#{
+    name: "onboard",
+    folder: "staff",
+    language: "gql",
+    body: "CALL staff.hire('dan') RETURN 'dan' AS hired"
+});
+g.get_query("onboard")["dialect"];   // "graphersal-gql/2"
+g.get_query("onboard")["effects"].map(|e| e.text);
+// ["Create Data(vertex \"person\")", "Create Data(edge \"created\")"]
+g.gql("CALL staff.onboard()").to_list();   // [#{"hired": "dan"}]
+```
+
+  A call is checked again when the calling query runs: a read-only saved query
+  (`graphersal-gql/1`) whose plan would write through a call (the called query was changed
+  since) is refused, so no read-only query ever writes.
+- **Permissions:** a call asks `Execute` on `Definition(query "name")`, like `g.query(..)`, and
+  every read and write of the called query is asked of the **caller's** authorizer, as part of
+  the calling query; under `AccessPolicy::read_only()` a call of a saved query that writes is
+  denied before anything runs ([Permissions](permissions.md)).
+- **One unit, no commit attribute:** unlike `g.query(..)` of a query that writes, which commits
+  as a unit of its own that names the query and its arguments, a GQL call is part of the
+  calling query's unit, and its commit names no saved query.
+- **Only GQL bodies:** a saved query written in Rhai cannot be called from GQL in this version
+  (`0A000`, the help names `g.query(name, #{..})`); call it with `g.query(..)` from the DSL, or
+  save it again in GQL. Calls nest at most 16 levels deep (and one query resolves at most 1024
+  calls in all, `54001`); a saved query that calls itself, directly or through others, is an
+  error (`42002`), since its arguments are constants and the recursion would never end.
+- **Names:** saved-query names are unique across all folders, so a name found in another folder
+  than the call names gets a "did you mean": `CALL older()` answers `did you mean: CALL
+  people.older`. Names are case-sensitive; a folder segment with other characters is
+  back-quoted (``CALL `my reports`.top()``). The vendor namespaces `db`, `dbms`, `apoc` and
+  `gds` stay [refused](../gql/refused.md) (`CALL db.labels()`).
+
+The errors point at the call:
+
+```rhai,graph=modern
+g.gql("CALL people.older()")   // error: there is no saved query `older` in the folder `people` (42002)
+g.gql("CALL db.labels()")   // refused: the vendor procedures of db, dbms, apoc and gds (0A000)
+```
+
+```text
+Error: GQL semantic error at line 1, column 22: too many arguments: people.older(min :: integer) takes 1 argument, 2 given ...
+Error: GQL data exception at line 1, column 19: the argument for `min` of CALL people.older must be integer: Type mismatch on query 'older.min': expected int64, got string ...
+Error: GQL semantic error at line 1, column 25: CALL people.older inside a query names the columns it reads with YIELD: the saved query returns `name`, `age` ...
+Help: add YIELD, as in CALL people.older(..) YIELD name, age. CALL folder.name(args) runs the saved query `name` of the catalog folder `folder` ...
+Error: GQL construct not supported yet at line 1, column 38: an argument of CALL people.older that reads the row is not yet supported (the variable s is not defined) ...
+Help: pass a constant or a $parameter, or write the saved query's pattern in the query itself. CALL folder.name(args) runs ...
+Error: GQL construct not supported yet at line 1, column 6: the saved query `rh` is written in Rhai; CALL runs saved queries written in GQL in this version ...
+Help: run it from the DSL with g.query("rh", #{..}), or save it again in GQL (language: "gql"). CALL folder.name(args) runs ...
+```
+
+The [GQL error reference](../gql/errors.md#calls-of-saved-queries) lists every error of a call.
 
 ## Errors name the query
 
@@ -480,7 +630,10 @@ Calling a query asks `Execute` on `Definition(query "name")` before the body run
 writes then asks its whole effect set; the body's own reads and writes are then asked as usual.
 Listing asks `Read`, defining `Create` (`Update` to replace, move or describe), dropping
 `Delete`. `AccessPolicy::read_only()` allows calling and listing, so under it a query that writes
-is denied before it writes anything. See [Permissions](permissions.md).
+is denied before it writes anything. A GQL `CALL folder.name(..)` asks the same `Execute`, and
+the called query's reads and writes are asked as part of the calling query
+([Calling saved queries from GQL](#calling-saved-queries-from-gql)). See
+[Permissions](permissions.md).
 
 ## Limits
 

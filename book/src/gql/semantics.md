@@ -420,6 +420,45 @@ against the [resource limits](../users_guide/resource_limits.md) like any other 
 **Labels in the body stay in the body.** Variables the body binds and does not return are gone
 after it; reading one is an error, as for a subquery. Returned names must be new names.
 
+## Calls of saved queries
+
+`CALL folder.name(args) [YIELD ..]` ([Calling saved queries](subset.md#calling-saved-queries))
+runs a saved GQL query as a query of its own for each incoming row, like a `CALL { }` body that
+imports nothing; Neo4j's procedures are its model, with these differences, each a deliberate
+decision:
+
+- **Constant arguments.** An argument is a constant or a `$parameter` (lists, maps and
+  arithmetic of them included), evaluated once when the query is compiled; Neo4j also takes
+  expressions over the row. So arity, types and missing parameters are errors before the run,
+  and the called query is planned once with its argument values. An argument that reads the row
+  is `0A000` (not yet).
+- **Saved GQL queries only.** A procedure is a saved query of the graph's catalog written in GQL;
+  one written in Rhai is `0A000` (call it with `g.query(..)` from the DSL), and the vendor
+  namespaces `db`, `dbms`, `apoc` and `gds` are [refused](refused.md) (`CALL db.labels()`).
+- **Names are unique across folders.** The folder of `CALL a.b.name()` must be `a/b` exactly
+  (`CALL name()` is the root folder); since a saved query's name is unique in the whole catalog,
+  a name found in another folder is an error with a "did you mean", never a second procedure.
+- **Positional order.** The arguments bind the parameters in the order the saved query first
+  reads them (`g.get_query(name)["params"]`), not in a declared signature order.
+- **Schema coercion.** An argument is checked and coerced by its parameter's schema, as a write
+  is: an integer passed for a `number` parameter arrives as a float (`42` becomes `42.0`), where
+  Neo4j's `NUMBER` keeps the integer.
+- **No commit attribute.** The called query's writes are part of the calling query's one unit;
+  unlike `g.query(..)` of a query that writes, the commit carries no attribute naming the
+  saved query and its arguments.
+- **Not inside `EXISTS`, `COUNT` or `COLLECT` yet.** A call stands wherever a clause stands, also
+  in `CALL { }` bodies and `UNION` operands, but not yet in those subquery bodies (`0A000`).
+
+```rhai,graph=modern,script
+g.define_query(#{name: "sw", language: "gql", body: "MATCH (s:software) RETURN s"});
+g.define_query(#{name: "half", language: "gql", params: #{x: "number"}, body: "RETURN $x AS x, $x / 2 AS h"});
+g.gql("CALL sw() YIELD s RETURN s.name AS n, labels(s) AS l ORDER BY n").to_list();
+// [#{"l": ["software"], "n": "lop"}, #{"l": ["software"], "n": "ripple"}]
+g.gql("CALL sw() YIELD s MATCH (s)<-[:created]-(p) RETURN s.name AS s, count(p) AS n ORDER BY s").to_list();
+// [#{"n": 3, "s": "lop"}, #{"n": 1, "s": "ripple"}]: a yielded node starts a later pattern
+g.gql("CALL half(5)").to_list();   // [#{"h": 2.5, "x": 5.0}]: the integer 5 arrives as 5.0
+```
+
 ## Writes
 
 **What a row sees.** Each clause sees every write of the clauses before it, for all rows; within
@@ -1192,6 +1231,10 @@ these differences is a deliberate decision, described in its section:
 | `id(x)` is an integer; `rand()` | ids are strings (`element_id(x)`); `id()` and `rand()` are refused | [Ids are strings](#ids-are-strings), [Refused Constructs](refused.md) |
 | a `datetime` keeps a zone name; values hold nanoseconds; years up to ±999 999 999; zoned `time()` | a `datetime` keeps the offset (the zone name's TCK cases excluded); microseconds, finer is `0A000`; years -9999 to 9999 (TCK cases excluded); `time()` not yet | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
 | `X.realtime()` | refused; one clock per query | [Dates and times](#dates-and-times) |
+| a procedure argument may read the row; procedures are vendor or user code (`db.*`, `apoc.*`, Java) | `CALL folder.name(..)` calls a saved GQL query with constant or `$parameter` arguments only, positional in the order its body first reads them; a saved query in Rhai, or a call inside `EXISTS` / `COUNT` / `COLLECT`, is `0A000`; `db`, `dbms`, `apoc`, `gds` are refused | [Calls of saved queries](#calls-of-saved-queries) |
+| procedure names are qualified, one per namespace | saved-query names are unique across all folders: a name in another folder is a "did you mean" error | [Calls of saved queries](#calls-of-saved-queries) |
+| a `NUMBER` argument keeps an integer (`42`) | coerced by the parameter's schema: a `number` parameter gets `42.0` | [Calls of saved queries](#calls-of-saved-queries) |
+| a procedure call is a commit of its own in some drivers | the call is part of the calling query's one unit, whose commit names no saved query (unlike `g.query(..)`) | [Calls of saved queries](#calls-of-saved-queries) |
 
 Where ISO GQL and Neo4j disagree, `gql()` follows Neo4j in a few places (comparisons across
 kinds, list ordering, float division by zero, `NaN`): [Differences from the
