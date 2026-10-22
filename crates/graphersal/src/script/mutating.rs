@@ -29,11 +29,16 @@ impl ScriptGraphTraversalSource {
     /// behind [`Self::is_mutating`], without the saved-query exception).
     pub(crate) fn plan_writes(&self) -> bool {
         // A leading `gql()` is lowered by the root hook, which needs a storage: an empty
-        // scratch graph serves (the write steps do not depend on the planner's statistics).
+        // scratch graph serves (the write steps do not depend on the planner's statistics);
+        // its calls of saved queries (stage 3h) are looked up in the real graph's catalog.
         #[cfg(feature = "gql")]
         if self.leading_gql().is_some() {
             let scratch = TraversalGraph::new();
-            let (_, start) = self.gql_start(GraphTraversalSource::new(&scratch));
+            let catalog = self.g.as_deref().map(super::saved_query_gql::GraphCatalog);
+            let catalog = catalog
+                .as_ref()
+                .map(|c| c as &dyn crate::gql::procedure::Procedures);
+            let (_, start) = self.gql_start(GraphTraversalSource::new(&scratch), catalog);
             let mut plan = self.lower_onto(true, start);
             return crate::traversal::permission_check::plan_mutates(&mut plan.steps);
         }

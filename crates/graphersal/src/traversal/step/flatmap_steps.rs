@@ -11,6 +11,8 @@ pub(crate) mod step_glob_path;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_bind;
 #[cfg(feature = "gql")]
+pub(crate) mod step_gql_call_query;
+#[cfg(feature = "gql")]
 pub(crate) mod step_gql_for;
 #[cfg(feature = "gql")]
 pub(crate) mod step_gql_lookup;

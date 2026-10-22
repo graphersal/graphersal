@@ -74,6 +74,7 @@ mod from_to_modulating_steps_tests;
 mod generic_persist_tests;
 mod glob_path_tests;
 mod gql_aggregate_tests;
+mod gql_call_tests;
 mod gql_compat_forms_tests;
 mod gql_composite_tests;
 mod gql_exists_tests;

@@ -439,11 +439,17 @@ impl Analysis {
                     _ => None,
                 };
                 match planned {
-                    Some((writes, after)) => {
-                        for write in &writes {
+                    Some(planned) => {
+                        for write in &planned.writes {
                             self.write(write.as_request());
                         }
-                        *flow = after;
+                        // The saved queries it calls (stage 3h): their effects transitively.
+                        for name in planned.calls {
+                            if !self.effects.calls.contains(&name) {
+                                self.effects.calls.push(name);
+                            }
+                        }
+                        *flow = planned.flow;
                     }
                     None => {
                         for action in [Action::Create, Action::Update, Action::Delete] {

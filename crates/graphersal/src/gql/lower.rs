@@ -58,6 +58,7 @@
 //! | `q1 NEXT q2` (stage 2d, design E19) | after a linear query: the `WITH` it desugars to (the binder makes one pipeline). After a `UNION` block, or a `UNION` block after `NEXT`: each operand starts from the records ([`Stage::Rows`], read like the row of a materializing `WITH`: `Binding::Column` on the row, `RowColumn` through `as("#n<k>")` only when read after leaving it, `gql:bind` to continue a pattern from an element column); several operands are a mid-traversal `union()`, whose children each see every record (an aggregation in an operand reads the whole table) |
 //! | `CALL (a) { body }`, `CALL (*) { .. }`, `CALL { .. }`, Cypher `CALL { WITH a .. }` (stage 2d, design mechanism 6, E16) | `flat_map(__.<body>)`: the body (a whole query: stages, `UNION`, `NEXT`) lowered onto the child from the site of the `CALL`, so it starts on the incoming row (no unit row): an import that is the current element needs no step (`Op::Resume` from it), another import is read where it is (`select("a")`, `gql:bind` from a `WITH` column, `Binding::Label` / `RowColumn` in expressions), an unanchored first component is a child-leading `v()` with its pushdown and index, or `gql:lookup` when its equality reads an import; the body's aggregation, `DISTINCT`, `ORDER BY`, `OFFSET` / `LIMIT` and `UNION` run per incoming row (`flat_map` runs the child once per traverser and multiplies its records by the bulk); an uncorrelated body runs per row too (E16). Its records continue the incoming path (outer labels stay readable); its `RETURN` row is the current object after it (`Binding::Column`), labelled `as("#c<k>")` only when a later step reads a column after leaving it; no `Binding::Current` of an outer binding after it. `MATCH (p:person) CALL (p) { MATCH (p)-->(f) RETURN f ORDER BY f.age DESC LIMIT 2 } RETURN p.name, f.name` is `v(labels: ["person"]).as("p").flat_map(__.out().as("f").gql:project("f").gql:order("f.age DESC").limit(2)).gql:project(..)` |
 //! | `OPTIONAL CALL (a) { body }` | `optional(__.flat_map(__.<body>).as("#c<k>"))`: the row label inside, so a row the body gives no record continues unchanged and reads the returned names `NULL` (absent label); every later read of a returned name goes through `#c<k>` |
+//! | `CALL folder.name(args) [YIELD ..]`, a call of a saved query (stage 3h, 3h.P0 D7) | `gql:call_query("folder/name", __.<body>)`: the saved query lowered on its own (its own text, labels and parameters, the argument values) onto the child from one fresh row (`Start::At` the default site: no `inject(0)`, the step's seed is the unit row), per incoming row its records under the yielded names (`Binding::Column` on the row, `as("#c<k>")` only when read after leaving it), as for a `CALL { }`; `OPTIONAL CALL` inside `optional(..)` with the row label; a saved query without `RETURN` (VOID) `optional(__.gql:call_query(..))`, the step emitting nothing, so each row passes on once. The resolution replaced the call by a `CALL () { RETURN NULL AS <name>, .. }` that only gives the binder and the planner its shape; its body is never lowered |
 //! | parenthesized path pattern `(a) ((x)-[e:T]->(y)-[f]->(z) WHERE cond){m,n} (b)` (stage 2e, design item 9 and M5; also `*`, `+`, `?`, no quantifier) | `repeat(B)` with the modulators of a quantified edge (`?` is `{0,1}`: `emit().repeat(B).times(1)`; `{0}` no step, `b` is `a`; without a quantifier `B` inline, once). `B` is one iteration in walk order from the current element, which is the node the iteration before ended on (the merge rule: `a` for the first): `x`'s label factors, filters and `as("x")` (when read), then per body edge its 1a hop with `gql:trail([e, f, ..])` before `as("e")` (its own earlier iterations, every other body edge, the clause's other edges; without a repeating body a single edge is compared by `where(P.neq(..))`, a `?` edge always by `gql:trail`, which an absent edge passes), the node reached with its filters and `as()`, and the body conditions over several body elements as `gql:filter` right after the last of them, reading this iteration's elements (the latest occurrence of each label). Walked from `b` the body runs from its last node, hop by hop reversed. After the loop `b`'s filters and `as("b")`, or a join when `b` was bound earlier (`(a) ((x)-->(y))+ (a)`). No merge point of the lowering (every iteration labels its edges). A body variable read outside the body is a group list (`Binding::Group`, reversed when walked from `b`); with `?` a singleton, `NULL` after zero iterations; a path variable assembles the iterations from the body labels (`PathPart::Body`) |
 //! | `INSERT pattern, ..` / Cypher `CREATE` (stage 3a, design W-d, W13) | per new node in text order `gql:insert_node(labels, "{k: expr, ..}")`, then per new edge in text order `gql:insert_edge(label, from, to, "{..}")`, each followed by its element's `as()` only when read later (D11): the first step reads the row before the clause, each later one runs on the element created just before (an edge's end inserted right before it is `Binding::Current`, another end a label, a `WITH` column or a `FOR` item as for any read); per row and per unit of bulk one element, emitted with bulk 1; the values' subqueries hosted by the step (`runtime::SubqueryHost`). `MATCH (p:person) INSERT (p)-[:R]->(:Q)` is `v(labels: ["person"]).as("p").gql:insert_node(["Q"]).gql:insert_edge("R", "p", "(#2)").discard()`. A leading `INSERT` starts from the unit row `inject(0)` (M1). After the clause the last element created is the current element; later clauses (`MATCH`, `RETURN`, ...) see the writes (the step-at-a-time executor: each step consumes its whole input before the next runs, so a clause never reads its own writes, W13) |
 //! | `FINISH`, a query ending in a write clause (design W2) | `discard()` in place of the result pipeline: no row |
@@ -114,10 +115,10 @@ use super::ast::{
     ProjectionItem, Quantifier, QueryEnd, SortDirection, SubqueryKind,
 };
 use super::bind::{
-    BindingId, BindingKind, BoundComposite, BoundInsert, BoundLinear, BoundMerge, BoundQuery,
-    BoundRemoveKind, BoundSetItem, BoundSetKind, BoundStep, BoundWrite, Column, ColumnRef,
-    Conjunct, Count, DeleteKind, InsertProperty, Predicate, Segment, SortKey, TargetKind,
-    WriteTarget, bind_with_parameters,
+    BindingId, BindingKind, BoundCall, BoundComposite, BoundInsert, BoundLinear, BoundMerge,
+    BoundQuery, BoundRemoveKind, BoundSetItem, BoundSetKind, BoundStep, BoundWrite, Column,
+    ColumnRef, Conjunct, Count, DeleteKind, InsertProperty, Predicate, Segment, SortKey,
+    TargetKind, WriteTarget, bind_with_parameters,
 };
 use super::eval::{Kind, Scope, Value, check_condition, compile};
 use super::lexer::Span;
@@ -127,7 +128,12 @@ use super::plan::{
     LookupBy, Materialize, Op, PipelinePlan, PushOp, PushOperand, Pushdown, ResultOp, Stage,
     SubqueryUse, UnionPlan, WriteStage, and_factors, exists_conjunct, label_disjuncts,
 };
+#[cfg(feature = "script")]
+use super::planner::NoFacts;
 use super::planner::{StorageFacts, plan};
+#[cfg(any(test, feature = "script"))]
+use super::procedure::NoProcedures;
+use super::procedure::{Procedures, ResolvedCall, Resolver, StorageProcedures, resolve};
 use super::runtime::{Binding, GqlElement, MAX_HOSTED_SUBQUERIES, PathPart, RowExpr, eval_error};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError};
 use crate::graph::GraphStorage;
@@ -137,6 +143,7 @@ use crate::traversal::step::flatbarrier_steps::step_gql_aggregate::GqlAggregateC
 use crate::traversal::step::flatbarrier_steps::step_gql_delete::GqlDeleteTarget;
 use crate::traversal::step::flatbarrier_steps::step_gql_order::GqlSortKey;
 use crate::traversal::step::flatmap_steps::step_gql_bind::GqlBindCheck;
+use crate::traversal::step::flatmap_steps::step_gql_call_query::GqlCallQuery;
 use crate::traversal::step::flatmap_steps::step_gql_for::GqlOrdinal;
 use crate::traversal::step::flatmap_steps::step_gql_lookup::{GqlLookup, GqlLookupKey};
 use crate::traversal::step::map_steps::step_gql_project::GqlColumn;
@@ -269,12 +276,26 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
             .into_iter()
             .map(|(name, value)| (name.into(), value.into()))
             .collect();
+        self.gql_in_catalog(query, &params, None)
+    }
+
+    /// [`Self::gql_with`] whose calls of saved queries (stage 3h) are looked up in `catalog`
+    /// instead of this source's own storage (the script layer lowers a query on a scratch
+    /// graph to see whether it writes, with the real graph's catalog).
+    pub(crate) fn gql_in_catalog(
+        self,
+        query: &str,
+        params: &[(CompactString, ElementProperty)],
+        catalog: Option<&dyn Procedures>,
+    ) -> Self {
         if !self.steps.is_empty() {
             return self.gql_error(not_at_start(query));
         }
         let lowered = {
             let facts = StorageFacts::from_storage(&self.storage);
-            prepare::<S>(query, &params, &facts)
+            let own = StorageProcedures(&self.storage);
+            let procedures = catalog.unwrap_or(&own);
+            prepare::<S>(query, params, &Resolver::new(procedures, &facts))
         };
         match lowered {
             Ok(lowered) => lowered.emit(self),
@@ -541,6 +562,10 @@ enum Instr<S: GraphStorage> {
     /// onto the child from the site of the `CALL`; per incoming row its records, which continue
     /// the incoming path. An `OPTIONAL CALL` is this inside an [`Instr::Optional`].
     Call(Vec<Instr<S>>),
+    /// `gql:call_query("folder/name")` (stage 3h): a call of a saved query, its body lowered
+    /// on its own ([`CallQuery`]). The passes over the caller's instructions never enter it:
+    /// it reads nothing of the caller's row.
+    CallQuery(Box<CallQuery<S>>),
     /// `filter(__.<body>)` (`not(__.<body>)` when `negated`): a top-level `[NOT] EXISTS`
     /// conjunct or pattern predicate, the subquery body lowered onto the child from the host's
     /// site (design M2, the 2b fast path); the child short-circuits at its first match.
@@ -609,6 +634,21 @@ enum Instr<S: GraphStorage> {
     /// W2): every row has done its work, none is returned. Also the edge of Cypher's empty
     /// interval `*2..1` (P0 U7): no row passes.
     Discard,
+}
+
+/// A lowered call of a saved query ([`Instr::CallQuery`], stage 3h, design D7 of 3h.P0).
+struct CallQuery<S: GraphStorage> {
+    /// The saved query's name (`Execute` names it).
+    name: CompactString,
+    /// Its folder and name, for the profile.
+    path: CompactString,
+    /// Its body, lowered on its own from one fresh row ([`Start::At`] the default site).
+    callee: Lowered<S>,
+    /// Per yielded column: its name in the caller and the callee's column it holds.
+    outputs: Vec<(CompactString, usize)>,
+    /// The callee returns no record: the step runs it and emits nothing (it stands inside
+    /// `optional()`, which passes the row on).
+    unit: bool,
 }
 
 /// A lowered `MERGE` ([`Instr::Upsert`], stage 3e, design W30-W37): per incoming row the
@@ -1051,6 +1091,18 @@ impl<S: GraphStorage> Lowered<S> {
                     let child = self.emit_into(AnonymousTraversal::new(), body);
                     g.flat_map(child)
                 }
+                Instr::CallQuery(call) => {
+                    let CallQuery {
+                        name,
+                        path,
+                        mut callee,
+                        outputs,
+                        unit,
+                    } = *call;
+                    let body = std::mem::take(&mut callee.instrs);
+                    let child = callee.emit_into(AnonymousTraversal::<'g, S>::new(), body);
+                    g.gql_call_query(GqlCallQuery::new(name, path, child, outputs, unit))
+                }
                 Instr::Exists { negated, body } => {
                     let child = self.emit_into(AnonymousTraversal::new(), body);
                     if negated {
@@ -1421,6 +1473,7 @@ impl<S: GraphStorage> Lowered<S> {
             | Instr::Optional(_)
             | Instr::Union(_)
             | Instr::Call(_)
+            | Instr::CallQuery(_)
             | Instr::InsertNode { .. }
             | Instr::InsertEdge { .. }
             | Instr::Set { .. }
@@ -1578,6 +1631,7 @@ trait Sink<'g, S: GraphStorage + 'g>: Sized {
     /// `gql:merge(..)`: one `MERGE` clause (stage 3e): its match and create children, the
     /// E1 checks and the `ON` items.
     fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self;
+    fn gql_call_query(self, call: GqlCallQuery<'g, S>) -> Self;
 }
 
 /// [`Sink`] for a traversal type with the builders of the same names (inherent methods take
@@ -1801,6 +1855,9 @@ macro_rules! sink {
             fn gql_merge(self, merge: GqlMerge<'g, S>) -> Self {
                 self.gql_merge(merge)
             }
+            fn gql_call_query(self, call: GqlCallQuery<'g, S>) -> Self {
+                self.gql_call_query(call)
+            }
         }
     };
 }
@@ -1821,12 +1878,16 @@ fn adjacency(labels: &Option<Vec<String>>) -> ArgStrings {
 fn prepare<S: GraphStorage>(
     query: &str,
     params: &[(CompactString, ElementProperty)],
-    facts: &StorageFacts<'_>,
+    resolver: &Resolver<'_>,
 ) -> Result<Lowered<S>, TraverserError> {
-    let parsed = parse(query)?;
+    let mut parsed = parse(query)?;
+    // Stage 3h: every call of a saved query resolved against the catalog first.
+    let calls = resolve(&mut parsed, Some(params), resolver)?;
     let bound = bind_with_parameters(&parsed, params.iter().map(|(name, _)| name.as_str()))?;
-    let plan = plan(&bound, facts, None);
-    Lowering::new(query, &bound, &plan, params).run()
+    let plan = plan(&bound, resolver.facts, None);
+    Lowering::new(query, &bound, &plan, params)
+        .with_calls(&calls)
+        .run(Start::Query)
 }
 
 /// The data writes the plan of `query` asks the authorization check for (each once, in plan
@@ -1839,20 +1900,62 @@ fn prepare<S: GraphStorage>(
 /// `None` when no placeholder lowers (a parameter whose value the plan itself needs, such as
 /// `LIMIT $n`), which the caller treats as "may write anything".
 #[cfg(feature = "script")]
-pub(crate) fn planned_writes(
-    query: &str,
-) -> Option<(
-    Vec<crate::graph::AccessRequestBuf>,
-    crate::traversal::step::AccessFlow,
-)> {
-    let nothing = || Some((Vec::new(), Default::default()));
-    let Ok(parsed) = parse(query) else {
+pub(crate) fn planned_writes(query: &str) -> Option<PlannedWrites> {
+    let nothing = || {
+        Some(PlannedWrites {
+            writes: Vec::new(),
+            flow: Default::default(),
+            calls: Vec::new(),
+        })
+    };
+    let Ok(mut parsed) = parse(query) else {
+        return nothing();
+    };
+    let Ok(calls) = resolve(&mut parsed, None, &deferred_resolver()) else {
         return nothing();
     };
     let Ok(bound) = super::bind::bind(&parsed) else {
         return nothing();
     };
-    lower_with_placeholders(query, &bound).ok()
+    let (writes, flow) = lower_with_placeholders(query, &bound).ok()?;
+    Some(PlannedWrites {
+        writes,
+        flow,
+        calls: called(&calls),
+    })
+}
+
+/// What [`planned_writes`] finds: the data writes of the plan itself, the flow after its last
+/// step, and the saved queries it calls (stage 3h), whose effects the caller adds.
+#[cfg(feature = "script")]
+pub(crate) struct PlannedWrites {
+    /// The data writes of the plan, without those of the saved queries it calls.
+    pub(crate) writes: Vec<crate::graph::AccessRequestBuf>,
+    /// The flow after its last step.
+    pub(crate) flow: crate::traversal::step::AccessFlow,
+    /// The names of the saved queries it calls, each once, in text order.
+    pub(crate) calls: Vec<String>,
+}
+
+/// The resolver of the analysis of a query's own plan (stage 3h, [`Resolver::deferred`]): no
+/// catalog, the calls not looked up.
+#[cfg(feature = "script")]
+fn deferred_resolver() -> Resolver<'static> {
+    let mut resolver = Resolver::new(&NoProcedures, &NoFacts);
+    resolver.deferred = true;
+    resolver
+}
+
+/// The names of the saved queries `calls` call, each once, in order.
+#[cfg(feature = "script")]
+fn called(calls: &[ResolvedCall]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for call in calls {
+        if !names.contains(&call.name) {
+            names.push(call.name.clone());
+        }
+    }
+    names
 }
 
 /// `query` (bound as `bound`) lowered on an empty scratch graph with each parameter it reads
@@ -1882,7 +1985,12 @@ fn lower_with_placeholders(
         let source = GraphTraversalSource::new(&scratch);
         let lowered = {
             let facts = StorageFacts::from_storage(&source.storage);
-            prepare::<&TraversalGraph>(query, &params, &facts)
+            // The calls of saved queries add no step here (their effects are added by name,
+            // `PlannedWrites::calls`); their arguments are placeholders too.
+            let mut resolver = Resolver::new(&NoProcedures, &facts);
+            resolver.deferred = true;
+            resolver.placeholders = true;
+            prepare::<&TraversalGraph>(query, &params, &resolver)
         };
         match lowered {
             Ok(lowered) => {
@@ -1918,18 +2026,50 @@ fn lower_with_placeholders(
 #[cfg(feature = "script")]
 pub(crate) fn saved_query_plan(
     query: &str,
-) -> Result<(Vec<String>, Vec<crate::graph::AccessRequestBuf>), TraverserError> {
-    let parsed = parse(query)?;
-    let bound = super::bind::bind(&parsed)?;
-    let mut parameters: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for parameter in &bound.parameters {
-        if seen.insert(parameter.name.as_str()) {
-            parameters.push(parameter.name.clone());
+    catalog: Option<&dyn Procedures>,
+) -> Result<SavedQueryPlan, TraverserError> {
+    let first_use = |bound: &super::bind::BoundQuery| {
+        let mut parameters: Vec<String> = Vec::new();
+        for parameter in &bound.parameters {
+            if !parameters.contains(&parameter.name) {
+                parameters.push(parameter.name.clone());
+            }
         }
-    }
+        parameters
+    };
+    // Stage 3h (3h.P0 D12): with the catalog every call is checked as a call of the query
+    // resolves it (its parameter values not known yet), and an implicit argument names the
+    // parameter it reads.
+    let checked = match catalog {
+        Some(catalog) => {
+            let mut parsed = parse(query)?;
+            resolve(&mut parsed, None, &Resolver::new(catalog, &NoFacts))?;
+            Some(first_use(&super::bind::bind(&parsed)?))
+        }
+        None => None,
+    };
+    let mut parsed = parse(query)?;
+    let calls = resolve(&mut parsed, None, &deferred_resolver())?;
+    let bound = super::bind::bind(&parsed)?;
+    let parameters = checked.unwrap_or_else(|| first_use(&bound));
     let (writes, _) = lower_with_placeholders(query, &bound)?;
-    Ok((parameters, writes))
+    Ok(SavedQueryPlan {
+        parameters,
+        writes,
+        calls: called(&calls),
+    })
+}
+
+/// What [`saved_query_plan`] finds.
+#[cfg(feature = "script")]
+pub(crate) struct SavedQueryPlan {
+    /// The parameters the query reads, each once, in the order of their first `$name`.
+    pub(crate) parameters: Vec<String>,
+    /// The data writes of its plan, without those of the saved queries it calls.
+    pub(crate) writes: Vec<crate::graph::AccessRequestBuf>,
+    /// The saved queries it calls (stage 3h), each once, in text order: their effects are its
+    /// effects too (`script/effects.rs`, transitively).
+    pub(crate) calls: Vec<String>,
 }
 
 /// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a
@@ -2068,6 +2208,9 @@ struct Lowering<'q> {
     /// trail check against it reads every occurrence (`gql:trail`, none passes) instead of
     /// `where(P.neq(..))`, which would drop the row.
     conditional: Vec<bool>,
+    /// The calls of saved queries the resolution found (stage 3h), by
+    /// `ProcedureRef::index`.
+    calls: &'q [ResolvedCall],
 }
 
 impl<'q> Lowering<'q> {
@@ -2087,7 +2230,14 @@ impl<'q> Lowering<'q> {
             children: std::cell::Cell::new(0),
             linears: linears(bound),
             conditional: conditional_bindings(bound),
+            calls: &[],
         }
+    }
+
+    /// The calls of saved queries the resolution found (stage 3h).
+    fn with_calls(mut self, calls: &'q [ResolvedCall]) -> Self {
+        self.calls = calls;
+        self
     }
 
     /// The result pipeline index of the `RETURN` row of `linear` (see [`Self::linears`]).
@@ -2188,20 +2338,17 @@ impl<'q> Lowering<'q> {
             .collect()
     }
 
-    fn run<S: GraphStorage>(self) -> Result<Lowered<S>, TraverserError> {
+    /// Lowers the whole query from `start`: [`Start::Query`] for a query of its own,
+    /// `Start::At(Site::default())` for the body of a called saved query (stage 3h), which runs
+    /// on one fresh row (that row is its unit row).
+    fn run<S: GraphStorage>(self, start: Start) -> Result<Lowered<S>, TraverserError> {
         let mut instrs = Vec::new();
         let bound = self.bound;
         // The `RETURN` ending a query that deletes checks for removed elements (W28).
         let returning = bound.segments.iter().any(|segment| {
             matches!(segment, Segment::Write(write) if matches!(**write, BoundWrite::Delete(_)))
         });
-        self.composite(
-            &self.plan.body,
-            &bound.body,
-            Start::Query,
-            returning,
-            &mut instrs,
-        )?;
+        self.composite(&self.plan.body, &bound.body, start, returning, &mut instrs)?;
         let labels = self.labels();
         let row_labels = self.row_labels(&labels);
         let columns: Vec<Option<ColumnRef>> = bound.bindings.iter().map(|b| b.column).collect();
@@ -2755,6 +2902,9 @@ impl<'q> Lowering<'q> {
         let Some(Segment::Call(bound_call)) = self.bound.segments.get(call.segment) else {
             return Err(self.unlowered());
         };
+        if let Some(procedure) = &bound_call.procedure {
+            return self.call_query(procedure.index, call, bound_call, site, instrs);
+        }
         let mut body = Vec::new();
         self.composite(
             &call.plan,
@@ -2778,6 +2928,59 @@ impl<'q> Lowering<'q> {
             Ok(Site::default())
         } else {
             instrs.push(Instr::Call(body));
+            instrs.push(Instr::RowLabel(call.segment));
+            Ok(Site::row(call.segment))
+        }
+    }
+
+    /// Lowers a call of a saved query (stage 3h, the [`ResolvedCall`] `index`) at `site`:
+    /// `gql:call_query("folder/name")` with the callee lowered onto its child from one fresh
+    /// row, then the row label `#c<k>` (emitted only when read later), as for a `CALL { }`;
+    /// `OPTIONAL CALL` inside `optional()`; a callee without `RETURN` inside `optional()` too,
+    /// the step emitting nothing, so each incoming row passes on once.
+    #[inline(never)]
+    fn call_query<S: GraphStorage>(
+        &self,
+        index: usize,
+        call: &'q CallStage,
+        bound_call: &BoundCall,
+        site: Site,
+        instrs: &mut Vec<Instr<S>>,
+    ) -> Result<Site, TraverserError> {
+        let Some(resolved) = self.calls.get(index) else {
+            return Err(self.unlowered());
+        };
+        let Some(callee) = resolved.callee.as_deref() else {
+            // Resolved without its catalog (`Resolver::deferred`, the analysis of a saved
+            // query's own writes on a scratch graph, never run): the call adds no step.
+            if resolved.unit || bound_call.unit() {
+                return Ok(site);
+            }
+            return Ok(if call.optional {
+                Site::default()
+            } else {
+                Site::row(call.segment)
+            });
+        };
+        let lowered = Lowering::new(&callee.text, &callee.bound, &callee.plan, &callee.params)
+            .with_calls(&callee.calls)
+            .run::<S>(Start::At(Site::default()))?;
+        let instr = Instr::CallQuery(Box::new(CallQuery {
+            name: CompactString::new(&resolved.name),
+            path: CompactString::new(&resolved.path),
+            callee: lowered,
+            outputs: resolved.outputs.clone(),
+            unit: resolved.unit,
+        }));
+        if resolved.unit || bound_call.unit() {
+            instrs.push(Instr::Optional(vec![instr]));
+            return Ok(site);
+        }
+        if call.optional {
+            instrs.push(Instr::Optional(vec![instr, Instr::RowLabel(call.segment)]));
+            Ok(Site::default())
+        } else {
+            instrs.push(instr);
             instrs.push(Instr::RowLabel(call.segment));
             Ok(Site::row(call.segment))
         }
@@ -3802,6 +4005,7 @@ impl<'q> Lowering<'q> {
                 }
                 Instr::Scan
                 | Instr::Unit
+                | Instr::CallQuery(_)
                 | Instr::HasLabel(_)
                 | Instr::Has(..)
                 | Instr::Label(_)
@@ -4630,6 +4834,7 @@ fn mark_reads<S: GraphStorage>(instrs: &[Instr<S>], marks: &mut Marks<'_>) {
             Instr::Union(operands) => operands.iter().for_each(|o| mark_reads(o, marks)),
             Instr::Scan
             | Instr::Unit
+            | Instr::CallQuery(_)
             | Instr::HasLabel(_)
             | Instr::Has(..)
             | Instr::Label(_)
@@ -4713,6 +4918,7 @@ fn in_part<S: GraphStorage>(instrs: &mut [Instr<S>], segment: usize) {
             Instr::Union(operands) => operands.iter_mut().for_each(|o| in_part(o, segment)),
             Instr::Scan
             | Instr::Unit
+            | Instr::CallQuery(_)
             | Instr::HasLabel(_)
             | Instr::Has(..)
             | Instr::RowCheck(..)
@@ -4944,7 +5150,7 @@ fn merge_lowering(
     }
     let source = GraphTraversalSource::new(graph);
     let facts = StorageFacts::from_storage(&source.storage);
-    let mut lowered = prepare::<G>(query, &[], &facts)?;
+    let mut lowered = prepare::<G>(query, &[], &Resolver::new(&NoProcedures, &facts))?;
     let mut instrs = std::mem::take(&mut lowered.instrs);
     let mut found = Vec::new();
     collect(&mut instrs, &mut found);
