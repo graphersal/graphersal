@@ -5,6 +5,10 @@ multilingual = false
 src = "src"
 title = "The Graphersal Documentation"
 
+# Edition of the Rust code blocks (`mdbook test`, see book/test.sh); the workspace edition.
+[rust]
+edition = "2024"
+
 [output.html]
 git-repository-url = "https://github.com/graphersal/graphersal"
 edit-url-template = "https://github.com/graphersal/graphersal/edit/main/book/{path}"

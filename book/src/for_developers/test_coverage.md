@@ -50,6 +50,21 @@ cargo llvm-cov report --package graphersal --ignore-filename-regex "$IGN" --html
   Fused or batch steps often have an unexercised per-traverser fallback; run the query with the optimizer disabled
   (`g.with("optimizer.disabled", [...])`) to reach it.
 
+## The book's Rust code blocks
+
+`mdbook test` compiles every Rust block of the book against the library. A plain `mdbook test book` fails
+("crate graphersal not linked"), because rustdoc needs the compiled crate and `mdbook` cannot pass `--extern`.
+`book/test.sh` does the whole job: it builds `graphersal` with `script,io,display,serde,persist,gql` into its own
+target directory (`target/mdbook-test`, so exactly one rlib exists) and runs `mdbook test` with that library path and
+a `rustdoc` shim that adds the `--extern`.
+
+```sh
+book/test.sh
+```
+
+A block that cannot compile by nature (it needs another crate or a feature the script does not enable) is marked
+`rust,ignore`; verbatim program output is a `text` block.
+
 ## Last measured numbers
 
 Measured with the three-run recipe above, with the features `script,io,display,serde` (before `persist` joined the

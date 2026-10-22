@@ -189,7 +189,7 @@ An **error location never shows it**: the `at #N:` line with its caret, the `pla
 [`step_location()`](profiling_and_execute.md) and the query a help text rewrites show the
 traversal as you wrote it, so `g.inject(1).math("value + 1")` fails with
 
-```
+```text
 Error: Step #1 'math("value + 1")' execution failed
   at #1: inject(1).math("value + 1")
                    ^^^^^^^^^^^^^^^^^

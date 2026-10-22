@@ -747,7 +747,7 @@ builds it in a child traversal. `TraversalGraph::file_tree()` builds the sample 
 
 ```rust
 use graphersal::prelude::*;
-
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 let graph = TraversalGraph::file_tree();
 
 let rust_files = graph
@@ -794,6 +794,8 @@ let outside_author = graph
     .count()
     .next()?;
 assert_eq!(outside_author.and_then(|count| count.as_i64()), Some(9));
+# Ok(())
+# }
 ```
 
 The options are `glob_path_with(pattern, GlobPathOptions)`, on `GraphTraversalSource` and in child

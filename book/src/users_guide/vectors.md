@@ -650,7 +650,7 @@ token, averaged over the text; semantic, fast on a CPU), behind the feature `mod
 [Real models: Model2Vec](../getting_started/embeddings.md#real-models-model2vec)). It loads from a
 **local directory only** and never touches the network:
 
-```rust,no_run
+```rust,ignore
 use std::sync::Arc;
 use graphersal::vector::{Embedder, Embedders, Model2Vec};
 

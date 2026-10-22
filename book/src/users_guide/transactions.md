@@ -377,7 +377,7 @@ and nothing is paid):
 | `after_commit(&ChangeSet)` | after the unit is final | no |
 | `after_rollback(&RollbackReason)` | after a unit that changed something was rolled back (vetoed or failed) | no |
 
-```rust
+```rust,ignore
 use graphersal::prelude::*;
 use graphersal::changes::ChangeSet;
 use graphersal::changes::{CommitHook, HookError, RollbackReason};

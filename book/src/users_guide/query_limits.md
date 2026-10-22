@@ -44,7 +44,7 @@ g.with("evaluationTimeout", 5000).V().out().out().count().next()
 
 When the budget runs out, the traversal stops with a `Timeout` error, for example:
 
-```
+```text
 Error: Step #3 'out()' execution failed
   at #3: v().out().out().out().count()
                    ^^^^^
