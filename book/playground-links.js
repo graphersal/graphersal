@@ -41,7 +41,45 @@
     return null;
   }
 
+  // The GQL text of a statement that is exactly one `g.gql(<string literal>)` call (optionally
+  // followed by `.to_list()`, `;` and a `//` comment), or null: a call with parameters, a computed
+  // text, an interpolating backtick string or a longer traversal stays a Rhai script. Such a
+  // statement opens as a GQL tab (`lang=gql`, playground/js/link.js); the playground's tab runs
+  // the same call, so the result is the same.
+  function gqlOf(text) {
+    var m = /^\s*g\s*\.\s*gql\s*\(\s*/.exec(text);
+    if (!m) return null;
+    var i = m[0].length, q = text[i], value = '';
+    if (q === '`') {
+      var end = text.indexOf('`', i + 1);
+      if (end < 0) return null;
+      value = text.slice(i + 1, end);
+      if (value.indexOf('${') >= 0) return null;
+      i = end + 1;
+    } else if (q === '"') {
+      var closed = false;
+      for (i++; i < text.length; i++) {
+        var c = text[i];
+        if (c === '"') { closed = true; i++; break; }
+        if (c === '\\') {
+          var e = text[++i], map = { n: '\n', t: '\t', r: '\r', '0': '\0', '\\': '\\', '"': '"', "'": "'" };
+          if (!(e in map)) return null;
+          value += map[e];
+        } else value += c;
+      }
+      if (!closed) return null;
+    } else return null;
+    var rest = text.slice(i);
+    if (!/^\s*\)(\s*\.\s*to_list\s*\(\s*\))?\s*;?\s*(\/\/[^\n]*)?\s*$/.test(rest)) return null;
+    return value.trim() ? value : null;
+  }
+
   function href(graph, script) {
+    var gql = gqlOf(script);
+    if (gql !== null) {
+      return base() + '#/play?graph=' + encodeURIComponent(graph) +
+        '&q=' + encodeURIComponent(gql) + '&lang=gql&run=1';
+    }
     return base() + '#/play?graph=' + encodeURIComponent(graph) +
       '&q=' + encodeURIComponent(script) + '&run=1';
   }
@@ -188,6 +226,12 @@
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(place);
     window.addEventListener('load', place);
     window.addEventListener('resize', place);
+  }
+
+  // For the Node test of playground/tests/book-links.test.mjs.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { gqlOf: gqlOf };
+    return;
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

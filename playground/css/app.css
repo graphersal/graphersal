@@ -635,6 +635,11 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
 /* A narrow panel drops secondary header items instead of pushing its buttons out of view. */
 @container (max-width: 520px) { .panel-header .secondary { display: none; } }
 @container (max-width: 380px) { .panel-header .tabs .tab { padding: 0 6px; } }
+/* A narrow panel (a phone): the header may grow to a second row, so no control is cut off. */
+@container (max-width: 520px) {
+  .panel-header { height: auto; flex-wrap: wrap; row-gap: 2px; padding: 3px 4px; }
+  .panel-actions { flex: 1 1 auto; flex-wrap: wrap; justify-content: flex-end; row-gap: 2px; }
+}
 .panel-toolbar {
   flex: none;
   display: flex;
