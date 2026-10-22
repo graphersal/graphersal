@@ -236,6 +236,12 @@
 //!   [`Binding::column`]; a node or edge column keeps its kind, so a later pattern continues
 //!   it), each a new name (42002 when in scope); the body's own names are invisible after it.
 //!   The `CALL` is a cut; an `OPTIONAL CALL`'s columns may be `NULL` ([`Binding::optional`]).
+//!   Stage 3h: a call of a saved query arrives resolved as such a `CALL () { RETURN NULL AS
+//!   <name>, .. }` ([`CallClause::procedure`], [`BoundCall::procedure`]): its yielded names are
+//!   its returned columns (42002 naming the call when one is in scope), the `$parameters` its
+//!   arguments read are parameters of the query, and one that writes makes the query write
+//!   ([`BoundQuery::writes`]; `materialize_for_write` before it). A call the resolution did not
+//!   reach (inside a subquery expression) is 0A000.
 //! - **Whole-query subquery bodies.** `EXISTS { .. }`, `COUNT { .. }` and `COLLECT { .. }` with
 //!   clauses other than `MATCH` ([`BoundSubquery::query`]) bind as a composite whose operands
 //!   start with every name in scope around the subquery (correlation as in a `MATCH`-only
@@ -396,10 +402,10 @@ use super::ast::{
     ForClause, GroupBy, Identifier, IndexExpr, InsertClause, LabelExpr, LabelExprKind, LabelItem,
     LetClause, LinearQuery, ListComprehension, ListPredicate, Literal, MapEntry, MapLiteral,
     MapProjection, MatchClause, MergeClause, NodePattern, OrderBy, OrdinalKind, ParenthesizedPath,
-    PathPattern, PatternStep, ProjectionItem, Quantifier, Query, QueryBlock, QueryEnd,
-    ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause, SetItem,
-    SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind, Subscript,
-    UnaryOp, UnionKind, WithClause,
+    PathPattern, PatternStep, ProcedureRef, ProjectionItem, Quantifier, Query, QueryBlock,
+    QueryEnd, ReduceAccumulator, RemoveClause, RemoveItemKind, ReturnClause, ReturnItem, SetClause,
+    SetItem, SetItemKind, SortDirection, Stage, SubqueryExpr, SubqueryForm, SubqueryKind,
+    Subscript, UnaryOp, UnionKind, WithClause,
 };
 use super::lexer::Span;
 use super::parser::{FunctionKind, MAX_DEPTH, MAX_HEIGHT, close_to, lookup_function};
@@ -715,6 +721,9 @@ pub(crate) struct BoundCall {
     pub(crate) outputs: Vec<BindingId>,
     /// The clause.
     pub(crate) span: Span,
+    /// Stage 3h: the call of a saved query this `CALL` stands for (its body only gives the
+    /// shape of its rows; the lowering emits `gql:call_query`), `None` for a written `CALL { }`.
+    pub(crate) procedure: Option<ProcedureRef>,
 }
 
 impl BoundCall {
@@ -1440,9 +1449,14 @@ impl BoundQuery {
         })
     }
 
-    /// Whether the query writes (holds a write clause anywhere).
+    /// Whether the query writes (holds a write clause anywhere, or calls a saved query that
+    /// writes, stage 3h).
     pub(crate) fn writes(&self) -> bool {
         self.first_write().is_some()
+            || self.segments.iter().any(|segment| {
+                matches!(segment, Segment::Call(call)
+                    if call.procedure.as_ref().is_some_and(|p| p.writes))
+            })
     }
 }
 
@@ -1714,7 +1728,7 @@ fn check_edge_counts(matches: &[MatchClause]) -> BResult<()> {
 }
 
 /// Whether `name` is an aggregate function.
-fn is_aggregate(name: &Identifier) -> bool {
+pub(crate) fn is_aggregate(name: &Identifier) -> bool {
     lookup_function(&name.name).is_some_and(|spec| spec.kind == FunctionKind::Aggregate)
 }
 
@@ -1743,7 +1757,7 @@ fn simple_key(expr: &Expr) -> bool {
     }
 }
 
-fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
+pub(crate) fn for_each_child<'e>(expr: &'e Expr, f: &mut impl FnMut(&'e Expr)) {
     match &expr.kind {
         ExprKind::Literal(_) | ExprKind::Parameter(_) | ExprKind::Variable(_) => {}
         ExprKind::List(items) => items.iter().for_each(f),
@@ -2032,7 +2046,10 @@ fn replace_columns(
 }
 
 /// The closest of `candidates` to `word` (a case-only difference is the closest).
-fn suggest<'c>(word: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
+pub(crate) fn suggest<'c>(
+    word: &str,
+    candidates: impl IntoIterator<Item = &'c str>,
+) -> Option<&'c str> {
     candidates
         .into_iter()
         .filter_map(|c| {
@@ -2976,11 +2993,19 @@ impl<'q> Binder<'q> {
             Stage::With(with) => self.with_clause(&WithParts::of(with)),
             Stage::For(clause) => self.for_clause(clause),
             Stage::Call(clause) => {
-                if composite_writes(&clause.body) {
+                let procedure_writes = clause.procedure.as_ref().is_some_and(|p| p.writes);
+                if procedure_writes || composite_writes(&clause.body) {
                     self.materialize_for_write(clause.span)?;
                 }
                 self.call_clause(clause)
             }
+            // A call of a saved query the resolution did not reach (stage 3h): one inside a
+            // subquery expression.
+            Stage::Procedure(call) => Err(not_yet(
+                call.span,
+                "CALL of a saved query inside EXISTS { }, COUNT { } or COLLECT { }",
+                "call it in the query itself, or inside a CALL { } subquery",
+            )),
             Stage::Insert(clause) => self.insert_clause(clause),
             Stage::Set(clause) => self.set_clause(clause),
             Stage::Remove(clause) => self.remove_clause(clause),
@@ -3124,6 +3149,15 @@ impl<'q> Binder<'q> {
         if let CallScope::Variables { variables, .. } = &clause.scope {
             self.check_imports(variables, "CALL")?;
         }
+        // The `$parameters` the arguments of a call of a saved query read (stage 3h).
+        if let Some(procedure) = &clause.procedure {
+            for (name, span) in &procedure.parameters {
+                self.parameters.push(ParameterRef {
+                    name: name.clone(),
+                    span: *span,
+                });
+            }
+        }
         self.enter_body(clause.span)?;
         let outer = Rc::new(self.scope.clone());
         let marks = self.marks();
@@ -3161,6 +3195,24 @@ impl<'q> Binder<'q> {
                 name: column.name.clone(),
                 span: column.span,
             };
+            if let Some(procedure) = &clause.procedure
+                && self.scope.get(&name.name).is_some()
+            {
+                return Err(semantic(
+                    column.span,
+                    format!(
+                        "CALL {} yields `{}`, which is already defined; a yielded name must be \
+                         new",
+                        procedure.dotted, name.name
+                    ),
+                )
+                .alternative(format!(
+                    "rename it with AS, as in YIELD ... AS {}2",
+                    name.name
+                ))
+                .topic(GqlHelpTopic::Procedure)
+                .into());
+            }
             if self.scope.get(&name.name).is_some() {
                 return Err(semantic(
                     column.span,
@@ -3193,6 +3245,7 @@ impl<'q> Binder<'q> {
                 imports,
                 outputs,
                 span: clause.span,
+                procedure: clause.procedure.clone(),
             })),
             segment,
             clause.span,
@@ -8173,12 +8226,19 @@ fn composite_writes(composite: &CompositeQuery) -> bool {
                     | Stage::Merge(_) => {
                         return true;
                     }
-                    Stage::Call(call) => pending.push(&call.body),
+                    Stage::Call(call) => {
+                        // A call of a saved query that writes (stage 3h).
+                        if call.procedure.as_ref().is_some_and(|p| p.writes) {
+                            return true;
+                        }
+                        pending.push(&call.body);
+                    }
                     Stage::Match(_)
                     | Stage::Let(_)
                     | Stage::Filter(_)
                     | Stage::With(_)
-                    | Stage::For(_) => {}
+                    | Stage::For(_)
+                    | Stage::Procedure(_) => {}
                 }
             }
         }

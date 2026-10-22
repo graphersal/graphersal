@@ -37,7 +37,9 @@
 //! exactly the tree of the stages before. Stage 3c adds `SET` ([`Stage::Set`], [`SetClause`])
 //! and `REMOVE` ([`Stage::Remove`], [`RemoveClause`]). Stage 3d adds `[DETACH | NODETACH]
 //! DELETE` ([`Stage::Delete`], [`DeleteClause`]). Stage 3e adds `MERGE` ([`Stage::Merge`],
-//! [`MergeClause`]).
+//! [`MergeClause`]). Stage 3h adds calls of saved queries, `CALL folder.name(args) [YIELD ..]`
+//! ([`Stage::Procedure`], [`ProcedureCall`]), which the resolution turns into a [`Stage::Call`]
+//! with its [`CallClause::procedure`] set.
 
 use super::lexer::Span;
 
@@ -241,6 +243,106 @@ pub(crate) enum Stage {
     /// `MERGE [p =] pattern [ON CREATE SET ..] [ON MATCH SET ..]` (stage 3e, a Cypher
     /// compatibility form).
     Merge(Box<MergeClause>),
+    /// `[OPTIONAL] CALL folder.name(args) [YIELD ..]` (stage 3h): a call of a saved query. The
+    /// resolution (`procedure.rs`) replaces each one it reaches by a [`Stage::Call`] whose
+    /// [`CallClause::procedure`] names the resolved saved query; one it cannot reach (inside a
+    /// subquery expression) is refused by the binder.
+    Procedure(Box<ProcedureCall>),
+}
+
+/// `[OPTIONAL] CALL folder.name(args) [YIELD item, .. [WHERE cond] | YIELD *]` (stage 3h,
+/// design D1-D11 of 3h.P0): a call of the saved query `name` of the catalog folder
+/// `folder` (the segments before the name joined by `/`; none: the root folder), its
+/// arguments positional in the order the query first reads its parameters. `YIELD .. WHERE`
+/// is parsed as the call followed by a [`Stage::Filter`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureCall {
+    /// `OPTIONAL CALL`: the `OPTIONAL` keyword.
+    pub(crate) optional: Option<Span>,
+    /// The `CALL` keyword.
+    pub(crate) keyword: Span,
+    /// The segments of the qualified name in order (at least one; the last is the saved
+    /// query's name).
+    pub(crate) name: Vec<Identifier>,
+    /// The arguments in written order; `None` when written without parentheses (implicit
+    /// arguments: the caller's parameters of the same names, design D5).
+    pub(crate) args: Option<Vec<Expr>>,
+    /// The `YIELD` part, when written.
+    pub(crate) yields: Option<YieldClause>,
+    /// The call is the whole query (a standalone call: no other clause, no `RETURN`); its
+    /// result is every yielded column (every column of the saved query without `YIELD` or
+    /// with `YIELD *`). The parser gives its linear query `RETURN *` spanning the call, which
+    /// the resolution replaces by the yielded columns (or by `FINISH` for a saved query
+    /// without columns).
+    pub(crate) standalone: bool,
+    /// From `OPTIONAL` (or `CALL`) to the end of the call (`YIELD` items included, its
+    /// `WHERE` not).
+    pub(crate) span: Span,
+}
+
+impl ProcedureCall {
+    /// The span of the qualified name.
+    pub(crate) fn name_span(&self) -> Span {
+        match (self.name.first(), self.name.last()) {
+            (Some(first), Some(last)) => first.span.to(last.span),
+            _ => self.keyword,
+        }
+    }
+
+    /// The qualified name as written with dots (`test.my.proc`).
+    pub(crate) fn dotted(&self) -> String {
+        self.name
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+/// The `YIELD` part of a [`ProcedureCall`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct YieldClause {
+    /// `YIELD *` (every column, standalone calls only): the span of `*`.
+    pub(crate) star: Option<Span>,
+    /// The items in written order (empty with `*`).
+    pub(crate) items: Vec<YieldItem>,
+    /// From `YIELD` to the last item.
+    pub(crate) span: Span,
+}
+
+/// One `YIELD` item: a column of the saved query's result, optionally renamed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct YieldItem {
+    /// The column of the saved query's `RETURN`.
+    pub(crate) column: Identifier,
+    /// `AS alias`: the name it gets in the caller.
+    pub(crate) alias: Option<Identifier>,
+}
+
+impl YieldItem {
+    /// The name the column gets in the caller (the alias, else the column name).
+    pub(crate) fn name(&self) -> &Identifier {
+        self.alias.as_ref().unwrap_or(&self.column)
+    }
+}
+
+/// What the resolution of a [`ProcedureCall`] left on the [`CallClause`] standing for it
+/// (stage 3h).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProcedureRef {
+    /// The index of the resolved call in the list the resolution returns
+    /// (`procedure::ResolvedCall`).
+    pub(crate) index: usize,
+    /// The called query writes (its plan holds a write, a call of a writing one included).
+    pub(crate) writes: bool,
+    /// The qualified name as written (`test.my.proc`), for messages.
+    pub(crate) dotted: String,
+    /// The span of the qualified name.
+    pub(crate) name: Span,
+    /// The caller's `$parameters` the call reads (in its arguments, or by name for implicit
+    /// arguments), each with the text that reads it: the binder records them like every other
+    /// `$name` of the query.
+    pub(crate) parameters: Vec<(String, Span)>,
 }
 
 /// `MERGE [p =] pattern { ON CREATE SET item, .. | ON MATCH SET item, .. }*` (stage 3e, design
@@ -423,6 +525,12 @@ pub(crate) struct CallClause {
     pub(crate) body: Box<CompositeQuery>,
     /// From `OPTIONAL` (or `CALL`) to the closing `}`.
     pub(crate) span: Span,
+    /// Stage 3h: the resolved saved query this clause stands for (a [`ProcedureCall`]
+    /// replaced by the resolution: its body is a synthesized `RETURN NULL AS <column>, ..`,
+    /// or `FINISH` for a call without columns, that only gives the binder and the planner
+    /// the shape of the call's rows; the lowering emits `gql:call_query` instead). `None` for
+    /// a written `CALL { }`.
+    pub(crate) procedure: Option<ProcedureRef>,
 }
 
 /// The variable scope clause of a [`CallClause`]: which outer variables the body reads.

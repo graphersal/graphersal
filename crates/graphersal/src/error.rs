@@ -2957,7 +2957,10 @@ impl DiagnosticError for ScriptError {
                  example g.query(\"{name}\").values(\"name\"). Calling a saved query on incoming \
                  traversers (g.v().query(..), __.query(..)) is not supported yet; filter in the \
                  query itself, or pass the values it needs as arguments: \
-                 let ids = g.v().has_label(\"person\").id().to_list(); g.query(\"{name}\", #{{ids: ids}})."
+                 let ids = g.v().has_label(\"person\").id().to_list(); g.query(\"{name}\", #{{ids: ids}}). \
+                 A saved query written in GQL also runs once per row of a GQL query, with CALL \
+                 and its folder, as in g.gql(\"MATCH (s:software) CALL {name}() YIELD x RETURN \
+                 s.name, x\") for one of the root folder that returns a column x."
             )),
             ScriptError::QueryDepthExceeded { limit, .. } => Some(format!(
                 "Saved queries may call each other at most {limit} levels deep; this bound stops a \
@@ -4441,6 +4444,9 @@ pub(crate) enum GqlHelpTopic {
     /// A temporal value with a part below the microsecond (0A000 "not yet", stage 3g, 3g.P0
     /// U1): values hold microseconds.
     TemporalPrecision,
+    /// A call of a saved query, `CALL folder.name(args) [YIELD ..]` (stage 3h): its name and
+    /// folder, its arguments, its `YIELD` items.
+    Procedure,
 }
 
 /// What went wrong in a GQL query: the kind of a [`TraverserError::Gql`] (feature `gql`).
@@ -6923,6 +6929,10 @@ fn gql_help(
                 help.push_str(GQL_MERGE_ADVICE);
                 return help;
             }
+            if topic == GqlHelpTopic::Procedure {
+                help.push_str(GQL_PROCEDURE_ADVICE);
+                return help;
+            }
             // A pattern predicate in a value position (stage 3f).
             if topic == GqlHelpTopic::Subquery {
                 help.push_str(gql_semantic_advice(topic));
@@ -6955,6 +6965,9 @@ fn gql_help(
         GqlErrorKind::Semantic => help.push_str(gql_semantic_advice(topic)),
         GqlErrorKind::Refused if topic == GqlHelpTopic::Call => {
             help.push_str(gql_semantic_advice(topic))
+        }
+        GqlErrorKind::Refused | GqlErrorKind::NotYet if topic == GqlHelpTopic::Procedure => {
+            help.push_str(GQL_PROCEDURE_ADVICE)
         }
         GqlErrorKind::Refused if alternative.is_some() => help.push_str(
             "gql() does not support this construct; write this part of the query as Gremlin \
@@ -7050,6 +7063,9 @@ fn gql_help(
                  n}) MERGE (:review {stars: 5})-[:about]->(s)\"). ",
             );
             help.push_str(GQL_MERGE_ADVICE);
+        }
+        GqlErrorKind::Data if topic == GqlHelpTopic::Procedure => {
+            help.push_str(GQL_PROCEDURE_ADVICE)
         }
         GqlErrorKind::Data if topic == GqlHelpTopic::StaticKind => {
             help.push_str(GQL_STATIC_KIND_ADVICE)
@@ -7250,6 +7266,22 @@ const GQL_MERGE_ADVICE: &str = "MERGE looks for its whole pattern for each row: 
      g.gql(\"MERGE (p:person {name: 'ann'}) ON CREATE SET p.new = true ON MATCH SET p.new = \
      false RETURN p.new\"). Each row sees what the rows before it created, so FOR creates a \
      repeated item once, as in g.gql(\"FOR n IN ['ann', 'ann'] MERGE (:person {name: n})\").";
+
+/// The general advice of an error about a call of a saved query ([`GqlHelpTopic::Procedure`],
+/// stage 3h): name and folder, arguments, `YIELD`, the standalone form, where to look the
+/// saved queries up, and `g.query(..)` for a saved query in Rhai.
+#[cfg(feature = "gql")]
+pub(crate) const GQL_PROCEDURE_ADVICE: &str = "CALL folder.name(args) runs the saved query \
+     `name` of the catalog folder `folder` (the segments before the name, joined by /; CALL \
+     name() calls one of the root folder), written in GQL. Its arguments are constants or \
+     $parameters, in the order its query first reads its parameters (a trailing one left out \
+     takes the parameter's default). YIELD names the columns of its RETURN the query reads \
+     after the call (YIELD a AS x renames one; each must be a new name), and a call alone is a \
+     whole query returning every column, as in g.define_query(#{name: \"adults\", folder: \
+     \"people\", language: \"gql\", body: \"MATCH (p:person) WHERE p.age >= $min RETURN p.name \
+     AS name\", params: #{min: \"integer\"}}); g.gql(\"CALL people.adults(30) YIELD name RETURN \
+     name ORDER BY name\"). g.queries() lists the saved queries with their folders and \
+     parameters; a saved query written in Rhai runs with g.query(name, #{..}).";
 
 /// The help of a read of an element removed earlier in a GQL query (W27, W28 of stage 3d): what
 /// still works after a `DELETE`, and the query that reads what it needs before it.
@@ -7740,6 +7772,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         GqlHelpTopic::Set => GQL_SET_ADVICE,
         GqlHelpTopic::Delete => GQL_DELETE_ADVICE,
         GqlHelpTopic::Merge => GQL_MERGE_ADVICE,
+        GqlHelpTopic::Procedure => GQL_PROCEDURE_ADVICE,
         GqlHelpTopic::Kind
         | GqlHelpTopic::AggregateValue
         | GqlHelpTopic::Percentile

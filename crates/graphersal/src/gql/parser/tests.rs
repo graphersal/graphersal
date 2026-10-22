@@ -1237,6 +1237,7 @@ fn stage_kinds(q: &Query) -> Vec<&'static str> {
             Stage::Remove(_) => "remove",
             Stage::Delete(_) => "delete",
             Stage::Merge(_) => "merge",
+            Stage::Procedure(_) => "procedure",
         })
         .collect()
 }
@@ -3509,6 +3510,7 @@ fn stage_kinds_of(linear: &LinearQuery) -> Vec<&'static str> {
             Stage::Remove(_) => "remove",
             Stage::Delete(_) => "delete",
             Stage::Merge(_) => "merge",
+            Stage::Procedure(_) => "procedure",
         })
         .collect()
 }
@@ -6305,5 +6307,95 @@ fn zoned_time_is_not_yet_and_realtime_is_refused() {
             "{call}: {alternative}"
         );
         assert!(!alternative.contains("0.2.0"), "{call}: {alternative}");
+    }
+}
+
+// ----- stage 3h: calls of saved queries -----
+
+/// The call of a saved query at stage `i` of `linear`.
+fn procedure_at(linear: &LinearQuery, i: usize) -> &ProcedureCall {
+    match linear.stages.get(i) {
+        Some(Stage::Procedure(call)) => call,
+        other => panic!("stage {i} is no procedure call: {other:?}"),
+    }
+}
+
+#[test]
+fn procedure_calls_parse_in_every_form() {
+    let q = ok("CALL test.my.proc(1, 'a') YIELD out AS o, x WHERE o > 1 RETURN o");
+    assert_eq!(stage_kinds(&q), ["procedure", "filter"]);
+    let call = procedure_at(&q, 0);
+    assert_eq!(call.dotted(), "test.my.proc");
+    assert_eq!(q.text(call.name_span()), "test.my.proc");
+    assert_eq!(call.args.as_ref().map(Vec::len), Some(2));
+    let yields = call.yields.as_ref().expect("YIELD");
+    let items: Vec<(&str, &str)> = yields
+        .items
+        .iter()
+        .map(|item| (item.column.name.as_str(), item.name().name.as_str()))
+        .collect();
+    assert_eq!(items, [("out", "o"), ("x", "x")]);
+    assert!(!call.standalone && call.optional.is_none());
+    assert_eq!(
+        q.text(call.span),
+        "CALL test.my.proc(1, 'a') YIELD out AS o, x"
+    );
+    // Standalone, without parentheses: implicit arguments; `RETURN *` until resolved.
+    let q = ok("CALL test.doNothing");
+    let call = procedure_at(&q, 0);
+    assert!(call.standalone && call.args.is_none());
+    assert!(q.ret.star.is_some());
+    let q = ok("CALL `my reports`.top() YIELD *;");
+    let call = procedure_at(&q, 0);
+    assert!(call.standalone);
+    assert_eq!(call.name[0].name, "my reports");
+    assert!(call.yields.as_ref().is_some_and(|y| y.star.is_some()));
+    // In a query, OPTIONAL, first or later.
+    let q = ok("MATCH (n) OPTIONAL CALL p() YIELD x RETURN n, x");
+    assert_eq!(stage_kinds(&q), ["match", "procedure"]);
+    assert!(procedure_at(&q, 1).optional.is_some());
+    assert!(!procedure_at(&q, 1).standalone);
+    let q = ok("MATCH (n) CALL p() RETURN n");
+    assert!(!procedure_at(&q, 1).standalone);
+    // `CALL { }` and `CALL (..) { }` stay subqueries.
+    assert_eq!(
+        stage_kinds(&ok("CALL () { RETURN 1 AS x } RETURN x")),
+        ["call"]
+    );
+    assert_eq!(
+        stage_kinds(&ok("CALL { RETURN 1 AS x } RETURN x")),
+        ["call"]
+    );
+    // A keyword after the first segment is a name.
+    let q = ok("CALL a.match.return() YIELD x RETURN x");
+    assert_eq!(procedure_at(&q, 0).dotted(), "a.match.return");
+}
+
+#[test]
+fn procedure_call_errors() {
+    for query in [
+        "CALL p(1,",
+        "CALL p() YIELD",
+        "CALL p() YIELD x AS",
+        "CALL p. YIELD x",
+    ] {
+        assert_eq!(fail(query).kind, GqlErrorKind::Syntax, "{query}");
+    }
+    let f = fail("CALL a.b.c.d.e.f.g.h.i.j()");
+    assert_eq!(f.kind, GqlErrorKind::Syntax);
+    assert!(f.message.contains("at most 9 segments"), "{}", f.message);
+    // In a query the call needs RETURN after it (or FINISH).
+    assert_eq!(fail("MATCH (n) CALL p()").kind, GqlErrorKind::Syntax);
+    assert!(ok("MATCH (n) CALL p() FINISH").end() != QueryEnd::Return);
+    // A reserved word cannot start a name; vendor namespaces stay refused at CALL (any case).
+    for (query, text) in [
+        ("CALL WHERE", "CALL"),
+        ("CALL dbms.components()", "CALL"),
+        ("CALL DB.labels() YIELD label RETURN label", "CALL"),
+        ("CALL gds.graph.list()", "CALL"),
+    ] {
+        let f = fail(query);
+        assert_eq!(f.kind, GqlErrorKind::Refused, "{query}");
+        assert_eq!(f.text, text, "{query}");
     }
 }

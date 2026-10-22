@@ -4843,3 +4843,107 @@ fn temporal_calls_bind_as_scalar_functions() {
     let q = ok("MATCH (a) RETURN date.truncate('day', max(a.d)) AS m, a");
     assert!(q.columns[0].aggregate);
 }
+
+// ----- stage 3h: calls of saved queries -----
+
+/// `t/pair($a)` returning `a`, `b`; `w/plant($n)` writing a node.
+struct Saved;
+
+impl crate::gql::procedure::Procedures for Saved {
+    fn saved_query(&self, name: &str) -> Option<crate::graph::definition::QueryDefinition> {
+        use crate::graph::definition::{
+            GQL_QUERY_DIALECT, GQL_WRITING_QUERY_DIALECT, QueryDefinition, QueryParam,
+        };
+        use crate::graph::schema::{JsonType, PropertySchema};
+        let (folder, body, param, ty, dialect) = match name {
+            "pair" => (
+                "t",
+                "RETURN $a AS a, $a + 1 AS b",
+                "a",
+                JsonType::Integer,
+                GQL_QUERY_DIALECT,
+            ),
+            "plant" => (
+                "w",
+                "INSERT (:fruit {name: $n})",
+                "n",
+                JsonType::String,
+                GQL_WRITING_QUERY_DIALECT,
+            ),
+            _ => return None,
+        };
+        Some(
+            QueryDefinition::new(body)
+                .with_folder(folder)
+                .with_dialect(dialect)
+                .with_param(param, QueryParam::new(PropertySchema::of(ty))),
+        )
+    }
+}
+
+/// `query` resolved against [`Saved`] without parameter values, then bound.
+fn resolved(query: &str) -> Result<BoundQuery, TraverserError> {
+    use crate::gql::procedure::{Resolver, resolve};
+    let mut parsed = parse(query).unwrap_or_else(|e| panic!("{query:?} does not parse: {e}"));
+    resolve(
+        &mut parsed,
+        None,
+        &Resolver::new(&Saved, &crate::gql::planner::NoFacts),
+    )?;
+    bind(&parsed)
+}
+
+#[test]
+fn a_resolved_call_binds_its_yielded_names_and_its_parameters() {
+    let q = resolved("MATCH (n) CALL t.pair($x) YIELD b AS y RETURN n, y").unwrap();
+    let call = the_call(&q);
+    assert_eq!(
+        call.procedure.as_ref().map(|p| p.dotted.as_str()),
+        Some("t.pair")
+    );
+    assert!(call.imports.is_empty());
+    let names: Vec<&str> = call
+        .outputs
+        .iter()
+        .filter_map(|id| {
+            q.binding(*id)
+                .and_then(|b| b.name.as_ref())
+                .map(|n| n.name.as_str())
+        })
+        .collect();
+    assert_eq!(names, ["y"]);
+    // `$x` of the argument is a parameter of the query.
+    let parameters: Vec<&str> = q.parameters.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(parameters, ["x"]);
+    assert!(!q.writes());
+    // A call of a saved query that writes makes the query write.
+    let q = resolved("CALL w.plant('fig') FINISH").unwrap();
+    assert!(q.writes());
+}
+
+#[test]
+fn a_yielded_name_must_be_new() {
+    let query = "WITH 1 AS y CALL t.pair(1) YIELD b AS y RETURN y";
+    let f = failure(query, resolved(query));
+    assert_eq!(f.kind, GqlErrorKind::Semantic);
+    assert!(
+        f.message
+            .contains("CALL t.pair yields `y`, which is already defined"),
+        "{}",
+        f.message
+    );
+    assert_eq!(f.text, "y");
+}
+
+#[test]
+fn an_unresolved_call_is_refused_by_the_binder() {
+    // Inside a subquery expression the resolution does not reach it (not yet).
+    let query = "MATCH (n) WHERE EXISTS { CALL t.pair(1) YIELD a RETURN a } RETURN n";
+    let f = failure(query, resolved(query));
+    assert_eq!(f.kind, GqlErrorKind::NotYet);
+    assert!(
+        f.message.contains("CALL of a saved query inside EXISTS"),
+        "{}",
+        f.message
+    );
+}
