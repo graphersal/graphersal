@@ -6021,3 +6021,358 @@ fn random_gql_temporal_queries_never_panic_and_equal_their_twins() {
     }
     fatal.assert_empty("GQL temporal");
 }
+
+// ---------------------------------------------------------------------------------------------
+// GQL stage 3h: calls of saved queries, `CALL folder.name(args) [YIELD ..]`, against a host that
+// defines a few saved queries first (reading, VOID writing, two-parameter, recursive, Rhai);
+// random call forms, mutations and a token soup never panic, and a call equals the saved
+// query's text inlined (new lists only, K3)
+// ---------------------------------------------------------------------------------------------
+
+/// The modern graph with the saved queries the 3h family calls: `people/older($min)` (name and
+/// age of the persons older than `min`, default 30), `t/pair($a, $b)`, `t/labels()`,
+/// `staff/hire($name)` (VOID, writes), `loop/a()` <-> `loop/b()` (a cycle), `deep()` (calls
+/// `people.older`) and `rh()` (Rhai).
+#[cfg(feature = "gql")]
+fn gql_3h_host() -> TraversalGraph {
+    use graphersal::catalog::{
+        Definition, GQL_QUERY_DIALECT, GQL_WRITING_QUERY_DIALECT, QueryDefinition, QueryParam,
+    };
+    use graphersal::schema::{JsonType, PropertySchema};
+    use graphersal::storage::GraphStorage;
+    let mut graph = TraversalGraph::tinkerpop_modern();
+    let int = || {
+        QueryParam::new(PropertySchema::of_types(&[
+            JsonType::Integer,
+            JsonType::Null,
+        ]))
+    };
+    let definitions = [
+        (
+            "older",
+            QueryDefinition::new(
+                "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age",
+            )
+            .with_folder("people")
+            .with_dialect(GQL_QUERY_DIALECT)
+            .with_param(
+                "min",
+                QueryParam::new(PropertySchema::of(JsonType::Integer)).with_default(30),
+            ),
+        ),
+        (
+            "pair",
+            QueryDefinition::new("RETURN $a AS a, $b AS b")
+                .with_folder("t")
+                .with_dialect(GQL_QUERY_DIALECT)
+                .with_param("a", int())
+                .with_param("b", int()),
+        ),
+        (
+            "labels",
+            QueryDefinition::new("FOR label IN ['A', 'B', 'C'] RETURN label")
+                .with_folder("t")
+                .with_dialect(GQL_QUERY_DIALECT),
+        ),
+        (
+            "hire",
+            QueryDefinition::new("INSERT (:person {name: $name})")
+                .with_folder("staff")
+                .with_dialect(GQL_WRITING_QUERY_DIALECT)
+                .with_param(
+                    "name",
+                    QueryParam::new(PropertySchema::of(JsonType::String)),
+                ),
+        ),
+        (
+            "a",
+            QueryDefinition::new("CALL loop.b() YIELD x RETURN x")
+                .with_folder("loop")
+                .with_dialect(GQL_QUERY_DIALECT),
+        ),
+        (
+            "b",
+            QueryDefinition::new("CALL loop.a() YIELD x RETURN x")
+                .with_folder("loop")
+                .with_dialect(GQL_QUERY_DIALECT),
+        ),
+        (
+            "deep",
+            QueryDefinition::new("CALL people.older(26) YIELD name RETURN name")
+                .with_dialect(GQL_QUERY_DIALECT),
+        ),
+        (
+            "rh",
+            QueryDefinition::new("fn rh() { g.v().values(\"name\") }"),
+        ),
+    ];
+    for (name, query) in definitions {
+        // A refused definition is no failure of the family: the calls then meet a missing query.
+        let _ = graph.set_definition(Definition::query(name, query));
+    }
+    graph
+}
+
+/// Valid and adversarial calls of saved queries (stage 3h): every form, the errors of design
+/// 3h.P0 (arity, types, YIELD, recursion, Rhai, vendor namespaces), calls in bodies.
+#[cfg(feature = "gql")]
+const GQL_3H_CORPUS: &[&str] = &[
+    "CALL people.older(26) YIELD name, age RETURN name, age ORDER BY name",
+    "CALL people.older()",
+    "CALL people.older YIELD *",
+    "CALL people.older(26) YIELD name AS a, age AS name WHERE name > 30 RETURN a, name",
+    "MATCH (s:software) CALL people.older($n) YIELD name RETURN s, name",
+    "MATCH (s:software) OPTIONAL CALL people.older(99) YIELD name RETURN s.name, name",
+    "MATCH (s:software) CALL staff.hire('x') RETURN s.name",
+    "FOR i IN range(1, 3) CALL staff.hire('x') FINISH",
+    "CALL staff.hire($name)",
+    "CALL t.pair(1, 2)",
+    "CALL t.pair(1)",
+    "CALL t.pair(1, 2, 3)",
+    "CALL t.pair('a', 2)",
+    "CALL t.pair(null, [1][0] + 1) YIELD a, b RETURN a + b AS s",
+    "CALL t.pair",
+    "CALL t.labels() YIELD label RETURN label UNION CALL t.labels() YIELD label RETURN label",
+    "MATCH (p) CALL (p) { CALL t.labels() YIELD label RETURN label } RETURN p, label",
+    "MATCH (p) WHERE EXISTS { CALL t.labels() YIELD label RETURN label } RETURN p",
+    "RETURN COUNT { CALL t.labels() YIELD label RETURN label } AS n",
+    "MATCH (p) CALL people.older(p.age) YIELD name RETURN name",
+    "MATCH (p) CALL people.older(count(p)) YIELD name RETURN name",
+    "MATCH (p) CALL people.older(1) RETURN p",
+    "MATCH (p) CALL people.older(1) YIELD * RETURN p",
+    "MATCH (p) CALL people.older(1) YIELD p RETURN p",
+    "CALL people.older(1) YIELD name, name RETURN name",
+    "CALL people.older(1) YIELD nope RETURN nope",
+    "CALL staff.hire('x') YIELD x RETURN x",
+    "CALL loop.a()",
+    "CALL deep() YIELD name RETURN name ORDER BY name",
+    "CALL rh()",
+    "CALL older()",
+    "CALL nobody.older()",
+    "CALL `people`.`older`(26)",
+    "CALL a.b.c.d.e.f.g.h.i.j.k()",
+    "CALL db.labels() YIELD label RETURN label",
+    "CALL apoc.x() YIELD y RETURN y",
+    "CALL people.older(26) YIELD name NEXT RETURN name",
+    "CALL people.older(26) YIELD name RETURN name NEXT CALL t.pair(1, 2)",
+    "CALL people.older(26) YIELD name INSERT (:copy {name: name}) RETURN name",
+    "OPTIONAL CALL people.older(26)",
+    "CALL people.",
+    "CALL .older()",
+    "CALL people.older(",
+    "CALL people.older(26) YIELD",
+    "CALL people.older(26) YIELD name AS",
+];
+
+/// Tokens of stage 3h for the call token soup (a list of its own).
+#[cfg(feature = "gql")]
+const GQL_3H_TOKENS: &[&str] = &[
+    "CALL",
+    "OPTIONAL",
+    "YIELD",
+    "*",
+    "AS",
+    "WHERE",
+    "RETURN",
+    "MATCH (p)",
+    "FINISH",
+    "people.older",
+    "people.older(26)",
+    "t.pair",
+    "t.pair(1, 2)",
+    "t.labels()",
+    "staff.hire('x')",
+    "loop.a()",
+    "rh()",
+    "db.labels()",
+    "`people`",
+    ".",
+    "(",
+    ")",
+    ",",
+    "{",
+    "}",
+    "name",
+    "age",
+    "label",
+    "a",
+    "b",
+    "$n",
+    "$name",
+    "1",
+    "null",
+    "UNION",
+    "NEXT",
+];
+
+/// A random call of a host saved query (`gql_3h_host`) in one of the stage 3h forms.
+#[cfg(feature = "gql")]
+fn random_gql_3h_call(rng: &mut Rng) -> String {
+    let min = rng.below(40);
+    let arg = match rng.below(4) {
+        0 => format!("{min}"),
+        1 => "$n".to_string(),
+        2 => format!("{} + 1", min),
+        _ => String::new(),
+    };
+    let yield_items = match rng.below(4) {
+        0 => "name".to_string(),
+        1 => "name, age".to_string(),
+        2 => "name AS who, age".to_string(),
+        _ => "age AS name".to_string(),
+    };
+    let col = yield_items
+        .rsplit(", ")
+        .next()
+        .and_then(|item| item.rsplit(' ').next())
+        .unwrap_or("name")
+        .to_string();
+    let filter = if rng.chance(30) {
+        format!(" WHERE age > {}", rng.below(35))
+    } else {
+        String::new()
+    };
+    match rng.below(7) {
+        0 => format!("CALL people.older({arg})"),
+        1 => format!("CALL people.older({arg}) YIELD *"),
+        2 => format!(
+            "CALL people.older({arg}) YIELD {yield_items}{filter} RETURN {col} ORDER BY {col}"
+        ),
+        3 => format!(
+            "MATCH (s:software) CALL people.older({arg}) YIELD {yield_items}{filter} RETURN s.name AS sw, {col}"
+        ),
+        4 => format!(
+            "MATCH (s:software) OPTIONAL CALL people.older({arg}) YIELD {yield_items} RETURN s.name AS sw, {col}"
+        ),
+        5 => format!(
+            "CALL t.pair({}, {}) YIELD a, b RETURN a, b",
+            rng.below(5),
+            if rng.chance(50) { "null" } else { "2" }
+        ),
+        _ => format!(
+            "MATCH (p:person) CALL (p) {{ CALL people.older({arg}) YIELD name RETURN name }} RETURN p.name AS p, name"
+        ),
+    }
+}
+
+/// One stage 3h case against the host: the Rust read and write entries, camelCase help, the
+/// profile, and the DSL (`g.gql`, saving the text as a GQL query, calling it with `g.query`).
+#[cfg(feature = "gql")]
+fn exercise_gql_3h(query: String) -> Result<(), Outcome> {
+    guarded(WATCHDOG, move || {
+        let params = [
+            ("n", ElementProperty::from(26)),
+            ("name", ElementProperty::from("x")),
+            ("min", ElementProperty::from(31)),
+        ];
+        let graph = gql_3h_host();
+        for camel in [false, true] {
+            let mut g = graph.traversal();
+            if camel {
+                g = g.with("render.spelling", "camel");
+            }
+            if let Err(err) = g.gql_with(&query, params.clone()).to_list() {
+                let _ = format_diagnostic(&err);
+                let _ = err.help();
+            }
+        }
+        let mut writable = gql_3h_host();
+        if let Err(err) = writable
+            .traversal_mut()
+            .gql_with(&query, params.clone())
+            .to_list()
+        {
+            let _ = format_diagnostic(&err);
+        }
+        match graph.traversal().gql_with(&query, params).profile() {
+            Ok(metrics) => {
+                let _ = metrics.to_string();
+            }
+            Err(err) => {
+                let _ = format_diagnostic(&err);
+            }
+        }
+        let graph = Arc::new(Graph::new(gql_3h_host()));
+        let script_params: HashMap<String, ElementProperty> =
+            [("q".to_string(), ElementProperty::from(query.as_str()))].into();
+        let _ = eval_value_with_limits(
+            graph,
+            r#"g.gql(q).toList();
+               g.gql(q, #{n: 2, name: "y"}).count().next();
+               g.define_query(#{name: "fz", language: "gql", body: q});
+               g.query("fz").toList();"#,
+            script_params,
+            &ScriptLimits::default(),
+        );
+    })
+}
+
+#[test]
+#[cfg(feature = "gql")]
+fn random_gql_3h_calls_never_panic_and_equal_the_inlined_query() {
+    let mut fatal = Fatal::default();
+    let mut rng = Rng::new(0x3A_C411);
+    // Twins: a call of `people.older(k)` returns the rows of its text with `$min` = k.
+    let mut differences = Vec::new();
+    let host = gql_3h_host();
+    for _ in 0..budget(40) {
+        let k = rng.below(40);
+        let call =
+            format!("CALL people.older({k}) YIELD name, age RETURN name, age ORDER BY name, age");
+        let inlined = format!(
+            "MATCH (p:person) WHERE p.age > {k} RETURN p.name AS name, p.age AS age \
+             ORDER BY name, age"
+        );
+        let a = host
+            .traversal()
+            .gql(&call)
+            .to_list()
+            .map_err(|e| e.to_string());
+        let b = host
+            .traversal()
+            .gql(&inlined)
+            .to_list()
+            .map_err(|e| e.to_string());
+        if a != b {
+            differences.push(format!("{call}\n  {a:?}\n  vs {b:?}"));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "calls differ from the inlined query:\n{}",
+        differences.join("\n")
+    );
+    let mut texts: Vec<String> = GQL_3H_CORPUS.iter().map(|s| s.to_string()).collect();
+    for _ in 0..budget(60) {
+        texts.push(random_gql_3h_call(&mut rng));
+    }
+    for _ in 0..budget(60) {
+        let base = rng.pick(GQL_3H_CORPUS).as_bytes();
+        let bytes = mutate(&mut rng, base, GQL_SNIPPETS);
+        texts.push(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    for _ in 0..budget(60) {
+        let len = 1 + rng.below(16);
+        let mut soup: Vec<&str> = (0..len).map(|_| *rng.pick(GQL_3H_TOKENS)).collect();
+        if rng.chance(50) {
+            soup.insert(0, "CALL");
+        }
+        texts.push(soup.join(" "));
+    }
+    // A long chain of calls in one query: bounded (1024 calls in all), never a stack overflow.
+    texts.push(format!(
+        "{}RETURN 1 AS x",
+        "CALL t.labels() YIELD label AS l ".repeat(40)
+    ));
+    texts.push(format!("{}FINISH", "CALL staff.hire('x') ".repeat(1100)));
+    let mut generated_ran = 0;
+    for text in texts {
+        let label = text.clone();
+        if label.starts_with("CALL people.older(") || label.starts_with("MATCH (s:software) CALL") {
+            generated_ran += 1;
+        }
+        fatal.check(&label, exercise_gql_3h(text));
+    }
+    assert!(generated_ran > 0, "the generator produced no call");
+    fatal.assert_empty("GQL 3h");
+}

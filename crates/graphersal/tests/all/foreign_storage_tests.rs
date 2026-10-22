@@ -1130,6 +1130,63 @@ fn curated_gql_3g_scripts_give_the_same_result_on_both_storages() {
     );
 }
 
+/// Stage 3h: GQL calls of saved queries (`CALL folder.name(..) [YIELD ..]`), each script defining
+/// its saved queries first (the catalog lives in the storage) and ending in [`DUMP_3A`]: reads,
+/// standalone and in-query forms, VOID writes per row, transitive effects, calls in bodies and
+/// `UNION` operands, the profile; errors: not found, arity, a Rhai body, a recursive chain.
+#[cfg(feature = "gql")]
+const GQL_CURATED_3H: &[&str] = &[
+    r#"OLDER; g.gql("CALL people.older(26) YIELD name, age RETURN name, age ORDER BY name").toList()"#,
+    r#"OLDER; [g.gql("CALL people.older()").toList(), g.gql("CALL people.older YIELD *", #{min: 33}).toList()]"#,
+    r#"OLDER; g.gql("MATCH (s:software) CALL people.older($m) YIELD name AS who, age WHERE age < 35 RETURN s.name AS sw, who ORDER BY sw, who", #{m: 26}).toList()"#,
+    r#"OLDER; g.gql("MATCH (s:software) OPTIONAL CALL people.older(40) YIELD name RETURN s.name AS sw, name ORDER BY sw").toList()"#,
+    r#"HIRE; g.gql("CALL staff.hire('ann')").toList(); g.gql("MATCH (s:software) CALL staff.hire('temp') RETURN s.name AS sw ORDER BY sw").toList()"#,
+    r#"HIRE; g.define_query(#{name: "onboard", folder: "staff", language: "gql", body: "CALL staff.hire('dan') RETURN 'dan' AS hired"}); [g.get_query("onboard")["dialect"], g.get_query("onboard")["effects"].map(|e| e.text), g.gql("CALL staff.onboard()").toList(), g.query("onboard").toList()]"#,
+    r#"OLDER; g.gql("MATCH (p:person) CALL (p) { CALL people.older(30) YIELD name RETURN name } RETURN p.name AS p, name ORDER BY p, name").toList()"#,
+    r#"OLDER; g.gql("CALL people.older(26) YIELD name RETURN name UNION CALL people.older(33) YIELD name RETURN name").toList()"#,
+    r#"OLDER; g.gql("CALL people.older(26) YIELD name RETURN name").profile().to_string().contains("gql:call_query")"#,
+    r#"OLDER; g.gql("CALL people.older(1, 2)").toList()"#,
+    r#"g.define_query(#{name: "rh", body: "fn rh() { g.v().count() }"}); g.gql("CALL rh()").toList()"#,
+    r#"g.gql("CALL nobody.older()").toList()"#,
+];
+
+#[test]
+#[cfg(feature = "gql")]
+fn curated_gql_3h_scripts_give_the_same_result_on_both_storages() {
+    let mut differences = Vec::new();
+    let mut failing = Vec::new();
+    for script in GQL_CURATED_3H {
+        let script = script
+            .replace("OLDER", OLDER_QUERY_3H)
+            .replace("HIRE", HIRE_QUERY_3H);
+        let script = format!("{script}; {DUMP_3A}");
+        let expected = run_curated(reference(), Mode::Plain, &script);
+        let actual = run_curated(forwarded(), Mode::Plain, &script);
+        if expected.result.is_err() {
+            failing.push(script.clone());
+        }
+        if expected != actual {
+            differences.push(format!(
+                "`{script}`\n  TraversalGraph: {expected:?}\n  Forwarding:     {actual:?}"
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "{} differences:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
+    // The scripts exercise stage 3h: only the three error cases fail.
+    assert_eq!(failing.len(), 3, "{failing:#?}");
+}
+
+/// The saved queries the [`GQL_CURATED_3H`] scripts define (`OLDER`, `HIRE` in their text).
+#[cfg(feature = "gql")]
+const OLDER_QUERY_3H: &str = r#"g.define_query(#{name: "older", folder: "people", language: "gql", params: #{min: #{schema: #{type: "integer"}, default: 30}}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"})"#;
+#[cfg(feature = "gql")]
+const HIRE_QUERY_3H: &str = r#"g.define_query(#{name: "hire", folder: "staff", language: "gql", params: #{name: "string"}, body: "MATCH (c:software {name: 'lop'}) INSERT (:person {name: $name})-[:created]->(c)"})"#;
+
 #[test]
 #[cfg(feature = "gql")]
 fn curated_gql_3e_scripts_give_the_same_result_on_both_storages() {

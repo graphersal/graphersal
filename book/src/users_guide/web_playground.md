@@ -59,8 +59,9 @@ answers questions by querying the served graph. In the WebAssembly playground th
   with GQL highlighting and completion: the keywords that fit the position (after `MATCH` a pattern's
   `WHERE`, `RETURN` and the next clauses, after `RETURN` `AS`, `ORDER BY`, `LIMIT`, ...), the GQL
   functions with a short description, the graph's labels after `:` (edge types inside `[..]`), the
-  property keys after `n.` (those of `n`'s labels), the variables the query binds, and the
-  parameters after `$`. Under the editor the **Parameters** field holds the parameter map as JSON,
+  property keys after `n.` (those of `n`'s labels), the variables the query binds, the
+  parameters after `$`, and after `CALL` the saved queries written in GQL as `folder.name`
+  ([Calling saved queries from GQL](saved_queries.md#calling-saved-queries-from-gql)). Under the editor the **Parameters** field holds the parameter map as JSON,
   `{"min": 30}` (checked as you type; a fault names its line and column); **+ Add $parameters**
   adds every `$name` the query reads that the map lacks. Run, Run selection, Stop, Profile, the
   history and the results work as in a Rhai tab: the tab runs `g.gql("<query>", #{min: 30})`, and

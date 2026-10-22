@@ -10,13 +10,15 @@
 //             edge types inside `[ ]`, the variable's kind elsewhere (`WHERE n:person`)
 //   property  after `var.`: the property keys of the variable's labels
 //   key       a key of a property map in a pattern, `(n:person {na`: the keys of its labels
+//   procedure after `CALL` (and inside its dotted name, `CALL people.ol`): the saved queries
+//             written in GQL, as `folder.name` (gqlProcedureChoices)
 //   word      anything else: keywords by position (the clause the cursor is in), functions
 //             where an expression may stand, and the variables the query binds
 // Inside a string, a comment or a back-quoted name there is nothing to complete (null).
 
 import { gqlTokens, gqlParamNames } from './gql-tokens.js';
 
-const WORDLIKE = new Set(['keyword', 'atom', 'variable', 'function', 'label', 'property']);
+const WORDLIKE = new Set(['keyword', 'atom', 'variable', 'function', 'label', 'property', 'procedure']);
 const QUIET = new Set(['string', 'comment', 'name']);
 
 /** The keywords that start (or continue) a clause, for the clause detection. */
@@ -50,7 +52,7 @@ export const GQL_CLAUSE_KEYWORDS = Object.freeze({
   SET: ['SET', 'REMOVE', 'RETURN', 'DELETE', 'DETACH DELETE', 'WITH', 'FINISH', 'MATCH'],
   DELETE: ['RETURN', 'FINISH', 'WITH', 'MATCH'],
   MERGE: ['ON CREATE SET', 'ON MATCH SET', 'RETURN', 'SET', 'WITH', 'MERGE', 'FINISH'],
-  CALL: ['RETURN', 'MATCH', 'WITH', 'FILTER', 'LET'],
+  CALL: ['YIELD', 'RETURN', 'MATCH', 'WITH', 'FILTER', 'LET', 'AS', 'WHERE', ...WRITE_NEXT],
   UNION: ['ALL', 'MATCH', 'RETURN', 'FOR', 'LET'],
 });
 
@@ -85,6 +87,8 @@ const isPunct = (t, c) => !!t && (t.type === 'punctuation' || t.type === 'operat
 export function gqlVariables(text) {
   const tokens = gqlTokens(text);
   const out = new Map();
+  // Inside `YIELD a [AS x], ..`: a yielded name is a new variable, unless `AS` renames it.
+  let yielding = false;
   const add = (name, kind, labels = []) => {
     const v = out.get(name);
     if (!v) out.set(name, { name, kind, labels: [...new Set(labels)] });
@@ -95,9 +99,18 @@ export function gqlVariables(text) {
   };
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
+    if (t.type === 'keyword') {
+      const word = upper(t);
+      if (word === 'YIELD') yielding = true;
+      else if (word !== 'AS') yielding = false;
+    }
     if (t.type !== 'variable') continue;
     const prev = tokens[i - 1];
     const next = tokens[i + 1];
+    if (yielding && !(next && next.type === 'keyword' && upper(next) === 'AS')) {
+      add(t.text, 'value');
+      continue;
+    }
     if (isPunct(prev, '(') || isPunct(prev, '[')) {
       // A pattern element: its labels follow `:` (and `|`, `&`, `!`) up to the closing bracket.
       const labels = [];
@@ -131,6 +144,8 @@ export function gqlVariables(text) {
  *   {kind: 'label', from, prefix, element}             element 'vertex' | 'edge'
  *   {kind: 'property', from, prefix, variable}         after `variable.`
  *   {kind: 'key', from, prefix, element, labels}       a pattern's property map key
+ *   {kind: 'procedure', from, prefix}                  a saved query's name after `CALL`; from
+ *                                                      and prefix cover the whole dotted name
  *   {kind: 'word', from, prefix, clause, keywords, functions, variables}
  * `variables` (word) and the variable lookups come from `gqlVariables(text)`.
  */
@@ -157,6 +172,24 @@ export function gqlCompletionContext(text, pos) {
   }
   if (!prefix && before.endsWith('$')) return { kind: 'param', from: before.length - 1, prefix: '$' };
   const prev = body[body.length - 1];
+  // The name of a called saved query: right after `CALL`, or inside its dotted name.
+  {
+    let i = body.length - 1;
+    let start = prefix ? from : before.length;
+    let named = !!prefix && last.type === 'procedure';
+    if (!prefix || named) {
+      // Walk back over `segment .` pairs to the `CALL`.
+      while (i >= 0 && isPunct(body[i], '.') && body[i - 1] && body[i - 1].type === 'procedure') {
+        start = body[i - 1].from;
+        i -= 2;
+        named = true;
+      }
+      const call = body[i];
+      if (call && call.type === 'keyword' && upper(call) === 'CALL' && (named || !prefix || last.type === 'procedure')) {
+        return { kind: 'procedure', from: start, prefix: doc.slice(start, before.length) };
+      }
+    }
+  }
   // The open brackets at the cursor.
   const stack = [];
   let clause = 'start';
@@ -278,4 +311,26 @@ export function keysFor(keys, element, labels = []) {
     for (const l of known.length ? known : Object.keys(byLabel)) for (const k of byLabel[l] || []) out.add(k);
   }
   return [...out].sort();
+}
+
+/** A saved query's folder segment or name as GQL writes it: back-quoted when no identifier. */
+function procedureSegment(text) {
+  return /^[\p{L}_][\p{L}\p{N}_]*$/u.test(text) ? text : '`' + text.replace(/`/g, '``') + '`';
+}
+
+/**
+ * The saved queries a GQL `CALL` can call, from `listQueries()` entries: those written in GQL
+ * whose status is not "error", as `{text, name, folder, params}` with `text` the dotted name
+ * (`people.older`: the folder's segments, then the name; back-quoted where needed), sorted.
+ * @param {Array<{name: string, folder?: ?string, language?: string, status?: string, params?: Array<{name: string}>}>} list
+ */
+export function gqlProcedureChoices(list) {
+  const out = [];
+  for (const entry of list || []) {
+    if (!entry || typeof entry.name !== 'string' || entry.language !== 'gql' || entry.status === 'error') continue;
+    const folder = entry.folder ? String(entry.folder).split('/').filter((x) => x !== '') : [];
+    const text = [...folder, entry.name].map(procedureSegment).join('.');
+    out.push({ text, name: entry.name, folder: entry.folder || '', params: (entry.params || []).map((p) => p && p.name).filter(Boolean) });
+  }
+  return out.sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 }

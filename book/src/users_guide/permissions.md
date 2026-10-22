@@ -67,6 +67,7 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | `move_query(..)`, `describe_query(..)` (Rust) | `Update` on `Definition(query "name")` |
 | `remove_definition(kind, name)` (Rust) | `Delete` on `Definition(kind "name")` |
 | `g.query("name", ..)` | `Execute` on `Definition(query "name")` before the body runs; for a query that writes, then each of its inferred effects (`Create Data(vertex "person")`, ...); the body's own requests then go through the host's authorizer under the saved query's restriction (a read-only query: every write denied; a query that writes: every write outside its effects denied; see [Saved Queries](saved_queries.md)) |
+| GQL `CALL folder.name(..)` | `Execute` on `Definition(query "name")` for each call step, then the called query's own reads and writes as part of the calling query, asked of the caller's authorizer ([Calling saved queries from GQL](saved_queries.md#calling-saved-queries-from-gql)) |
 | `g.queries()`, `g.queries(folder)` | `Read` on `Definition(query)` |
 | `g.get_query("name")` | `Read` on `Definition(query "name")` |
 | `g.define_query(..)`, `g.define_queries(..)` | `Create` on `Definition(query "name")` per query, `Update` when it replaces one |

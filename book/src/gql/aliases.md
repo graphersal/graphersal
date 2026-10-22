@@ -346,5 +346,6 @@ g.gql("RETURN zoned_time('12:00+01:00') AS t")   // error: zoned_time() (a time 
 | `FOREACH` | not supported yet ([Writing with GQL](writes.md#not-yet)); `CREATE` is an alias of `INSERT`; `SET` and `REMOVE` are supported, `+=` as a [compatibility form](#set-and-remove) |
 | `DELETE`, `DETACH DELETE` | the same in GQL, supported ([Writing with GQL](writes.md#delete)); GQL also writes the default explicitly as `NODETACH DELETE` |
 | `SET n[key] = v`, `SET n:$(expr)` (Cypher 25 dynamic keys and labels) | not supported; name the key and the label in the query |
-| `CALL db.*()`, `apoc.*`, `SHOW ...` | refused: vendor extensions |
+| `CALL proc(..) YIELD ..` | supported for saved queries written in GQL: `CALL folder.name(..)` with `YIELD`, `YIELD *` and the standalone forms of Cypher ([Calling saved queries](subset.md#calling-saved-queries)) |
+| `CALL db.*()`, `dbms.*`, `apoc.*`, `gds.*`, `SHOW ...` | refused: vendor extensions |
 | `a--1` (minus minus one) | a comment starts at `--` (GQL wins): `RETURN n.age--1 AS x` returns the column `n.age`; write `n.age - -1` |

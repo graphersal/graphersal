@@ -118,7 +118,7 @@ export const QueryEditor = {
       const tab = state.tabs.find((t) => t.id === shownTabId);
       const parsed = tab ? parseParams(tab.params) : null;
       return parsed && parsed.ok ? parsed.names.map((name) => ({ name, detail: 'Parameters field' })) : [];
-    });
+    }, () => state.savedQueries);
     const completionSource = (ctx) => (isGqlState(ctx.state) ? gqlSource(ctx) : dslSource(ctx));
 
     function setDoc(text, focus = true) {

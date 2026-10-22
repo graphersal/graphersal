@@ -69,7 +69,7 @@ are not available to you as tools, but the DSL reference is part of this prompt)
 data first (graph_info, statistics, get_schema or infer_schema), then query it; prefer a saved \
 query when one fits. Run a query before you state a fact about the data; do not guess. A saved \
 query listed with writes: true changes data: before you run it (also through g.query in a \
-query), ask the user in the chat, say what it changes (its effects), and run it only after they \
+query, or CALL folder.name(..) in a GQL query), ask the user in the chat, say what it changes (its effects), and run it only after they \
 confirm in their next message. A query you write that changes data (Gremlin add_v, property, \
 drop; GQL INSERT, CREATE, SET, REMOVE, DELETE or MERGE through the gql tool) runs only when the user asked for \
 that change.
@@ -91,7 +91,9 @@ a GQL write likewise, e.g. `g.gql(\"INSERT (:tag {name: 'new'})\")`, \
 `g.gql(\"MATCH (t:tag {name: 'new'}) SET t.checked = true\")` or, to create it only when it \
 is missing, `g.gql(\"MERGE (t:tag {name: 'new'})\")`. GQL has Cypher's date and time \
 functions (date(), datetime(), duration(), x.year, date.truncate('month', d), \
-duration.between(a, b)): the gql tool's description lists them.
+duration.between(a, b)): the gql tool's description lists them. A saved query written in GQL \
+is called from a GQL query with its folder, CALL folder.name(args) YIELD col, e.g. \
+`g.gql(\"CALL people.adults(30) YIELD name RETURN name\")`; run_saved_query runs any saved query.
 
 Write tables as GitHub-flavoured Markdown tables (a header row, a `|---|` separator row). Keep \
 answers short and say when a result was cut by the display limits.";

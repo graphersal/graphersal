@@ -6,8 +6,10 @@
 // as far as highlighting needs them: `//`, `/* */` and `--` comments (`--` is an edge when `>`
 // or `(` follows it or a `)` precedes it on the same line), '...' and "..." strings (a doubled
 // quote or a backslash escape inside), back-quoted names, `$name` / `$`quoted`` parameters,
-// numbers, case-insensitive keywords, labels after `:` and property names after `.`. It never
-// fails: text the engine would refuse is still given a token.
+// numbers, case-insensitive keywords, labels after `:` and property names after `.`, and the
+// name of a called saved query after `CALL` (`CALL people.older(..)`: every segment of the
+// dotted name a 'procedure'; `CALL (` / `CALL {` is a subquery). It never fails: text the engine
+// would refuse is still given a token.
 
 /** The keywords of the engine's lexer (ASCII case-insensitive), without the literals below. */
 export const GQL_KEYWORDS = new Set([
@@ -27,6 +29,9 @@ export function gqlStartState() {
   return {
     inComment: false, inString: null, afterDot: false, afterColon: false, afterLabel: false, afterRParen: false,
     braces: 0, // open `{` (inside a map `:` separates a key from its value, it starts no label)
+    // The name of a called saved query: 'start' after `CALL`, 'segment' after one of its
+    // segments, 'dot' after the `.` between two; null elsewhere.
+    procedure: null,
   };
 }
 
@@ -62,7 +67,8 @@ function stringEnd(line, pos, quote) {
 /**
  * The token of `line` that starts at `pos` (after any whitespace, which is a token of its own):
  * `{end, type}` with `type` one of 'comment', 'string', 'number', 'keyword', 'atom', 'param',
- * 'label', 'property', 'name' (a back-quoted name), 'function', 'variable', 'operator',
+ * 'label', 'property', 'name' (a back-quoted name), 'function', 'procedure' (a segment of the
+ * saved query's name after `CALL`), 'variable', 'operator',
  * 'punctuation', or null (whitespace). `state` (from `gqlStartState`) carries comments and
  * strings across lines and is updated.
  */
@@ -91,6 +97,8 @@ export function scanGql(line, pos, state) {
   state.afterLabel = false;
   const rparen = state.afterRParen;
   state.afterRParen = false;
+  const procedure = state.procedure;
+  state.procedure = null;
   if (rest.startsWith('//')) return { end: line.length, type: 'comment' };
   if (rest.startsWith('/*')) {
     const close = line.indexOf('*/', pos + 2);
@@ -111,6 +119,10 @@ export function scanGql(line, pos, state) {
       return { end: line.length, type: c === '`' ? 'name' : 'string' };
     }
     if (c === '`') {
+      if (procedure === 'start' || procedure === 'dot') {
+        state.procedure = 'segment';
+        return { end, type: 'procedure' };
+      }
       state.afterLabel = afterColon;
       return { end, type: afterColon ? 'label' : afterDot ? 'property' : 'name' };
     }
@@ -132,6 +144,10 @@ export function scanGql(line, pos, state) {
     const m = IDENT_REST.exec(rest.slice(1));
     const word = c + m[0];
     const end = pos + word.length;
+    if (procedure === 'start' || procedure === 'dot') {
+      state.procedure = 'segment';
+      return { end, type: 'procedure' };
+    }
     if (afterColon) {
       state.afterLabel = true;
       return { end, type: 'label' };
@@ -139,11 +155,16 @@ export function scanGql(line, pos, state) {
     if (afterDot) return { end, type: 'property' };
     const upper = word.toUpperCase();
     if (GQL_ATOMS.has(upper)) return { end, type: 'atom' };
+    if (upper === 'CALL') state.procedure = 'start';
     if (/^\s*\(/.test(line.slice(end))) return { end, type: GQL_KEYWORDS.has(upper) ? 'keyword' : 'function' };
     if (GQL_KEYWORDS.has(upper)) return { end, type: 'keyword' };
     return { end, type: 'variable' };
   }
   if (c === '.') {
+    if (procedure === 'segment') {
+      state.procedure = 'dot';
+      return { end: pos + 1, type: 'punctuation' };
+    }
     state.afterDot = true;
     return { end: pos + 1, type: 'punctuation' };
   }

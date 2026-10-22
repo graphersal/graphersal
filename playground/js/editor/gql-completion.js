@@ -1,6 +1,8 @@
 // Autocompletion of GQL text (a query tab in GQL, the saved-query editor's GQL mode): keywords by
 // position, the GQL functions with a short text (js/editor/gql-functions.js), labels, edge types
-// and property keys of the live graph, the variables the query binds and the `$parameters`.
+// and property keys of the live graph, the variables the query binds and the `$parameters`;
+// after `CALL` the saved queries written in GQL (`getQueries()`, the catalog's list the
+// playground already loads: `state.savedQueries`).
 // The context comes from the pure js/editor/gql-complete.js; this file only builds the
 // CodeMirror options.
 //
@@ -9,7 +11,7 @@
 // `gqlVocabulary`, loaded on first use and after every change of the data). It may also be a
 // promise of it (the first load): a request that needs it then waits for it.
 
-import { gqlCompletionContext, gqlParamChoices, gqlVariables, paramToken, keysFor } from './gql-complete.js';
+import { gqlCompletionContext, gqlParamChoices, gqlVariables, gqlProcedureChoices, paramToken, keysFor } from './gql-complete.js';
 import { GQL_FUNCTIONS } from './gql-functions.js';
 
 function docNode(fn, spelling) {
@@ -65,12 +67,15 @@ function nameText(name) {
  * @param {() => ({vertexLabels?: string[], edgeLabels?: string[], keys?: object}|Promise<object>|null)} getVocabulary
  * @param {() => Array<string|{name: string, detail?: string}>} [getParams]  the parameters to offer
  *   after `$` first (a tab's Parameters field, a saved query's declared parameters)
+ * @param {() => Array<object>|null} [getQueries]  the saved queries (`engine.listQueries()`
+ *   entries), offered after `CALL`
  */
-export function gqlCompletionSource(getVocabulary, getParams = () => []) {
+export function gqlCompletionSource(getVocabulary, getParams = () => [], getQueries = () => []) {
   return (context) => {
     const text = context.state.doc.toString();
     const ctx = gqlCompletionContext(text, context.pos);
     if (!ctx) return null;
+    if (ctx.kind === 'procedure') return procedureResult(ctx, getQueries());
     if (ctx.kind === 'param') {
       const given = (getParams() || []).map((p) => (typeof p === 'string' ? { name: p } : p));
       const details = new Map(given.map((p) => [p.name, p.detail]));
@@ -94,6 +99,22 @@ export function gqlCompletionSource(getVocabulary, getParams = () => []) {
     const vocab = getVocabulary();
     if (vocab && typeof vocab.then === 'function') return vocab.then((v) => graphResult(ctx, text, v || {}));
     return graphResult(ctx, text, vocab || {});
+  };
+}
+
+/** The saved queries in GQL after `CALL`: `folder.name(` with the parameters in the detail. */
+function procedureResult(ctx, queries) {
+  const choices = gqlProcedureChoices(queries);
+  if (!choices.length) return null;
+  return {
+    from: ctx.from,
+    options: choices.map((q) => ({
+      label: q.text,
+      type: 'function',
+      detail: `saved query (${q.params.join(', ')})`,
+      apply: applyCall(q.text),
+    })),
+    validFor: /^[\p{L}\p{N}_.`]*$/u,
   };
 }
 

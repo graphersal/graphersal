@@ -9,7 +9,7 @@ import { scanGql, gqlStartState, gqlStartLine } from './gql-tokens.js';
 const STYLE = {
   comment: 'comment', string: 'string', number: 'number', keyword: 'keyword', atom: 'atom',
   param: 'variableName.special', label: 'typeName', property: 'propertyName', name: 'variableName',
-  function: 'propertyName', variable: 'variableName', operator: 'operator', punctuation: 'punctuation',
+  function: 'propertyName', procedure: 'propertyName', variable: 'variableName', operator: 'operator', punctuation: 'punctuation',
 };
 
 export const gqlLanguage = StreamLanguage.define({

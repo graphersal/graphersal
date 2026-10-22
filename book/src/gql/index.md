@@ -93,7 +93,7 @@ the walk from it.
 | Command line | `graphersal -e 'g.gql("MATCH (p:person) RETURN p.name AS name")'`, or in the REPL |
 | Python | through a script: `graph.query('g.gql("...", #{...})', params={...})` |
 | Playground | a **GQL query** tab (the **+** menu, or the **Rhai / GQL** switch): plain GQL with completion and a Parameters field; or `g.gql("...")` in a Rhai tab; the examples list has a GQL group ([Web Playground](../users_guide/web_playground.md#what-it-does)) |
-| Saved queries | `g.define_query(#{name: "older", language: "gql", params: #{min: "integer"}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name"})`, then `g.query("older", #{min: 30})` from any front end ([Saved queries in GQL](../users_guide/saved_queries.md#saved-queries-in-gql)) |
+| Saved queries | `g.define_query(#{name: "older", language: "gql", params: #{min: "integer"}, body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name"})`, then `g.query("older", #{min: 30})` from any front end ([Saved queries in GQL](../users_guide/saved_queries.md#saved-queries-in-gql)), or `CALL older(30) YIELD name RETURN name` from a GQL query ([Calling saved queries](subset.md#calling-saved-queries)) |
 | MCP (dev server) | the tool `gql` {`query`, `params`, `profile`, `max_rows`}: the query as plain text, no Rhai string around it; it writes like the `query` tool, and a server started with `--mcp-read-only` refuses its writes |
 
 In Rust:

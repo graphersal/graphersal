@@ -54,10 +54,16 @@ Unsupported = missing 533, setup 69. Wrong behaviour = wrong_result 0, wrong_col
 <!-- opencypher:end headline -->
 
 The date and time functions (`date()`, `datetime()`, `duration()`, `datetime.truncate()`, ...)
-are not yet supported in GQL, and `expressions/temporal` is about a quarter of the kit, so the
-headline also shows the share without it. The write clauses (`CREATE`, `SET`, `REMOVE`,
-`DELETE`, `MERGE`) pass; `rand()` is refused by design ([Refused Constructs](refused.md)). The
-ranking with counts is in the report.
+are supported with the differences listed on [Semantics](semantics.md#where-dates-and-times-differ-from-neo4j)
+(zoned `time()` not yet), and `expressions/temporal` is about a quarter of the kit and its least
+covered part, so the headline also shows the share without it. The write clauses (`CREATE`,
+`SET`, `REMOVE`, `DELETE`, `MERGE`) pass, and so do the procedure calls of `clauses/call`: the
+kit declares each procedure it calls with its signature and a table of rows, and the harness
+saves it as a saved GQL query before the case runs (`test.my.proc` is the query `proc` of the
+folder `test/my`, its parameters typed from the signature, its body returning the table's rows
+that match the arguments), which the query then calls with `CALL test.my.proc(..)`
+([Calling saved queries](subset.md#calling-saved-queries)). `rand()` is refused by design
+([Refused Constructs](refused.md)). The ranking with counts is in the report.
 
 Per sub-directory of the kit:
 

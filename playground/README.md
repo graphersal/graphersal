@@ -236,7 +236,10 @@ the Query panel's header (`setTabLanguage`). The pure logic is `js/gql-tab.js`:
   line there when the engine gains a function), and the graph's vocabulary (`store.js`
   `gqlVocabulary`: labels from `statistics()`, keys by label from the stored schema or, without
   one, `inferSchema()`; loaded on first use and again after a data change). The Parameters field's
-  keys come first after `$`. The saved-query editor uses the same source for a GQL body (its
+  keys come first after `$`. After `CALL` (and inside its dotted name) the saved queries written in
+  GQL are offered as `folder.name` (`gqlProcedureChoices` over `state.savedQueries`, the list the
+  Catalog manager loads; the tokenizer gives the name's segments the type `procedure`), and a
+  `YIELD` item binds a variable. The saved-query editor uses the same source for a GQL body (its
   declared parameters after `$`) and `js/editor/param-completion.js` for a Rhai body (the declared
   names with their type, above the DSL's globals); both read the parameter table on every request.
 - **Examples**: an example may carry `lang: "gql"` and `params` (a JSON map); it opens as a GQL tab.

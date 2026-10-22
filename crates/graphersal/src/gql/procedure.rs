@@ -700,14 +700,20 @@ impl Pass<'_, '_> {
             }
             for parameter in &shape.order {
                 let param = param_of(parameter)?;
-                parameters.push((parameter.clone(), span));
-                let Some(params) = self.params else {
+                let given = self.params.and_then(|params| {
+                    params
+                        .iter()
+                        .find(|(n, _)| n.as_str() == parameter)
+                        .map(|(_, v)| v.clone())
+                });
+                // The call reads the caller's parameter unless its default stands in for a
+                // value the caller does not give (without values, it may be given).
+                if self.params.is_none() || given.is_some() || param.default_value().is_none() {
+                    parameters.push((parameter.clone(), span));
+                }
+                if self.params.is_none() {
                     continue;
-                };
-                let given = params
-                    .iter()
-                    .find(|(n, _)| n.as_str() == parameter)
-                    .map(|(_, v)| v.clone());
+                }
                 let value = match (given, param.default_value()) {
                     (Some(value), _) => value,
                     (None, Some(default)) => default.clone(),

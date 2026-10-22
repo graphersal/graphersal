@@ -4471,18 +4471,23 @@ pub enum GqlErrorKind {
     /// The query does not parse: an unexpected token, a missing keyword, an unclosed bracket.
     Syntax,
     /// The query parses but does not bind: an unknown or redeclared variable, a misplaced
-    /// parameter, a variable used as the wrong kind of element.
+    /// parameter, a variable used as the wrong kind of element; a `CALL folder.name(..)` of a
+    /// saved query that does not exist, takes other arguments or returns no such `YIELD`
+    /// column.
     Semantic,
     /// A construct `gql()` refuses for good: the undirected edge forms `~[e]~`, `<~`, `~>`,
-    /// vendor procedures (`CALL db.labels()`) and commands (`LOAD CSV`, `CREATE DATABASE`),
-    /// catalog commands (`CREATE INDEX`, `CREATE CONSTRAINT`), `CALL { } IN TRANSACTIONS` (one
-    /// query is one unit), Cypher `id()`.
+    /// vendor procedures (`CALL db.labels()`, the namespaces `db`, `dbms`, `apoc` and `gds`;
+    /// any other `CALL folder.name(..)` calls a saved query of the catalog) and commands
+    /// (`LOAD CSV`, `CREATE DATABASE`), catalog commands (`CREATE INDEX`, `CREATE CONSTRAINT`),
+    /// `CALL { } IN TRANSACTIONS` (one query is one unit), Cypher `id()`.
     Refused,
     /// A construct of a later version of the GQL support, such as a parenthesized path
-    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, or Cypher's
-    /// `FOREACH` write clause.
+    /// pattern nested in another one `(((a)-->(b)){2}){1,3}`, `sin(x)`, `EXCEPT`, Cypher's
+    /// `FOREACH` write clause, a `CALL` of a saved query written in Rhai or with an argument
+    /// that reads the row.
     NotYet,
-    /// The query exceeds a fixed bound of the parser, such as the nesting depth.
+    /// The query exceeds a fixed bound of the parser, such as the nesting depth, or of the
+    /// calls of saved queries (16 levels, 1024 calls in all).
     Limit,
     /// The query is valid, but evaluating an expression on a row of the data failed while the
     /// traversal ran: a division by zero, a numeric overflow, an operand of the wrong kind
@@ -7001,6 +7006,16 @@ fn gql_help(
             crate::gql::bind::MAX_SUBQUERIES,
             crate::gql::lower::MAX_LOWERED_SUBQUERIES,
             crate::gql::bind::MAX_BODY_DEPTH,
+        )),
+        // Stage 3h: a chain of saved queries that call each other.
+        GqlErrorKind::Limit if topic == GqlHelpTopic::Procedure => help.push_str(&format!(
+            "Saved queries called with CALL nest at most {} levels deep, and one query and the \
+             saved queries it calls hold at most {} calls in all. Call an inner saved query \
+             directly, as in g.gql(\"CALL people.adults(30) YIELD name RETURN name\"), or write \
+             a part of the chain in the query itself; g.get_query(name) shows a saved query's \
+             body.",
+            crate::gql::procedure::MAX_CALL_DEPTH,
+            crate::gql::procedure::MAX_RESOLVED_CALLS,
         )),
         GqlErrorKind::Limit if alternative.is_some() => {
             help.push_str("The query is larger than gql() accepts.")

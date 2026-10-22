@@ -12145,6 +12145,44 @@ mod gql {
         }
 
         #[test]
+        fn a_too_deep_chain_of_calls_names_the_bound_and_the_fix() {
+            let mut graph = TraversalGraph::tinkerpop_modern();
+            graph
+                .set_definition(Definition::query(
+                    "q0",
+                    QueryDefinition::new("RETURN 1 AS x").with_dialect(GQL_QUERY_DIALECT),
+                ))
+                .unwrap();
+            for i in 1..=17 {
+                graph
+                    .set_definition(Definition::query(
+                        format!("q{i}"),
+                        QueryDefinition::new(format!("CALL q{}() YIELD x RETURN x", i - 1))
+                            .with_dialect(GQL_QUERY_DIALECT),
+                    ))
+                    .unwrap();
+            }
+            let err = graph
+                .traversal()
+                .gql("CALL q17()")
+                .to_list()
+                .expect_err("the chain is too deep");
+            assert_eq!(
+                kind_and_status(&err),
+                (GqlErrorKind::Limit, "54001".to_string())
+            );
+            let help = err.help().unwrap();
+            assert!(
+                help.starts_with(
+                    "Saved queries called with CALL nest at most 16 levels deep, and one query \
+                     and the saved queries it calls hold at most 1024 calls in all. Call an \
+                     inner saved query directly"
+                ),
+                "{help}"
+            );
+        }
+
+        #[test]
         fn a_vendor_procedure_names_calls_of_saved_queries() {
             let (_, report) = failure("CALL db.labels()");
             assert!(

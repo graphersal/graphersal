@@ -404,6 +404,26 @@ fn implicit_arguments_come_from_the_parameters_of_a_standalone_call() {
 }
 
 #[test]
+fn an_implicit_argument_the_caller_does_not_give_takes_its_default() {
+    let mut graph = fixture();
+    save(
+        &mut graph,
+        Some("t"),
+        "older",
+        "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name",
+        vec![("min", param(JsonType::Integer, false).with_default(30))],
+    );
+    assert_eq!(
+        table(&rows(&graph, "CALL t.older")),
+        ["name=josh", "name=peter"]
+    );
+    assert_eq!(
+        table(&rows_with(&graph, "CALL t.older", vec![("min", 33.into())])),
+        ["name=peter"]
+    );
+}
+
+#[test]
 fn an_argument_is_checked_against_the_parameter_schema() {
     let mut graph = fixture();
     save(

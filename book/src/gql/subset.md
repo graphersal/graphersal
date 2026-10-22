@@ -17,6 +17,8 @@ error that says so ([Not supported yet](#not-supported-yet) at the end,
   WITH [DISTINCT] <item> [AS <name>], ...     -- or WITH *; Cypher
        [ORDER BY ...] [OFFSET <n>] [LIMIT <n>] [WHERE <condition>]
   [OPTIONAL] CALL [(<name>, ...) | (*)] { <query> }   -- a subquery run for each row
+  [OPTIONAL] CALL <folder>.<name>(<arg>, ...)          -- a saved query run for each row
+       [YIELD <column> [AS <name>], ... [WHERE <condition>]]
   INSERT <pattern> [, <pattern> ...]          -- Cypher spelling: CREATE; creates per row
   SET <item> [, ...]  /  REMOVE <item> [, ...] -- change properties and labels per row
   [DETACH | NODETACH] DELETE <expr> [, ...]   -- removes per row; NODETACH is the default
@@ -31,6 +33,9 @@ RETURN [DISTINCT] <item> [AS <name>], ...     -- or RETURN *; items may aggregat
 [ UNION [ALL | DISTINCT] <clauses> RETURN ... [ORDER BY ...] [OFFSET ..] [LIMIT ..] ]   -- any number
 [ NEXT <the same again: clauses, RETURN, UNION ...> ]                                   -- any number
 [;]
+
+-- or a standalone call of a saved query, the whole query:
+CALL <folder>.<name>[(<arg>, ...)] [YIELD * | YIELD <column> [AS <name>], ... [WHERE <condition>]]
 ```
 
 A pattern is a path of node and edge patterns, optionally named (`p = (a)-->(b)`); an edge may
@@ -39,7 +44,9 @@ carry a quantifier (`-[:knows]->{1,3}`), and so may a parenthesized part of the 
 with any clause, or with `RETURN` alone ([Queries without MATCH](#queries-without-match)).
 Queries ending in `RETURN` combine with `UNION` and continue with `NEXT`
 ([UNION and NEXT](#union-and-next)); `NEXT` binds looser than `UNION`. A `CALL` runs a whole
-query of that shape for each row ([CALL subqueries](#call-subqueries)). `INSERT` creates nodes
+query of that shape for each row ([CALL subqueries](#call-subqueries)), and `CALL
+folder.name(..)` a saved query of the graph's catalog ([Calling saved
+queries](#calling-saved-queries)). `INSERT` creates nodes
 and edges once per row, `SET` / `REMOVE` change them, `DELETE` removes them and Cypher's `MERGE`
 finds or creates them; a query whose last clause writes may end there and returns no rows
 ([Writing with GQL](writes.md)).
@@ -770,6 +777,59 @@ g.gql("CALL { MATCH (s:software) RETURN s } MATCH (s)<-[:created]-(p) RETURN s.n
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:knows]->(f) RETURN f AS p } RETURN p")   // error: the CALL body returns `p`, which is already defined outside it
 g.gql("MATCH (p:person) CALL (p) { MATCH (p)-[:created]->(s) } RETURN p")   // error: a CALL { } body without RETURN only makes sense for writes
 ```
+
+## Calling saved queries
+
+`CALL folder.name(args)` is GQL's named procedure call: it runs the [saved
+query](../users_guide/saved_queries.md#calling-saved-queries-from-gql) `name` of the catalog
+folder `folder` (the segments before the name joined by `/`; one segment, `CALL name()`, calls
+a query of the root folder) **for each incoming row**, like a `CALL { }` body that imports
+nothing. Only saved queries written in GQL can be called.
+
+```text
+CALL f.name(a, b) YIELD x, y AS z [WHERE <condition>]   -- inside a query: YIELD names the columns read after it
+CALL f.name(a, b)                -- inside a query, a VOID saved query (no RETURN): each row kept once
+OPTIONAL CALL f.name(a) YIELD x  -- keeps a row without results, with x NULL
+CALL f.name(a, b)                -- the whole query: every column of the saved query
+CALL f.name(a, b) YIELD *        -- the same
+CALL f.name                      -- the whole query, arguments from the query's parameters by name
+```
+
+- The **arguments** are constants or `$parameters` (and lists, maps and arithmetic of them),
+  positional in the order the saved query first reads its parameters; trailing ones left out
+  take their defaults, and each is checked against the parameter's schema before the run. An
+  argument that reads the row is not supported yet.
+- **`YIELD`** names columns of the saved query's `RETURN`; each yielded name is a new variable
+  (`AS` renames one, also swapping two names), and `WHERE` after the items filters the rows.
+  Inside a query, a call of a saved query with columns needs `YIELD`; `YIELD *` and the form
+  without parentheses are for a standalone call only.
+- The saved query runs as a query of its own: it sees none of the caller's variables, and its
+  variables none of the caller's. Its writes are part of the calling query's one unit.
+- A call stands wherever a clause stands, also inside `CALL { }` bodies and `UNION` operands;
+  inside `EXISTS { }`, `COUNT { }` and `COLLECT { }` it is not supported yet. The vendor
+  namespaces `db`, `dbms`, `apoc` and `gds` are [refused](refused.md).
+
+```rhai,graph=modern,script
+g.define_query(#{
+    name: "older",
+    folder: "people",
+    language: "gql",
+    params: #{min: #{schema: #{type: "integer"}, default: 30}},
+    body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name, p.age AS age"
+});
+g.gql("MATCH (s:software) CALL people.older(33) YIELD name RETURN s.name AS sw, name ORDER BY sw").to_list();
+// [#{"name": "peter", "sw": "lop"}, #{"name": "peter", "sw": "ripple"}]
+g.gql("MATCH (s:software) OPTIONAL CALL people.older(40) YIELD name RETURN s.name AS sw, name ORDER BY sw").to_list();
+// [#{"name": (), "sw": "lop"}, #{"name": (), "sw": "ripple"}]
+g.gql("CALL people.older(26) YIELD name RETURN name UNION CALL people.older(33) YIELD name RETURN name").to_list();
+// marko, vadas, josh, peter
+g.gql("CALL people.older").to_list();   // [#{"age": 32, "name": "josh"}, #{"age": 35, "name": "peter"}]: min takes its default 30
+```
+
+`.profile()` shows a call as `gql:call_query("people/older", ..)` with the saved query's plan
+as its child. [Saved Queries](../users_guide/saved_queries.md#calling-saved-queries-from-gql)
+has the parameters, `VOID` queries, effects and permissions; [Errors](errors.md#calls-of-saved-queries)
+every error of a call.
 
 ## INSERT
 
@@ -1523,6 +1583,8 @@ construct and the alternative.
 | a write in an operand of `UNION`, a path variable in `INSERT` | run the write on its own; name the nodes and edges |
 | a `SET` / `REMOVE` target deeper than a variable (`n.a.b = ..`, `head(l).k = ..`, a computed key `n[k] = ..`) | `WITH head(l) AS x SET x.k = ..` |
 | `NEXT YIELD` | `RETURN` the columns to pass on before `NEXT` |
+| a `CALL folder.name(..)` of a saved query written in Rhai | `g.query(name, #{..})` from the DSL, or save it again in GQL ([Calling saved queries](#calling-saved-queries)) |
+| an argument of `CALL folder.name(..)` that reads the row (`CALL people.older(s.age)`); a `CALL` of a saved query inside `EXISTS { }`, `COUNT { }`, `COLLECT { }` | a constant or a `$parameter`; a `CALL (s) { .. }` subquery or the saved query's pattern in the query |
 | `OPTIONAL { ... }` / `OPTIONAL ( ... )` blocks | one `OPTIONAL MATCH` per optional part |
 | a quantified edge over a list of edges bound before, Cypher's `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` | a new name compared in `WHERE`: `MATCH (a)-[rs2*]->(b) WHERE rs2 = rs` |
 | a quantifier nested in a quantified path pattern, `(((a)-->(b)){2})+` | write the inner path out, `((x)-->(y)-->(z))+`, or Gremlin `repeat()` |
