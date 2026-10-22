@@ -1108,7 +1108,11 @@ const EVALUATION_TIMEOUT_MS: i64 = 1_000;
 /// `repeat()` stops with the memory limit error instead of growing to gigabytes within the
 /// `evaluationTimeout`. Without a tracking allocator in this binary the engine's estimate is
 /// compared.
-const MEMORY_LIMIT_BYTES: i64 = 512 * 1024 * 1024;
+///
+/// The value is 128 MiB rather than 512 MiB to compensate for that estimate undercounting
+/// unbounded loops several times over (512 MiB let one case reach about 3 GB of resident
+/// memory); it returns to 512 MiB once the memory estimate counts traverser values.
+const MEMORY_LIMIT_BYTES: i64 = 128 * 1024 * 1024;
 
 /// A fresh, empty directory for one case: its file root. Removed by `Drop`.
 struct CaseDir(std::path::PathBuf);
@@ -1964,8 +1968,8 @@ fn fuzz_fast() {
 /// `repeat(__.path())`): under the host's `memory.limit` each stops with the memory limit error.
 /// The `evaluationTimeout` is raised so a debug build reaches the limit before the deadline, and
 /// the limit is lowered to 64 MiB to keep the test small: the engine's estimate (no tracking
-/// allocator here) undercounts these loops several times over, so the 512 MiB host limit still
-/// lets one case reach about 3 GB of resident memory.
+/// allocator here) undercounts these loops several times over, so a 512 MiB host limit let one
+/// case reach about 3 GB of resident memory.
 #[test]
 fn unbounded_repeat_stops_at_the_memory_limit() {
     for seed in [23_102_892, 23_189_523, 23_159_444] {
