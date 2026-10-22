@@ -493,8 +493,15 @@ g.define_query(#{
 g.gql("CALL staff.hire('ann')").to_list();   // [] (VOID), and ann is created
 g.gql("FOR n IN ['bob', 'cy'] CALL staff.hire('temp') RETURN n").to_list();
 // [#{"n": "bob"}, #{"n": "cy"}]: two persons named temp, one per row
-g.gql("FOR n IN ['bob', 'cy'] CALL staff.hire('temp') FINISH");   // a query ending in a VOID call ends with FINISH (or RETURN)
+g.gql("FOR n IN ['bob', 'cy'] CALL staff.hire('tmp')").to_list();
+// []: like a last clause that writes, a VOID call may end the query (zero rows)
 ```
+
+- **Yielded nodes and edges** keep their properties and labels, and a later pattern may start at
+  one (`CALL sw() YIELD s MATCH (s)-->(x) ..`); the kind is checked when a row reaches the
+  pattern: `NULL` gives no row, any other value that is not a node (or edge) is `22G03`.
+- **A body that is only a call** without parentheses (`body: "CALL people.older"`) reads the
+  called query's parameters by name: declare them in the calling query's `params`.
 
 - **Effects are transitive:** a saved GQL query that calls another is checked against the
   catalog when it is saved (the called query must exist, its arguments fit), and its dialect

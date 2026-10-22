@@ -121,6 +121,10 @@ pub(crate) struct ResolvedCall {
     /// The callee returns no record (it ends in `FINISH` or a write): each incoming row
     /// passes on once.
     pub(crate) unit: bool,
+    /// The call has no parentheses: a standalone call reading its arguments from the caller's
+    /// parameters of the same names. Resolved without the catalog
+    /// ([`Resolver::deferred`]) the names it reads are not known.
+    pub(crate) implicit_arguments: bool,
 }
 
 /// The query a call runs: bound and planned with the argument values as its parameters.
@@ -387,8 +391,7 @@ impl Pass<'_, '_> {
             parameters,
         };
         let clause = synthesized_clause(call, &outputs, shape.unit, procedure);
-        let ret = call
-            .standalone
+        let ret = (call.standalone || call.ends_query)
             .then(|| standalone_return(call, &outputs, shape.unit));
         self.calls.push(ResolvedCall {
             name,
@@ -399,6 +402,7 @@ impl Pass<'_, '_> {
                 .map(|(name, column)| (CompactString::new(&name.name), *column))
                 .collect(),
             unit: shape.unit,
+            implicit_arguments: call.args.is_none(),
         });
         Ok((clause, ret))
     }
@@ -436,9 +440,8 @@ impl Pass<'_, '_> {
             parameters,
         };
         let clause = synthesized_clause(call, &outputs, unit, procedure);
-        let ret = call
-            .standalone
-            .then(|| standalone_return(call, &outputs, unit));
+        let ret =
+            (call.standalone || call.ends_query).then(|| standalone_return(call, &outputs, unit));
         self.calls.push(ResolvedCall {
             name,
             path,
@@ -448,6 +451,7 @@ impl Pass<'_, '_> {
                 .map(|(name, column)| (CompactString::new(&name.name), *column))
                 .collect(),
             unit,
+            implicit_arguments: call.args.is_none(),
         });
         Ok((clause, ret))
     }
@@ -946,11 +950,21 @@ impl Pass<'_, '_> {
                         list(&shape.columns)
                     ),
                 )
-                .alternative(format!(
-                    "add YIELD, as in CALL {}(..) YIELD {}",
-                    call.dotted(),
-                    shape.columns.join(", ")
-                ))
+                .alternative(if call.ends_query {
+                    // At the end of the query: only a VOID call ends one without RETURN.
+                    format!(
+                        "add YIELD and end the query with RETURN, as in CALL {}(..) YIELD {cols} \
+                         RETURN {cols}",
+                        call.dotted(),
+                        cols = shape.columns.join(", ")
+                    )
+                } else {
+                    format!(
+                        "add YIELD, as in CALL {}(..) YIELD {}",
+                        call.dotted(),
+                        shape.columns.join(", ")
+                    )
+                })
                 .topic(GqlHelpTopic::Procedure),
             ));
         };

@@ -82,7 +82,17 @@ pub(super) fn check(
 ) -> Result<GqlBody, GqlBodyError> {
     let plan = crate::gql::lower::saved_query_plan(source, catalog)
         .map_err(|error| GqlBodyError::Gql(Box::new(error)))?;
-    let (parameters, writes, calls) = (plan.parameters, plan.writes, plan.calls);
+    let (mut parameters, writes, calls) = (plan.parameters, plan.writes, plan.calls);
+    // Checked without the catalog, a standalone call without parentheses reads parameters the
+    // plan cannot name: the declared ones it may read count as read (they were checked against
+    // the catalog when the query was saved).
+    if plan.unknown_parameters {
+        for declared in declared {
+            if !parameters.iter().any(|p| p == declared) {
+                parameters.push(declared.to_string());
+            }
+        }
+    }
     if let Some(parameter) = parameters.iter().find(|p| !declared.contains(&p.as_str())) {
         return Err(GqlBodyError::Parameters(
             ScriptError::UndeclaredQueryParameter {

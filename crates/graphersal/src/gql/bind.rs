@@ -3236,7 +3236,17 @@ impl<'q> Binder<'q> {
                 group: false,
             };
             let reference = ColumnRef { segment, column: i };
-            outputs.push(self.new_binding(site, Some(&name), name.span, None, Some(reference)));
+            let id = self.new_binding(site, Some(&name), name.span, None, Some(reference));
+            // A yielded column of a saved query is a value of unknown kind (the synthesized
+            // body returns NULL): a later pattern may start at it as a node or an edge, its
+            // kind checked when a row reaches the pattern like a materialized value column.
+            if clause.procedure.is_some()
+                && let Some(binding) = self.bindings.get_mut(id.0)
+                && binding.kind == BindingKind::Value
+            {
+                binding.checked = true;
+            }
+            outputs.push(id);
         }
         self.push_numbered(
             Segment::Call(Box::new(BoundCall {

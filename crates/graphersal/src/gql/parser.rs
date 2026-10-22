@@ -1834,7 +1834,34 @@ impl<'a> Parser<'a> {
         if last_writes && self.at_query_end(ctx) {
             return Ok(self.without_result(start, matches, stages, None));
         }
+        if let Some(call) = self.void_call_end(ctx, &mut stages) {
+            // `RETURN *` until the resolution writes `FINISH` for the VOID saved query.
+            let mut linear = self.without_result(start, matches, stages, None);
+            linear.ret.star = Some(call);
+            linear.ret.span = call;
+            return Ok(linear);
+        }
         Err(self.missing_clause(ctx, &stages, &matches, other))
+    }
+
+    /// A last clause that is a call of a saved query without `YIELD` (stage 3h) at the end of
+    /// the query or of a `CALL { }` body: like a last clause that writes (design W2), it may
+    /// end the query without a result statement, as in Neo4j. Marks the call
+    /// [`ProcedureCall::ends_query`] and returns its span; only a VOID call (of a saved query
+    /// without `RETURN`) can end a query, which the resolution checks.
+    #[inline(never)]
+    fn void_call_end(&self, ctx: Body, stages: &mut [Stage]) -> Option<Span> {
+        if !matches!(ctx, Body::Top | Body::Call) || !self.at_query_end(ctx) {
+            return None;
+        }
+        let Some(Stage::Procedure(call)) = stages.last_mut() else {
+            return None;
+        };
+        if call.yields.is_some() {
+            return None;
+        }
+        call.ends_query = true;
+        Some(call.span)
     }
 
     /// Whether the current token ends a query or body of `ctx`: the end of input or `;` at the
@@ -2209,6 +2236,7 @@ impl<'a> Parser<'a> {
             args,
             yields,
             standalone: false,
+            ends_query: false,
             span,
         };
         Ok((Box::new(call), filter))

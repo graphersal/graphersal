@@ -693,6 +693,119 @@ fn a_query_that_reads_after_a_writing_call_sees_its_writes() {
     assert_eq!(table(&got), ["planted=fig f=fig"]);
 }
 
+#[test]
+fn a_query_may_end_in_a_void_call() {
+    let mut graph = fixture();
+    save_in(
+        &mut graph,
+        None,
+        "plant",
+        "INSERT (:fruit {name: $n})",
+        vec![("n", param(JsonType::String, false))],
+        GQL_WRITING_QUERY_DIALECT,
+    );
+    // Like a last clause that writes: zero rows, the call runs once per row.
+    let got = graph
+        .traversal_mut()
+        .gql("FOR i IN [1, 2, 3] CALL plant('apple')")
+        .to_list()
+        .unwrap();
+    assert!(got.is_empty(), "{got:?}");
+    let got = graph
+        .traversal_mut()
+        .gql("MATCH (s:software) CALL plant('pear');")
+        .to_list()
+        .unwrap();
+    assert!(got.is_empty(), "{got:?}");
+    let got = graph
+        .traversal_mut()
+        .gql("MATCH (s:software {name: 'lop'}) CALL (s) { CALL plant('fig') } RETURN s.name AS s")
+        .to_list()
+        .unwrap();
+    assert_eq!(table(&got), ["s=lop"]);
+    let count = graph.traversal().v(None).has_label("fruit").count().next();
+    assert_eq!(count.unwrap(), Some(ElementProperty::from(6_i64)));
+    // A VOID query that only reads: zero rows too.
+    assert!(rows(&graph, "MATCH (s:software) CALL t.nothing()").is_empty());
+    assert!(rows(&graph, "MATCH (s:software) OPTIONAL CALL t.nothing()").is_empty());
+    // A called query that returns columns still needs YIELD and the query RETURN.
+    assert_error(
+        &graph,
+        "MATCH (s:software) CALL people.adults(30)",
+        "42002",
+        "names the columns it reads with YIELD",
+    );
+    assert_error(
+        &graph,
+        "MATCH (s:software) CALL people.adults(30) YIELD name",
+        "42001",
+        "missing RETURN",
+    );
+}
+
+#[test]
+fn a_yielded_node_or_edge_starts_a_later_pattern() {
+    let mut graph = fixture();
+    save(
+        &mut graph,
+        None,
+        "software",
+        "MATCH (s:software) RETURN s, s.name AS name",
+        vec![],
+    );
+    save(
+        &mut graph,
+        None,
+        "knowing",
+        "MATCH ()-[k:knows]->() RETURN k",
+        vec![],
+    );
+    let got = rows(
+        &graph,
+        "CALL software() YIELD s MATCH (s)<-[:created]-(p) RETURN s.name AS s, p.name AS p \
+         ORDER BY s, p",
+    );
+    assert_eq!(
+        table(&got),
+        [
+            "s=lop p=josh",
+            "s=lop p=marko",
+            "s=lop p=peter",
+            "s=ripple p=josh"
+        ]
+    );
+    let got = rows(
+        &graph,
+        "CALL knowing() YIELD k MATCH ()-[k]->(b) RETURN b.name AS b ORDER BY b",
+    );
+    assert_eq!(table(&got), ["b=josh", "b=vadas"]);
+    // A NULL gives no row; any other value that is not an element of the kind is an error
+    // when a row reaches the pattern.
+    assert!(rows(&graph, "CALL t.pair(NULL) YIELD a MATCH (a)-->(x) RETURN x").is_empty());
+    let (_, status, message) = error_of(
+        &graph,
+        "CALL software() YIELD name MATCH (name)-->(x) RETURN x",
+        vec![],
+    );
+    assert_eq!(status, "22G03", "{message}");
+    assert!(
+        message.contains(
+            "`name` is written as a node of the pattern but holds a value that is not a node"
+        ),
+        "{message}"
+    );
+    let (_, status, message) = error_of(
+        &graph,
+        "CALL knowing() YIELD k MATCH (k)-->(x) RETURN x",
+        vec![],
+    );
+    assert_eq!(status, "22G03", "{message}");
+    assert!(
+        message.contains("holds a value that is not a node"),
+        "{message}"
+    );
+}
+
 // ----- plan -----
 
 #[test]
@@ -779,6 +892,47 @@ mod saved {
         );
         ok(&graph, r#"g.query("seed")"#);
         assert_eq!(fruits(&graph), r#"["pea"]"#);
+    }
+
+    #[test]
+    fn a_body_that_is_only_an_implicit_call_reads_the_declared_parameters() {
+        let graph = Arc::new(GraphSource::tinkerpop_modern());
+        ok(
+            &graph,
+            r#"g.define_query(#{name: "older", folder: "people", language: "gql",
+                   params: #{min: #{schema: #{type: "integer"}, default: 30}},
+                   body: "MATCH (p:person) WHERE p.age > $min RETURN p.name AS name ORDER BY name"});
+               g.define_query(#{name: "older2", language: "gql",
+                   params: #{min: #{schema: #{type: "integer"}, default: 30}},
+                   body: "CALL people.older"})"#,
+        );
+        assert_eq!(
+            ok(
+                &graph,
+                r#"g.queries().filter(|q| q.name == "older2").map(|q| [q.status, q.params.map(|p| p.name)])"#
+            ),
+            r#"[["ok", ["min"]]]"#
+        );
+        assert_eq!(
+            ok(&graph, r#"g.query("older2", #{min: 33}).to_list()"#),
+            r#"[#{"name": "peter"}]"#
+        );
+        assert_eq!(
+            ok(&graph, r#"g.query("older2").to_list()"#),
+            r#"[#{"name": "josh"}, #{"name": "peter"}]"#
+        );
+        assert_eq!(
+            ok(&graph, r#"g.gql("CALL older2(33)").to_list()"#),
+            r#"[#{"name": "peter"}]"#
+        );
+        // The parameters of the call are checked against the declared ones as usual.
+        let err = run(
+            &graph,
+            r#"g.define_query(#{name: "bad", language: "gql", params: #{other: "integer"},
+                   body: "CALL people.older"})"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("reads the parameter $min"), "{err}");
     }
 
     #[test]

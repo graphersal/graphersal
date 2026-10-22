@@ -2051,12 +2051,14 @@ pub(crate) fn saved_query_plan(
     let mut parsed = parse(query)?;
     let calls = resolve(&mut parsed, None, &deferred_resolver())?;
     let bound = super::bind::bind(&parsed)?;
+    let unknown_parameters = checked.is_none() && calls.iter().any(|c| c.implicit_arguments);
     let parameters = checked.unwrap_or_else(|| first_use(&bound));
     let (writes, _) = lower_with_placeholders(query, &bound)?;
     Ok(SavedQueryPlan {
         parameters,
         writes,
         calls: called(&calls),
+        unknown_parameters,
     })
 }
 
@@ -2070,6 +2072,10 @@ pub(crate) struct SavedQueryPlan {
     /// The saved queries it calls (stage 3h), each once, in text order: their effects are its
     /// effects too (`script/effects.rs`, transitively).
     pub(crate) calls: Vec<String>,
+    /// Without the catalog: a call without parentheses reads parameters of the query that
+    /// [`SavedQueryPlan::parameters`] cannot name (they are the called query's), so a declared
+    /// parameter missing from it may still be read.
+    pub(crate) unknown_parameters: bool,
 }
 
 /// The most subquery bodies one query lowers (module docs, "Subqueries"): each host of a

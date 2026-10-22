@@ -446,9 +446,6 @@ decision:
 - **No commit attribute.** The called query's writes are part of the calling query's one unit;
   unlike `g.query(..)` of a query that writes, the commit carries no attribute naming the
   saved query and its arguments.
-- **YIELD columns are values.** A yielded column holds the value the saved query returns: a node
-  keeps its properties and labels (`s.name`, `labels(s)`), but a later `MATCH` cannot continue a
-  pattern from it yet; return the node's key and match it again.
 - **Not inside `EXISTS`, `COUNT` or `COLLECT` yet.** A call stands wherever a clause stands, also
   in `CALL { }` bodies and `UNION` operands, but not yet in those subquery bodies (`0A000`).
 
@@ -457,6 +454,8 @@ g.define_query(#{name: "sw", language: "gql", body: "MATCH (s:software) RETURN s
 g.define_query(#{name: "half", language: "gql", params: #{x: "number"}, body: "RETURN $x AS x, $x / 2 AS h"});
 g.gql("CALL sw() YIELD s RETURN s.name AS n, labels(s) AS l ORDER BY n").to_list();
 // [#{"l": ["software"], "n": "lop"}, #{"l": ["software"], "n": "ripple"}]
+g.gql("CALL sw() YIELD s MATCH (s)<-[:created]-(p) RETURN s.name AS s, count(p) AS n ORDER BY s").to_list();
+// [#{"n": 3, "s": "lop"}, #{"n": 1, "s": "ripple"}]: a yielded node starts a later pattern
 g.gql("CALL half(5)").to_list();   // [#{"h": 2.5, "x": 5.0}]: the integer 5 arrives as 5.0
 ```
 
@@ -1235,7 +1234,7 @@ these differences is a deliberate decision, described in its section:
 | a procedure argument may read the row; procedures are vendor or user code (`db.*`, `apoc.*`, Java) | `CALL folder.name(..)` calls a saved GQL query with constant or `$parameter` arguments only, positional in the order its body first reads them; a saved query in Rhai, or a call inside `EXISTS` / `COUNT` / `COLLECT`, is `0A000`; `db`, `dbms`, `apoc`, `gds` are refused | [Calls of saved queries](#calls-of-saved-queries) |
 | procedure names are qualified, one per namespace | saved-query names are unique across all folders: a name in another folder is a "did you mean" error | [Calls of saved queries](#calls-of-saved-queries) |
 | a `NUMBER` argument keeps an integer (`42`) | coerced by the parameter's schema: a `number` parameter gets `42.0` | [Calls of saved queries](#calls-of-saved-queries) |
-| a node a procedure yields continues a later pattern | a yielded node is a value: its properties and labels are read, a `MATCH` from it is not supported yet; the call is part of the calling query's one unit, whose commit names no saved query (unlike `g.query(..)`) | [Calls of saved queries](#calls-of-saved-queries) |
+| a procedure call is a commit of its own in some drivers | the call is part of the calling query's one unit, whose commit names no saved query (unlike `g.query(..)`) | [Calls of saved queries](#calls-of-saved-queries) |
 
 Where ISO GQL and Neo4j disagree, `gql()` follows Neo4j in a few places (comparisons across
 kinds, list ordering, float division by zero, `NaN`): [Differences from the

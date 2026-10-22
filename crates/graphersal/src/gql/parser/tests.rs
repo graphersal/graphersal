@@ -6384,8 +6384,17 @@ fn procedure_call_errors() {
     let f = fail("CALL a.b.c.d.e.f.g.h.i.j()");
     assert_eq!(f.kind, GqlErrorKind::Syntax);
     assert!(f.message.contains("at most 9 segments"), "{}", f.message);
-    // In a query the call needs RETURN after it (or FINISH).
-    assert_eq!(fail("MATCH (n) CALL p()").kind, GqlErrorKind::Syntax);
+    // A call without YIELD may end a query (a VOID call, checked by the resolution): the
+    // parser marks it and gives the query `RETURN *` until then; with YIELD it needs RETURN.
+    let q = ok("MATCH (n) CALL p()");
+    assert!(
+        matches!(q.body.first.first.stages.last(), Some(Stage::Procedure(c)) if c.ends_query),
+        "{q:?}"
+    );
+    assert_eq!(
+        fail("MATCH (n) CALL p() YIELD x").kind,
+        GqlErrorKind::Syntax
+    );
     assert!(ok("MATCH (n) CALL p() FINISH").end() != QueryEnd::Return);
     // A reserved word cannot start a name; vendor namespaces stay refused at CALL (any case).
     for (query, text) in [

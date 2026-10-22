@@ -789,6 +789,8 @@ nothing. Only saved queries written in GQL can be called.
 ```text
 CALL f.name(a, b) YIELD x, y AS z [WHERE <condition>]   -- inside a query: YIELD names the columns read after it
 CALL f.name(a, b)                -- inside a query, a VOID saved query (no RETURN): each row kept once
+MATCH .. CALL f.name(a, b)       -- a VOID call may end the query, like a write: zero rows
+CALL f.name() YIELD n MATCH (n)-->(m) ..   -- a yielded node (or edge) starts a later pattern
 OPTIONAL CALL f.name(a) YIELD x  -- keeps a row without results, with x NULL
 CALL f.name(a, b)                -- the whole query: every column of the saved query
 CALL f.name(a, b) YIELD *        -- the same

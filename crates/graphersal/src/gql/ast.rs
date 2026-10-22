@@ -275,6 +275,13 @@ pub(crate) struct ProcedureCall {
     /// the resolution replaces by the yielded columns (or by `FINISH` for a saved query
     /// without columns).
     pub(crate) standalone: bool,
+    /// The call, without `YIELD`, is the last clause of a query (or of a `CALL { }` body) that
+    /// has no result statement: like a last clause that writes (design W2), a call of a VOID
+    /// saved query (one without `RETURN`) may end it, with zero rows, as in Neo4j. The parser
+    /// gives its linear query `RETURN *` spanning the call, which the resolution replaces by
+    /// an empty result (`FINISH`); a saved query that returns columns is the error of an
+    /// in-query call without `YIELD`.
+    pub(crate) ends_query: bool,
     /// From `OPTIONAL` (or `CALL`) to the end of the call (`YIELD` items included, its
     /// `WHERE` not).
     pub(crate) span: Span,
