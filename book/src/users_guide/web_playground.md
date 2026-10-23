@@ -40,7 +40,8 @@ answers questions by querying the served graph. In the WebAssembly playground th
   field finds a plain text in titles and scripts, case-insensitive (`.order(` lists every example
   that uses it, with the matching line); `Up`/`Down` move, `Enter` opens, `Esc` clears the search
   and then closes. Reopening returns to where you were and marks the example opened last, so the
-  next one is right below it.
+  next one is right below it. The Modern graph group has `subgraph()` examples (the edges of one
+  kind, the edges walked by `repeat()`, the result as a graph, traversing the extracted graph).
 - **Query tabs**: the Query panel holds several queries side by side. Each tab has its own text,
   Profile/Memory toggles, last result and last profile; switching tabs shows that tab's results
   without running anything. The graph is shared: when a run in one tab changes it, the other tabs'
@@ -232,6 +233,10 @@ this off for good). **✕ Clear highlight** in the toolbar, shown while a highli
 double-click selection. Clearing applies to that result only: the next query result highlights
 again, and switching to another query tab shows that tab's result highlighted, while the tab you
 cleared stays cleared. Both tiers behave the same.
+
+**Vertex details.** Clicking a vertex shows its id and label, then `edges: in 3 · out 5`: the number
+of incoming and outgoing edges of the vertex in the whole graph, also when its neighbours are not
+in the drawing (the engine counts them from the graph, not from the visible subgraph).
 
 **Long values.** In an element's details (click a vertex or an edge) and in the Results table, a
 text longer than 200 characters or with more than 3 lines is cut to its start and "…", and a

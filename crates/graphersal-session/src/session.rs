@@ -660,7 +660,8 @@ impl Session {
 
     /// One element for the inspector, fetched when it is clicked (the drawings carry no
     /// properties), as JSON text: `kind` `"vertex"` or `"edge"`, `id` its id. `{kind, id, label,
-    /// labels, properties}` for a vertex, `{kind, id, label, source, target, properties}` for an
+    /// labels, properties, inDegree, outDegree}` for a vertex (the degrees count the edges in the
+    /// whole graph, drawn or not), `{kind, id, label, source, target, properties}` for an
     /// edge, the properties in the engine's order; `null` when no element of that kind has the
     /// id (it was dropped since it was drawn). An unknown `kind` is an error.
     pub fn element(&self, kind: &str, id: &str) -> Result<String, String> {
@@ -1931,6 +1932,20 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown element kind")
         );
+    }
+
+    #[test]
+    fn a_vertex_carries_its_in_and_out_degree_from_the_whole_graph() {
+        let session = modern();
+        let degrees = |id: &str| {
+            let v: Value = serde_json::from_str(&session.element("vertex", id).unwrap()).unwrap();
+            (v["inDegree"].clone(), v["outDegree"].clone())
+        };
+        assert_eq!(degrees("1"), (json!(0), json!(3)));
+        assert_eq!(degrees("3"), (json!(3), json!(0)));
+        assert_eq!(degrees("4"), (json!(1), json!(2)));
+        let e: Value = serde_json::from_str(&session.element("edge", "0").unwrap()).unwrap();
+        assert!(e.get("inDegree").is_none(), "{e}");
     }
 
     #[test]

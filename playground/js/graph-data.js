@@ -257,6 +257,9 @@ export function inspectorRows(element, formatValue) {
   if (!element) return [];
   const rows = [['id', element.id], ['label', element.label || '(none)']];
   if (element.labels && element.labels.length > 1) rows.push(['labels', element.labels.join(', ')]);
+  if (element.kind === 'vertex' && Number.isFinite(element.inDegree) && Number.isFinite(element.outDegree)) {
+    rows.push(['edges', `in ${element.inDegree} · out ${element.outDegree}`]);
+  }
   if (element.kind === 'edge') rows.push(['out → in', `${element.source} → ${element.target}`]);
   for (const [k, v] of Object.entries(element.properties || {})) rows.push([k, formatValue(v)]);
   return rows;

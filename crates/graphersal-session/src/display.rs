@@ -595,22 +595,45 @@ pub(crate) fn caption_text(value: &ElementProperty) -> Option<String> {
 }
 
 /// One element with everything the inspector shows, tagged with its `kind`: a vertex
-/// (`{kind: "vertex", id, label, labels, properties}`) or an edge (`{kind: "edge", id, label,
+/// (`{kind: "vertex", id, label, labels, properties, inDegree, outDegree}`) or an edge (`{kind: "edge", id, label,
 /// source, target, properties}`). Serialized directly (never through a `serde_json::Value`), so
 /// the properties keep the engine's order.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum InspectedElement {
-    /// A vertex.
-    Vertex(Node),
+    /// A vertex, with its degrees.
+    Vertex(InspectedVertex),
     /// An edge.
     Edge(Edge),
+}
+
+/// A [`Node`] with the number of edges it has in the graph, for the inspector: counted from the
+/// graph's adjacency (no edge is loaded), so the figures are right for a vertex of any drawing
+/// tier, also one whose neighbours are not drawn.
+#[derive(Debug, Clone, Serialize)]
+pub struct InspectedVertex {
+    /// The vertex as drawn.
+    #[serde(flatten)]
+    pub node: Node,
+    /// The number of incoming edges.
+    #[serde(rename = "inDegree")]
+    pub in_degree: usize,
+    /// The number of outgoing edges.
+    #[serde(rename = "outDegree")]
+    pub out_degree: usize,
 }
 
 /// The element of `kind` with `id`, or `None` when there is none (dropped since it was drawn).
 pub fn element_of<S: GraphStorage>(g: &S, kind: ElementKind, id: &str) -> Option<InspectedElement> {
     Some(match kind {
-        ElementKind::Vertex => InspectedElement::Vertex(node_of(g, g.get_vertex_by_id(id)?)),
+        ElementKind::Vertex => {
+            let v = g.get_vertex_by_id(id)?;
+            InspectedElement::Vertex(InspectedVertex {
+                node: node_of(g, v),
+                in_degree: g.in_edges(v).count(),
+                out_degree: g.out_edges(v).count(),
+            })
+        }
         ElementKind::Edge => InspectedElement::Edge(edge_of(g, g.get_edge_by_id(id)?)),
     })
 }

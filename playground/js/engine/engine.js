@@ -221,6 +221,8 @@
  * @property {string} id
  * @property {string} label            Primary label ('' when unlabeled).
  * @property {string[]} [labels]       A vertex's full label set.
+ * @property {number} [inDegree]       A vertex's number of incoming edges (in the whole graph).
+ * @property {number} [outDegree]      A vertex's number of outgoing edges (in the whole graph).
  * @property {string} [source]         An edge's out-vertex id.
  * @property {string} [target]         An edge's in-vertex id.
  * @property {Object<string,*>} properties

@@ -145,3 +145,11 @@ test('drawPlan: full detail when small, then reduced, then minimal', () => {
   assert.ok(DRAW_TUNING.reducedFrom < DRAW_TUNING.minimalFrom);
   assert.ok(DRAW_TUNING.coseMaxNodes < DRAW_TUNING.reducedFrom);
 });
+
+test('inspectorRows: a vertex with degrees shows "in N · out M" right after id and label', () => {
+  const rows = inspectorRows({ kind: 'vertex', id: '1', label: 'person', inDegree: 3, outDegree: 5, properties: { name: 'marko' } }, (v) => v);
+  assert.deepEqual(rows, [['id', '1'], ['label', 'person'], ['edges', 'in 3 · out 5'], ['name', 'marko']]);
+  const edge = inspectorRows({ kind: 'edge', id: '0', label: 'knows', source: '1', target: '2', inDegree: 1, outDegree: 1, properties: {} }, (v) => v);
+  assert.equal(edge.some((r) => r[0] === 'edges'), false);
+  assert.equal(inspectorRows({ kind: 'vertex', id: '1', label: 'p', properties: {} }, (v) => v).some((r) => r[0] === 'edges'), false);
+});
