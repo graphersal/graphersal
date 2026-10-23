@@ -63,6 +63,52 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
 
 The server needs no WebAssembly build: `playground/pkg/` is not used in this mode.
 
+### Arguments from a file
+
+`--args-file FILE` (or `@FILE`) reads arguments from a JSON file, so a server with many flags
+starts with one. The keys are the long flag names without dashes:
+
+```json
+{
+  "_comment": "keys starting with _ are comments",
+  "graph": "data/",
+  "server": true,
+  "port": 8080,
+  "mcp": true,
+  "mcp-read-only": true,
+  "mcp-instructions": "operator-notes.md",
+  "embedder": ["potion=minishlab/potion-base-8M"],
+  "timeout": 30000
+}
+```
+
+```bash
+graphersal --args-file args.json                 # everything from the file
+graphersal @args.json --port 9000                # the command line wins: port 9000
+graphersal --args-file args.json --embedder b=./m   # a repeatable flag adds to the file's
+```
+
+- A switch (`server`, `mcp`, `no-limit`, ...) is `true`; `false` is the same as leaving it out.
+  A number is written as a number (`"port": 8080`), a string as a string. `eval` and `embedder`
+  repeat: a string or an array of strings. Every flag of `graphersal --help` is a key except
+  `help`, `version` and `args-file`.
+- **Relative paths** (`graph`, `schema`, `ui-dir`, `ai`, `mcp-instructions`, and the path of an
+  `embedder`) resolve against the directory of the args file, not the working directory. The
+  sample names (`modern`, `empty`, `large`, `tree`) and model repositories stay as written.
+- **The command line wins.** The file's arguments come first, as if typed before the others: a flag
+  given on the command line replaces the file's, a repeatable flag (`--eval`, `--embedder`) adds to
+  it. The usual validation runs on the merged arguments, so a file with `"server": true` plus
+  `-e` on the command line fails as `--server -e` does.
+- A file may not name another args file, and `--args-file` may appear once. An unreadable file,
+  invalid JSON, a value of the wrong type or an unknown key is a usage error (exit code 2) that
+  names the key; values are never echoed. Unlike the [`--ai` file](#the-configuration-file),
+  where an unknown key only warns, an unknown key here is an error (a near-typo adds
+  `did you mean "server"?`): a flag that is silently dropped could switch off `mcp-read-only`
+  or `mcp-token`. Only a key starting with `_` is a silent comment.
+
+The file holds no secrets by design (give `--mcp-token` on the command line or keep the file
+private); the repository has an example, `crates/graphersal-cli/examples/args-dev-server.json`.
+
 ## Limits
 
 The limit options become **session presets**: every query sent to the server runs under them, as
@@ -310,6 +356,20 @@ With every [saved query](../users_guide/saved_queries.md) as a tool of its own (
 ```bash
 graphersal --graph data/ --server --port 9000 --mcp --mcp-query-tools
 ```
+
+With a note of the operator that every connecting agent reads in the `instructions` of
+`initialize` (what the graph holds, which queries to prefer, house rules):
+
+```bash
+graphersal --graph data/ --server --mcp --mcp-instructions operator-notes.md
+```
+
+The file is UTF-8 text of at most 20000 characters; it is appended under the line "Notes from the
+operator of this server about this graph:" after the built-in instructions (and the read-only
+note). It is trusted text of the operator. A missing, non-UTF-8 or empty file, or the option
+without `--mcp`, is a usage error. The [AI Chat](#ai-chat) does not use it (its system prompt
+has the built-in MCP instructions, but not these notes): give the chat its own text with
+`system_prompt` or `system_prompt_file`, so nothing is added twice.
 
 The options combine (`--mcp --mcp-read-only --mcp-token ... --mcp-query-tools`), and the
 [limit options](#limits) apply to the agent's queries as to the browser's.
@@ -588,7 +648,7 @@ The text is placed in the system prompt after the agent's rules and before the D
 under the line "Notes from the operator of this server about this graph:". It is trusted text of
 the operator, but it comes after the rules and does not lift them: tool results stay data, never
 instructions. It applies to the AI Chat only; the [MCP](#mcp-an-ai-agent-on-the-same-graph)
-instructions are unchanged. The prompt prefix stays fixed for the conversation, so the provider's
+instructions are unchanged (and the `--mcp-instructions` notes are not added). The prompt prefix stays fixed for the conversation, so the provider's
 prompt cache still works.
 
 ### What data leaves the machine

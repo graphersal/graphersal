@@ -1,0 +1,11 @@
+{
+  "_comment": "graphersal --args-file examples/args-dev-server.json (or @examples/args-dev-server.json). Keys are the long flag names; relative paths resolve against this file's directory; flags on the command line win.",
+  "graph": "modern",
+  "server": true,
+  "port": 8080,
+  "mcp": true,
+  "mcp-read-only": true,
+  "mcp-instructions": "operator-notes.md",
+  "max-operations": 10000000,
+  "timeout": 30000
+}

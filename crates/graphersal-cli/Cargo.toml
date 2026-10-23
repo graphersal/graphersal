@@ -52,7 +52,7 @@ default = ["dev-server", "ai", "model2vec"]
 # `graphersal --server`: the playground UI over HTTP on 127.0.0.1 (DEV mode, unstable).
 # `--mcp` adds the MCP endpoint `/mcp`; `rand` (already in the tree through graphersal) makes
 # its session ids unguessable.
-dev-server = ["dep:tiny_http", "dep:serde_json", "dep:rand"]
+dev-server = ["dep:tiny_http", "dep:rand"]
 # `--ai FILE`: the AI Chat of the dev server, an LLM agent working on the served graph
 # (EXPERIMENTAL). `ureq` calls the provider (OpenAI-compatible Chat Completions or Anthropic
 # Messages) over HTTPS.
@@ -61,7 +61,7 @@ ai = ["dev-server", "dep:ureq"]
 # `model2vec` feature, pure Rust) for every mode, and `graphersal embed-model download <repo>`
 # fetches one from Hugging Face over HTTPS (`ureq`, SHA-256 checked with `ring`, the manifest
 # written with `serde_json`; all three already in the tree).
-model2vec = ["graphersal/model2vec", "dep:ureq", "dep:ring", "dep:serde_json"]
+model2vec = ["graphersal/model2vec", "dep:ureq", "dep:ring"]
 
 [dependencies]
 graphersal = { workspace = true, features = ["io", "script", "gql", "display", "serde", "persist", "persist-zip", "alloc-tracking"] }
@@ -76,7 +76,8 @@ tracing = { workspace = true }
 # server's session.
 graphersal-session = { workspace = true }
 tiny_http = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# Always built: `--args-file` reads JSON (already in the tree through graphersal).
+serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }

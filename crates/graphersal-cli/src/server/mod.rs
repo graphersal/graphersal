@@ -412,6 +412,7 @@ pub fn run(cli: &Cli) -> i32 {
             cli.mcp_token.clone(),
             cli.mcp_query_tools,
         )
+        .with_operator_notes(cli.mcp_instructions.clone())
     });
     if let Some(mcp) = &mcp {
         errln!("{}", mcp.banner(port));

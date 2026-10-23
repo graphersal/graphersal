@@ -169,6 +169,8 @@ graphersal --graph modern --server --port 9000 --mcp                    # MCP en
 graphersal --graph modern --server --port 9000 --mcp --mcp-read-only    # the agent may only read
 graphersal --graph modern --server --port 9000 --mcp --mcp-token my-secret-token   # the agent must send the token
 graphersal --graph data/ --server --port 9000 --mcp --mcp-query-tools  # also every saved query as a tool of its own
+graphersal --graph data/ --server --mcp --mcp-instructions notes.md      # operator notes in the MCP instructions
+graphersal --args-file args.json                                         # the flags from a JSON file (also @args.json)
 ```
 
 Connect Claude Code (the server must be running; then start a NEW `claude` session):

@@ -4530,3 +4530,72 @@ mod embed_models {
         let _ = std::fs::remove_dir_all(&empty);
     }
 }
+
+#[test]
+fn an_args_file_supplies_flags_and_the_command_line_wins() {
+    let dir = temp_path("argsfile");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("a.json");
+    std::fs::write(
+        &file,
+        r#"{"_c": "comment", "graph": "empty", "eval": ["g.v().count().next()"], "format": "json"}"#,
+    )
+    .unwrap();
+    let path = file.to_str().unwrap();
+
+    let res = run(&["--args-file", path], "");
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert_eq!(res.stdout.trim(), "0");
+
+    // @FILE, the graph replaced on the command line, eval scripts concatenated (file first)
+    let res = run(
+        &[
+            &format!("@{path}"),
+            "--graph",
+            "modern",
+            "-e",
+            "g.v().count().next()",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 0, "stderr: {}", res.stderr);
+    assert_eq!(
+        res.stdout.lines().map(str::trim).collect::<Vec<_>>(),
+        ["6", "6"]
+    );
+
+    for (content, needle) in [
+        (r#"{"grpah": "x"}"#, "did you mean \"graph\"?"),
+        (r#"{"args-file": "b.json"}"#, "another"),
+        (r#"{"port": true}"#, "key \"port\""),
+        ("not json", "not valid JSON"),
+    ] {
+        std::fs::write(&file, content).unwrap();
+        let res = run(&["--args-file", path], "");
+        assert_eq!(res.code, 2, "{content}");
+        assert!(res.stderr.contains(needle), "{}", res.stderr);
+        assert!(res.stderr.contains("graphersal --help"), "{}", res.stderr);
+    }
+    let res = run(&["--args-file", "/nonexistent/args.json"], "");
+    assert_eq!(res.code, 2);
+    assert!(res.stderr.contains("cannot read"), "{}", res.stderr);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn mcp_instructions_need_mcp_and_a_readable_file() {
+    let res = run(&["--server", "--mcp-instructions", "/nonexistent/n.md"], "");
+    assert_eq!(res.code, 2);
+    assert!(res.stderr.contains("--mcp-instructions"), "{}", res.stderr);
+    let res = run(
+        &[
+            "--server",
+            "--mcp",
+            "--mcp-instructions",
+            "/nonexistent/n.md",
+        ],
+        "",
+    );
+    assert_eq!(res.code, 2);
+    assert!(res.stderr.contains("cannot read"), "{}", res.stderr);
+}

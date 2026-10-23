@@ -5219,3 +5219,55 @@ fn mcp_gql_merge_reports_a_change_only_when_it_creates() {
         "the matching MERGE commits nothing"
     );
 }
+
+#[test]
+fn an_args_file_starts_the_server_and_its_mcp_notes_reach_initialize() {
+    let ui = ui_dir("argsfile");
+    let base = ui.parent().unwrap().to_path_buf();
+    std::fs::write(base.join("notes.md"), "Prefer GQL. Persons are staff.\n").unwrap();
+    let file = base.join("args.json");
+    std::fs::write(
+        &file,
+        r#"{"_note": "port 8080 is replaced by the command line", "graph": "modern",
+            "ui-dir": "ui", "mcp": true, "mcp-instructions": "notes.md", "port": 8080}"#,
+    )
+    .unwrap();
+    let server = start(&["--args-file", file.to_str().unwrap()]);
+    let answer = mcp_post(
+        server.port,
+        &[],
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let text = answer.json()["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.starts_with("Graphersal dev server"), "{text}");
+    assert!(
+        text.ends_with(
+            "Notes from the operator of this server about this graph:\n\nPrefer GQL. Persons are staff."
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("Persons are staff").count(), 1);
+    // The file's ui-dir (relative to the file) is served.
+    assert!(get(server.port, "/").body.contains("<title>ui</title>"));
+}
+
+#[test]
+fn a_broken_args_file_is_a_usage_error() {
+    let dir = std::env::temp_dir().join(format!("graphersal_args_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("bad.json");
+    std::fs::write(&file, r#"{"sever": true}"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+        .arg(format!("@{}", file.display()))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("did you mean \"server\"?"), "{err}");
+    assert!(err.contains("graphersal --help"), "{err}");
+    assert!(out.stdout.is_empty());
+}

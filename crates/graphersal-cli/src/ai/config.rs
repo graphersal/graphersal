@@ -19,6 +19,8 @@
 
 use serde_json::{Map, Value};
 
+use crate::args_file::edit_distance;
+
 /// Default `max_tool_calls_per_turn`.
 pub const DEFAULT_MAX_TOOL_CALLS_PER_TURN: u32 = 20;
 /// Default `max_tokens` (the answer length bound of one provider call).
@@ -334,24 +336,6 @@ fn check_base_url(url: &str) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_string())
-}
-
-/// The Levenshtein distance of two keys (small inputs, no dependency).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let above = row[j + 1];
-            row[j + 1] = (above + 1)
-                .min(row[j] + 1)
-                .min(diagonal + usize::from(ca != *cb));
-            diagonal = above;
-        }
-    }
-    row[b.len()]
 }
 
 /// The custom system prompt text from `system_prompt` or `system_prompt_file`.

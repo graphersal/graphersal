@@ -94,7 +94,8 @@ USAGE:
     graphersal [OPTIONS] <SCRIPT>        # evaluate SCRIPT, print the result, exit
     graphersal [OPTIONS] --in            # evaluate the script read from stdin, print the result, exit
     graphersal --graph <SOURCE> --server [--port N] [--ui-dir DIR] [--mcp [--mcp-read-only]
-               [--mcp-token SECRET] [--mcp-query-tools]] [--ai FILE]
+               [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]]
+               [--ai FILE]
                                          # DEV server: the playground UI over HTTP (unstable),
                                          # optionally an MCP endpoint for AI agents
     graphersal store <COMMAND> <DIR> ... # manage a Store (graphersal store help)
@@ -204,6 +205,12 @@ OPTIONS:
         --mcp-query-tools  With --mcp: also offer every saved query as a tool of its own (its
                            name, description and parameters); for small curated catalogs.
                            list_saved_queries and run_saved_query are always offered.
+        --mcp-instructions <FILE>
+                           With --mcp: a UTF-8 text file (at most 20000 characters) appended
+                           to the instructions the MCP server answers to initialize, under
+                           "Notes from the operator of this server about this graph:" (what
+                           the graph holds, which queries to prefer). Operator-trusted text.
+                           The AI Chat does not use it: its own "system_prompt" does that.
         --ai <FILE>        With --server: EXPERIMENTAL AI Chat, an LLM agent working on the
                            served graph. FILE is JSON: {"provider": "openai"|"anthropic",
                            "model": "<id>", "api_key_env": "<VARIABLE>", "base_url": null,
@@ -227,6 +234,16 @@ OPTIONS:
         --repl             Start the REPL even when stdin is not a terminal: lines are read
                            without editing, commands (/help, /set ...) work, no history file
                            (for scripted sessions of the shell).
+        --args-file <FILE> Read arguments from FILE (also written @FILE), once: a JSON object
+                           whose keys are the long flag names without dashes, e.g.
+                           {"graph": "data.gstore", "server": true, "port": 8080, "mcp": true,
+                           "embedder": ["a=/models/a"], "_comment": "ignored"}. A switch is
+                           true (false = absent), a repeatable flag (eval, embedder) takes a
+                           string or an array, numbers are written as numbers. Relative paths
+                           resolve against the file's directory. The command line wins: a flag
+                           given there replaces the file's, a repeatable one adds to it. An
+                           unknown key is an error (exit 2); a key starting with "_" is a
+                           comment. The file may not name another args file.
     -h, --help             Print this help and exit.
     -V, --version          Print the version and exit.
 
@@ -273,6 +290,7 @@ EXAMPLES:
     graphersal --graph large --memory-limit auto -e 'g.v().out().out().fold()'
     graphersal --graph ./mygraph.json --server --port 8080      # then open http://localhost:8080/
     graphersal store create data/ --from modern && graphersal --graph data/ --server
+    graphersal --args-file args-dev-server.json --port 9000     # the file, with the port replaced
     graphersal embed-model download minishlab/potion-base-8M
     graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion \
         -e 'g.v().values("name").embed().to_list()'
@@ -717,6 +735,9 @@ pub struct Cli {
     pub mcp_query_tools: bool,
     /// `--ai`: the AI Chat configuration file of the dev server.
     pub ai: Option<String>,
+    /// `--mcp-instructions`: the TEXT of the operator's file, appended to the MCP server
+    /// instructions (read and checked while parsing).
+    pub mcp_instructions: Option<String>,
     /// `--embedder NAME=PATH|REPO` (repeatable, in order): Model2Vec models to register.
     pub embedders: Vec<(String, String)>,
     /// `--default-embedder NAME`: the default of the registry.
@@ -798,6 +819,7 @@ impl Default for Cli {
             mcp_token: None,
             mcp_query_tools: false,
             ai: None,
+            mcp_instructions: None,
             embedders: Vec::new(),
             default_embedder: None,
         }
@@ -814,6 +836,8 @@ impl Cli {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        // `--args-file FILE` / `@FILE` become ordinary arguments in front of the real ones.
+        let args = crate::args_file::expand(args.into_iter().map(Into::into).collect())?;
         let mut cli = Cli::default();
         let mut server = false;
         let mut schema_path: Option<String> = None;
@@ -821,11 +845,7 @@ impl Cli {
         // The first display option given: the playground UI sets those per run, so --server
         // rejects them instead of ignoring them.
         let mut display_flag: Option<String> = None;
-        let mut args = args
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<String>>()
-            .into_iter();
+        let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
             let (flag, inline) = match arg.split_once('=') {
@@ -908,6 +928,9 @@ impl Cli {
                 "--mcp-read-only" => cli.mcp_read_only = true,
                 "--mcp-query-tools" => cli.mcp_query_tools = true,
                 "--ai" => cli.ai = Some(value(&mut args)?),
+                "--mcp-instructions" => {
+                    cli.mcp_instructions = Some(read_mcp_instructions(&value(&mut args)?)?)
+                }
                 "--embedder" => {
                     let raw = value(&mut args)?;
                     match raw.split_once('=') {
@@ -1093,9 +1116,16 @@ impl Cli {
                 );
             }
         }
-        if (cli.mcp_read_only || cli.mcp_token.is_some() || cli.mcp_query_tools) && !cli.mcp {
+        if (cli.mcp_read_only
+            || cli.mcp_token.is_some()
+            || cli.mcp_query_tools
+            || cli.mcp_instructions.is_some())
+            && !cli.mcp
+        {
             return Err(
-                "--mcp-read-only, --mcp-token and --mcp-query-tools need --mcp".to_string(),
+                "--mcp-read-only, --mcp-token, --mcp-query-tools and --mcp-instructions need \
+                 --mcp"
+                    .to_string(),
             );
         }
 
@@ -1121,6 +1151,31 @@ impl Cli {
             .with_max_items(self.max_items.unwrap_or(DEFAULT_MAX_ITEMS))
             .with_spelling(self.spelling)
     }
+}
+
+/// The longest `--mcp-instructions` text, in characters.
+pub const MAX_MCP_INSTRUCTIONS_CHARS: usize = 20_000;
+
+/// Reads the `--mcp-instructions` file: UTF-8, not empty, at most
+/// [`MAX_MCP_INSTRUCTIONS_CHARS`] characters; returns the trimmed text.
+fn read_mcp_instructions(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("--mcp-instructions {path}: cannot read the file ({err})"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("--mcp-instructions {path}: the file is not UTF-8 text"))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(format!("--mcp-instructions {path}: the file is empty"));
+    }
+    let chars = text.chars().count();
+    if chars > MAX_MCP_INSTRUCTIONS_CHARS {
+        return Err(format!(
+            "--mcp-instructions {path}: the text has {chars} characters, the limit is \
+             {MAX_MCP_INSTRUCTIONS_CHARS}\nHelp: keep the operator notes short; the agent also \
+             reads the schema and the saved queries of the graph itself"
+        ));
+    }
+    Ok(text.to_string())
 }
 
 /// Parses a `--spelling` / `/set spelling` value: `snake` or `camel`.
@@ -1687,5 +1742,117 @@ mod tests {
         assert!(Cli::parse(["--embedder"]).is_err());
         let plain = Cli::parse(["-e", "1"]).unwrap();
         assert!(plain.embedders.is_empty() && plain.default_embedder.is_none());
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("graphersal-cli-args-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_args_file_is_merged_before_the_command_line() {
+        let dir = scratch("merge");
+        let file = dir.join("a.json");
+        std::fs::write(
+            &file,
+            r#"{"_c": "comment", "graph": "empty", "server": true, "port": 8080,
+                "mcp": true, "embedder": ["a=./m"], "schema-mode": "open"}"#,
+        )
+        .unwrap();
+        let path = file.to_str().unwrap();
+        let cli = Cli::parse(["--args-file", path]).unwrap_err();
+        assert!(cli.contains("--schema-mode needs --schema"), "{cli}");
+
+        std::fs::write(
+            &file,
+            r#"{"graph": "empty", "server": true, "port": 8080, "mcp": true,
+                "embedder": ["a=./m"], "ui-dir": "ui"}"#,
+        )
+        .unwrap();
+        let cli = Cli::parse([
+            format!("@{path}"),
+            "--port".into(),
+            "0".into(),
+            "--embedder".into(),
+            "b=repo/x".into(),
+        ])
+        .unwrap();
+        assert_eq!(cli.mode, Mode::Server);
+        assert_eq!(cli.graph, GraphSpec::Empty);
+        assert_eq!(cli.port, 0, "the command line wins");
+        assert!(cli.mcp);
+        assert_eq!(
+            cli.ui_dir.as_deref(),
+            Some(dir.join("ui").to_str().unwrap())
+        );
+        assert_eq!(cli.embedders.len(), 2);
+        assert_eq!(cli.embedders[0].0, "a");
+        assert_eq!(cli.embedders[1], ("b".to_string(), "repo/x".to_string()));
+
+        // the existing validation runs on the merged list
+        let err = Cli::parse([format!("--args-file={path}"), "-e".into(), "1".into()]).unwrap_err();
+        assert!(err.contains("--server serves the playground UI"), "{err}");
+        let err = Cli::parse(["--args-file", path, "--args-file", path]).unwrap_err();
+        assert!(err.contains("only once"), "{err}");
+        let err = Cli::parse(["--args-file", "/nonexistent/x.json"]).unwrap_err();
+        assert!(err.contains("cannot read"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_example_args_file_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let path = dir.join("args-dev-server.json");
+        let cli = Cli::parse([
+            "--args-file".to_string(),
+            path.to_str().unwrap().to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cli.mode, Mode::Server);
+        assert!(cli.mcp && cli.mcp_read_only);
+        assert_eq!(cli.timeout_ms, Some(30000));
+        assert!(
+            cli.mcp_instructions
+                .as_deref()
+                .is_some_and(|text| text.contains("TinkerPop"))
+        );
+    }
+
+    #[test]
+    fn mcp_instructions_are_checked() {
+        let dir = scratch("notes");
+        let notes = dir.join("n.md");
+        let path = notes.to_str().unwrap();
+        std::fs::write(&notes, "  Be kind.\n").unwrap();
+        let cli = Cli::parse(["--server", "--mcp", "--mcp-instructions", path]).unwrap();
+        assert_eq!(cli.mcp_instructions.as_deref(), Some("Be kind."));
+        let err = Cli::parse(["--server", "--mcp-instructions", path]).unwrap_err();
+        assert!(err.contains("need --mcp"), "{err}");
+        std::fs::write(&notes, "  \n").unwrap();
+        assert!(
+            Cli::parse(["--server", "--mcp", "--mcp-instructions", path])
+                .unwrap_err()
+                .contains("empty")
+        );
+        std::fs::write(&notes, [0xff, 0xfe]).unwrap();
+        assert!(
+            Cli::parse(["--server", "--mcp", "--mcp-instructions", path])
+                .unwrap_err()
+                .contains("UTF-8")
+        );
+        std::fs::write(&notes, "x".repeat(MAX_MCP_INSTRUCTIONS_CHARS)).unwrap();
+        assert!(Cli::parse(["--server", "--mcp", "--mcp-instructions", path]).is_ok());
+        std::fs::write(&notes, "x".repeat(MAX_MCP_INSTRUCTIONS_CHARS + 1)).unwrap();
+        let err = Cli::parse(["--server", "--mcp", "--mcp-instructions", path]).unwrap_err();
+        assert!(
+            err.contains("--mcp-instructions") && err.contains("limit"),
+            "{err}"
+        );
+        let missing =
+            Cli::parse(["--server", "--mcp", "--mcp-instructions", "/nonexistent/n"]).unwrap_err();
+        assert!(missing.contains("cannot read"), "{missing}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

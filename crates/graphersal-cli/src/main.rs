@@ -7,6 +7,7 @@
 mod out;
 #[cfg(feature = "ai")]
 mod ai;
+mod args_file;
 mod cli;
 #[cfg(feature = "model2vec")]
 mod embed_model;

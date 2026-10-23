@@ -95,6 +95,8 @@ pub(super) struct Mcp {
     /// `--mcp-query-tools`: every saved query is also a tool of its own.
     query_tools: bool,
     token: Option<String>,
+    /// `--mcp-instructions`: the operator's text, appended to the instructions.
+    operator_notes: Option<String>,
     /// Session id -> `clientInfo` of its `initialize`, in the order they were created.
     sessions: Mutex<Vec<(String, Value)>>,
     /// The `clientInfo` of the last `initialize` (the top bar's badge names it).
@@ -107,9 +109,17 @@ impl Mcp {
             read_only,
             query_tools,
             token,
+            operator_notes: None,
             sessions: Mutex::new(Vec::new()),
             client: Mutex::new(None),
         }
+    }
+
+    /// Adds the operator's notes (`--mcp-instructions`) to the `initialize` instructions. The
+    /// AI Chat prompt does not carry them: it has its own `system_prompt` key.
+    pub(super) fn with_operator_notes(mut self, notes: Option<String>) -> Self {
+        self.operator_notes = notes;
+        self
     }
 
     /// The stderr lines that say where the endpoint is and how to connect Claude Code.
@@ -423,6 +433,12 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
     if mcp.read_only {
         instructions.push_str(READ_ONLY_NOTE);
     }
+    if let Some(notes) = &mcp.operator_notes {
+        instructions.push_str("\n\n");
+        instructions.push_str(OPERATOR_HEADING);
+        instructions.push_str("\n\n");
+        instructions.push_str(notes);
+    }
     Ok((
         json!({
             "protocolVersion": version,
@@ -475,6 +491,9 @@ failing query changes nothing. Errors carry a `Help:` line that names the fix. P
 (checkpoints, history, views of past states) is the user's, in the browser: when the user opens \
 a read-only view of a past state, `graph_info` says so and writes are refused until they go \
 back to the live graph.";
+
+/// The heading above the `--mcp-instructions` text.
+const OPERATOR_HEADING: &str = "Notes from the operator of this server about this graph:";
 
 const READ_ONLY_NOTE: &str = " This server is READ-ONLY for MCP: only reading tools are \
 offered and a query that would write is refused.";
