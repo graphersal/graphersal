@@ -62,6 +62,30 @@
   {
     "group": "Modern graph",
     "graph": "modern",
+    "title": "Subgraph: all knows edges, then count it",
+    "script": "// subgraph() collects the edges that pass it into a graph; cap(\"sg\") returns it.\n// The result is a graph value you can keep traversing with v() and e().\nlet sg = g.v().has_label(\"person\").out_e(\"knows\").subgraph(\"sg\").cap(\"sg\").next();\n#{ vertices: sg.v().count().next(), edges: sg.e().count().next(), names: sg.v().values(\"name\").to_list() }"
+  },
+  {
+    "group": "Modern graph",
+    "graph": "modern",
+    "title": "Subgraph: the edges walked by repeat()",
+    "script": "// The edges walked by repeat() are collected on the way.\ng.v(1).repeat(__.out_e().subgraph(\"sg\").in_v()).times(2).cap(\"sg\")"
+  },
+  {
+    "group": "Modern graph",
+    "graph": "modern",
+    "title": "Subgraph: show the result as a graph",
+    "script": "// Put the edges of one kind into a subgraph and switch the output to the graph view.\ng.e().has_label(\"created\").subgraph(\"sg\").cap(\"sg\")"
+  },
+  {
+    "group": "Modern graph",
+    "graph": "modern",
+    "title": "Subgraph: traverse the extracted graph",
+    "script": "// The subgraph is a graph of its own: who is left once only 'created' edges are kept?\nlet sg = g.e().has_label(\"created\").subgraph(\"sg\").cap(\"sg\").next();\nsg.v().group_count().by(T.label).next()"
+  },
+  {
+    "group": "Modern graph",
+    "graph": "modern",
     "title": "Add a vertex",
     "script": "g.add_v(\"person\").property(\"name\", \"zoe\").property(\"age\", 23)"
   },
