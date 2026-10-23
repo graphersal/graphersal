@@ -56,11 +56,33 @@ export function formatLimit(key, value) {
 }
 
 /**
+ * The rows of the "Process memory" section (`statistics().process`: the loaded embedding models
+ * with their sizes and, on the dev server with --ai, the AI Chat history), or null when there is
+ * nothing to show.
+ * @param {Object|undefined} process
+ * @returns {null|Array<{name:string, text:string}>}
+ */
+export function processMemoryRows(process) {
+  if (!process) return null;
+  const rows = [];
+  for (const m of process.models || []) {
+    rows.push({ name: `Model ${m.name}`, text: `${formatBytes(m.bytes)} (${m.dimension} dimensions${m.default ? ', default' : ''})` });
+  }
+  const chat = process.aiChat;
+  if (chat) {
+    const n = chat.conversations;
+    rows.push({ name: 'AI Chat history', text: `${formatBytes(chat.historyBytes)} (${n} ${n === 1 ? 'conversation' : 'conversations'})` });
+  }
+  return rows.length ? rows : null;
+}
+
+/**
  * The rows of the Statistics tab.
  * @param {Object|null} raw  The engine's `statistics()` answer.
  * @returns {{counts: null|{vertices:number, edges:number, vertexLabels:Array, edgeLabels:Array,
  *   vertexLabelTotal:number, edgeLabelTotal:number, truncated:boolean},
  *   memory: null|Array<{name:string, text:string}>,
+ *   process: null|Array<{name:string, text:string}>,
  *   limits: Array<{key:string, text:string, source:'preset'|'default'|'script'}>,
  *   noPresets: boolean}}
  */
@@ -112,6 +134,7 @@ export function statisticsModel(raw) {
         { name: 'Total', text: formatBytes(m.total_bytes) },
       ]
     : null;
+  const processRows = processMemoryRows(r.process);
   const presets = (r.limits && r.limits.presets) || {};
   const defaults = (r.limits && r.limits.defaults) || {};
   const limits = [];
@@ -128,7 +151,7 @@ export function statisticsModel(raw) {
     limits.push({ key, text: formatLimit(key, value), source: 'default' });
   }
   const noPresets = !limits.some((l) => l.source !== 'default');
-  return { counts, memory, limits, noPresets };
+  return { counts, memory, process: processRows, limits, noPresets };
 }
 
 /** Whether a run's response changed the data, so the counts and memory are out of date. */

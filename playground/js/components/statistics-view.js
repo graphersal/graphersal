@@ -76,6 +76,10 @@ export const StatisticsView = {
         <h4>Memory <span class="muted">(g.memory_usage(), an estimate of the graph's own footprint)</span></h4>
         <p><span v-for="m in model.memory" :key="m.name" class="stats-pair">{{ m.name }} <b>{{ m.text }}</b></span></p>
       </section>
+      <section v-if="model.process" class="stats-section">
+        <h4>Process memory <span class="muted">(loaded models and the AI Chat history, an estimate; not part of the graph)</span></h4>
+        <p><span v-for="m in model.process" :key="m.name" class="stats-pair">{{ m.name }} <b>{{ m.text }}</b></span></p>
+      </section>
       <section v-if="model.limits.length" class="stats-section">
         <h4>Limits of a query</h4>
         <p v-if="model.noPresets" class="muted">{{ server

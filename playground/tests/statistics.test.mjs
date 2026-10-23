@@ -139,3 +139,19 @@ test('only a run that changed the data makes the block reload', () => {
   assert.equal(changedData({ ok: false, changes: { data: false, schema: false } }), false);
   assert.equal(changedData(null), false);
 });
+
+test('the process memory section lists models and the AI Chat history, and is hidden when empty', () => {
+  assert.equal(statisticsModel({ ...WASM, process: { models: [] } }).process, null);
+  assert.equal(statisticsModel(WASM).process, null);
+  const m = statisticsModel({
+    ...WASM,
+    process: {
+      models: [{ name: 'tiny', model: 'model2vec@abc', dimension: 256, bytes: 2097152, default: true }],
+      aiChat: { conversations: 2, historyBytes: 5120 },
+    },
+  });
+  assert.deepEqual(m.process, [
+    { name: 'Model tiny', text: `${formatBytes(2097152)} (256 dimensions, default)` },
+    { name: 'AI Chat history', text: `${formatBytes(5120)} (2 conversations)` },
+  ]);
+});
