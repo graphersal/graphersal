@@ -896,7 +896,9 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "completions") => value(context.call(|s| views::completions(s.engine()))?),
         (Method::Get, "token-values") => value(context.call(|s| s.token_values())?),
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
-        (Method::Get, "statistics") => value(context.call(|s| s.statistics())?),
+        (Method::Get, "statistics") => {
+            value(with_process_memory(context, context.call(|s| s.statistics())?))
+        }
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
             let bytes = context.call_fallible(|s| s.save_snapshot())?;
             Ok(download(bytes, "graph.gsnap"))
@@ -1144,6 +1146,21 @@ fn ai_status(context: &Context) -> Value {
         let _ = context;
         Value::Null
     }
+}
+
+/// The session's statistics (`Session::statistics`) with the dev server's own part of the
+/// process memory added: `process.aiChat {conversations, historyBytes}` when the AI Chat is on
+/// ([`ai::process_memory`]). Served by `GET /api/statistics` and the MCP `statistics` tool.
+fn with_process_memory(context: &Context, mut statistics: Value) -> Value {
+    #[cfg(feature = "ai")]
+    if let Some(chat) = ai::process_memory(context)
+        && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)
+    {
+        process.insert("aiChat".to_string(), chat);
+    }
+    #[cfg(not(feature = "ai"))]
+    let _ = context;
+    statistics
 }
 
 /// `/api/ai/conversations*` ([`ai::route`]); `404` in a build without the `ai` feature.

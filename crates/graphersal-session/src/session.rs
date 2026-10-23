@@ -630,7 +630,33 @@ impl Session {
         })
     }
 
-    /// The statistics panel: `{statistics, memory, limits: {presets, defaults}}`.
+    /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
+    /// bytes, default}]}`, one entry per registered embedder that reports its size
+    /// ([`graphersal::vector::Embedder::memory_bytes`]: a loaded model; the built-in
+    /// `hash-ngram/1` and remote providers report none and are left out). A host adds its own
+    /// members (the dev server adds `aiChat`). Separate from `GraphStatistics`, which holds data
+    /// counts only.
+    pub fn process_memory(&self) -> Value {
+        let embedders = &self.presets.embedders;
+        let default = embedders.default_embedder().info().name.clone();
+        let models: Vec<Value> = embedders
+            .infos()
+            .filter_map(|info| {
+                let bytes = embedders.get(&info.name)?.memory_bytes()?;
+                Some(json!({
+                    "name": info.name,
+                    "model": info.model,
+                    "dimension": info.dimension,
+                    "bytes": bytes,
+                    "default": info.name == default,
+                }))
+            })
+            .collect();
+        json!({ "models": models })
+    }
+
+    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}`
+    /// (`process`: [`Self::process_memory`]).
     /// `statistics` is [`crate::views::statistics_view`] (`g.statistics()`, `null` when the storage
     /// keeps none), `memory` the graph's own footprint ([`crate::views::memory_usage`]); `limits`
     /// are the session's host presets ([`SessionPresets::to_value`]) and, beside them, the
@@ -651,6 +677,7 @@ impl Session {
         json!({
             "statistics": self.graph.statistics_view(),
             "memory": self.graph.memory_view(),
+            "process": self.process_memory(),
             "limits": {
                 "presets": self.presets.to_value(),
                 "defaults": defaults,
@@ -2820,6 +2847,52 @@ mod tests {
         let mut free = modern();
         assert_eq!(run(&mut free, "g.v().to_list()")["ok"], true);
         assert!(free.presets().options.is_empty());
+    }
+
+    /// The process memory block lists the embedders that report a size and nothing else; the
+    /// graph statistics beside it are untouched.
+    #[test]
+    fn statistics_carry_the_process_memory_of_the_loaded_models() {
+        use graphersal::vector::{
+            EmbedContext, EmbedError, Embedder, EmbedderInfo, Vector, VectorElement,
+        };
+        struct Sized(EmbedderInfo);
+        impl Embedder for Sized {
+            fn info(&self) -> &EmbedderInfo {
+                &self.0
+            }
+            fn embed(
+                &self,
+                texts: &[&str],
+                _ctx: &EmbedContext<'_>,
+            ) -> Result<Vec<Vector>, EmbedError> {
+                texts
+                    .iter()
+                    .map(|_| {
+                        Vector::from_f32(vec![1.0]).map_err(|e| EmbedError::failed(e.to_string()))
+                    })
+                    .collect()
+            }
+            fn memory_bytes(&self) -> Option<u64> {
+                Some(1234)
+            }
+        }
+        let embedders = Embedders::builder()
+            .with(Arc::new(Sized(EmbedderInfo::new("acme/m", 1, VectorElement::F32))))
+            .unwrap()
+            .build();
+        let mut s =
+            Session::with_presets(SessionPresets::new().with_embedders(Arc::new(embedders)));
+        s.load_sample("modern").unwrap();
+        let stats = s.statistics();
+        let models = stats["process"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1, "{stats}");
+        assert_eq!(models[0]["name"], "acme/m");
+        assert_eq!(models[0]["bytes"], 1234);
+        assert_eq!(models[0]["default"], false);
+        assert_eq!(stats["statistics"]["vertex_count"], 6);
+        // The default session has only the built-in embedder, which reports no size.
+        assert_eq!(modern().statistics()["process"]["models"], json!([]));
     }
 
     /// The host's embedders reach every run: the `embed` step (also inside the MCP read-only

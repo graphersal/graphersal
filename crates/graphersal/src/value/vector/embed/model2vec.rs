@@ -68,6 +68,8 @@ pub struct Model2Vec {
     model: StaticModel,
     max_tokens: usize,
     normalize: bool,
+    /// Estimated bytes in memory: the f32 embedding matrix and the tokenizer file.
+    memory_bytes: u64,
 }
 
 impl fmt::Debug for Model2Vec {
@@ -296,6 +298,10 @@ impl Model2Vec {
             model,
             max_tokens: options.max_tokens,
             normalize,
+            memory_bytes: (rows as u64)
+                .saturating_mul(cols as u64)
+                .saturating_mul(4)
+                .saturating_add(files.tokenizer.len() as u64),
         })
     }
 
@@ -332,6 +338,10 @@ impl Model2Vec {
 impl Embedder for Model2Vec {
     fn info(&self) -> &EmbedderInfo {
         &self.info
+    }
+
+    fn memory_bytes(&self) -> Option<u64> {
+        Some(self.memory_bytes)
     }
 
     fn embed(&self, texts: &[&str], ctx: &EmbedContext<'_>) -> Result<Vec<Vector>, EmbedError> {

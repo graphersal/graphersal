@@ -724,7 +724,7 @@ For reference while it exists; it follows the playground's engine boundary
 | `POST /api/layout/step` | `layoutStep(job, budgetMs)`: the next slice (`{job, budgetMs?}`, default 100 ms, at most 500); Stop (`POST /api/cancel`) ends a running slice as `cancelled` |
 | `POST /api/layout/cancel` | `layoutCancel(job)`: ends the job, keeping the positions reached so far |
 | `GET /api/completions`, `GET /api/token-values`, `GET /api/memory` | `completions()`, `tokenValues()`, `memoryUsage()` |
-| `GET /api/statistics` | `statistics()`: `{statistics, memory, limits: {presets, defaults}}` |
+| `GET /api/statistics` | `statistics()`: `{statistics, memory, process, limits: {presets, defaults}}`. `process` is the memory the process holds beside the graph (`GraphStatistics` stays data counts): `models` lists every loaded embedding model that reports its size (`name`, `model`, `dimension`, `bytes`, `default`; an estimate of the weights and the tokenizer), and `aiChat {conversations, historyBytes}` (an estimate of the stored chat history) is added when the server runs with `--ai`. The MCP `statistics` tool returns the same |
 | `GET /api/export?format=graphson\|graphml` | `saveGraph(format)` (download) |
 | `GET /api/export?format=gsnap` | `saveGraph('snapshot')`: the current state as a packed snapshot (binary download) |
 | `POST /api/save` | Save to file: `{path, format, bytes, warnings}`, plus `schemaPath` when the schema was written to the `--schema` file, or `warning` when a stored schema could not be saved (GraphML/GraphSON without `--schema`) |

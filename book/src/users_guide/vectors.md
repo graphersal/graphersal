@@ -587,7 +587,7 @@ short title (5 words) and about 18.5 µs per paragraph of about 1 KB, so embeddi
 ### Embedders for hosts
 
 A host plugs in its own embedder (a model loaded from a file, an HTTP client, a binding
-language's function) by implementing the Rust trait `graphersal::vector::Embedder`: `info()`
+language's function) by implementing the Rust trait `graphersal::vector::Embedder` (an embedder that holds a model in memory may also override `memory_bytes()`, which a host's process memory report shows): `info()`
 returns its `EmbedderInfo` (name, model identity, dimension, element kind, metric, batch size,
 determinism, locality; built at runtime, so a dimension learnt from a model file is fine), and
 `embed(texts, ctx)` returns one vector per text, calling `ctx.check()` between pieces of work so a

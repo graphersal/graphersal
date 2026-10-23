@@ -4376,6 +4376,26 @@ mod ai_chat {
     }
 
     #[test]
+    fn the_statistics_report_the_chat_history_in_the_process_memory() {
+        let mock = MockLlm::start();
+        let server = start_ai("ai-process", &mock, "");
+        let port = server.port;
+        let empty = get(port, "/api/statistics").json();
+        assert_eq!(empty["process"]["aiChat"]["conversations"], 0, "{empty}");
+        assert_eq!(empty["process"]["aiChat"]["historyBytes"], 0, "{empty}");
+        assert_eq!(empty["process"]["models"], serde_json::json!([]), "{empty}");
+        let id = create(port, "page-p");
+        assert_eq!(send(port, "page-p", &id, "hello there").status, 200);
+        finished(port, "page-p", &id);
+        let stats = get(port, "/api/statistics").json();
+        assert_eq!(stats["process"]["aiChat"]["conversations"], 1, "{stats}");
+        let bytes = stats["process"]["aiChat"]["historyBytes"].as_u64().unwrap();
+        assert!(bytes >= "hello there".len() as u64, "{stats}");
+        // The data counts stay data counts only.
+        assert!(stats["statistics"].get("process").is_none(), "{stats}");
+    }
+
+    #[test]
     fn a_question_is_answered_after_a_query_that_ran_on_the_session() {
         let mock = MockLlm::start();
         let server = start_ai("ai-answer", &mock, "");
@@ -4916,6 +4936,53 @@ fn an_embedder_of_the_command_line_serves_the_session() {
         r#"g.v().has_label("software").embed("name").to_list().len()"#,
     );
     assert_eq!(r["ok"], true, "{r}");
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--embedder` with `--server`: the process memory block of `GET /api/statistics` lists the
+/// loaded model with its estimated size, and has no AI Chat member without `--ai`.
+#[cfg(feature = "model2vec")]
+#[test]
+fn the_statistics_list_a_loaded_model_in_the_process_memory() {
+    let dir = std::env::temp_dir().join(format!("graphersal_srv_{}_m2v_mem", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.json"), r#"{"normalize": true}"#).unwrap();
+    std::fs::write(
+        dir.join("tokenizer.json"),
+        r#"{"version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "lop": 1, "ripple": 2},
+                      "unk_token": "[UNK]"}}"#,
+    )
+    .unwrap();
+    let data: Vec<u8> = [0.0f32, 1.0, 1.0, 0.0, 0.5, 0.5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut header = format!(
+        r#"{{"embeddings": {{"dtype": "F32", "shape": [3, 2], "data_offsets": [0, {}]}}}}"#,
+        data.len()
+    );
+    while header.len() % 8 != 0 {
+        header.push(' ');
+    }
+    let mut model = (header.len() as u64).to_le_bytes().to_vec();
+    model.extend_from_slice(header.as_bytes());
+    model.extend_from_slice(&data);
+    std::fs::write(dir.join("model.safetensors"), model).unwrap();
+    let spec = format!("tiny={}", dir.display());
+    let server = start(&["--graph", "modern", "--embedder", &spec]);
+    let stats = get(server.port, "/api/statistics").json();
+    let models = stats["process"]["models"].as_array().expect("models");
+    assert_eq!(models.len(), 1, "{stats}");
+    assert_eq!(models[0]["name"], "tiny");
+    assert_eq!(models[0]["dimension"], 2);
+    // 3 rows x 2 columns of f32 plus the tokenizer file.
+    assert!(models[0]["bytes"].as_u64().unwrap() >= 24, "{stats}");
+    assert!(stats["process"].get("aiChat").is_none(), "{stats}");
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }

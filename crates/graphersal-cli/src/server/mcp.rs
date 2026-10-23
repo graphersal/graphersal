@@ -1346,9 +1346,10 @@ fn run_tool(
                 text
             ))
         }
-        "statistics" => Ok(pretty(
-            &context.call(|s| s.statistics()).map_err(http_failed)?,
-        )),
+        "statistics" => Ok(pretty(&super::with_process_memory(
+            context,
+            context.call(|s| s.statistics()).map_err(http_failed)?,
+        ))),
         "list_saved_queries" => list_saved_queries(context, caller.read_only, args),
         "run_saved_query" => run_saved_query(context, caller, args),
         "list_compressions" => {

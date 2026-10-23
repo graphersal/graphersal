@@ -95,6 +95,14 @@ pub trait Embedder: Send + Sync + 'static {
     /// [`EmbedContext::check`] between pieces of work, so a cancelled or timed-out execution
     /// stops.
     fn embed(&self, texts: &[&str], ctx: &EmbedContext<'_>) -> Result<Vec<Vector>, EmbedError>;
+
+    /// The bytes this embedder keeps in memory (a loaded model's weights and tokenizer), as far
+    /// as it knows them, or `None` (the default: a remote provider, a function without state).
+    /// An estimate for a host's "process memory" report, never used for a decision; it may be
+    /// called at any time and must be cheap.
+    fn memory_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The description of an [`Embedder`]: its registry name, the shape of its vectors and how it

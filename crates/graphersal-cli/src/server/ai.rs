@@ -174,6 +174,33 @@ impl TurnTiming {
 }
 
 impl State {
+    /// An estimate of the bytes of the stored history: message texts, tool arguments and
+    /// results, the provider's replayed content, the events and the system prompt.
+    fn approx_bytes(&self) -> usize {
+        let json_len = |v: &Value| v.to_string().len();
+        let history: usize = self
+            .history
+            .iter()
+            .map(|message| match message {
+                Message::User(text) => text.len(),
+                Message::Assistant(turn) => {
+                    turn.text.len()
+                        + turn
+                            .tool_calls
+                            .iter()
+                            .map(|c| c.id.len() + c.name.len() + json_len(&c.arguments))
+                            .sum::<usize>()
+                }
+                Message::ToolResults(results) => results
+                    .iter()
+                    .map(|r| r.call_id.len() + r.content.len())
+                    .sum(),
+            })
+            .sum();
+        let events: usize = self.events.iter().map(json_len).sum();
+        history + events + self.system.as_ref().map_or(0, String::len)
+    }
+
     fn push(&mut self, mut event: Value) {
         event["seq"] = json!(self.events.len() + 1);
         self.events.push(event);
@@ -312,6 +339,19 @@ pub(super) fn status(context: &Context) -> Value {
         "sendsDataTo": (!config.is_local()).then(|| config.host()),
         "maxToolCallsPerTurn": config.max_tool_calls_per_turn,
     })
+}
+
+/// `{conversations, historyBytes}` for the process memory report (`None` without `--ai`): the
+/// number of conversations kept and an estimate of the bytes their stored history takes (the
+/// messages sent to the provider, the events shown to the page and the system prompt).
+pub(super) fn process_memory(context: &Context) -> Option<Value> {
+    let ai = context.ai.as_ref()?;
+    let list = ai.conversations.lock().ok()?.clone();
+    let bytes: usize = list
+        .iter()
+        .filter_map(|c| c.state.lock().ok().map(|state| state.approx_bytes()))
+        .sum();
+    Some(json!({ "conversations": list.len(), "historyBytes": bytes }))
 }
 
 /// Routes `/api/ai/conversations*` (`endpoint` without the `/api/` prefix).
