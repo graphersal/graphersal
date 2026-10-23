@@ -1143,7 +1143,7 @@ fn a_call_body_uses_the_property_index() {
 /// Stack headroom (2d P0 rule): the deepest accepted `CALL` nesting (`bind::MAX_BODY_DEPTH`,
 /// 16), each level a `UNION ALL` body or a correlated body importing the row, the tallest
 /// expression innermost, parses, binds, plans, lowers and runs on the default test thread
-/// (2 MiB; measured minimum 1.76 MB debug, see `ai/gql/reports-2d/T5.md`).
+/// (2 MiB; measured minimum 1.76 MB debug).
 #[test]
 fn the_deepest_calls_run_within_the_stack() {
     let graph = modern();
@@ -1167,7 +1167,7 @@ fn the_deepest_calls_run_within_the_stack() {
 /// Stack headroom (2d P0 rule), stage 2d.T5c: the deepest accepted whole-query subquery
 /// nesting (`bind::MAX_BODY_DEPTH`, 16 levels of `EXISTS` / `COUNT` / `COLLECT` bodies), the
 /// tallest expression innermost, parses, binds, plans, lowers and runs on the default test
-/// thread (2 MiB; measured minimum in `ai/gql/reports-2d/T5c.md`).
+/// thread (2 MiB).
 #[test]
 fn the_deepest_whole_query_bodies_run_within_the_stack() {
     let graph = modern();
