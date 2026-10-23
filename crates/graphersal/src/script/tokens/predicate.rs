@@ -25,7 +25,9 @@ pub(crate) fn script_text_regex(
 }
 
 pub(crate) fn script_p_within(val: Dynamic) -> ArgP {
-    if val.is_array() {
+    if val.is::<ScriptP>() {
+        ArgP::WithIn(Vec::new())
+    } else if val.is_array() {
         ArgP::WithIn(val.cast::<rhai::Array>())
     } else {
         ArgP::WithIn(vec![val])
@@ -33,7 +35,9 @@ pub(crate) fn script_p_within(val: Dynamic) -> ArgP {
 }
 
 pub(crate) fn script_p_without(val: Dynamic) -> ArgP {
-    if val.is_array() {
+    if val.is::<ScriptP>() {
+        ArgP::WithOut(Vec::new())
+    } else if val.is_array() {
         ArgP::WithOut(val.cast::<rhai::Array>())
     } else {
         ArgP::WithOut(vec![val])

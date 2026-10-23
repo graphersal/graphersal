@@ -891,7 +891,10 @@ pub(super) fn predicate_operand(
     arg: Dynamic,
 ) -> Result<ArgP, Box<rhai::EvalAltResult>> {
     match arg.clone().try_cast::<ArgP>() {
-        Some(p) => Ok(p),
+        Some(p) => {
+            validate_predicate_operands(&p)?;
+            Ok(p)
+        }
         None => Err(Box::new(rhai::EvalAltResult::ErrorRuntime(
             Dynamic::from(crate::error::format_diagnostic(
                 &crate::error::ScriptError::ArgumentMismatch {
@@ -907,6 +910,7 @@ pub(super) fn predicate_operand(
 
 pub(super) fn try_dynamic_to_argp(arg: &Dynamic) -> Result<ArgP, Box<rhai::EvalAltResult>> {
     if let Some(p) = arg.clone().read_lock::<ArgP>() {
+        validate_predicate_operands(&p)?;
         Ok((*p).clone())
     } else {
         let type_name = arg.type_name();
@@ -921,6 +925,62 @@ pub(super) fn try_dynamic_to_argp(arg: &Dynamic) -> Result<ArgP, Box<rhai::EvalA
                 rhai::Position::NONE,
             ))),
         }
+    }
+}
+
+/// Rejects container and other non-scalar values before they can be stringified as predicate
+/// operands. `P.within`/`P.without` accept a list of scalar candidates, not a list as one value.
+pub(super) fn validate_predicate_operands(
+    predicate: &ArgP,
+) -> Result<(), Box<rhai::EvalAltResult>> {
+    let check = |step_name: &str, value: &Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+        if value.is_string()
+            || value.is_int()
+            || value.is_float()
+            || value.is_bool()
+            || value.is_unit()
+            || value.is::<ScriptUuid>()
+            || is_temporal(value)
+            || value.is::<ScriptVector>()
+        {
+            Ok(())
+        } else {
+            Err(script_error_from_script(
+                crate::error::ScriptError::ArgumentMismatch {
+                    step_name: step_name.to_string(),
+                    expected: "a scalar predicate operand".to_string(),
+                    actual: type_name_of(value),
+                },
+            ))
+        }
+    };
+
+    match predicate {
+        ArgP::Eq(value) => check("P.eq", value),
+        ArgP::Neq(value) => check("P.neq", value),
+        ArgP::Lt(value) => check("P.lt", value),
+        ArgP::Gt(value) => check("P.gt", value),
+        ArgP::Lte(value) => check("P.lte", value),
+        ArgP::Gte(value) => check("P.gte", value),
+        ArgP::WithIn(values) => values.iter().try_for_each(|value| check("P.within", value)),
+        ArgP::WithOut(values) => values
+            .iter()
+            .try_for_each(|value| check("P.without", value)),
+        ArgP::Inside(a, b) => check("P.inside", a).and_then(|()| check("P.inside", b)),
+        ArgP::Outside(a, b) => check("P.outside", a).and_then(|()| check("P.outside", b)),
+        ArgP::Between(a, b) => check("P.between", a).and_then(|()| check("P.between", b)),
+        ArgP::StartingWith(value) => check("TextP.starting_with", value),
+        ArgP::NotStartingWith(value) => check("TextP.not_starting_with", value),
+        ArgP::EndingWith(value) => check("TextP.ending_with", value),
+        ArgP::NotEndingWith(value) => check("TextP.not_ending_with", value),
+        ArgP::Containing(value) => check("TextP.containing", value),
+        ArgP::NotContaining(value) => check("TextP.not_containing", value),
+        ArgP::Regex(_) | ArgP::NotRegex(_) | ArgP::TypeOf(_) => Ok(()),
+        ArgP::And(a, b) | ArgP::Or(a, b) => {
+            validate_predicate_operands(a)?;
+            validate_predicate_operands(b)
+        }
+        ArgP::Not(inner) => validate_predicate_operands(inner),
     }
 }
 
@@ -1296,7 +1356,10 @@ pub(super) fn predicate_to_gts(
         return try_dynamic_to_gts(arg);
     }
     match arg.clone().try_cast::<ArgP>() {
-        Some(p) => Ok(one_step_source(Step::Is(p))),
+        Some(p) => {
+            validate_predicate_operands(&p)?;
+            Ok(one_step_source(Step::Is(p)))
+        }
         None => Err(choose_mismatch(
             step_name,
             "a traversal or a predicate (P.gt(1), ...)",

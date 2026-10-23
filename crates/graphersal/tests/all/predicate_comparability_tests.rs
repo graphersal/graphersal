@@ -177,10 +177,29 @@ fn property_predicates_on_the_modern_graph() {
         2
     );
     assert_eq!(run(r#"g.V().has("name", P.lt("m")).count().next()"#), 2);
+    // Zero-argument membership predicates use the scope marker internally; keep them empty.
+    assert_eq!(run(r#"g.V().has("age", P.within()).count().next()"#), 0);
+    assert_eq!(run(r#"g.V().has("age", P.without()).count().next()"#), 4);
     assert_eq!(
         run(r#"g.V().values("age").is(P.gt("x")).count().next()"#),
         0
     );
+}
+
+#[test]
+fn container_predicate_operands_fail_with_the_predicate_name() {
+    let cases = [
+        r#"g.v().has("name", P.gt(["a"])).count().next()"#,
+        r#"g.v().has("name", P.eq(["a"])).count().next()"#,
+        r#"g.v().has("name", P.within([["a"]])).count().next()"#,
+        r#"g.v().has("name", P.gt("a").or(P.lt(["z"]))).count().next()"#,
+    ];
+
+    for script in cases {
+        let error = eval_value(modern(), script).expect_err(script).to_string();
+        assert!(error.contains("Argument mismatch for step 'P."), "{error}");
+        assert!(error.contains("got array"), "{error}");
+    }
 }
 
 #[test]

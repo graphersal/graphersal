@@ -675,8 +675,9 @@ impl ScriptGraphTraversalSource {
             let key = try_dynamic_to_gts(pick)?;
             return Ok(this.add_step(Step::OptionTraversal(key, branch)));
         }
-        let token = if let Some(predicate) = pick.read_lock::<ArgP>().map(|p| argp_to_p(&p)) {
-            OptionToken::Predicate(predicate)
+        let token = if let Some(predicate) = pick.clone().read_lock::<ArgP>() {
+            validate_predicate_operands(&predicate)?;
+            OptionToken::Predicate(argp_to_p(&predicate))
         } else {
             match pick.clone().try_cast::<Pick>() {
                 Some(Pick::Any) => OptionToken::Any,

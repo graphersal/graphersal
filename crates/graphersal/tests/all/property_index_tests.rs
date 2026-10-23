@@ -269,8 +269,14 @@ fn differential_queries(graph: &Arc<Graph>, rng: &mut Rng, queries: usize) -> us
             _ => format!("v().has_label(\"a\", \"c\").{}", random_condition(rng, "k")),
         };
         let (with, without) = both(graph, &query);
-        assert_eq!(with, without, "{query}");
-        if uses_index(graph, &query) {
+        let succeeded = with.is_ok() && without.is_ok();
+        // The scan script has an extra `with(..)` prefix, so equivalent errors can point at
+        // different absolute source columns. Compare the diagnostic itself, not that offset.
+        let without_position = |result: Result<Vec<String>, String>| {
+            result.map_err(|error| error.split(" (line").next().unwrap_or(&error).to_string())
+        };
+        assert_eq!(without_position(with), without_position(without), "{query}");
+        if succeeded && uses_index(graph, &query) {
             served += 1;
         }
     }
