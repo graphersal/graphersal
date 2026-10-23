@@ -200,11 +200,11 @@ fn merge_on_a_value_the_row_gives_uses_the_index_lookup() {
         merges[0].matcher,
         r#"__.gql:lookup("(n:person)", "name: x") [index: vertex person.name].has_label("person").gql:project("n")"#
     );
-    // Without the index: a scan with the filter on the row.
+    // Without the index: the same lookup, scanning the label and comparing directly.
     let (_, merges) = lowered("FOR x IN ['a', 'b'] MERGE (n:person {name: x}) RETURN n");
     assert_eq!(
         merges[0].matcher,
-        r#"__.v().has_label("person").gql:filter("name: x").gql:project("n")"#
+        r#"__.gql:lookup("(n:person)", "name: x") [scan: vertex person.name].has_label("person").gql:project("n")"#
     );
 }
 

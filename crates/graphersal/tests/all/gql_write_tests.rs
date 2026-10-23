@@ -2189,3 +2189,86 @@ fn an_indexed_merge_equals_the_scan_on_a_larger_graph() {
         ["1", "1", "2"]
     );
 }
+
+// ----- MERGE without an index (scan lookup) -----
+
+/// A MERGE whose pattern properties read the row starts its match child with a `gql:lookup`
+/// that scans the label and compares the stored value directly (no index needed), and it
+/// still sees the vertices earlier rows of the same query created.
+#[test]
+fn an_unindexed_merge_matches_through_a_scan_lookup_and_sees_earlier_rows() {
+    let mut graph = TraversalGraph::new();
+    let q = "UNWIND [1, 2, 1, 3, 2, 1] AS i MERGE (m:M {i: i}) \
+             ON CREATE SET m.n = 1 ON MATCH SET m.n = m.n + 1";
+    let profile = TraversalGraph::new()
+        .traversal_mut()
+        .gql(q)
+        .profile()
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string();
+    assert!(
+        profile.contains("gql:lookup(") && profile.contains("[scan: vertex M.i]"),
+        "{profile}"
+    );
+    write(&mut graph, q);
+    assert_eq!(graph.vertex_count(), 3);
+    let rows = write(
+        &mut graph,
+        "MATCH (m:M) RETURN m.i AS i, m.n AS n ORDER BY i",
+    );
+    assert_eq!(column(&rows, "i"), ["1", "2", "3"]);
+    assert_eq!(column(&rows, "n"), ["3", "2", "1"]);
+}
+
+/// The scan lookup leaves the graph the index-served and the filter-scanned forms leave, for
+/// every kind of value (numbers across int and float, strings, booleans, NULL is an error).
+#[test]
+fn an_unindexed_merge_agrees_with_the_indexed_one_on_mixed_values() {
+    let q = "UNWIND [1, 1.0, 'a', 'a', true, false, true, 2] AS v MERGE (:M {k: v})";
+    let mut plain = TraversalGraph::new();
+    write(&mut plain, q);
+    let mut indexed = TraversalGraph::new();
+    indexed
+        .traversal_mut()
+        .create_index(
+            "m_k",
+            graphersal::catalog::PropertyIndexDefinition::new(
+                graphersal::storage::ElementKind::Vertex,
+                "M",
+                "k",
+            ),
+        )
+        .unwrap();
+    write(&mut indexed, q);
+    assert_eq!(dump(&plain), dump(&indexed));
+}
+
+/// A failing query leaves nothing of the merges before the failure (rollback).
+#[test]
+fn an_unindexed_merge_rolls_back_with_its_query() {
+    let mut graph = TraversalGraph::new();
+    let result = graph
+        .traversal_mut()
+        .gql("UNWIND [1, 2, NULL] AS i MERGE (:M {i: i})")
+        .to_list();
+    assert!(result.is_err());
+    assert_eq!(graph.vertex_count(), 0);
+}
+
+/// The shape of the cost: 6000 distinct keys merge in well under the time a per-candidate
+/// evaluator needs (that took about 2 s here, the scan lookup about a tenth of it); the
+/// bound is loose so a loaded machine does not fail it, but a regression to the evaluator
+/// plus a debug build would.
+#[test]
+fn an_unindexed_merge_batch_is_not_dominated_by_the_evaluator() {
+    let mut graph = TraversalGraph::new();
+    let started = std::time::Instant::now();
+    write(&mut graph, "UNWIND range(1, 6000) AS i MERGE (:M {i: i})");
+    write(&mut graph, "UNWIND range(1, 6000) AS i MERGE (:M {i: i})");
+    assert_eq!(graph.vertex_count(), 6000);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
+}

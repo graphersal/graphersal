@@ -2622,14 +2622,14 @@ fn merge_match_child_is_served_by_an_index_through_a_lookup() {
         ),
         [["lookup n => [Project]"]]
     );
-    // Without an index a child-leading scan, the equality a filter on the row; on a constant
-    // a scan with the pushed filter.
+    // Without an index the same lookup (it scans the label and compares the stored value
+    // directly, no evaluator per candidate); on a constant a scan with the pushed filter.
     assert_eq!(
         merge_trees(
             "FOR x IN ['a'] MERGE (n:person {name: x}) RETURN n",
             &NoFacts
         ),
-        [["scan n; filter [0] => [Project]"]]
+        [["lookup n => [Project]"]]
     );
     let (b, p) = plan_with("MERGE (n:person {name: 'ann'})", &name_indexes());
     let plan = merges(&p)[0]

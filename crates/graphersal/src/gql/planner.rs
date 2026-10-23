@@ -354,6 +354,10 @@ struct Planner<'q> {
     /// Per binding: an element of a parenthesized path pattern's body (stage 2e), bound only
     /// by walking its body: never a start, never reached by another pattern edge first.
     in_body: Vec<bool>,
+    /// Whether an unindexed property equality may start a component as an [`Op::Lookup`]
+    /// (set while a `MERGE` match child is planned: the lookup compares the stored value
+    /// directly instead of evaluating the node's filter for every candidate).
+    scan_lookups: bool,
 }
 
 impl<'q> Planner<'q> {
@@ -436,6 +440,7 @@ impl<'q> Planner<'q> {
             uses: bound.conjuncts.iter().map(SubqueryUse::of).collect(),
             subplans: Vec::new(),
             in_body,
+            scan_lookups: false,
         }
     }
 
@@ -667,7 +672,9 @@ impl<'q> Planner<'q> {
     /// [`Self::composite`].
     #[inline(never)]
     fn merge(&mut self, index: usize, merge: &BoundMerge, current: Option<BindingId>) -> Stage {
+        let outer = std::mem::replace(&mut self.scan_lookups, true);
         let plan = self.composite(&merge.body, Entry::Body { current });
+        self.scan_lookups = outer;
         for &output in &merge.outputs {
             self.bind(output);
         }
@@ -811,7 +818,7 @@ impl<'q> Planner<'q> {
     fn lookup(&self, nodes: &[BindingId], correlated: bool) -> Option<Lookup> {
         let bound = self.bound;
         type Rank = (u8, (u8, u64, BindingId), usize);
-        let mut best: Option<(Rank, BindingId, LookupBy, &super::ast::Expr)> = None;
+        let mut best: Option<(Rank, BindingId, LookupBy, &super::ast::Expr, bool)> = None;
         for &node in nodes.iter().filter(|&&id| !self.in_body(id)) {
             let Some(binding) = bound.binding(node) else {
                 continue;
@@ -833,7 +840,7 @@ impl<'q> Planner<'q> {
                 let Some((by, value)) = lookup_form(conjunct, node, binding.key.as_deref()) else {
                     continue;
                 };
-                let served = match &by {
+                let indexed = match &by {
                     LookupBy::Id => true,
                     LookupBy::Index(key) => labels.as_ref().is_some_and(|labels| {
                         !labels.is_empty()
@@ -842,16 +849,20 @@ impl<'q> Planner<'q> {
                                 .all(|label| self.facts.has_vertex_index(label, key))
                     }),
                 };
-                if !served {
+                if !indexed && !self.scan_lookups {
                     continue;
                 }
-                let rank = (u8::from(by != LookupBy::Id), self.start_rank(node), c);
+                let rank = (
+                    u8::from(by != LookupBy::Id) + u8::from(!indexed),
+                    self.start_rank(node),
+                    c,
+                );
                 if best.as_ref().is_none_or(|(r, ..)| rank < *r) {
-                    best = Some((rank, node, by, value));
+                    best = Some((rank, node, by, value, indexed));
                 }
             }
         }
-        let ((_, _, conjunct), node, by, value) = best?;
+        let ((_, _, conjunct), node, by, value, indexed) = best?;
         let scan_labels = bound.binding(node).and_then(|b| scan_labels(&b.labels));
         let mut filters = self.filters_of(node, scan_labels.as_deref());
         filters.pushed.retain(|&c| c != conjunct);
@@ -864,6 +875,7 @@ impl<'q> Planner<'q> {
             },
             conjunct,
             by,
+            indexed,
             value: value.clone(),
         })
     }

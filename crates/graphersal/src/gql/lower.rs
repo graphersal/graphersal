@@ -3125,6 +3125,7 @@ impl<'q> Lowering<'q> {
                 value: self.compile(&lookup.value, None, &[])?,
                 key,
                 labels,
+                indexed: lookup.indexed,
             },
             site,
         })

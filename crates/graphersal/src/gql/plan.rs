@@ -582,6 +582,9 @@ pub(crate) struct Lookup {
     pub(crate) conjunct: usize,
     /// What serves it.
     pub(crate) by: LookupBy,
+    /// Whether an index (or the id) serves it now; `false`: the lookup scans the scan labels
+    /// and compares the stored value directly (planned for a `MERGE` match child only).
+    pub(crate) indexed: bool,
     /// The other side of the equality: reads only bindings bound before the component and
     /// parameters, evaluated once per incoming row.
     pub(crate) value: Expr,

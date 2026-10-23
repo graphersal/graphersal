@@ -99,7 +99,10 @@ Files appear as their stage lands; this table is the target layout.
   (record columns read through their own labels, the path from `Lowered::created_paths`)
   ending in a `gql:project` of the same columns, the checks, the `ON` items via
   `Lowering::set_items` on the record; tests `lower/merge_tests.rs`, planner tests, end to end
-  in `gql_write_tests.rs`).
+  in `gql_write_tests.rs`); a match child plans an unindexed property equality reading the row
+  as `Op::Lookup` too (`Planner::scan_lookups`, `Lookup::indexed`; `gql:lookup .. [scan: ..]`:
+  scans the label and compares the stored value, no evaluator per candidate, ~10x on
+  `UNWIND range(1, 20000) AS i MERGE (:M {i: i})`; still O(n) per row, an index is O(1)).
 - **Writes (stage 3a).** `INSERT` / `CREATE` lower to the internal write steps; a writing query
   is mutating for `is_mutating()` (`script/mutating.rs` lowers a leading `gql()` on an empty
   scratch graph), so the Rhai terminals take the write lock, and `gql_start` pins the

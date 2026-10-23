@@ -8,6 +8,7 @@ use crate::gql::runtime::{Binding, Row, RowExpr, RowValue, eval_error, history_r
 use crate::graph::{GraphStorage, PropertyIndexRange};
 use crate::traversal::context::tick_deadline;
 use crate::traversal::optimizer::path_analysis::PathRequirement;
+use crate::value::scalar::compare_scalars;
 use crate::*;
 
 /// What a [`StepGqlLookup`] looks the vertices up by.
@@ -56,6 +57,8 @@ pub(crate) struct StepGqlLookup<S: GraphStorage> {
     key: GqlLookupKey,
     /// The scan labels (empty: none).
     labels: Arc<[String]>,
+    /// Whether an index served the lookup when it was planned (display only).
+    indexed: bool,
     /// The step labels the value reads (sorted).
     path_labels: Arc<[CompactString]>,
     /// The labels it reads in every occurrence (group variables, sorted).
@@ -72,6 +75,7 @@ impl<S: GraphStorage> Clone for StepGqlLookup<S> {
             bindings: Arc::clone(&self.bindings),
             key: self.key.clone(),
             labels: Arc::clone(&self.labels),
+            indexed: self.indexed,
             path_labels: Arc::clone(&self.path_labels),
             history: Arc::clone(&self.history),
         }
@@ -90,7 +94,11 @@ impl<S: GraphStorage> fmt::Display for StepGqlLookup<S> {
         match &self.key {
             GqlLookupKey::Id => f.write_str(" [id]"),
             GqlLookupKey::Property(key) => {
-                f.write_str(" [index: ")?;
+                f.write_str(if self.indexed {
+                    " [index: "
+                } else {
+                    " [scan: "
+                })?;
                 for (at, label) in self.labels.iter().enumerate() {
                     if at > 0 {
                         f.write_str(", ")?;
@@ -115,6 +123,8 @@ pub(crate) struct GqlLookup<S: GraphStorage> {
     pub(crate) key: GqlLookupKey,
     /// The scan labels (empty: none).
     pub(crate) labels: Vec<String>,
+    /// Whether an index served the lookup when it was planned (display only).
+    pub(crate) indexed: bool,
 }
 
 impl<S: GraphStorage> StepGqlLookup<S> {
@@ -129,6 +139,7 @@ impl<S: GraphStorage> StepGqlLookup<S> {
             bindings,
             key: lookup.key,
             labels: lookup.labels.into(),
+            indexed: lookup.indexed,
             path_labels,
             history,
         }
@@ -140,10 +151,26 @@ impl<S: GraphStorage> StepGqlLookup<S> {
             GqlLookupKey::Id => storage
                 .vertex_id(v)
                 .map(|id| Value::Scalar(ElementProperty::String(CompactString::from(id)))),
-            GqlLookupKey::Property(key) => storage
-                .vertex_properties(v)
-                .and_then(|properties| properties.get(key.as_str()))
-                .map(|stored| Value::from_property(stored.clone())),
+            GqlLookupKey::Property(key) => {
+                let stored = storage
+                    .vertex_properties(v)
+                    .and_then(|properties| properties.get(key.as_str()));
+                // A plain number, string or boolean against a scalar: GQL `=` is the scalar
+                // comparison, without cloning the stored value (the candidate loop of a lookup
+                // no index serves).
+                if let (
+                    Some(
+                        stored @ (ElementProperty::Number(_)
+                        | ElementProperty::String(_)
+                        | ElementProperty::Boolean(_)),
+                    ),
+                    Value::Scalar(wanted),
+                ) = (stored, value)
+                {
+                    return compare_scalars(stored, wanted) == Some(std::cmp::Ordering::Equal);
+                }
+                stored.map(|stored| Value::from_property(stored.clone()))
+            }
         };
         equals(&found.unwrap_or(Value::Null), value) == Truth::True
     }
