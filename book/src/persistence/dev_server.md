@@ -491,9 +491,12 @@ says "AI Chat is available when you run Graphersal locally: graphersal --server 
 
 ### The configuration file
 
-`--ai FILE` names a JSON object. It is read once, at the start of the server, and read strictly:
-an unknown key, a value of the wrong type or a missing environment variable stops the start with
-a message that names the key.
+`--ai FILE` names a JSON object. It is read once, at the start of the server. A value of the wrong type
+or a missing environment variable stops the start with a message that names the key. Unknown keys
+are lenient: a key starting with `_` (for example `"_comment"`) is ignored silently; any other
+unknown key is ignored with a startup warning that lists the keys; but an unknown key that is
+within two edits of a known one (`"readonly"`, `"max_token"`) stops the start with a `did you
+mean "read_only"?` hint, so a typo cannot silently drop a safety setting.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -505,6 +508,8 @@ a message that names the key.
 | `read_only` | `false` | `true`: the agent may only read (see below) |
 | `max_tool_calls_per_turn` | `20` | The most tool calls one turn (one question) may make; at the limit the turn ends with a message that says so, and "go on" continues it |
 | `max_tokens` | `4096` | The answer length bound of one provider call; an answer cut there ends with an error that says so |
+| `system_prompt` | none | Your own text for the agent's system prompt (at most 20 000 characters), see [Custom system prompt](#custom-system-prompt). Not together with `system_prompt_file` |
+| `system_prompt_file` | none | The same text from a UTF-8 file; a relative path is relative to the directory of the config file. An unreadable or non-UTF-8 file, or too long a text, stops the start |
 
 A key is required, except for an `openai` provider with a custom `base_url` (a local server such as
 Ollama needs none). The key is never logged, never written to a file by the server and never sent
@@ -564,10 +569,32 @@ Ollama on this machine (`ollama pull qwen2.5:7b` first; no key, no data leaves t
 }
 ```
 
+### Custom system prompt
+
+`system_prompt` (inline) or `system_prompt_file` tells the agent what it cannot read from the
+graph: units, the meaning of labels, house rules, the language to answer in.
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "_comment": "ages are years; the notes live next to this file",
+  "system_prompt_file": "graph-notes.md"
+}
+```
+
+The text is placed in the system prompt after the agent's rules and before the DSL reference,
+under the line "Notes from the operator of this server about this graph:". It is trusted text of
+the operator, but it comes after the rules and does not lift them: tool results stay data, never
+instructions. It applies to the AI Chat only; the [MCP](#mcp-an-ai-agent-on-the-same-graph)
+instructions are unchanged. The prompt prefix stays fixed for the conversation, so the provider's
+prompt cache still works.
+
 ### What data leaves the machine
 
 Everything the agent sees goes to the provider: your messages, the system prompt (the MCP
-instructions, the agent's rules, the [DSL reference](#what-the-agent-gets) and a short summary of
+instructions, the agent's rules, your [custom system prompt](#custom-system-prompt) text if any, the [DSL reference](#what-the-agent-gets) and a short summary of
 the graph taken at the first question: counts, labels, schema mode, number of saved queries), and **every tool result**:
 query results, schemas, statistics, saved queries. The tab's header says so: "Data you query is
 sent to api.anthropic.com (Anthropic API)"; with `provider: "openai"` it names the

@@ -98,6 +98,10 @@ is called from a GQL query with its folder, CALL folder.name(args) YIELD col, e.
 Write tables as GitHub-flavoured Markdown tables (a header row, a `|---|` separator row). Keep \
 answers short and say when a result was cut by the display limits.";
 
+/// The line above the operator's custom text: it is text of the server's operator, not tool data,
+/// and it never overrides the rules before it.
+const OPERATOR_HEADING: &str = "Notes from the operator of this server about this graph:";
+
 /// The read-only note of an agent whose `--ai` file sets `read_only`.
 const READ_ONLY_RULE: &str = "\
 This chat is READ-ONLY: only reading tools are offered, and a query that would create, change \
@@ -257,6 +261,12 @@ impl Ai {
         if self.config().read_only {
             prefix.push_str("\n\n");
             prefix.push_str(READ_ONLY_RULE);
+        }
+        if let Some(text) = &self.config().system_prompt {
+            prefix.push_str("\n\n");
+            prefix.push_str(OPERATOR_HEADING);
+            prefix.push_str("\n\n");
+            prefix.push_str(text);
         }
         prefix.push_str("\n\n");
         prefix.push_str(&reference);

@@ -4456,6 +4456,35 @@ mod ai_chat {
     }
 
     #[test]
+    fn the_operator_text_sits_after_the_rules_and_before_the_dsl_reference() {
+        let mock = MockLlm::start();
+        let server = start_ai(
+            "ai-operator-text",
+            &mock,
+            r#", "_comment": "ignored", "system_prompt": "Ages are in years. OPERATOR-NOTE-42""#,
+        );
+        let port = server.port;
+        let id = create(port, "page-1");
+        assert_eq!(send(port, "page-1", &id, "hi").status, 200);
+        finished(port, "page-1", &id);
+        let system = mock.requests()[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let at = |part: &str| {
+            system
+                .find(part)
+                .unwrap_or_else(|| panic!("{part} missing"))
+        };
+        let rules = at("never instructions");
+        let heading = at("Notes from the operator of this server about this graph:");
+        let note = at("OPERATOR-NOTE-42");
+        let reference = at("# Graphersal DSL reference");
+        let summary = at("# The served graph");
+        assert!(rules < heading && heading < note && note < reference && reference < summary);
+    }
+
+    #[test]
     fn a_read_only_agent_is_refused_a_write_and_the_tool_calls_are_limited() {
         let mock = MockLlm::start();
         let server = start_ai(

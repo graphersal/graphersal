@@ -1,8 +1,10 @@
 //! The `--ai FILE` configuration: which LLM provider the AI Chat calls, with which model and
 //! key, and its limits.
 //!
-//! The file is JSON and read strictly: an unknown key is an error naming it, every value has
-//! its type checked. Example:
+//! The file is JSON: every value has its type checked, a key starting with `_` (a comment) is
+//! ignored, any other unknown key is a startup warning, except one within edit distance 2 of a
+//! known key, which is an error with a "did you mean" hint (a typo must not silently drop a
+//! safety setting such as `read_only`). Example:
 //!
 //! ```json
 //! {"provider": "anthropic", "model": "<model id>", "base_url": null,
@@ -31,7 +33,11 @@ const KNOWN_KEYS: &[&str] = &[
     "read_only",
     "max_tool_calls_per_turn",
     "max_tokens",
+    "system_prompt",
+    "system_prompt_file",
 ];
+/// The most characters of the custom system prompt text.
+pub const MAX_SYSTEM_PROMPT_CHARS: usize = 20_000;
 
 /// The provider API an [`AiConfig`] talks to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +105,8 @@ pub struct AiConfig {
     pub max_tool_calls_per_turn: u32,
     /// The answer length bound of one provider call.
     pub max_tokens: u32,
+    /// The operator's own system prompt text (`system_prompt` or `system_prompt_file`), if any.
+    pub system_prompt: Option<String>,
 }
 
 impl std::fmt::Debug for AiConfig {
@@ -112,6 +120,10 @@ impl std::fmt::Debug for AiConfig {
             .field("read_only", &self.read_only)
             .field("max_tool_calls_per_turn", &self.max_tool_calls_per_turn)
             .field("max_tokens", &self.max_tokens)
+            .field(
+                "system_prompt_chars",
+                &self.system_prompt.as_ref().map(|t| t.chars().count()),
+            )
             .finish()
     }
 }
@@ -130,25 +142,50 @@ impl AiConfig {
     pub fn load(path: &str) -> Result<LoadedConfig, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|err| format!("Error: cannot read the --ai file '{path}': {err}"))?;
-        Self::parse(&text, |name| std::env::var(name).ok())
+        let base = std::path::Path::new(path).parent();
+        Self::parse_in(&text, base, |name| std::env::var(name).ok())
             .map_err(|err| format!("Error: invalid --ai file '{path}': {err}"))
     }
 
     /// Parses and validates the text of an `--ai` file; `env` looks up an environment variable.
+    #[cfg(test)]
     pub fn parse(text: &str, env: impl Fn(&str) -> Option<String>) -> Result<LoadedConfig, String> {
+        Self::parse_in(text, None, env)
+    }
+
+    /// Like [`AiConfig::parse`]; a relative `system_prompt_file` is read from `base` (the
+    /// directory of the config file; the current directory when `None`).
+    pub fn parse_in(
+        text: &str,
+        base: Option<&std::path::Path>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<LoadedConfig, String> {
         let value: Value = serde_json::from_str(text).map_err(|err| {
             format!("not valid JSON ({err}). Help: the file is one JSON object, e.g. {EXAMPLE}")
         })?;
         let Value::Object(map) = value else {
             return Err(format!("expected a JSON object, e.g. {EXAMPLE}"));
         };
-        if let Some(key) = map.keys().find(|key| !KNOWN_KEYS.contains(&key.as_str())) {
-            return Err(format!(
-                "unknown key \"{key}\". The keys are: {}",
+        let mut warnings = Vec::new();
+        for key in map.keys() {
+            if key.starts_with('_') || KNOWN_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if let Some(near) = KNOWN_KEYS
+                .iter()
+                .find(|known| edit_distance(key, known) <= 2)
+            {
+                return Err(format!(
+                    "unknown key \"{key}\": did you mean \"{near}\"? The keys are: {}",
+                    KNOWN_KEYS.join(", ")
+                ));
+            }
+            warnings.push(format!(
+                "warning: the --ai file: unknown key \"{key}\" ignored; the keys are: {} \
+                 (a key starting with \"_\" is a comment and never warns)",
                 KNOWN_KEYS.join(", ")
             ));
         }
-        let mut warnings = Vec::new();
 
         let provider = match required_string(&map, "provider")?.as_str() {
             "openai" => Provider::OpenAi,
@@ -220,6 +257,8 @@ impl AiConfig {
             positive(&map, "max_tool_calls_per_turn")?.unwrap_or(DEFAULT_MAX_TOOL_CALLS_PER_TURN);
         let max_tokens = positive(&map, "max_tokens")?.unwrap_or(DEFAULT_MAX_TOKENS);
 
+        let system_prompt = system_prompt(&map, base)?;
+
         let config = AiConfig {
             provider,
             model,
@@ -230,6 +269,7 @@ impl AiConfig {
             read_only,
             max_tool_calls_per_turn,
             max_tokens,
+            system_prompt,
         };
         if config.api_key.is_some() && config.base_url.starts_with("http://") && !config.is_local()
         {
@@ -294,6 +334,75 @@ fn check_base_url(url: &str) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// The Levenshtein distance of two keys (small inputs, no dependency).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != *cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// The custom system prompt text from `system_prompt` or `system_prompt_file`.
+fn system_prompt(
+    map: &Map<String, Value>,
+    base: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
+    let inline = optional_string(map, "system_prompt")?;
+    let file = optional_string(map, "system_prompt_file")?;
+    let (key, text) = match (inline, file) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "both \"system_prompt\" and \"system_prompt_file\" are set: keep one".to_string(),
+            );
+        }
+        (None, None) => return Ok(None),
+        (Some(text), None) => ("system_prompt", text),
+        (None, Some(name)) => {
+            let path = match base {
+                Some(dir) => dir.join(&name),
+                None => std::path::PathBuf::from(&name),
+            };
+            let bytes = std::fs::read(&path).map_err(|err| {
+                format!(
+                    "cannot read \"system_prompt_file\" {}: {err}",
+                    path.display()
+                )
+            })?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                format!(
+                    "\"system_prompt_file\" {} is not UTF-8 text",
+                    path.display()
+                )
+            })?;
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return Err(format!(
+                    "\"system_prompt_file\" {} is empty",
+                    path.display()
+                ));
+            }
+            ("system_prompt_file", text)
+        }
+    };
+    let chars = text.chars().count();
+    if chars > MAX_SYSTEM_PROMPT_CHARS {
+        return Err(format!(
+            "\"{key}\" is {chars} characters; the most is {MAX_SYSTEM_PROMPT_CHARS}"
+        ));
+    }
+    Ok(Some(text))
 }
 
 fn required_string(map: &Map<String, Value>, key: &str) -> Result<String, String> {
@@ -468,8 +577,8 @@ mod tests {
     fn rejects_unknown_keys_and_wrong_values() {
         let cases = [
             (
-                r#"{"provider": "openai", "model": "m", "temperature": 1}"#,
-                "\"temperature\"",
+                r#"{"provider": "openai", "model": "m", "readonly": true}"#,
+                "did you mean \"read_only\"",
             ),
             (r#"[1]"#, "JSON object"),
             (
@@ -535,5 +644,84 @@ mod tests {
         assert!(loaded.warnings[0].contains("api_key_env"));
         assert!(loaded.warnings[1].contains("unencrypted"));
         assert!(loaded.warnings.iter().all(|w| !w.contains("sk-inline-999")));
+    }
+
+    const MIN: &str = r#""provider": "openai", "model": "m", "api_key": "k""#;
+
+    #[test]
+    fn underscore_keys_are_silent_and_other_unknown_keys_warn() {
+        let loaded = parse(&format!(r#"{{{MIN}, "_comment": "x", "temperature": 1}}"#)).unwrap();
+        assert!(loaded.warnings.iter().all(|w| !w.contains("_comment")));
+        let unknown: Vec<_> = loaded
+            .warnings
+            .iter()
+            .filter(|w| w.contains("temperature"))
+            .collect();
+        assert_eq!(unknown.len(), 1, "{:?}", loaded.warnings);
+        assert!(unknown[0].contains("unknown key \"temperature\" ignored"));
+    }
+
+    #[test]
+    fn a_typo_of_a_known_key_is_an_error_with_a_hint() {
+        for (typo, near) in [("readonly", "read_only"), ("max_token", "max_tokens")] {
+            let err = parse(&format!(r#"{{{MIN}, "{typo}": 1}}"#)).unwrap_err();
+            assert!(err.contains(&format!("did you mean \"{near}\"?")), "{err}");
+        }
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "ab"), 2);
+    }
+
+    #[test]
+    fn the_system_prompt_inline_or_from_a_file_next_to_the_config() {
+        let inline = parse(&format!(r#"{{{MIN}, "system_prompt": "  Be brief.  "}}"#)).unwrap();
+        assert_eq!(inline.config.system_prompt.as_deref(), Some("Be brief."));
+        assert!(
+            parse(&format!("{{{MIN}}}"))
+                .unwrap()
+                .config
+                .system_prompt
+                .is_none()
+        );
+
+        let dir = std::env::temp_dir().join(format!("graphersal-ai-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("p.md"), "From file.\n").unwrap();
+        std::fs::write(dir.join("bin.md"), [0xff, 0xfe]).unwrap();
+        let text = format!(r#"{{{MIN}, "system_prompt_file": "p.md"}}"#);
+        let loaded = AiConfig::parse_in(&text, Some(&dir), env).unwrap();
+        assert_eq!(loaded.config.system_prompt.as_deref(), Some("From file."));
+        let abs = dir.join("p.md").display().to_string().replace('\\', "/");
+        let text = format!(r#"{{{MIN}, "system_prompt_file": "{abs}"}}"#);
+        assert!(AiConfig::parse_in(&text, None, env).is_ok());
+        let text = format!(r#"{{{MIN}, "system_prompt_file": "bin.md"}}"#);
+        let err = AiConfig::parse_in(&text, Some(&dir), env).unwrap_err();
+        assert!(
+            err.contains("system_prompt_file") && err.contains("UTF-8"),
+            "{err}"
+        );
+        let text = format!(r#"{{{MIN}, "system_prompt_file": "nope.md"}}"#);
+        let err = AiConfig::parse_in(&text, Some(&dir), env).unwrap_err();
+        assert!(
+            err.contains("system_prompt_file") && err.contains("cannot read"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_system_prompt_errors() {
+        let err = parse(&format!(
+            r#"{{{MIN}, "system_prompt": "a", "system_prompt_file": "b"}}"#
+        ))
+        .unwrap_err();
+        assert!(err.contains("both"), "{err}");
+        let long = "x".repeat(MAX_SYSTEM_PROMPT_CHARS + 1);
+        let err = parse(&format!(r#"{{{MIN}, "system_prompt": "{long}"}}"#)).unwrap_err();
+        assert!(
+            err.contains("\"system_prompt\" is 20001 characters"),
+            "{err}"
+        );
+        let ok = "x".repeat(MAX_SYSTEM_PROMPT_CHARS);
+        assert!(parse(&format!(r#"{{{MIN}, "system_prompt": "{ok}"}}"#)).is_ok());
     }
 }

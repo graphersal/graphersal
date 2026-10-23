@@ -371,7 +371,7 @@ fn a_bad_ai_file_stops_the_server_before_it_starts() {
     let file = temp_path("bad_ai.json");
     std::fs::write(
         &file,
-        r#"{"provider": "openai", "model": "m", "api_key": "k", "temperature": 0}"#,
+        r#"{"provider": "openai", "model": "m", "api_key": "k", "readonly": true}"#,
     )
     .expect("write the --ai file");
     let path = file.to_str().expect("utf-8 path");
@@ -379,7 +379,7 @@ fn a_bad_ai_file_stops_the_server_before_it_starts() {
     let _ = std::fs::remove_file(&file);
     assert_eq!(res.code, 2);
     assert!(
-        res.stderr.contains("unknown key \"temperature\""),
+        res.stderr.contains("did you mean \"read_only\"?"),
         "{}",
         res.stderr
     );
