@@ -4355,6 +4355,27 @@ mod ai_chat {
     }
 
     #[test]
+    fn the_done_event_reports_the_turn_time_and_the_tool_time() {
+        let mock = MockLlm::start();
+        let server = start_ai("ai-timing", &mock, "");
+        let port = server.port;
+        let id = create(port, "page-t");
+        assert_eq!(send(port, "page-t", &id, "RUN g.v().count()").status, 200);
+        let list = finished(port, "page-t", &id);
+        let done = list.last().unwrap();
+        assert_eq!(done["type"], "done", "{list:?}");
+        let elapsed = done["elapsedMs"].as_u64().expect("elapsedMs is a number");
+        let tools = done["toolMs"].as_u64().expect("toolMs is a number");
+        assert!(tools <= elapsed, "{done}");
+        // A turn without a tool call has a tool time of 0.
+        assert_eq!(send(port, "page-t", &id, "hello").status, 200);
+        let list = finished(port, "page-t", &id);
+        let done = list.last().unwrap();
+        assert_eq!(done["toolMs"], 0, "{done}");
+        assert!(done["elapsedMs"].is_u64(), "{done}");
+    }
+
+    #[test]
     fn a_question_is_answered_after_a_query_that_ran_on_the_session() {
         let mock = MockLlm::start();
         let server = start_ai("ai-answer", &mock, "");

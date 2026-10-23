@@ -10,7 +10,7 @@ import { ref, computed, watch, nextTick, onMounted } from 'vue';
 import {
   state, aiChatMode, chatController, chatSubmit, chatStop, setChatDraft, openQueryTab,
 } from '../store.js';
-import { groupTurns, turnSummary, toolCallQuery, COMMAND_HINT } from '../ai-chat.js';
+import { groupTurns, turnSummary, timingText, toolCallQuery, COMMAND_HINT } from '../ai-chat.js';
 import { AI_CHAT_UNAVAILABLE } from '../engine/engine.js';
 import { LINKS } from '../config.js';
 import { MarkdownView } from './markdown-view.js';
@@ -110,7 +110,7 @@ export const AiChat = {
     }
 
     return {
-      state, mode, ai, chat, entries, opened, toggle, turnSummary, thinking, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
+      state, mode, ai, chat, entries, opened, toggle, turnSummary, timingText, thinking, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
       AI_CHAT_UNAVAILABLE, send, onKey, stop: () => chatStop(props.tab.id), argsText, toolCallQuery, openQuery,
     };
   },
@@ -197,6 +197,7 @@ export const AiChat = {
             <div v-else-if="it.type === 'assistant'" class="chat-msg assistant"><markdown-view :text="it.text"></markdown-view></div>
             <div v-else-if="it.type === 'done' && it.stopped" class="chat-notice faint">Stopped.</div>
           </template>
+          <div v-if="timingText(en)" class="chat-timing faint" title="Time the server spent on this turn, and the part of it spent in tool calls">{{ timingText(en) }}</div>
         </div>
       </template>
 

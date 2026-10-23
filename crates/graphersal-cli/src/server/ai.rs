@@ -31,12 +31,14 @@
 //! - `POST /api/ai/conversations/<id>/messages` `{text}` -> `{turn}` (`409` while a turn runs);
 //! - `GET /api/ai/conversations/<id>/events?after=N` -> `{events, running, last}`: the events
 //!   after sequence number `N` (`user`, `assistant`, `tool_call {name, args}`, `tool_result
-//!   {name, ok, summary, text}`, `error {message, help}`, `done {stopped, toolCalls}`);
+//!   {name, ok, summary, text}`, `error {message, help}`, `done {stopped, toolCalls, elapsedMs, toolMs}`: the turn's wall time and the part of
+//!   it spent in tool calls);
 //! - `POST /api/ai/conversations/<id>/stop` -> `{stopped}`;
 //! - `DELETE /api/ai/conversations/<id>`: drops the conversation (its pending call abandoned,
 //!   its query cancelled); later requests for it are `404`.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use graphersal::exec::CancelToken;
 use serde_json::{Value, json};
@@ -133,6 +135,8 @@ struct State {
     events: Vec<Value>,
     /// The running turn, if any.
     turn: Option<Turn>,
+    /// The timing of the running turn.
+    timing: Option<TurnTiming>,
     /// The id the next turn gets.
     next_turn: u64,
     /// The system prompt, built at the first turn (the graph summary of that moment): the same
@@ -153,6 +157,22 @@ struct Turn {
     cancel: CancelToken,
 }
 
+/// The timing of the running turn (the `done` event's `elapsedMs` and `toolMs`).
+struct TurnTiming {
+    /// When the turn started.
+    started: Instant,
+    /// Milliseconds spent in tool calls so far.
+    tool_ms: u64,
+}
+
+impl TurnTiming {
+    /// `(elapsedMs, toolMs)` of the turn so far; the tool time never exceeds the wall time.
+    fn totals(&self) -> (u64, u64) {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        (elapsed, self.tool_ms.min(elapsed))
+    }
+}
+
 impl State {
     fn push(&mut self, mut event: Value) {
         event["seq"] = json!(self.events.len() + 1);
@@ -165,8 +185,10 @@ impl State {
 
     /// Ends the running turn with a `done` event.
     fn finish(&mut self, stopped: bool, tool_calls: u32) {
+        let (elapsed_ms, tool_ms) = self.timing.take().map_or((0, 0), |t| t.totals());
         self.turn = None;
-        self.push(json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls}));
+        self.push(json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls,
+                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}));
     }
 
     /// Stops the running turn: its query cancelled, its pending provider call abandoned, and
@@ -177,6 +199,7 @@ impl State {
             return false;
         };
         turn.cancel.cancel();
+        let (elapsed_ms, tool_ms) = self.timing.take().map_or((0, 0), |t| t.totals());
         if let Some(Message::Assistant(last)) = self.history.last()
             && !last.tool_calls.is_empty()
         {
@@ -191,7 +214,8 @@ impl State {
                 .collect();
             self.history.push(Message::ToolResults(results));
         }
-        self.push(json!({"type": "done", "stopped": true, "toolCalls": Value::Null}));
+        self.push(json!({"type": "done", "stopped": true, "toolCalls": Value::Null,
+                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}));
         true
     }
 }
@@ -430,6 +454,10 @@ fn send(
             id: turn,
             cancel: cancel.clone(),
         });
+        state.timing = Some(TurnTiming {
+            started: Instant::now(),
+            tool_ms: 0,
+        });
         state.push(json!({"type": "user", "text": text}));
         state.history.push(Message::User(text));
         (turn, cancel)
@@ -594,15 +622,20 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
                 continue;
             }
             calls += 1;
+            let call_started = Instant::now();
             let (text, is_error) = match unconfirmed_write(context, conversation, call) {
                 Some(refusal) => (refusal, true),
                 None => run_call(context, &caller, call),
             };
+            let call_ms = u64::try_from(call_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let Ok(mut state) = conversation.state.lock() else {
                 return;
             };
             if !state.is_current(turn) {
                 return;
+            }
+            if let Some(t) = state.timing.as_mut() {
+                t.tool_ms = t.tool_ms.saturating_add(call_ms);
             }
             state.push(json!({
                 "type": "tool_result",

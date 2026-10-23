@@ -7,7 +7,7 @@
 // by the page's `X-Graphersal-Client`), sends a message (a turn runs on the server) and polls the
 // conversation's events (`GET .../events?after=N`) until the turn is done. The events are
 // `user {text}`, `assistant {text}`, `tool_call {id, name, args}`, `tool_result {id, name, ok,
-// summary, text}`, `error {message, help}` and `done {stopped, toolCalls}`, each with `seq`.
+// summary, text}`, `error {message, help}` and `done {stopped, toolCalls, elapsedMs, toolMs}`, each with `seq`.
 //
 // Isolation: every chat tab owns its own conversation, cursor (`after`), poll loop, Stop and
 // error. The transcript and the conversation id persist with the tab (localStorage, shared by
@@ -253,6 +253,8 @@ function finishTurn(turn, running) {
   turn.tail = tail;
   turn.state = state;
   turn.toolCalls = calls.length;
+  turn.elapsedMs = done && Number.isFinite(done.elapsedMs) ? done.elapsedMs : null;
+  turn.toolMs = done && Number.isFinite(done.toolMs) ? done.toolMs : 0;
   turn.ran = calls.length - open.length;
   turn.names = names;
   turn.current = state === 'running' && open.length ? open[open.length - 1].name : null;
@@ -281,6 +283,26 @@ export function turnSummary(turn) {
       return `${verb} after ${plural(turn.ran, 'tool call')}: ${names}`;
     }
   }
+}
+
+/** A duration for the answer's timing line: "840 ms", "12.4 s", "2 min 5 s". */
+export function durationText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
+/**
+ * The muted line under a turn's answer: the time the server spent on the turn and the part of it
+ * spent in tool calls, e.g. "12.4 s · tools 3.1 s" (just "800 ms" for a turn without tool time).
+ * Empty when the `done` event carries no timing (an older server, an interrupted turn).
+ */
+export function timingText(turn) {
+  if (!turn || turn.elapsedMs == null) return '';
+  const total = durationText(turn.elapsedMs);
+  return turn.toolMs > 0 ? `${total} · tools ${durationText(turn.toolMs)}` : total;
 }
 
 /** The status of an HTTP error thrown by the engine (`err.status`), or 0. */

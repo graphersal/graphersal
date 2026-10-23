@@ -601,3 +601,19 @@ test('the HTTP engine: ai info, the conversation endpoints and the status of a r
   await assert.rejects(() => engine.aiEvents('gone', 0), (e) => e.status === 404);
   await assert.rejects(() => engine.aiSend('other', 'x'), (e) => e.status === 403 && /another page/.test(e.message));
 });
+
+test('timingText: the turn time and the tool time of the done event', async () => {
+  const { durationText, timingText, groupTurns } = await import('../js/ai-chat.js');
+  assert.equal(durationText(840), '840 ms');
+  assert.equal(durationText(12400), '12.4 s');
+  assert.equal(durationText(125000), '2 min 5 s');
+  assert.equal(timingText({ elapsedMs: 12400, toolMs: 3100 }), '12.4 s · tools 3.1 s');
+  assert.equal(timingText({ elapsedMs: 800, toolMs: 0 }), '800 ms');
+  assert.equal(timingText({ elapsedMs: null, toolMs: 0 }), '');
+  const [turn] = groupTurns([
+    { type: 'user', text: 'q', seq: 1 },
+    { type: 'assistant', text: 'a', seq: 2 },
+    { type: 'done', stopped: false, toolCalls: 0, elapsedMs: 1500, toolMs: 0, seq: 3 },
+  ]);
+  assert.equal(timingText(turn), '1.5 s');
+});

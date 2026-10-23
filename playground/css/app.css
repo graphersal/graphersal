@@ -811,6 +811,7 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
 .chat-error-message { color: var(--danger); font-weight: 600; overflow-wrap: anywhere; }
 .chat-error-help { white-space: pre-wrap; color: var(--text); margin-top: 2px; overflow-wrap: anywhere; }
 .chat-notice { font-size: 12px; color: var(--text-muted); font-style: italic; }
+.chat-timing { font-size: 11px; color: var(--text-muted); margin: -2px 0 0 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .chat-thinking { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .ai-chat-input { flex: none; display: flex; gap: 6px; padding: 6px 8px 2px; border-top: 1px solid var(--border); background: var(--surface); }
 .ai-chat-input textarea { flex: 1; min-width: 0; resize: vertical; min-height: 38px; max-height: 40vh; font: inherit; font-size: 13px; padding: 6px 8px; }
