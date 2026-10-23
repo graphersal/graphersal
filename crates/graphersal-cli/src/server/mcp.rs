@@ -443,13 +443,16 @@ fn initialize(mcp: &Mcp, params: &Value) -> RpcResult {
 
 const INSTRUCTIONS: &str = "Graphersal dev server: an in-memory property graph (Gremlin/TinkerPop \
 model: vertices and edges with labels and properties) that a user works with LIVE in a browser \
-playground at the same time; the browser reloads when you change the graph. Use `query` to run \
-traversals (Gremlin in Rhai syntax, see its description), `gql` for GQL queries (experimental; MATCH \
-... WHERE ... RETURN, Cypher-like patterns, rows as JSON objects, and INSERT / CREATE, SET, REMOVE, DELETE and MERGE writes; \
-see its description), `get_schema`/`statistics`/`graph_info` \
+playground at the same time; the browser reloads when you change the graph. Prefer GQL, the ISO graph \
+query language (it also accepts the Cypher spellings, such as CREATE and UNWIND), for reading and \
+writing data: the `gql` tool takes the query text as it is (MATCH ... WHERE ... RETURN, rows as \
+JSON objects, INSERT / CREATE, SET, REMOVE, DELETE and MERGE writes; experimental, see its \
+description). Use `query` for what GQL does not cover: Gremlin (Apache TinkerPop) in Rhai syntax, \
+and scripts with several statements (see its description). Use `get_schema`/`statistics`/`graph_info` \
 to learn the data first, and the schema tools to read or evolve the schema. Before writing a \
 new query, check `list_saved_queries`: saved queries are named, parameterized queries the user \
-stored in the graph (written in Rhai or, `language: \"gql\"`, in GQL); run one with `run_saved_query` {name, params} instead of writing it again \
+stored in the graph, each written in GQL (`language: \"gql\"`) or in Gremlin (Rhai); run one \
+with `run_saved_query` {name, params} instead of writing it again \
 (a GQL query calls one written in GQL as `CALL folder.name(args) YIELD col`). \
 Saved queries marked `writes: true` change data (their `effects` say what); run them only when \
 the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept \
@@ -528,6 +531,13 @@ const QUERY_DESCRIPTION: &str = "Run a Graphersal script against the shared grap
 its results as JSON (bounded: at most max_rows top-level results, default 100, and 100 items of \
 every nested list; a note says when something was cut).
 
+GQL (the ISO graph query language, which also accepts Cypher spellings) is supported and is the \
+preferred language for reading and writing data. To run a GQL query directly, with no script \
+around it, call the `gql` tool and pass the query text as it is (MATCH (p:person) RETURN p.name \
+AS name). Inside this tool a GQL query is a script statement: g.gql(\"MATCH (p:person) RETURN \
+p.name AS name\", #{param: value}). This tool is for Gremlin, for GQL combined with other \
+statements, and for everything GQL does not cover.
+
 Before writing a new query, check list_saved_queries: a saved query the user stored for this \
 task is run with run_saved_query (or inside a script as g.query(\"name\", #{param: value})).
 
@@ -603,7 +613,7 @@ them). No Rhai escaping is needed: pass the GQL text as it is. GQL support is ex
 subset and answers may still change between versions); the query tool with Gremlin stays the \
 complete interface.
 
-Supported (stages 1a, 1b, 1c, 2a, 2b, 2c, 2d, 2e, 3a, 3c, 3d, 3e, 3g and 3h): MATCH with comma-separated patterns of node patterns \
+Supported: MATCH with comma-separated patterns of node patterns \
 (v:Label {key: value}) and edge patterns -[e:LABEL]->, <-[e]-, -[e]- (either direction); label \
 expressions with | & ! and %; WHERE (comparisons, AND/OR/NOT/XOR, IS [NOT] NULL, IN, STARTS \
 WITH, ENDS WITH, CONTAINS); OPTIONAL MATCH (NULL columns when nothing matches); WITH (Cypher \
