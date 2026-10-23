@@ -896,9 +896,10 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "completions") => value(context.call(|s| views::completions(s.engine()))?),
         (Method::Get, "token-values") => value(context.call(|s| s.token_values())?),
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
-        (Method::Get, "statistics") => {
-            value(with_process_memory(context, context.call(|s| s.statistics())?))
-        }
+        (Method::Get, "statistics") => value(with_process_memory(
+            context,
+            context.call(|s| s.statistics())?,
+        )),
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
             let bytes = context.call_fallible(|s| s.save_snapshot())?;
             Ok(download(bytes, "graph.gsnap"))

@@ -214,8 +214,10 @@ impl State {
     fn finish(&mut self, stopped: bool, tool_calls: u32) {
         let (elapsed_ms, tool_ms) = self.timing.take().map_or((0, 0), |t| t.totals());
         self.turn = None;
-        self.push(json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls,
-                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}));
+        self.push(
+            json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls,
+                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}),
+        );
     }
 
     /// Stops the running turn: its query cancelled, its pending provider call abandoned, and
@@ -241,8 +243,10 @@ impl State {
                 .collect();
             self.history.push(Message::ToolResults(results));
         }
-        self.push(json!({"type": "done", "stopped": true, "toolCalls": Value::Null,
-                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}));
+        self.push(
+            json!({"type": "done", "stopped": true, "toolCalls": Value::Null,
+                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}),
+        );
         true
     }
 }

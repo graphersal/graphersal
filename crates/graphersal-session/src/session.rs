@@ -2878,7 +2878,11 @@ mod tests {
             }
         }
         let embedders = Embedders::builder()
-            .with(Arc::new(Sized(EmbedderInfo::new("acme/m", 1, VectorElement::F32))))
+            .with(Arc::new(Sized(EmbedderInfo::new(
+                "acme/m",
+                1,
+                VectorElement::F32,
+            ))))
             .unwrap()
             .build();
         let mut s =
