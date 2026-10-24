@@ -131,11 +131,9 @@ impl ClockSource {
     fn read(self) -> crate::value::temporal::DateTime {
         match self {
             ClockSource::Pinned(now) => now,
-            ClockSource::System => {
-                // A system clock outside the years -9999 to 9999 reads as the epoch.
-                crate::value::temporal::DateTime::from_micros(crate::graph::undo::now_micros(), 0)
-                    .unwrap_or(crate::value::temporal::DateTime::EPOCH)
-            }
+            // A system clock outside the years -9999 to 9999 reads as the epoch; the digits are
+            // those the platform clock gives (nanoseconds at most).
+            ClockSource::System => crate::graph::schema::defaults::system_now(),
         }
     }
 }

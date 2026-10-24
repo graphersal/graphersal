@@ -272,7 +272,7 @@ fn write_offset(out: &mut String, seconds: i32) {
 fn write_duration(out: &mut String, d: Duration) {
     let months = d.months() as i64;
     let days = d.days() as i64;
-    // The time part holds at most an i64 of microseconds: the seconds fit an i64.
+    // The time part holds at most an i64 of seconds plus nanoseconds: the seconds fit an i64.
     let mut seconds = d.nanos().div_euclid(1_000_000_000) as i64;
     let mut nanos = d.nanos().rem_euclid(1_000_000_000) as i64;
     if months == 0 && days == 0 && seconds == 0 && nanos == 0 {

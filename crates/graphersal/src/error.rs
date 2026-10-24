@@ -900,7 +900,9 @@ fn temporal_help(step: &str, error: &crate::value::temporal::TemporalError) -> S
             "Dates and times cover the years -9999 to 9999 with a resolution of one \
              nanosecond; {step}() left that range. Check the amount (date_add(DT.year, 10000) \
              goes too far) or keep the extreme values out with a filter such as \
-             is(P.gt(datetime(\"1900-01-01T00:00:00Z\")))."
+             is(P.gt(datetime(\"1900-01-01T00:00:00Z\"))). A duration's time part reaches a \
+             64-bit count of seconds (PT9223372036854775807.999999999S), more than its micros \
+             and nanos getters hold: read a long one with date_part(DT.hour) or as_string()."
         ),
         TemporalError::UnknownZone { .. } => "A zone is an IANA name of the bundled time zone \
                                               database (\"Europe/Berlin\", \

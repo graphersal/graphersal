@@ -25,7 +25,9 @@ older build refuses a version 2 file instead of misreading it. See
 The tags hold microseconds. A value with a part below the microsecond
 (`time("12:00:00.000000001")`) is refused when it is written: the transaction or snapshot that
 holds it fails with an error naming the value, and nothing is stored (never a cut value).
-Truncate it with `date_trunc(DT.microsecond)` to store it.
+Truncate it with `date_trunc(DT.microsecond)` to store it. A `duration` whose time part exceeds
+a 64-bit count of microseconds (about 292,000 years; the type reaches a 64-bit count of seconds)
+is refused in the same way.
 
 File format version 2 has no tag for an `offsettime` and no field for a zone name either. Such a
 value is refused in the same way when it is written (the unit fails, nothing is stored, the zone

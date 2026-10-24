@@ -1625,7 +1625,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$map","namespace":"global","numParams":1,"params":[{"type":"&mut WithOptionsTokens"}],"returnType":"WithOptions"}
 {"access":"public","name":"get$max","namespace":"global","numParams":1,"params":[{"type":"&mut OperatorTokens"}],"returnType":"Operator"}
 {"access":"public","name":"get$metrics","namespace":"global","numParams":1,"params":[{"type":"&mut TraversalMetrics"}],"returnType":"types::dynamic::Dynamic"}
-{"access":"public","name":"get$micros","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"i64"}
+{"access":"public","name":"get$micros","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
@@ -2654,7 +2654,7 @@ get$local(_: &mut ScopeTokens) -> Scope
 get$map(_: &mut WithOptionsTokens) -> WithOptions
 get$max(_: &mut OperatorTokens) -> Operator
 get$metrics(_: &mut TraversalMetrics) -> types::dynamic::Dynamic
-get$micros(_: &mut duration) -> i64
+get$micros(_: &mut duration) -> core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 get$microsecond(_: &mut DTTokens) -> DT
 get$microsecond(_: &mut datetime) -> i64
 get$microsecond(_: &mut localdatetime) -> i64

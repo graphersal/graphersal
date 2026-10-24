@@ -94,12 +94,12 @@ pub(crate) struct UndoLog {
     /// when it opened; `None` when the graph's execution policy sets no `memory.limit` (then
     /// nothing is paid). Reset when the outermost unit closes.
     budget: Option<MemoryBudget>,
-    /// The start of the outermost open unit, in microseconds since the Unix epoch (`None`
+    /// The start of the outermost open unit, in nanoseconds since the Unix epoch (`None`
     /// outside a unit): `GraphStorage::unit_started_at`, the time of `defaultFunction`
     /// `now`/`today`. Taken when the outermost unit opens; reset when it closes.
-    started_at: Option<i64>,
+    started_at: Option<i128>,
     /// The start of the last outermost unit: the next one never starts earlier.
-    last_started_at: i64,
+    last_started_at: i128,
 }
 
 impl UndoLog {
@@ -229,15 +229,27 @@ pub(crate) enum UndoEntry {
     },
 }
 
-/// The system clock in microseconds since the Unix epoch (UTC), through `web_time` (never
-/// `std::time`, which panics on wasm32). A clock before the epoch reads as 0 and one beyond
-/// `i64::MAX` microseconds saturates; the caller makes the result monotonic.
-pub(crate) fn now_micros() -> i64 {
+/// The system clock in nanoseconds since the Unix epoch (UTC), through `web_time` (never
+/// `std::time`, which panics on wasm32). A clock before the epoch reads as 0; the caller makes
+/// the result monotonic.
+///
+/// The digits are those the platform clock gives, never invented: nanoseconds where the
+/// operating system has them (Linux), microseconds on macOS (`CLOCK_REALTIME`), 100 ns on
+/// Windows, milliseconds on wasm32 in a browser or Node.js (`Date.now()`); the digits below
+/// are zero.
+pub(crate) fn now_nanos() -> i128 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
+            i128::try_from(elapsed.as_nanos()).unwrap_or(i128::MAX)
         })
+}
+
+/// The system clock in microseconds since the Unix epoch (UTC): [`now_nanos`] rounded down,
+/// saturating beyond `i64::MAX`. The time stamps of the commit, the journal and the Store's
+/// files (`ChangeSet::committed_at`, `created_at`, `taken_at`, `started_at`) keep this unit.
+pub(crate) fn now_micros() -> i64 {
+    i64::try_from(now_nanos() / 1000).unwrap_or(i64::MAX)
 }
 
 /// The log position a mark stands for.
@@ -279,9 +291,9 @@ impl TraversalGraph {
                     .map(|limit| MemoryBudget::new(limit).start(&*self));
             // The unit's time (`defaultFunction` `now`): never earlier than the previous unit's
             // or the last commit's, so a later unit never stores an earlier `now`.
-            let started_at = now_micros()
+            let started_at = now_nanos()
                 .max(self.undo.last_started_at)
-                .max(self.undo.last_committed_at);
+                .max(self.undo.last_committed_at as i128 * 1000);
             self.undo.started_at = Some(started_at);
             self.undo.last_started_at = started_at;
         }
@@ -474,7 +486,7 @@ impl TraversalGraph {
 
     /// The start of the outermost open unit (`GraphStorage::unit_started_at`); `None` outside a
     /// unit.
-    pub(crate) fn undo_unit_started_at(&self) -> Option<i64> {
+    pub(crate) fn undo_unit_started_at(&self) -> Option<i128> {
         self.undo.started_at
     }
 

@@ -50,10 +50,10 @@ impl CreateContext {
     /// or the system clock when the storage reports none (no unit open, or a storage that does
     /// not track it).
     pub fn for_storage<S: crate::graph::GraphStorage + ?Sized>(storage: &S) -> Self {
-        let micros = storage
+        let nanos = storage
             .unit_started_at()
-            .unwrap_or_else(crate::graph::undo::now_micros);
-        CreateContext::at(datetime_of_micros(micros))
+            .unwrap_or_else(crate::graph::undo::now_nanos);
+        CreateContext::at(datetime_of_nanos(nanos))
     }
 
     /// The time of `defaultFunction: "now"`.
@@ -68,10 +68,16 @@ impl CreateContext {
     }
 }
 
-/// The UTC `datetime` of `micros` since the Unix epoch; a time outside the years -9999 to 9999
+/// The UTC `datetime` of `nanos` since the Unix epoch; a time outside the years -9999 to 9999
 /// reads as the epoch (as the DSL's `now()` reads such a system clock).
-pub(crate) fn datetime_of_micros(micros: i64) -> DateTime {
-    DateTime::from_micros(micros, 0).unwrap_or(DateTime::EPOCH)
+pub(crate) fn datetime_of_nanos(nanos: i128) -> DateTime {
+    DateTime::from_nanos(nanos, 0).unwrap_or(DateTime::EPOCH)
+}
+
+/// The system clock as a UTC `datetime`, with the digits the platform gives
+/// ([`now_nanos`](crate::graph::undo::now_nanos)).
+pub(crate) fn system_now() -> DateTime {
+    datetime_of_nanos(crate::graph::undo::now_nanos())
 }
 
 /// Adds the create-time default of every top-level property the element's labels declare and
@@ -163,13 +169,8 @@ pub(crate) fn check_defaults(schema: &GraphSchema) -> Result<(), SchemaError> {
                 hint: hint.clone(),
             };
             // `now`/`today` are checked with the current time: a value the property admits.
-            let value = coerce_to_declared(
-                default.value(&CreateContext::at(datetime_of_micros(
-                    crate::graph::undo::now_micros(),
-                ))),
-                node,
-            )
-            .map_err(|failure| fail(failure.reason.to_string()))?;
+            let value = coerce_to_declared(default.value(&CreateContext::at(system_now())), node)
+                .map_err(|failure| fail(failure.reason.to_string()))?;
             let ctx = NestedCtx {
                 element_type,
                 label,

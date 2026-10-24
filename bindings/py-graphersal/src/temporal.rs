@@ -8,7 +8,7 @@
 //! | `date` | `datetime.date` |
 //! | `time` | naive `datetime.time` |
 //! | `offsettime` | `datetime.time` with a fixed `tzinfo` (`datetime.timezone`); a `time` whose `tzinfo` has no fixed offset (a `ZoneInfo`) is refused |
-//! | `duration` | `datetime.timedelta` when it has no months, else [`Interval`] |
+//! | `duration` | `datetime.timedelta` when it has no months and fits one (at most 999999999 days), else [`Interval`] |
 //!
 //! Python's `datetime` counts in microseconds, the engine in nanoseconds: a value with a part
 //! below the microsecond raises `ValueError` rather than being rounded (truncate it first with
@@ -78,10 +78,12 @@ impl Interval {
         self.duration.days()
     }
 
-    /// The time part in microseconds.
+    /// The time part in microseconds: a Python `int`, exact over the whole range (an `i64` of
+    /// seconds, beyond an `i64` of microseconds). An `Interval` never has digits below the
+    /// microsecond (those values are refused when converted).
     #[getter]
-    fn micros(&self) -> i64 {
-        self.duration.micros()
+    fn micros(&self) -> i128 {
+        self.duration.nanos() / 1000
     }
 
     /// The ISO 8601 text (`P1Y2M3DT4H`), the engine's canonical form.
@@ -136,10 +138,16 @@ pub(crate) fn temporal_to_pyobject(py: Python<'_>, value: Temporal) -> PyResult<
             time_object(&module, value.time(), Some(zone))?
         }
         Temporal::Duration(duration) => {
-            if duration.months() == 0 && i64::from(duration.days()).abs() <= MAX_TIMEDELTA_DAYS {
+            // The whole length in microseconds (exact: no part below the microsecond here).
+            let micros = duration.nanos() / 1000;
+            let total = i128::from(duration.days()) * i128::from(MICROS_PER_DAY) + micros;
+            let fits = (-i128::from(MAX_TIMEDELTA_DAYS) * i128::from(MICROS_PER_DAY)
+                ..(i128::from(MAX_TIMEDELTA_DAYS) + 1) * i128::from(MICROS_PER_DAY))
+                .contains(&total);
+            if duration.months() == 0 && fits {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("days", duration.days())?;
-                kwargs.set_item("microseconds", duration.micros())?;
+                kwargs.set_item("microseconds", micros)?;
                 module.getattr("timedelta")?.call((), Some(&kwargs))?
             } else {
                 Bound::new(py, Interval { duration })?.into_any()

@@ -526,7 +526,7 @@ pub(crate) trait Env {
     /// creating step stores, [`TraverserContext::create_context`](crate::traversal::context::TraverserContext::create_context));
     /// the default reads the system clock.
     fn now(&self) -> crate::value::temporal::DateTime {
-        crate::graph::schema::defaults::datetime_of_micros(crate::graph::undo::now_micros())
+        crate::graph::schema::defaults::system_now()
     }
 }
 

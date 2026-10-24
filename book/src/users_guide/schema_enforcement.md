@@ -297,6 +297,8 @@ the change set and the journal record it, so replay and recovery reproduce the s
   (`CreateContext::at(t)` pins).
 - A later unit never gets an earlier time than a previous one of the same graph (the system clock
   is raised to the previous unit's start and the last commit time).
+- The time is kept in nanoseconds, with the digits the platform clock gives
+  ([Clock precision](../dates/now_and_today.md#clock-precision)).
 
 ```rhai,graph=empty,script
 g.set_schema(#{mode: "open", vertices: #{event: #{schema: #{type: "object", properties: #{

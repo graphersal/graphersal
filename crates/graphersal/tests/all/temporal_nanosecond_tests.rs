@@ -58,12 +58,13 @@ fn the_range_edges_hold_every_nanosecond() {
     assert!(Time::from_nanos_of_day(86_400_000_000_000).is_err());
     assert!(Time::from_nanos_of_day(-1).is_err());
     assert!(Time::from_hms_nano(0, 0, 0, 1_000_000_000).is_err());
-    // A duration's time part holds an i64 of microseconds at nanosecond resolution.
-    let max = Duration::with_nanos(0, 0, i64::MAX as i128 * 1000 + 999).unwrap();
-    assert_eq!(max.micros(), i64::MAX);
-    assert!(Duration::with_nanos(0, 0, i64::MAX as i128 * 1000 + 1000).is_err());
-    let min = Duration::with_nanos(0, 0, i64::MIN as i128 * 1000).unwrap();
-    assert_eq!(min, Duration::from_micros(i64::MIN));
+    // A duration's time part holds an i64 of seconds plus nanoseconds (temporal v2 stage 2b,
+    // java.time.Duration's range).
+    let max = Duration::with_nanos(0, 0, i64::MAX as i128 * 1_000_000_000 + 999_999_999).unwrap();
+    assert_eq!(max.micros(), None);
+    assert!(Duration::with_nanos(0, 0, i64::MAX as i128 * 1_000_000_000 + 1_000_000_000).is_err());
+    let min = Duration::with_nanos(0, 0, i64::MIN as i128 * 1_000_000_000).unwrap();
+    assert!(Duration::with_nanos(0, 0, i64::MIN as i128 * 1_000_000_000 - 1).is_err());
     assert!(min.checked_neg().is_err());
     assert!(max.checked_add(Duration::from_nanos(1).unwrap()).is_err());
     assert_eq!(min.to_string().parse::<Duration>().unwrap(), min);
@@ -145,10 +146,10 @@ fn arithmetic_with_nanoseconds_and_overflow_is_an_error() {
     );
     let d = dur("PT0.000000001S");
     assert_eq!(d.nanos(), 1);
-    assert_eq!(d.micros(), 0);
+    assert_eq!(d.micros(), Some(0));
     let sum = d.checked_add(dur("PT0.999999999S")).unwrap();
     assert_eq!(sum.to_string(), "PT1S");
-    assert_eq!(dur("-PT0.0000015S").micros(), -1);
+    assert_eq!(dur("-PT0.0000015S").micros(), Some(-1));
 }
 
 #[cfg(feature = "script")]

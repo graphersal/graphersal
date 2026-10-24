@@ -259,8 +259,14 @@ pub struct OffsetTime {
 /// `interval`): months and days stay calendar units, so `P1M` added to January 31 gives the end
 /// of February and `P1D` across a daylight saving change in a zone keeps the wall-clock time.
 ///
-/// The time part holds what fits an `i64` of microseconds, about ±292,000 years, at nanosecond
-/// resolution.
+/// The time part has nanosecond resolution and the range of `java.time.Duration` (TinkerPop)
+/// and of Neo4j's duration: an `i64` of seconds plus `0..1_000_000_000` nanoseconds, from
+/// `-9223372036854775808` seconds ([`Duration::MIN_NANOS`]) to `9223372036854775807.999999999`
+/// seconds ([`Duration::MAX_NANOS`]), about ±292 billion years. The months and the days are
+/// `i32`s each.
+///
+/// A duration added to a date or time whose result leaves the years -9999 to 9999 is
+/// [`TemporalError::OutOfRange`], never a wrapped or cut value.
 ///
 /// Equality is field by field; ordering is by the length (a month = 30 days, a day = 24 hours),
 /// ties broken by the fields.
@@ -294,12 +300,6 @@ pub(crate) const MAX_OFFSET_SECONDS: i32 = 18 * 3600;
 
 /// Nanoseconds in a microsecond.
 const NANOS_PER_MICRO: i128 = 1_000;
-
-/// The smallest time part of a [`Duration`] in nanoseconds (`i64::MIN` microseconds).
-const MIN_DURATION_NANOS: i128 = i64::MIN as i128 * NANOS_PER_MICRO;
-/// The largest time part of a [`Duration`] in nanoseconds (`i64::MAX` microseconds and 999
-/// nanoseconds).
-const MAX_DURATION_NANOS: i128 = i64::MAX as i128 * NANOS_PER_MICRO + 999;
 
 impl Date {
     /// The day `year-month-day`; `OutOfRange` for an impossible or unsupported date.
@@ -708,7 +708,7 @@ impl Ord for DateTime {
 
 impl Duration {
     /// The duration of `months` months, `days` days and `micros` microseconds; each part keeps
-    /// its own sign.
+    /// its own sign. Never fails: every `i64` of microseconds is within the time part's range.
     pub fn new(months: i32, days: i32, micros: i64) -> Duration {
         Duration {
             months,
@@ -717,10 +717,20 @@ impl Duration {
         }
     }
 
+    /// The smallest time part in nanoseconds: `i64::MIN` seconds (`java.time.Duration`'s and
+    /// Neo4j's lower bound), `-9223372036854775808000000000`.
+    pub const MIN_NANOS: i128 = i64::MIN as i128 * NANOS_PER_SECOND as i128;
+
+    /// The largest time part in nanoseconds: `i64::MAX` seconds and 999999999 nanoseconds
+    /// (`java.time.Duration`'s and Neo4j's upper bound), `9223372036854775807999999999`.
+    pub const MAX_NANOS: i128 = i64::MAX as i128 * NANOS_PER_SECOND as i128 + 999_999_999;
+
     /// The duration of `months` months, `days` days and `nanos` nanoseconds; each part keeps its
-    /// own sign. `OutOfRange` when the nanoseconds exceed an `i64` of microseconds.
+    /// own sign. `OutOfRange` when the nanoseconds are outside
+    /// [`MIN_NANOS`](Self::MIN_NANOS)`..=`[`MAX_NANOS`](Self::MAX_NANOS) (an `i64` of seconds
+    /// plus the nanoseconds of one second).
     pub fn with_nanos(months: i32, days: i32, nanos: i128) -> TemporalResult<Duration> {
-        if (MIN_DURATION_NANOS..=MAX_DURATION_NANOS).contains(&nanos) {
+        if (Self::MIN_NANOS..=Self::MAX_NANOS).contains(&nanos) {
             Ok(Duration {
                 months,
                 days,
@@ -736,8 +746,8 @@ impl Duration {
         Duration::new(0, 0, micros)
     }
 
-    /// A duration of `nanos` nanoseconds (no calendar part); `OutOfRange` beyond an `i64` of
-    /// microseconds.
+    /// A duration of `nanos` nanoseconds (no calendar part); `OutOfRange` outside
+    /// [`MIN_NANOS`](Self::MIN_NANOS)`..=`[`MAX_NANOS`](Self::MAX_NANOS).
     pub fn from_nanos(nanos: i128) -> TemporalResult<Duration> {
         Duration::with_nanos(0, 0, nanos)
     }
@@ -752,10 +762,12 @@ impl Duration {
         self.days
     }
 
-    /// The time part in whole microseconds, the nanoseconds below them cut (toward zero).
-    pub fn micros(self) -> i64 {
-        // In range by construction.
-        (self.nanos.get() / NANOS_PER_MICRO) as i64
+    /// The time part in whole microseconds, the nanoseconds below them cut toward zero (as
+    /// before temporal v2); `None` when the time part exceeds an `i64` of microseconds (about
+    /// ±292,000 years), which the time part's range ([`MAX_NANOS`](Self::MAX_NANOS)) allows.
+    /// [`nanos`](Self::nanos) gives every time part exactly.
+    pub fn micros(self) -> Option<i64> {
+        i64::try_from(self.nanos.get() / NANOS_PER_MICRO).ok()
     }
 
     /// The time part in nanoseconds.

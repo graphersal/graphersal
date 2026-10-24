@@ -66,7 +66,8 @@ class Interval:
         """The days (a day is not always 24 hours in a time zone)."""
     @property
     def micros(self) -> int:
-        """The time part in microseconds."""
+        """The time part in microseconds, exact over the whole range (up to an int64 of
+        seconds, beyond an int64 of microseconds)."""
     def to_iso(self) -> str:
         """The ISO 8601 text (``P1Y2M3DT4H``), the engine's canonical form."""
     def __eq__(self, other: object) -> bool: ...

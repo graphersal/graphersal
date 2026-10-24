@@ -1072,15 +1072,19 @@ pub trait GraphStorage: Send + Sync {
         0
     }
 
-    /// The start of the outermost open unit, in microseconds since the Unix epoch (UTC):
-    /// the time `defaultFunction` `now`/`today` store for the elements a query creates in it
-    /// ([`CreateContext::for_storage`]), one value for the whole unit (PostgreSQL `now()`).
-    /// `None` outside a unit.
+    /// The start of the outermost open unit, in nanoseconds since the Unix epoch (UTC, the unit
+    /// of [`DateTime::from_nanos`](crate::temporal::DateTime::from_nanos)): the time
+    /// `defaultFunction` `now`/`today` store for the elements a query creates in it
+    /// ([`CreateContext::for_storage`]) and the GQL clocks read, one value for the whole unit
+    /// (PostgreSQL `now()`). `None` outside a unit. A value outside the years -9999 to 9999
+    /// reads as the epoch.
     ///
-    /// [`TraversalGraph`] takes it once when the outermost unit opens, never earlier than the
-    /// previous unit's start or the last commit time (so later units never get an earlier
-    /// time). Default: `None` (the caller then reads the system clock).
-    fn unit_started_at(&self) -> Option<i64> {
+    /// [`TraversalGraph`] takes it once when the outermost unit opens from the system clock
+    /// (with the digits the platform gives: see the book page "Dates and Times", "Clock
+    /// precision"), never earlier than the previous unit's start or the last commit time (so
+    /// later units never get an earlier time). Default: `None` (the caller then reads the
+    /// system clock).
+    fn unit_started_at(&self) -> Option<i128> {
         None
     }
 
@@ -2398,7 +2402,7 @@ impl GraphStorage for TraversalGraph {
         self.commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         self.undo_unit_started_at()
     }
 
@@ -2805,7 +2809,7 @@ impl<G: GraphStorage> GraphStorage for &G {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         (**self).unit_started_at()
     }
 }
@@ -3229,7 +3233,7 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         (**self).unit_started_at()
     }
 
@@ -3667,7 +3671,7 @@ impl<G: GraphStorage> GraphStorage for &mut G {
         (**self).last_commit_seq()
     }
 
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         (**self).unit_started_at()
     }
 
@@ -4276,7 +4280,7 @@ impl GraphStorage for Arc<TraversalGraph> {
         GraphStorage::last_commit_seq(self.as_ref())
     }
 
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         GraphStorage::unit_started_at(self.as_ref())
     }
 

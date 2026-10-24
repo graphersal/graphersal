@@ -12189,3 +12189,34 @@ mod gql {
         }
     }
 }
+
+/// Temporal v2 stage 2b (rule 6): a duration's time part reaches a 64-bit count of seconds, more
+/// than the `micros` / `nanos` getters hold; the range help keeps its advice and names the
+/// readers that take a long duration.
+#[cfg(feature = "script")]
+#[test]
+fn a_long_duration_range_help_names_date_part_and_as_string() {
+    use crate::script_host::eval;
+
+    for query in [
+        r#"duration("PT9223372036854775807S").micros"#,
+        r#"g.inject(duration("PT9223372036854775807S")).date_add(DT.second, 1).next()"#,
+    ] {
+        let graph = std::sync::Arc::new(GraphSource::empty());
+        let report = eval(graph, query)
+            .expect_err("beyond the range")
+            .to_string();
+        assert!(
+            report.contains("Dates and times cover the years -9999 to 9999"),
+            "{query}: {report}"
+        );
+        assert!(
+            report.contains(
+                "A duration's time part reaches a 64-bit count of seconds \
+                 (PT9223372036854775807.999999999S), more than its micros and nanos getters \
+                 hold: read a long one with date_part(DT.hour) or as_string()."
+            ),
+            "{query}: {report}"
+        );
+    }
+}

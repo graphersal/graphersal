@@ -360,11 +360,12 @@ graph.query('duration("P1Y2M")')
   aware `datetime`.
 - A `timedelta` becomes a duration of whole days and the rest, both with the sign of the whole:
   `timedelta(hours=-1)` is `-PT1H` (Python itself writes it as `days=-1, seconds=82800`); a
-  duration comes back as the equal `timedelta`.
+  duration comes back as the equal `timedelta`, or as an `Interval` when it is longer than a
+  `timedelta` holds (999999999 days; a duration's time part reaches an int64 of seconds).
 - `graphersal.Interval(months, days=0, micros=0)` or `graphersal.Interval("P1Y2M3DT4H")` holds a
   duration with months (a month has no fixed length, so `timedelta` cannot). It is immutable,
   equal when all three fields are equal (`P1M` is not `P30D`, as in the engine), and has
-  `months`, `days`, `micros` and `to_iso()`.
+  `months`, `days`, `micros` (exact, also beyond an int64) and `to_iso()`.
 - Python's `datetime` holds the years 1 to 9999; a Graphersal date before year 1 raises
   `GraphersalError` when it is returned (read it as text with `as_string()`).
 - Saved queries (`call_query`) take the same values; they travel as their ISO 8601 text, and the

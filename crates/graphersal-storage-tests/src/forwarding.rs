@@ -380,7 +380,7 @@ impl GraphStorage for Forwarding {
     fn last_commit_seq(&self) -> u64 {
         GraphStorage::last_commit_seq(&self.0)
     }
-    fn unit_started_at(&self) -> Option<i64> {
+    fn unit_started_at(&self) -> Option<i128> {
         GraphStorage::unit_started_at(&self.0)
     }
     fn raise_id_sequences(

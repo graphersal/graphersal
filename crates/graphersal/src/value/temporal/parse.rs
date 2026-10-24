@@ -85,13 +85,15 @@ impl<'a> Cursor<'a> {
     }
 
     /// A run of digits (at least one), as `i64`; `None` when there is none.
-    fn number(&mut self) -> TemporalResult<Option<i64>> {
+    /// An unsigned run of digits of a duration part, up to `u64::MAX` (so the smallest time
+    /// part, `-PT9223372036854775808S`, reads back).
+    fn number(&mut self) -> TemporalResult<Option<u64>> {
         let start = self.pos;
-        let mut value: i64 = 0;
+        let mut value: u64 = 0;
         while let Some(b @ b'0'..=b'9') = self.peek() {
             value = match value
                 .checked_mul(10)
-                .and_then(|v| v.checked_add((b - b'0') as i64))
+                .and_then(|v| v.checked_add((b - b'0') as u64))
             {
                 Some(v) => v,
                 None => return self.fail("a number is too large"),
@@ -351,8 +353,8 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
         return c.fail("expected 'P' (ISO 8601 duration such as P1DT2H)");
     }
     // Wide accumulators: the parts are summed and the leading sign applied before the range
-    // check, so `-P178956970Y8M` (i32::MIN months) and `-PT2562047788H0M54.775808S` (the
-    // smallest time part, i64::MIN microseconds) parse back.
+    // check, so `-P178956970Y8M` (i32::MIN months) and `-PT9223372036854775808S` (the
+    // smallest time part, i64::MIN seconds) parse back.
     let mut months: i128 = 0;
     let mut days: i128 = 0;
     let mut nanos: i128 = 0;
@@ -397,8 +399,9 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
         if fraction != 0 && unit != b'S' {
             return c.fail("only seconds may have a fraction");
         }
-        // `number` is at most i64::MAX (an hour of nanoseconds is below 2^42, the product below
-        // 2^105) and at most seven parts are summed: no i128 overflow.
+        // `number` is below 2^64 (an hour of nanoseconds is below 2^42, the product below
+        // 2^106) and every sum is checked against LIMIT (2^100) after each part: no i128
+        // overflow.
         let n = number as i128 * sign;
         let second = NANOS_PER_SECOND as i128;
         match (in_time, unit) {

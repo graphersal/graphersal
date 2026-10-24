@@ -42,6 +42,11 @@ g.inject(datetime("2023-08-02T09:30Z")).is(P.typeOf(GType.DATETIME)).count().nex
 - **A `duration` is not normalized:** `P1M`, `P30D` and `PT720H` are three different values. A
   month has no fixed length and a day is not always 24 hours in a time zone, so the three fields
   stay apart, as in PostgreSQL's `interval`.
+- **Duration range:** the months and the days are 32-bit integers each; the time part has the
+  range of `java.time.Duration` (TinkerPop) and of Neo4j's duration, a 64-bit count of seconds
+  plus the nanoseconds of one second: from `-PT9223372036854775808S` to
+  `PT9223372036854775807.999999999S` (about ±292 billion years). Adding such a duration to a
+  date or time whose result leaves the years -9999 to 9999 is an error.
 - **No guessing:** a string stays a string whatever it looks like. A date comes from a
   constructor, a conversion step ([Conversions](conversions.md)), a schema that declares the
   property ([Schema](schema.md)), a typed value in a file ([Storage and Exchange](storage.md)) or
@@ -58,7 +63,7 @@ In a script each type is a value of its own Rhai type with getters and operators
 | `date` | `year`, `month`, `day` |
 | `time` | `hour`, `minute`, `second`, `microsecond`, `nanosecond` |
 | `offsettime` | `hour`, `minute`, `second`, `microsecond`, `nanosecond` (of its local time), `offset` (seconds), `timezone` (the offset text) |
-| `duration` | `months`, `days`, `micros` (the time part in whole microseconds), `nanos` (in nanoseconds) |
+| `duration` | `months`, `days`, `micros` (the time part in whole microseconds), `nanos` (in nanoseconds); `micros` beyond a 64-bit integer (about 292,000 years) and `nanos` beyond one (about 292 years) are a range error |
 
 `microsecond` is the whole microseconds of the second (0-999999), `nanosecond` all its
 nanoseconds (0-999999999): `time("12:00:00.123456789")` has `microsecond` 123456 and

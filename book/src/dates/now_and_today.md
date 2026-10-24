@@ -50,3 +50,23 @@ pin_now(&mut engine, None); // the system clock again
 
 The system clock is read through `web_time`, so `now()` works the same in the WebAssembly
 playground.
+
+## Clock precision
+
+`now()`, `today()`, the GQL clocks (`datetime()`, `date()`, `X.statement()`, ...) and the time a
+schema's `defaultFunction: "now"` stores all come from the system clock, taken once (at the
+start of the evaluation, or of the outermost open unit). The time is kept in nanoseconds, with
+the digits the platform clock gives and never invented ones (the digits below are zero):
+
+| Platform | Digits of the system clock |
+|---|---|
+| Linux | nanoseconds |
+| macOS | microseconds (`CLOCK_REALTIME`) |
+| Windows | 100 nanoseconds |
+| WebAssembly (the browser playground, Node.js) | milliseconds (`Date.now()`) |
+
+A pinned clock (`pin_now`, `GraphTraversalSource::with_now`) keeps every digit of the pinned
+value. The binary store format of this release holds microseconds: where the clock has digits
+below the microsecond (Linux, Windows), a `now()` stored in a [Store](../persistence/store.md)
+is refused like any such value; store `g.inject(now()).date_trunc(DT.microsecond)` instead
+([Storage and Exchange](storage.md)).

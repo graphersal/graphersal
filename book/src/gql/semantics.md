@@ -1158,8 +1158,9 @@ the engine's [date and time values](../dates/index.md) (Cypher's `time` is the e
   ([Time Zones](../dates/time_zones.md#zone-names-in-a-value)). A `time` keeps an offset only (a
   named zone gives its offset at the query's instant).
 - **One clock per query.** The constructors without an argument, `X.statement()` and
-  `X.transaction()` all read one instant, taken when the query starts; `X.realtime()` is
-  refused, as `rand()` is.
+  `X.transaction()` all read one instant, taken when the query starts (in nanoseconds, with the
+  digits the platform clock has: [Clock precision](../dates/now_and_today.md#clock-precision));
+  `X.realtime()` is refused, as `rand()` is.
 
 The Gremlin steps and the Rhai operators keep their own (PostgreSQL-style) rules: every
 difference below lives in `gql()` only. [Dates in GQL](../dates/gql.md) sets each function
@@ -1184,6 +1185,7 @@ g.gql("RETURN localtime({hour: 12, minute: 0, second: 0, nanosecond: 5}) AS t").
 | `toString(temporal)` writes `'12:00'`, `'PT-1M-0.001S'` | the same; `CAST(x AS STRING)` writes the engine's ISO text (`'12:00:00'`, `'-PT1M0.001S'`) | `toString` is the Cypher compatibility function, `CAST` the ISO one |
 | `<` / `>` on two durations is `NULL` | the same; `ORDER BY` sorts durations by length (a month of 30 days) | a month has no fixed length; a sort needs a total order |
 | `X.realtime()` reads the live clock | refused (`0A000`); the other clocks read one instant per query | a clock that moves during the query makes it non-deterministic, as `rand()` |
+| a duration: 64-bit months, days and seconds, plus the nanoseconds of one second | the same time part (a 64-bit count of seconds plus nanoseconds, `-PT9223372036854775808S` to `PT9223372036854775807.999999999S`); months and days are 32-bit, beyond is `22008` | the size of a stored value; a result leaving the years -9999 to 9999 is `22008` in both |
 | years -999 999 999 to 999 999 999 | years -9999 to 9999; beyond is `22008` | the engine's range ([Dates and Times](../dates/index.md)); 2 TCK cases are excluded (`year-range`) |
 | `duration.between` of two different types aligns them (a missing date: times only, a missing time: midnight, a missing zone: the other side's) | the same; the zone lent is the other side's zone name when it has one, else its offset | Neo4j's rule |
 

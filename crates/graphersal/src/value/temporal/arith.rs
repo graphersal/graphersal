@@ -782,7 +782,7 @@ fn duration_part(v: Duration, unit: DT) -> Option<Number> {
         DT::Millisecond => int(nanos % second / 1_000_000),
         DT::Second => int(nanos / second % 60),
         DT::Minute => int(nanos / (60 * second) % 60),
-        // At most i64::MAX microseconds: the hours fit an i64.
+        // At most i64::MAX seconds: the hours fit an i64.
         DT::Hour => int(nanos / (3600 * second)),
         DT::Day => int(v.days as i128),
         DT::Month => int((months % 12) as i128),

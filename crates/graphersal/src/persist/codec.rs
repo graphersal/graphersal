@@ -438,8 +438,9 @@ fn read_vector(reader: &mut Reader<'_>, start: u64) -> DecodeResult<Vector> {
 }
 
 /// Writes a temporal value with its tag (format spec 3, file format version 2). The tags hold
-/// microseconds: a value with a part below the microsecond is refused (never cut), so the unit
-/// that wrote it fails and nothing is stored. An `offsettime` and a `datetime` with a zone name
+/// microseconds: a value with a part below the microsecond, or a duration whose time part
+/// exceeds an `i64` of microseconds, is refused (never cut), so the unit that wrote it fails
+/// and nothing is stored. An `offsettime` and a `datetime` with a zone name
 /// have no tag in this version and are refused in the same way (the zone name is never dropped
 /// silently).
 fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
@@ -482,10 +483,18 @@ fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
             put_uvar(out, time.micros_of_day() as u64);
         }
         Temporal::Duration(duration) => {
+            // The tag holds an i64 of microseconds; the time part reaches an i64 of seconds.
+            let Some(micros) = duration.micros() else {
+                return Err(format!(
+                    "the duration {value} has a time part beyond an integer of microseconds \
+                     (about 292,000 years), which this file format (version {FORMAT_VERSION}) \
+                     cannot store yet"
+                ));
+            };
             put_u8(out, tag::DURATION);
             put_svar(out, duration.months() as i64);
             put_svar(out, duration.days() as i64);
-            put_svar(out, duration.micros());
+            put_svar(out, micros);
         }
         // Refused above (no tag in file format version 2).
         Temporal::OffsetTime(_) => {

@@ -223,3 +223,16 @@ def test_a_value_below_the_microsecond_is_refused_never_rounded(graph):
     assert graph.query(
         'g.inject(time("12:00:00.123456789")).date_trunc(DT.microsecond).next()'
     ) == dt.time(12, 0, 0, 123456)
+
+
+def test_a_duration_longer_than_a_timedelta_is_an_interval(graph):
+    # Temporal v2 stage 2b: a duration's time part reaches an int64 of seconds.
+    longest = graph.query('duration("PT9223372036854775807S")')
+    assert isinstance(longest, graphersal.Interval)
+    assert (longest.months, longest.days) == (0, 0)
+    assert longest.micros == 9223372036854775807 * 10**6
+    assert longest.to_iso() == "PT2562047788015215H30M7S"
+    # The edge of a timedelta still converts.
+    edge = graph.query('duration("P999999999DT86399.999999S")')
+    assert edge == dt.timedelta.max
+    assert isinstance(graph.query('duration("P999999999DT86400S")'), graphersal.Interval)

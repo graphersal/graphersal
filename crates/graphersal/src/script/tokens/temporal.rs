@@ -116,6 +116,17 @@ fn script_duration(text: &str) -> Rhai<Duration> {
         .map_err(|error| temporal_failure("duration", error))
 }
 
+/// `d.micros`: the time part of a duration in whole microseconds (the nanoseconds below them
+/// cut toward zero); beyond an integer (about 292,000 years) a range error.
+fn duration_micros(duration: &Duration) -> Rhai<i64> {
+    duration.micros().ok_or_else(|| {
+        temporal_failure(
+            "micros",
+            TemporalError::out_of_range("the microseconds of the duration"),
+        )
+    })
+}
+
 /// `d.nanos`: the time part of a duration in nanoseconds; beyond an integer (about 292 years)
 /// a range error.
 fn duration_nanos(duration: &Duration) -> Rhai<i64> {
@@ -338,7 +349,7 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
         })
         .register_get("months", |v: &mut Duration| v.months() as i64)
         .register_get("days", |v: &mut Duration| v.days() as i64)
-        .register_get("micros", |v: &mut Duration| v.micros())
+        .register_get("micros", |v: &mut Duration| duration_micros(v))
         .register_get("nanos", |v: &mut Duration| duration_nanos(v));
 
     // The `DT` token: `DT.day` (dot, on the scope marker; both spellings of the multi-word

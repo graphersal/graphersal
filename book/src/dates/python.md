@@ -13,7 +13,7 @@ rounded; truncate it first with `date_trunc(DT.microsecond)`:
 | `date` | `datetime.date` |
 | `time` | naive `datetime.time` |
 | `offsettime` | `datetime.time` with `tzinfo=datetime.timezone(timedelta(seconds=offset))` |
-| `duration` without months | `datetime.timedelta` |
+| `duration` without months | `datetime.timedelta` (an `Interval` beyond 999999999 days) |
 | `duration` with months | `graphersal.Interval(months, days, micros)` |
 
 ```python
@@ -39,7 +39,8 @@ graph.query('duration("P1Y2M")')
 - A `timedelta` becomes whole days and the rest, both with the sign of the whole
   (`timedelta(hours=-1)` is `-PT1H`).
 - `graphersal.Interval` is immutable, equal when its three fields are equal (`Interval("P1M") !=
-  Interval(0, 30)`, as in the engine), has `months`, `days`, `micros` and `to_iso()`, and is
+  Interval(0, 30)`, as in the engine), has `months`, `days`, `micros` (a Python `int`, exact
+  over the whole range of a duration) and `to_iso()`, and is
   built from the fields or from ISO 8601 text (`Interval("P1Y2M3DT4H")`).
 - Python's `datetime` holds the years 1 to 9999; a date before year 1 cannot be returned as one
   (read it with `as_string()`).

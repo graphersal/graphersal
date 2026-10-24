@@ -431,7 +431,7 @@ fn accessors() {
     let span = dur("P1M2DT3S");
     assert_eq!(
         (span.months(), span.days(), span.micros()),
-        (1, 2, 3_000_000)
+        (1, 2, Some(3_000_000))
     );
     assert!(!span.is_zero());
     assert!(Duration::default().is_zero());
@@ -741,8 +741,8 @@ fn overflow_at_the_range_edges_is_an_error() {
         None
     )));
     assert!(out(add(
-        Temporal::Duration(Duration::new(0, 0, i64::MAX)),
-        DT::Microsecond,
+        Temporal::Duration(Duration::from_nanos(Duration::MAX_NANOS).unwrap()),
+        DT::Nanosecond,
         1,
         None
     )));
@@ -918,14 +918,17 @@ fn age_is_months_then_days_then_micros_with_one_sign() {
         let signs = [
             span.months().signum(),
             span.days().signum(),
-            span.micros().signum() as i32,
+            span.micros().unwrap().signum() as i32,
         ];
         assert!(
             signs.iter().all(|s| *s >= 0) || signs.iter().all(|s| *s <= 0),
             "{a} - {b} = {span}"
         );
         assert!(span.days().abs() < 31, "{a} - {b} = {span}");
-        assert!(span.micros().abs() < 86_400_000_000, "{a} - {b} = {span}");
+        assert!(
+            span.micros().unwrap().abs() < 86_400_000_000,
+            "{a} - {b} = {span}"
+        );
         let back = age(Temporal::LocalDateTime(b), Temporal::LocalDateTime(a), None).unwrap();
         assert_eq!(back, span.checked_neg().unwrap(), "{a} - {b} = {span}");
     }
