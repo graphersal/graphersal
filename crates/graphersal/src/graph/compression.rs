@@ -1132,9 +1132,9 @@ pub struct CompressionStats {
 // TraversalGraph: write path, pass, load, invariant
 // ---------------------------------------------------------------------------------------------
 
-/// The labels of an edge as a slice.
-fn edge_labels(label: &Option<CompactString>) -> Vec<&str> {
-    label.as_deref().into_iter().collect()
+/// The labels of an edge as a list of zero or one.
+fn edge_labels(label: Option<&str>) -> Vec<&str> {
+    label.into_iter().collect()
 }
 
 impl TraversalGraph {
@@ -1176,7 +1176,12 @@ impl TraversalGraph {
         else {
             return;
         };
-        let labels: Vec<&str> = vertex.1.iter().map(CompactString::as_str).collect();
+        let labels: Vec<&str> = self
+            .labels
+            .set(vertex.1)
+            .iter()
+            .map(CompactString::as_str)
+            .collect();
         self.compression
             .normalize_key(ElementKind::Vertex, &labels, &mut vertex.2, key);
     }
@@ -1197,7 +1202,7 @@ impl TraversalGraph {
         else {
             return;
         };
-        let labels = edge_labels(&edge.1);
+        let labels = edge_labels(self.labels.name_str(edge.1));
         if let Some(properties) = edge.2.as_mut() {
             self.compression
                 .normalize_key(ElementKind::Edge, &labels, properties, key);
@@ -1221,7 +1226,12 @@ impl TraversalGraph {
         else {
             return;
         };
-        let labels: Vec<&str> = vertex.1.iter().map(CompactString::as_str).collect();
+        let labels: Vec<&str> = self
+            .labels
+            .set(vertex.1)
+            .iter()
+            .map(CompactString::as_str)
+            .collect();
         self.compression
             .normalize_element(ElementKind::Vertex, &labels, &mut vertex.2, force);
     }
@@ -1239,7 +1249,7 @@ impl TraversalGraph {
         else {
             return;
         };
-        let labels = edge_labels(&weight.1);
+        let labels = edge_labels(self.labels.name_str(weight.1));
         if let Some(properties) = weight.2.as_mut() {
             self.compression
                 .normalize_element(ElementKind::Edge, &labels, properties, force);
@@ -1454,12 +1464,18 @@ impl TraversalGraph {
     #[doc(hidden)]
     pub fn check_compression_invariant(&self) -> Result<(), String> {
         for (id, labels, properties, _) in self.graph.node_weights() {
-            let labels: Vec<&str> = labels.iter().map(CompactString::as_str).collect();
+            let labels: Vec<&str> = self
+                .labels
+                .set(*labels)
+                .iter()
+                .map(CompactString::as_str)
+                .collect();
             self.check_element(ElementKind::Vertex, id, &labels, properties)?;
         }
         for (id, label, properties, _) in self.graph.edge_weights() {
             if let Some(properties) = properties {
-                self.check_element(ElementKind::Edge, id, &edge_labels(label), properties)?;
+                let labels = edge_labels(self.labels.name_str(*label));
+                self.check_element(ElementKind::Edge, id, &labels, properties)?;
             }
         }
         // The rule state matches the catalog.

@@ -636,11 +636,13 @@ impl TraversalGraph {
                     return;
                 };
                 self.pindex_vertex(handle, false, None);
+                let old_set = self.labels.intern_set(&old);
                 let Some(vertex) = self.vertex_weight_mut(handle) else {
                     tracing::error!(%id, "undo: vertex of a label change not found");
                     return;
                 };
-                let current = std::mem::replace(&mut vertex.1, old.clone());
+                let current_set = std::mem::replace(&mut vertex.1, old_set);
+                let current = self.labels.set(current_set).to_vec();
                 self.statistics.vertex_relabeled(&current, &old);
                 for label in current.iter().filter(|l| !old.contains(l)) {
                     self.index.remove_node_label(label, handle);
@@ -657,11 +659,13 @@ impl TraversalGraph {
                     return;
                 };
                 self.pindex_edge(handle, false, None);
+                let old_id = self.labels.intern_name(old.as_deref());
                 let Some(edge) = self.edge_weight_mut(handle) else {
                     tracing::error!(%id, "undo: edge of a label change not found");
                     return;
                 };
-                let current = std::mem::replace(&mut edge.1, old.clone());
+                let current_id = std::mem::replace(&mut edge.1, old_id);
+                let current = self.labels.name(current_id).cloned();
                 self.statistics
                     .edge_relabeled(current.as_deref(), old.as_deref());
                 if let Some(current) = current {
@@ -828,9 +832,10 @@ impl TraversalGraph {
         self.shapes.adopt(&mut properties);
         // The slot the topology fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
+        let label_set = self.labels.intern_set(&labels);
         let index = self.graph.add_node((
             id,
-            labels,
+            label_set,
             properties,
             crate::graph::handle::FIRST_GENERATION,
         ));
@@ -841,9 +846,9 @@ impl TraversalGraph {
             // Indexed after the generation patch, so the entry's handle matches its slot (the
             // id index keeps no copy of the id, see `GraphIndex`).
             self.index.insert_node(&vertex.0, handle);
-            self.statistics.vertex_added(&vertex.1);
-            for label in &vertex.1 {
-                self.index.insert_node_label(label.clone(), handle);
+            self.statistics.vertex_added(&labels);
+            for label in labels {
+                self.index.insert_node_label(label, handle);
             }
         }
         self.pindex_vertex(handle, true, None);
@@ -870,7 +875,12 @@ impl TraversalGraph {
         let Some(edge_index) = self.graph.add_edge(
             from.index(),
             to.index(),
-            (id, label.clone(), properties, generations),
+            (
+                id,
+                self.labels.intern_name(label.as_deref()),
+                properties,
+                generations,
+            ),
         ) else {
             // Unreachable: every caller resolved both endpoints. A handle to no slot reads as
             // removed, and nothing was stored.
@@ -916,6 +926,7 @@ impl TraversalGraph {
         };
         self.pindex_edge(edge, false, None);
         let (id, label, properties, _) = self.graph.remove_edge(index)?;
+        let label = self.labels.name(label).cloned();
         self.statistics.edge_removed(label.as_deref());
         if let Some(label) = &label {
             self.index.remove_edge_label(label, edge);
@@ -964,6 +975,7 @@ impl TraversalGraph {
         }
         self.pindex_vertex(node, false, None);
         let (id, labels, properties, _) = self.graph.remove_node(index)?;
+        let labels = self.labels.set(labels).to_vec();
         self.statistics.vertex_removed(&labels);
         self.index.remove_node(&id, node);
         for label in &labels {

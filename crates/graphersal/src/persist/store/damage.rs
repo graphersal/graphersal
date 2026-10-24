@@ -1173,7 +1173,7 @@ fn rebuild_range(
                     .filter(|v| !placeholders.contains(&v.0))
                     .map(|v| VertexRecord {
                         id: v.0.clone(),
-                        labels: v.1.clone(),
+                        labels: graph.labels.set(v.1).to_vec(),
                         properties: v.2.clone(),
                     })
                     .collect(),
@@ -1194,7 +1194,7 @@ fn rebuild_range(
                 };
                 out.push(EdgeRecord {
                     id: e.0.clone(),
-                    label: e.1.clone(),
+                    label: graph.labels.name(e.1).cloned(),
                     out_id: out_v.0.clone(),
                     in_id: in_v.0.clone(),
                     properties: e.2.clone().unwrap_or_default(),
