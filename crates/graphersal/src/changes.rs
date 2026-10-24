@@ -61,9 +61,11 @@
 //! type tag for every logical type plain JSON cannot hold (CLAUDE.md rule 7 allows explicit
 //! tags; content is never sniffed): `uuid`, written in TinkerPop GraphSON style as
 //! `{"@type": "g:UUID", "@value": "<canonical lowercase uuid>"}`, and the date and time types
-//! with their canonical text: `gx:OffsetDateTime`, `gx:LocalDate`, `gx:LocalDateTime`,
-//! `gx:LocalTime`, and for a `duration` `gx:Duration` (microseconds only), `gx:Period` (months
-//! and days only) or `graphersal:Interval` (both), and a vector as
+//! with their canonical text (up to nine fraction digits, exact): `gx:OffsetDateTime`,
+//! `gx:ZonedDateTime` (a `datetime` with a zone name, `..+02:00[Europe/Berlin]`),
+//! `gx:OffsetTime`, `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, and for a `duration`
+//! `gx:Duration` (a time part only), `gx:Period` (months and days only) or
+//! `graphersal:Interval` (both), and a vector as
 //! `{"@type": "graphersal:Vector", "@value": {"element": "f32", "data": [..]}}` (exact for every
 //! element kind: an `i8` vector with `scale` and `codes`, a `bit` vector with `dimension` and
 //! `bits` in hex). JSON-native types stay untagged.

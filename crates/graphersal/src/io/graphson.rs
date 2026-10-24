@@ -23,9 +23,9 @@
 //! | `g:List`, `g:Set`, plain array | `array` | `g:List` |
 //! | `g:Map` with string keys, plain object | `object` | `g:Map` |
 //! | `gx:Char` | `string` | string |
-//! | `g:Date`, `g:Timestamp` (epoch ms), `gx:Instant`, `gx:OffsetDateTime`, `gx:ZonedDateTime` (an IANA zone id of the bundled database is kept, any other zone id is dropped, reported) | `datetime` | `gx:OffsetDateTime`, `gx:ZonedDateTime` for a value with a zone name |
+//! | `g:Date`, `g:Timestamp` (epoch ms), `gx:Instant`, `gx:OffsetDateTime` (also `g:DateTime`), `gx:ZonedDateTime` (an IANA zone id of the bundled database is kept when the stated offset is the zone's offset at that instant; any other zone id is dropped and reported, the stated offset kept) | `datetime` | `gx:OffsetDateTime`, `gx:ZonedDateTime` for a value with a zone name |
 //! | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, `gx:OffsetTime` | `date`, `localdatetime`, `time`, `offsettime` | the same tags |
-//! | `gx:Duration` (a day = 24 h), `gx:Period` | `duration` | `gx:Duration` (time part only), `gx:Period` (months and days only), else `graphersal:Interval` |
+//! | `gx:Duration` (a day = 24 h), `gx:Period` | `duration` | `gx:Duration` (time part only; a negative one in `java.time`'s per-field form `PT-1H-30M`), `gx:Period` (months and days only), else `graphersal:Interval` |
 //! | `g:List` of numbers where the target schema declares a vector (mode `open`/`closed`: coerced on write); `graphersal:Vector` (exact, our own tag) | `vector` | `g:List` of `g:Float` (an i8 or bit vector as its f32 values) |
 //! | `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:ZoneOffset`, other types | skipped, reported | - |
 //!
@@ -39,8 +39,9 @@
 //! `for_developers/tinkerpop_deviations.md`): ids are strings (TinkerGraph then answers
 //! `g.V("1")`), multi-/meta-properties are folded into arrays and `_meta`, a label set is one
 //! `"A::B"` label for TinkerGraph, unlabeled elements get the default labels `vertex`/`edge`,
-//! unsupported types (and the date types without a twin) are skipped, a zone id and digits below
-//! a microsecond are dropped, a duration with both months/days and a time part is exported as
+//! unsupported types (and the date types without a twin) are skipped, a zone id the bundled
+//! database does not know (or whose offset at that instant is not the stated one) is dropped
+//! (the stated offset is kept), a duration with both months/days and a time part is exported as
 //! `graphersal:Interval` (no `java.time` type holds it), an edge to a missing vertex and a
 //! duplicate vertex id are skipped instead of failing, vertex-property ids are not kept.
 
@@ -154,22 +155,32 @@ pub enum ImportNoteKind {
         /// The key.
         key: String,
     },
-    /// A `gx:ZonedDateTime` imported as a `datetime` with its offset at that time: its zone id
-    /// is not an IANA zone of the bundled database (`GMT+02:00`), or does not have that offset
-    /// then, so it is not kept. A known zone id (`Europe/Paris`) is kept in the value.
+    /// A `gx:ZonedDateTime` imported as a `datetime` with the offset it states: its zone id is
+    /// not an IANA zone of the bundled database (`GMT+02:00`), or that zone does not have the
+    /// stated offset at that instant (another time zone database wrote it), so the name is not
+    /// kept. The stated offset is never recomputed from the name (the instant stays as written;
+    /// a deliberate deviation from `java.time`, which keeps the zone and recomputes the offset:
+    /// book `users_guide/graphson.md`, `for_developers/tinkerpop_deviations.md`). A known zone id
+    /// with its offset (`Europe/Paris`) is kept in the value.
     ZoneDropped {
         /// The value's `@type`.
         type_tag: String,
     },
-    /// A date or time value with digits below a microsecond, cut to microseconds. No longer
-    /// reported: values hold nanoseconds, as Java writes them, and nothing is cut. Kept so code
-    /// that matches it still compiles.
+    /// A date or time value with digits below a microsecond, cut to microseconds. Never
+    /// reported since temporal values hold nanoseconds (0.3.0): every digit Java writes is
+    /// kept. Deprecated rather than removed, so code that matches it still compiles.
+    #[deprecated(
+        since = "0.3.0",
+        note = "never reported: temporal values hold nanoseconds and nothing is cut"
+    )]
     SubMicrosecondsCut {
         /// The value's `@type`.
         type_tag: String,
     },
 }
 
+// The deprecated `SubMicrosecondsCut` arm keeps these matches exhaustive (rule 15).
+#[allow(deprecated)]
 impl ImportNoteKind {
     /// Whether this kind of note means that data was not imported.
     pub fn is_skip(&self) -> bool {
@@ -194,6 +205,7 @@ impl ImportNoteKind {
     }
 }
 
+#[allow(deprecated)]
 impl fmt::Display for ImportNoteKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1882,6 +1894,56 @@ fn meta_plan(props: &PropertyMap) -> MetaPlan<'_> {
     }
 }
 
+/// The text `java.time.Duration.toString()` gives a duration of `nanos` nanoseconds: every field
+/// carries the sign (`PT-1H-30M`, `PT-0.5S`), the fraction without trailing zeros.
+///
+/// Export writes it for a negative `gx:Duration`: `Duration.parse` sums the fields before it
+/// applies a leading sign, so it cannot read the canonical `-PT2562047788015215H30M8S` of the
+/// shortest duration (-2^63 seconds); the per-field form reads back on both sides.
+fn java_duration_text(nanos: i128) -> String {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    if nanos == 0 {
+        return "PT0S".to_string();
+    }
+    let seconds = nanos.div_euclid(NANOS_PER_SECOND);
+    let fraction = nanos.rem_euclid(NANOS_PER_SECOND);
+    let effective = if seconds < 0 && fraction > 0 {
+        seconds + 1
+    } else {
+        seconds
+    };
+    let hours = effective / 3600;
+    let minutes = (effective % 3600) / 60;
+    let secs = effective % 60;
+    let mut text = String::from("PT");
+    if hours != 0 {
+        let _ = write!(text, "{hours}H");
+    }
+    if minutes != 0 {
+        let _ = write!(text, "{minutes}M");
+    }
+    if secs == 0 && fraction == 0 && text.len() > 2 {
+        return text;
+    }
+    if seconds < 0 && fraction > 0 && secs == 0 {
+        text.push_str("-0");
+    } else {
+        let _ = write!(text, "{secs}");
+    }
+    if fraction > 0 {
+        let digits = if seconds < 0 {
+            NANOS_PER_SECOND - fraction
+        } else {
+            fraction
+        };
+        let digits = format!("{digits:09}");
+        text.push('.');
+        text.push_str(digits.trim_end_matches('0'));
+    }
+    text.push('S');
+    text
+}
+
 /// Writes a value as GraphSON 3.0 typed JSON.
 fn write_typed(value: &ElementProperty, out: &mut String) -> Result<(), PhysicalError> {
     match value {
@@ -1910,10 +1972,17 @@ fn write_typed(value: &ElementProperty, out: &mut String) -> Result<(), Physical
             out.push('}');
         }
         // `gx:OffsetDateTime`, `gx:LocalDate`, ... with the canonical text, which `java.time`
-        // parses (`temporal::tags`).
+        // parses (`temporal::tags`); a negative `gx:Duration` as `java.time` writes it.
         ElementProperty::Temporal(value) => {
             write!(out, "{{\"@type\":\"{}\",\"@value\":", tags::tag_of(value))?;
-            write_json_string(&value.to_string(), out)?;
+            match value {
+                Temporal::Duration(duration)
+                    if duration.nanos() < 0 && tags::is_fixed_length(*duration) =>
+                {
+                    write_json_string(&java_duration_text(duration.nanos()), out)?;
+                }
+                _ => write_json_string(&value.to_string(), out)?,
+            }
             out.push('}');
         }
         // A `g:List` of `g:Float` (TinkerGraph loads it; an i8 or bit vector as its f32 values):
@@ -2017,6 +2086,39 @@ mod tests {
             matches!(props.get("b"), Some(ElementProperty::Number(n)) if n.as_f64().is_some_and(f64::is_nan))
         );
         assert!(!report.has_skips());
+    }
+
+    /// The expected texts are what `java.time.Duration.toString()` prints for the same lengths.
+    #[test]
+    fn java_duration_text_is_what_java_time_writes() {
+        const S: i128 = 1_000_000_000;
+        for (nanos, java) in [
+            (0, "PT0S"),
+            (-S / 2, "PT-0.5S"),
+            (-3 * S / 2, "PT-1.5S"),
+            (-1, "PT-0.000000001S"),
+            (-5400 * S, "PT-1H-30M"),
+            (-3600 * S - 1, "PT-1H-0.000000001S"),
+            (-61 * S - S / 4, "PT-1M-1.25S"),
+            (i128::from(i64::MIN) * S, "PT-2562047788015215H-30M-8S"),
+            (
+                i128::from(i64::MIN) * S + 1,
+                "PT-2562047788015215H-30M-7.999999999S",
+            ),
+            (90 * S + S / 2, "PT1M30.5S"),
+            (
+                i128::from(i64::MAX) * S + S - 1,
+                "PT2562047788015215H30M7.999999999S",
+            ),
+        ] {
+            assert_eq!(java_duration_text(nanos), java, "{nanos}");
+            // Our reader takes it back.
+            let back = Temporal::parse_strict(TemporalKind::Duration, java).unwrap();
+            assert_eq!(
+                back,
+                Temporal::Duration(Duration::from_nanos(nanos).unwrap())
+            );
+        }
     }
 
     #[test]

@@ -1229,7 +1229,7 @@ mod serde_glue {
                 }
             }
             (Some(PhysicalValue::String(tag)), Some(_)) => Err(format!(
-                "unknown or malformed type tag \"{tag}\" (known: \"{UUID_TAG}\" with a uuid string, \"{OBJECT_TAG}\" with an object, the temporal tags \"gx:OffsetDateTime\", \"gx:LocalDate\", \"gx:LocalDateTime\", \"gx:LocalTime\", \"gx:Duration\", \"gx:Period\", \"graphersal:Interval\" with their text, \"graphersal:Vector\" with its object)"
+                "unknown or malformed type tag \"{tag}\" (known: \"{UUID_TAG}\" with a uuid string, \"{OBJECT_TAG}\" with an object, the temporal tags \"gx:OffsetDateTime\", \"gx:ZonedDateTime\", \"gx:OffsetTime\", \"gx:LocalDate\", \"gx:LocalDateTime\", \"gx:LocalTime\", \"gx:Duration\", \"gx:Period\", \"graphersal:Interval\" with their text, \"graphersal:Vector\" with its object)"
             )),
             _ => Err(format!(
                 "a tagged value needs a string \"{TYPE_KEY}\" and a \"{VALUE_KEY}\""

@@ -768,6 +768,7 @@ mod graphson {
     }
 
     #[test]
+    #[allow(deprecated)] // `SubMicrosecondsCut` is deprecated (never reported)
     fn a_zoned_date_time_keeps_its_offset_and_the_zone_is_reported() {
         let (got, report) = one_value(
             r#"{"@type":"gx:ZonedDateTime","@value":"2016-12-23T12:12:24.000000036+02:00[GMT+02:00]"}"#,

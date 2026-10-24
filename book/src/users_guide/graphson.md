@@ -60,9 +60,9 @@ if report.has_skips() {
 | `gx:Char` | `string` | a string |
 | `g:Date`, `g:Timestamp` (epoch milliseconds) | `datetime` in UTC | `gx:OffsetDateTime` |
 | `gx:Instant`, `gx:OffsetDateTime` | `datetime` with the offset of the text (a text without an offset is malformed and skipped, never read as UTC) | `gx:OffsetDateTime` |
-| `gx:ZonedDateTime` (`2007-12-03T10:15:30+01:00[Europe/Paris]`) | `datetime` with the offset and the zone id of the text; a zone id the bundled database does not know (`GMT+02:00`) is dropped (reported) | `gx:ZonedDateTime` for a `datetime` with a zone name, else `gx:OffsetDateTime` |
+| `gx:ZonedDateTime` (`2007-12-03T10:15:30+01:00[Europe/Paris]`) | `datetime` with the offset and the zone id of the text; a zone id the bundled database does not know (`GMT+02:00`), or whose offset at that instant is not the text's (`2024-01-01T10:00+05:00[Europe/Berlin]`), is dropped and reported, and the text's offset is kept | `gx:ZonedDateTime` for a `datetime` with a zone name, else `gx:OffsetDateTime` |
 | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, `gx:OffsetTime` (`10:15:30+01:00`) | `date`, `localdatetime`, `time`, `offsettime` | the same tags |
-| `gx:Duration` (a fixed length; `P2DT3H` reads a day as 24 hours) | `duration` of a time part only | `gx:Duration` for a duration of a time part only (`PT26H`) |
+| `gx:Duration` (a fixed length; `P2DT3H` reads a day as 24 hours; `java.time`'s signed fields `PT-1H-30M` too) | `duration` of a time part only, up to the `java.time.Duration` range (a 64-bit count of seconds plus nanoseconds) | `gx:Duration` for a duration of a time part only (`PT26H`); a negative one as `java.time` writes it, each field signed (`PT-1H-30M`, `PT-0.5S`) |
 | `gx:Period` (`P1Y2M3D`, weeks as 7 days) | `duration` of months and days | `gx:Period` for a duration of months and days only |
 | `graphersal:Interval` (Graphersal's own tag) | `duration` | `graphersal:Interval` for a duration with both months or days and a time part (`P1MT2H`): no `java.time` type holds it, so TinkerGraph cannot load such a value |
 | `g:List` of numbers, read as a list; a vector where the target graph's schema declares one (mode `open` or `closed`, coerced on write); `graphersal:Vector` (Graphersal's own exact tag, as a serialized `ChangeSet` writes it) | `vector` (book page [Vectors](vectors.md)) | `g:List` of `g:Float`, which TinkerGraph loads; an `i8` or `bit` vector as its dequantized values |
@@ -78,8 +78,11 @@ by their tag (both the `gx:` and the `g:` prefix are read; the types are describ
 writes it (seconds may be missing, up to nine fraction digits), and kept to the nanosecond,
 Graphersal's resolution. A date outside the years
 -9999 to 9999, or text that is not of the tag's type, is skipped as malformed. The export writes
-each value's canonical text, which `java.time`'s parsers read: TinkerGraph's `g.io(file).read()`
-loads it (except `graphersal:Interval`). A skipped value inside a container skips the whole
+each value's canonical text, which `java.time`'s parsers read, with all nine fraction digits
+where the value has them; a negative `gx:Duration` is written in `java.time`'s own form,
+because `Duration.parse` sums the fields before it applies a leading sign and so cannot read
+`-PT2562047788015215H30M8S`, the canonical text of the shortest duration. TinkerGraph's
+`g.io(file).read()` loads every value (except `graphersal:Interval`). A skipped value inside a container skips the whole
 property value. A value
 nested deeper than 128 levels, a `g:Map` with an odd number of items or a non-string key, and a
 payload that does not fit its type (`{"@type": "g:Int32", "@value": "7"}`) are skipped as
@@ -136,8 +139,8 @@ representation:
 | `SkippedDuplicateEdge` | an edge whose id a different edge of the file already has |
 | `SkippedReservedMeta` | a `_meta` property of a vertex that also has meta-properties |
 | `MultiValuedToArray`, `MetaPropertiesToMeta`, `LabelSplit`, `VertexWithoutId`, `EdgeCopiesDisagree`, `IgnoredKey { key }` | representation changes |
-| `ZoneDropped { type_tag }` | a `gx:ZonedDateTime` imported as a `datetime` with its offset; its zone id is not a zone of the bundled database (or not at that offset), so it is not kept |
-| `SubMicrosecondsCut { type_tag }` | no longer reported: values keep nanoseconds (kept for code that matches it) |
+| `ZoneDropped { type_tag }` | a `gx:ZonedDateTime` imported as a `datetime` with the offset of its text; its zone id is not a zone of the bundled database, or that zone's offset at that instant is not the text's, so the name is not kept (the offset is never recomputed from it) |
+| `SubMicrosecondsCut { type_tag }` | deprecated since 0.3.0 and never reported: values keep nanoseconds (kept so code that matches it compiles) |
 
 Its `Display` is the text the CLI, Rhai and Python show: a first line with the counts and one line
 per note.
@@ -233,8 +236,12 @@ Listed in [TinkerPop Deviations](../for_developers/tinkerpop_deviations.md#graph
 - **Skipped values**: the types listed above as skipped (`gx:Year`, `gx:BigDecimal`, ...) are
   skipped and reported where TinkerPop reads them.
 - **Dates**: a `gx:ZonedDateTime` whose zone id the bundled database does not know keeps its
-  offset but not its zone id (reported), and a duration with both months or days and a time part
-  is exported as `graphersal:Interval`, which TinkerPop cannot read.
+  offset but not its zone id (reported). One whose offset is not its zone's offset at that
+  instant (written with another time zone database) keeps the offset of the text and drops the
+  name (reported), where `java.time` keeps the instant and the zone and recomputes the offset
+  (user decision: the stored offset is kept as written, never recomputed from a zone name, as in
+  the store). A duration with both months or days and a time part is exported as
+  `graphersal:Interval`, which TinkerPop cannot read.
 - **Lenient structure**: an edge to a missing vertex is skipped (TinkerPop's `readGraph` fails), a
   duplicate vertex id keeps the first vertex, and vertex-property ids are not kept.
 - **Widening**: `g:Int32` and `g:Float` come back as `g:Int64` and `g:Double` on export.

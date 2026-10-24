@@ -366,9 +366,12 @@ coerce by the new label's declarations.
 
 `none` describes without enforcing; the GraphML import still restores the declared logical types
 from it (`uuid`, the date and time types, `array`, `object`; see [UUID Values](uuid_values.md)).
-A date or time is written to GraphML as its canonical text under a `string` key and read back
-as a temporal value where the target schema declares its format (text that is not of the type
-fails the import with `InvalidAttributeValue`); without a declaration it stays a string.
+A date or time is written to GraphML as its canonical text under a `string` key (up to nine
+fraction digits, a zone name in brackets, an `offsettime` with its offset) and read back
+exactly as a temporal value where the target schema declares its format (`date-time`, `date`,
+`local-date-time`, `time`, `offset-time`, `duration`; text that is not of the type, such as an
+`offset-time` without its offset, fails the import with `InvalidAttributeValue`); without a
+declaration it stays a string.
 
 ## Edge topology (`closed`)
 

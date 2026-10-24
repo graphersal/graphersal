@@ -55,13 +55,17 @@ its offset.
 GraphSON 3.0 reads and writes the `java.time` types: `g:Date`/`g:Timestamp` (epoch milliseconds)
 become a `datetime` in UTC, `gx:OffsetDateTime`, `gx:Instant` and `gx:ZonedDateTime` a `datetime`
 with the offset of the text (a `gx:ZonedDateTime` keeps its zone id when the bundled database
-knows it, otherwise the id is dropped and reported), `gx:LocalDate`, `gx:LocalDateTime`,
+knows it and the text's offset is that zone's offset at that instant; otherwise the id is
+dropped and reported, and the offset of the text is kept: the instant is never recomputed from
+the name, as in the store), `gx:LocalDate`, `gx:LocalDateTime`,
 `gx:LocalTime` and `gx:OffsetTime` the types without a date or a zone and the `offsettime`,
 `gx:Duration` and `gx:Period` a `duration`. The export writes the tags of the change set table above, which TinkerGraph's
 `g.io(file).read()` loads, with one exception: a `duration` with both months or days **and** a time
 part has no `java.time` type, so it is written as `graphersal:Interval`, which only Graphersal
-reads (a [deliberate deviation](../for_developers/tinkerpop_deviations.md)). Up to nine
-fraction digits are kept, and the `java.time` types Graphersal cannot hold (`gx:Year`,
+reads (a [deliberate deviation](../for_developers/tinkerpop_deviations.md)), and a negative
+`gx:Duration` is written as `java.time` writes it, each field signed (`PT-1H-30M`), because
+`java.time` cannot read `-PT2562047788015215H30M8S`, the canonical text of the shortest duration.
+Up to nine fraction digits are kept in both directions, and the `java.time` types Graphersal cannot hold (`gx:Year`,
 `gx:YearMonth`, `gx:MonthDay`, `gx:ZoneOffset`) are skipped and reported. The
 full mapping is on the [GraphSON](../users_guide/graphson.md#type-mapping) page.
 

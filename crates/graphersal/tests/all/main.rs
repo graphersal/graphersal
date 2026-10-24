@@ -212,6 +212,7 @@ mod t_token_tests;
 mod table_visualization_tests;
 mod temporal_error_tests;
 mod temporal_format_tests;
+mod temporal_io_tests;
 mod temporal_nanosecond_tests;
 mod temporal_range_clock_tests;
 mod temporal_step_tests;
