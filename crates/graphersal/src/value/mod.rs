@@ -891,6 +891,14 @@ pub(crate) fn compare_element_property(
 
 /// A logical copy of a stored property map: every compressed string decompressed (D5).
 pub(crate) fn logical_element(element: &PropertyMap) -> PropertyMap {
+    // A stored map keeps its shared key list: the copy is the shape (one `Arc`) and the logical
+    // values, with no key hashed and no `IndexMap` built (the hot path of materializing elements).
+    if let Some((shape, values)) = element.shaped_parts() {
+        return PropertyMap::from_shaped(
+            std::sync::Arc::clone(shape),
+            values.iter().map(ElementProperty::to_logical).collect(),
+        );
+    }
     element
         .iter()
         .map(|(key, value)| (key.clone(), value.to_logical()))

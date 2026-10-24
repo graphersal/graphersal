@@ -43,6 +43,8 @@ pub(crate) struct Labels {
     set_ids: HashTable<u32>,
     /// The set interned last (loads and bulk inserts repeat one).
     last_set: LabelSetId,
+    /// The edge label interned last.
+    last_name: LabelId,
 }
 
 impl Default for Labels {
@@ -53,6 +55,7 @@ impl Default for Labels {
             sets: vec![Box::new([])],
             set_ids: HashTable::new(),
             last_set: LabelSetId::EMPTY,
+            last_name: LabelId::NONE,
         }
     }
 }
@@ -108,11 +111,15 @@ impl Labels {
         let Some(label) = label else {
             return LabelId::NONE;
         };
+        if self.name_str(self.last_name) == Some(label) {
+            return self.last_name;
+        }
         let hash = name_hash(label);
         let names = &self.names;
         if let Some(&id) = self.name_ids.find(hash, |&id| {
             names.get(id as usize).is_some_and(|name| name == label)
         }) {
+            self.last_name = LabelId(id);
             return LabelId(id);
         }
         let id = self.names.len() as u32;
@@ -121,6 +128,7 @@ impl Labels {
         self.name_ids.insert_unique(hash, id, |&id| {
             names.get(id as usize).map_or(0, |name| name_hash(name))
         });
+        self.last_name = LabelId(id);
         LabelId(id)
     }
 
