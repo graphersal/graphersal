@@ -7,8 +7,8 @@ single-file container has its own container version):
   **version 3** (`graphersal::persist::STORE_FORMAT_VERSION`); `graphersal store info` prints it
   (`backend  directory (format version 3)`, `format  version 3`);
 - the **file format version** of snapshot manifests and segments, WAL segments and packed
-  snapshots (`.gsnap`): this release writes **version 2** (`graphersal::persist::FORMAT_VERSION`)
-  and reads versions 1 and 2.
+  snapshots (`.gsnap`): this release writes **version 3** (`graphersal::persist::FORMAT_VERSION`)
+  and reads versions 1, 2 and 3.
 
 | Version | What changed |
 |---|---|
@@ -17,6 +17,16 @@ single-file container has its own container version):
 | store 3 (0.2.0) | the same `GRAPH` layout; marks a store whose files are of file format version 2, so that 0.1.x refuses it as newer instead of taking its files for damage |
 | file 1 (0.1.x) | the first file format |
 | file 2 (0.2.0) | the value tags of the date and time types (`date`, `localdatetime`, `datetime`, `time`, `duration`) and of vectors (`vector`); a version 1 file is read as it is |
+| file 3 (0.3.0) | nanosecond value tags for `localdatetime`, `datetime` (with or without a zone name), `time`, `offsettime` and `duration` (the whole `java.time.Duration` range); every such value is written with them. Version 1 and 2 files are read as they are |
+
+**File format version 3 needs no upgrade.** The store format version stays 3, so a store
+written by 0.2.x opens as it is: its version 2 snapshots and WAL segments stay and are read
+as they are, and everything written from then on (a new WAL segment, new snapshots, backups,
+`.gsnap` exports) is of file format version 3. From the first such file on, Graphersal 0.2.x
+refuses the store, its backups and those packed snapshots as written by a newer version
+(`PersistError::UnsupportedVersion`, the row below), never as damage. To hand data back to
+0.2.x, export it as GraphSON. Files of version 2 never hold a value with digits below the
+microsecond, an `offsettime` or a zone name: 0.2.x could not write them.
 
 | The store or file is | Then |
 |---|---|
@@ -56,7 +66,7 @@ row for the previous version.
 |---|---|---|---|
 | 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
 | 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x | 3 | nothing to do |
+| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
 <!-- upgrades:end -->
 
 ## Upgrading a store of an older version

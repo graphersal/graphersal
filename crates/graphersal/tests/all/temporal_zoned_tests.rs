@@ -1,8 +1,8 @@
 //! Temporal v2, stage 2: the time of day with a UTC offset (`OffsetTime`, Rhai `offsettime`,
 //! GQL `zoned_time()` / Cypher compatibility `time()`) and zone names kept in a `datetime`
 //! (`..+02:00[Europe/Berlin]`): text, comparison, daylight-saving-correct arithmetic, the
-//! schema format `offset-time`, the property index, GraphSON, the date steps, GQL, and the
-//! persistence refusal of both forms by the file format version 2.
+//! schema format `offset-time`, the property index, GraphSON, the date steps, GQL, and a Store
+//! that keeps both forms (file format version 3; stage 2 refused them under version 2).
 
 use graphersal::prelude::*;
 use graphersal::temporal::{
@@ -511,29 +511,44 @@ mod persist {
         })
     }
 
+    /// Every field of a value as text: an offset time's offset and a datetime's zone name
+    /// (equality compares the instant only).
+    fn exact(value: &ElementProperty) -> String {
+        match value {
+            ElementProperty::Temporal(t) => format!("{}({t})", t.kind()),
+            ElementProperty::Array(items) => {
+                let items: Vec<String> = items.iter().map(exact).collect();
+                format!("[{}]", items.join(", "))
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
     #[test]
-    fn a_store_refuses_an_offset_time_and_a_zone_name_and_keeps_nothing() {
+    fn a_store_keeps_an_offset_time_and_a_zone_name() {
         let dir = MemDir::new();
         let store = Store::create_with(&dir, TraversalGraph::new(), StoreOptions::new()).unwrap();
-        let plain = Temporal::DateTime("2024-01-01T10:00:00+01:00".parse().unwrap());
-        add(&store, "ok", ElementProperty::Temporal(plain)).unwrap();
-        let seq = store.graph().read().last_commit_seq();
-        for value in [
+        let values = [
+            Temporal::DateTime("2024-01-01T10:00:00+01:00".parse().unwrap()),
             Temporal::OffsetTime("10:00+02:00".parse().unwrap()),
             Temporal::DateTime("2024-01-01T10:00[Europe/Berlin]".parse().unwrap()),
-        ] {
-            let err = add(&store, "bad", ElementProperty::Temporal(value))
-                .expect_err("the value has no form in file format version 2");
-            let text = format!("{err} {err:?}");
-            assert!(text.contains("cannot store yet"), "{text}");
-            let nested = ElementProperty::Array(vec![ElementProperty::Temporal(value)]);
-            assert!(add(&store, "bad", nested).is_err());
-            let lock = store.graph().read();
-            assert_eq!(lock.last_commit_seq(), seq);
-            assert_eq!(lock.vertex_count(), 1);
+            Temporal::DateTime(
+                "2024-07-01T10:00:00.000000001[America/Argentina/ComodRivadavia]"
+                    .parse()
+                    .unwrap(),
+            ),
+        ];
+        let mut expected = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            let plain = ElementProperty::Temporal(*value);
+            let nested = ElementProperty::Array(vec![ElementProperty::Temporal(*value)]);
+            add(&store, &format!("v{index}"), plain.clone()).unwrap();
+            add(&store, &format!("n{index}"), nested.clone()).unwrap();
+            expected.push((format!("v{index}"), exact(&plain)));
+            expected.push((format!("n{index}"), exact(&nested)));
         }
-        // Through a query: the query fails and leaves nothing.
-        let failed = store
+        // Through a query.
+        store
             .graph()
             .write()
             .traversal_mut()
@@ -542,16 +557,32 @@ mod persist {
                 "at",
                 ElementProperty::Temporal(Temporal::OffsetTime("10:00Z".parse().unwrap())),
             )
-            .iterate();
-        assert!(failed.is_err());
-        assert_eq!(store.graph().read().vertex_count(), 1);
-        // The store keeps working and reopens with the value it stored.
+            .iterate()
+            .unwrap();
+        let check = |store: &Store| {
+            let lock = store.graph().read();
+            assert_eq!(lock.vertex_count(), expected.len() + 1);
+            for (id, text) in &expected {
+                let v = lock.get_vertex_by_id(id.as_str()).unwrap();
+                assert_eq!(
+                    &exact(lock.vertex_properties(v).unwrap().get("at").unwrap()),
+                    text
+                );
+            }
+        };
+        check(&store);
+        // WAL replay, then a checkpoint and a load from the snapshot.
+        store.close().unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        check(&store);
         store.checkpoint(None).unwrap();
         store.close().unwrap();
         let store = Store::open(&dir, StoreOptions::new()).unwrap();
-        let lock = store.graph().read();
-        let values = lock.traversal().v(None).values("at").to_list().unwrap();
-        assert_eq!(values, vec![ElementProperty::Temporal(plain)]);
+        check(&store);
+        assert!(
+            exact(&ElementProperty::Temporal(values[2])).contains("[Europe/Berlin]"),
+            "the zone name prints"
+        );
     }
 }
 

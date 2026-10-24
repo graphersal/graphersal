@@ -1,8 +1,8 @@
 //! Nanosecond resolution of the temporal types (temporal v2, stage 1): the range edges of the
 //! years -9999..9999 at a nanosecond, overflow as an error, truncation to every unit, the parts,
 //! text round trips with one to nine fraction digits, ordering, durations, schema coercion, the
-//! Rhai and GQL forms, the property index, and the persistence refusal of a value with a part
-//! below the microsecond (the binary file format holds microseconds until it changes).
+//! Rhai and GQL forms, the property index, and a Store that keeps a value with a part below the
+//! microsecond (file format version 3; stage 1 refused it under version 2).
 
 use graphersal::prelude::*;
 use graphersal::temporal::{
@@ -400,7 +400,7 @@ mod persist {
     }
 
     #[test]
-    fn a_store_refuses_a_value_below_the_microsecond_and_keeps_nothing() {
+    fn a_store_keeps_a_value_below_the_microsecond() {
         let dir = MemDir::new();
         let store = Store::create_with(&dir, TraversalGraph::new(), StoreOptions::new()).unwrap();
         let whole = Time::from_hms_micro(12, 0, 0, 1).unwrap();
@@ -410,47 +410,68 @@ mod persist {
             ElementProperty::Temporal(Temporal::Time(whole)),
         )
         .unwrap();
-        let seq = store.graph().read().last_commit_seq();
-        for value in [
+        let values = [
             Temporal::Time(Time::from_hms_nano(12, 0, 0, 1).unwrap()),
             Temporal::Duration(Duration::from_nanos(1).unwrap()),
             Temporal::LocalDateTime("2024-01-01T00:00:00.000000001".parse().unwrap()),
             Temporal::DateTime("2024-01-01T00:00:00.000000001Z".parse().unwrap()),
-        ] {
-            let err = add(&store, "bad", ElementProperty::Temporal(value))
-                .expect_err("a value below the microsecond is refused");
-            let text = format!("{err} {:?}", err);
-            assert!(text.contains("below the microsecond"), "{text}");
+        ];
+        for (index, value) in values.iter().enumerate() {
+            add(
+                &store,
+                &format!("v{index}"),
+                ElementProperty::Temporal(*value),
+            )
+            .expect("a value below the microsecond is stored");
             // Nested in an array too.
-            let nested = ElementProperty::Array(vec![ElementProperty::Temporal(value)]);
-            assert!(add(&store, "bad", nested).is_err());
-            let lock = store.graph().read();
-            assert_eq!(lock.last_commit_seq(), seq);
-            assert_eq!(lock.vertex_count(), 1);
+            let nested = ElementProperty::Array(vec![ElementProperty::Temporal(*value)]);
+            add(&store, &format!("n{index}"), nested).unwrap();
         }
-        // A value written through a query fails the query and leaves nothing.
-        let failed = store
+        // Through a query.
+        store
             .graph()
             .write()
             .traversal_mut()
             .add_v("e")
+            .property("id_", "query")
             .property(
                 "at",
                 ElementProperty::Temporal(Temporal::Time(Time::from_hms_nano(1, 0, 0, 5).unwrap())),
             )
-            .iterate();
-        assert!(failed.is_err());
-        assert_eq!(store.graph().read().vertex_count(), 1);
-        // The store keeps working and reopens with the whole-microsecond value.
+            .iterate()
+            .unwrap();
+        let expect = |lock: &TraversalGraph| {
+            assert_eq!(lock.vertex_count(), 1 + 2 * values.len() + 1);
+            for (index, value) in values.iter().enumerate() {
+                let v = lock.get_vertex_by_id(format!("v{index}").as_str()).unwrap();
+                let got = lock.vertex_properties(v).unwrap().get("at").unwrap();
+                let got = got.as_temporal().unwrap();
+                assert_eq!(
+                    format!("{}({got})", got.kind()),
+                    format!("{}({value})", value.kind())
+                );
+            }
+        };
+        // WAL replay, then a checkpoint and a load from the snapshot.
+        store.close().unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        expect(&store.graph().read());
         store.checkpoint(None).unwrap();
         store.close().unwrap();
         let store = Store::open(&dir, StoreOptions::new()).unwrap();
-        let lock = store.graph().read();
-        assert_eq!(lock.vertex_count(), 1);
-        let values = lock.traversal().v(None).values("at").to_list().unwrap();
+        expect(&store.graph().read());
+        let values = store
+            .graph()
+            .read()
+            .traversal()
+            .v(None)
+            .has("id_", "query")
+            .values("at")
+            .to_list()
+            .unwrap();
         assert_eq!(
-            values,
-            vec![ElementProperty::Temporal(Temporal::Time(whole))]
+            values[0].as_temporal().unwrap().to_string(),
+            "01:00:00.000000005"
         );
     }
 }

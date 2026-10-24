@@ -951,6 +951,13 @@ impl Gen<'_> {
                     .pick(&[
                         r#"UUID.fromString("00000000-0000-0000-0000-000000000001")"#,
                         r#"UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff")"#,
+                        // Temporal values at the edges of temporal v2 (nanoseconds, a zone
+                        // name, an offset time, the longest duration).
+                        r#"datetime("2024-03-31T03:30:00.000000001+02:00[Europe/Berlin]")"#,
+                        r#"offsettime("23:59:59.999999999-18:00")"#,
+                        r#"duration("PT9223372036854775807.999999999S")"#,
+                        r#"localdatetime("-9999-01-01T00:00:00")"#,
+                        r#"time("00:00:00.000000001")"#,
                         "big_list",
                         "[]",
                         "#{}",

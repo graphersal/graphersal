@@ -15,25 +15,22 @@ Equality and ordering compare these numbers ([Comparing and Sorting](comparing.m
 ## Snapshots, journals and the Store
 
 The binary format (packed snapshots `.gsnap`, Store segments, the write-ahead log) has a value
-tag per type, 9 to 13, defined in [the format specification](../persistence/format.md#3-value-encoding):
+tag per type, defined in [the format specification](../persistence/format.md#3-value-encoding):
 the exact payload, the range of each type, and the rule that a `datetime` keeps its offset while
-equality uses the instant. These tags came with **file format version 2**: a build that knows them
-writes version 2 and reads versions 1 and 2, so a `.gsnap` written by 0.1.x still loads, while an
-older build refuses a version 2 file instead of misreading it. See
-[Format Versions and Upgrade](../persistence/store_versions.md) for a Store written by 0.1.x.
+equality uses the instant. Every value is stored exactly as it is in memory: nanoseconds over the
+whole range of years, an `offsettime` with its offset, a `datetime` with its zone name (as text,
+`Europe/Berlin`, never as a number of this build), a `duration` over its whole range (a 64-bit
+count of seconds plus the nanoseconds of one second). Nothing is refused and nothing is cut.
 
-The tags hold microseconds. A value with a part below the microsecond
-(`time("12:00:00.000000001")`) is refused when it is written: the transaction or snapshot that
-holds it fails with an error naming the value, and nothing is stored (never a cut value).
-Truncate it with `date_trunc(DT.microsecond)` to store it. A `duration` whose time part exceeds
-a 64-bit count of microseconds (about 292,000 years; the type reaches a 64-bit count of seconds)
-is refused in the same way.
-
-File format version 2 has no tag for an `offsettime` and no field for a zone name either. Such a
-value is refused in the same way when it is written (the unit fails, nothing is stored, the zone
-name is never dropped silently): store a `datetime` without the name
-(`datetime("2024-03-31T12:00:00+02:00")`), or the time and its offset apart. The next file format
-version adds both.
+These nanosecond tags came with **file format version 3** (Graphersal 0.3.0); version 2 (0.2.x)
+had microsecond tags only and could not store a value with digits below the microsecond, an
+`offsettime` or a zone name. A build that knows version 3 writes version 3 and reads versions 1
+to 3, so a `.gsnap` or a Store written by 0.1.x or 0.2.x still loads; a Store written by 0.2.x
+is continued as it is, with no upgrade. Graphersal 0.2.x refuses a version 3 file as written by
+a newer version instead of misreading it. A zone name that this build's time zone database does
+not know (a file written by a newer Graphersal with a newer database) is refused as content of
+a newer version, never taken for damage. See
+[Format Versions and Upgrade](../persistence/store_versions.md).
 
 ## Change sets
 

@@ -393,27 +393,41 @@ mod persist {
         })
     }
 
-    /// File format version 2 holds a duration's time part in an i64 of microseconds: a longer
-    /// one is refused, never cut (stage 3 changes the format).
+    /// File format version 3 holds a duration's whole time part (`svar` seconds and the
+    /// nanoseconds of one second): the extremes of the range are stored and read back (stage
+    /// 2b refused one beyond an i64 of microseconds under version 2).
     #[test]
-    fn a_store_refuses_a_duration_beyond_an_i64_of_microseconds() {
+    fn a_store_keeps_a_duration_beyond_an_i64_of_microseconds() {
         let dir = MemDir::new();
         let store = Store::create_with(&dir, TraversalGraph::new(), StoreOptions::new()).unwrap();
         let edge = Duration::new(0, 0, i64::MAX);
-        add(&store, "ok", edge).unwrap();
         let long = Duration::from_nanos(i64::MAX as i128 * 1000 + 1000).unwrap();
-        let err = add(&store, "bad", long).expect_err("refused");
-        let text = format!("{err} {err:?}");
-        assert!(text.contains("beyond an integer of microseconds"), "{text}");
-        assert_eq!(store.graph().read().vertex_count(), 1);
+        let max = Duration::with_nanos(i32::MAX, i32::MIN, Duration::MAX_NANOS).unwrap();
+        let min = Duration::with_nanos(i32::MIN, i32::MAX, Duration::MIN_NANOS).unwrap();
+        for (id, value) in [("ok", edge), ("long", long), ("max", max), ("min", min)] {
+            add(&store, id, value).unwrap();
+        }
+        let read = |store: &Store, id: &str| {
+            let lock = store.graph().read();
+            let v = lock.get_vertex_by_id(id).unwrap();
+            match lock.vertex_properties(v).unwrap().get("d") {
+                Some(ElementProperty::Temporal(Temporal::Duration(d))) => {
+                    (d.months(), d.days(), d.nanos())
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let parts = |d: Duration| (d.months(), d.days(), d.nanos());
+        store.close().unwrap();
+        let store = Store::open(&dir, StoreOptions::new()).unwrap();
+        for (id, value) in [("ok", edge), ("long", long), ("max", max), ("min", min)] {
+            assert_eq!(read(&store, id), parts(value), "{id}: WAL replay");
+        }
         store.checkpoint(None).unwrap();
         store.close().unwrap();
         let store = Store::open(&dir, StoreOptions::new()).unwrap();
-        let lock = store.graph().read();
-        let values = lock.traversal().v(None).values("d").to_list().unwrap();
-        assert_eq!(
-            values,
-            vec![ElementProperty::Temporal(Temporal::Duration(edge))]
-        );
+        for (id, value) in [("ok", edge), ("long", long), ("max", max), ("min", min)] {
+            assert_eq!(read(&store, id), parts(value), "{id}: snapshot");
+        }
     }
 }

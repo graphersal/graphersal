@@ -744,7 +744,7 @@ a quantifier nested inside a quantified path pattern, EXCEPT and INTERSECT (filt
 rows with a pattern predicate instead, e.g. WHERE NOT (p)-[:created]->()), SHORTEST, CALL { } IN TRANSACTIONS, vendor \
 procedures (CALL db.labels(), apoc.*), a CALL of a saved query written in Rhai (run it with \
 run_saved_query) or with an argument that reads the row, non-deterministic functions (rand, randomUUID, date.realtime()), trigonometry, \
-Cypher's zoned time() (use localtime() or datetime()), a temporal value below the microsecond, and the write \
+and the write \
 FOREACH (write FOR x IN list INSERT .. instead); use the query tool with Gremlin for the rest, e.g. g.gql(\"MATCH (p:person) RETURN p\").select(\"p\").out(\"created\").
 
 Examples: MATCH (p:person)-[:knows]->(f:person) WHERE f.age > $min RETURN p.name AS who, \

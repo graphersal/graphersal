@@ -10,21 +10,30 @@
 use compact_str::CompactString;
 
 use crate::value::number::{N, Number};
-use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
+use crate::value::temporal::zone::ZoneId;
+use crate::value::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
 use crate::value::{ElementProperty, PropertyMap, Vector, VectorElement};
 
 /// The file format version every file of this build writes (format spec 15).
-pub(crate) const FORMAT_VERSION: u32 = 2;
+pub(crate) const FORMAT_VERSION: u32 = 3;
 
 /// The oldest file format version this build reads: version 1 (Graphersal 0.1.x) differs from
-/// version 2 only by the temporal value tags it does not have (format spec 3, 15).
+/// version 2 only by the temporal value tags it does not have, version 2 (0.2.x) from version 3
+/// only by the nanosecond temporal value tags (format spec 3, 15).
 pub(crate) const MIN_FORMAT_VERSION: u32 = 1;
 
 /// The first file format version with the temporal value tags (9 to 13) and the vector tag (14).
 pub(crate) const TEMPORAL_FORMAT_VERSION: u32 = 2;
 
-/// Whether this build reads files of format `version` (1 and 2).
+/// The first file format version with the nanosecond temporal value tags (15 to 20): an
+/// `offsettime` and a `datetime` with a zone name among them.
+pub(crate) const NANOS_FORMAT_VERSION: u32 = 3;
+
+/// Nanoseconds per second, for the `svar seconds` + `uvar nanos` pairs of tags 15 to 20.
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+
+/// Whether this build reads files of format `version` (1 to 3).
 #[inline]
 pub(crate) fn readable_version(version: u32) -> bool {
     (MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&version)
@@ -248,21 +257,39 @@ pub(crate) mod tag {
     pub(crate) const UUID: u8 = 6;
     pub(crate) const ARRAY: u8 = 7;
     pub(crate) const OBJECT: u8 = 8;
-    /// `date`: `svar` days since 1970-01-01 (file format version 2).
+    /// `date`: `svar` days since 1970-01-01 (file format version 2; also what version 3 writes).
     pub(crate) const DATE: u8 = 9;
-    /// `localdatetime`: `svar` microseconds since 1970-01-01T00:00:00 (wall clock).
+    /// `localdatetime`: `svar` microseconds since 1970-01-01T00:00:00 (wall clock); read only
+    /// (version 3 writes [`LOCAL_DATE_TIME_NS`]).
     pub(crate) const LOCAL_DATE_TIME: u8 = 10;
-    /// `datetime`: `svar` microseconds since the epoch (UTC), `svar` offset seconds.
+    /// `datetime`: `svar` microseconds since the epoch (UTC), `svar` offset seconds; read only.
     pub(crate) const DATE_TIME: u8 = 11;
-    /// `time`: `uvar` microseconds since midnight.
+    /// `time`: `uvar` microseconds since midnight; read only.
     pub(crate) const TIME: u8 = 12;
-    /// `duration`: `svar` months, `svar` days, `svar` microseconds.
+    /// `duration`: `svar` months, `svar` days, `svar` microseconds; read only.
     pub(crate) const DURATION: u8 = 13;
     /// `vector`: `u8` element kind (0 f32, 1 f16, 2 i8, 3 bit), `uvar` dimension
     /// (1..=65536), for i8 the `f32` scale, then the packed components little endian (f32: 4
     /// bytes, f16: 2, i8: 1, bit: `ceil(dimension / 8)` bytes in all, first component in the
     /// most significant bit) (file format version 2).
     pub(crate) const VECTOR: u8 = 14;
+    /// `localdatetime` (file format version 3): `svar` seconds since 1970-01-01T00:00:00
+    /// rounded down (wall clock), `uvar` nanoseconds of that second (0..10^9).
+    pub(crate) const LOCAL_DATE_TIME_NS: u8 = 15;
+    /// `datetime` without a zone name (version 3): `svar` seconds since the epoch (UTC) rounded
+    /// down, `uvar` nanoseconds of that second, `svar` offset seconds.
+    pub(crate) const DATE_TIME_NS: u8 = 16;
+    /// `datetime` with an IANA zone name (version 3): the fields of [`DATE_TIME_NS`], then the
+    /// name as a key (a string-table reference in a chunk, an inline string in a record).
+    pub(crate) const ZONED_DATE_TIME: u8 = 17;
+    /// `time` (version 3): `uvar` nanoseconds since midnight.
+    pub(crate) const TIME_NS: u8 = 18;
+    /// `offsettime` (version 3): `uvar` nanoseconds since midnight (local), `svar` offset
+    /// seconds.
+    pub(crate) const OFFSET_TIME: u8 = 19;
+    /// `duration` (version 3): `svar` months, `svar` days, `svar` seconds of the time part
+    /// rounded down, `uvar` nanoseconds of that second.
+    pub(crate) const DURATION_NS: u8 = 20;
     /// "Absent" in the `before` of a journal SetProperty (never a value).
     pub(crate) const ABSENT: u8 = 255;
 }
@@ -338,7 +365,7 @@ fn put_value_at<K: KeyWriter>(
                 put_value_at(out, item, keys, depth + 1)?;
             }
         }
-        ElementProperty::Temporal(value) => put_temporal(out, value)?,
+        ElementProperty::Temporal(value) => put_temporal(out, value, keys),
         ElementProperty::Vector(vector) => put_vector(out, vector),
         ElementProperty::Vertex(_) => return Err("a vertex is not a storable value".into()),
         ElementProperty::Edge(_) => return Err("an edge is not a storable value".into()),
@@ -437,73 +464,60 @@ fn read_vector(reader: &mut Reader<'_>, start: u64) -> DecodeResult<Vector> {
     vector.map_err(|err| invalid(err.to_string()))
 }
 
-/// Writes a temporal value with its tag (format spec 3, file format version 2). The tags hold
-/// microseconds: a value with a part below the microsecond, or a duration whose time part
-/// exceeds an `i64` of microseconds, is refused (never cut), so the unit that wrote it fails
-/// and nothing is stored. An `offsettime` and a `datetime` with a zone name
-/// have no tag in this version and are refused in the same way (the zone name is never dropped
-/// silently).
-fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
-    if value.has_no_v2_form() {
-        let what = match value {
-            Temporal::OffsetTime(_) => "an offsettime",
-            _ => "a datetime with a time zone name",
-        };
-        return Err(format!(
-            "the value {value} is {what}, which this file format (version {FORMAT_VERSION}) \
-             cannot store yet; store a datetime without the zone name (its offset stays, for \
-             example datetime(\"2024-01-01T10:00:00+01:00\")) or a time and its offset apart"
-        ));
-    }
-    if value.has_sub_micros() {
-        return Err(format!(
-            "the {} {value} has a part below the microsecond, which this file format \
-             (version {FORMAT_VERSION}) cannot store yet; truncate it first, for example with \
-             date_trunc(DT.microsecond)",
-            value.kind()
-        ));
-    }
+/// Writes a temporal value with its tag (format spec 3, file format version 3): a `date` as tag
+/// 9, every other kind in its nanosecond tag (15 to 20), the one form version 3 writes for it.
+/// Every engine value has an encoding, so nothing is refused. A zone name is written as a key
+/// through `keys` (the chunk's string table, or inline in a journal record), never as the
+/// build-local [`ZoneId`].
+fn put_temporal<K: KeyWriter>(out: &mut Vec<u8>, value: &Temporal, keys: &mut K) {
     match *value {
         Temporal::Date(date) => {
             put_u8(out, tag::DATE);
             put_svar(out, date.days_since_epoch() as i64);
         }
         Temporal::LocalDateTime(local) => {
-            put_u8(out, tag::LOCAL_DATE_TIME);
-            put_svar(out, local.micros());
+            put_u8(out, tag::LOCAL_DATE_TIME_NS);
+            put_seconds_nanos(out, local.nanos());
         }
-        Temporal::DateTime(value) => {
-            put_u8(out, tag::DATE_TIME);
-            put_svar(out, value.epoch_micros());
-            put_svar(out, value.offset_seconds() as i64);
-        }
+        Temporal::DateTime(value) => match value.zone_name() {
+            None => {
+                put_u8(out, tag::DATE_TIME_NS);
+                put_seconds_nanos(out, value.epoch_nanos());
+                put_svar(out, value.offset_seconds() as i64);
+            }
+            Some(name) => {
+                put_u8(out, tag::ZONED_DATE_TIME);
+                put_seconds_nanos(out, value.epoch_nanos());
+                put_svar(out, value.offset_seconds() as i64);
+                keys.put_key(out, name);
+            }
+        },
         Temporal::Time(time) => {
-            put_u8(out, tag::TIME);
-            // Within `0..86_400_000_000` by construction.
-            put_uvar(out, time.micros_of_day() as u64);
+            put_u8(out, tag::TIME_NS);
+            // Within `0..86_400 * 10^9` by construction.
+            put_uvar(out, time.nanos_of_day() as u64);
+        }
+        Temporal::OffsetTime(time) => {
+            put_u8(out, tag::OFFSET_TIME);
+            put_uvar(out, time.time().nanos_of_day() as u64);
+            put_svar(out, time.offset_seconds() as i64);
         }
         Temporal::Duration(duration) => {
-            // The tag holds an i64 of microseconds; the time part reaches an i64 of seconds.
-            let Some(micros) = duration.micros() else {
-                return Err(format!(
-                    "the duration {value} has a time part beyond an integer of microseconds \
-                     (about 292,000 years), which this file format (version {FORMAT_VERSION}) \
-                     cannot store yet"
-                ));
-            };
-            put_u8(out, tag::DURATION);
+            put_u8(out, tag::DURATION_NS);
             put_svar(out, duration.months() as i64);
             put_svar(out, duration.days() as i64);
-            put_svar(out, micros);
-        }
-        // Refused above (no tag in file format version 2).
-        Temporal::OffsetTime(_) => {
-            return Err(format!(
-                "the offsettime {value} has no encoding in file format version {FORMAT_VERSION}"
-            ));
+            put_seconds_nanos(out, duration.nanos());
         }
     }
-    Ok(())
+}
+
+/// Writes nanoseconds as `svar` seconds rounded down and `uvar` nanoseconds of that second
+/// (0..10^9). The callers' values lie within an `i64` of seconds by construction: the years
+/// -9999..9999 (about ±3.2 * 10^11 seconds) and a duration's time part
+/// ([`Duration::MIN_NANOS`]`..=`[`Duration::MAX_NANOS`]).
+fn put_seconds_nanos(out: &mut Vec<u8>, nanos: i128) {
+    put_svar(out, nanos.div_euclid(NANOS_PER_SECOND) as i64);
+    put_uvar(out, nanos.rem_euclid(NANOS_PER_SECOND) as u64);
 }
 
 /// Writes a property map: `uvar count | (key | value)*`, insertion order kept.
@@ -775,6 +789,14 @@ pub(crate) fn read_tagged_value<K: KeyReader>(
         tag::DATE | tag::LOCAL_DATE_TIME | tag::DATE_TIME | tag::TIME | tag::DURATION => {
             ElementProperty::Temporal(read_temporal(reader, tag, start)?)
         }
+        tag::LOCAL_DATE_TIME_NS
+        | tag::DATE_TIME_NS
+        | tag::ZONED_DATE_TIME
+        | tag::TIME_NS
+        | tag::OFFSET_TIME
+        | tag::DURATION_NS => {
+            ElementProperty::Temporal(read_temporal_ns(reader, tag, keys, start)?)
+        }
         tag::VECTOR => ElementProperty::Vector(read_vector(reader, start)?),
         tag::ARRAY => {
             if depth >= max_depth {
@@ -857,6 +879,86 @@ fn read_temporal(reader: &mut Reader<'_>, tag: u8, start: u64) -> DecodeResult<T
             let months = int32(reader.svar()?, "duration")?;
             let days = int32(reader.svar()?, "duration")?;
             Temporal::Duration(Duration::new(months, days, reader.svar()?))
+        }
+    })
+}
+
+/// Reads the payload of a nanosecond temporal value tag (15 to 20, file format version 3); a
+/// value outside the supported range or a nanosecond field of 10^9 or more is invalid (damage),
+/// and so is the tag in a file of an older format version. A zone name this build's time zone
+/// database does not know (a newer database's name) is content of a newer Graphersal behind a
+/// valid checksum: [`DecodeError::unsupported`], never damage (format spec 16 rule 9).
+fn read_temporal_ns<K: KeyReader>(
+    reader: &mut Reader<'_>,
+    tag: u8,
+    keys: &K,
+    start: u64,
+) -> DecodeResult<Temporal> {
+    if reader.version < NANOS_FORMAT_VERSION {
+        return Err(DecodeError::new(
+            start,
+            format!(
+                "value tag {tag} (a temporal value) in a file of format version {}",
+                reader.version
+            ),
+        ));
+    }
+    let invalid = |what: &str| DecodeError::new(start, format!("invalid {what} value"));
+    let int32 = |value: i64, what: &str| i32::try_from(value).map_err(|_| invalid(what));
+    let seconds_nanos = |reader: &mut Reader<'_>, what: &str| -> DecodeResult<i128> {
+        let seconds = reader.svar()?;
+        let nanos = reader.uvar()?;
+        if nanos >= NANOS_PER_SECOND as u64 {
+            return Err(invalid(what));
+        }
+        Ok(seconds as i128 * NANOS_PER_SECOND + nanos as i128)
+    };
+    let nanos_of_day = |reader: &mut Reader<'_>, what: &str| -> DecodeResult<Time> {
+        let nanos = i64::try_from(reader.uvar()?).map_err(|_| invalid(what))?;
+        Time::from_nanos_of_day(nanos).map_err(|_| invalid(what))
+    };
+    Ok(match tag {
+        tag::LOCAL_DATE_TIME_NS => {
+            let nanos = seconds_nanos(reader, "localdatetime")?;
+            Temporal::LocalDateTime(
+                LocalDateTime::from_nanos(nanos).map_err(|_| invalid("localdatetime"))?,
+            )
+        }
+        tag::DATE_TIME_NS | tag::ZONED_DATE_TIME => {
+            let nanos = seconds_nanos(reader, "datetime")?;
+            let offset = int32(reader.svar()?, "datetime")?;
+            let value = DateTime::from_nanos(nanos, offset).map_err(|_| invalid("datetime"))?;
+            if tag == tag::DATE_TIME_NS {
+                Temporal::DateTime(value)
+            } else {
+                let name_at = reader.offset();
+                let name = keys.key(reader)?;
+                let Some(zone) = ZoneId::lookup(&name) else {
+                    return Err(DecodeError::unsupported(
+                        name_at,
+                        format!(
+                            "the time zone '{name}' of a datetime is not in this build's time \
+                             zone database (written by a newer Graphersal)"
+                        ),
+                    ));
+                };
+                // The offset stays as written; the name is not used to recompute it.
+                Temporal::DateTime(value.with_zone_id(Some(zone)))
+            }
+        }
+        tag::TIME_NS => Temporal::Time(nanos_of_day(reader, "time")?),
+        tag::OFFSET_TIME => {
+            let time = nanos_of_day(reader, "offsettime")?;
+            let offset = int32(reader.svar()?, "offsettime")?;
+            Temporal::OffsetTime(OffsetTime::new(time, offset).map_err(|_| invalid("offsettime"))?)
+        }
+        _ => {
+            let months = int32(reader.svar()?, "duration")?;
+            let days = int32(reader.svar()?, "duration")?;
+            let nanos = seconds_nanos(reader, "duration")?;
+            Temporal::Duration(
+                Duration::with_nanos(months, days, nanos).map_err(|_| invalid("duration"))?,
+            )
         }
     })
 }
@@ -1159,6 +1261,63 @@ mod tests {
         assert!(decompress(0, &[1, 2, 3], 4).is_err());
         assert!(decompress(9, &[], 0).is_err());
         assert!(decompress(1, &[0u8; 4], MAX_BLOCK_BYTES + 1).is_err());
+    }
+
+    /// A zone name in a chunk is a string-table reference (format spec 3, tag 17): written and
+    /// read through the table; a name this build does not know is unsupported content, a
+    /// reference out of range damage; the nanosecond tags in a version 2 chunk are damage.
+    #[test]
+    fn zone_names_go_through_the_string_table() {
+        struct Table(Vec<CompactString>);
+        impl KeyWriter for Table {
+            fn put_key(&mut self, out: &mut Vec<u8>, key: &str) {
+                let index = match self.0.iter().position(|k| k == key) {
+                    Some(index) => index,
+                    None => {
+                        self.0.push(key.into());
+                        self.0.len() - 1
+                    }
+                };
+                put_uvar(out, index as u64);
+            }
+        }
+        let zoned: DateTime = "2024-01-01T10:00:00.000000001[America/Argentina/ComodRivadavia]"
+            .parse()
+            .unwrap();
+        let value = ElementProperty::Temporal(Temporal::DateTime(zoned));
+        let mut table = Table(Vec::new());
+        let mut out = Vec::new();
+        put_value(&mut out, &value, &mut table).unwrap();
+        put_value(&mut out, &value, &mut table).unwrap();
+        assert_eq!(table.0.len(), 1, "one table entry for both values");
+        assert_eq!(out[0], tag::ZONED_DATE_TIME);
+        let read = |bytes: &[u8], table: &[CompactString], version: u32| {
+            let mut reader = Reader::new(bytes).with_version(version);
+            read_value(&mut reader, &TableKeys(table), 8)
+        };
+        let back = read(&out, &table.0, FORMAT_VERSION).unwrap();
+        match back {
+            ElementProperty::Temporal(Temporal::DateTime(back)) => {
+                assert_eq!(back.zone_name(), zoned.zone_name());
+                assert_eq!(back.epoch_nanos(), zoned.epoch_nanos());
+                assert_eq!(back.offset_seconds(), zoned.offset_seconds());
+            }
+            other => panic!("{other:?}"),
+        }
+        let newer = vec![CompactString::from("Mars/Olympus_Mons")];
+        let err = read(&out, &newer, FORMAT_VERSION).unwrap_err();
+        assert!(err.unsupported, "{err:?}");
+        assert!(err.reason.contains("Mars/Olympus_Mons"), "{}", err.reason);
+        let err = read(&out, &[], FORMAT_VERSION).unwrap_err();
+        assert!(
+            !err.unsupported && err.reason.contains("out of range"),
+            "{err:?}"
+        );
+        let err = read(&out, &table.0, 2).unwrap_err();
+        assert!(
+            !err.unsupported && err.reason.contains("format version 2"),
+            "{err:?}"
+        );
     }
 
     /// A block of a codec of the format that this build lacks is unsupported, never damage

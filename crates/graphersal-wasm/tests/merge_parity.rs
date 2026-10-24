@@ -86,8 +86,9 @@ fn merged_hash() -> u64 {
     data_hash(&packed)
 }
 
-/// Recorded from the native run; the browser must produce the same bytes.
-const EXPECTED: u64 = 6_753_398_160_212_031_903;
+/// Recorded from the native run; the browser must produce the same bytes (file format version 3:
+/// the version word in every segment header).
+const EXPECTED: u64 = 1_991_369_822_573_691_254;
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]

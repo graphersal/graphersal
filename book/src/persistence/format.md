@@ -1,7 +1,7 @@
-# Storage Format Specification (store version 3, file version 2)
+# Storage Format Specification (store version 3, file version 3)
 
 This page is the normative specification of Graphersal's storage format, store format version 3
-with file format version 2 (15): the packed snapshot (`.gsnap`), the write-ahead log
+with file format version 3 (15): the packed snapshot (`.gsnap`), the write-ahead log
 (journal), the Store directory and its files, and the single-file container (`.gstore`). It is
 written so that a third party can read (and write) these files without Graphersal's code: a
 backup tool, a converter, a change-data-capture connector that tails the WAL.
@@ -111,22 +111,31 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
 | 7 | array | `uvar n`, then `n` values |
 | 8 | object | `uvar n`, then `n` pairs of key and value; a key is a string-table reference (`uvar`) inside a segment chunk and an inline `string` inside a WAL record |
 | 9 | `date` | `svar days`: days since 1970-01-01 (file format version 2) |
-| 10 | `localdatetime` | `svar micros`: microseconds since 1970-01-01T00:00:00, wall clock, no zone (file format version 2) |
-| 11 | `datetime` | `svar micros` since 1970-01-01T00:00:00Z (the instant), then `svar offset`: the UTC offset in seconds (file format version 2) |
-| 12 | `time` | `uvar micros`: microseconds since midnight (file format version 2) |
-| 13 | `duration` | `svar months`, `svar days`, `svar micros`, each with its own sign (file format version 2) |
+| 10 | `localdatetime` | `svar micros`: microseconds since 1970-01-01T00:00:00, wall clock, no zone (file format version 2; read only since version 3) |
+| 11 | `datetime` | `svar micros` since 1970-01-01T00:00:00Z (the instant), then `svar offset`: the UTC offset in seconds (file format version 2; read only since version 3) |
+| 12 | `time` | `uvar micros`: microseconds since midnight (file format version 2; read only since version 3) |
+| 13 | `duration` | `svar months`, `svar days`, `svar micros`, each with its own sign (file format version 2; read only since version 3) |
 | 14 | `vector` | `u8 element` (0 `f32`, 1 `f16`, 2 `i8`, 3 `bit`), `uvar dimension`, then for `i8` the scale (4 bytes, IEEE 754 binary32, little-endian), then the packed components: `f32` 4 bytes each (binary32, little-endian), `f16` 2 bytes each (binary16, little-endian), `i8` 1 byte each (two's complement), `bit` `ceil(dimension / 8)` bytes in all, the first component in the most significant bit of the first byte (file format version 2) |
-| 15..254 | reserved | invalid in versions 1 and 2 |
+| 15 | `localdatetime` | `svar seconds` since 1970-01-01T00:00:00 rounded down (toward minus infinity), then `uvar nanos`: the nanoseconds of that second, `0..10^9`; wall clock, no zone (file format version 3) |
+| 16 | `datetime` | `svar seconds` since 1970-01-01T00:00:00Z rounded down and `uvar nanos` as in tag 15 (the instant), then `svar offset`: the UTC offset in seconds (file format version 3) |
+| 17 | `datetime` with a zone name | the fields of tag 16, then the IANA zone name (`Europe/Berlin`) as a key: a string-table reference (`uvar`) inside a segment chunk, an inline `string` inside a WAL record (file format version 3) |
+| 18 | `time` | `uvar nanos`: nanoseconds since midnight (file format version 3) |
+| 19 | `offsettime` | `uvar nanos`: nanoseconds since midnight (the local time of day), then `svar offset`: the UTC offset in seconds (file format version 3) |
+| 20 | `duration` | `svar months`, `svar days`, then the time part as `svar seconds` rounded down and `uvar nanos` of that second (`0..10^9`); each part with its own sign (the time part's sign is that of `seconds * 10^9 + nanos`) (file format version 3) |
+| 21..254 | reserved | invalid in versions 1 to 3 |
 | 255 | absent | only where a field explicitly allows it (the *before* value of a SetProperty mutation, 9.3) |
 
 - The order of object entries (and of property maps, 7.3) is the insertion order and MUST be
   preserved. A repeated key in one object or property map is invalid.
-- **Temporal values** (tags 9 to 13) use the proleptic Gregorian calendar and a resolution of one
-  microsecond. An engine value with a part below the microsecond has no encoding in these tags:
-  a writer refuses it (the write fails, nothing is cut). An engine time of day with a UTC offset
-  (`offsettime`) and a `datetime` that keeps an IANA zone name have no encoding in this version
-  either and are refused in the same way (never written without the name); a later file format
-  version defines them. Their ranges are normative; a value outside its range is invalid:
+- **Temporal values** use the proleptic Gregorian calendar. Tags 9 to 13 (file format version
+  2) have a resolution of one microsecond; tags 15 to 20 (version 3) one nanosecond. A writer
+  of version 3 writes ONE form per kind: a `date` as tag 9, a `localdatetime` as tag 15, a
+  `datetime` as tag 16 (tag 17 when it keeps a zone name), a `time` as tag 18, an `offsettime`
+  as tag 19, a `duration` as tag 20; every engine value has an encoding, so nothing is refused.
+  A reader of version 3 reads tags 9 to 13 as well (a version 2 segment's chunks copied into
+  a version 3 snapshot keep them). The `svar seconds` + `uvar nanos` pairs hold nanoseconds
+  over the years -9999 to 9999 (about ±3.2 * 10^20 ns, more than an `i64`) and a duration's
+  whole time part. Their ranges are normative; a value outside its range is invalid:
 
   | Tag | Valid payload |
   |---:|---|
@@ -135,10 +144,21 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   | 11 | `offset` within ±64800 (±18:00); both the instant and the local time (`micros + offset * 10^6`) within the range of tag 10 |
   | 12 | `micros` in `0..86400000000` |
   | 13 | `months` and `days` within `i32`, `micros` within `i64` |
+  | 15 | `nanos` below 10^9; `seconds * 10^9 + nanos` within the days of tag 9 (`-9999-01-01T00:00:00` to `9999-12-31T23:59:59.999999999`) |
+  | 16, 17 | `nanos` below 10^9; `offset` within ±64800; both the instant and the local time within the range of tag 15 |
+  | 18 | `nanos` in `0..86400000000000` |
+  | 19 | `nanos` as in tag 18; `offset` within ±64800 |
+  | 20 | `months` and `days` within `i32`; `nanos` below 10^9 (`seconds` is an `svar`, so the time part spans `-9223372036854775808` s to `9223372036854775807.999999999` s, the range of `java.time.Duration`) |
 
   A `datetime` keeps the offset it was written with; equality and order of two `datetime`s use
-  the instant only (the offset is not compared). A `duration` is not normalized: `P1M`, `P30D`
-  and `PT720H` are three different values.
+  the instant only (the offset and the zone name are not compared). The zone name of tag 17 is
+  stored as text, never as an index into a build's own table; the offset is stored as written
+  and is not recomputed from the name. A name the reader's time zone database does not know (a
+  newer database's) is content of a newer writer behind a valid checksum: unsupported content
+  (16 rule 9), never damage; the reference reader refuses the value and the operation, as it
+  does with every unsupported content; ASCII case is ignored when the name is looked up. An
+  `offsettime` orders by its UTC time of day (the local time minus the offset, not wrapped). A
+  `duration` is not normalized: `P1M`, `P30D` and `PT720H` are three different values.
 - **Vector values** (tag 14): `dimension` is 1 to 65536; a component of an `f32` or `f16`
   vector is finite (no NaN, no infinity; `-0.0` is valid and equals `0.0`); the `i8` scale is
   finite and `>= 0` (`-0.0` is written as `0.0`); the value of an `i8` component is
@@ -147,8 +167,8 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   violation are invalid (damage): every element kind of version 2 is defined here. A reader
   checks the payload length (`dimension` times the component size) against the remaining bytes
   before it allocates.
-- Tags 9 to 14 are **invalid in a file of format version 1** (15): a reader MUST report such a
-  value as damage, never decode it. A reader takes the version from the header of the file the
+- Tags 9 to 14 are **invalid in a file of format version 1**, tags 15 to 20 **in a file of
+  format version 1 or 2** (15): a reader MUST report such a value as damage, never decode it. A reader takes the version from the header of the file the
   value is in: a segment chunk from its segment's header (7.1, also when the chunk is read
   through the chunk index without framing the whole segment), a WAL record from its WAL
   segment's header (9.1), a definition from the manifest (6.1) or WAL segment it is stored in.
@@ -1361,7 +1381,7 @@ many small appends).
 - Every file starts with a magic and a format version. There are three version axes: the
   **store format version** in `GRAPH` (offset 8, 5.1), the **file format version** in the
   manifests, segments, WAL segments and packed snapshots, and the single-file **container
-  version** (14.1). This specification is store format version 3, file format version 2 and
+  version** (14.1). This specification is store format version 3, file format version 3 and
   container version 1.
 - Version history of the store format: 1, the first version; 2 (Graphersal 0.1.0) added the
   store identity `store_id` at `GRAPH` offset 100 (5.5), which version 1 left zero; 3
@@ -1372,17 +1392,23 @@ many small appends).
   and offer a repair that loses data; with version 3 in `GRAPH` it refuses the store as newer
   before it reads any other file.
 - Version history of the file format: 1 (Graphersal 0.1.x); 2 (Graphersal 0.2.0) added the
-  temporal value tags 9 to 13 and the vector value tag 14 (3). Nothing else differs, so a reader
-  of version 2 reads version
-  1 files as they are: a packed snapshot written by 0.1.x loads, and a store created from it
-  keeps its version 1 manifest and segment files byte for byte (8, 12.1). Every file carries its
-  own version: a snapshot of file format version 2 MAY reference (6.2) or a packed snapshot MAY
-  contain segment files of version 1, and a manifest of version 1 MAY be rewritten as version 2
-  (its content is valid in both). A file of version 2 is not readable by a reader of version 1.
-  The container is still at version 1.
+  temporal value tags 9 to 13 and the vector value tag 14 (3); 3 (Graphersal 0.3.0) added the
+  nanosecond temporal value tags 15 to 20 (with `offsettime` and the zone name of a
+  `datetime`) and writes every temporal kind but `date` with them. Nothing else differs, so a
+  reader of version 3 reads version 1 and 2 files as they are: a packed snapshot written by
+  0.1.x or 0.2.x loads, and a store created from it keeps its older manifest and segment files
+  byte for byte (8, 12.1). Every file carries its own version: a snapshot of file format version
+  3 MAY reference (6.2) or a packed snapshot MAY contain segment files of versions 1 and 2, and
+  a manifest of an older version MAY be rewritten as version 3 (its content is valid in both).
+  A file of version 3 is not readable by a reader of version 2: Graphersal 0.2.x refuses a
+  store, backup or packed snapshot holding one as written by a newer version (unsupported
+  version, below), never as damage, because it checks every file header first (it does so since
+  0.1.1). That is why file format version 3 needs no new store format version, unlike version 2
+  (whose readers, 0.1.0, took an unknown file version for damage). The container is still at
+  version 1.
 - A writer writes only the current version.
 - A file with a newer version than the reader knows MUST be refused (unsupported version),
-  never guessed at. A reader of file format version 2 MUST accept versions 1 and 2 in every
+  never guessed at. A reader of file format version 3 MUST accept versions 1, 2 and 3 in every
   file header (manifest 6.1, segment 7.1, packed snapshot 8, WAL segment 9.1).
 - **A version from the future is not damage, and a store holding one MUST NOT be worked on.**
   A file whose magic matches and whose header checksum is valid (the `GRAPH` fixed part, 5.1; a
@@ -1433,7 +1459,7 @@ upgrade not in it is refused before anything is written. The reference implement
 |---|---|---|---|
 | 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
 | 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x | 3 | nothing to do |
+| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
 <!-- upgrades:end -->
 
 "Version word" means only the version word of `GRAPH` and `GRAPH.copy` (and their checksums)
@@ -1470,6 +1496,11 @@ append to a WAL segment of an older file format version: when the newest segment
 lineage is older, the next record goes into a new segment of the current version (9.8:
 `wal_head` names it); a segment of an older version that holds no record (it starts at the next
 commit) is replaced whole by one of the current version under the same name.
+
+A new FILE format version alone needs no upgrade and no table row: a store of store format
+version 3 written by 0.2.x (files of version 2) is opened and continued as it is by a reader of
+file format version 3; its version 2 files stay, the files written from then on are of version
+3 (a new WAL segment, new snapshots), and from then on 0.2.x refuses the store as newer (15).
 - New definition kinds (6.3), new payload keys of a known kind, new segment kinds (7.5) and
   named extra files (8) do **not** change the version: the rules of 16 tell every reader how to
   treat what it does not know.
@@ -1477,7 +1508,7 @@ commit) is replaced whole by one of the current version under the same name.
 ## 16. Extensibility
 
 The format is meant to grow without migrations. These rules bind every reader and writer of
-store format version 3 and file format version 2:
+store format version 3 and file format version 3:
 
 1. **Length before payload, payload as a map.** Every definition carries its length before its
    payload (6.3), so a reader skips an unknown kind by its length; a payload is a property map,
@@ -1552,14 +1583,15 @@ store format version 3 and file format version 2:
   incomplete record at the end as "not yet written". Records before the writer's durable end are
   final; a record after it may still be cut off (9.7).
 - Read every file with the version in its own header (15): accept files of format versions 1
-  and 2 in one store or packed snapshot, reject a temporal value tag in a version 1 file, and
-  reject a temporal value outside its range (3) as damage.
+  to 3 in one store or packed snapshot, reject a temporal value tag in a version 1 file and a
+  nanosecond temporal value tag (15 to 20) in a version 1 or 2 file, and reject a temporal value
+  outside its range (3) as damage; a zone name you do not know is unsupported content (3).
 
 **Writers**
 
-- Write every new file with the current file format version (2) and `GRAPH` with store format
+- Write every new file with the current file format version (3) and `GRAPH` with store format
   version 3; never append a record to a WAL segment of an older file format version (start a new
-  segment, 15.1), and never write a temporal value into a file of version 1.
+  segment, 15.1), and never write a nanosecond temporal tag into a file of version 1 or 2.
 - Follow the write ordering of 9.9: a WAL never holds a commit that did not happen, and a caller
   never gets "ok" for a commit that is not durable under the configured durability.
 - Make files visible only when complete: a temporary name, sync, an atomic rename, a sync of the

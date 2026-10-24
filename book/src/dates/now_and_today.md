@@ -66,7 +66,5 @@ the digits the platform clock gives and never invented ones (the digits below ar
 | WebAssembly (the browser playground, Node.js) | milliseconds (`Date.now()`) |
 
 A pinned clock (`pin_now`, `GraphTraversalSource::with_now`) keeps every digit of the pinned
-value. The binary store format of this release holds microseconds: where the clock has digits
-below the microsecond (Linux, Windows), a `now()` stored in a [Store](../persistence/store.md)
-is refused like any such value; store `g.inject(now()).date_trunc(DT.microsecond)` instead
-([Storage and Exchange](storage.md)).
+value. A [Store](../persistence/store.md) keeps every digit of a stored `now()` (file format
+version 3, [Storage and Exchange](storage.md)).

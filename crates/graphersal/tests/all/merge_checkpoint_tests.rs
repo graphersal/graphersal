@@ -268,7 +268,7 @@ fn edge_ids(graph: &TraversalGraph) -> Vec<String> {
 
 /// The mutation kinds of the matrix (row 2), each one a committed unit (or, `fail`, a unit
 /// that rolls back after taking an auto id).
-pub(crate) const KINDS: [&str; 17] = [
+pub(crate) const KINDS: [&str; 18] = [
     "add_vertex",
     "add_edge",
     "drop_vertex",
@@ -286,6 +286,7 @@ pub(crate) const KINDS: [&str; 17] = [
     "unknown_definition",
     "drop_and_readd",
     "auto_id_gap",
+    "temporal",
 ];
 
 /// Applies one mutation of `kind` (picking its element with `rng`); failures of the unit are
@@ -443,6 +444,38 @@ pub(crate) fn mutate(graph: &Arc<Graph>, kind: &str, rng: &mut Rng, round: usize
                 Err(Abort)
             });
             run(graph, r#"g.add_v("auto").to_list()"#);
+        }
+        "temporal" => {
+            // Every temporal kind of file format version 3: digits below the microsecond, a
+            // zone name, an offset time, the longest durations; nested too.
+            let ns = seed * 100_003 % 1_000_000_000;
+            let values = [
+                format!(r#"localdatetime("2024-05-06T07:08:09.{ns:09}")"#),
+                format!(r#"datetime("1969-12-31T23:59:59.{ns:09}-05:30")"#),
+                format!(r#"datetime("2024-03-31T03:30:00.{ns:09}+02:00[Europe/Berlin]")"#),
+                format!(r#"time("23:59:59.{ns:09}")"#),
+                format!(r#"offsettime("10:00:00.{ns:09}+05:45")"#),
+                format!(r#"duration("P{}M-{seed}DT{seed}.{ns:09}S")"#, seed % 13),
+                r#"duration("PT9223372036854775807.999999999S")"#.to_string(),
+                r#"duration("-PT9223372036854775808S")"#.to_string(),
+                format!(r#"date("{:04}-02-28")"#, seed % 9999),
+                format!(
+                    r#"[datetime("9999-12-30T12:00:00.{ns:09}[Asia/Tokyo]"), #{{at: offsettime("00:00:00.{ns:09}-18:00")}}]"#
+                ),
+            ];
+            let value = &values[seed as usize % values.len()];
+            if let Some(a) = vertex {
+                run(
+                    graph,
+                    &format!(r#"g.v("{a}").property("t{}", {value}).to_list()"#, seed % 3),
+                );
+            }
+            if let Some(e) = edge {
+                run(
+                    graph,
+                    &format!(r#"g.e("{e}").property("when", {value}).to_list()"#),
+                );
+            }
         }
         other => panic!("unknown kind {other}"),
     }

@@ -862,7 +862,8 @@ impl Temporal {
     }
 
     /// Whether the value has a non-zero part below the microsecond (`12:00:00.000000001`): such a
-    /// value has no exact microsecond form (a file format or a binding that holds microseconds).
+    /// value has no exact microsecond form (a binding or an older format that holds
+    /// microseconds).
     pub fn has_sub_micros(&self) -> bool {
         match *self {
             Temporal::Date(_) => false,
@@ -871,19 +872,6 @@ impl Temporal {
             Temporal::Time(v) => v.nanos % 1000 != 0,
             Temporal::Duration(v) => v.nanos.get() % NANOS_PER_MICRO != 0,
             Temporal::OffsetTime(v) => v.nanos % 1000 != 0,
-        }
-    }
-
-    /// Whether the value is of a form the file format version 2 has no encoding for: an
-    /// [`OffsetTime`], or a [`DateTime`] with a zone name.
-    pub fn has_no_v2_form(&self) -> bool {
-        match self {
-            Temporal::OffsetTime(_) => true,
-            Temporal::DateTime(v) => v.zone.is_some(),
-            Temporal::Date(_)
-            | Temporal::LocalDateTime(_)
-            | Temporal::Time(_)
-            | Temporal::Duration(_) => false,
         }
     }
 

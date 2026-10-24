@@ -3717,7 +3717,7 @@ fn crc32c(bytes: &[u8]) -> u32 {
 
 /// Files of a newer Graphersal (made by patching the version words of files this build wrote,
 /// checksums recomputed: a store of store format version 4, a single-file store of container
-/// version 2, a packed snapshot of file format version 3) are refused as "written by a newer
+/// version 2, a packed snapshot of the next file format version) are refused as "written by a newer
 /// Graphersal" by the `store` commands and by `--graph`: exit 1, never DAMAGE, never
 /// "Corrupt", no repair offered, nothing written.
 #[test]
@@ -3761,7 +3761,7 @@ fn store_commands_refuse_files_of_a_newer_graphersal() {
     std::fs::write(&file, bytes).unwrap();
     // The packed snapshot's header: file format version at 8.
     let mut bytes = std::fs::read(&snap).unwrap();
-    bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(graphersal::persist::FORMAT_VERSION + 1).to_le_bytes());
     std::fs::write(&snap, bytes).unwrap();
 
     let store_bytes = std::fs::read(dir.join("GRAPH")).unwrap();

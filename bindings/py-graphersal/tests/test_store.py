@@ -231,3 +231,44 @@ def test_a_store_of_graphersal_0_1_is_upgraded(tmp_path):
     shutil.copytree(FIXTURES / "backup", tmp_path / "old_backup")
     backup = graphersal.Store.upgrade(str(tmp_path / "old_backup"), str(tmp_path / "backup"))
     assert backup["backup"]["commit_seq"] == 7
+
+
+def test_temporal_values_survive_the_store_exactly(tmp_path):
+    """File format version 3: a zoned datetime (a ZoneInfo), an offset time, nanoseconds and the
+    longest durations are stored and read back exactly, through the WAL and a checkpoint."""
+    import datetime as dt
+    import zoneinfo
+
+    berlin = zoneinfo.ZoneInfo("Europe/Berlin")
+    zoned = dt.datetime(2024, 3, 30, 12, 0, 0, 123456, tzinfo=berlin)
+    offset_time = dt.time(10, 0, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=45)))
+    path = str(tmp_path / "data")
+    texts = {
+        "ns": 'time("12:00:00.000000001")',
+        "ldt": 'localdatetime("9999-12-31T23:59:59.999999999")',
+        "long": 'duration("PT9223372036854775807.999999999S")',
+        "short": 'duration("-PT9223372036854775808S")',
+    }
+    with graphersal.Store.create(path) as store:
+        store.graph.execute(
+            'g.addV("e").property("name", "x").property("zoned", z).property("ot", o).iterate()',
+            params={"z": zoned, "o": offset_time},
+        )
+        for key, value in texts.items():
+            store.graph.execute(f'g.V().has("name", "x").property("{key}", {value}).iterate()')
+
+    def check(graph):
+        got = graph.query('g.V().has("name", "x").values("zoned").next()')
+        assert got == zoned and got.tzinfo == berlin
+        assert graph.query('g.V().has("name", "x").values("ot").next()') == offset_time
+        for key, value in texts.items():
+            assert graph.query(
+                f'g.V().has("name", "x").values("{key}").as_string().next()'
+            ) == graph.query(f"g.inject({value}).as_string().next()")
+
+    with graphersal.Store.open(path) as store:
+        check(store.graph)  # WAL replay
+        store.checkpoint("temporal")
+    with graphersal.Store.open(path) as store:
+        check(store.graph)  # from the snapshot
+        assert store.verify()["ok"]

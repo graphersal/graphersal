@@ -132,7 +132,7 @@ that). There is no disk: download a `.gsnap` to keep a state.
 treats records after the writer's durable end as possibly not final. In Rust,
 `store.changes_since(commit)` yields the `ChangeSet`s.
 
-**Is the format stable?** Store format version 3 (with file format version 2) is specified on the
+**Is the format stable?** Store format version 3 (with file format version 3) is specified on the
 [specification](format.md) page; a newer version is refused, never guessed at, and a store of an
 older released version is upgraded by `graphersal store upgrade` without the older build (every
 build keeps the readers of every released format; [Format Versions](store_versions.md)).

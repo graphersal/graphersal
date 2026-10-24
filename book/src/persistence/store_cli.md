@@ -472,7 +472,7 @@ every other command does (below):
 |---|---|---|---|
 | 1 | never released (no store id) | 3 | unsupported (packed snapshot) |
 | 2 | Graphersal 0.1.x | 3 | in place or into a copy (version word) |
-| 3 | Graphersal 0.2.x | 3 | nothing to do |
+| 3 | Graphersal 0.2.x and later | 3 | nothing to do |
 <!-- upgrades:end -->
 
 ```text
