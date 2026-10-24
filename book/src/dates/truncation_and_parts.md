@@ -29,7 +29,8 @@ g.inject(duration("P1Y2M3DT4H5M")).date_trunc(DT.day).next()   // duration("P1Y2
 | `decade` | the first day of a year divisible by 10 (2020-01-01) |
 | `century`, `millennium` | the first day of a year ending in `01`/`001`: centuries and millennia start at year 1, as PostgreSQL counts them (2001-01-01 starts the 21st century) |
 
-A `date` takes `day` and larger, a `time` `hour` and smaller, a `duration` keeps the fields at
+A `date` takes `day` and larger, a `time` and an `offsettime` `hour` and smaller (the offset
+stays), a `duration` keeps the fields at
 and above the unit (`month` and larger keep whole multiples of the unit's months and drop the days
 and the time part).
 
@@ -49,7 +50,7 @@ One field as a number: an `int64`, except `DT.epoch`, a `float64` of seconds.
 | `DT.day_of_year` (1-366) | the day of the year |
 | `DT.decade`, `DT.century`, `DT.millennium` | as PostgreSQL counts them (the 21st century is 2001-2100) |
 | `DT.epoch` | seconds since 1970-01-01T00:00:00Z (a `localdatetime` read as UTC); for a `duration` its length with a year of 365.25 days and a month of 30 days |
-| `DT.offset` | the UTC offset of a `datetime` in seconds |
+| `DT.offset` | the UTC offset of a `datetime` or an `offsettime` in seconds |
 
 ```rhai,graph=empty
 g.inject(date("2023-08-17")).date_part(DT.day_of_week).next()   // 4

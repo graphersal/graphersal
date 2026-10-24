@@ -84,6 +84,7 @@ impl ElementProperty {
             | ValueType::LocalDateTime
             | ValueType::DateTime
             | ValueType::Time
+            | ValueType::OffsetTime
             | ValueType::Duration => self.cast_to_temporal(target),
             ValueType::Vector(element) => self.cast_to_vector(*element),
 

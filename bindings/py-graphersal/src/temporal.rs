@@ -1,11 +1,13 @@
-//! The five date and time types (book "Dates and Times") as Python values, both ways:
+//! The six date and time types (book "Dates and Times") as Python values, both ways:
 //!
 //! | Graphersal | Python |
 //! |---|---|
 //! | `datetime` | aware `datetime.datetime`, `tzinfo` = `datetime.timezone(timedelta(seconds=offset))` |
+//! | `datetime` with a zone name | aware `datetime.datetime`, `tzinfo` = `zoneinfo.ZoneInfo(name)` (a `ZoneInfo` datetime comes back with its name) |
 //! | `localdatetime` | naive `datetime.datetime` |
 //! | `date` | `datetime.date` |
-//! | `time` | naive `datetime.time` (an aware `time` has no instant and is refused) |
+//! | `time` | naive `datetime.time` |
+//! | `offsettime` | `datetime.time` with a fixed `tzinfo` (`datetime.timezone`); a `time` whose `tzinfo` has no fixed offset (a `ZoneInfo`) is refused |
 //! | `duration` | `datetime.timedelta` when it has no months, else [`Interval`] |
 //!
 //! Python's `datetime` counts in microseconds, the engine in nanoseconds: a value with a part
@@ -14,7 +16,7 @@
 //! built and read through the `datetime` module's own API (the datetime C API is not part of the
 //! stable ABI this extension is built for).
 
-use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
+use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
@@ -122,12 +124,16 @@ pub(crate) fn temporal_to_pyobject(py: Python<'_>, value: Temporal) -> PyResult<
         Temporal::Date(date) => date_object(&module, date)?,
         Temporal::Time(time) => time_object(&module, time, None)?,
         Temporal::LocalDateTime(local) => datetime_object(&module, local, None)?,
-        Temporal::DateTime(value) => {
-            let delta = module
-                .getattr("timedelta")?
-                .call((0, value.offset_seconds()), None)?;
-            let zone = module.getattr("timezone")?.call1((delta,))?;
-            datetime_object(&module, value.local(), Some(zone))?
+        Temporal::DateTime(value) => match value.zone_name() {
+            Some(name) => zoned_datetime_object(&module, value, name)?,
+            None => {
+                let zone = fixed_zone(&module, value.offset_seconds())?;
+                datetime_object(&module, value.local(), Some(zone))?
+            }
+        },
+        Temporal::OffsetTime(value) => {
+            let zone = fixed_zone(&module, value.offset_seconds())?;
+            time_object(&module, value.time(), Some(zone))?
         }
         Temporal::Duration(duration) => {
             if duration.months() == 0 && i64::from(duration.days()).abs() <= MAX_TIMEDELTA_DAYS {
@@ -148,6 +154,46 @@ pub(crate) fn temporal_to_pyobject(py: Python<'_>, value: Temporal) -> PyResult<
         }
     };
     Ok(object.unbind())
+}
+
+/// `datetime.timezone(timedelta(seconds=offset))`.
+fn fixed_zone<'py>(module: &Bound<'py, PyModule>, offset: i32) -> PyResult<Bound<'py, PyAny>> {
+    let delta = module.getattr("timedelta")?.call((0, offset), None)?;
+    module.getattr("timezone")?.call1((delta,))
+}
+
+/// A `datetime` with a zone name as an aware `datetime.datetime` in `zoneinfo.ZoneInfo(name)`:
+/// the instant moved into the zone (`astimezone`), so a time the zone repeats gets the right
+/// `fold`. A zone the Python installation does not know (no `tzdata` on some systems) raises,
+/// never drops the name silently.
+fn zoned_datetime_object<'py>(
+    module: &Bound<'py, PyModule>,
+    value: DateTime,
+    name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = module.py();
+    let zone = py
+        .import("zoneinfo")
+        .and_then(|zoneinfo| zoneinfo.getattr("ZoneInfo")?.call1((name,)))
+        .map_err(|err| {
+            crate::error::GraphersalError::new_err(format!(
+                "the datetime {value} names the zone {name}, which this Python installation \
+                 does not know ({err}); install the tzdata package, or read the value without \
+                 its zone name (datetime(x.as_string()) of the offset form)"
+            ))
+        })?;
+    let utc = fixed_zone(module, 0)?;
+    let at_utc = datetime_object(
+        module,
+        value
+            .with_offset(0)
+            .map_err(|err| crate::error::GraphersalError::new_err(err.to_string()))?
+            .local(),
+        Some(utc),
+    )?;
+    at_utc
+        .call_method1("astimezone", (zone,))
+        .map_err(|_| out_of_python_range(&value.to_string()))
 }
 
 fn date_object<'py>(module: &Bound<'py, PyModule>, date: Date) -> PyResult<Bound<'py, PyAny>> {
@@ -257,9 +303,21 @@ pub(crate) fn python_to_temporal(value: &Bound<'_, PyAny>) -> Result<Option<Temp
         }
         let offset = i32::try_from(micros / MICROS_PER_SECOND)
             .map_err(|_| "the datetime's UTC offset is out of range".to_string())?;
-        return DateTime::from_local(local, offset)
-            .map(|v| Some(Temporal::DateTime(v)))
-            .map_err(failed);
+        let instant = DateTime::from_local(local, offset).map_err(failed)?;
+        // A `zoneinfo.ZoneInfo` (its `key` is the IANA name) keeps its name, as the engine's
+        // zoned datetime; a name the bundled database does not know is an error, never dropped.
+        let key = value
+            .getattr("tzinfo")
+            .and_then(|zone| zone.getattr("key"))
+            .ok()
+            .and_then(|key| key.extract::<String>().ok());
+        return match key {
+            Some(name) => instant
+                .in_zone(&name)
+                .map(|v| Some(Temporal::DateTime(v)))
+                .map_err(failed),
+            None => Ok(Some(Temporal::DateTime(instant))),
+        };
     }
     if is("date") {
         return Date::from_ymd(int("year")? as i32, int("month")? as u8, int("day")? as u8)
@@ -267,22 +325,42 @@ pub(crate) fn python_to_temporal(value: &Bound<'_, PyAny>) -> Result<Option<Temp
             .map_err(failed);
     }
     if is("time") {
-        let zone = value.getattr("tzinfo").map_err(|err| err.to_string())?;
-        if !zone.is_none() {
-            return Err(
-                "an aware datetime.time (with tzinfo) has no date, so no instant: pass a naive \
-                 time (time.replace(tzinfo=None)) or an aware datetime.datetime"
-                    .to_string(),
-            );
-        }
-        return Time::from_hms_micro(
+        let time = Time::from_hms_micro(
             int("hour")? as u8,
             int("minute")? as u8,
             int("second")? as u8,
             int("microsecond")? as u32,
         )
-        .map(|v| Some(Temporal::Time(v)))
-        .map_err(failed);
+        .map_err(failed)?;
+        let zone = value.getattr("tzinfo").map_err(|err| err.to_string())?;
+        if zone.is_none() {
+            return Ok(Some(Temporal::Time(time)));
+        }
+        // A fixed offset (`datetime.timezone`) makes an offsettime; a zone with rules (a
+        // `ZoneInfo`) has no offset without a date.
+        let offset = value
+            .call_method0("utcoffset")
+            .map_err(|err| err.to_string())?;
+        if offset.is_none() {
+            return Err(
+                "an aware datetime.time whose tzinfo has no fixed offset (a ZoneInfo) has no \
+                 date to find its offset at: pass a datetime.timezone offset, or an aware \
+                 datetime.datetime"
+                    .to_string(),
+            );
+        }
+        let micros = timedelta_micros(&offset)?;
+        if micros % MICROS_PER_SECOND != 0 {
+            return Err(
+                "the time's UTC offset has a fraction of a second; Graphersal keeps whole seconds"
+                    .to_string(),
+            );
+        }
+        let offset = i32::try_from(micros / MICROS_PER_SECOND)
+            .map_err(|_| "the time's UTC offset is out of range".to_string())?;
+        return OffsetTime::new(time, offset)
+            .map(|v| Some(Temporal::OffsetTime(v)))
+            .map_err(failed);
     }
     if is("timedelta") {
         // Whole days and the rest, both with the sign of the whole (timedelta(hours=-1) is

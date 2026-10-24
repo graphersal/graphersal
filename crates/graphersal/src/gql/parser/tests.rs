@@ -2148,8 +2148,7 @@ fn not_yet_functions_name_the_reason_and_the_alternative() {
         ("sin(n.x)", GqlErrorKind::NotYet, "math(\"sin(_)\")"),
         ("pi()", GqlErrorKind::NotYet, "math("),
         ("e()", GqlErrorKind::NotYet, "math("),
-        // Stage 3g: date() is a function; Cypher's zoned time() stays not yet.
-        ("time('12:00')", GqlErrorKind::NotYet, "localtime("),
+        // Stage 3g: date() is a function; Cypher's zoned time() too since temporal v2.
         ("timestamp()", GqlErrorKind::NotYet, "datetime()"),
         ("toIntegerList(n.l)", GqlErrorKind::NotYet, "unfold()"),
         ("normalize(n.s)", GqlErrorKind::NotYet, "lower()"),
@@ -6253,7 +6252,8 @@ fn other_namespaced_calls_stay_refused() {
 }
 
 #[test]
-fn zoned_time_is_not_yet_and_realtime_is_refused() {
+fn zoned_time_parses_and_realtime_is_refused() {
+    // Temporal v2 (user decision U2): Cypher's zoned time() is a function.
     for call in [
         "time('12:00')",
         "zoned_time()",
@@ -6261,21 +6261,7 @@ fn zoned_time_is_not_yet_and_realtime_is_refused() {
         "time.statement()",
         "time.transaction()",
     ] {
-        let f = fail(&format!("MATCH (n) RETURN {call}"));
-        assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
-        assert_eq!(f.gqlstatus, "0A000", "{call}");
-        let name = call.split('(').next().unwrap_or("");
-        assert_eq!(f.text, name, "{call}");
-        assert!(
-            f.message
-                .contains(&format!("{name}() (a time of day with a UTC offset)")),
-            "{}",
-            f.message
-        );
-        assert!(
-            f.alternative.unwrap_or_default().contains("localtime("),
-            "{call}"
-        );
+        ok(&format!("MATCH (n) RETURN {call}"));
     }
     for call in [
         "date.realtime()",

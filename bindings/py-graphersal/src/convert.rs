@@ -7,7 +7,7 @@ use graphersal::script::rhai::Dynamic;
 use graphersal::script::{
     ScriptEdge, ScriptExecution, ScriptUuid, ScriptVector, ScriptVertex, metrics_to_map,
 };
-use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
+use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyList};
@@ -197,6 +197,9 @@ fn script_temporal(value: &Dynamic) -> Option<Temporal> {
     }
     if let Some(v) = value.read_lock::<Time>() {
         return Some(Temporal::Time(*v));
+    }
+    if let Some(v) = value.read_lock::<OffsetTime>() {
+        return Some(Temporal::OffsetTime(*v));
     }
     value
         .read_lock::<Duration>()

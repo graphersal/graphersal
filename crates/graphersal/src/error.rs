@@ -813,16 +813,18 @@ fn temporal_input_help(step: &str, operand: &str, expected: &str, actual: &str) 
              \"2023-08-01T00:00:00Z\")))."
         );
     }
-    let types = "The date steps take date and time values (datetime, date, localdatetime, time; \
-                 date_add() and date_trunc() also a duration). Build one with \
+    let types = "The date steps take date and time values (datetime, date, localdatetime, time, \
+                 offsettime; date_add() and date_trunc() also a duration). Build one with \
                  datetime(\"2023-08-02T00:00:00Z\"), date(\"2023-08-02\"), \
-                 localdatetime(\"2023-08-02T09:30:00\"), time(\"09:30:00\") or duration(\"P1D\")";
+                 localdatetime(\"2023-08-02T09:30:00\"), time(\"09:30:00\"), \
+                 offsettime(\"09:30:00+02:00\") or duration(\"P1D\")";
     if actual.starts_with("string") {
         return format!(
             "{types}. A string is never read as a date by itself: convert it first with \
              as_date() (ISO 8601 text), for example \
              g.inject(\"2023-08-02T00:00:00Z\").as_date().{example}, or with \
-             as_date(GType.DATE) (and GType.LOCALDATETIME, GType.TIME) for the other types."
+             as_date(GType.DATE) (and GType.LOCALDATETIME, GType.TIME, GType.OFFSETTIME) for the \
+             other types."
         );
     }
     if actual.starts_with("int64") || actual.starts_with("float64") {
@@ -879,8 +881,13 @@ fn temporal_parse_help(step: &str, target: &str) -> String {
         "time" => "as_date(GType.TIME) reads a time text such as \"09:30:00\", or takes the time \
                    of day of a datetime (at its own offset) or of a localdatetime."
             .to_string(),
-        _ => "as_date() converts to datetime, date, localdatetime and time (as_date(GType.DATE), \
-              ...); as_duration() reads durations."
+        "offsettime" => "as_date(GType.OFFSETTIME) reads a time text with its UTC offset such \
+                         as \"09:30:00+02:00\", or takes the time of day and the offset of a \
+                         datetime; a time or a localdatetime gives its time at UTC, as in \
+                         g.inject(time(\"09:30\")).as_date(GType.OFFSETTIME)."
+            .to_string(),
+        _ => "as_date() converts to datetime, date, localdatetime, time and offsettime \
+              (as_date(GType.DATE), ...); as_duration() reads durations."
             .to_string(),
     }
 }
@@ -904,7 +911,8 @@ fn temporal_help(step: &str, error: &crate::value::temporal::TemporalError) -> S
             .to_string(),
         TemporalError::Unsupported { .. } => "Each type has its own units: a date has no hours \
                                               (convert it with as_date(GType.LOCALDATETIME) \
-                                              first), a time has no days or months, a duration \
+                                              first), a time and an offsettime have no days or \
+                                              months, a duration \
                                               has no weeks and no zone. DT.day_of_week, \
                                               DT.iso_day_of_week, DT.day_of_year, DT.iso_year, \
                                               DT.epoch and DT.offset are parts for date_part(), \
@@ -7155,8 +7163,10 @@ const GQL_TEMPORAL_CONSTRUCT_ADVICE: &str = "date(), localtime(), localdatetime(
      of fields or a temporal value with the parts the result needs: date(x) of a date, a local \
      datetime or a datetime, localtime(x) of a local time, a local datetime or a datetime, \
      localdatetime(x) of a local datetime or a datetime, datetime(x) of a local datetime (read \
-     at UTC) or a datetime; a date and a time are joined in a map, as in localdatetime({date: \
-     d, hour: 12}); duration() takes text or a map of numbers, and datetime.fromepoch(seconds, \
+     at UTC) or a datetime; time(x) (ISO zoned_time()), a time of day with its UTC offset, of a \
+     time, a datetime, or a local time or local datetime (read at UTC), as in \
+     time({hour: 12, timezone: '+01:00'}); a date and a time are joined in a map, as in \
+     localdatetime({date: d, hour: 12}); duration() takes text or a map of numbers, and datetime.fromepoch(seconds, \
      nanoseconds) and datetime.fromepochmillis(milliseconds) integers, as in \
      g.gql(\"RETURN date(localdatetime('2015-07-21T12:00')) AS d, \
      localdatetime({date: date('2015-07-21'), hour: 12}) AS t, \
@@ -7169,7 +7179,9 @@ const GQL_TEMPORAL_COMPONENT_ADVICE: &str = "A component of a temporal value is 
      name (in any case): a date, and the date of a local datetime or a datetime, has year, \
      quarter, month, week, weekYear, dayOfQuarter, day, ordinalDay and dayOfWeek; a time of \
      day has hour, minute, second, millisecond, microsecond and nanosecond; a datetime also \
-     has timezone, offset, offsetMinutes, offsetSeconds, epochSeconds and epochMillis; a \
+     has timezone, offset, offsetMinutes, offsetSeconds, epochSeconds and epochMillis (its \
+     timezone is the zone name when it was built with one, else the offset); a time (with an \
+     offset) also has timezone, offset, offsetMinutes and offsetSeconds; a \
      duration has the totals years, quarters, months, weeks, days, hours, minutes, seconds, \
      milliseconds, microseconds and nanoseconds and the remainders such as monthsOfYear and \
      secondsOfMinute, as in g.gql(\"RETURN date('2015-07-21').week AS w, \
@@ -7183,9 +7195,9 @@ const GQL_TEMPORAL_COMPONENT_ADVICE: &str = "A component of a temporal value is 
 const GQL_TEMPORAL_TRUNCATE_ADVICE: &str = "X.truncate(unit, value [, map]) takes a unit name \
      (in any case): date.truncate the units millennium, century, decade, year, weekYear, \
      quarter, month, week and day; localdatetime.truncate and datetime.truncate those and \
-     hour, minute, second, millisecond, microsecond and nanosecond; localtime.truncate day \
-     to nanosecond. The value is a temporal value with the parts the result needs (a date \
-     gives a datetime at midnight), and the map sets fields of the result, as in \
+     hour, minute, second, millisecond, microsecond and nanosecond; localtime.truncate and \
+     time.truncate day to nanosecond. The value is a temporal value with the parts the result \
+     needs (a date gives a datetime at midnight), and the map sets fields of the result, as in \
      g.gql(\"RETURN date.truncate('month', date('2015-07-21')) AS d, \
      datetime.truncate('hour', datetime('2015-07-21T21:40:32+01:00'), {minute: 30}) AS t\"). \
      Millennia and centuries start at the years 2000 and 1900, as in Neo4j (the Gremlin step \
@@ -7196,8 +7208,9 @@ const GQL_TEMPORAL_TRUNCATE_ADVICE: &str = "X.truncate(unit, value [, map]) take
 #[cfg(feature = "gql")]
 const GQL_TEMPORAL_BETWEEN_ADVICE: &str = "duration.between(a, b), duration.inMonths(a, b), \
      duration.inDays(a, b) and duration.inSeconds(a, b) take two dates, local times, local \
-     datetimes or datetimes, never durations; kinds may be mixed (a value without a date \
-     gives the times only, one without a time is read at midnight). Two local times have no \
+     datetimes or datetimes, never durations (times with an offset too); kinds may be mixed (a \
+     value without a date gives the times only, one without a time is read at midnight, one \
+     without an offset at the other's offset or in its zone). Two local times have no \
      months or days: use duration.inSeconds(a, b) or duration.between(a, b) for them, as in \
      g.gql(\"RETURN duration.between(date('2015-01-01'), localdatetime('2015-03-15T12:00')) \
      AS u, duration.inSeconds(localtime('12:00'), localtime('13:30')) AS s\"). ";
@@ -7632,7 +7645,8 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
              datetime('2015-07-21T21:40+01:00'), duration('P14DT16H12M')) or a map of its \
              fields: year with month / day, week / dayOfWeek, ordinalDay or quarter / \
              dayOfQuarter; hour, minute, second, millisecond, microsecond, nanosecond; a \
-             datetime's timezone as an offset ('+01:00') or a zone name ('Europe/Berlin'); a \
+             datetime's timezone as an offset ('+01:00') or a zone name ('Europe/Berlin', kept \
+             in the value); a time's timezone, as in time({hour: 12, timezone: '+01:00'}); a \
              base value as date, time or datetime; a datetime's epochSeconds or epochMillis \
              (not both, nor next to a base value); a duration's years .. nanoseconds, as in \
              g.gql(\"RETURN date({year: 2015, week: 30, dayOfWeek: 2}) AS d, \

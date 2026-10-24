@@ -1313,13 +1313,15 @@ the same as each function on [Dates in GQL](../dates/gql.md).
 |---|---|---|
 | `date(x)` | `date(x)` | a calendar day (`date`) |
 | `local_time(x)` | `localtime(x)` | a time of day without an offset (`time`) |
+| `zoned_time(x)` | `time(x)` | a time of day with its UTC offset (`offsettime`) |
 | `local_datetime(x)` | `localdatetime(x)` | a date and a time of day without an offset (`localdatetime`) |
-| `zoned_datetime(x)` | `datetime(x)` | an instant with its UTC offset (`datetime`) |
+| `zoned_datetime(x)` | `datetime(x)` | an instant with its UTC offset, and its zone name when built with one (`datetime`) |
 | `duration(x)` | `duration(x)` | months, days and a time part (`duration`) |
 
 `x` is ISO 8601 text, a map of fields, or (not for `duration`) another temporal value, which is
 projected onto the type (`date(datetime(..))` is the date at the value's own offset,
-`datetime(localdatetime(..))` the wall clock at UTC). With no argument a constructor gives the
+`datetime(localdatetime(..))` the wall clock at UTC, `time(localtime(..))` at UTC,
+`time(datetime(..))` its time of day and offset). With no argument a constructor gives the
 time the query started ([Clocks](#clocks)). A `NULL` argument, or a `NULL` field of the map,
 gives `NULL`. Values hold **nanoseconds**, as Neo4j's: up to nine fraction digits and the
 `nanosecond` field are kept exactly.
@@ -1340,15 +1342,18 @@ g.gql("RETURN date(null) AS a, date({year: 2015, month: null}) AS b").to_list() 
 |---|---|
 | `date` | `2015-07-21` / `20150721`, `2015-07` / `201507`, `2015`; week dates `2015-W30-2` / `2015W302`, `2015-W30` (its Monday); ordinal dates `2015-202` / `2015202`; quarter dates `2015-Q3-21` / `2015Q321`, `2015-Q3` |
 | `localtime` | `21:40:32.142` / `214032.142`, `21:40` / `2140`, `21`; a comma for the fraction (`21:40:32,142`); no offset (`12:00+01:00` is `22007`) |
+| `time` | a `localtime` form, then `Z`, `+01:00`, `+0100` or `+01` (`21:40:32.142+0100`, `2140-02`); no offset is UTC; no zone name |
 | `localdatetime` | a date form, `T`, a time form: `2015-07-21T21:40`, `2015-W30-2T2140`, `2015202T21:40:32.142` |
-| `datetime` | a local datetime with `Z`, `+01:00`, `+0100` or `+01`, and / or a zone in brackets: `2015-07-21T21:40:32.142[Europe/London]`, `..+01:00[Europe/London]` (the offset must be the zone's at that time); a date alone is midnight; no offset and no zone is UTC |
+| `datetime` | a local datetime with `Z`, `+01:00`, `+0100` or `+01`, and / or a zone in brackets: `2015-07-21T21:40:32.142[Europe/London]`, `..+01:00[Europe/London]` (the offset must be the zone's at that time; the name is kept); a date alone is midnight; no offset and no zone is UTC |
 | `duration` | `P14DT16H12M`, `P5W`, `-P1D`, `P-1DT2H`; a fraction on any unit (`P1.5Y`, `PT0.75M`, `PT1.5H`); the alternative form `P0001-02-03T04:05:06` |
 
 ```rhai,graph=empty
 g.gql("RETURN date('2015W302') AS w, date('2015-202') AS o, date('2015-Q3-21') AS q, date('2015-W30') AS monday").to_list()
 // #{"monday": date("2015-07-20"), "o": date("2015-07-21"), "q": date("2015-07-21"), "w": date("2015-07-21")}
 g.gql("RETURN datetime('2015-07-21T21:40:32.142[Europe/London]') AS a, datetime('2015-07-21T21:40:32+0100') AS b, datetime('2015-07-21') AS c").to_list()
-// #{"a": datetime("2015-07-21T21:40:32.142+01:00"), "b": datetime("2015-07-21T21:40:32+01:00"), "c": datetime("2015-07-21T00:00:00Z")}
+// #{"a": datetime("2015-07-21T21:40:32.142+01:00[Europe/London]"), "b": datetime("2015-07-21T21:40:32+01:00"), "c": datetime("2015-07-21T00:00:00Z")}
+g.gql("RETURN time('21:40:32.142+0100') AS a, time('2140-02') AS b, zoned_time('12:00') AS c").to_list()
+// #{"a": offsettime("21:40:32.142+01:00"), "b": offsettime("21:40:00-02:00"), "c": offsettime("12:00:00Z")}
 g.gql("RETURN duration('P1Y2M10DT2H30M') AS a, duration('P1.5Y') AS b, duration('PT0.75M') AS c, duration('P0001-02-03T04:05:06') AS d").to_list()
 // #{"a": duration("P1Y2M10DT2H30M"), "b": duration("P1Y6M"), "c": duration("PT45S"), "d": duration("P1Y2M3DT4H5M6S")}
 g.gql("RETURN date('2015-13-01') AS d")   // fails: the date does not exist (22007)
@@ -1360,9 +1365,10 @@ g.gql("RETURN date('2015-13-01') AS d")   // fails: the date does not exist (220
 |---|---|
 | `date` | `year` with one group: `month` / `day`; `week` / `dayOfWeek` (ISO 8601 weeks: `year` is then the week-numbering year); `ordinalDay`; `quarter` / `dayOfQuarter`. A missing smaller field is its first value (`{year: 1984}` is January 1) |
 | `localtime` | `hour`, `minute`, `second`, and `millisecond`, `microsecond`, `nanosecond` (added up: `{millisecond: 645, microsecond: 876}` is `.645876`) |
+| `time` | the keys of `localtime` and `timezone` (an offset, or a zone name: its offset at the query's instant); no `timezone` is UTC |
 | `localdatetime` | the keys of both |
-| `datetime` | the keys of both and `timezone` (`'+01:00'`, `'Europe/Stockholm'`); no `timezone` is UTC |
-| base values | `date: d` takes the date (of a date, a local datetime or a datetime at its own offset), `time: t` the time of day (and the offset of a datetime `t`), `datetime: x` both; the other keys then override single fields (`{date: d, day: 28}`, `{date: d, week: 1}` keeps the day of the week). With a base that has an offset, `timezone` converts the instant (`12:00+01:00` to `16:00+05:00`); without one it attaches the zone |
+| `datetime` | the keys of both and `timezone` (`'+01:00'`, `'Europe/Stockholm'`: the name is kept); no `timezone` is UTC |
+| base values | `date: d` takes the date (of a date, a local datetime or a datetime at its own offset), `time: t` the time of day (and the offset of a datetime or time `t`, and the zone name of a datetime `t`), `datetime: x` both; the other keys then override single fields (`{date: d, day: 28}`, `{date: d, week: 1}` keeps the day of the week), and a base with a zone name is read again in its zone. With a base that has an offset, `timezone` converts the instant (`12:00+01:00` to `16:00+05:00`); without one it attaches the zone |
 | `duration` | `years`, `months`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `milliseconds`, `microseconds`, `nanoseconds`, each may be fractional and negative; a fraction cascades down (a year is 12 months, a month 2 629 746 seconds, a week 7 days, a day 86 400 seconds, then the whole days of the seconds become days: `{months: 0.75}` is `P22DT19H51M49.5S`) |
 
 An unknown key, or two groups of date keys together, is `22007`; a field out of range (`month:
@@ -1372,7 +1378,7 @@ An unknown key, or two groups of date keys together, is `22007`; a field out of 
 g.gql("RETURN date({year: 2015, week: 30, dayOfWeek: 2}) AS w, date({year: 1984, quarter: 3, dayOfQuarter: 45}) AS q, localdatetime({year: 1984, ordinalDay: 202, hour: 12}) AS o").to_list()
 // #{"o": localdatetime("1984-07-20T12:00:00"), "q": date("1984-08-14"), "w": date("2015-07-21")}
 g.gql("RETURN localtime({hour: 12, minute: 31, second: 14, millisecond: 645, microsecond: 876}) AS t, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS dt").to_list()
-// #{"dt": datetime("1984-10-11T12:00:00+01:00"), "t": time("12:31:14.645876")}
+// #{"dt": datetime("1984-10-11T12:00:00+01:00[Europe/Stockholm]"), "t": time("12:31:14.645876")}
 g.gql("RETURN date({date: date('2015-07-21'), day: 28}) AS a, localdatetime({date: date('2015-07-21'), time: localtime('12:30')}) AS b, datetime({datetime: datetime('2015-07-21T12:00+01:00'), timezone: '+05:00'}) AS c").to_list()
 // #{"a": date("2015-07-28"), "b": localdatetime("2015-07-21T12:30:00"), "c": datetime("2015-07-21T16:00:00+05:00")}
 g.gql("RETURN duration({days: 14, hours: 16, minutes: 12}) AS a, duration({years: 1.5, weeks: 2, seconds: 1.25}) AS b, duration({months: 0.75}) AS c").to_list()
@@ -1401,8 +1407,9 @@ A name the value's type does not have is `22G03`, and the message lists the name
 | Of | Components |
 |---|---|
 | `date`, `localdatetime`, `datetime` | `year`, `quarter` (1-4), `month`, `week` and `weekYear` (ISO 8601: Monday weeks, week 1 holds January 4), `dayOfQuarter` (also `quarterDay`), `day`, `ordinalDay` (1-366), `dayOfWeek` (also `weekDay`; 1 = Monday to 7 = Sunday) |
-| `localtime`, `localdatetime`, `datetime` | `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond`, each fraction counted from the start of the second (`.645876` gives 645, 645876, 645876000) |
-| `datetime` | `timezone` and `offset` (the offset text: `Z`, `+01:00`; never a zone name), `offsetMinutes`, `offsetSeconds`, `epochSeconds`, `epochMillis` |
+| `localtime`, `time`, `localdatetime`, `datetime` | `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond`, each fraction counted from the start of the second (`.645876` gives 645, 645876, 645876000) |
+| `datetime` | `timezone` (the zone name, `'Europe/Stockholm'`, of a value built with one, else the offset text), `offset` (the offset text: `Z`, `+01:00`), `offsetMinutes`, `offsetSeconds`, `epochSeconds`, `epochMillis` |
+| `time` | `timezone` and `offset` (the offset text), `offsetMinutes`, `offsetSeconds` |
 | `duration` | the totals `years`, `quarters`, `months`, `weeks`, `days`, `hours`, `minutes`, `seconds`, `milliseconds`, `microseconds`, `nanoseconds`; the remainders `quartersOfYear`, `monthsOfQuarter`, `monthsOfYear`, `daysOfWeek`, `minutesOfHour`, `secondsOfMinute`, `millisecondsOfSecond`, `microsecondsOfSecond`, `nanosecondsOfSecond` |
 
 A duration's months, days and seconds stay apart: `years` and `quarters` count its months,
@@ -1423,14 +1430,16 @@ g.gql("RETURN date('2015-01-01').hour AS h")   // fails: a date has no component
 
 | Form | Result |
 |---|---|
-| `x + dur`, `dur + x`, `x - dur` (`x` a `date`, `localtime`, `localdatetime` or `datetime`) | a value of `x`'s type: the duration's months (the day clamped to the month's end), then its days, then its time part, each where the type has it |
+| `x + dur`, `dur + x`, `x - dur` (`x` a `date`, `localtime`, `time`, `localdatetime` or `datetime`) | a value of `x`'s type: the duration's months (the day clamped to the month's end), then its days, then its time part, each where the type has it |
 | `dur + dur`, `dur - dur` | part by part (`P1D + PT49H` is `P1DT49H`) |
 | `dur * n`, `n * dur`, `dur / n` | each part scaled, with the fraction cascade of `duration({..})` (`P1M * 0.5` is `P15DT5H14M33S`) |
 | `-dur` | every part negated |
 
 A `date` takes the months, the days and the **whole days** of the time part (toward zero:
-`PT33H` adds one day, `PT-33H` takes one away), a `localtime` only the time part, wrapping
-around midnight. A `datetime` keeps its offset. Two values that are not both durations cannot
+`PT33H` adds one day, `PT-33H` takes one away), a `localtime` and a `time` only the time part,
+wrapping around midnight (a `time` keeps its offset). A `datetime` keeps its offset, or, with a
+zone name, follows its zone: a day added across a daylight saving change keeps the wall-clock
+time. Two values that are not both durations cannot
 be added (`22G03`: the time between them is `duration.between(a, b)`); `dur / 0` is `22012`; a
 result outside the years -9999 to 9999 is `22008`.
 
@@ -1469,15 +1478,16 @@ g.gql("RETURN toString(localtime('12:00')) AS a, CAST(localtime('12:00') AS STRI
 
 #### Truncation
 
-`date.truncate(unit, x [, map])`, `localtime.truncate(..)`, `localdatetime.truncate(..)` and
-`datetime.truncate(..)` cut `x` to the start of `unit` and give a value of their type (these
+`date.truncate(unit, x [, map])`, `localtime.truncate(..)`, `time.truncate(..)`,
+`localdatetime.truncate(..)` and `datetime.truncate(..)` cut `x` to the start of `unit` and give
+a value of their type (these
 qualified names are Cypher's; GQL has no spelling for them):
 
 | Function | Units (any ASCII case) |
 |---|---|
 | `date.truncate` | `millennium`, `century`, `decade`, `year`, `weekYear`, `quarter`, `month`, `week`, `day` |
 | `localdatetime.truncate`, `datetime.truncate` | those, and `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond` |
-| `localtime.truncate` | `day` (midnight) to `nanosecond` |
+| `localtime.truncate`, `time.truncate` | `day` (midnight) to `nanosecond` |
 
 - `millennium` and `century` follow Neo4j: 2017 truncates to 2000, 1984 to 1900 (Gremlin's
   `date_trunc` keeps PostgreSQL's 2001 and 1901). `weekYear` is the Monday of ISO week 1 of the
@@ -1485,10 +1495,12 @@ qualified names are Cypher's; GQL has no spelling for them):
   value (it holds nanoseconds).
 - `x` may be of another temporal type and is projected first: the date of a datetime at its own
   offset, the time of day of either, midnight for a date. `datetime.truncate` keeps the offset
-  of a datetime and gives UTC to a value without one.
+  of a datetime (and its zone name: the truncated wall clock is read in that zone again) and
+  gives UTC to a value without one; `time.truncate` keeps the offset of a time or a datetime.
 - The **map** overrides fields of the truncated value as the constructors' base form does:
   `{day: 2}`, `{dayOfWeek: 2}`, `{hour: 1}`, `{millisecond: 5}`, and for `datetime.truncate`
-  `{timezone: ..}`, which keeps the wall clock and reads it in that zone.
+  `{timezone: ..}`, which keeps the wall clock and reads it in that zone (a name is kept), for
+  `time.truncate` the offset of the result.
 - A unit the type lacks (`date.truncate('hour', ..)`) or an unknown unit is `22023`; a value
   without the part the type needs (`date.truncate('day', localtime(..))`) or a duration `22G03`.
 
@@ -1498,7 +1510,7 @@ g.gql("RETURN date.truncate('millennium', date('2017-10-11')) AS m, date.truncat
 g.gql("RETURN date.truncate('week', date('2017-10-11'), {dayOfWeek: 2}) AS a, localdatetime.truncate('quarter', localdatetime('2017-11-11T12:31:14'), {day: 2}) AS b, localtime.truncate('hour', localtime('12:31:14'), {minute: 5}) AS c").to_list()
 // #{"a": date("2017-10-10"), "b": localdatetime("2017-10-02T00:00:00"), "c": time("12:05:00")}
 g.gql("RETURN datetime.truncate('month', date('2017-11-11')) AS a, datetime.truncate('day', datetime('2017-10-11T12:31:14+01:00'), {timezone: 'Europe/Stockholm'}) AS b").to_list()
-// #{"a": datetime("2017-11-01T00:00:00Z"), "b": datetime("2017-10-11T00:00:00+02:00")}
+// #{"a": datetime("2017-11-01T00:00:00Z"), "b": datetime("2017-10-11T00:00:00+02:00[Europe/Stockholm]")}
 g.gql("RETURN date.truncate('hour', date('2017-10-11')) AS d")   // fails: the unit hour is not defined for a date (22023)
 ```
 
@@ -1514,7 +1526,9 @@ g.gql("RETURN date.truncate('hour', date('2017-10-11')) AS d")   // fails: the u
 The operands may be of different types; they are aligned first as Neo4j aligns them: when only
 one has a time of day, the other gets midnight; when only one has a date, the other gets that
 date (`date('1984-10-11')` to `localtime('16:30')` is `PT16H30M`); when only one has an offset,
-the other is read at that offset. `inMonths` / `inDays` of two `localtime`s, a duration or a
+the other is read at that offset, or in that side's zone when it is a `datetime` with a zone
+name (across a daylight saving change, as Neo4j). `inMonths` / `inDays` of two `localtime`s or
+two `time`s, a duration or a
 value that is no temporal value is `22G03`.
 
 ```rhai,graph=empty
@@ -1527,7 +1541,7 @@ g.gql("RETURN duration.inDays(localtime('10:00'), localtime('12:00')) AS d")   /
 
 #### Clocks
 
-`date()`, `localtime()`, `localdatetime()` and `datetime()` with no argument (and their ISO
+`date()`, `localtime()`, `time()`, `localdatetime()` and `datetime()` with no argument (and their ISO
 names), and `X.statement()` / `X.transaction()` (`date.statement()`, `datetime.transaction()`,
 ...) give the time the query started: **one instant per query**, the same for every row and
 every call, so a query is deterministic and repeatable. A zone argument or map gives that
@@ -1544,15 +1558,13 @@ g.gql("RETURN datetime.realtime() AS t")   // refused: a clock that moves while 
 
 #### Not yet
 
-Cypher's zoned `time()` (and `time.truncate`, `time.statement`, ...) and ISO GQL's
-`zoned_time()`: a time of day with an offset has no engine type yet; use `localtime()` or a
-`datetime()`. `timestamp()`, `current_date()` and the
-other date functions named under [Not supported yet](#not-supported-yet); the GQL literals
-`DATE '..'`, `DURATION '..'` and `CAST(x AS DATE)`. Each is `0A000` with the alternative.
+`timestamp()`, `current_date()` and the other date functions named under
+[Not supported yet](#not-supported-yet); the GQL literals `DATE '..'`, `DURATION '..'` and
+`CAST(x AS DATE)`. Each is `0A000` with the alternative.
 
 ```rhai,graph=empty
-g.gql("RETURN time('12:00+01:00') AS t")   // error: time() (a time of day with a UTC offset) is not yet supported
-g.gql("RETURN localtime('12:31:14.645876123') AS t").to_list()   // [#{"t": time("12:31:14.645876123")}]
+g.gql("RETURN timestamp() AS t")   // error: timestamp() is not yet supported
+g.gql("RETURN time('12:00+01:00') AS t").to_list()   // [#{"t": offsettime("12:00:00+01:00")}]
 ```
 
 ## Parameters
@@ -1596,7 +1608,7 @@ construct and the alternative.
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
-| Cypher's zoned `time()` / ISO `zoned_time()`, `time.truncate()`, `time.statement()` | `localtime()` (no offset) or `datetime()` (with a date) ([Dates and times](#dates-and-times)) |
+
 | `timestamp()`, `current_date()`, `current_time()`, `current_timestamp()`, `date_trunc()`, `datetime_trunc()` | `datetime().epochMillis`, `date()`, `localtime()`, `datetime()` (the time the query started), `date.truncate(unit, d)` |
 | the literals `DATE '..'`, `DURATION '..'`, `CAST(x AS DATE)` | `date('..')`, `duration('..')` |
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |

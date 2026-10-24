@@ -10,14 +10,15 @@
 //!
 //! | Part | File | Entry | Task |
 //! |---|---|---|---|
-//! | `date(..)`, `local_time(..)`, `local_datetime(..)`, `zoned_datetime(..)` and the Cypher names, `duration(..)`, `X.statement()` / `X.transaction()`, `datetime.fromepoch(millis)` | `construct.rs` | [`construct::construct`], [`construct::duration`], [`construct::clock`], [`construct::from_epoch`], [`construct::from_epoch_millis`] | 3g.T4 |
+//! | `date(..)`, `local_time(..)`, `zoned_time(..)`, `local_datetime(..)`, `zoned_datetime(..)` and the Cypher names, `duration(..)`, `X.statement()` / `X.transaction()`, `datetime.fromepoch(millis)` | `construct.rs` | [`construct::construct`], [`construct::duration`], [`construct::clock`], [`construct::from_epoch`], [`construct::from_epoch_millis`] | 3g.T4 |
 //! | components `x.year`, ..., `toString(x)` in the Neo4j text form | `ops.rs` | [`ops::component`], [`ops::to_text`] | 3g.T5 |
 //! | `+` / `-` with durations, `dur * n`, `dur / n`, the sign | `arith.rs` | [`arith::binary`], [`arith::sign`] | 3g.T6 |
 //! | `X.truncate(unit, value [, map])` | `truncate.rs` | [`truncate::truncate`] | 3g.T7 |
 //! | `duration.between`, `duration.inMonths` / `inDays` / `inSeconds` | `between.rs` | [`between::between`] | 3g.T8 |
 //!
-//! Cypher's zoned `time()` (U2) and `X.realtime()` (U9) never reach this module: the parser
-//! refuses them (`parser::NOT_YET_FUNCTIONS`). Values hold nanoseconds, as Neo4j's (U1).
+//! `X.realtime()` (U9) never reaches this module: the parser refuses it
+//! (`parser::NOT_YET_FUNCTIONS`). Values hold nanoseconds, as Neo4j's (U1); Cypher's `time()`
+//! builds the engine `OffsetTime` and a `datetime` keeps its zone name (temporal v2, U2 / U3).
 //!
 //! # Deliberate deviations from Neo4j (rule 18)
 //!
@@ -28,9 +29,7 @@
 //!
 //! | Neo4j | `gql()` | Where |
 //! |---|---|---|
-//! | a `datetime` keeps its zone name (`+01:00[Europe/Stockholm]`), and later arithmetic steps over daylight saving | a zone name resolves to its offset at that instant and only the offset is kept (`x.timezone` is the offset text); TCK exclusion `zone-name-not-kept` (101 cases) | `construct.rs`, `ops.rs`, `between.rs`, `truncate.rs` |
 //! | years -999 999 999 to 999 999 999 | the years -9999 to 9999, 22008 beyond (the engine range); TCK exclusion `year-range` (2 cases) | `construct.rs`, `between.rs` |
-//! | `time()`, a time of day with an offset | 0A000 "not yet" (no engine type), `localtime()` / `datetime()` instead | `parser::NOT_YET_FUNCTIONS` |
 //! | `X.realtime()` reads the live clock | refused like `rand()`; every other clock reads the query's one pinned instant | `parser::NOT_YET_FUNCTIONS`, `construct::clock` |
 //!
 //! Where GQL differs from the Gremlin / Rhai steps on the same engine values, it follows Neo4j:
@@ -128,13 +127,14 @@ pub(crate) fn cypher_name(function: TemporalFunction) -> &'static str {
 }
 
 /// The name of a temporal value's kind in messages (`a date`, `a local time`, ...: the Cypher
-/// type names, the engine `Time` being Cypher's `localtime`).
+/// type names, the engine `Time` being Cypher's `localtime` and `OffsetTime` Cypher's `time`).
 pub(crate) fn kind_name(value: &Temporal) -> &'static str {
     match value {
         Temporal::Date(_) => "a date",
         Temporal::LocalDateTime(_) => "a local datetime",
         Temporal::DateTime(_) => "a datetime",
         Temporal::Time(_) => "a local time",
+        Temporal::OffsetTime(_) => "a time",
         Temporal::Duration(_) => "a duration",
     }
 }

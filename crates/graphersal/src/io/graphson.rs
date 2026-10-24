@@ -23,11 +23,11 @@
 //! | `g:List`, `g:Set`, plain array | `array` | `g:List` |
 //! | `g:Map` with string keys, plain object | `object` | `g:Map` |
 //! | `gx:Char` | `string` | string |
-//! | `g:Date`, `g:Timestamp` (epoch ms), `gx:Instant`, `gx:OffsetDateTime`, `gx:ZonedDateTime` (zone id dropped, reported) | `datetime` | `gx:OffsetDateTime` |
-//! | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` | `date`, `localdatetime`, `time` | the same tags |
+//! | `g:Date`, `g:Timestamp` (epoch ms), `gx:Instant`, `gx:OffsetDateTime`, `gx:ZonedDateTime` (an IANA zone id of the bundled database is kept, any other zone id is dropped, reported) | `datetime` | `gx:OffsetDateTime`, `gx:ZonedDateTime` for a value with a zone name |
+//! | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, `gx:OffsetTime` | `date`, `localdatetime`, `time`, `offsettime` | the same tags |
 //! | `gx:Duration` (a day = 24 h), `gx:Period` | `duration` | `gx:Duration` (time part only), `gx:Period` (months and days only), else `graphersal:Interval` |
 //! | `g:List` of numbers where the target schema declares a vector (mode `open`/`closed`: coerced on write); `graphersal:Vector` (exact, our own tag) | `vector` | `g:List` of `g:Float` (an i8 or bit vector as its f32 values) |
-//! | `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:OffsetTime`, `gx:ZoneOffset`, other types | skipped, reported | - |
+//! | `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:ZoneOffset`, other types | skipped, reported | - |
 //!
 //! Structure: element ids become strings (`g:Int32 1` -> `"1"`), a label `"A::B"` becomes the
 //! label set `[A, B]`, a vertex property with several entries becomes one array, meta-properties
@@ -92,10 +92,9 @@ const MAX_JSON_DEPTH: usize = DEFAULT_MAX_VALUE_DEPTH * 2 + 8;
 
 /// Local names (after the `g:`/`gx:` prefix) of the date and time types Graphersal cannot hold:
 /// always skipped (the others are read by [`decode_temporal`]).
-const SKIPPED_DATE_TIME_TYPES: [&str; 7] = [
+const SKIPPED_DATE_TIME_TYPES: [&str; 6] = [
     "Calendar",
     "TimeZone",
-    "OffsetTime",
     "Year",
     "YearMonth",
     "MonthDay",
@@ -112,8 +111,7 @@ const SKIPPED_DATE_TIME_TYPES: [&str; 7] = [
 #[non_exhaustive]
 pub enum ImportNoteKind {
     /// A date or time value of a type Graphersal cannot hold (`gx:Year`, `gx:YearMonth`,
-    /// `gx:MonthDay`, `gx:OffsetTime`, `gx:ZoneOffset`, ...), never converted to a string or a
-    /// number.
+    /// `gx:MonthDay`, `gx:ZoneOffset`, ...), never converted to a string or a number.
     SkippedDateTime {
         /// The value's `@type`.
         type_tag: String,
@@ -156,8 +154,9 @@ pub enum ImportNoteKind {
         /// The key.
         key: String,
     },
-    /// A `gx:ZonedDateTime` imported as a `datetime` with its offset at that time: the zone id
-    /// (`Europe/Paris`) is not kept (a value never stores a zone).
+    /// A `gx:ZonedDateTime` imported as a `datetime` with its offset at that time: its zone id
+    /// is not an IANA zone of the bundled database (`GMT+02:00`), or does not have that offset
+    /// then, so it is not kept. A known zone id (`Europe/Paris`) is kept in the value.
     ZoneDropped {
         /// The value's `@type`.
         type_tag: String,
@@ -547,9 +546,10 @@ fn decode_typed(
 ///
 /// - `g:Date`, `g:Timestamp`: epoch milliseconds -> `datetime` in UTC;
 /// - `gx:Instant`, `gx:OffsetDateTime` (also `g:DateTime`) -> `datetime` with its offset;
-///   `gx:ZonedDateTime` -> `datetime` with the offset it states, the zone id is dropped
-///   ([`ImportNoteKind::ZoneDropped`]);
-/// - `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` -> `date`, `localdatetime`, `time`;
+///   `gx:ZonedDateTime` -> `datetime` with the offset it states and its zone id when the
+///   bundled database knows it, else without it ([`ImportNoteKind::ZoneDropped`]);
+/// - `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, `gx:OffsetTime` -> `date`,
+///   `localdatetime`, `time`, `offsettime`;
 /// - `gx:Duration` (a fixed length; a day is 24 hours) and `gx:Period` (years, months, days) ->
 ///   `duration`.
 ///
@@ -580,6 +580,7 @@ fn decode_temporal(
         "LocalDate" => TemporalKind::Date,
         "LocalDateTime" => TemporalKind::LocalDateTime,
         "LocalTime" => TemporalKind::Time,
+        "OffsetTime" => TemporalKind::OffsetTime,
         "Duration" | "Period" => TemporalKind::Duration,
         _ => return None,
     };
@@ -590,7 +591,13 @@ fn decode_temporal(
     };
     let text = text.as_ref();
     let (text, zone) = match (name, text.split_once('[')) {
-        ("ZonedDateTime", Some((local, _))) if has_offset(local) => (local, true),
+        ("ZonedDateTime", Some((local, _))) if has_offset(local) => {
+            if Temporal::parse_strict(kind, text).is_ok() {
+                (text, false)
+            } else {
+                (local, true)
+            }
+        }
         _ => (text, false),
     };
     let Ok(value) = Temporal::parse_strict(kind, text) else {

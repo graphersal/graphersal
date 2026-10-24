@@ -9176,14 +9176,7 @@ mod gql {
                 "Gremlin math() after gql(), for example g.gql(\"MATCH (n:person) RETURN n.age \
                  AS a\").select(\"a\").math(\"sin(_)\").",
             ),
-            // Stage 3g: date() is a function; Cypher's zoned time() stays not yet.
-            (
-                "time('12:00')",
-                GqlErrorKind::NotYet,
-                "time() (a time of day with a UTC offset) is not yet supported",
-                "local_time() / localtime() is a time of day without an offset, for example \
-                 localtime('12:31:14')",
-            ),
+            // Stage 3g: date() is a function; Cypher's zoned time() too since temporal v2.
             (
                 "toIntegerList(p.tags)",
                 GqlErrorKind::NotYet,
@@ -11844,6 +11837,34 @@ mod gql {
     /// The temporal functions of stage 3g.T9 (rule 6): a constructor, a component, a
     /// truncation and a difference given what they cannot take each name their forms with a
     /// runnable example.
+    /// Temporal v2 (rule 6): the help of the temporal families names the zoned `time()`.
+    #[test]
+    fn gql_temporal_help_names_the_zoned_time() {
+        for (query, part) in [
+            (
+                "MATCH (p:person) RETURN time(date('2015-07-21')) AS t",
+                "time(x) (ISO zoned_time()), a time of day with its UTC offset",
+            ),
+            (
+                "MATCH (p:person) RETURN time('12:00Z').year AS y",
+                "a time (with an offset) also has timezone, offset, offsetMinutes and \
+                 offsetSeconds",
+            ),
+            (
+                "MATCH (p:person) RETURN time.truncate('year', time('12:00Z')) AS t",
+                "localtime.truncate and time.truncate day to nanosecond",
+            ),
+            (
+                "MATCH (p:person) RETURN datetime({year: 2015, timezone: 'Mars/Olympus'}) AS t",
+                "a time's timezone, as in time({hour: 12, timezone: '+01:00'})",
+            ),
+        ] {
+            let help = gql_help(query);
+            assert!(help.contains(part), "{query}: {help}");
+            assert_examples_run(&help);
+        }
+    }
+
     #[test]
     fn gql_temporal_function_errors_name_their_forms() {
         for (expr, status, caret, advice) in [

@@ -12,7 +12,8 @@
 //! |---|---|
 //! | a date, a local datetime, a datetime | `year`, `quarter` (1-4), `month`, `week` and `weekYear` (ISO 8601: Monday weeks, week 1 holds January 4), `dayOfQuarter` (= `quarterDay`, 1-92), `day`, `ordinalDay` (1-366), `dayOfWeek` (= `weekDay`, 1 = Monday .. 7 = Sunday) |
 //! | a local time, a local datetime, a datetime | `hour`, `minute`, `second`, `millisecond`, `microsecond`, `nanosecond`; each fraction counts from the start of the second (`.645876` gives 645, 645876, 645876000) |
-//! | a datetime | `timezone` and `offset` (the offset text `Z`, `+01:00`, `-02:05:07`: a datetime keeps its offset, not a zone name, U3), `offsetMinutes`, `offsetSeconds`, `epochSeconds`, `epochMillis` (floor) |
+//! | a datetime | `timezone` (the zone name of a datetime written with one, `Europe/Stockholm`, else the offset text), `offset` (the offset text `Z`, `+01:00`, `-02:05:07`), `offsetMinutes`, `offsetSeconds`, `epochSeconds`, `epochMillis` (floor) |
+//! | a time (with an offset) | the components of a local time, `timezone` and `offset` (both the offset text), `offsetMinutes`, `offsetSeconds` |
 //! | a duration | totals `years` (months / 12), `quarters` (months / 3), `months`, `weeks` (days / 7), `days`, `hours` (seconds / 3600), `minutes` (seconds / 60), `seconds`, `milliseconds`, `microseconds`, `nanoseconds` (seconds and the fraction); remainders `quartersOfYear`, `monthsOfQuarter`, `monthsOfYear`, `daysOfWeek`, `minutesOfHour`, `secondsOfMinute`, `millisecondsOfSecond`, `microsecondsOfSecond`, `nanosecondsOfSecond` |
 //!
 //! A duration's months, days and seconds stay apart (the seconds never fold into days); the
@@ -27,7 +28,7 @@
 use super::super::super::eval::{EvalError, Value};
 use super::super::super::lexer::Span;
 use super::kind_name;
-use crate::value::temporal::{Date, DateTime, Duration, Temporal, Time, civil, format};
+use crate::value::temporal::{Date, DateTime, Duration, OffsetTime, Temporal, Time, civil, format};
 
 /// Nanoseconds in one second.
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
@@ -139,6 +140,8 @@ const TIME_NAMES: &str = "hour, minute, second, millisecond, microsecond, nanose
 /// The components only a datetime has.
 const ZONED_NAMES: &str = "timezone, offset, offsetMinutes, offsetSeconds, epochSeconds, \
                            epochMillis";
+/// The components of the offset of a time.
+const OFFSET_NAMES: &str = "timezone, offset, offsetMinutes, offsetSeconds";
 /// The components of a duration.
 const DURATION_NAMES: &str = "years, quarters, months, weeks, days, hours, minutes, seconds, \
                               milliseconds, microseconds, nanoseconds, quartersOfYear, \
@@ -201,6 +204,7 @@ fn names_of(value: &Temporal) -> String {
         Temporal::Time(_) => TIME_NAMES.to_owned(),
         Temporal::LocalDateTime(_) => format!("{DATE_NAMES}, {TIME_NAMES}"),
         Temporal::DateTime(_) => format!("{DATE_NAMES}, {TIME_NAMES}, {ZONED_NAMES}"),
+        Temporal::OffsetTime(_) => format!("{TIME_NAMES}, {OFFSET_NAMES}"),
         Temporal::Duration(_) => DURATION_NAMES.to_owned(),
     }
 }
@@ -220,7 +224,30 @@ fn read(value: &Temporal, field: Field) -> Result<Component, Missing> {
                 .or_else(|_| zoned_field(instant, field))
         }
         Temporal::Duration(duration) => duration_field(duration, field),
+        Temporal::OffsetTime(time) => {
+            time_field(time.time(), field).or_else(|_| offset_field(time, field))
+        }
     }
+}
+
+/// The offset text (`Z`, `+01:00`).
+fn offset_text(offset: i32) -> String {
+    let mut text = String::new();
+    // Writing into a `String` never fails.
+    let _ = format::write_offset(&mut text, offset);
+    text
+}
+
+/// A component of the offset of a time.
+fn offset_field(time: OffsetTime, field: Field) -> Result<Component, Missing> {
+    let offset = time.offset_seconds();
+    let number = match field {
+        Field::Timezone | Field::Offset => return Ok(Component::Text(offset_text(offset))),
+        Field::OffsetMinutes => i64::from(offset / 60),
+        Field::OffsetSeconds => i64::from(offset),
+        _ => return Err(Missing::NoSuchComponent),
+    };
+    Ok(Component::Integer(number))
 }
 
 /// A component of a calendar day.
@@ -265,13 +292,14 @@ fn time_field(time: Time, field: Field) -> Result<Component, Missing> {
 fn zoned_field(instant: DateTime, field: Field) -> Result<Component, Missing> {
     let offset = instant.offset_seconds();
     let number = match field {
-        // A datetime keeps its offset, not a zone name (U3): the zone is the offset text.
-        Field::Timezone | Field::Offset => {
-            let mut text = String::new();
-            // Writing into a `String` never fails.
-            let _ = format::write_offset(&mut text, offset);
-            return Ok(Component::Text(text));
+        // The zone name when the value has one (temporal v2), else the offset text.
+        Field::Timezone => {
+            return Ok(Component::Text(match instant.zone_name() {
+                Some(name) => name.to_string(),
+                None => offset_text(offset),
+            }));
         }
+        Field::Offset => return Ok(Component::Text(offset_text(offset))),
         Field::OffsetMinutes => i64::from(offset / 60),
         Field::OffsetSeconds => i64::from(offset),
         Field::EpochSeconds => instant.epoch_nanos().div_euclid(NANOS_PER_SECOND) as i64,

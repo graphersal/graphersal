@@ -436,7 +436,7 @@ pub(super) fn register(registry: &mut Registry) {
     register_gtype_tokens!(
         registry;
         NULL, BOOLEAN, INT, LONG, FLOAT, DOUBLE, NUMBER, STRING, UUID, DATETIME, DURATION, DATE,
-        LOCALDATETIME, TIME, VECTOR, LIST, MAP, VERTEX, EDGE, PATH, GRAPH,
+        LOCALDATETIME, TIME, OFFSETTIME, VECTOR, LIST, MAP, VERTEX, EDGE, PATH, GRAPH,
     );
 
     // Dates and times: the value types, constructors, `now()`/`today()`, and the `DT` token.

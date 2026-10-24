@@ -166,19 +166,19 @@ fn epoch_millis_round_down() {
 
 #[test]
 fn zone_suffixes() {
-    // Only a zone: the wall-clock time resolved in it.
+    // Only a zone: the wall-clock time resolved in it; the name is kept (temporal v2).
     assert_eq!(
         dt("2023-08-02T10:00:00[Europe/Berlin]").to_string(),
-        "2023-08-02T10:00:00+02:00"
+        "2023-08-02T10:00:00+02:00[Europe/Berlin]"
     );
     assert_eq!(
         dt("2023-01-02T10:00:00[Europe/Berlin]").to_string(),
-        "2023-01-02T10:00:00+01:00"
+        "2023-01-02T10:00:00+01:00[Europe/Berlin]"
     );
     // An offset and a matching zone; the critical flag is accepted.
     assert_eq!(
         dt("2023-08-02T10:00:00+02:00[!Europe/Berlin]").to_string(),
-        "2023-08-02T10:00:00+02:00"
+        "2023-08-02T10:00:00+02:00[Europe/Berlin]"
     );
     // An offset the zone does not have then.
     assert!(matches!(
@@ -1395,26 +1395,26 @@ mod gql_helpers {
                 ("2015-W30T2140-02", "2015-07-20T21:40-02:00"),
                 ("2015202T21+18:00", "2015-07-21T21:00+18:00"),
                 ("2015-07-21T21:40:32.142", "2015-07-21T21:40:32.142Z"),
-                // A zone name is resolved to its offset at that time (the name is not kept).
+                // A zone name is resolved to its offset at that time and kept (temporal v2).
                 (
                     "2015-07-21T21:40:32.142+02:00[Europe/Stockholm]",
-                    "2015-07-21T21:40:32.142+02:00",
+                    "2015-07-21T21:40:32.142+02:00[Europe/Stockholm]",
                 ),
                 (
                     "2015-07-21T21:40:32.142+0845[Australia/Eucla]",
-                    "2015-07-21T21:40:32.142+08:45",
+                    "2015-07-21T21:40:32.142+08:45[Australia/Eucla]",
                 ),
                 (
                     "2015-07-21T21:40:32.142-04[America/New_York]",
-                    "2015-07-21T21:40:32.142-04:00",
+                    "2015-07-21T21:40:32.142-04:00[America/New_York]",
                 ),
                 (
                     "2015-07-21T21:40:32.142[Europe/London]",
-                    "2015-07-21T21:40:32.142+01:00",
+                    "2015-07-21T21:40:32.142+01:00[Europe/London]",
                 ),
                 (
                     "1818-07-21T21:40:32.142[Europe/Stockholm]",
-                    "1818-07-21T21:40:32.142+00:53:28",
+                    "1818-07-21T21:40:32.142+00:53:28[Europe/Stockholm]",
                 ),
             ],
         );

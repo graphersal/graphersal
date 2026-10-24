@@ -1169,6 +1169,7 @@ fn example_text(kind: TemporalKind) -> &'static str {
         TemporalKind::LocalDateTime => "2024-05-01T09:30:00",
         TemporalKind::Time => "09:30:00",
         TemporalKind::Duration => "P1DT2H",
+        TemporalKind::OffsetTime => "09:30:00+02:00",
     }
 }
 
@@ -1203,6 +1204,9 @@ fn parse_types(value: &PhysicalValue<'_>, at: &Pointer) -> Result<Vec<JsonType>,
                      \"local-date-time\"}."
                 }
                 "time" => "time is written {\"type\": \"string\", \"format\": \"time\"}.",
+                "offsettime" | "offset-time" | "timetz" => {
+                    "offsettime is written {\"type\": \"string\", \"format\": \"offset-time\"}."
+                }
                 "duration" | "interval" => {
                     "duration is written {\"type\": \"string\", \"format\": \"duration\"}."
                 }
@@ -1216,7 +1220,8 @@ fn parse_types(value: &PhysicalValue<'_>, at: &Pointer) -> Result<Vec<JsonType>,
                 }
                 _ => {
                     "The types are null, boolean, integer (int64), number (float64), string \
-                      (uuid, datetime, date, localdatetime, time and duration with a \"format\"), \
+                      (uuid, datetime, date, localdatetime, time, offsettime and duration with a \
+                      \"format\"), \
                       array and object."
                 }
             };

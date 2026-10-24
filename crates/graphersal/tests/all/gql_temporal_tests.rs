@@ -69,13 +69,10 @@ fn single(graph: &TraversalGraph, query: &str) -> ElementProperty {
 }
 
 #[test]
-fn zoned_time_and_realtime_are_refused_before_the_run() {
+fn realtime_is_refused_before_the_run() {
+    // Cypher's zoned time() is a function since temporal v2 (gql_zoned_temporal_tests.rs).
     let graph = graph();
     for (call, kind) in [
-        ("time('12:00')", GqlErrorKind::NotYet),
-        ("zoned_time()", GqlErrorKind::NotYet),
-        ("time.truncate('hour', n.d)", GqlErrorKind::NotYet),
-        ("time.statement()", GqlErrorKind::NotYet),
         ("datetime.realtime()", GqlErrorKind::Refused),
         ("date.realtime()", GqlErrorKind::Refused),
     ] {
@@ -363,7 +360,7 @@ fn map_constructors_build_every_form() {
         (
             "datetime({year: 1984, ordinalDay: 202, hour: 12, timezone: 'Europe/Stockholm'})",
             Z,
-            "1984-07-20T12:00+02:00",
+            "1984-07-20T12:00+02:00[Europe/Stockholm]",
         ),
         (
             "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 34, second: 56, timezone: '+02:05:59'})",
@@ -469,12 +466,13 @@ fn string_constructors_read_iso_8601_in_full() {
             "2015-07-21T21:00+18:00",
         ),
         ("2015-07-21T21:40", "datetime", Z, "2015-07-21T21:40Z"),
-        // A zone name resolves to its offset at that time (the value keeps the offset, U3).
+        // A zone name resolves to its offset at that time; the value keeps the name (temporal
+        // v2).
         (
             "2015-07-21T21:40:32.142[Europe/London]",
             "datetime",
             Z,
-            "2015-07-21T21:40:32.142+01:00",
+            "2015-07-21T21:40:32.142+01:00[Europe/London]",
         ),
         ("P5M1.5D", "duration", U, "P5M1DT12H"),
         ("PT0.75M", "duration", U, "PT45S"),
@@ -774,7 +772,10 @@ fn clocks_read_the_one_pinned_time_of_the_execution() {
     );
     assert_eq!(
         text("b"),
-        engine_text(TemporalKind::DateTime, "2024-03-31T01:30:00+01:00")
+        engine_text(
+            TemporalKind::DateTime,
+            "2024-03-31T01:30:00+01:00[Europe/Berlin]"
+        )
     );
     assert_eq!(text("c"), engine_text(TemporalKind::Date, "2024-03-31"));
     assert_eq!(text("d"), engine_text(TemporalKind::Time, "19:30:00"));
@@ -1141,7 +1142,7 @@ fn truncate_follows_the_tck_units_and_projections() {
         ),
         ("localtime.truncate('nanosecond', n.t)", "12:31:14.645876"),
         // A datetime keeps its offset; a value without one is UTC; a zone in the map keeps the
-        // wall clock and gives the zone's offset at that time (U3).
+        // wall clock, gives the zone's offset at that time and its name (temporal v2).
         (
             "datetime.truncate('hour', n.z)",
             "1984-10-11T12:00:00-01:00",
@@ -1150,7 +1151,7 @@ fn truncate_follows_the_tck_units_and_projections() {
         ("datetime.truncate('day', n.l)", "1984-10-11T00:00:00Z"),
         (
             "datetime.truncate('hour', n.z, {timezone: 'Europe/Stockholm'})",
-            "1984-10-11T12:00:00+01:00",
+            "1984-10-11T12:00:00+01:00[Europe/Stockholm]",
         ),
         (
             "datetime.truncate('month', n.d, {timezone: '+05:00'})",

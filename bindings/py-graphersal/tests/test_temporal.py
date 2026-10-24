@@ -98,9 +98,36 @@ def test_a_zoneinfo_datetime_keeps_its_offset_at_that_instant(graph):
     assert summer == dt.datetime(2023, 8, 2, 9, 30, tzinfo=berlin)
 
 
-def test_an_aware_time_is_refused(graph):
+def test_an_aware_time_is_an_offsettime_unless_its_zone_has_rules(graph):
+    # Temporal v2: a time with a fixed offset is the engine's offsettime, both ways.
+    at = dt.time(9, 30, 0, 250000, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+    assert graph.query("type_of(x)", params={"x": at}) == "offsettime"
+    assert text(graph, at) == "09:30:00.250+02:00"
+    assert back(graph, at) == at
+    assert back(graph, at).utcoffset() == dt.timedelta(hours=2)
+    assert graph.query('offsettime("10:00Z")') == dt.time(10, 0, tzinfo=dt.timezone.utc)
+    # A zone with rules has no offset without a date.
     with pytest.raises(graphersal.GraphersalError, match="aware datetime.time"):
-        back(graph, dt.time(9, 30, tzinfo=dt.timezone.utc))
+        back(graph, dt.time(9, 30, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")))
+
+
+def test_a_zone_name_crosses_as_a_zoneinfo(graph):
+    berlin = zoneinfo.ZoneInfo("Europe/Berlin")
+    value = graph.query('datetime("2024-03-30T12:00[Europe/Berlin]") + duration("P1D")')
+    assert value == dt.datetime(2024, 3, 31, 12, 0, tzinfo=berlin)
+    assert value.tzinfo == berlin
+    assert value.utcoffset() == dt.timedelta(hours=2)
+    # A ZoneInfo datetime keeps its name in the engine, and calendar arithmetic follows it.
+    at = dt.datetime(2024, 3, 30, 12, 0, tzinfo=berlin)
+    assert text(graph, at) == "2024-03-30T12:00:00+01:00[Europe/Berlin]"
+    assert graph.query("x.timezone", params={"x": at}) == "Europe/Berlin"
+    assert graph.query('(x + duration("P1D")).as_string()', params={"x": at}) == (
+        "2024-03-31T12:00:00+02:00[Europe/Berlin]"
+    )
+    # A repeated wall-clock hour comes back with the right fold.
+    late = graph.query('datetime("2024-10-27T02:30+01:00[Europe/Berlin]")')
+    assert late.utcoffset() == dt.timedelta(hours=1)
+    assert late.fold == 1
 
 
 def test_datetimes_compare_by_instant(graph):

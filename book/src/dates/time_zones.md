@@ -1,9 +1,12 @@
 # Time Zones
 
-A time zone is never stored in a value. A `datetime` carries a fixed UTC offset (the one it was
-written with); an operation that needs a zone takes it as an argument and gives back a `datetime`
-with the zone's offset at that instant. This is the PostgreSQL model (`AT TIME ZONE`, a session
-zone for the calendar arithmetic), with the zone passed explicitly instead of a session setting.
+A `datetime` carries the UTC offset it was written with. Written with an IANA zone name
+(`datetime("2024-03-30T12:00[Europe/Berlin]")`, a GQL `timezone: 'Europe/Berlin'`, a Python
+`zoneinfo.ZoneInfo`), it keeps the name as well, and its calendar arithmetic follows the zone
+([Zone names in a value](#zone-names-in-a-value)). An operation can also take a zone as an
+argument and give back a `datetime` with the zone's offset at that instant, without the name:
+the PostgreSQL model (`AT TIME ZONE`, a session zone for the calendar arithmetic), with the zone
+passed explicitly instead of a session setting.
 
 ## Zone arguments
 
@@ -30,6 +33,36 @@ The steps that take a zone: [`at_zone(zone)`](../traversal/steps/at_zone.md),
 [`date_part(.., zone)`](../traversal/steps/date_part.md), and `today(zone)`. Only a `datetime` (and
 the `localdatetime` of `at_zone`) takes one; the other types have no instant, and a zone argument
 for them is an error.
+
+## Zone names in a value
+
+A text with a zone in brackets (RFC 9557, `java.time` `ZonedDateTime`) keeps the zone's name
+beside the offset; the value prints it back:
+
+```rhai,graph=empty
+datetime("2024-03-30T12:00[Europe/Berlin]")   // datetime("2024-03-30T12:00:00+01:00[Europe/Berlin]")
+datetime("2024-03-30T12:00[Europe/Berlin]").timezone   // "Europe/Berlin"
+datetime("2024-03-30T12:00+01:00").timezone   // "+01:00"
+```
+
+Such a value computes in its zone wherever a zone argument could be given and none is: adding
+days, weeks, months or years keeps the wall-clock time and takes the zone's offset at the new
+day, while hours and smaller units (and the time part of a duration) move the instant. A
+difference in days or larger units, `age()`, `date_trunc()` and `date_part()` read the wall clock
+of the zone. The result keeps the name.
+
+```rhai,graph=empty
+datetime("2024-03-30T12:00[Europe/Berlin]") + duration("P1D")   // datetime("2024-03-31T12:00:00+02:00[Europe/Berlin]")
+datetime("2024-03-30T12:00[Europe/Berlin]") + duration("PT24H")   // datetime("2024-03-31T13:00:00+02:00[Europe/Berlin]")
+g.inject(datetime("2024-03-31T12:00[Europe/Berlin]")).date_trunc(DT.day).next()   // datetime("2024-03-31T00:00:00+01:00[Europe/Berlin]")
+```
+
+A zone argument wins over the value's own zone, and its result has no name, as for any
+`datetime` (`at_zone()`, `date_add(.., zone)`, ...). Equality and order ignore the name, as they
+ignore the offset ([Comparing and Sorting](comparing.md)). The name is the database's spelling
+(`europe/berlin` reads as `Europe/Berlin`); a fixed offset in brackets (`[+01:00]`) is no name.
+The binary store format of this release cannot store a zone name yet: a store refuses such a
+value with an error rather than dropping the name ([Storage and Exchange](storage.md)).
 
 ## Moving between a `datetime` and its wall clock
 
@@ -89,6 +122,5 @@ g.inject(datetime("2023-08-02T12:00Z")).date_trunc(DT.day, "America/New_York").n
 ```
 
 GQL has no zone argument: a zone name in its text (`datetime('..[Europe/Berlin]')`) or in a map
-(`timezone: 'Europe/Berlin'`) resolves to the zone's offset when the value is built, and its
-arithmetic then stays at that offset, unlike Neo4j, which keeps the name
-([Dates in GQL](gql.md), [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j)).
+(`timezone: 'Europe/Berlin'`) is kept in the value, as Neo4j keeps it, and its arithmetic then
+follows the zone ([Dates in GQL](gql.md)).

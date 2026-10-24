@@ -129,7 +129,9 @@ fn add(x: Temporal, d: Duration, negate: bool, span: Span) -> Result<Temporal, E
                 .map_err(|_| error(TemporalError::out_of_range("the duration")))?;
             Duration::new(d.months(), days, 0)
         }
-        Temporal::Time(_) => Duration::from_nanos(d.nanos()).map_err(error)?,
+        Temporal::Time(_) | Temporal::OffsetTime(_) => {
+            Duration::from_nanos(d.nanos()).map_err(error)?
+        }
         Temporal::LocalDateTime(_) | Temporal::DateTime(_) | Temporal::Duration(_) => d,
     };
     arith::add_duration(x, d, None).map_err(error)

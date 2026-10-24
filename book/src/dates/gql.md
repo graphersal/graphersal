@@ -2,7 +2,8 @@
 
 [`gql()`](../gql/index.md) has openCypher's temporal functions (`date()`, `datetime()`,
 `duration()`, `x.year`, `date.truncate()`, `duration.between()`, ...) with Neo4j's meaning. They
-build and read the same five values as the Gremlin steps of this part: a date a GQL query returns
+build and read the same six values as the Gremlin steps of this part (Cypher's `time` is the
+`offsettime`, its `localtime` the `time`): a date a GQL query returns
 is a `date` value, and a date a Gremlin step stored reads as a date in GQL. The full list of
 forms is on [The Supported Subset](../gql/subset.md#dates-and-times), the differences from Neo4j
 on [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j).
@@ -25,10 +26,11 @@ g.gql("MATCH (e:event) RETURN e.at.year AS y, e.at + duration('P1M') AS next").t
 
 | GQL | Gremlin / Rhai | Difference |
 |---|---|---|
-| `date('2015-07-21')`, `localtime('21:40')`, `localdatetime('..')`, `datetime('..')`, `duration('P1D')` | the literals `date("2015-07-21")`, `time("21:40")`, `localdatetime("..")`, `datetime("..")`, `duration("P1D")` | GQL also reads Neo4j's forms: week, ordinal and quarter dates (`2015-W30-2`, `2015-202`, `2015-Q3-21`), basic forms (`20150721T2140`), a zone in brackets (`[Europe/London]`), fractions on any duration unit (`P1.5Y`); digits below the microsecond are `0A000` in GQL and cut in Rhai |
+| `date('2015-07-21')`, `localtime('21:40')`, `time('21:40+01:00')`, `localdatetime('..')`, `datetime('..')`, `duration('P1D')` | the literals `date("2015-07-21")`, `time("21:40")`, `offsettime("21:40+01:00")`, `localdatetime("..")`, `datetime("..")`, `duration("P1D")` | GQL also reads Neo4j's forms: week, ordinal and quarter dates (`2015-W30-2`, `2015-202`, `2015-Q3-21`), basic forms (`20150721T2140`, `2140-02`), fractions on any duration unit (`P1.5Y`); GQL's `time('21:40')` without an offset is UTC, Rhai's `offsettime()` needs the offset; both keep a zone in brackets (`[Europe/London]`) and nine fraction digits |
 | `date({year: 2015, week: 30, dayOfWeek: 2})` and the other maps | none: build the text, or `date_add()` from a start | |
 | `date(x)`, `localdatetime(x)`, `datetime(x)` of another temporal value | [`as_date(GType.DATE)`](conversions.md#as_dategtypex-to-another-date-type), `as_date(GType.LOCALDATETIME)`, `as_date(GType.DATETIME)` | the same projections (the date of a `datetime` at its own offset, a `localdatetime` read at UTC); GQL's `localdatetime(date)` and `datetime(date)` are errors as in Neo4j (`localdatetime({date: d})` is midnight), `as_date(GType.LOCALDATETIME)` of a date is midnight |
-| `datetime({.., timezone: 'Europe/Berlin'})`, `datetime({datetime: x, timezone: z})` | [`at_zone(z)`](time_zones.md#moving-between-a-datetime-and-its-wall-clock) | both resolve a zone name to its offset at that instant |
+| `datetime({.., timezone: 'Europe/Berlin'})`, `datetime({datetime: x, timezone: z})` | [`at_zone(z)`](time_zones.md#moving-between-a-datetime-and-its-wall-clock) | both resolve a zone name to its offset at that instant; GQL keeps the name in the value (Neo4j), `at_zone()` gives the offset only (write the name in the text to keep it: `datetime("..[Europe/Berlin]")`) |
+| `time(x)`, `time({time: x, timezone: z})` | [`as_date(GType.OFFSETTIME)`](conversions.md#as_dategtypex-to-another-date-type) | the same projections (a `localtime` or `localdatetime` at UTC, a `datetime` with its offset) |
 | `datetime.fromepochmillis(ms)`, `datetime({epochMillis: ms})`, `datetime({epochSeconds: s})` | [`as_date()`](conversions.md) of an `int64` (epoch milliseconds) | |
 | `date()`, `datetime()`, `X.statement()`, `X.transaction()` | [`today()`, `now()`](now_and_today.md) | both are one instant per run; a query run from a script reads the script's instant, so `datetime()` in `g.gql(..)` equals the script's `now()` (a host's pinned clock too); run alone, a query takes it when it starts |
 
@@ -46,7 +48,7 @@ g.inject(datetime("2015-07-21T23:40:32+02:00")).as_date(GType.DATE).next()   // 
 | `x.dayOfWeek` (1 = Monday) | `date_part(DT.iso_day_of_week)` | `DT.day_of_week` is PostgreSQL's 0 = Sunday |
 | `x.millisecond`, `x.microsecond`, `x.nanosecond` | `date_part(DT.millisecond)`, `DT.microsecond`, `DT.nanosecond` | the same: the fraction of the second |
 | `x.epochSeconds`, `x.epochMillis` | `date_part(DT.epoch)` (seconds with the fraction), the getter `epoch_millis` | |
-| `x.offset`, `x.timezone` (`'+01:00'`), `x.offsetSeconds` | `date_part(DT.offset)` (seconds) | GQL writes the offset as text |
+| `x.offset` (`'+01:00'`), `x.timezone` (the zone name, else the offset), `x.offsetSeconds` | `date_part(DT.offset)` (seconds), the getter `timezone` | GQL writes the offset as text |
 | `dur.months`, `dur.years`, `dur.days`, `dur.hours`, ... (totals) | `date_part(DT.month)` of a duration is the remainder field (PostgreSQL: `P1Y` has month 0); the getters `months`, `days`, `micros` | GQL's names are Neo4j's totals (`duration('P1Y').months` is 12); its remainders are `monthsOfYear`, `minutesOfHour`, ... |
 
 ```rhai,graph=empty
@@ -59,7 +61,7 @@ g.inject(duration("P1Y")).date_part(DT.month).next()   // 0
 
 | GQL | Gremlin | Difference |
 |---|---|---|
-| `date.truncate('month', d)`, `localdatetime.truncate(..)`, `datetime.truncate(..)`, `localtime.truncate(..)` | [`date_trunc(DT.month)`](truncation_and_parts.md#date_trunc) | the same for `year` down to `microsecond` and `week` |
+| `date.truncate('month', d)`, `localdatetime.truncate(..)`, `datetime.truncate(..)`, `localtime.truncate(..)`, `time.truncate(..)` | [`date_trunc(DT.month)`](truncation_and_parts.md#date_trunc) | the same for `year` down to `microsecond` and `week` |
 | `X.truncate('millennium' \| 'century', d)` | `date_trunc(DT.millennium)`, `DT.century` | GQL follows Neo4j (2017 gives 2000, 1984 gives 1900), Gremlin PostgreSQL (2001, 1901) |
 | `X.truncate('weekYear', d)`, a map of overrides (`{dayOfWeek: 2}`) | none | |
 | `datetime.truncate(unit, d, {timezone: z})` | `date_trunc(unit, z)` | GQL keeps the wall clock and reads it in `z`; Gremlin truncates on the wall clock of `z` |
@@ -101,7 +103,17 @@ g.gql("RETURN toString(localtime('12:00')) AS a, CAST(localtime('12:00') AS STRI
 g.inject(time("12:00")).as_string().next()   // "12:00:00"
 ```
 
-## Not in GQL yet
+## Zone names and the zoned time
 
-Cypher's zoned `time()` (a time of day with an offset; neither side has the type) and named
-zones kept in a value: [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j).
+A zone name in a value (`datetime('2017-08-08T12:31[Europe/Stockholm]')`,
+`datetime({.., timezone: 'Europe/Stockholm'})`) is kept, printed (`toString` writes
+`..+02:00[Europe/Stockholm]`), read as `x.timezone`, and later arithmetic, truncation and
+`duration.between` follow the zone's daylight saving rules, as Neo4j does. Cypher's `time()`
+(ISO `zoned_time()`) is the `offsettime`.
+
+```rhai,graph=empty
+g.gql("RETURN datetime('2024-03-30T12:00[Europe/Berlin]') + duration('P1D') AS d").to_list()   // #{"d": datetime("2024-03-31T12:00:00+02:00[Europe/Berlin]")}
+g.gql("RETURN time({hour: 12, timezone: '+01:00'}) AS t").to_list()   // #{"t": offsettime("12:00:00+01:00")}
+```
+
+`X.realtime()` stays refused: [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j).

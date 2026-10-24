@@ -134,6 +134,7 @@ schema. The format is described by the meta-schema `graphersal-schema-v1.json`
 | `"string"` + `"format": "date"` | `date` | A calendar day (`2024-05-01`). |
 | `"string"` + `"format": "local-date-time"` | `localdatetime` | A date and time without a zone (`2024-05-01T09:30:00`). A Graphersal format name: JSON Schema has none. |
 | `"string"` + `"format": "time"` | `time` | A time of day **without** an offset (`09:30:00`). JSON Schema's own `time` requires an offset; Graphersal's is local. |
+| `"string"` + `"format": "offset-time"` | `offsettime` | A time of day **with** its UTC offset (`09:30:00+02:00`). A Graphersal format name (JSON Schema's `time` is this form, but Graphersal's `time` is local). |
 | `"string"` + `"format": "duration"` | `duration` | ISO 8601 (`P1Y2M3DT4H`): months, days and nanoseconds. |
 | `"boolean"`, `"null"` | `boolean`, `null` | |
 | `"array"` + `items` | `array<T>` | `items` is a full schema (constraints and nullability apply to the items); without `items` any item. |
@@ -168,7 +169,7 @@ they do not know, so a schema with `local-date-time` stays usable with them. The
 
 | Kind | Keywords |
 |---|---|
-| Structure | `type`, `format` (`uuid`, `date-time`, `date`, `local-date-time`, `time`, `duration` on a string; `vector` on an array), `element`, `dimension`, `metric`, `embedder` (with `format: "vector"`; `embedder` on a top-level property only), `items`, `properties`, `required`, `additionalProperties` (`true`/`false`), `anyOf` |
+| Structure | `type`, `format` (`uuid`, `date-time`, `date`, `local-date-time`, `time`, `offset-time`, `duration` on a string; `vector` on an array), `element`, `dimension`, `metric`, `embedder` (with `format: "vector"`; `embedder` on a top-level property only), `items`, `properties`, `required`, `additionalProperties` (`true`/`false`), `anyOf` |
 | Constraints | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` (numbers), `formatMinimum`, `formatMaximum`, `formatExclusiveMinimum`, `formatExclusiveMaximum` (dates and times), `minLength`, `maxLength`, `pattern` (strings), `minItems`, `maxItems` (arrays), `enum`, `const` (any value) |
 | Annotations (no effect on validation) | `title`, `description`, `$comment`, `examples`, `deprecated` |
 | Create-time defaults ([Defaults on create](#defaults-on-create)) | `default` (also an annotation below the top level), `defaultFunction` (`uuidv4`, `uuidv7`, `now`, `today`) |
@@ -205,7 +206,7 @@ may sit next to a `$ref`; they override the definition's.
 | Input | Why it is rejected |
 |---|---|
 | An unknown key or keyword, anywhere | A typo must never weaken a schema silently. |
-| `format` other than `uuid`, `date-time`, `date`, `local-date-time`, `time`, `duration` (`email`, `uri`, ...) | Accepting an unknown format as a plain string now would let a later version silently change what an existing schema accepts. Remove the `format` (the value is a string). |
+| `format` other than `uuid`, `date-time`, `date`, `local-date-time`, `time`, `offset-time`, `duration` (`email`, `uri`, ...) | Accepting an unknown format as a plain string now would let a later version silently change what an existing schema accepts. Remove the `format` (the value is a string). |
 | `formatMinimum` (and the other format bounds) without a temporal `format`, or with text that is not of the format's type | A bound needs the type it compares in; the hint shows an example of the type's text. |
 | `additionalProperties: {schema}` (a map of T, Pydantic `dict[str, T]`) | No map type yet. Use `{"type": "object", "additionalProperties": true}`. |
 | `oneOf`, `allOf`, `not`, `if`/`then`/`else` | Not implemented; `anyOf` covers `oneOf` when the members cannot both match. |

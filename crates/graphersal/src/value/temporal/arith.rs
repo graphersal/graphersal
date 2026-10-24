@@ -10,6 +10,12 @@
 //!   the target month (PostgreSQL, `java.time`).
 //! - A wall-clock time a zone skips moves forward by the gap, one it repeats takes the earlier
 //!   offset ("compatible" disambiguation, `zone.rs`).
+//! - A `datetime` with a zone name computes in that zone when no zone argument is given, and
+//!   the result keeps the name (`2024-03-30T12:00+01:00[Europe/Berlin]` plus one day is
+//!   `2024-03-31T12:00+02:00[Europe/Berlin]`); with a zone argument the argument wins and the
+//!   result has no name, as for any `datetime`.
+//! - An `offsettime` works like a `time` on its local time of day and keeps its offset; its
+//!   differences use the UTC time of day (`java.time` `OffsetTime.until`).
 //!
 //! Every operation is checked: a result outside the years -9999 to 9999 or an overflowing count
 //! is [`TemporalError::OutOfRange`], a combination a type does not have (hours of a `date`, the
@@ -17,10 +23,10 @@
 //! accepted for a `datetime` only: the other types have no instant to place in a zone.
 
 use super::civil;
-use super::zone::Zone;
+use super::zone::{Zone, ZoneId};
 use super::{
-    Date, DateTime, Duration, LocalDateTime, Temporal, TemporalError, TemporalKind, TemporalResult,
-    Time,
+    Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, TemporalError, TemporalKind,
+    TemporalResult, Time,
 };
 use crate::value::Number;
 use crate::value::dt::DT;
@@ -38,6 +44,25 @@ fn no_zone(kind: TemporalKind, zone: Option<&Zone>) -> TemporalResult<()> {
         Some(_) => Err(TemporalError::unsupported("a time zone argument", kind)),
         None => Ok(()),
     }
+}
+
+/// The zone a `datetime` computes in (the argument, else the value's own zone name, else none:
+/// its fixed offset) and the zone name the result keeps (the value's, only without an
+/// argument).
+fn zone_of(value: DateTime, zone: Option<&Zone>) -> TemporalResult<(Option<Zone>, Option<ZoneId>)> {
+    match zone {
+        Some(zone) => Ok((Some(zone.clone()), None)),
+        None => Ok((value.zone_rules()?, value.zone_id())),
+    }
+}
+
+/// An `offsettime` with its local time of day replaced.
+fn offset_time_at(value: OffsetTime, nanos: i128) -> TemporalResult<OffsetTime> {
+    let nanos = nanos.rem_euclid(NANOS_PER_DAY) as i64;
+    OffsetTime::new(
+        Time::from_nanos_of_day(nanos).map_err(|_| out_of_range())?,
+        value.offset_seconds(),
+    )
 }
 
 /// The wall-clock view of a `datetime`: in the zone when one is given, else at its own offset.
@@ -122,6 +147,8 @@ pub(crate) fn add(
     let months = unit.calendar_months();
     match value {
         Temporal::DateTime(v) => {
+            let (own, keep) = zone_of(v, zone)?;
+            let zone = own.as_ref();
             if let Some(len) = fixed {
                 let nanos = v.epoch_nanos() + scaled_nanos(n, len);
                 let instant = DateTime::from_nanos(nanos, 0).map_err(|_| out_of_range())?;
@@ -130,7 +157,9 @@ pub(crate) fn add(
                     None => v.offset_seconds(),
                 };
                 return Ok(Temporal::DateTime(
-                    DateTime::from_nanos(nanos, offset).map_err(|_| out_of_range())?,
+                    DateTime::from_nanos(nanos, offset)
+                        .map_err(|_| out_of_range())?
+                        .with_zone_id(keep),
                 ));
             }
             let local = local_of(v, zone)?;
@@ -140,8 +169,20 @@ pub(crate) fn add(
                 (None, None) => return Err(TemporalError::unsupported(adding(unit), kind)),
             };
             Ok(Temporal::DateTime(
-                from_local_of(shifted, v, zone).map_err(|_| out_of_range())?,
+                from_local_of(shifted, v, zone)
+                    .map_err(|_| out_of_range())?
+                    .with_zone_id(keep),
             ))
+        }
+        Temporal::OffsetTime(v) => {
+            no_zone(kind, zone)?;
+            let Some(len) = fixed else {
+                return Err(TemporalError::unsupported(adding(unit), kind));
+            };
+            Ok(Temporal::OffsetTime(offset_time_at(
+                v,
+                v.time().nanos_of_day() as i128 + scaled_nanos(n, len),
+            )?))
         }
         Temporal::LocalDateTime(v) => {
             no_zone(kind, zone)?;
@@ -213,6 +254,8 @@ pub(crate) fn add_duration(
     );
     match value {
         Temporal::DateTime(v) => {
+            let (own, keep) = zone_of(v, zone)?;
+            let zone = own.as_ref();
             let local = local_of(v, zone)?;
             let local = local_add_days(local_add_months(local, months)?, days)?;
             let shifted = from_local_of(local, v, zone).map_err(|_| out_of_range())?;
@@ -226,8 +269,23 @@ pub(crate) fn add_duration(
                 None => v.offset_seconds(),
             };
             Ok(Temporal::DateTime(
-                DateTime::from_nanos(instant, offset).map_err(|_| out_of_range())?,
+                DateTime::from_nanos(instant, offset)
+                    .map_err(|_| out_of_range())?
+                    .with_zone_id(keep),
             ))
+        }
+        Temporal::OffsetTime(v) => {
+            no_zone(kind, zone)?;
+            if months != 0 || days != 0 {
+                return Err(TemporalError::unsupported(
+                    "adding a duration with months or days",
+                    kind,
+                ));
+            }
+            Ok(Temporal::OffsetTime(offset_time_at(
+                v,
+                v.time().nanos_of_day() as i128 + nanos,
+            )?))
         }
         Temporal::LocalDateTime(v) => {
             no_zone(kind, zone)?;
@@ -292,6 +350,7 @@ pub(crate) fn diff_millis(a: Temporal, b: Temporal) -> TemporalResult<i64> {
             Temporal::LocalDateTime(v) => Ok(v.nanos().div_euclid(1_000_000) as i64),
             Temporal::Date(v) => Ok(v.days as i64 * 86_400_000),
             Temporal::Time(v) => Ok(v.nanos / 1_000_000),
+            Temporal::OffsetTime(v) => Ok(v.utc_nanos().div_euclid(1_000_000)),
             Temporal::Duration(_) => Err(TemporalError::unsupported("the difference", kind)),
         }
     };
@@ -337,7 +396,8 @@ pub(crate) fn months_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
 }
 
 /// The wall-clock views of two values of one type for a calendar difference: a `datetime`'s in
-/// the zone, else both at `b`'s offset (as `java.time` `b.until(a, unit)`).
+/// the zone (the argument, else `b`'s zone name), else both at `b`'s offset (as `java.time`
+/// `b.until(a, unit)`).
 fn local_pair(
     a: Temporal,
     b: Temporal,
@@ -346,10 +406,13 @@ fn local_pair(
 ) -> TemporalResult<(LocalDateTime, LocalDateTime)> {
     let kind = same_kind(a, b, operation)?;
     match (a, b) {
-        (Temporal::DateTime(a), Temporal::DateTime(b)) => match zone {
-            Some(zone) => Ok((zone.at(a)?.local(), zone.at(b)?.local())),
-            None => Ok((a.with_offset(b.offset_seconds())?.local(), b.local())),
-        },
+        (Temporal::DateTime(a), Temporal::DateTime(b)) => {
+            let (own, _) = zone_of(b, zone)?;
+            match own {
+                Some(zone) => Ok((zone.at(a)?.local(), zone.at(b)?.local())),
+                None => Ok((a.with_offset(b.offset_seconds())?.local(), b.local())),
+            }
+        }
         (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => {
             no_zone(kind, zone)?;
             Ok((a, b))
@@ -386,6 +449,10 @@ pub(crate) fn diff(a: Temporal, b: Temporal, unit: DT, zone: Option<&Zone>) -> T
                 no_zone(kind, zone)?;
                 a.nanos as i128 - b.nanos as i128
             }
+            (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) => {
+                no_zone(kind, zone)?;
+                a.utc_nanos() as i128 - b.utc_nanos() as i128
+            }
             _ => return Err(TemporalError::unsupported(operation, kind)),
         };
         return i64::try_from(elapsed / len as i128).map_err(|_| out_of_range());
@@ -410,6 +477,10 @@ pub(crate) fn age(a: Temporal, b: Temporal, zone: Option<&Zone>) -> TemporalResu
     if let (Temporal::Time(a), Temporal::Time(b)) = (a, b) {
         no_zone(kind, zone)?;
         return Duration::from_nanos(a.nanos as i128 - b.nanos as i128);
+    }
+    if let (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) = (a, b) {
+        no_zone(kind, zone)?;
+        return Duration::from_nanos(a.utc_nanos() as i128 - b.utc_nanos() as i128);
     }
     let (la, lb) = local_pair(a, b, zone, "the age")?;
     let negative = la < lb;
@@ -509,10 +580,25 @@ pub(crate) fn trunc(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalR
     }
     match value {
         Temporal::DateTime(v) => {
+            let (own, keep) = zone_of(v, zone)?;
+            let zone = own.as_ref();
             let local = trunc_local(local_of(v, zone)?, unit)?;
             Ok(Temporal::DateTime(
-                from_local_of(local, v, zone).map_err(|_| out_of_range())?,
+                from_local_of(local, v, zone)
+                    .map_err(|_| out_of_range())?
+                    .with_zone_id(keep),
             ))
+        }
+        Temporal::OffsetTime(v) => {
+            no_zone(kind, zone)?;
+            let Some(len) = unit.fixed_nanos() else {
+                return Err(TemporalError::unsupported(operation(), kind));
+            };
+            let nanos = v.time().nanos_of_day();
+            Ok(Temporal::OffsetTime(offset_time_at(
+                v,
+                (nanos / len * len) as i128,
+            )?))
         }
         Temporal::LocalDateTime(v) => {
             no_zone(kind, zone)?;
@@ -631,6 +717,8 @@ pub(crate) fn part(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalRe
     let unsupported = || TemporalError::unsupported(format!("the part {unit}"), kind);
     match value {
         Temporal::DateTime(v) => {
+            let (own, _) = zone_of(v, zone)?;
+            let zone = own.as_ref();
             if unit == DT::Epoch {
                 return Ok(Number::from_f64(epoch_seconds(v.epoch_nanos())));
             }
@@ -660,6 +748,19 @@ pub(crate) fn part(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalRe
                 return Err(unsupported());
             }
             local_part(LocalDateTime::new(Date { days: 0 }, v), unit).ok_or_else(unsupported)
+        }
+        Temporal::OffsetTime(v) => {
+            no_zone(kind, zone)?;
+            match unit {
+                DT::Offset => Ok(Number::from_i64(v.offset_seconds() as i64)),
+                // PostgreSQL `extract(epoch from timetz)`: the seconds of the UTC time of day.
+                DT::Epoch => Ok(Number::from_f64(epoch_seconds(v.utc_nanos() as i128))),
+                _ if unit.fixed_nanos().is_some() => {
+                    local_part(LocalDateTime::new(Date { days: 0 }, v.time()), unit)
+                        .ok_or_else(unsupported)
+                }
+                _ => Err(unsupported()),
+            }
         }
         Temporal::Duration(v) => {
             no_zone(kind, zone)?;
@@ -891,7 +992,11 @@ pub(crate) fn scale_duration(
 /// - two `localdatetime`s: months, days and the time;
 /// - two `datetime`s: as two wall-clock values after `to` is moved to `from`'s offset (so the
 ///   time part is the elapsed time);
-/// - two `time`s: the time between them within the day (negative when `to` is earlier).
+/// - two `datetime`s when `from` has a zone name: the months and days on the wall clock of
+///   that zone (`to` moved into it), the rest as elapsed time from the instant those reach
+///   (`ZonedDateTime.until`: across a daylight saving change a day stays a calendar day);
+/// - two `time`s: the time between them within the day (negative when `to` is earlier); two
+///   `offsettime`s the same on their UTC times of day.
 ///
 /// Unlike [`age`] (PostgreSQL), every part has the sign of the direction and the borrowing
 /// follows `java.time`: `2018-01-01T10:00:00.2` to `2018-01-02T10:00:00.1` is
@@ -902,6 +1007,24 @@ pub(crate) fn between_neo4j(from: Temporal, to: Temporal) -> TemporalResult<Dura
     let (from, to) = match (from, to) {
         (Temporal::Time(a), Temporal::Time(b)) => {
             return Duration::from_nanos(b.nanos as i128 - a.nanos as i128);
+        }
+        (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) => {
+            return Duration::from_nanos(b.utc_nanos() as i128 - a.utc_nanos() as i128);
+        }
+        (Temporal::DateTime(a), Temporal::DateTime(b)) if a.zone_id().is_some() => {
+            let Some(zone) = a.zone_rules()? else {
+                return Err(out_of_range());
+            };
+            let (from, to) = (zone.at(a)?.local(), zone.at(b)?.local());
+            let months = months_between(from, to);
+            let after_months = local_add_months(from, months)?;
+            let days = days_between(after_months, to);
+            let after_days = zone.resolve(local_add_days(after_months, days)?)?;
+            return Duration::with_nanos(
+                to_i32(months)?,
+                to_i32(days)?,
+                b.epoch_nanos() - after_days.epoch_nanos(),
+            );
         }
         (Temporal::Date(a), Temporal::Date(b)) => (
             LocalDateTime::new(a, Time::MIDNIGHT),

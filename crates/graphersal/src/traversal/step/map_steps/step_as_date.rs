@@ -3,7 +3,7 @@
 use crate::graph::GraphStorage;
 use crate::traversal::step::map_steps::temporal::{describe, held_value, replaced};
 use crate::value::temporal::{
-    Date, DateTime, LocalDateTime, Temporal, TemporalKind, TemporalResult, Time,
+    Date, DateTime, LocalDateTime, OffsetTime, Temporal, TemporalKind, TemporalResult, Time,
 };
 use crate::*;
 
@@ -27,11 +27,13 @@ enum Target {
 /// UTC. Everything else (a float, `null`, a list, a map, a `time`, a `duration`, a graph element)
 /// fails with "Can't parse" (TinkerPop raises the same for a float, `null` and a list).
 ///
-/// `as_date(GType.DATETIME | DATE | LOCALDATETIME | TIME)` converts to that type (a Graphersal
-/// extension): a string must be a text of that type (only `DATETIME` reads it leniently, like
-/// `as_date()`); a `datetime` gives its wall-clock date, date-time or time at its own offset; a
-/// `localdatetime` its date or time; a `date` the `localdatetime` at midnight; a number converts
-/// only to `DATETIME` (epoch milliseconds). `GType.DURATION` is `as_duration()`'s.
+/// `as_date(GType.DATETIME | DATE | LOCALDATETIME | TIME | OFFSETTIME)` converts to that type (a
+/// Graphersal extension): a string must be a text of that type (only `DATETIME` reads it
+/// leniently, like `as_date()`); a `datetime` gives its wall-clock date, date-time or time at its
+/// own offset, or its time with its offset; a `localdatetime` its date or time (an `offsettime`
+/// at UTC); a `date` the `localdatetime` at midnight; a `time` the `offsettime` at UTC; an
+/// `offsettime` its local `time`; a number converts only to `DATETIME` (epoch milliseconds).
+/// `GType.DURATION` is `as_duration()`'s.
 #[derive(Clone)]
 struct StepAsDate {
     target: Target,
@@ -54,6 +56,7 @@ fn gtype_of(kind: TemporalKind) -> GType {
         TemporalKind::LocalDateTime => GType::LOCALDATETIME,
         TemporalKind::DateTime => GType::DATETIME,
         TemporalKind::Time => GType::TIME,
+        TemporalKind::OffsetTime => GType::OFFSETTIME,
         TemporalKind::Duration => GType::DURATION,
     }
 }
@@ -91,7 +94,8 @@ impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     }
 
     /// `as_date(GType.X)`: converts to the date or time type `target` (`GType::DATE`,
-    /// `GType::LOCALDATETIME`, `GType::TIME`, `GType::DATETIME`); see the step's documentation in
+    /// `GType::LOCALDATETIME`, `GType::TIME`, `GType::OFFSETTIME`, `GType::DATETIME`); see the
+    /// step's documentation in
     /// the book part "Dates and Times". Another token fails before execution.
     pub fn as_date_to(self, target: GType) -> Self {
         self.push_step(step(target_of(target)))
@@ -132,7 +136,18 @@ fn from_temporal(value: Temporal, kind: TemporalKind) -> Result<Temporal, Refusa
         (TemporalKind::DateTime, Temporal::DateTime(_))
         | (TemporalKind::Date, Temporal::Date(_))
         | (TemporalKind::LocalDateTime, Temporal::LocalDateTime(_))
-        | (TemporalKind::Time, Temporal::Time(_)) => Ok(value),
+        | (TemporalKind::Time, Temporal::Time(_))
+        | (TemporalKind::OffsetTime, Temporal::OffsetTime(_)) => Ok(value),
+        (TemporalKind::OffsetTime, Temporal::DateTime(v)) => {
+            OffsetTime::new(v.local().time(), v.offset_seconds()).map(Temporal::OffsetTime)
+        }
+        (TemporalKind::OffsetTime, Temporal::LocalDateTime(v)) => {
+            OffsetTime::new(v.time(), 0).map(Temporal::OffsetTime)
+        }
+        (TemporalKind::OffsetTime, Temporal::Time(v)) => {
+            OffsetTime::new(v, 0).map(Temporal::OffsetTime)
+        }
+        (TemporalKind::Time, Temporal::OffsetTime(v)) => Ok(Temporal::Time(v.time())),
         (TemporalKind::DateTime, Temporal::Date(v)) => {
             DateTime::from_local(LocalDateTime::new(v, midnight), 0).map(Temporal::DateTime)
         }
@@ -167,6 +182,7 @@ fn from_text(text: &str, kind: TemporalKind) -> Result<Temporal, Refusal> {
         TemporalKind::Date => text.parse::<Date>().map(Temporal::Date),
         TemporalKind::LocalDateTime => text.parse::<LocalDateTime>().map(Temporal::LocalDateTime),
         TemporalKind::Time => text.parse::<Time>().map(Temporal::Time),
+        TemporalKind::OffsetTime => text.parse::<OffsetTime>().map(Temporal::OffsetTime),
         TemporalKind::Duration => Temporal::parse_as(kind, text),
     };
     parsed.map_err(|err| match err {
@@ -279,7 +295,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepAsDate {
                 ValueError::UnsupportedCastTarget {
                     target: token.token(),
                     reason: "as_date() converts to GType.DATETIME, GType.DATE, \
-                             GType.LOCALDATETIME or GType.TIME; as_duration() reads durations",
+                             GType.LOCALDATETIME, GType.TIME or GType.OFFSETTIME; as_duration() \
+                             reads durations",
                 },
             ))),
             Target::Tinkerpop | Target::Kind(_) => Ok(()),

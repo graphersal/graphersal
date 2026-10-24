@@ -123,8 +123,10 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
   preserved. A repeated key in one object or property map is invalid.
 - **Temporal values** (tags 9 to 13) use the proleptic Gregorian calendar and a resolution of one
   microsecond. An engine value with a part below the microsecond has no encoding in these tags:
-  a writer refuses it (the write fails, nothing is cut). Their ranges are normative; a value
-  outside its range is invalid:
+  a writer refuses it (the write fails, nothing is cut). An engine time of day with a UTC offset
+  (`offsettime`) and a `datetime` that keeps an IANA zone name have no encoding in this version
+  either and are refused in the same way (never written without the name); a later file format
+  version defines them. Their ranges are normative; a value outside its range is invalid:
 
   | Tag | Valid payload |
   |---:|---|

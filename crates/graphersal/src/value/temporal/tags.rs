@@ -5,6 +5,8 @@
 //! | Type | Tag |
 //! |---|---|
 //! | `datetime` | `gx:OffsetDateTime` |
+//! | `datetime` with a zone name | `gx:ZonedDateTime` (`2024-01-01T10:00:00+01:00[Europe/Berlin]`) |
+//! | `offsettime` | `gx:OffsetTime` (`10:00:00+02:00`) |
 //! | `date` | `gx:LocalDate` |
 //! | `localdatetime` | `gx:LocalDateTime` |
 //! | `time` | `gx:LocalTime` |
@@ -21,6 +23,10 @@ use super::{Duration, Temporal, TemporalError, TemporalKind, TemporalResult};
 
 /// `datetime`.
 pub(crate) const OFFSET_DATE_TIME: &str = "gx:OffsetDateTime";
+/// `datetime` with a zone name.
+pub(crate) const ZONED_DATE_TIME: &str = "gx:ZonedDateTime";
+/// `offsettime`.
+pub(crate) const OFFSET_TIME: &str = "gx:OffsetTime";
 /// `date`.
 pub(crate) const LOCAL_DATE: &str = "gx:LocalDate";
 /// `localdatetime`.
@@ -47,7 +53,9 @@ pub(crate) fn is_period(duration: Duration) -> bool {
 /// The tag of a value.
 pub(crate) fn tag_of(value: &Temporal) -> &'static str {
     match value {
+        Temporal::DateTime(v) if v.zone_name().is_some() => ZONED_DATE_TIME,
         Temporal::DateTime(_) => OFFSET_DATE_TIME,
+        Temporal::OffsetTime(_) => OFFSET_TIME,
         Temporal::Date(_) => LOCAL_DATE,
         Temporal::LocalDateTime(_) => LOCAL_DATE_TIME,
         Temporal::Time(_) => LOCAL_TIME,
@@ -62,6 +70,8 @@ pub(crate) fn tag_of(value: &Temporal) -> &'static str {
 pub(crate) fn is_tag(tag: &str) -> bool {
     [
         OFFSET_DATE_TIME,
+        ZONED_DATE_TIME,
+        OFFSET_TIME,
         LOCAL_DATE,
         LOCAL_DATE_TIME,
         LOCAL_TIME,
@@ -77,7 +87,8 @@ pub(crate) fn is_tag(tag: &str) -> bool {
 /// only. `None` when `tag` is not one of the tags.
 pub(crate) fn read_tagged(tag: &str, text: &str) -> Option<TemporalResult<Temporal>> {
     let kind = match tag {
-        OFFSET_DATE_TIME => TemporalKind::DateTime,
+        OFFSET_DATE_TIME | ZONED_DATE_TIME => TemporalKind::DateTime,
+        OFFSET_TIME => TemporalKind::OffsetTime,
         LOCAL_DATE => TemporalKind::Date,
         LOCAL_DATE_TIME => TemporalKind::LocalDateTime,
         LOCAL_TIME => TemporalKind::Time,
@@ -94,10 +105,18 @@ pub(crate) fn read_tagged(tag: &str, text: &str) -> Option<TemporalResult<Tempor
         (INTERVAL, Temporal::Duration(duration)) => {
             !is_fixed_length(duration) && !is_period(duration)
         }
+        (ZONED_DATE_TIME, Temporal::DateTime(v)) => v.zone_name().is_some(),
         _ => true,
     };
     Some(if fits {
         Ok(value)
+    } else if kind == TemporalKind::DateTime {
+        Err(TemporalError::parse(
+            text,
+            "datetime",
+            "the zone does not fit the tag (gx:ZonedDateTime needs a zone name \
+             in brackets)",
+        ))
     } else {
         Err(TemporalError::parse(
             text,

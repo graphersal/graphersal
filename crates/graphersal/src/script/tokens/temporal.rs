@@ -1,12 +1,13 @@
-//! Dates and times in scripts: the five temporal value types carried natively (`date`,
-//! `localdatetime`, `datetime`, `time`, `duration`), their constructors (`datetime("..")`,
+//! Dates and times in scripts: the six temporal value types carried natively (`date`,
+//! `localdatetime`, `datetime`, `time`, `offsettime`, `duration`), their constructors (`datetime("..")`,
 //! TinkerPop's `DateTime("..")`, ...), `now()`/`today()`, getters and operators, and the `DT`
 //! token (`DT.day`/`DT::day`, the bare `second`/`minute`/`hour`/`day` of the TinkerPop scenarios).
 
 use crate::script::*;
 use crate::value::dt::DT;
 use crate::value::temporal::{
-    Date, DateTime, Duration, LocalDateTime, Temporal, TemporalError, Time, arith, zone::Zone,
+    Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, TemporalError, Time, arith,
+    format, zone::Zone,
 };
 
 /// A temporal value as a script value: one Rhai type per temporal type (`type_of()` is
@@ -18,6 +19,7 @@ pub(crate) fn temporal_to_dynamic(value: Temporal) -> Dynamic {
         Temporal::DateTime(v) => Dynamic::from(v),
         Temporal::Time(v) => Dynamic::from(v),
         Temporal::Duration(v) => Dynamic::from(v),
+        Temporal::OffsetTime(v) => Dynamic::from(v),
     }
 }
 
@@ -38,6 +40,9 @@ pub(crate) fn dynamic_temporal(arg: &Dynamic) -> Option<Temporal> {
     if let Some(v) = arg.read_lock::<Duration>() {
         return Some(Temporal::Duration(*v));
     }
+    if let Some(v) = arg.read_lock::<OffsetTime>() {
+        return Some(Temporal::OffsetTime(*v));
+    }
     // A host may hand the enum itself to a script.
     arg.read_lock::<Temporal>().map(|v| *v)
 }
@@ -49,6 +54,7 @@ pub(crate) fn is_temporal(arg: &Dynamic) -> bool {
         || arg.is::<LocalDateTime>()
         || arg.is::<Time>()
         || arg.is::<Duration>()
+        || arg.is::<OffsetTime>()
         || arg.is::<Temporal>()
 }
 
@@ -83,6 +89,28 @@ fn script_time(text: &str) -> Rhai<Time> {
         .map_err(|error| temporal_failure("time", error))
 }
 
+fn script_offset_time(text: &str) -> Rhai<OffsetTime> {
+    text.parse()
+        .map_err(|error| temporal_failure("offsettime", error))
+}
+
+/// `d.timezone`: the zone name of a `datetime` written with one (`Europe/Berlin`), else its
+/// offset text (`+02:00`, `Z`), as GQL's `x.timezone` gives it.
+fn timezone_text(value: &DateTime) -> String {
+    match value.zone_name() {
+        Some(name) => name.to_string(),
+        None => offset_text(value.offset_seconds()),
+    }
+}
+
+/// An offset as its text (`+02:00`, `Z`).
+fn offset_text(offset_seconds: i32) -> String {
+    let mut text = String::new();
+    // Writing into a `String` never fails.
+    let _ = format::write_offset(&mut text, offset_seconds);
+    text
+}
+
 fn script_duration(text: &str) -> Rhai<Duration> {
     text.parse()
         .map_err(|error| temporal_failure("duration", error))
@@ -113,7 +141,7 @@ fn script_today(ctx: &NativeCallContext, zone: Option<&str>) -> Rhai<Date> {
 
 /// `a - b` of two values of one type (PostgreSQL): two `datetime`s or `localdatetime`s give the
 /// elapsed time as days of 24 hours and a time part, two `date`s the days between them, two
-/// `time`s the elapsed time.
+/// `time`s the elapsed time, two `offsettime`s the elapsed time between their UTC times of day.
 fn difference(a: Temporal, b: Temporal) -> Result<Duration, TemporalError> {
     let elapsed: i128 = match (a, b) {
         (Temporal::DateTime(a), Temporal::DateTime(b)) => a.epoch_nanos() - b.epoch_nanos(),
@@ -124,6 +152,9 @@ fn difference(a: Temporal, b: Temporal) -> Result<Duration, TemporalError> {
         }
         (Temporal::Time(a), Temporal::Time(b)) => {
             return Duration::from_nanos(a.nanos_of_day() as i128 - b.nanos_of_day() as i128);
+        }
+        (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) => {
+            return Duration::from_nanos(a.utc_nanos() as i128 - b.utc_nanos() as i128);
         }
         (Temporal::Duration(a), Temporal::Duration(b)) => {
             return b.checked_neg().and_then(|b| a.checked_add(b));
@@ -161,7 +192,7 @@ fn minus(value: Temporal, duration: Duration) -> Rhai<Dynamic> {
         .map_err(|error| temporal_failure("-", error))
 }
 
-/// Registers the five types with their printing, comparison, arithmetic and getters.
+/// Registers the six types with their printing, comparison, arithmetic and getters.
 macro_rules! register_temporal_type {
     ($registry:expr, $ty:ty, $name:literal, $variant:ident) => {{
         $registry
@@ -196,6 +227,7 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
     register_temporal_type!(registry, LocalDateTime, "localdatetime", LocalDateTime);
     register_temporal_type!(registry, Time, "time", Time);
     register_temporal_type!(registry, Duration, "duration", Duration);
+    register_temporal_type!(registry, OffsetTime, "offsettime", OffsetTime);
 
     // `+`/`-` with a duration (PostgreSQL `value + interval`); duration + duration.
     registry
@@ -207,6 +239,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
             plus(Temporal::LocalDateTime(a), d)
         })
         .register_fn("+", |a: Time, d: Duration| plus(Temporal::Time(a), d))
+        .register_fn("+", |a: OffsetTime, d: Duration| {
+            plus(Temporal::OffsetTime(a), d)
+        })
         .register_fn("+", |a: Duration, d: Duration| {
             plus(Temporal::Duration(a), d)
         })
@@ -218,6 +253,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
             minus(Temporal::LocalDateTime(a), d)
         })
         .register_fn("-", |a: Time, d: Duration| minus(Temporal::Time(a), d))
+        .register_fn("-", |a: OffsetTime, d: Duration| {
+            minus(Temporal::OffsetTime(a), d)
+        })
         .register_fn("-", |d: Duration| {
             d.checked_neg()
                 .map_err(|error| temporal_failure("-", error))
@@ -233,6 +271,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
             script_local(text)
         })
         .register_fn("time", |text: &str| script_time(text))
+        .register_fn_as(&["offsettime", "offsetTime"], |text: &str| {
+            script_offset_time(text)
+        })
         .register_fn("duration", |text: &str| script_duration(text))
         .register_fn("now", |ctx: NativeCallContext| access::now_of(&ctx))
         .register_fn("today", |ctx: NativeCallContext| script_today(&ctx, None))
@@ -259,6 +300,7 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
             v.local().time().nanosecond() as i64
         })
         .register_get("offset", |v: &mut DateTime| v.offset_seconds() as i64)
+        .register_get("timezone", |v: &mut DateTime| timezone_text(v))
         .register_get("epoch_millis", |v: &mut DateTime| v.epoch_millis())
         .register_get("epochMillis", |v: &mut DateTime| v.epoch_millis())
         .register_get("year", |v: &mut LocalDateTime| v.date().year() as i64)
@@ -281,6 +323,19 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
         .register_get("second", |v: &mut Time| v.second() as i64)
         .register_get("microsecond", |v: &mut Time| v.microsecond() as i64)
         .register_get("nanosecond", |v: &mut Time| v.nanosecond() as i64)
+        .register_get("hour", |v: &mut OffsetTime| v.time().hour() as i64)
+        .register_get("minute", |v: &mut OffsetTime| v.time().minute() as i64)
+        .register_get("second", |v: &mut OffsetTime| v.time().second() as i64)
+        .register_get("microsecond", |v: &mut OffsetTime| {
+            v.time().microsecond() as i64
+        })
+        .register_get("nanosecond", |v: &mut OffsetTime| {
+            v.time().nanosecond() as i64
+        })
+        .register_get("offset", |v: &mut OffsetTime| v.offset_seconds() as i64)
+        .register_get("timezone", |v: &mut OffsetTime| {
+            offset_text(v.offset_seconds())
+        })
         .register_get("months", |v: &mut Duration| v.months() as i64)
         .register_get("days", |v: &mut Duration| v.days() as i64)
         .register_get("micros", |v: &mut Duration| v.micros())

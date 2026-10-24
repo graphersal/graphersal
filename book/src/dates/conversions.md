@@ -23,17 +23,23 @@ g.inject(1.5).as_date().next()   // error: Can't parse float64 1.5 as a datetime
 
 ## `as_date(GType.X)`: to another date type
 
-`as_date(GType.DATETIME | DATE | LOCALDATETIME | TIME)` converts to that type (a Graphersal
-extension, spelled like `as_number(GType.LONG)`):
+`as_date(GType.DATETIME | DATE | LOCALDATETIME | TIME | OFFSETTIME)` converts to that type (a
+Graphersal extension, spelled like `as_number(GType.LONG)`):
 
-| Incoming → | `DATETIME` | `DATE` | `LOCALDATETIME` | `TIME` |
-|---|---|---|---|---|
-| string | lenient, as `as_date()` | strict: a date text | strict: a local date-time text | strict: a time text |
-| `datetime` | unchanged | its wall-clock date (at its own offset) | its wall clock | its wall-clock time |
-| `localdatetime` | at UTC | its date | unchanged | its time |
-| `date` | midnight UTC | unchanged | midnight | an error |
-| `time` | an error | an error | an error | unchanged |
-| `int64` | epoch milliseconds, UTC | an error | an error | an error |
+| Incoming → | `DATETIME` | `DATE` | `LOCALDATETIME` | `TIME` | `OFFSETTIME` |
+|---|---|---|---|---|---|
+| string | lenient, as `as_date()` | strict: a date text | strict: a local date-time text | strict: a time text | strict: a time text with its offset |
+| `datetime` | unchanged | its wall-clock date (at its own offset) | its wall clock | its wall-clock time | its wall-clock time and offset |
+| `localdatetime` | at UTC | its date | unchanged | its time | its time at UTC |
+| `date` | midnight UTC | unchanged | midnight | an error | an error |
+| `time` | an error | an error | an error | unchanged | at UTC |
+| `offsettime` | an error | an error | an error | its local time | unchanged |
+| `int64` | epoch milliseconds, UTC | an error | an error | an error | an error |
+
+```rhai,graph=empty
+g.inject(datetime("2023-08-02T09:30+02:00")).as_date(GType.OFFSETTIME).next()   // offsettime("09:30:00+02:00")
+g.inject(offsettime("09:30+02:00")).as_date(GType.TIME).next()   // time("09:30:00")
+```
 
 `GType.DURATION` is not a target here: use `as_duration()`. To read a `datetime`'s wall clock in
 another zone, use `as_local(zone)` first ([Time Zones](time_zones.md)).

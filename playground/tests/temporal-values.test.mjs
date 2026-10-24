@@ -28,8 +28,8 @@ const SAMPLES = {
 
 // ------------------------------------------------------------------ property editor
 
-test('the property editor offers the five date and time types as text types', () => {
-  assert.deepEqual(TEMPORAL_TYPES, ['datetime', 'localdatetime', 'date', 'time', 'duration']);
+test('the property editor offers the six date and time types as text types', () => {
+  assert.deepEqual(TEMPORAL_TYPES, ['datetime', 'localdatetime', 'date', 'time', 'offsettime', 'duration']);
   for (const t of TEMPORAL_TYPES) {
     assert.ok(TYPES.includes(t), t);
     assert.ok(TEXT_TYPES.includes(t), t);

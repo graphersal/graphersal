@@ -315,15 +315,18 @@ outside the int64 range (it is never widened to a float). A key that is not a `s
 
 ## Dates and times
 
-The engine's five date and time types (book part "Dates and Times") convert both ways, to the
-microsecond, which is the resolution of both sides:
+The engine's six date and time types (book part "Dates and Times") convert both ways, to the
+microsecond (the engine holds nanoseconds: a value with digits below the microsecond raises
+`ValueError`):
 
 | Graphersal | Python |
 |---|---|
 | `datetime` (an instant with its UTC offset) | aware `datetime.datetime`, `tzinfo=datetime.timezone(timedelta(seconds=offset))` |
+| `datetime` with a zone name (`..+02:00[Europe/Berlin]`) | aware `datetime.datetime`, `tzinfo=zoneinfo.ZoneInfo(name)` |
 | `localdatetime` (a wall-clock time) | naive `datetime.datetime` |
 | `date` | `datetime.date` |
 | `time` (a time of day) | naive `datetime.time` |
+| `offsettime` (a time of day with its UTC offset) | `datetime.time` with `tzinfo=datetime.timezone(..)` |
 | `duration` without months | `datetime.timedelta` |
 | `duration` with months (`P1M`) | `graphersal.Interval` |
 
@@ -347,11 +350,14 @@ graph.query('duration("P1Y2M")')
 # Interval('P1Y2M')
 ```
 
-- An aware `datetime` with any `tzinfo` (`datetime.timezone`, `zoneinfo.ZoneInfo`) is stored with
-  the UTC offset it has at that instant; the zone name is not kept (it comes back as a
-  `datetime.timezone`). An offset with a fraction of a second is refused.
-- An aware `datetime.time` (with `tzinfo`) is refused: a time of day without a date has no instant.
-  Pass a naive time or an aware `datetime`.
+- An aware `datetime` is stored with the UTC offset it has at that instant; with a
+  `zoneinfo.ZoneInfo` the zone name is kept too (a name the bundled database does not know is
+  refused), and it comes back as a `ZoneInfo` datetime; any other `tzinfo` comes back as a
+  `datetime.timezone`. An offset with a fraction of a second is refused. Returning a zoned value
+  needs the zone in Python's own database (`tzdata` on systems without one), else it raises.
+- An aware `datetime.time` with a fixed offset (`datetime.timezone`) is an `offsettime`; one whose
+  `tzinfo` is a `ZoneInfo` is refused: a zone's offset needs a date. Pass a fixed offset or an
+  aware `datetime`.
 - A `timedelta` becomes a duration of whole days and the rest, both with the sign of the whole:
   `timedelta(hours=-1)` is `-PT1H` (Python itself writes it as `days=-1, seconds=82800`); a
   duration comes back as the equal `timedelta`.
@@ -730,7 +736,7 @@ write lock for the whole script.
   as data through `dry_run`.
 - Positional parameters (`$1`, `$2`, ...).
 - `list`/`dict` values in `params`.
-- Time zone names on values: a `datetime` keeps its UTC offset, not its `ZoneInfo`.
+
 - Graph file formats other than GraphSON and GraphML (and Graphersal's own snapshots).
 
 ## Building from source

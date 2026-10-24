@@ -1145,17 +1145,18 @@ value is `NULL`, both as in Neo4j.
 ## Dates and times
 
 The [temporal functions](subset.md#dates-and-times) are openCypher's, with Neo4j's meaning, on
-the engine's [date and time values](../dates/index.md). Three properties of those values shape
-the answers:
+the engine's [date and time values](../dates/index.md) (Cypher's `time` is the engine's
+`offsettime`, its `localtime` the `time`). Three properties of those values shape the answers:
 
 - **Nanoseconds.** A value holds nanoseconds, as Neo4j's: text, a map field and a computed
   duration keep up to nine fraction digits; a duration scaled by a number keeps whole
   nanoseconds, truncated toward zero, as Neo4j does.
-- **Offsets, not zone names.** A `datetime` keeps a fixed UTC offset. A zone name (in text,
-  `[Europe/London]`, or as `timezone: 'Europe/Stockholm'`) resolves to the zone's offset at that
-  instant, and the name is not kept: `d.timezone` gives the offset text, and later arithmetic
-  stays at that offset, with no step at a daylight saving change
-  ([Time Zones](../dates/time_zones.md)).
+- **Zone names are kept.** A `datetime` keeps its UTC offset and, when it was built with one, its
+  zone name (in text, `[Europe/London]`, or as `timezone: 'Europe/Stockholm'`), as Neo4j does:
+  `d.timezone` gives the name, `toString` writes it (`..+01:00[Europe/London]`), and later
+  arithmetic, truncation and `duration.between` follow the zone's daylight saving rules
+  ([Time Zones](../dates/time_zones.md#zone-names-in-a-value)). A `time` keeps an offset only (a
+  named zone gives its offset at the query's instant).
 - **One clock per query.** The constructors without an argument, `X.statement()` and
   `X.transaction()` all read one instant, taken when the query starts; `X.realtime()` is
   refused, as `rand()` is.
@@ -1166,7 +1167,8 @@ beside the Gremlin step that does the same.
 
 ```rhai,graph=empty
 g.gql("RETURN datetime('2015-07-21T21:40:32.142[Europe/London]') AS d, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}).timezone AS z").to_list()
-// #{"d": datetime("2015-07-21T21:40:32.142+01:00"), "z": "+01:00"}
+// #{"d": datetime("2015-07-21T21:40:32.142+01:00[Europe/London]"), "z": "Europe/Stockholm"}
+g.gql("RETURN time({hour: 12, timezone: '+01:00'}) AS t").to_list()   // #{"t": offsettime("12:00:00+01:00")}
 g.gql("RETURN datetime('2015-03-29T01:30+01:00') + duration('PT1H') AS d").to_list()   // #{"d": datetime("2015-03-29T02:30:00+01:00")}
 g.gql("RETURN localtime({hour: 12, minute: 0, second: 0, nanosecond: 5}) AS t").to_list()   // [#{"t": time("12:00:00.000000005")}]
 ```
@@ -1175,15 +1177,15 @@ g.gql("RETURN localtime({hour: 12, minute: 0, second: 0, nanosecond: 5}) AS t").
 
 | Neo4j | `gql()` | Why |
 |---|---|---|
-| `time()`: a time of day with an offset (`'12:00+01:00'`) | `time()`, `time.*` and ISO `zoned_time()` are `0A000` "not yet"; use `localtime()` or `datetime()` | the engine has no time-with-offset type yet |
-| a `datetime` keeps its zone name: `'..+01:00[Europe/London]'`, `d.timezone` is `'Europe/London'`, arithmetic and `duration.between` follow the zone's daylight saving rules | the name resolves to its offset at that instant and is not kept: `'..+01:00'`, `d.timezone` is `'+01:00'`, later arithmetic stays at the offset | a value keeps an offset only, as in Gremlin; 101 TCK cases that print or need the name are excluded (`zone-name-not-kept`) |
+| `time()`: a time of day with an offset (`'12:00+01:00'`) | the same (the engine's `offsettime`, ISO `zoned_time()`); equal when the UTC times of day are equal | Neo4j's `=` compares the offset too; no TCK case tells the two apart |
+| a `datetime` keeps its zone name: `'..+01:00[Europe/London]'`, `d.timezone` is `'Europe/London'`, arithmetic and `duration.between` follow the zone's daylight saving rules | the same; equality and order use the instant only | as for any `datetime` ([Comparing and Sorting](../dates/comparing.md)) |
 | `X.truncate('millennium' \| 'century', ..)`: 2017 gives 2000, 1984 gives 1900 | the same | Neo4j's rule in `gql()`; Gremlin's `date_trunc(DT.millennium)` keeps PostgreSQL's (2001, 1901) |
 | `date + duration` takes months, days and the whole days of the time part; `localtime + duration` only the time part, wrapping | the same | Neo4j's rule in `gql()`; Gremlin's `date_add` refuses a duration with a time part on a date |
 | `toString(temporal)` writes `'12:00'`, `'PT-1M-0.001S'` | the same; `CAST(x AS STRING)` writes the engine's ISO text (`'12:00:00'`, `'-PT1M0.001S'`) | `toString` is the Cypher compatibility function, `CAST` the ISO one |
 | `<` / `>` on two durations is `NULL` | the same; `ORDER BY` sorts durations by length (a month of 30 days) | a month has no fixed length; a sort needs a total order |
 | `X.realtime()` reads the live clock | refused (`0A000`); the other clocks read one instant per query | a clock that moves during the query makes it non-deterministic, as `rand()` |
 | years -999 999 999 to 999 999 999 | years -9999 to 9999; beyond is `22008` | the engine's range ([Dates and Times](../dates/index.md)); 2 TCK cases are excluded (`year-range`) |
-| `duration.between` of two different types aligns them (a missing date: times only, a missing time: midnight, a missing zone: the other side's) | the same; the zone lent is a fixed offset, so a difference across a daylight saving change differs (part of the zone-name exclusion) | Neo4j's rule, on values that keep offsets |
+| `duration.between` of two different types aligns them (a missing date: times only, a missing time: midnight, a missing zone: the other side's) | the same; the zone lent is the other side's zone name when it has one, else its offset | Neo4j's rule |
 
 ## Ids are strings
 
@@ -1226,7 +1228,7 @@ these differences is a deliberate decision, described in its section:
 | `'a' + 1` is `'a1'` | an error (`22G03`): convert explicitly | [Comparisons across types](#comparisons-across-types) |
 | some functions saturate, give `NaN` / infinity or take floats | errors or GQL's types | [Where functions differ from Neo4j](#where-functions-differ-from-neo4j) |
 | `id(x)` is an integer; `rand()` | ids are strings (`element_id(x)`); `id()` and `rand()` are refused | [Ids are strings](#ids-are-strings), [Refused Constructs](refused.md) |
-| a `datetime` keeps a zone name; years up to ±999 999 999; zoned `time()` | a `datetime` keeps the offset (the zone name's TCK cases excluded); years -9999 to 9999 (TCK cases excluded); `time()` not yet | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
+| years up to ±999 999 999 | years -9999 to 9999 (TCK cases excluded) | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
 | `X.realtime()` | refused; one clock per query | [Dates and times](#dates-and-times) |
 | a procedure argument may read the row; procedures are vendor or user code (`db.*`, `apoc.*`, Java) | `CALL folder.name(..)` calls a saved GQL query with constant or `$parameter` arguments only, positional in the order its body first reads them; a saved query in Rhai, or a call inside `EXISTS` / `COUNT` / `COLLECT`, is `0A000`; `db`, `dbms`, `apoc`, `gds` are refused | [Calls of saved queries](#calls-of-saved-queries) |
 | procedure names are qualified, one per namespace | saved-query names are unique across all folders: a name in another folder is a "did you mean" error | [Calls of saved queries](#calls-of-saved-queries) |

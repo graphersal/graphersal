@@ -283,7 +283,9 @@ impl<'g, S: GraphStorage + 'g> Operand<'g, S> {
 /// The value `null` stands for as the operand of `date_diff()`: the epoch of the other
 /// operand's type (TinkerPop: a `null` date is the epoch), midnight for a `time`.
 pub(crate) fn epoch_of(kind: crate::value::temporal::TemporalKind) -> Option<Temporal> {
-    use crate::value::temporal::{Date, DateTime, LocalDateTime, TemporalKind as K, Time};
+    use crate::value::temporal::{
+        Date, DateTime, LocalDateTime, OffsetTime, TemporalKind as K, Time,
+    };
     match kind {
         K::DateTime => DateTime::from_micros(0, 0).ok().map(Temporal::DateTime),
         K::LocalDateTime => LocalDateTime::from_micros(0)
@@ -291,6 +293,10 @@ pub(crate) fn epoch_of(kind: crate::value::temporal::TemporalKind) -> Option<Tem
             .map(Temporal::LocalDateTime),
         K::Date => Date::from_days_since_epoch(0).ok().map(Temporal::Date),
         K::Time => Time::from_micros_of_day(0).ok().map(Temporal::Time),
+        K::OffsetTime => Time::from_micros_of_day(0)
+            .and_then(|midnight| OffsetTime::new(midnight, 0))
+            .ok()
+            .map(Temporal::OffsetTime),
         K::Duration => None,
     }
 }

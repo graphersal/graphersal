@@ -55,6 +55,9 @@ pub(crate) fn not_a_temporal(kind: TemporalKind) -> &'static str {
         }
         TemporalKind::Time => "not a time (ISO 8601 without an offset such as 09:30:00)",
         TemporalKind::Duration => "not a duration (ISO 8601 such as P1Y2M3DT4H5M6S)",
+        TemporalKind::OffsetTime => {
+            "not an offsettime (ISO 8601 time with its UTC offset such as 09:30:00+02:00)"
+        }
     }
 }
 

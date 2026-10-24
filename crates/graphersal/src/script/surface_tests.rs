@@ -209,7 +209,7 @@ fn standard_library_is_the_one_of_engine_new() {
 }
 
 /// Names registered in one spelling only, on purpose (rule 2 asks for both spellings of a step).
-const SINGLE_SPELLING: [(&str, &str); 14] = [
+const SINGLE_SPELLING: [(&str, &str); 15] = [
     ("file_tree", "GraphSource factory, not a step"),
     ("tinkerpop_modern", "GraphSource factory, not a step"),
     ("subgraph_labels", "schema map function, not a step"),
@@ -235,6 +235,10 @@ const SINGLE_SPELLING: [(&str, &str); 14] = [
     (
         "localDateTime",
         "camelCase twin of the type name localdatetime (Java LocalDateTime)",
+    ),
+    (
+        "offsetTime",
+        "camelCase twin of the type name offsettime (Java OffsetTime)",
     ),
 ];
 

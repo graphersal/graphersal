@@ -112,20 +112,26 @@ pub enum SchemaFormat {
     /// `format: "duration"`: months, days and nanoseconds (ISO 8601 text), the logical
     /// `duration` type.
     Duration,
+    /// `format: "offset-time"`: a time of day with its UTC offset (`09:30:00+02:00`), the
+    /// logical `offsettime` type (a Graphersal name; JSON Schema's `time` is this form, but
+    /// Graphersal's `time` has no offset).
+    OffsetTime,
 }
 
 impl SchemaFormat {
     /// Every format, in the order the documentation lists them.
-    pub const ALL: [SchemaFormat; 6] = [
+    pub const ALL: [SchemaFormat; 7] = [
         SchemaFormat::Uuid,
         SchemaFormat::DateTime,
         SchemaFormat::Date,
         SchemaFormat::LocalDateTime,
         SchemaFormat::Time,
+        SchemaFormat::OffsetTime,
         SchemaFormat::Duration,
     ];
 
-    /// The keyword value: `uuid`, `date-time`, `date`, `local-date-time`, `time`, `duration`.
+    /// The keyword value: `uuid`, `date-time`, `date`, `local-date-time`, `time`,
+    /// `offset-time`, `duration`.
     pub fn as_str(self) -> &'static str {
         match self {
             SchemaFormat::Uuid => "uuid",
@@ -134,6 +140,7 @@ impl SchemaFormat {
             SchemaFormat::LocalDateTime => "local-date-time",
             SchemaFormat::Time => "time",
             SchemaFormat::Duration => "duration",
+            SchemaFormat::OffsetTime => "offset-time",
         }
     }
 
@@ -153,6 +160,7 @@ impl SchemaFormat {
             SchemaFormat::LocalDateTime => Some(TemporalKind::LocalDateTime),
             SchemaFormat::Time => Some(TemporalKind::Time),
             SchemaFormat::Duration => Some(TemporalKind::Duration),
+            SchemaFormat::OffsetTime => Some(TemporalKind::OffsetTime),
         }
     }
 
@@ -164,6 +172,7 @@ impl SchemaFormat {
             TemporalKind::LocalDateTime => SchemaFormat::LocalDateTime,
             TemporalKind::Time => SchemaFormat::Time,
             TemporalKind::Duration => SchemaFormat::Duration,
+            TemporalKind::OffsetTime => SchemaFormat::OffsetTime,
         }
     }
 
@@ -580,6 +589,12 @@ impl PropertySchema {
     /// `{"type": "string", "format": "time"}`: a `time` (a local time of day).
     pub fn time() -> Self {
         Self::with_string_format(SchemaFormat::Time)
+    }
+
+    /// `{"type": "string", "format": "offset-time"}`: an `offsettime` (a time of day with its
+    /// UTC offset).
+    pub fn offset_time() -> Self {
+        Self::with_string_format(SchemaFormat::OffsetTime)
     }
 
     /// `{"type": "string", "format": "duration"}`: a `duration`.

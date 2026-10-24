@@ -1,20 +1,21 @@
 # Dates and Times
 
-Graphersal has five date and time types. They are values of their own, like numbers and
+Graphersal has six date and time types. They are values of their own, like numbers and
 [UUIDs](../users_guide/uuid_values.md): a property holds a `date`, not a string that looks like
 one, and a query compares, sorts and computes with it. The model follows PostgreSQL and the SQL
 standard; the part TinkerPop defines (`datetime()`, `asDate()`, `dateAdd()`, `dateDiff()`,
 `DT.second` to `DT.day`) behaves exactly as TinkerPop 3.8 specifies it
 ([TinkerPop compatibility](tinkerpop.md)).
 
-## The five types
+## The six types
 
 | Graphersal (`type_of`, `GType`) | What it is | Literal | PostgreSQL | SQL standard | Python | TinkerPop / `java.time` |
 |---|---|---|---|---|---|---|
-| `datetime` (`GType.DATETIME`) | an instant with the UTC offset it was written with | `datetime("2023-08-02T09:30:00+02:00")` | `timestamptz` (keeps no offset) | `TIMESTAMP WITH TIME ZONE` | aware `datetime.datetime` | `datetime`, `OffsetDateTime` |
+| `datetime` (`GType.DATETIME`) | an instant with the UTC offset it was written with, and the IANA zone name when it was written with one | `datetime("2023-08-02T09:30:00+02:00")`, `datetime("2023-08-02T09:30[Europe/Berlin]")` | `timestamptz` (keeps no offset) | `TIMESTAMP WITH TIME ZONE` | aware `datetime.datetime` (a `zoneinfo.ZoneInfo` for a zone name) | `datetime`, `OffsetDateTime`, `ZonedDateTime` |
 | `localdatetime` (`GType.LOCALDATETIME`) | a wall-clock date and time, no zone | `localdatetime("2023-08-02T09:30")` | `timestamp` | `TIMESTAMP` | naive `datetime.datetime` | `LocalDateTime` |
 | `date` (`GType.DATE`) | a calendar day | `date("2023-08-02")` | `date` | `DATE` | `datetime.date` | `LocalDate` |
 | `time` (`GType.TIME`) | a time of day, no zone | `time("09:30:15.5")` | `time` | `TIME` | naive `datetime.time` | `LocalTime` |
+| `offsettime` (`GType.OFFSETTIME`) | a time of day with a UTC offset | `offsettime("09:30:15.5+02:00")` | `timetz` | `TIME WITH TIME ZONE` (GQL `ZONED TIME`) | `datetime.time` with a `datetime.timezone` | `OffsetTime` |
 | `duration` (`GType.DURATION`) | months, days and nanoseconds, each with its own sign | `duration("P1Y2M3DT4H")` | `interval` | `INTERVAL` | `datetime.timedelta`, or `graphersal.Interval` with months | `Duration`, `Period` |
 
 ```rhai,graph=empty
@@ -34,8 +35,10 @@ g.inject(datetime("2023-08-02T09:30Z")).is(P.typeOf(GType.DATETIME)).count().nex
   is year 44 BC counted astronomically, year 0 = 1 BC). A value outside the range, or a result
   that would leave it, is an error, never a wrapped value.
 - **Offsets:** a `datetime` keeps its offset (±18:00, whole seconds) and shows it, unlike
-  PostgreSQL's `timestamptz`, which keeps only the instant. A time zone is never stored in a
-  value: operations take one ([Time Zones](time_zones.md)).
+  PostgreSQL's `timestamptz`, which keeps only the instant. A `datetime` written with an IANA
+  zone name keeps the name too (`2024-03-31T12:00:00+02:00[Europe/Berlin]`) and follows the
+  zone's daylight saving rules in its calendar arithmetic; operations can also take a zone
+  ([Time Zones](time_zones.md)). An `offsettime` keeps its offset.
 - **A `duration` is not normalized:** `P1M`, `P30D` and `PT720H` are three different values. A
   month has no fixed length and a day is not always 24 hours in a time zone, so the three fields
   stay apart, as in PostgreSQL's `interval`.
@@ -50,10 +53,11 @@ In a script each type is a value of its own Rhai type with getters and operators
 
 | Type | Getters |
 |---|---|
-| `datetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond`, `nanosecond` (on its own wall clock), `offset` (seconds), `epoch_millis` |
+| `datetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond`, `nanosecond` (on its own wall clock), `offset` (seconds), `timezone` (the zone name, else the offset text), `epoch_millis` |
 | `localdatetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond`, `nanosecond` |
 | `date` | `year`, `month`, `day` |
 | `time` | `hour`, `minute`, `second`, `microsecond`, `nanosecond` |
+| `offsettime` | `hour`, `minute`, `second`, `microsecond`, `nanosecond` (of its local time), `offset` (seconds), `timezone` (the offset text) |
 | `duration` | `months`, `days`, `micros` (the time part in whole microseconds), `nanos` (in nanoseconds) |
 
 `microsecond` is the whole microseconds of the second (0-999999), `nanosecond` all its
@@ -65,21 +69,25 @@ let d = datetime("2023-08-02T09:30:15.25+02:00"); [d.hour, d.offset, d.microseco
 datetime("2023-08-02T12:00Z") + duration("P1M")   // datetime("2023-09-02T12:00:00Z")
 date("2023-08-02") - date("2023-01-01")   // duration("P213D")
 time("10:00") - time("09:30")   // duration("PT30M")
+offsettime("10:00+02:00") - offsettime("07:30Z")   // duration("PT30M")
+datetime("2024-03-30T12:00[Europe/Berlin]") + duration("P1D")   // datetime("2024-03-31T12:00:00+02:00[Europe/Berlin]")
 datetime("2023-08-02T09:30+02:00").as_string()   // "2023-08-02T09:30:00+02:00"
 ```
 
 `+` and `-` with a `duration` work as [`date_add()`](arithmetic.md) does; the difference of two
 values of one type is a `duration` (two `datetime`s or `localdatetime`s give days of 24 hours and
-a time part, two `date`s days, two `time`s the elapsed time). `as_string()` is the canonical text,
+a time part, two `date`s days, two `time`s the elapsed time, two `offsettime`s the time between
+their UTC times of day). `as_string()` is the canonical text,
 `to_string()` the DSL literal. A value printed or shown as a script value is its literal
 (`date("2023-08-02")`); tables, JSON and the playground show the canonical text.
 
 ## The pages of this part
 
-- [Comparing and Sorting](comparing.md): equality by instant, field-wise durations, the order of
-  types.
+- [Comparing and Sorting](comparing.md): equality by instant (and by UTC time of day), field-wise
+  durations, the order of types.
 - [Text Formats](text_formats.md): the canonical output, what is read, strict and lenient input.
-- [Time Zones](time_zones.md): the bundled IANA database, offsets, daylight saving.
+- [Time Zones](time_zones.md): the bundled IANA database, offsets, zone names kept in a value,
+  daylight saving.
 - [Arithmetic](arithmetic.md): `date_add()`, `date_diff()`, `age()`.
 - [Truncation and Parts](truncation_and_parts.md): `date_trunc()`, `date_part()`.
 - [Conversions](conversions.md): `as_date()`, `as_duration()`, `as_number()`, `as_string()`.

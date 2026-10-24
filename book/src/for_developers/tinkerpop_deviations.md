@@ -130,7 +130,7 @@ table on [GraphSON](../users_guide/graphson.md#deviations-from-tinkerpop)):
 | Multi- and meta-properties | list cardinality, properties on properties | several entries become one array, meta-properties the reserved `_meta` object property; export restores them from `_meta` only |
 | Multi-label vertices | no label sets | written as `"A::B"`, one opaque label in TinkerGraph |
 | Unlabeled vertex/edge | always labeled | exported with the default labels `vertex`/`edge`, read back with them |
-| Date and time values | read into `java.time` values | read into the temporal types (a `gx:ZonedDateTime` keeps its offset, its zone id is dropped and reported; up to nine fraction digits are kept); `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:OffsetTime`, `gx:ZoneOffset` are skipped and reported; a duration with both months or days and a time part is exported as `graphersal:Interval`, which TinkerPop cannot read |
+| Date and time values | read into `java.time` values | read into the temporal types (a `gx:ZonedDateTime` keeps its offset and a zone id of the bundled database, any other zone id is dropped and reported; up to nine fraction digits are kept); `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:ZoneOffset` are skipped and reported; a duration with both months or days and a time part is exported as `graphersal:Interval`, which TinkerPop cannot read |
 | `BigDecimal`, `Class`, enum tokens, vendor types | read into Java values | skipped and listed in the import report, never converted |
 | Edge to a vertex that is not in the file | `readGraph` fails | skipped and reported (or connected to the target graph's vertex of that id) |
 | Duplicate vertex id | an error | the first vertex wins, the second is skipped and reported |

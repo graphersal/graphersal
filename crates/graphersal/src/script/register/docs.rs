@@ -77,7 +77,7 @@ pub(crate) fn receiver_of(first_param: Option<&str>) -> &'static str {
         "ScriptVector" | "Vector" => "Vector",
         "ScriptFake" | "Fake" => "Fake",
         "DateTime" | "datetime" | "Date" | "date" | "LocalDateTime" | "localdatetime" | "Time"
-        | "time" | "Duration" | "duration" => "temporal",
+        | "time" | "Duration" | "duration" | "OffsetTime" | "offsettime" => "temporal",
         // `rhai::Map` is a `BTreeMap`; `map` is its display name.
         "BTreeMap" | "map" => "map",
         _ => "global",
@@ -888,6 +888,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "global" "time":
         "A time of day.",
         "time(\"09:30:15\").second" => "15";
+    "global" "offsettime":
+        "A time of day with its UTC offset.",
+        "offsettime(\"09:30+02:00\").offset" => "7200";
     "global" "duration":
         "A duration (PostgreSQL interval).",
         "duration(\"P1Y2M\").months" => "14";

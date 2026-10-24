@@ -1,4 +1,5 @@
 //! Constructors and clocks (3g.T4): `date(..)`, `local_time(..)` / `localtime(..)`,
+//! `zoned_time(..)` / `time(..)` (temporal v2),
 //! `local_datetime(..)` / `localdatetime(..)`, `zoned_datetime(..)` / `datetime(..)` from a map,
 //! a string or another temporal value (no argument: the time the execution started, the pinned
 //! `now()`, U9), `duration(map | string)`, `X.statement([zone])` / `X.transaction([zone])` (the
@@ -11,11 +12,14 @@
 //!   and `millisecond` + `microsecond` + `nanosecond` (summed: 123 ms + 456 µs); a datetime's
 //!   `timezone` (`'+01:00'`, `'Europe/Stockholm'`). A base value projects: `date: d` gives the
 //!   date (of a date, a local datetime or a datetime at its own offset), `time: t` the time of
-//!   day (and, for a datetime, the offset of a datetime `t`), `datetime: x` both; the other
+//!   day (and, for a datetime or a time, the offset of a datetime or time `t`, and the zone name
+//!   of a datetime `t`), `datetime: x` both; the other
 //!   keys then override single fields as `java.time`'s `with` does (`{date: d, day: 28}`,
 //!   `{date: d, week: 1}` keeps the day of the week, `{date: d, quarter: 3}` the month within
 //!   the quarter). A `timezone` with a base that has an offset converts the instant
-//!   (`12:00+01:00` to `16:00+05:00`); without one it is attached. No zone: UTC.
+//!   (`12:00+01:00` to `16:00+05:00`); without one it is attached. No zone: UTC. A base with a
+//!   zone name whose fields are overridden is resolved again in its zone (the offset follows the
+//!   zone's daylight saving rules) and keeps the name.
 //! - **From a string**: ISO 8601 in full as Neo4j reads it (basic and extended forms, week and
 //!   ordinal dates, `2015`, `2140`, `+0100`, fractions on any duration unit;
 //!   `value::temporal::parse::parse_extended`).
@@ -26,7 +30,9 @@
 //!   `datetime` at UTC, which the other fields override (`java.time`'s `with`, as for
 //!   `datetime: x`) and `timezone` converts; both together, or next to `date` / `time` /
 //!   `datetime`, is 22007.
-//! - A zone name resolves to its offset at that time; the value keeps the offset only (U3).
+//! - A zone name resolves to its offset at that time, and a `datetime` keeps the name
+//!   (`+01:00[Europe/Stockholm]`, temporal v2); a `time` keeps the offset only (a named zone
+//!   gives its offset at the time the query started).
 //! - Values hold nanoseconds (U1): up to nine fraction digits, and the `nanosecond` field, are
 //!   kept exactly.
 //! - Errors: a `NULL` argument (or a `NULL` field in the map) gives `NULL` (F2); text that is
@@ -46,7 +52,7 @@ use crate::value::temporal::civil;
 use crate::value::temporal::parse::parse_extended;
 use crate::value::temporal::zone::Zone;
 use crate::value::temporal::{
-    Date, DateTime, LocalDateTime, Temporal, TemporalError, TemporalKind, Time,
+    Date, DateTime, LocalDateTime, OffsetTime, Temporal, TemporalError, TemporalKind, Time,
 };
 
 /// A temporal value as a GQL value.
@@ -95,6 +101,7 @@ fn engine_kind(of: TemporalType) -> TemporalKind {
         TemporalType::LocalTime => TemporalKind::Time,
         TemporalType::LocalDateTime => TemporalKind::LocalDateTime,
         TemporalType::DateTime => TemporalKind::DateTime,
+        TemporalType::Time => TemporalKind::OffsetTime,
     }
 }
 
@@ -134,28 +141,34 @@ fn from_text(kind: TemporalKind, text: &str, span: Span) -> Result<Temporal, Eva
     Ok(read.value)
 }
 
-/// `now` (an instant) in `zone` (UTC when `None`), as a value of type `of`.
+/// `now` (an instant) in `zone` (UTC when `None`; a `datetime` keeps an IANA zone's name), as a
+/// value of type `of`.
 fn now_as(
     of: TemporalType,
     now: DateTime,
     zone: Option<&Zone>,
     span: Span,
 ) -> Result<Temporal, EvalError> {
+    let error = |e| temporal_error(e, span);
     let at = match zone {
-        Some(zone) => zone.at(now),
+        Some(zone) => zone.at_named(now),
         None => now.with_offset(0),
     }
-    .map_err(|e| temporal_error(e, span))?;
+    .map_err(error)?;
     Ok(match of {
         TemporalType::Date => Temporal::Date(at.local().date()),
         TemporalType::LocalTime => Temporal::Time(at.local().time()),
         TemporalType::LocalDateTime => Temporal::LocalDateTime(at.local()),
         TemporalType::DateTime => Temporal::DateTime(at),
+        TemporalType::Time => Temporal::OffsetTime(
+            OffsetTime::new(at.local().time(), at.offset_seconds()).map_err(error)?,
+        ),
     })
 }
 
 /// Another temporal value projected onto type `of` (`date(datetime)`, `localtime(datetime)`,
-/// `datetime(localdatetime)` at UTC, ...); a value without the parts of `of` is 22G03.
+/// `datetime(localdatetime)` at UTC, `time(localtime)` at UTC, `time(datetime)` its time and
+/// offset, ...); a value without the parts of `of` is 22G03.
 fn project<E>(
     function: Function,
     of: TemporalType,
@@ -166,7 +179,19 @@ fn project<E>(
         (TemporalType::Date, Temporal::Date(_))
         | (TemporalType::LocalTime, Temporal::Time(_))
         | (TemporalType::LocalDateTime, Temporal::LocalDateTime(_))
-        | (TemporalType::DateTime, Temporal::DateTime(_)) => Some(value),
+        | (TemporalType::DateTime, Temporal::DateTime(_))
+        | (TemporalType::Time, Temporal::OffsetTime(_)) => Some(value),
+        (TemporalType::Time, Temporal::Time(v)) => Some(Temporal::OffsetTime(
+            OffsetTime::new(v, 0).map_err(|e| temporal_error(e, arg.span))?,
+        )),
+        (TemporalType::Time, Temporal::LocalDateTime(v)) => Some(Temporal::OffsetTime(
+            OffsetTime::new(v.time(), 0).map_err(|e| temporal_error(e, arg.span))?,
+        )),
+        (TemporalType::Time, Temporal::DateTime(v)) => Some(Temporal::OffsetTime(
+            OffsetTime::new(v.local().time(), v.offset_seconds())
+                .map_err(|e| temporal_error(e, arg.span))?,
+        )),
+        (TemporalType::LocalTime, Temporal::OffsetTime(v)) => Some(Temporal::Time(v.time())),
         (TemporalType::Date, Temporal::LocalDateTime(v)) => Some(Temporal::Date(v.date())),
         (TemporalType::Date, Temporal::DateTime(v)) => Some(Temporal::Date(v.local().date())),
         (TemporalType::LocalTime, Temporal::LocalDateTime(v)) => Some(Temporal::Time(v.time())),
@@ -177,11 +202,17 @@ fn project<E>(
         (TemporalType::DateTime, Temporal::LocalDateTime(v)) => Some(Temporal::DateTime(
             DateTime::from_local(v, 0).map_err(|e| temporal_error(e, arg.span))?,
         )),
-        (TemporalType::Date, Temporal::Time(_) | Temporal::Duration(_))
-        | (TemporalType::LocalTime, Temporal::Date(_) | Temporal::Duration(_))
+        (
+            TemporalType::Date,
+            Temporal::Time(_) | Temporal::OffsetTime(_) | Temporal::Duration(_),
+        )
+        | (
+            TemporalType::LocalTime | TemporalType::Time,
+            Temporal::Date(_) | Temporal::Duration(_),
+        )
         | (
             TemporalType::LocalDateTime | TemporalType::DateTime,
-            Temporal::Date(_) | Temporal::Time(_) | Temporal::Duration(_),
+            Temporal::Date(_) | Temporal::Time(_) | Temporal::OffsetTime(_) | Temporal::Duration(_),
         ) => None,
     };
     projected.ok_or_else(|| {
@@ -279,6 +310,7 @@ impl Key {
         match of {
             TemporalType::Date => date,
             TemporalType::LocalTime => time,
+            TemporalType::Time => time || self == Key::Timezone,
             TemporalType::LocalDateTime => date || time || self == Key::DateTime,
             TemporalType::DateTime => true,
         }
@@ -447,7 +479,7 @@ fn read_fields<E>(
 fn field_kind<E>(function: Function, key: Key, value: &Value<E>, span: Span) -> EvalError {
     let what = match key {
         Key::Date => "a date, a local datetime or a datetime",
-        Key::Time => "a local time, a local datetime or a datetime",
+        Key::Time => "a local time, a time, a local datetime or a datetime",
         Key::DateTime => "a local datetime or a datetime",
         Key::Timezone => "a string (an offset like '+01:00' or a zone like 'Europe/Berlin')",
         _ => "an integer",
@@ -494,7 +526,9 @@ fn from_map<En: Env>(
             function,
             match of {
                 TemporalType::Date => "the map needs the field year or date",
-                TemporalType::LocalTime => "the map needs the field hour or time",
+                TemporalType::LocalTime | TemporalType::Time => {
+                    "the map needs the field hour or time"
+                }
                 TemporalType::LocalDateTime | TemporalType::DateTime => {
                     "the map needs the field year, date or datetime"
                 }
@@ -505,6 +539,7 @@ fn from_map<En: Env>(
     let build = Build {
         function,
         fields: &fields,
+        now: env.now(),
         span,
     };
     build.value(of).map(Some)
@@ -554,6 +589,9 @@ fn clock_zone<E>(
 struct Build<'a> {
     function: Function,
     fields: &'a Fields,
+    /// The instant the execution started: a `time` placed in a named zone takes the zone's
+    /// offset at it (a time of day has no date of its own).
+    now: DateTime,
     span: Span,
 }
 
@@ -577,6 +615,38 @@ impl Build<'_> {
             }
             TemporalType::LocalDateTime => self.local().map(Temporal::LocalDateTime),
             TemporalType::DateTime => self.datetime().map(Temporal::DateTime),
+            TemporalType::Time => self.offset_time().map(Temporal::OffsetTime),
+        }
+    }
+
+    /// A `time` map: the time of day, at the offset of a base `time` or `datetime` when it has
+    /// one, then converted to (or, without such a base, placed in) `timezone`; UTC when neither
+    /// gives one.
+    fn offset_time(&self) -> Result<OffsetTime, EvalError> {
+        let f = self.fields;
+        let error = |e| temporal_error(e, self.span);
+        let base = f.time.map(|t| self.time_of(t, Key::Time)).transpose()?;
+        let nanos = self
+            .time_part(base)?
+            .ok_or_else(|| self.needs("hour or time"))?;
+        let time = self.time(nanos)?;
+        let base_offset = match f.time {
+            Some(Temporal::OffsetTime(v)) => Some(v.offset_seconds()),
+            Some(Temporal::DateTime(v)) => Some(v.offset_seconds()),
+            _ => None,
+        };
+        let zone_offset = match &f.timezone {
+            Some(zone) => Some(zone.offset_at(self.now).map_err(error)?),
+            None => None,
+        };
+        match (base_offset, zone_offset) {
+            (Some(offset), Some(target)) => OffsetTime::new(time, offset)
+                .and_then(|value| value.with_offset(target))
+                .map_err(error),
+            (Some(offset), None) | (None, Some(offset)) => {
+                OffsetTime::new(time, offset).map_err(error)
+            }
+            (None, None) => OffsetTime::new(time, 0).map_err(error),
         }
     }
 
@@ -612,25 +682,29 @@ impl Build<'_> {
     }
 
     /// A `datetime` map: the local value, at the base's offset when a `datetime` or `time` base
-    /// has one, then converted to (or, without such a base, placed in) `timezone`; UTC when
-    /// neither gives a zone.
+    /// has one (resolved again in the base's zone when it has a zone name, which the value then
+    /// keeps), then converted to (or, without such a base, placed in) `timezone`, whose IANA
+    /// name the value keeps; UTC when neither gives a zone.
     fn datetime(&self) -> Result<DateTime, EvalError> {
         let f = self.fields;
-        let base_offset = match (f.datetime, f.time) {
+        let error = |e| temporal_error(e, self.span);
+        let (base_offset, base_zone) = match (f.datetime, f.time) {
             (Some(Temporal::DateTime(v)), _) | (None, Some(Temporal::DateTime(v))) => {
-                Some(v.offset_seconds())
+                (Some(v.offset_seconds()), v.zone_rules().map_err(error)?)
             }
-            _ if self.epoch()?.is_some() => Some(0),
-            _ => None,
+            (None, Some(Temporal::OffsetTime(v))) => (Some(v.offset_seconds()), None),
+            _ if self.epoch()?.is_some() => (Some(0), None),
+            _ => (None, None),
         };
         let local = self.local()?;
-        let error = |e| temporal_error(e, self.span);
+        let based = |offset: i32| match &base_zone {
+            Some(zone) => zone.resolve_named(local),
+            None => DateTime::from_local(local, offset),
+        };
         match (base_offset, &f.timezone) {
-            (Some(offset), Some(zone)) => {
-                zone.at(DateTime::from_local(local, offset).map_err(error)?)
-            }
-            (Some(offset), None) => DateTime::from_local(local, offset),
-            (None, Some(zone)) => zone.resolve(local),
+            (Some(offset), Some(zone)) => based(offset).and_then(|value| zone.at_named(value)),
+            (Some(offset), None) => based(offset),
+            (None, Some(zone)) => zone.resolve_named(local),
             (None, None) => DateTime::from_local(local, 0),
         }
         .map_err(error)
@@ -675,7 +749,9 @@ impl Build<'_> {
             Temporal::Date(d) => Ok(d.days_since_epoch()),
             Temporal::LocalDateTime(v) => Ok(v.date().days_since_epoch()),
             Temporal::DateTime(v) => Ok(v.local().date().days_since_epoch()),
-            Temporal::Time(_) | Temporal::Duration(_) => Err(self.base_kind(key, &value)),
+            Temporal::Time(_) | Temporal::OffsetTime(_) | Temporal::Duration(_) => {
+                Err(self.base_kind(key, &value))
+            }
         }
     }
 
@@ -683,6 +759,7 @@ impl Build<'_> {
     fn time_of(&self, value: Temporal, key: Key) -> Result<i64, EvalError> {
         match value {
             Temporal::Time(t) => Ok(t.nanos_of_day()),
+            Temporal::OffsetTime(t) => Ok(t.time().nanos_of_day()),
             Temporal::LocalDateTime(v) => Ok(v.time().nanos_of_day()),
             Temporal::DateTime(v) => Ok(v.local().time().nanos_of_day()),
             Temporal::Date(_) | Temporal::Duration(_) => Err(self.base_kind(key, &value)),
@@ -694,9 +771,10 @@ impl Build<'_> {
         match value {
             Temporal::LocalDateTime(v) => Ok(v),
             Temporal::DateTime(v) => Ok(v.local()),
-            Temporal::Date(_) | Temporal::Time(_) | Temporal::Duration(_) => {
-                Err(self.base_kind(Key::DateTime, &value))
-            }
+            Temporal::Date(_)
+            | Temporal::Time(_)
+            | Temporal::OffsetTime(_)
+            | Temporal::Duration(_) => Err(self.base_kind(Key::DateTime, &value)),
         }
     }
 

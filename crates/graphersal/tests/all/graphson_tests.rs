@@ -466,12 +466,12 @@ fn every_type_mapping() {
 #[test]
 fn date_types_without_a_twin_are_skipped_and_reported_never_converted() {
     // The `java.time` types Graphersal has no value for are skipped and reported, never
-    // converted into something else (a year into an integer, an offset time into a string).
+    // converted into something else (a year into an integer, an offset into a string; an
+    // offset time is a value since temporal v2).
     for (tag, payload) in [
         ("gx:Year", r#""2016""#),
         ("gx:YearMonth", r#""2016-06""#),
         ("gx:MonthDay", r#""--12-03""#),
-        ("gx:OffsetTime", r#""10:15:30+01:00""#),
         ("gx:ZoneOffset", r#""+01:00""#),
         ("g:Calendar", "1481750076295"),
         ("g:TimeZone", r#""Europe/Paris""#),

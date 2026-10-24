@@ -60,13 +60,13 @@ if report.has_skips() {
 | `gx:Char` | `string` | a string |
 | `g:Date`, `g:Timestamp` (epoch milliseconds) | `datetime` in UTC | `gx:OffsetDateTime` |
 | `gx:Instant`, `gx:OffsetDateTime` | `datetime` with the offset of the text (a text without an offset is malformed and skipped, never read as UTC) | `gx:OffsetDateTime` |
-| `gx:ZonedDateTime` (`2007-12-03T10:15:30+01:00[Europe/Paris]`) | `datetime` with the offset of the text; the zone id is dropped (reported) | `gx:OffsetDateTime` |
-| `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` | `date`, `localdatetime`, `time` | the same tags |
+| `gx:ZonedDateTime` (`2007-12-03T10:15:30+01:00[Europe/Paris]`) | `datetime` with the offset and the zone id of the text; a zone id the bundled database does not know (`GMT+02:00`) is dropped (reported) | `gx:ZonedDateTime` for a `datetime` with a zone name, else `gx:OffsetDateTime` |
+| `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime`, `gx:OffsetTime` (`10:15:30+01:00`) | `date`, `localdatetime`, `time`, `offsettime` | the same tags |
 | `gx:Duration` (a fixed length; `P2DT3H` reads a day as 24 hours) | `duration` of a time part only | `gx:Duration` for a duration of a time part only (`PT26H`) |
 | `gx:Period` (`P1Y2M3D`, weeks as 7 days) | `duration` of months and days | `gx:Period` for a duration of months and days only |
 | `graphersal:Interval` (Graphersal's own tag) | `duration` | `graphersal:Interval` for a duration with both months or days and a time part (`P1MT2H`): no `java.time` type holds it, so TinkerGraph cannot load such a value |
 | `g:List` of numbers, read as a list; a vector where the target graph's schema declares one (mode `open` or `closed`, coerced on write); `graphersal:Vector` (Graphersal's own exact tag, as a serialized `ChangeSet` writes it) | `vector` (book page [Vectors](vectors.md)) | `g:List` of `g:Float`, which TinkerGraph loads; an `i8` or `bit` vector as its dequantized values |
-| `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:OffsetTime`, `gx:ZoneOffset`, `g:Calendar`, `g:TimeZone` | **skipped** | |
+| `gx:Year`, `gx:YearMonth`, `gx:MonthDay`, `gx:ZoneOffset`, `g:Calendar`, `g:TimeZone` | **skipped** | |
 | `gx:BigDecimal`, `g:Class`, the enum tokens, `g:Vertex`/`g:Edge`/`g:Path`/... as a value, vendor types (`janusgraph:Geoshape`) | **skipped** | |
 
 Nothing is guessed: a string stays a string whatever it looks like (a date-like text without a
@@ -136,7 +136,7 @@ representation:
 | `SkippedDuplicateEdge` | an edge whose id a different edge of the file already has |
 | `SkippedReservedMeta` | a `_meta` property of a vertex that also has meta-properties |
 | `MultiValuedToArray`, `MetaPropertiesToMeta`, `LabelSplit`, `VertexWithoutId`, `EdgeCopiesDisagree`, `IgnoredKey { key }` | representation changes |
-| `ZoneDropped { type_tag }` | a `gx:ZonedDateTime` imported as a `datetime` with its offset; the zone id is not kept |
+| `ZoneDropped { type_tag }` | a `gx:ZonedDateTime` imported as a `datetime` with its offset; its zone id is not a zone of the bundled database (or not at that offset), so it is not kept |
 | `SubMicrosecondsCut { type_tag }` | no longer reported: values keep nanoseconds (kept for code that matches it) |
 
 Its `Display` is the text the CLI, Rhai and Python show: a first line with the counts and one line
@@ -232,8 +232,8 @@ Listed in [TinkerPop Deviations](../for_developers/tinkerpop_deviations.md#graph
   them.
 - **Skipped values**: the types listed above as skipped (`gx:Year`, `gx:BigDecimal`, ...) are
   skipped and reported where TinkerPop reads them.
-- **Dates**: a `gx:ZonedDateTime` keeps its offset but not its zone id (reported), and a
-  duration with both months or days and a time part
+- **Dates**: a `gx:ZonedDateTime` whose zone id the bundled database does not know keeps its
+  offset but not its zone id (reported), and a duration with both months or days and a time part
   is exported as `graphersal:Interval`, which TinkerPop cannot read.
 - **Lenient structure**: an edge to a missing vertex is skipped (TinkerPop's `readGraph` fails), a
   duplicate vertex id keeps the first vertex, and vertex-property ids are not kept.

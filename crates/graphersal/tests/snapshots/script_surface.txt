@@ -60,6 +60,7 @@
 {"displayName":"datetime","typeName":"graphersal::value::temporal::DateTime"}
 {"displayName":"duration","typeName":"graphersal::value::temporal::Duration"}
 {"displayName":"localdatetime","typeName":"graphersal::value::temporal::LocalDateTime"}
+{"displayName":"offsettime","typeName":"graphersal::value::temporal::OffsetTime"}
 {"displayName":"time","typeName":"graphersal::value::temporal::Time"}
 
 ## functions (metadata)
@@ -312,6 +313,8 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","docComments":["/// A set value (duplicates dropped) of the given values, e.g. to seed a set side effect.","///","/// Example: `g.with_side_effect(\"s\", Set.of()).v().out().values(\"name\").aggregate(\"s\").cap(\"s\").next()` returns `[\"josh\", \"lop\", \"vadas\", \"ripple\"]`"],"name":"of","namespace":"global","numParams":7,"params":[{"type":"graphersal::script::tokens::set::ScriptSetTokens"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// A set value (duplicates dropped) of the given values, e.g. to seed a set side effect.","///","/// Example: `g.with_side_effect(\"s\", Set.of()).v().out().values(\"name\").aggregate(\"s\").cap(\"s\").next()` returns `[\"josh\", \"lop\", \"vadas\", \"ripple\"]`"],"name":"of","namespace":"global","numParams":8,"params":[{"type":"graphersal::script::tokens::set::ScriptSetTokens"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// A set value (duplicates dropped) of the given values, e.g. to seed a set side effect.","///","/// Example: `g.with_side_effect(\"s\", Set.of()).v().out().values(\"name\").aggregate(\"s\").cap(\"s\").next()` returns `[\"josh\", \"lop\", \"vadas\", \"ripple\"]`"],"name":"of","namespace":"global","numParams":9,"params":[{"type":"graphersal::script::tokens::set::ScriptSetTokens"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// A time of day with its UTC offset.","///","/// Example: `offsettime(\"09:30+02:00\").offset` returns `7200`"],"name":"offsetTime","namespace":"global","numParams":1,"params":[{"type":"string"}],"returnType":"core::result::Result<graphersal::value::temporal::OffsetTime,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// A time of day with its UTC offset.","///","/// Example: `offsettime(\"09:30+02:00\").offset` returns `7200`"],"name":"offsettime","namespace":"global","numParams":1,"params":[{"type":"string"}],"returnType":"core::result::Result<graphersal::value::temporal::OffsetTime,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// A time of day.","///","/// Example: `time(\"09:30:15\").second` returns `15`"],"name":"time","namespace":"global","numParams":1,"params":[{"type":"string"}],"returnType":"core::result::Result<graphersal::value::temporal::Time,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// A vector for a text from an embedder (default hash-ngram/1), computed before any traversal runs.","///","/// Example: `embed(\"Marko\") == embed(\"marko\")` returns `true`"],"name":"embed","namespace":"global","numParams":1,"params":[{"type":"string"}],"returnType":"core::result::Result<graphersal::script::tokens::vector::ScriptVector,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// A vector for a text from an embedder (default hash-ngram/1), computed before any traversal runs.","///","/// Example: `embed(\"Marko\") == embed(\"marko\")` returns `true`"],"name":"embed","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"map"}],"returnType":"core::result::Result<graphersal::script::tokens::vector::ScriptVector,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
@@ -1173,11 +1176,13 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"string"}
+{"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut date"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"string"}
+{"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical ISO 8601 text of a date or time value.","///","/// Example: `datetime(\"2023-08-02T09:30+02:00\").as_string()` returns `2023-08-02T09:30:00+02:00`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical text of the UUID value.","///","/// Example: `UUID.from_string(\"123e4567-e89b-12d3-a456-426614174000\").as_string().len()` returns `36`"],"name":"asString","namespace":"global","numParams":1,"params":[{"type":"&mut Uuid"}],"returnType":"string"}
 {"access":"public","docComments":["/// The canonical text of the UUID value.","///","/// Example: `UUID.from_string(\"123e4567-e89b-12d3-a456-426614174000\").as_string().len()` returns `36`"],"name":"as_string","namespace":"global","numParams":1,"params":[{"type":"&mut Uuid"}],"returnType":"string"}
@@ -1416,6 +1421,8 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"string"}],"returnType":"bool"}
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"string"}],"returnType":"bool"}
+{"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
+{"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"string"}],"returnType":"bool"}
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"RenderedText"}],"returnType":"bool"}
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"Uuid"}],"returnType":"bool"}
 {"access":"public","name":"!=","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"string"}],"returnType":"bool"}
@@ -1426,6 +1433,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"datetime"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"RenderedText"}],"returnType":"string"}
 {"access":"public","name":"+","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"-","namespace":"global","numParams":1,"params":[{"type":"duration"}],"returnType":"core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
@@ -1436,17 +1444,21 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"duration"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"-","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"time"}],"returnType":"core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"date"},{"type":"date"}],"returnType":"bool"}
 {"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"datetime"},{"type":"datetime"}],"returnType":"bool"}
 {"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"bool"}
 {"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
+{"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
 {"access":"public","name":"<","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"time"}],"returnType":"bool"}
 {"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"date"},{"type":"date"}],"returnType":"bool"}
 {"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"datetime"},{"type":"datetime"}],"returnType":"bool"}
 {"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"bool"}
 {"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
+{"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
 {"access":"public","name":"<=","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"time"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"Edge"},{"type":"Edge"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"JsonPath"},{"type":"JsonPath"}],"returnType":"bool"}
@@ -1470,6 +1482,8 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"string"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"string"}],"returnType":"bool"}
+{"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
+{"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"string"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"RenderedText"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"string"},{"type":"Uuid"}],"returnType":"bool"}
 {"access":"public","name":"==","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"string"}],"returnType":"bool"}
@@ -1478,11 +1492,13 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":">","namespace":"global","numParams":2,"params":[{"type":"datetime"},{"type":"datetime"}],"returnType":"bool"}
 {"access":"public","name":">","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"bool"}
 {"access":"public","name":">","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
+{"access":"public","name":">","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
 {"access":"public","name":">","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"time"}],"returnType":"bool"}
 {"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"date"},{"type":"date"}],"returnType":"bool"}
 {"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"datetime"},{"type":"datetime"}],"returnType":"bool"}
 {"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"duration"},{"type":"duration"}],"returnType":"bool"}
 {"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"localdatetime"},{"type":"localdatetime"}],"returnType":"bool"}
+{"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"offsettime"},{"type":"offsettime"}],"returnType":"bool"}
 {"access":"public","name":">=","namespace":"global","numParams":2,"params":[{"type":"time"},{"type":"time"}],"returnType":"bool"}
 {"access":"public","name":"between","namespace":"global","numParams":2,"params":[{"name":"val","type":"Dynamic"},{"name":"val1","type":"Dynamic"}],"returnType":"ArgP"}
 {"access":"public","name":"containing","namespace":"global","numParams":1,"params":[{"name":"val","type":"Dynamic"}],"returnType":"ArgP"}
@@ -1526,6 +1542,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$NULL","namespace":"global","numParams":1,"params":[{"type":"&mut GTypeTokens"}],"returnType":"GType"}
 {"access":"public","name":"get$NUMBER","namespace":"global","numParams":1,"params":[{"type":"&mut GTypeTokens"}],"returnType":"GType"}
 {"access":"public","name":"get$None","namespace":"global","numParams":1,"params":[{"type":"&mut Pick"}],"returnType":"Pick"}
+{"access":"public","name":"get$OFFSETTIME","namespace":"global","numParams":1,"params":[{"type":"&mut GTypeTokens"}],"returnType":"GType"}
 {"access":"public","name":"get$OUT","namespace":"global","numParams":1,"params":[{"type":"&mut DirectionTokens"}],"returnType":"Direction"}
 {"access":"public","name":"get$PATH","namespace":"global","numParams":1,"params":[{"type":"&mut GTypeTokens"}],"returnType":"GType"}
 {"access":"public","name":"get$PlantUML","namespace":"global","numParams":1,"params":[{"type":"&mut V"}],"returnType":"graphersal::graph::schema::visualize::VisualizeFormat"}
@@ -1575,6 +1592,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$hour","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$hour","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$hour","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$hour","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$hour","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$id","namespace":"global","numParams":1,"params":[{"type":"&mut Edge"}],"returnType":"string"}
 {"access":"public","name":"get$id","namespace":"global","numParams":1,"params":[{"type":"&mut TTokens"}],"returnType":"By"}
@@ -1611,6 +1629,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$microsecond","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$millennium","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$millisecond","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
@@ -1619,6 +1638,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$minute","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$minute","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$minute","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$minute","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$minute","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$mixed","namespace":"global","numParams":1,"params":[{"type":"&mut PopTokens"}],"returnType":"Pop"}
 {"access":"public","name":"get$month","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
@@ -1632,6 +1652,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$none","namespace":"global","numParams":1,"params":[{"type":"&mut Pick"}],"returnType":"Pick"}
 {"access":"public","name":"get$none","namespace":"global","numParams":1,"params":[{"type":"&mut SchemaModeTokens"}],"returnType":"SchemaMode"}
@@ -1639,6 +1660,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$normSack","namespace":"global","numParams":1,"params":[{"type":"&mut BarrierTokens"}],"returnType":"Barrier"}
 {"access":"public","name":"get$offset","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$offset","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
+{"access":"public","name":"get$offset","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$onCreate","namespace":"global","numParams":1,"params":[{"type":"&mut MergeTokens"}],"returnType":"Merge"}
 {"access":"public","name":"get$onMatch","namespace":"global","numParams":1,"params":[{"type":"&mut MergeTokens"}],"returnType":"Merge"}
 {"access":"public","name":"get$open","namespace":"global","numParams":1,"params":[{"type":"&mut SchemaModeTokens"}],"returnType":"SchemaMode"}
@@ -1655,12 +1677,15 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$second","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
 {"access":"public","name":"get$second","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
 {"access":"public","name":"get$second","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$second","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"i64"}
 {"access":"public","name":"get$second","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$set","namespace":"global","numParams":1,"params":[{"type":"&mut CardinalityTokens"}],"returnType":"Cardinality"}
 {"access":"public","name":"get$shuffle","namespace":"global","numParams":1,"params":[{"type":"&mut Order"}],"returnType":"Order"}
 {"access":"public","name":"get$single","namespace":"global","numParams":1,"params":[{"type":"&mut CardinalityTokens"}],"returnType":"Cardinality"}
 {"access":"public","name":"get$sum","namespace":"global","numParams":1,"params":[{"type":"&mut OperatorTokens"}],"returnType":"Operator"}
 {"access":"public","name":"get$sumLong","namespace":"global","numParams":1,"params":[{"type":"&mut OperatorTokens"}],"returnType":"Operator"}
+{"access":"public","name":"get$timezone","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"string"}
+{"access":"public","name":"get$timezone","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"string"}
 {"access":"public","name":"get$to","namespace":"global","numParams":1,"params":[{"type":"&mut DirectionTokens"}],"returnType":"Direction"}
 {"access":"public","name":"get$tokens","namespace":"global","numParams":1,"params":[{"type":"&mut WithOptionsTokens"}],"returnType":"WithOptions"}
 {"access":"public","name":"get$unproductive","namespace":"global","numParams":1,"params":[{"type":"&mut Pick"}],"returnType":"Pick"}
@@ -1737,6 +1762,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"to_debug","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"string"}
 {"access":"public","name":"to_debug","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"string"}
 {"access":"public","name":"to_debug","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"string"}
+{"access":"public","name":"to_debug","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"string"}
 {"access":"public","name":"to_debug","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"string"}
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"name":"v","type":"&mut VisualizeFormat"}],"returnType":"String"}
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut BarrierTokens"}],"returnType":"string"}
@@ -1780,6 +1806,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"string"}
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"string"}
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"string"}
+{"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut offsettime"}],"returnType":"string"}
 {"access":"public","name":"to_string","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"string"}
 {"access":"public","name":"typeOf","namespace":"global","numParams":1,"params":[{"name":"val","type":"GType"}],"returnType":"ArgP"}
 {"access":"public","name":"within","namespace":"global","numParams":1,"params":[{"name":"val","type":"Dynamic"}],"returnType":"ArgP"}
@@ -1825,6 +1852,8 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 !=(_: localdatetime, _: localdatetime) -> bool
 !=(_: localdatetime, _: string) -> bool
 !=(_: map, _: map) -> bool
+!=(_: offsettime, _: offsettime) -> bool
+!=(_: offsettime, _: string) -> bool
 !=(_: string, _: RenderedText) -> bool
 !=(_: string, _: Uuid) -> bool
 !=(_: time, _: string) -> bool
@@ -1835,6 +1864,7 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 +(_: datetime, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 +(_: duration, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 +(_: localdatetime, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
++(_: offsettime, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 +(_: string, _: RenderedText) -> string
 +(_: time, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 -(_: date, _: date) -> core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
@@ -1845,17 +1875,21 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 -(_: duration, _: duration) -> core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 -(_: localdatetime, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 -(_: localdatetime, _: localdatetime) -> core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+-(_: offsettime, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+-(_: offsettime, _: offsettime) -> core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 -(_: time, _: duration) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 -(_: time, _: time) -> core::result::Result<graphersal::value::temporal::Duration,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 <(_: date, _: date) -> bool
 <(_: datetime, _: datetime) -> bool
 <(_: duration, _: duration) -> bool
 <(_: localdatetime, _: localdatetime) -> bool
+<(_: offsettime, _: offsettime) -> bool
 <(_: time, _: time) -> bool
 <=(_: date, _: date) -> bool
 <=(_: datetime, _: datetime) -> bool
 <=(_: duration, _: duration) -> bool
 <=(_: localdatetime, _: localdatetime) -> bool
+<=(_: offsettime, _: offsettime) -> bool
 <=(_: time, _: time) -> bool
 ==(_: Edge, _: Edge) -> bool
 ==(_: JsonPath, _: JsonPath) -> bool
@@ -1879,6 +1913,8 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 ==(_: localdatetime, _: localdatetime) -> bool
 ==(_: localdatetime, _: string) -> bool
 ==(_: map, _: map) -> bool
+==(_: offsettime, _: offsettime) -> bool
+==(_: offsettime, _: string) -> bool
 ==(_: string, _: RenderedText) -> bool
 ==(_: string, _: Uuid) -> bool
 ==(_: time, _: string) -> bool
@@ -1887,11 +1923,13 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 >(_: datetime, _: datetime) -> bool
 >(_: duration, _: duration) -> bool
 >(_: localdatetime, _: localdatetime) -> bool
+>(_: offsettime, _: offsettime) -> bool
 >(_: time, _: time) -> bool
 >=(_: date, _: date) -> bool
 >=(_: datetime, _: datetime) -> bool
 >=(_: duration, _: duration) -> bool
 >=(_: localdatetime, _: localdatetime) -> bool
+>=(_: offsettime, _: offsettime) -> bool
 >=(_: time, _: time) -> bool
 Auto(_: V) -> graphersal::graph::schema::visualize::VisualizeFormat
 Barrier::!=(left: &mut Barrier, right: Barrier) -> bool
@@ -2191,6 +2229,7 @@ asString(_: &mut date) -> string
 asString(_: &mut datetime) -> string
 asString(_: &mut duration) -> string
 asString(_: &mut localdatetime) -> string
+asString(_: &mut offsettime) -> string
 asString(_: &mut time) -> string
 asVector(_: &mut GraphTraversalSource) -> GraphTraversalSource
 as_(_: &mut GraphTraversalSource, _: array) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
@@ -2222,6 +2261,7 @@ as_string(_: &mut date) -> string
 as_string(_: &mut datetime) -> string
 as_string(_: &mut duration) -> string
 as_string(_: &mut localdatetime) -> string
+as_string(_: &mut offsettime) -> string
 as_string(_: &mut time) -> string
 as_vector(_: &mut GraphTraversalSource) -> GraphTraversalSource
 atZone(_: &mut GraphTraversalSource, _: string) -> GraphTraversalSource
@@ -2530,6 +2570,7 @@ get$Mixed(_: &mut PopTokens) -> Pop
 get$NULL(_: &mut GTypeTokens) -> GType
 get$NUMBER(_: &mut GTypeTokens) -> GType
 get$None(_: &mut Pick) -> Pick
+get$OFFSETTIME(_: &mut GTypeTokens) -> GType
 get$OUT(_: &mut DirectionTokens) -> Direction
 get$PATH(_: &mut GTypeTokens) -> GType
 get$PlantUML(_: &mut V) -> graphersal::graph::schema::visualize::VisualizeFormat
@@ -2580,6 +2621,7 @@ get$global(_: &mut ScopeTokens) -> Scope
 get$hour(_: &mut DTTokens) -> DT
 get$hour(_: &mut datetime) -> i64
 get$hour(_: &mut localdatetime) -> i64
+get$hour(_: &mut offsettime) -> i64
 get$hour(_: &mut time) -> i64
 get$id(_: &mut Edge) -> string
 get$id(_: &mut TTokens) -> By
@@ -2616,6 +2658,7 @@ get$micros(_: &mut duration) -> i64
 get$microsecond(_: &mut DTTokens) -> DT
 get$microsecond(_: &mut datetime) -> i64
 get$microsecond(_: &mut localdatetime) -> i64
+get$microsecond(_: &mut offsettime) -> i64
 get$microsecond(_: &mut time) -> i64
 get$millennium(_: &mut DTTokens) -> DT
 get$millisecond(_: &mut DTTokens) -> DT
@@ -2624,6 +2667,7 @@ get$minus(_: &mut OperatorTokens) -> Operator
 get$minute(_: &mut DTTokens) -> DT
 get$minute(_: &mut datetime) -> i64
 get$minute(_: &mut localdatetime) -> i64
+get$minute(_: &mut offsettime) -> i64
 get$minute(_: &mut time) -> i64
 get$mixed(_: &mut PopTokens) -> Pop
 get$month(_: &mut DTTokens) -> DT
@@ -2637,6 +2681,7 @@ get$nanos(_: &mut duration) -> core::result::Result<i64,alloc::boxed::Box<rhai::
 get$nanosecond(_: &mut DTTokens) -> DT
 get$nanosecond(_: &mut datetime) -> i64
 get$nanosecond(_: &mut localdatetime) -> i64
+get$nanosecond(_: &mut offsettime) -> i64
 get$nanosecond(_: &mut time) -> i64
 get$none(_: &mut Pick) -> Pick
 get$none(_: &mut SchemaModeTokens) -> SchemaMode
@@ -2644,6 +2689,7 @@ get$none(_: &mut WithOptionsTokens) -> WithOptions
 get$normSack(_: &mut BarrierTokens) -> Barrier
 get$offset(_: &mut DTTokens) -> DT
 get$offset(_: &mut datetime) -> i64
+get$offset(_: &mut offsettime) -> i64
 get$onCreate(_: &mut MergeTokens) -> Merge
 get$onMatch(_: &mut MergeTokens) -> Merge
 get$open(_: &mut SchemaModeTokens) -> SchemaMode
@@ -2660,12 +2706,15 @@ get$results(_: &mut Execution) -> array
 get$second(_: &mut DTTokens) -> DT
 get$second(_: &mut datetime) -> i64
 get$second(_: &mut localdatetime) -> i64
+get$second(_: &mut offsettime) -> i64
 get$second(_: &mut time) -> i64
 get$set(_: &mut CardinalityTokens) -> Cardinality
 get$shuffle(_: &mut Order) -> Order
 get$single(_: &mut CardinalityTokens) -> Cardinality
 get$sum(_: &mut OperatorTokens) -> Operator
 get$sumLong(_: &mut OperatorTokens) -> Operator
+get$timezone(_: &mut datetime) -> string
+get$timezone(_: &mut offsettime) -> string
 get$to(_: &mut DirectionTokens) -> Direction
 get$tokens(_: &mut WithOptionsTokens) -> WithOptions
 get$unproductive(_: &mut Pick) -> Pick
@@ -3009,6 +3058,8 @@ of(_: SetTokens, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: type
 of(_: SetTokens, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 ofList(_: SetTokens, _: array) -> core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 of_list(_: SetTokens, _: array) -> core::result::Result<graphersal::script::tokens::set::ScriptSet,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+offsetTime(_: string) -> core::result::Result<graphersal::value::temporal::OffsetTime,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+offsettime(_: string) -> core::result::Result<graphersal::value::temporal::OffsetTime,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 option(_: &mut GraphTraversalSource, _: Merge, _: types::dynamic::Dynamic, _: Cardinality) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 option(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 optional(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
@@ -3305,6 +3356,7 @@ to_debug(_: &mut datetime) -> string
 to_debug(_: &mut duration) -> string
 to_debug(_: &mut localdatetime) -> string
 to_debug(_: &mut map) -> string
+to_debug(_: &mut offsettime) -> string
 to_debug(_: &mut time) -> string
 to_debug(arg_p: &mut ArgP) -> String
 to_debug(v: &mut VisualizeFormat) -> String
@@ -3380,6 +3432,7 @@ to_string(_: &mut datetime) -> string
 to_string(_: &mut duration) -> string
 to_string(_: &mut localdatetime) -> string
 to_string(_: &mut map) -> string
+to_string(_: &mut offsettime) -> string
 to_string(_: &mut time) -> string
 to_string(arg_p: &mut ArgP) -> String
 to_string(v: &mut VisualizeFormat) -> String
@@ -3610,6 +3663,7 @@ GType
   MAP: GType
   NULL: GType
   NUMBER: GType
+  OFFSETTIME: GType
   PATH: GType
   STRING: GType
   TIME: GType
@@ -4032,6 +4086,8 @@ now
 of
 ofList
 of_list
+offsetTime
+offsettime
 option
 optional
 or

@@ -3,7 +3,10 @@
 //! - Years are four digits with a `-` for years before 1 (`-0044-03-15`; year 0 is 1 BC).
 //! - Seconds are always written; a fraction only when it is not zero, in groups of three digits
 //!   (`.250`, `.250500`, `.250500001`), as `java.time` writes them.
-//! - An offset of zero is `Z`, others `+HH:MM`, with `:SS` only when the offset has seconds.
+//! - An offset of zero is `Z`, others `+HH:MM`, with `:SS` only when the offset has seconds; a
+//!   `datetime` with a zone name adds it in brackets (`+02:00[Europe/Berlin]`, RFC 9557, as
+//!   `java.time` `ZonedDateTime` writes it).
+//! - An `offsettime` is the time and its offset (`09:30:00+02:00`, `09:30:00Z`).
 //! - A duration is `P[nY][nM][nD][T[nH][nM][n[.f]S]]`, `PT0S` when zero; when every non-zero
 //!   part is negative the whole is written negative (`-P1DT2H`), otherwise each negative part
 //!   carries its own sign (`P1M-2D`).
@@ -13,7 +16,7 @@
 use std::fmt::{self, Write};
 
 use super::civil::{self, NANOS_PER_SECOND};
-use super::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
+use super::{Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, Time};
 
 fn write_date(f: &mut impl Write, days: i32) -> fmt::Result {
     let (year, month, day) = civil::civil_from_days(days);
@@ -141,11 +144,19 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
     Ok(())
 }
 
+/// Writes the zone name of a `datetime` in brackets (`[Europe/Berlin]`) when it has one.
+fn write_zone(f: &mut impl Write, value: DateTime) -> fmt::Result {
+    match value.zone_name() {
+        Some(name) => write!(f, "[{name}]"),
+        None => Ok(()),
+    }
+}
+
 /// Writes a value in the text Neo4j gives it (`java.time` `toString`), the form of GQL's
 /// `toString` (Cypher compatibility; ISO `CAST(x AS STRING)` keeps the canonical text):
-/// `12:00` and `1984-10-11T12:31` without zero seconds, an offset `Z` / `+01:00`, a duration
-/// signed per component (`PT-1M-0.001S`). Our values carry no zone name, so the
-/// `[Europe/Stockholm]` suffix is never written. The engine parsers read the text back.
+/// `12:00` and `1984-10-11T12:31` without zero seconds, an offset `Z` / `+01:00`, the zone name
+/// of a `datetime` in brackets (`+01:00[Europe/Stockholm]`), a duration signed per component
+/// (`PT-1M-0.001S`). The engine parsers read the text back.
 #[cfg_attr(
     not(feature = "gql"),
     allow(dead_code, reason = "GQL toString() calls it")
@@ -157,9 +168,14 @@ pub(crate) fn write_neo4j(f: &mut impl Write, value: &Temporal) -> fmt::Result {
         Temporal::LocalDateTime(v) => write_neo4j_local(f, v.nanos()),
         Temporal::DateTime(v) => {
             write_neo4j_local(f, v.local().nanos())?;
-            write_offset(f, v.offset_seconds)
+            write_offset(f, v.offset_seconds)?;
+            write_zone(f, v)
         }
         Temporal::Duration(v) => write_neo4j_duration(f, v),
+        Temporal::OffsetTime(v) => {
+            write_neo4j_time(f, v.nanos)?;
+            write_offset(f, v.offset_seconds)
+        }
     }
 }
 
@@ -196,6 +212,14 @@ impl fmt::Display for LocalDateTime {
 impl fmt::Display for DateTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_local(f, self.local().nanos())?;
+        write_offset(f, self.offset_seconds)?;
+        write_zone(f, *self)
+    }
+}
+
+impl fmt::Display for OffsetTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_time(f, self.nanos)?;
         write_offset(f, self.offset_seconds)
     }
 }

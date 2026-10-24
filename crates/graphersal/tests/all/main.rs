@@ -215,6 +215,7 @@ mod temporal_format_tests;
 mod temporal_nanosecond_tests;
 mod temporal_step_tests;
 mod temporal_value_tests;
+mod temporal_zoned_tests;
 mod test_serde;
 mod timeout_tests;
 mod token_classes_tests;

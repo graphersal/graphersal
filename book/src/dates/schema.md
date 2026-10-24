@@ -11,6 +11,7 @@ overview.
 | `local-date-time` | `localdatetime` | `2024-05-01T09:30:00` (a Graphersal name: JSON Schema has none) |
 | `date` | `date` | `2024-05-01` |
 | `time` | `time` | `09:30:00` (local; JSON Schema's own `time` requires an offset) |
+| `offset-time` | `offsettime` | `09:30:00+02:00` (a Graphersal name: JSON Schema's `time` is this form, but Graphersal's `time` is local) |
 | `duration` | `duration` | `P1Y2M3DT4H` |
 
 JSON Schema validators treat `format` as an annotation and ignore one they do not know, so a
@@ -62,4 +63,4 @@ property. Their value is the text of a value of the node's type, and a value is 
 `infer_schema()` reports a stored date with its format (`{"type": "string", "format":
 "date-time"}`), and a position that holds strings and dates as an `anyOf`, so freezing the
 structure you have (`g.set_schema(g.infer_schema(), SchemaMode.closed)`) keeps the dates dates.
-The playground's schema editor offers the five formats as types and their bounds as constraints.
+The playground's schema editor offers the date formats as types and their bounds as constraints.

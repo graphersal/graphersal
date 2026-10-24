@@ -439,8 +439,21 @@ fn read_vector(reader: &mut Reader<'_>, start: u64) -> DecodeResult<Vector> {
 
 /// Writes a temporal value with its tag (format spec 3, file format version 2). The tags hold
 /// microseconds: a value with a part below the microsecond is refused (never cut), so the unit
-/// that wrote it fails and nothing is stored.
+/// that wrote it fails and nothing is stored. An `offsettime` and a `datetime` with a zone name
+/// have no tag in this version and are refused in the same way (the zone name is never dropped
+/// silently).
 fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
+    if value.has_no_v2_form() {
+        let what = match value {
+            Temporal::OffsetTime(_) => "an offsettime",
+            _ => "a datetime with a time zone name",
+        };
+        return Err(format!(
+            "the value {value} is {what}, which this file format (version {FORMAT_VERSION}) \
+             cannot store yet; store a datetime without the zone name (its offset stays, for \
+             example datetime(\"2024-01-01T10:00:00+01:00\")) or a time and its offset apart"
+        ));
+    }
     if value.has_sub_micros() {
         return Err(format!(
             "the {} {value} has a part below the microsecond, which this file format \
@@ -473,6 +486,12 @@ fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
             put_svar(out, duration.months() as i64);
             put_svar(out, duration.days() as i64);
             put_svar(out, duration.micros());
+        }
+        // Refused above (no tag in file format version 2).
+        Temporal::OffsetTime(_) => {
+            return Err(format!(
+                "the offsettime {value} has no encoding in file format version {FORMAT_VERSION}"
+            ));
         }
     }
     Ok(())

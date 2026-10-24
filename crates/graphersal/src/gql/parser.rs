@@ -519,8 +519,8 @@ pub(crate) enum Function {
     Temporal(TemporalFunction),
 }
 
-/// The temporal types GQL constructs (stage 3g): Cypher's zoned `time()` has no engine type yet
-/// and stays "not yet" (user decision U2).
+/// The temporal types GQL constructs (stage 3g; `zoned_time` / Cypher `time` since temporal v2,
+/// user decision U2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TemporalType {
     /// `date`: a calendar day (engine `Date`).
@@ -532,6 +532,8 @@ pub(crate) enum TemporalType {
     LocalDateTime,
     /// `zoned_datetime`, Cypher `datetime`: an instant with its UTC offset (engine `DateTime`).
     DateTime,
+    /// `zoned_time`, Cypher `time`: a time of day with its UTC offset (engine `OffsetTime`).
+    Time,
 }
 
 /// The clock a Cypher `X.statement()` / `X.transaction()` reads (both the pinned `now()`, user
@@ -743,6 +745,12 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         0,
         1,
     ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::Time),
+        &["zoned_time", "time"],
+        0,
+        1,
+    ),
     temporal(TemporalFunction::Duration, &["duration"], 1, 1),
     temporal(
         TemporalFunction::Clock(TemporalType::Date, Clock::Statement),
@@ -793,6 +801,18 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         1,
     ),
     temporal(
+        TemporalFunction::Clock(TemporalType::Time, Clock::Statement),
+        &["time.statement"],
+        0,
+        1,
+    ),
+    temporal(
+        TemporalFunction::Clock(TemporalType::Time, Clock::Transaction),
+        &["time.transaction"],
+        0,
+        1,
+    ),
+    temporal(
         TemporalFunction::Truncate(TemporalType::Date),
         &["date.truncate"],
         2,
@@ -813,6 +833,12 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
     temporal(
         TemporalFunction::Truncate(TemporalType::DateTime),
         &["datetime.truncate"],
+        2,
+        3,
+    ),
+    temporal(
+        TemporalFunction::Truncate(TemporalType::Time),
+        &["time.truncate"],
         2,
         3,
     ),
@@ -909,20 +935,6 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "a trigonometric function",
         "Gremlin math() after gql(), for example \
          g.gql(\"MATCH (n:person) RETURN n.age AS a\").select(\"a\").math(\"sin(_)\")",
-    ),
-    // Stage 3g: Cypher's zoned `time()` has no engine type yet (user decision U2).
-    not_yet_function(
-        &[
-            "zoned_time",
-            "time",
-            "time.truncate",
-            "time.statement",
-            "time.transaction",
-        ],
-        "a time of day with a UTC offset",
-        "local_time() / localtime() is a time of day without an offset, for example \
-         localtime('12:31:14'); zoned_datetime() / datetime() keeps an offset with a date, for \
-         example datetime('2015-07-21T12:31:14+01:00')",
     ),
     // Stage 3g: `X.realtime()` reads a clock that moves during the query (user decision U9).
     UnsupportedFunction {

@@ -313,18 +313,19 @@ are compatibility functions with Neo4j's meaning ([Dates and times](subset.md#da
 | `date(x)` | `date(x)` | the same name |
 | `localtime(x)` | `local_time(x)` | a time of day without an offset |
 | `localdatetime(x)` | `local_datetime(x)` | |
-| `datetime(x)` | `zoned_datetime(x)` | an instant with its UTC offset |
+| `datetime(x)` | `zoned_datetime(x)` | an instant with its UTC offset (and its zone name) |
+| `time(x)` | `zoned_time(x)` | a time of day with its UTC offset |
 | `duration(x)` | `duration(x)` | the same name |
-| `date.truncate()`, `localtime.truncate()`, `localdatetime.truncate()`, `datetime.truncate()` | none | compatibility functions |
+| `date.truncate()`, `localtime.truncate()`, `time.truncate()`, `localdatetime.truncate()`, `datetime.truncate()` | none | compatibility functions |
 | `duration.between()`, `duration.inMonths()`, `duration.inDays()`, `duration.inSeconds()` | none | compatibility functions; ISO's `duration_between()` is an unknown function that suggests `duration.between()` |
 | `X.statement()`, `X.transaction()`; `datetime.fromepoch()`, `datetime.fromepochmillis()` | none | compatibility functions; the clocks give the time the query started |
-| `time(x)`, `time.truncate()`, `time.statement()`, ... | `zoned_time(x)` | not supported yet: no engine type for a time with an offset; use `localtime()` or `datetime()` |
+
 | `X.realtime()` | none | refused: a clock that moves while the query runs |
 
 ```rhai,graph=empty
 g.gql("RETURN datetime('2015-07-21T21:40+01:00') = zoned_datetime('2015-07-21T21:40+01:00') AS a, localtime('12:00') = local_time('12:00') AS b, localdatetime('2015-07-21T21:40') = local_datetime('2015-07-21T21:40') AS c").to_list()
 // #{"a": true, "b": true, "c": true}
-g.gql("RETURN zoned_time('12:00+01:00') AS t")   // error: zoned_time() (a time of day with a UTC offset) is not yet supported
+g.gql("RETURN zoned_time('12:00+01:00') = time('12:00+01:00') AS t").to_list()   // #{"t": true}
 ```
 
 ## Cypher spellings that are not aliases

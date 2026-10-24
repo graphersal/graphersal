@@ -1,5 +1,6 @@
-//! Truncation (3g.T7): `date.truncate`, `localtime.truncate`, `localdatetime.truncate`,
-//! `datetime.truncate(unit, value [, map])` with the openCypher (Neo4j) meanings:
+//! Truncation (3g.T7): `date.truncate`, `localtime.truncate`, `time.truncate` (temporal v2),
+//! `localdatetime.truncate`, `datetime.truncate(unit, value [, map])` with the openCypher (Neo4j)
+//! meanings:
 //!
 //! - **Units** (ASCII case-insensitive): `millennium`, `century`, `decade`, `year`, `weekYear`,
 //!   `quarter`, `month`, `week`, `day` for the types with a date; `day`, `hour`, `minute`,
@@ -15,7 +16,9 @@
 //! - **The value** may be of another temporal type, projected first as Neo4j does: the date of a
 //!   local datetime or of a datetime (its wall clock at its own offset), the time of day of
 //!   either, midnight for a date given to a type with a time of day. `datetime.truncate` keeps
-//!   the offset of a datetime and gives UTC to a value without one. A value without the part
+//!   the offset of a datetime (and its zone name, resolving the truncated wall clock in that
+//!   zone again) and gives UTC to a value without one; `time.truncate` keeps the offset of a
+//!   datetime or a time the same way. A value without the part
 //!   the type needs (`date.truncate(.., localtime)`, `localtime.truncate(.., date)`) or a
 //!   duration is 22G03.
 //! - **The map** overrides fields of the truncated value as the constructors' base form does
@@ -25,8 +28,9 @@
 //!   `minute`, `second` and the summed `millisecond` + `microsecond` + `nanosecond` (with the
 //!   unit `millisecond` a `microsecond` / `nanosecond` adds to the kept milliseconds, with
 //!   `microsecond` a `nanosecond` to the kept microseconds, as Neo4j); `timezone` for
-//!   `datetime.truncate` keeps the wall clock and resolves it in that zone (a zone name gives
-//!   its offset at that time, U3). A key the type lacks or groups that conflict are 22007, a
+//!   `datetime.truncate` keeps the wall clock and resolves it in that zone (a zone name is kept
+//!   in the value), for `time.truncate` it replaces the offset (a zone name gives its offset at
+//!   the time the query started). A key the type lacks or groups that conflict are 22007, a
 //!   field out of range 22008, a `NULL` field `NULL`.
 //! - `NULL` in any argument gives `NULL` (F2).
 
@@ -42,8 +46,10 @@ use crate::value::dt::DT;
 use crate::value::number::N;
 use crate::value::temporal::arith;
 use crate::value::temporal::civil;
-use crate::value::temporal::zone::Zone;
-use crate::value::temporal::{Date, DateTime, LocalDateTime, Temporal, TemporalError, Time};
+use crate::value::temporal::zone::{Zone, ZoneId};
+use crate::value::temporal::{
+    Date, DateTime, LocalDateTime, OffsetTime, Temporal, TemporalError, Time,
+};
 
 /// A truncation unit (Neo4j's names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +135,7 @@ impl Unit {
     fn valid_for(self, of: TemporalType) -> bool {
         match of {
             TemporalType::Date => self.on_date(),
-            TemporalType::LocalTime => self.on_time(),
+            TemporalType::LocalTime | TemporalType::Time => self.on_time(),
             TemporalType::LocalDateTime | TemporalType::DateTime => true,
         }
     }
@@ -158,7 +164,7 @@ impl Unit {
 pub(crate) fn truncate<En: Env>(
     of: TemporalType,
     args: Vec<Arg<En::Element>>,
-    _env: &En,
+    env: &En,
     span: Span,
 ) -> Result<Value<En::Element>, EvalError> {
     if any_null(&args) {
@@ -220,7 +226,7 @@ pub(crate) fn truncate<En: Env>(
     let Some(overridden) = Override::read(name, of, fields, map_span)? else {
         return Ok(Value::Null);
     };
-    let result = overridden.apply(name, of, parsed, truncated, map_span)?;
+    let result = overridden.apply(name, of, parsed, truncated, env.now(), map_span)?;
     Ok(Value::Scalar(ElementProperty::Temporal(result)))
 }
 
@@ -231,6 +237,7 @@ fn type_name(of: TemporalType) -> &'static str {
         TemporalType::LocalTime => "a local time",
         TemporalType::LocalDateTime => "a local datetime",
         TemporalType::DateTime => "a datetime",
+        TemporalType::Time => "a time",
     }
 }
 
@@ -260,13 +267,15 @@ fn overflow(name: &str, span: Span) -> EvalError {
     )
 }
 
-/// The value projected onto what the target type keeps: the date, the time of day and the
-/// offset (a datetime's own, kept by `datetime.truncate`).
+/// The value projected onto what the target type keeps: the date, the time of day, the offset
+/// (a datetime's or a time's own, kept by `datetime.truncate` and `time.truncate`) and a
+/// datetime's zone name.
 #[derive(Debug, Clone, Copy)]
 struct Parts {
     date: Option<Date>,
     time: Time,
     offset: Option<i32>,
+    zone: Option<ZoneId>,
 }
 
 impl Parts {
@@ -280,6 +289,7 @@ impl Parts {
         let (date, time, offset, has_time) = match source {
             Temporal::Date(date) => (Some(date), midnight, None, false),
             Temporal::Time(time) => (None, time, None, true),
+            Temporal::OffsetTime(value) => (None, value.time(), Some(value.offset_seconds()), true),
             Temporal::LocalDateTime(local) => (Some(local.date()), local.time(), None, true),
             Temporal::DateTime(value) => {
                 let local = value.local();
@@ -292,8 +302,16 @@ impl Parts {
             }
             Temporal::Duration(_) => return Err(wrong(name, "a date, a time or a datetime", arg)),
         };
+        let zone = match source {
+            Temporal::DateTime(value) => value.zone_id(),
+            Temporal::Date(_)
+            | Temporal::Time(_)
+            | Temporal::OffsetTime(_)
+            | Temporal::LocalDateTime(_)
+            | Temporal::Duration(_) => None,
+        };
         match of {
-            TemporalType::LocalTime if !has_time => {
+            TemporalType::LocalTime | TemporalType::Time if !has_time => {
                 Err(wrong(name, "a value with a time of day", arg))
             }
             TemporalType::Date | TemporalType::LocalDateTime | TemporalType::DateTime
@@ -303,8 +321,14 @@ impl Parts {
             }
             TemporalType::Date
             | TemporalType::LocalTime
+            | TemporalType::Time
             | TemporalType::LocalDateTime
-            | TemporalType::DateTime => Ok(Parts { date, time, offset }),
+            | TemporalType::DateTime => Ok(Parts {
+                date,
+                time,
+                offset,
+                zone,
+            }),
         }
     }
 
@@ -373,7 +397,7 @@ impl Parts {
         Ok(Parts {
             date: Some(date),
             time: midnight,
-            offset: self.offset,
+            ..self
         })
     }
 }
@@ -416,9 +440,9 @@ impl Override {
         fields: &[(CompactString, Value<E>)],
         span: Span,
     ) -> Result<Option<Override>, EvalError> {
-        let has_date = !matches!(of, TemporalType::LocalTime);
+        let has_date = !matches!(of, TemporalType::LocalTime | TemporalType::Time);
         let has_time = !matches!(of, TemporalType::Date);
-        let has_zone = matches!(of, TemporalType::DateTime);
+        let has_zone = matches!(of, TemporalType::DateTime | TemporalType::Time);
         let mut read = Override::default();
         for (key, value) in fields {
             let lower = key.to_ascii_lowercase();
@@ -517,6 +541,7 @@ impl Override {
         of: TemporalType,
         unit: Unit,
         parts: Parts,
+        now: DateTime,
         span: Span,
     ) -> Result<Temporal, EvalError> {
         let date = match parts.date {
@@ -531,16 +556,26 @@ impl Override {
         Ok(match of {
             TemporalType::Date => Temporal::Date(date.ok_or_else(|| overflow(name, span))?),
             TemporalType::LocalTime => Temporal::Time(time),
+            TemporalType::Time => {
+                let offset = match &self.timezone {
+                    Some(zone) => Zone::parse(zone)
+                        .and_then(|zone| zone.offset_at(now))
+                        .map_err(|e| engine_error(name, e, span))?,
+                    None => parts.offset.unwrap_or(0),
+                };
+                Temporal::OffsetTime(
+                    OffsetTime::new(time, offset).map_err(|e| engine_error(name, e, span))?,
+                )
+            }
             TemporalType::LocalDateTime => Temporal::LocalDateTime(local(date)?),
             TemporalType::DateTime => {
                 let local = local(date)?;
-                let value = match &self.timezone {
-                    Some(zone) => Zone::parse(zone)
-                        .and_then(|zone| zone.resolve(local))
-                        .map_err(|e| engine_error(name, e, span))?,
-                    None => DateTime::from_local(local, parts.offset.unwrap_or(0))
-                        .map_err(|e| engine_error(name, e, span))?,
-                };
+                let value = match (&self.timezone, parts.zone) {
+                    (Some(zone), _) => Zone::parse(zone).and_then(|zone| zone.resolve_named(local)),
+                    (None, Some(id)) => id.zone().and_then(|zone| zone.resolve_named(local)),
+                    (None, None) => DateTime::from_local(local, parts.offset.unwrap_or(0)),
+                }
+                .map_err(|e| engine_error(name, e, span))?;
                 Temporal::DateTime(value)
             }
         })

@@ -25,10 +25,13 @@ scenarios that also hold a set literal (`{"x", "y", "z"}`), for which Graphersal
 
 Everything else on the pages of this part is a Graphersal extension, modelled on PostgreSQL:
 
-- the types `date`, `localdatetime` and `time` (`GType.DATE`, `LOCALDATETIME`, `TIME`; `typeOf`
-  names `LocalDate`, `LocalDateTime`, `LocalTime`), and `duration` as a value with months, days
-  and nanoseconds (PostgreSQL's `interval`, broader than Java's `Duration`), with their
-  constructors;
+- the types `date`, `localdatetime`, `time` and `offsettime` (`GType.DATE`, `LOCALDATETIME`,
+  `TIME`, `OFFSETTIME`; `typeOf` names `LocalDate`, `LocalDateTime`, `LocalTime`, `OffsetTime`),
+  and `duration` as a value with months, days and nanoseconds (PostgreSQL's `interval`, broader
+  than Java's `Duration`), with their constructors;
+- a zone name kept in a `datetime` written with one (`datetime("..[Europe/Berlin]")`, Java's
+  `ZonedDateTime`, which TinkerPop's `datetime()` does not produce): its calendar arithmetic
+  follows the zone; a `datetime` without a name behaves as TinkerPop specifies;
 - the units `DT.nanosecond`, `DT.microsecond`, `DT.millisecond`, `DT.week` to `DT.millennium`
   and the parts
   `DT.day_of_week`, `DT.iso_day_of_week`, `DT.day_of_year`, `DT.iso_year`, `DT.epoch`,

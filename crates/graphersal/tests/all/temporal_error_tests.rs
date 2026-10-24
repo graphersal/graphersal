@@ -225,3 +225,24 @@ fn a_saved_query_date_argument_without_an_offset_names_the_constructor() {
         "{text}"
     );
 }
+
+#[test]
+fn offsettime_conversions_and_types_are_named_in_the_help() {
+    // Temporal v2: the help names the new type and its as_date() target (rule 6).
+    let text = script_failure(r#"g.inject("09:30").as_date(GType.OFFSETTIME).next()"#);
+    assert!(
+        text.contains("as_date(GType.OFFSETTIME) reads a time text with its UTC offset"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"g.inject(time("09:30")).as_date(GType.OFFSETTIME)"#),
+        "{text}"
+    );
+    let text = script_failure(r#"g.inject(true).date_add(DT.hour, 1).next()"#);
+    assert!(text.contains(r#"offsettime("09:30:00+02:00")"#), "{text}");
+    let text = script_failure(r#"g.inject(offsettime("10:00Z")).date_add(DT.day, 1).next()"#);
+    assert!(
+        text.contains("a time and an offsettime have no days or months"),
+        "{text}"
+    );
+}

@@ -14,13 +14,12 @@
 //!   both sides always have one, so a `date` gets midnight); when only one side has a date, the
 //!   other gets that date (a `localtime` beside a `date` is read on that day, so the months and
 //!   days are 0 and only the times count: `date('1984-10-11')` to `localtime('16:30')` is
-//!   `PT16H30M`); when only one side has an offset, the other is read at that offset. A pair of
-//!   `datetime`s is compared at `from`'s offset for the months and days (`java.time`
-//!   `withOffsetSameInstant`), so the time part is the elapsed time.
-//! - Zone names are resolved to their offset when the value is built (U3): an operand without an
-//!   offset is read at the other side's fixed offset, not in its named zone, so a difference that
-//!   crosses a daylight saving change differs from Neo4j's (those TCK cases are excluded as a
-//!   deviation in 3g.T9).
+//!   `PT16H30M`); when only one side has an offset (a `datetime` or a `time`), the other is read
+//!   at that offset, or in that side's zone when it is a `datetime` with a zone name (so a local
+//!   04:00 on a day the zone leaves daylight saving is read at the zone's winter offset). A pair
+//!   of `datetime`s is compared at `from`'s offset for the months and days (`java.time`
+//!   `withOffsetSameInstant`), or on the wall clock of `from`'s zone when it has a zone name
+//!   (`ZonedDateTime.until`), so the time part is the elapsed time.
 //! - `inMonths` / `inDays` of two `localtime`s is 22G03 (neither has a calendar, as Neo4j's
 //!   unsupported unit); a duration or a non-temporal operand is 22G03; a result outside the
 //!   supported range 22008. `NULL` in either argument gives `NULL` (F2).
@@ -32,8 +31,10 @@ use super::super::{Arg, any_null};
 use super::{cypher_name, kind_name};
 use crate::ElementProperty;
 use crate::value::temporal::arith;
+use crate::value::temporal::zone::Zone;
 use crate::value::temporal::{
-    Date, DateTime, Duration, LocalDateTime, Temporal, TemporalError, TemporalResult, Time,
+    Date, DateTime, Duration, LocalDateTime, OffsetTime, Temporal, TemporalError, TemporalResult,
+    Time,
 };
 
 /// `duration.between(a, b)` or one of its `in*` forms (`form`).
@@ -83,10 +84,12 @@ fn instant<E>(name: &str, arg: &Arg<E>) -> Result<Temporal, EvalError> {
             Temporal::Date(_)
             | Temporal::LocalDateTime(_)
             | Temporal::DateTime(_)
-            | Temporal::Time(_) => Ok(*temporal),
+            | Temporal::Time(_)
+            | Temporal::OffsetTime(_) => Ok(*temporal),
             Temporal::Duration(_) => Err(EvalError::invalid_type(
                 format!(
-                    "{name}() takes a date, a localtime, a localdatetime or a datetime, not {}",
+                    "{name}() takes a date, a localtime, a time, a localdatetime or a datetime, \
+                     not {}",
                     kind_name(temporal)
                 ),
                 arg.span,
@@ -94,7 +97,7 @@ fn instant<E>(name: &str, arg: &Arg<E>) -> Result<Temporal, EvalError> {
         },
         other => Err(EvalError::invalid_type(
             format!(
-                "{name}() takes a date, a localtime, a localdatetime or a datetime, not {}",
+                "{name}() takes a date, a localtime, a time, a localdatetime or a datetime, not {}",
                 other.kind_name()
             ),
             arg.span,
@@ -154,19 +157,27 @@ fn out_of_range() -> TemporalError {
 /// Whether a value has a time of day.
 fn has_time(value: Temporal) -> bool {
     match value {
-        Temporal::Time(_) | Temporal::LocalDateTime(_) | Temporal::DateTime(_) => true,
+        Temporal::Time(_)
+        | Temporal::OffsetTime(_)
+        | Temporal::LocalDateTime(_)
+        | Temporal::DateTime(_) => true,
         Temporal::Date(_) | Temporal::Duration(_) => false,
     }
 }
 
-/// The UTC offset of a value with one.
-fn offset_of(value: Temporal) -> Option<i32> {
+/// The zone of a value with an offset: a `datetime`'s zone name, else its fixed offset; a
+/// `time`'s offset.
+fn zone_of(value: Temporal) -> TemporalResult<Option<Zone>> {
     match value {
-        Temporal::DateTime(v) => Some(v.offset_seconds()),
+        Temporal::DateTime(v) => Ok(Some(match v.zone_rules()? {
+            Some(zone) => zone,
+            None => Zone::Fixed(v.offset_seconds()),
+        })),
+        Temporal::OffsetTime(v) => Ok(Some(Zone::Fixed(v.offset_seconds()))),
         Temporal::Date(_)
         | Temporal::LocalDateTime(_)
         | Temporal::Time(_)
-        | Temporal::Duration(_) => None,
+        | Temporal::Duration(_) => Ok(None),
     }
 }
 
@@ -176,7 +187,7 @@ fn date_of(value: Temporal) -> Option<Date> {
         Temporal::Date(v) => Some(v),
         Temporal::LocalDateTime(v) => Some(v.date()),
         Temporal::DateTime(v) => Some(v.local().date()),
-        Temporal::Time(_) | Temporal::Duration(_) => None,
+        Temporal::Time(_) | Temporal::OffsetTime(_) | Temporal::Duration(_) => None,
     }
 }
 
@@ -193,21 +204,39 @@ fn midnight() -> TemporalResult<Time> {
     Time::from_nanos_of_day(0)
 }
 
-/// `value` read on `date` (a `localtime` becomes a `localdatetime`).
-fn attach_date(value: Temporal, date: Date) -> Temporal {
+/// `value` read on `date` (a `localtime` becomes a `localdatetime`, a `time` the `datetime` at
+/// its offset).
+fn attach_date(value: Temporal, date: Date) -> TemporalResult<Temporal> {
     match value {
-        Temporal::Time(v) => Temporal::LocalDateTime(LocalDateTime::new(date, v)),
-        other => other,
+        Temporal::Time(v) => Ok(Temporal::LocalDateTime(LocalDateTime::new(date, v))),
+        Temporal::OffsetTime(v) => Ok(Temporal::DateTime(DateTime::from_local(
+            LocalDateTime::new(date, v.time()),
+            v.offset_seconds(),
+        )?)),
+        other => Ok(other),
     }
 }
 
-/// `value` read at `offset` (a `localdatetime` becomes a `datetime`; a `date` or a `localtime`
-/// stays: alignment gave it a time and a date before when the other side has both).
-fn attach_offset(value: Temporal, offset: i32) -> TemporalResult<Temporal> {
+/// `value` read in `zone` (a `localdatetime` becomes a `datetime`, a `localtime` a `time`; a
+/// `date` stays: alignment gave it a time and a date before when the other side has both).
+fn attach_zone(value: Temporal, zone: &Zone) -> TemporalResult<Temporal> {
     match value {
-        Temporal::LocalDateTime(v) => Ok(Temporal::DateTime(DateTime::from_local(v, offset)?)),
+        Temporal::LocalDateTime(v) => Ok(Temporal::DateTime(zone.resolve_named(v)?)),
+        Temporal::Time(v) => {
+            // Only beside a `time` (no date on either side): a fixed offset.
+            let offset = zone.offset_at(DateTime::from_local(
+                LocalDateTime::new(date_zero()?, v),
+                0,
+            )?)?;
+            Ok(Temporal::OffsetTime(OffsetTime::new(v, offset)?))
+        }
         other => Ok(other),
     }
+}
+
+/// 1970-01-01.
+fn date_zero() -> TemporalResult<Date> {
+    Date::from_days_since_epoch(0)
 }
 
 /// Neo4j's operand alignment (`TemporalValue.until`): a time of day (both when `time_based`,
@@ -224,13 +253,13 @@ fn align(from: Temporal, to: Temporal, time_based: bool) -> TemporalResult<(Temp
         from = attach_time(from)?;
     }
     match (date_of(from), date_of(to)) {
-        (Some(date), None) => to = attach_date(to, date),
-        (None, Some(date)) => from = attach_date(from, date),
+        (Some(date), None) => to = attach_date(to, date)?,
+        (None, Some(date)) => from = attach_date(from, date)?,
         (Some(_), Some(_)) | (None, None) => {}
     }
-    match (offset_of(from), offset_of(to)) {
-        (Some(offset), None) => to = attach_offset(to, offset)?,
-        (None, Some(offset)) => from = attach_offset(from, offset)?,
+    match (zone_of(from)?, zone_of(to)?) {
+        (Some(zone), None) => to = attach_zone(to, &zone)?,
+        (None, Some(zone)) => from = attach_zone(from, &zone)?,
         (Some(_), Some(_)) | (None, None) => {}
     }
     Ok((from, to))
@@ -243,6 +272,7 @@ fn elapsed_nanos(from: Temporal, to: Temporal) -> TemporalResult<i128> {
             Temporal::DateTime(v) => Ok(v.epoch_nanos()),
             Temporal::LocalDateTime(v) => Ok(v.nanos()),
             Temporal::Time(v) => Ok(v.nanos_of_day() as i128),
+            Temporal::OffsetTime(v) => Ok(v.utc_nanos() as i128),
             Temporal::Date(_) | Temporal::Duration(_) => Err(TemporalError::unsupported(
                 "duration.inSeconds",
                 value.kind(),
@@ -252,7 +282,8 @@ fn elapsed_nanos(from: Temporal, to: Temporal) -> TemporalResult<i128> {
     match (from, to) {
         (Temporal::DateTime(_), Temporal::DateTime(_))
         | (Temporal::LocalDateTime(_), Temporal::LocalDateTime(_))
-        | (Temporal::Time(_), Temporal::Time(_)) => nanos(to)?
+        | (Temporal::Time(_), Temporal::Time(_))
+        | (Temporal::OffsetTime(_), Temporal::OffsetTime(_)) => nanos(to)?
             .checked_sub(nanos(from)?)
             .ok_or_else(out_of_range),
         _ => Err(TemporalError::unsupported(
@@ -274,11 +305,15 @@ fn calendar_pair(
             LocalDateTime::new(b, midnight()?),
         ))),
         (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => Ok(Some((a, b))),
-        (Temporal::DateTime(a), Temporal::DateTime(b)) => Ok(Some((
-            a.local(),
-            b.with_offset(a.offset_seconds())?.local(),
-        ))),
-        (Temporal::Time(_), Temporal::Time(_)) => Ok(None),
+        (Temporal::DateTime(a), Temporal::DateTime(b)) => match a.zone_rules()? {
+            Some(zone) => Ok(Some((zone.at(a)?.local(), zone.at(b)?.local()))),
+            None => Ok(Some((
+                a.local(),
+                b.with_offset(a.offset_seconds())?.local(),
+            ))),
+        },
+        (Temporal::Time(_), Temporal::Time(_))
+        | (Temporal::OffsetTime(_), Temporal::OffsetTime(_)) => Ok(None),
         _ => Err(TemporalError::unsupported("duration.between", from.kind())),
     }
 }

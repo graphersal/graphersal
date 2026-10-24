@@ -157,6 +157,7 @@ pub(crate) fn encoding_of(ty: &ValueType) -> Option<Encoding> {
         | ValueType::LocalDateTime
         | ValueType::DateTime
         | ValueType::Time
+        | ValueType::OffsetTime
         | ValueType::Duration => Some(Encoding::String),
         // A vector is carried as the list of its values (a container in every format).
         ValueType::Vector(_) | ValueType::Array(_) | ValueType::Object | ValueType::Union(_) => {

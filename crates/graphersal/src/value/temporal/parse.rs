@@ -10,7 +10,8 @@
 //!   and/or a time zone in brackets (`[Europe/Berlin]`, RFC 9557). Without either it is UTC (as
 //!   TinkerPop's `asDate("2023-08-02")`). With only a zone the wall-clock time is resolved in
 //!   it (a skipped time moves forward, a repeated one takes the earlier offset); with both the
-//!   offset must be the zone's at that instant;
+//!   offset must be the zone's at that instant. An IANA zone name is kept in the value;
+//! - offset time: a time, then an offset (`Z`, `+02:00`, `+0200`, `+02`), which it must have;
 //! - duration: `[+-]P[nY][nM][nW][nD][T[nH][nM][n[.f]S]]`, each number with an optional sign
 //!   of its own (`P1M-2D`), letters in either case.
 
@@ -18,8 +19,8 @@ use super::arith::{Amount, DurationParts, cascade};
 use super::civil::{self, NANOS_PER_DAY, NANOS_PER_SECOND};
 use super::zone::Zone;
 use super::{
-    Date, DateTime, Duration, LocalDateTime, MAX_OFFSET_SECONDS, Temporal, TemporalError,
-    TemporalKind, TemporalResult, Time,
+    Date, DateTime, Duration, LocalDateTime, MAX_OFFSET_SECONDS, OffsetTime, Temporal,
+    TemporalError, TemporalKind, TemporalResult, Time,
 };
 
 struct Cursor<'a> {
@@ -278,6 +279,19 @@ pub(super) fn time(text: &str) -> TemporalResult<Time> {
     Ok(Time { nanos })
 }
 
+pub(super) fn offset_time(text: &str) -> TemporalResult<OffsetTime> {
+    let mut c = Cursor::new(text, "offsettime");
+    let nanos = read_time(&mut c)?;
+    let Some(offset) = read_offset(&mut c)? else {
+        return c.fail("an offsettime needs its UTC offset (Z, +02:00); use a time without one");
+    };
+    if c.peek() == Some(b'[') {
+        return c.fail("an offsettime has a UTC offset, not a time zone name");
+    }
+    c.finish()?;
+    OffsetTime::new(Time { nanos }, offset)
+}
+
 pub(super) fn local_date_time(text: &str) -> TemporalResult<LocalDateTime> {
     let mut c = Cursor::new(text, "localdatetime");
     let nanos = read_local(&mut c)?;
@@ -313,14 +327,14 @@ fn read_date_time(text: &str, strict: bool) -> TemporalResult<DateTime> {
              text without one is not read as UTC",
         ),
         (None, None) => DateTime::from_local(local, 0),
-        (None, Some(name)) => Zone::parse(name)?.resolve(local),
+        (None, Some(name)) => Zone::parse(name)?.resolve_named(local),
         (Some(offset), Some(name)) => {
             let value = DateTime::from_local(local, offset)?;
             let zone = Zone::parse(name)?;
             if zone.offset_at(value)? != offset {
                 return c.fail("the offset is not the time zone's offset at that time");
             }
-            Ok(value)
+            Ok(value.with_zone_id(zone.id()))
         }
     }
 }
@@ -430,8 +444,8 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
 pub(crate) struct Extended {
     /// The value.
     pub(crate) value: Temporal,
-    /// Whether the text named an IANA zone (`[Europe/London]`), resolved to its offset at that
-    /// time: the value keeps only the offset (3g U3).
+    /// Whether the text named a zone in brackets (`[Europe/London]`); an IANA name is kept in
+    /// the value (temporal v2).
     pub(crate) zone_name: bool,
 }
 
@@ -718,6 +732,8 @@ fn duration_extended(text: &str) -> TemporalResult<Extended> {
 ///   beyond four digits takes a sign (`+2015`, `-0044`);
 /// - time (a local time of day): `21:40:32.142`, `214032.142`, `21:40`, `2140`, `21`, up to nine
 ///   fraction digits; an offset is refused (a time with an offset is another type);
+/// - offset time: a time as above, then an offset (`+0100`, `Z`, `-02`); without one UTC (Neo4j's
+///   default zone); a zone name is refused (a time of day has no date to resolve it at);
 /// - local date-time: a date, optionally `T` and a time (`2015-W30-2T214032.142`,
 ///   `2015T214032`, `2015202T21`);
 /// - date-time: a local date-time, then an offset (`Z`, `+01:00`, `+0100`, `-02`) and / or a
@@ -752,6 +768,19 @@ pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<E
             c.finish()?;
             Ok(plain(Temporal::Time(Time { nanos })))
         }
+        TemporalKind::OffsetTime => {
+            let mut c = Cursor::new(text, "time");
+            let nanos = read_time_extended(&mut c)?;
+            let offset = read_offset(&mut c)?.unwrap_or(0);
+            if c.peek() == Some(b'[') {
+                return c.fail("a time with an offset takes no time zone name");
+            }
+            c.finish()?;
+            Ok(plain(Temporal::OffsetTime(OffsetTime::new(
+                Time { nanos },
+                offset,
+            )?)))
+        }
         TemporalKind::LocalDateTime => {
             let mut c = Cursor::new(text, "localdatetime");
             let nanos = read_local_extended(&mut c)?;
@@ -773,13 +802,14 @@ pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<E
             let value = match (offset, zone) {
                 (Some(offset), None) => DateTime::from_local(local, offset)?,
                 (None, None) => DateTime::from_local(local, 0)?,
-                (None, Some(name)) => Zone::parse(name)?.resolve(local)?,
+                (None, Some(name)) => Zone::parse(name)?.resolve_named(local)?,
                 (Some(offset), Some(name)) => {
                     let value = DateTime::from_local(local, offset)?;
-                    if Zone::parse(name)?.offset_at(value)? != offset {
+                    let zone = Zone::parse(name)?;
+                    if zone.offset_at(value)? != offset {
                         return c.fail("the offset is not the time zone's offset at that time");
                     }
-                    value
+                    value.with_zone_id(zone.id())
                 }
             };
             Ok(Extended {

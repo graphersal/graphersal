@@ -7,6 +7,7 @@
 //! | [`LocalDateTime`] | a wall-clock date and time, no zone | `2023-08-02T09:30:00` |
 //! | [`DateTime`] | an instant plus the UTC offset it was written with | `2023-08-02T09:30:00+02:00` |
 //! | [`Time`] | a time of day, no zone | `09:30:00` |
+//! | [`OffsetTime`] | a time of day plus a UTC offset | `09:30:00+02:00` |
 //! | [`Duration`] | months, days and nanoseconds (PostgreSQL `interval`) | `P1M2DT3H` |
 //!
 //! Every type with a time has a resolution of one nanosecond (as `java.time` and TinkerPop) and
@@ -17,7 +18,11 @@
 //! **Equality.** A [`DateTime`] compares by its instant only: `12:00:00Z` equals
 //! `14:00:00+02:00` (TinkerPop: "dates are evaluated based on the numerical comparison of Unix
 //! Epoch time"; PostgreSQL `timestamptz`); the offset is kept and shown but never compared. A
-//! [`Duration`] compares field by field (`P1M` is not `P30D`: they differ when added to
+//! A `datetime` written with an IANA zone name keeps it
+//! (`2024-03-31T03:00:00+02:00[Europe/Berlin]`): its calendar arithmetic then follows the zone's
+//! daylight saving rules, while equality still uses the instant only (the name, like the offset,
+//! is shown but never compared). An [`OffsetTime`] compares by its UTC time of day (`12:00+01:00`
+//! equals `11:00Z`). A [`Duration`] compares field by field (`P1M` is not `P30D`: they differ when added to
 //! January 31), and orders by its length with a month counted as 30 days and a day as 24 hours,
 //! ties broken by the fields.
 
@@ -40,6 +45,7 @@ mod tests;
 pub(crate) mod zone;
 
 use civil::{MICROS_PER_DAY, NANOS_PER_DAY, NANOS_PER_SECOND};
+use zone::ZoneId;
 
 /// A failed temporal operation: unparsable text, a result outside the supported range, an unknown
 /// time zone or an operation a type does not have.
@@ -119,9 +125,9 @@ fn quoted(text: &str) -> String {
 /// The result type of temporal operations.
 pub type TemporalResult<T> = Result<T, TemporalError>;
 
-/// The five temporal types, in their order between each other (orderability).
+/// The six temporal types, in their order between each other (orderability).
 ///
-/// Closed by definition is NOT claimed: a later type (a zoned date-time) may be added.
+/// Closed by definition is NOT claimed: a later type may be added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum TemporalKind {
@@ -135,11 +141,13 @@ pub enum TemporalKind {
     Time,
     /// [`Duration`].
     Duration,
+    /// [`OffsetTime`].
+    OffsetTime,
 }
 
 impl TemporalKind {
     /// The type's name in diagnostics and schemas (`date`, `localdatetime`, `datetime`, `time`,
-    /// `duration`).
+    /// `duration`, `offsettime`).
     pub fn name(self) -> &'static str {
         match self {
             TemporalKind::Date => "date",
@@ -147,6 +155,7 @@ impl TemporalKind {
             TemporalKind::DateTime => "datetime",
             TemporalKind::Time => "time",
             TemporalKind::Duration => "duration",
+            TemporalKind::OffsetTime => "offsettime",
         }
     }
 }
@@ -215,13 +224,33 @@ pub struct LocalDateTime {
 }
 
 /// An instant plus the UTC offset it was written with (TinkerPop `datetime`, Java
-/// `OffsetDateTime`, SQL `TIMESTAMP WITH TIME ZONE`, Python aware `datetime`).
+/// `OffsetDateTime`, SQL `TIMESTAMP WITH TIME ZONE`, Python aware `datetime`), and the IANA zone
+/// name when it was written with one (Java `ZonedDateTime`: `..+02:00[Europe/Berlin]`).
+///
+/// A value with a zone name computes its calendar arithmetic (adding days or months,
+/// truncation, parts) on the zone's wall clock, so the offset follows the zone's daylight saving
+/// rules; its offset is always the zone's offset at its instant.
 ///
 /// Equality, hashing and ordering use the instant only; see the module documentation.
 #[derive(Clone, Copy)]
 pub struct DateTime {
     /// Nanoseconds since 1970-01-01T00:00:00Z.
     nanos: Nanos96,
+    /// The offset from UTC in seconds, within ±18 hours.
+    offset_seconds: i32,
+    /// The IANA zone the value was written in, if any.
+    zone: Option<ZoneId>,
+}
+
+/// A time of day with a UTC offset, `00:00:00` to `23:59:59.999999999` (Java `OffsetTime`, SQL
+/// `TIME WITH TIME ZONE`, GQL `ZONED TIME`, Python `time` with a fixed `tzinfo`).
+///
+/// Equality, hashing and ordering use the UTC time of day only (`12:00+01:00` equals `11:00Z`,
+/// as a [`DateTime`] compares by its instant); the offset is kept and shown but never compared.
+#[derive(Clone, Copy)]
+pub struct OffsetTime {
+    /// Nanoseconds after midnight of the local time, `0..86_400_000_000_000`.
+    nanos: i64,
     /// The offset from UTC in seconds, within ±18 hours.
     offset_seconds: i32,
 }
@@ -242,7 +271,7 @@ pub struct Duration {
     nanos: Nanos96,
 }
 
-/// A temporal value of any of the five types.
+/// A temporal value of any of the six types.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Temporal {
@@ -256,6 +285,8 @@ pub enum Temporal {
     Time(Time),
     /// A length of time.
     Duration(Duration),
+    /// A time of day with an offset.
+    OffsetTime(OffsetTime),
 }
 
 /// The largest UTC offset, ±18 hours (as `java.time.ZoneOffset`).
@@ -462,6 +493,7 @@ impl DateTime {
     pub(crate) const EPOCH: DateTime = DateTime {
         nanos: Nanos96::ZERO,
         offset_seconds: 0,
+        zone: None,
     };
 
     /// The instant `micros` microseconds after 1970-01-01T00:00:00Z, written with the offset
@@ -486,6 +518,7 @@ impl DateTime {
                 Ok(DateTime {
                     nanos: Nanos96::new(nanos),
                     offset_seconds,
+                    zone: None,
                 })
             }
             _ => Err(TemporalError::out_of_range("the date-time")),
@@ -535,10 +568,115 @@ impl DateTime {
         }
     }
 
-    /// The same instant written with another offset; `OutOfRange` when its local time leaves the
-    /// supported years.
+    /// The same instant written with another offset, without a zone name; `OutOfRange` when its
+    /// local time leaves the supported years.
     pub fn with_offset(self, offset_seconds: i32) -> TemporalResult<DateTime> {
         DateTime::from_nanos(self.nanos.get(), offset_seconds)
+    }
+
+    /// The IANA zone name the value was written with (`Europe/Berlin`), if any.
+    pub fn zone_name(self) -> Option<&'static str> {
+        self.zone.map(ZoneId::name)
+    }
+
+    /// The same instant in the zone `zone`: an IANA name of the bundled database (kept in the
+    /// value, the offset the zone's at that instant) or a fixed offset (`+02:00`, `Z`: no name
+    /// kept). `UnknownZone` for any other text.
+    pub fn in_zone(self, zone: &str) -> TemporalResult<DateTime> {
+        zone::Zone::parse(zone)?.at_named(self)
+    }
+
+    /// The wall-clock time `local` in the zone `zone` (an IANA name, kept in the value, or a
+    /// fixed offset): a time the zone skips moves forward by the gap, one it repeats takes the
+    /// earlier offset.
+    pub fn from_local_in(local: LocalDateTime, zone: &str) -> TemporalResult<DateTime> {
+        zone::Zone::parse(zone)?.resolve_named(local)
+    }
+
+    /// The same value without its zone name (the offset stays).
+    pub fn without_zone(self) -> DateTime {
+        DateTime { zone: None, ..self }
+    }
+
+    /// The zone name's id, if any.
+    pub(crate) fn zone_id(self) -> Option<ZoneId> {
+        self.zone
+    }
+
+    /// The value with the zone name `zone`, whose offset at the instant the caller computed the
+    /// value with.
+    pub(crate) fn with_zone_id(self, zone: Option<ZoneId>) -> DateTime {
+        DateTime { zone, ..self }
+    }
+
+    /// The rules of the value's zone name, if it has one.
+    pub(crate) fn zone_rules(self) -> TemporalResult<Option<zone::Zone>> {
+        self.zone.map(ZoneId::zone).transpose()
+    }
+}
+
+impl OffsetTime {
+    /// The time of day `time` at the offset `offset_seconds` (within ±18 hours).
+    pub fn new(time: Time, offset_seconds: i32) -> TemporalResult<OffsetTime> {
+        if offset_seconds.abs() > MAX_OFFSET_SECONDS {
+            return Err(TemporalError::out_of_range(
+                "the UTC offset (at most ±18:00)",
+            ));
+        }
+        Ok(OffsetTime {
+            nanos: time.nanos,
+            offset_seconds,
+        })
+    }
+
+    /// The local time of day.
+    pub fn time(self) -> Time {
+        Time { nanos: self.nanos }
+    }
+
+    /// The UTC offset in seconds.
+    pub fn offset_seconds(self) -> i32 {
+        self.offset_seconds
+    }
+
+    /// The UTC time of day in nanoseconds: the local time minus the offset, NOT wrapped into a
+    /// day (`01:00+02:00` gives minus one hour), so it orders values as instants of one day.
+    pub fn utc_nanos(self) -> i64 {
+        self.nanos - self.offset_seconds as i64 * NANOS_PER_SECOND
+    }
+
+    /// The same time written with another offset (the local time wraps around midnight:
+    /// `23:00Z` at `+02:00` is `01:00+02:00`).
+    pub fn with_offset(self, offset_seconds: i32) -> TemporalResult<OffsetTime> {
+        let local =
+            (self.utc_nanos() + offset_seconds as i64 * NANOS_PER_SECOND).rem_euclid(NANOS_PER_DAY);
+        OffsetTime::new(Time { nanos: local }, offset_seconds)
+    }
+}
+
+impl PartialEq for OffsetTime {
+    fn eq(&self, other: &Self) -> bool {
+        self.utc_nanos() == other.utc_nanos()
+    }
+}
+
+impl Eq for OffsetTime {}
+
+impl Hash for OffsetTime {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.utc_nanos().hash(state);
+    }
+}
+
+impl PartialOrd for OffsetTime {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OffsetTime {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.utc_nanos().cmp(&other.utc_nanos())
     }
 }
 
@@ -679,7 +817,8 @@ impl Ord for Duration {
 }
 
 /// Every field of a temporal value, for a key that must tell apart equal values written
-/// differently (a `datetime`'s offset): the kind, two small integers and the nanoseconds.
+/// differently (a `datetime`'s offset and zone name, an `offsettime`'s offset): the kind, two
+/// small integers and the nanoseconds.
 pub(crate) type TemporalBits = (TemporalKind, i64, i64, i128);
 
 impl Temporal {
@@ -691,8 +830,14 @@ impl Temporal {
             Temporal::DateTime(v) => (
                 TemporalKind::DateTime,
                 v.offset_seconds as i64,
-                0,
+                v.zone.map_or(0, |zone| zone.raw() as i64),
                 v.nanos.get(),
+            ),
+            Temporal::OffsetTime(v) => (
+                TemporalKind::OffsetTime,
+                v.offset_seconds as i64,
+                0,
+                v.nanos as i128,
             ),
             Temporal::Time(v) => (TemporalKind::Time, 0, 0, v.nanos as i128),
             Temporal::Duration(v) => (
@@ -713,6 +858,20 @@ impl Temporal {
             Temporal::DateTime(v) => v.nanos.get() % NANOS_PER_MICRO != 0,
             Temporal::Time(v) => v.nanos % 1000 != 0,
             Temporal::Duration(v) => v.nanos.get() % NANOS_PER_MICRO != 0,
+            Temporal::OffsetTime(v) => v.nanos % 1000 != 0,
+        }
+    }
+
+    /// Whether the value is of a form the file format version 2 has no encoding for: an
+    /// [`OffsetTime`], or a [`DateTime`] with a zone name.
+    pub fn has_no_v2_form(&self) -> bool {
+        match self {
+            Temporal::OffsetTime(_) => true,
+            Temporal::DateTime(v) => v.zone.is_some(),
+            Temporal::Date(_)
+            | Temporal::LocalDateTime(_)
+            | Temporal::Time(_)
+            | Temporal::Duration(_) => false,
         }
     }
 
@@ -724,6 +883,7 @@ impl Temporal {
             Temporal::DateTime(_) => TemporalKind::DateTime,
             Temporal::Time(_) => TemporalKind::Time,
             Temporal::Duration(_) => TemporalKind::Duration,
+            Temporal::OffsetTime(_) => TemporalKind::OffsetTime,
         }
     }
 
@@ -735,6 +895,7 @@ impl Temporal {
             TemporalKind::DateTime => Temporal::DateTime(text.parse()?),
             TemporalKind::Time => Temporal::Time(text.parse()?),
             TemporalKind::Duration => Temporal::Duration(text.parse()?),
+            TemporalKind::OffsetTime => Temporal::OffsetTime(text.parse()?),
         })
     }
 
@@ -749,12 +910,14 @@ impl Temporal {
             TemporalKind::Date
             | TemporalKind::LocalDateTime
             | TemporalKind::Time
-            | TemporalKind::Duration => Temporal::parse_as(kind, text),
+            | TemporalKind::Duration
+            | TemporalKind::OffsetTime => Temporal::parse_as(kind, text),
         }
     }
 }
 
-/// Orders by type first (date, local date-time, date-time, time, duration), then by value.
+/// Orders by type first (date, local date-time, date-time, time, duration, offset time), then
+/// by value.
 impl PartialOrd for Temporal {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -769,6 +932,7 @@ impl Ord for Temporal {
             (Temporal::DateTime(a), Temporal::DateTime(b)) => a.cmp(b),
             (Temporal::Time(a), Temporal::Time(b)) => a.cmp(b),
             (Temporal::Duration(a), Temporal::Duration(b)) => a.cmp(b),
+            (Temporal::OffsetTime(a), Temporal::OffsetTime(b)) => a.cmp(b),
             _ => self.kind().cmp(&other.kind()),
         }
     }
@@ -796,6 +960,7 @@ text_traits!(
     LocalDateTime => parse::local_date_time,
     DateTime => parse::date_time,
     Duration => parse::duration,
+    OffsetTime => parse::offset_time,
 );
 
 impl fmt::Display for Temporal {
@@ -806,6 +971,7 @@ impl fmt::Display for Temporal {
             Temporal::DateTime(v) => fmt::Display::fmt(v, f),
             Temporal::Time(v) => fmt::Display::fmt(v, f),
             Temporal::Duration(v) => fmt::Display::fmt(v, f),
+            Temporal::OffsetTime(v) => fmt::Display::fmt(v, f),
         }
     }
 }
@@ -818,6 +984,7 @@ impl fmt::Debug for Temporal {
             Temporal::DateTime(v) => fmt::Debug::fmt(v, f),
             Temporal::Time(v) => fmt::Debug::fmt(v, f),
             Temporal::Duration(v) => fmt::Debug::fmt(v, f),
+            Temporal::OffsetTime(v) => fmt::Debug::fmt(v, f),
         }
     }
 }
@@ -849,5 +1016,11 @@ impl From<DateTime> for Temporal {
 impl From<Duration> for Temporal {
     fn from(v: Duration) -> Self {
         Temporal::Duration(v)
+    }
+}
+
+impl From<OffsetTime> for Temporal {
+    fn from(v: OffsetTime) -> Self {
+        Temporal::OffsetTime(v)
     }
 }

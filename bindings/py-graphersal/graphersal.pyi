@@ -27,7 +27,8 @@ __all__ = [
 
 #: A value a script parameter may take (a ``Vertex``/``Edge`` by its id and label). The date and
 #: time values map to the engine's ``datetime`` (an aware ``datetime.datetime``),
-#: ``localdatetime`` (a naive one), ``date``, ``time`` (a naive ``datetime.time``) and
+#: ``localdatetime`` (a naive one), ``date``, ``time`` (a naive ``datetime.time``), ``offsettime``
+#: (a ``datetime.time`` with a ``datetime.timezone``) and
 #: ``duration`` (a ``timedelta`` or an ``Interval``). A one-dimensional ``float32``/``float64``
 #: buffer (a ``numpy.ndarray``) is accepted as an f32 ``Vector`` too.
 _ParamValue = Union[

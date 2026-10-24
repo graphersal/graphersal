@@ -7,7 +7,7 @@
 // Values come from and go to the engine in its TYPED form (crates/graphersal-session `edit.rs`):
 // `{type, value}` with `int64` as decimal text, `float64` a number or "NaN"/"Infinity"/
 // "-Infinity", `uuid` its canonical text, the date and time types (`datetime`,
-// `localdatetime`, `date`, `time`, `duration`) their ISO 8601 text, `array` a list of typed
+// `localdatetime`, `date`, `time`, `offsettime`, `duration`) their ISO 8601 text, `array` a list of typed
 // values, `object` a list of `[key, typed]` pairs, `null` without a value. A type is never guessed from a string's content
 // (CLAUDE.md rule 7): a string stays a string until the user picks another type.
 //
@@ -17,7 +17,7 @@
 // type, an empty or repeated key, a required key left out).
 
 /** The date and time types (book "Dates and Times"), each written as its ISO 8601 text. */
-export const TEMPORAL_TYPES = Object.freeze(['datetime', 'localdatetime', 'date', 'time', 'duration']);
+export const TEMPORAL_TYPES = Object.freeze(['datetime', 'localdatetime', 'date', 'time', 'offsettime', 'duration']);
 /** The element kinds of a vector (book "Vectors"); a new vector is f32. */
 export const VECTOR_ELEMENTS = Object.freeze(['f32', 'f16', 'i8', 'bit']);
 /** The most components of a vector. */
@@ -28,7 +28,8 @@ export const TYPES = Object.freeze(['string', 'int64', 'float64', 'boolean', 'uu
 export const TEXT_TYPES = Object.freeze(['string', 'int64', 'float64', 'uuid', ...TEMPORAL_TYPES, 'vector']);
 /** The JSON Schema `format` of a string that declares a uuid or a date and time type. */
 export const FORMAT_TYPES = Object.freeze({
-  uuid: 'uuid', 'date-time': 'datetime', 'local-date-time': 'localdatetime', date: 'date', time: 'time', duration: 'duration',
+  uuid: 'uuid', 'date-time': 'datetime', 'local-date-time': 'localdatetime', date: 'date', time: 'time',
+  'offset-time': 'offsettime', duration: 'duration',
 });
 
 /** An example value of a text type, for a field's placeholder. */
@@ -36,7 +37,7 @@ export function placeholderOf(type) {
   return {
     string: 'value', int64: '42', float64: '1.5', uuid: '550e8400-e29b-41d4-a716-446655440000',
     datetime: '2023-08-02T09:30:00+02:00', localdatetime: '2023-08-02T09:30:00', date: '2023-08-02',
-    time: '09:30:00', duration: 'P1DT2H', vector: '[0.1, 0.2, 0.3]',
+    time: '09:30:00', offsettime: '09:30:00+02:00', duration: 'P1DT2H', vector: '[0.1, 0.2, 0.3]',
   }[type] ?? '';
 }
 /** Containers: edited as a tree (or as raw JSON). */
@@ -55,6 +56,7 @@ const OFFSET_PART = '(?:[Zz]|[+-]\\d{2}(?::?\\d{2}(?::\\d{2})?)?)';
 const TEMPORAL_RE = {
   date: new RegExp(`^${DATE_PART}$`),
   time: new RegExp(`^${TIME_PART}$`),
+  offsettime: new RegExp(`^${TIME_PART}${OFFSET_PART}$`),
   localdatetime: new RegExp(`^${DATE_PART}(?:[Tt ]${TIME_PART})?$`),
   // A stored date-time needs its offset or zone: without one the instant would be a guess.
   datetime: new RegExp(`^${DATE_PART}(?:[Tt ]${TIME_PART})?(?:${OFFSET_PART}(?:\\[[^\\]]+\\])?|\\[[^\\]]+\\])$`),
@@ -63,6 +65,7 @@ const TEMPORAL_RE = {
 const TEMPORAL_HELP = {
   date: 'a date is YYYY-MM-DD, e.g. 2023-08-02',
   time: 'a time is HH:MM[:SS[.ffffff]], e.g. 09:30:00',
+  offsettime: 'an offsettime is HH:MM[:SS[.ffffff]] with its UTC offset, e.g. 09:30:00+02:00',
   localdatetime: 'a localdatetime is YYYY-MM-DDTHH:MM[:SS[.ffffff]] without an offset, e.g. 2023-08-02T09:30:00',
   datetime: 'a datetime needs its UTC offset or zone, e.g. 2023-08-02T09:30:00+02:00 or 2023-08-02T09:30[Europe/Berlin]',
   duration: 'a duration is ISO 8601, e.g. P1Y2M3DT4H5M6S or PT90M',
@@ -169,6 +172,7 @@ export function typedFromNode(node, path = []) {
     case 'localdatetime':
     case 'date':
     case 'time':
+    case 'offsettime':
     case 'duration': {
       const error = scalarError(node.type, node.text);
       if (error) return { error, path };

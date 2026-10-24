@@ -45,6 +45,8 @@ pub enum ValueType {
     /// A length of time in months, days and nanoseconds
     /// ([`Duration`](crate::value::temporal::Duration)).
     Duration,
+    /// A time of day with a UTC offset ([`OffsetTime`](crate::value::temporal::OffsetTime)).
+    OffsetTime,
     /// A vector of one element kind ([`Vector`](crate::value::Vector)), any dimension.
     Vector(VectorElement),
     /// A homogeneous sequence of `T`.
@@ -72,6 +74,7 @@ impl fmt::Display for ValueType {
             ValueType::DateTime => f.write_str("datetime"),
             ValueType::Time => f.write_str("time"),
             ValueType::Duration => f.write_str("duration"),
+            ValueType::OffsetTime => f.write_str("offsettime"),
             ValueType::Vector(element) => write!(f, "vector<{element}>"),
             ValueType::Array(inner) => write!(f, "array<{inner}>"),
             ValueType::Object => f.write_str("object"),
@@ -157,6 +160,7 @@ impl ValueType {
             TemporalKind::DateTime => ValueType::DateTime,
             TemporalKind::Time => ValueType::Time,
             TemporalKind::Duration => ValueType::Duration,
+            TemporalKind::OffsetTime => ValueType::OffsetTime,
         }
     }
 
@@ -168,6 +172,7 @@ impl ValueType {
             ValueType::DateTime => Some(TemporalKind::DateTime),
             ValueType::Time => Some(TemporalKind::Time),
             ValueType::Duration => Some(TemporalKind::Duration),
+            ValueType::OffsetTime => Some(TemporalKind::OffsetTime),
             ValueType::Null
             | ValueType::Boolean
             | ValueType::Int64

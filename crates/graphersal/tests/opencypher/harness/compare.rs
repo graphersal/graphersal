@@ -208,6 +208,14 @@ pub fn temporal_text(value: &Temporal) -> Option<String> {
             out.push('T');
             write_time(&mut out, local.time());
             write_offset(&mut out, v.offset_seconds());
+            // `ZonedDateTime.toString`: the zone id in brackets after the offset.
+            if let Some(zone) = v.zone_name() {
+                let _ = write!(out, "[{zone}]");
+            }
+        }
+        Temporal::OffsetTime(v) => {
+            write_time(&mut out, v.time());
+            write_offset(&mut out, v.offset_seconds());
         }
         Temporal::Duration(d) => write_duration(&mut out, *d),
         _ => return None,
@@ -1013,13 +1021,6 @@ mod tests {
 
     /// Why a TCK text cannot be one of our values, or `None` when it can.
     fn unrepresentable(s: &str, shape: &str) -> Option<&'static str> {
-        if s.contains('[') {
-            return Some("a zone name");
-        }
-        if shape == "time" {
-            return Some("a time with an offset");
-        }
-
         // Years beyond four digits, or a count beyond our fields.
         if s.split(|c: char| !c.is_ascii_digit()).any(|n| n.len() > 9)
             || (shape != "duration" && s.trim_start_matches(['-', '+']).find('-') > Some(4))
@@ -1042,6 +1043,7 @@ mod tests {
             "localtime" => TemporalKind::Time,
             "localdatetime" => TemporalKind::LocalDateTime,
             "datetime" => TemporalKind::DateTime,
+            "time" => TemporalKind::OffsetTime,
             _ => TemporalKind::Duration,
         };
         fn strings(value: &TckValue, out: &mut Vec<String>) {
@@ -1102,14 +1104,19 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
-        for shape in ["date", "localtime", "localdatetime", "datetime", "duration"] {
+        // Since temporal v2 a time with an offset and a zone name are values too.
+        for shape in [
+            "date",
+            "localtime",
+            "time",
+            "localdatetime",
+            "datetime",
+            "duration",
+        ] {
             assert!(
                 rendered.get(shape).is_some_and(|n| *n >= 10),
                 "too few {shape} texts: {rendered:?}, skipped {skipped:?}"
             );
-        }
-        for reason in ["a zone name", "a time with an offset"] {
-            assert!(skipped.contains_key(reason), "{skipped:?}");
         }
     }
 

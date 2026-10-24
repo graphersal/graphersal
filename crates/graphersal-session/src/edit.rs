@@ -171,7 +171,7 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
             }
             Ok(ElementProperty::Object(Box::new(fields)))
         }
-        kind @ ("date" | "localdatetime" | "datetime" | "time" | "duration") => {
+        kind @ ("date" | "localdatetime" | "datetime" | "time" | "offsettime" | "duration") => {
             let text = value
                 .as_str()
                 .ok_or_else(|| format!("a {kind} value must be text"))?;
@@ -180,6 +180,7 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
                 "localdatetime" => TemporalKind::LocalDateTime,
                 "datetime" => TemporalKind::DateTime,
                 "time" => TemporalKind::Time,
+                "offsettime" => TemporalKind::OffsetTime,
                 _ => TemporalKind::Duration,
             };
             // As a stored value: a datetime needs its offset or zone (no guessed instant).
@@ -212,7 +213,7 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
         }
         other => Err(format!(
             "unknown type \"{other}\": null, boolean, int64, float64, string, uuid, datetime, \
-             localdatetime, date, time, duration, vector, array or object"
+             localdatetime, date, time, offsettime, duration, vector, array or object"
         )),
     }
 }
@@ -622,10 +623,14 @@ mod tests {
             &json!({"type": "datetime", "value": "2023-08-02T09:30[Europe/Berlin]"}),
         )
         .unwrap();
+        // The zone name is kept (temporal v2).
         assert_eq!(
             typed_value(&zoned),
-            json!({"type": "datetime", "value": "2023-08-02T09:30:00+02:00"})
+            json!({"type": "datetime", "value": "2023-08-02T09:30:00+02:00[Europe/Berlin]"})
         );
+        let time = json!({"type": "offsettime", "value": "09:30:00+02:00"});
+        assert_eq!(typed_value(&value_from_typed(&time).unwrap()), time);
+        assert!(value_from_typed(&json!({"type": "offsettime", "value": "09:30"})).is_err());
         assert!(value_from_typed(&json!({"type": "duration", "value": 5})).is_err());
         let unknown = value_from_typed(&json!({"type": "instant", "value": "x"})).unwrap_err();
         assert!(unknown.contains("datetime"), "{unknown}");

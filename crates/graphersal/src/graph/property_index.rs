@@ -166,7 +166,8 @@ impl PropertyIndexType {
                 | ValueType::LocalDateTime
                 | ValueType::DateTime
                 | ValueType::Time
-                | ValueType::Duration => true,
+                | ValueType::Duration
+                | ValueType::OffsetTime => true,
                 ValueType::Vector(_) | ValueType::Array(_) | ValueType::Object => false,
                 ValueType::Union(members) => members.iter().any(|member| self.holds(member)),
             },
@@ -1056,6 +1057,9 @@ enum IndexKey {
     Time(i64),
     /// The duration itself (its `Ord` is the length, then the fields).
     Duration(Duration),
+    /// The UTC time of day in nanoseconds (`OffsetTime::utc_nanos`; the offset is not part of
+    /// the key).
+    OffsetTime(i64),
 }
 
 /// The kinds of [`IndexKey`], in key order.
@@ -1071,6 +1075,7 @@ enum KeyKind {
     DateTime,
     Time,
     Duration,
+    OffsetTime,
 }
 
 impl IndexKey {
@@ -1098,6 +1103,7 @@ impl IndexKey {
                 }
                 Temporal::Time(time) => IndexKey::Time(time.nanos_of_day()),
                 Temporal::Duration(duration) => IndexKey::Duration(duration),
+                Temporal::OffsetTime(time) => IndexKey::OffsetTime(time.utc_nanos()),
             }),
             // A vector is not an index key (book `users_guide/vectors.md`): `has(key, vector)` finds it
             // by a scan, with value equality.
@@ -1122,6 +1128,7 @@ impl IndexKey {
             IndexKey::DateTime(..) => KeyKind::DateTime,
             IndexKey::Time(_) => KeyKind::Time,
             IndexKey::Duration(_) => KeyKind::Duration,
+            IndexKey::OffsetTime(_) => KeyKind::OffsetTime,
         }
     }
 
@@ -1156,6 +1163,7 @@ fn kind_start(kind: KeyKind) -> (IndexKey, u64) {
         KeyKind::Time => IndexKey::Time(i64::MIN),
         // Every part at its minimum is the shortest length and the smallest fields.
         KeyKind::Duration => IndexKey::Duration(Duration::new(i32::MIN, i32::MIN, i64::MIN)),
+        KeyKind::OffsetTime => IndexKey::OffsetTime(i64::MIN),
     };
     (key, 0)
 }
@@ -1177,7 +1185,8 @@ fn kind_end(kind: KeyKind) -> Bound<(IndexKey, u64)> {
         KeyKind::LocalDateTime => Bound::Excluded(kind_start(KeyKind::DateTime)),
         KeyKind::DateTime => Bound::Excluded(kind_start(KeyKind::Time)),
         KeyKind::Time => Bound::Excluded(kind_start(KeyKind::Duration)),
-        KeyKind::Duration => Bound::Unbounded,
+        KeyKind::Duration => Bound::Excluded(kind_start(KeyKind::OffsetTime)),
+        KeyKind::OffsetTime => Bound::Unbounded,
     }
 }
 

@@ -95,6 +95,9 @@ impl GType {
     pub const LOCALDATETIME: GType = GType::Value(ValueType::LocalDateTime);
     /// `GType.TIME` — a time of day (a Graphersal extension).
     pub const TIME: GType = GType::Value(ValueType::Time);
+    /// `GType.OFFSETTIME` — a time of day with a UTC offset (a Graphersal extension; Java's
+    /// `OffsetTime`).
+    pub const OFFSETTIME: GType = GType::Value(ValueType::OffsetTime);
     /// `GType.VECTOR` — any vector, whatever its element kind (a Graphersal extension); as a
     /// conversion target (`as_vector()`) an f32 vector.
     pub const VECTOR: GType = GType::Vector;
@@ -129,6 +132,7 @@ impl GType {
             GType::Value(ValueType::Date) => "DATE",
             GType::Value(ValueType::LocalDateTime) => "LOCALDATETIME",
             GType::Value(ValueType::Time) => "TIME",
+            GType::Value(ValueType::OffsetTime) => "OFFSETTIME",
             GType::Value(ValueType::Vector(_)) | GType::Vector => "VECTOR",
             GType::Value(ValueType::Array(_)) => "LIST",
             GType::Value(ValueType::Object) => "MAP",
@@ -160,6 +164,7 @@ impl GType {
         "LocalDate",
         "LocalDateTime",
         "LocalTime",
+        "OffsetTime",
         "Vector",
         "Number",
         "List",
@@ -187,6 +192,7 @@ impl GType {
             "LocalDate" => GType::DATE,
             "LocalDateTime" => GType::LOCALDATETIME,
             "LocalTime" => GType::TIME,
+            "OffsetTime" => GType::OFFSETTIME,
             "Vector" => GType::VECTOR,
             "Number" => GType::NUMBER,
             "List" => GType::LIST,

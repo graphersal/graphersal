@@ -794,23 +794,20 @@ mod graphson {
             report.to_string().contains("zone id is not kept"),
             "{report}"
         );
-        // A zone name the bundled database knows, without anything to cut.
+        // A zone name the bundled database knows is kept (temporal v2), nothing is reported.
         let (got, report) = one_value(
             r#"{"@type":"gx:ZonedDateTime","@value":"2007-12-03T10:15:30+01:00[Europe/Paris]"}"#,
         );
-        assert_eq!(got.as_deref(), Some("datetime(2007-12-03T10:15:30+01:00)"));
-        assert_eq!(report.notes.len(), 1, "{report}");
+        assert_eq!(
+            got.as_deref(),
+            Some("datetime(2007-12-03T10:15:30+01:00[Europe/Paris])")
+        );
+        assert_eq!(report.notes.len(), 0, "{report}");
     }
 
     #[test]
     fn the_types_without_a_twin_and_malformed_dates_are_skipped() {
-        for tag in [
-            "gx:Year",
-            "gx:YearMonth",
-            "gx:MonthDay",
-            "gx:OffsetTime",
-            "gx:ZoneOffset",
-        ] {
+        for tag in ["gx:Year", "gx:YearMonth", "gx:MonthDay", "gx:ZoneOffset"] {
             let (got, report) = one_value(&format!(r#"{{"@type":"{tag}","@value":"2016"}}"#));
             assert_eq!(got, None, "{tag}");
             assert!(
@@ -1172,7 +1169,7 @@ mod schema {
         );
         assert_eq!(
             add(&graph, "at", "2024-01-01T10:00[Europe/Berlin]".into()).unwrap(),
-            "datetime(2024-01-01T10:00:00+01:00)"
+            "datetime(2024-01-01T10:00:00+01:00[Europe/Berlin])"
         );
         // Without either the text is not read as UTC (rule 7: no guessing).
         for text in ["2024-01-01T10:00", "2024-01-01"] {

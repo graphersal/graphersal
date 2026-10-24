@@ -17,9 +17,28 @@ g.inject(datetime("2023-08-02T12:00Z"), datetime("2023-08-02T14:00+02:00")).dedu
 g.inject(datetime("2023-08-02T14:00+02:00")).is(P.gt(datetime("2023-08-02T11:00Z"))).count().next()   // 1
 ```
 
+A zone name is shown but never compared either: `2023-08-02T14:00+02:00[Europe/Berlin]` equals
+`2023-08-02T12:00Z` (as Neo4j and the openCypher TCK compare instants).
+
+```rhai,graph=empty
+datetime("2023-08-02T14:00[Europe/Berlin]") == datetime("2023-08-02T12:00Z")   // true
+```
+
 Of two values with the same instant and different offsets the first one met is kept (`dedup()`,
 a `group()` key); their order in a sort is unspecified. To compare the wall clocks instead, convert
 first: `as_local()` gives the wall-clock `localdatetime` ([Time Zones](time_zones.md)).
+
+## `offsettime`: by its UTC time of day
+
+Two `offsettime`s are equal when they are the same time of day in UTC (`12:00+01:00` equals
+`11:00Z`), and order by it, as a `datetime` compares by its instant (`java.time`
+`OffsetTime.isEqual` / `isBefore`). The offset is kept and shown, never compared; the UTC time is
+not wrapped around midnight (`01:00+02:00` is before `00:00Z`, the previous day's 23:00 in UTC).
+
+```rhai,graph=empty
+offsettime("12:00+01:00") == offsettime("11:00Z")   // true
+offsettime("01:00+02:00") < offsettime("00:00Z")   // true
+```
 
 ## `duration`: field-wise equal, ordered by length
 
@@ -56,7 +75,7 @@ g.inject(date("2023-08-02")).as_date().is(P.lt(datetime("2024-01-01T00:00Z"))).c
 
 `order()` of a mixed stream puts the dates after the numbers and before the strings (TinkerPop's
 orderability places its date type there), in the order `date`, `localdatetime`, `datetime`,
-`time`, `duration`:
+`time`, `duration`, `offsettime`:
 
 ```rhai,graph=empty
 g.inject("x", 1, duration("P1D"), time("01:00"), datetime("2023-08-02T00:00Z"), date("2023-08-02")).order().to_list()
@@ -66,7 +85,8 @@ g.inject("x", 1, duration("P1D"), time("01:00"), datetime("2023-08-02T00:00Z"), 
 
 A [property index](../users_guide/property_indexes.md) on a key holding dates and times serves
 `has()` with these same rules: an equality or `P.within` reads the values equal to the operand
-(a `datetime` by its instant, a `duration` field by field), a range (`P.gt`, `P.between`, ...)
+(a `datetime` by its instant, an `offsettime` by its UTC time of day, a `duration` field by
+field), a range (`P.gt`, `P.between`, ...)
 reads the values of the operand's type in that range. The results are always the same as without
 the index.
 

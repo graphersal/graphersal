@@ -15,7 +15,8 @@ the text `java.time` writes, so other tools read it back:
 | `date` | `2023-08-02`; a year before 1 or after 9999 with its sign: `-0044-03-15` |
 | `time` | `09:30:00`; a fraction only when it is not zero, in groups of three digits (milliseconds, microseconds or nanoseconds): `09:30:00.500`, `09:30:00.123456`, `09:30:00.123456789` |
 | `localdatetime` | `2023-08-02T09:30:00` (the date, `T`, the time) |
-| `datetime` | `2023-08-02T09:30:00+02:00`; `Z` for a zero offset; an offset with seconds as `+00:19:32` |
+| `datetime` | `2023-08-02T09:30:00+02:00`; `Z` for a zero offset; an offset with seconds as `+00:19:32`; a zone name after the offset in brackets: `2023-08-02T09:30:00+02:00[Europe/Berlin]` |
+| `offsettime` | `09:30:00+02:00`, `09:30:00Z`: the time as for a `time`, then the offset |
 | `duration` | `P1Y2M3DT4H5M6S`: years and months from the months, days, then the time part; a zero part is left out, a zero duration is `PT0S`; a sign before `P` when every part is negative (`-P1M2D`), else a sign per part (`P1M-2D`) |
 
 ```rhai,graph=empty
@@ -35,13 +36,16 @@ weeks are read as 7 days. Years and months are one field, months: `P1Y2M` is 14 
 | `date` | `YYYY-MM-DD`; a year before 1 with its sign (`-0044-03-15`) |
 | `time` | `HH:MM`, `HH:MM:SS`, `HH:MM:SS.f` with 1 to 9 fraction digits, kept to the nanosecond |
 | `localdatetime` | a date, optionally followed by `T` (or `t`, or a space) and a time; a date alone is midnight |
-| `datetime` | a local date-time, then an offset (`Z`, `+02:00`, `+0200`, `+02`, `+00:19:32`) and/or a zone in brackets (`[Europe/Berlin]`) |
+| `datetime` | a local date-time, then an offset (`Z`, `+02:00`, `+0200`, `+02`, `+00:19:32`) and/or a zone in brackets (`[Europe/Berlin]`, kept in the value) |
+| `offsettime` | a time as for a `time`, then an offset (`Z`, `+02:00`, `+0200`, `+02`), which it must have; no zone name |
 | `duration` | `[+-]P[nY][nM][nW][nD][T[nH][nM][n[.f]S]]`, a sign per number allowed (`P1M-2D`), letters in either case |
 
 ```rhai,graph=empty
 datetime("2023-08-02T09:30+0200")   // datetime("2023-08-02T09:30:00+02:00")
-datetime("2023-08-02T09:30[Europe/Berlin]")   // datetime("2023-08-02T09:30:00+02:00")
-datetime("2023-08-02T09:30:00.123456789Z")   // datetime("2023-08-02T09:30:00.123456Z")
+datetime("2023-08-02T09:30[Europe/Berlin]")   // datetime("2023-08-02T09:30:00+02:00[Europe/Berlin]")
+datetime("2023-08-02T09:30:00.123456789Z")   // datetime("2023-08-02T09:30:00.123456789Z")
+offsettime("09:30+0200")   // offsettime("09:30:00+02:00")
+offsettime("09:30")   // error: an offsettime needs its UTC offset
 date("10000-01-01")   // error: expected a four-digit year
 duration("1 day")   // error: not an ISO 8601 duration
 ```
@@ -69,4 +73,4 @@ g.inject("2023-08-02").as_date().next()   // datetime("2023-08-02T00:00:00Z")
 
 A stored instant without its offset would be a guess about where it was written; the strict
 rule turns that guess into an error that names the expected form. The other types have no
-offset, so they read the same everywhere.
+offset (an `offsettime` always needs its offset), so they read the same everywhere.
