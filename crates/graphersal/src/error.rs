@@ -7644,7 +7644,9 @@ fn gql_data_status_advice(gqlstatus: &str) -> Option<&'static str> {
         "22007" => {
             "A temporal constructor reads ISO 8601 text of its own type (date('2015-07-21'), \
              date('2015-W30-2'), localtime('21:40:32'), localdatetime('2015-07-21T21:40'), \
-             datetime('2015-07-21T21:40+01:00'), duration('P14DT16H12M')) or a map of its \
+             datetime('2015-07-21T21:40+01:00'), duration('P14DT16H12M'); the literals \
+             DATE '2015-07-21', TIME '21:40+01:00', TIMESTAMP '2015-07-21T21:40' and DURATION \
+             'P14D' read the same text, a LOCAL literal without an offset) or a map of its \
              fields: year with month / day, week / dayOfWeek, ordinalDay or quarter / \
              dayOfQuarter; hour, minute, second, millisecond, microsecond, nanosecond; a \
              datetime's timezone as an offset ('+01:00') or a zone name ('Europe/Berlin', kept \

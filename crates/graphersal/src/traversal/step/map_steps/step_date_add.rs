@@ -72,7 +72,8 @@ macro_rules! date_add_builders {
         /// `date_add(DT, n, zone)`: like [`date_add`](Self::date_add), on the wall clock of a
         /// `datetime` in `zone` (an IANA name such as `"Europe/Berlin"` or an offset such as
         /// `"+02:00"`): a day stays a calendar day across a daylight saving change, and the
-        /// result carries the zone's offset. An unknown zone fails before execution.
+        /// result carries the zone's offset and, for an IANA zone, its name. An unknown zone
+        /// fails before execution.
         pub fn date_add_in(self, unit: DT, n: i64, zone: &str) -> Self {
             self.push_step(step(Amount::Units(unit, n), Some(zone)))
         }

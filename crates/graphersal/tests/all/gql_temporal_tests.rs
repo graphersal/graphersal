@@ -1803,3 +1803,142 @@ fn a_projection_never_invents_the_time_of_a_date() {
         engine_text(TemporalKind::LocalDateTime, "2020-01-01T00:00")
     );
 }
+
+// ----- temporal v2 stage 5: ISO GQL temporal literals and bare clocks -----
+
+#[test]
+fn temporal_literals_build_the_type_their_text_names() {
+    let graph = graph();
+    let cases = [
+        ("DATE '2024-01-05'", "2024-01-05"),
+        ("date '2015-W30-2'", "2015-07-21"),
+        (
+            "TIME '10:00:00.123456789+01:00'",
+            "10:00:00.123456789+01:00",
+        ),
+        ("TIME '10:00'", "10:00:00"),
+        ("TIME '10:00Z'", "10:00:00Z"),
+        ("TIMESTAMP '2024-01-05T10:00'", "2024-01-05T10:00:00"),
+        (
+            "DATETIME '2024-01-05T10:00-05:00'",
+            "2024-01-05T10:00:00-05:00",
+        ),
+        (
+            "DATETIME '2024-01-05T10:00[Europe/Berlin]'",
+            "2024-01-05T10:00:00+01:00[Europe/Berlin]",
+        ),
+        ("DURATION 'P1DT2H'", "P1DT2H"),
+        ("ZONED TIME '10:00-03:30'", "10:00:00-03:30"),
+        ("zoned time '10:00Z'", "10:00:00Z"),
+        ("LOCAL TIME '23:59:59.999999999'", "23:59:59.999999999"),
+        (
+            "ZONED DATETIME '2024-01-05T10:00+02:00'",
+            "2024-01-05T10:00:00+02:00",
+        ),
+        (
+            "ZONED TIMESTAMP '2024-07-05T10:00[Europe/Berlin]'",
+            "2024-07-05T10:00:00+02:00[Europe/Berlin]",
+        ),
+        ("LOCAL DATETIME '2024-01-05T10:00'", "2024-01-05T10:00:00"),
+        ("LOCAL TIMESTAMP '2024-01-05T10:00'", "2024-01-05T10:00:00"),
+    ];
+    for (literal, expected) in cases {
+        let query = format!("RETURN {literal} AS x");
+        assert_eq!(temporal_text(&graph, &query), expected, "{query}");
+    }
+    // The type follows the text, never a guess: TIME with an offset is a zoned time.
+    assert_eq!(
+        rows(
+            &graph,
+            "RETURN TIME '10:00+01:00' = zoned_time('10:00+01:00') AS a, \
+             TIME '10:00' = local_time('10:00') AS b, \
+             TIMESTAMP '2024-01-05T10:00' = local_datetime('2024-01-05T10:00') AS c"
+        ),
+        rows(&graph, "RETURN true AS a, true AS b, true AS c")
+    );
+    // A literal is an ordinary operand.
+    assert_eq!(
+        temporal_text(&graph, "RETURN DATE '2024-01-31' + DURATION 'P1M' AS x"),
+        "2024-02-29"
+    );
+    assert_eq!(
+        rows(
+            &graph,
+            "MATCH (x:x) WHERE x.d < DATE '2020-06-01' RETURN count(x) AS n"
+        ),
+        rows(&graph, "RETURN 1 AS n")
+    );
+}
+
+#[test]
+fn temporal_literals_refuse_a_text_of_another_form() {
+    let graph = graph();
+    // A ZONED literal needs an offset or a zone: a syntax error before the run.
+    for query in [
+        "RETURN ZONED TIME '10:00' AS x",
+        "RETURN ZONED DATETIME '2024-01-05T10:00' AS x",
+    ] {
+        let (status, kind, message, compile_time) = failure(&graph, query);
+        assert_eq!(status, "42001", "{query}");
+        assert_eq!(kind, GqlErrorKind::Syntax, "{query}");
+        assert!(message.contains("needs a UTC offset"), "{message}");
+        assert!(compile_time, "{query}");
+    }
+    // A LOCAL literal with an offset, and a text of no form, are the constructor's 22007.
+    for query in [
+        "RETURN LOCAL TIME '10:00+01:00' AS x",
+        "RETURN LOCAL DATETIME '2024-01-05T10:00Z' AS x",
+        "RETURN DATE 'garbage' AS x",
+        "RETURN TIME 'x' AS x",
+        "RETURN DURATION '1 day' AS x",
+    ] {
+        let (status, _, _, _) = failure(&graph, query);
+        assert_eq!(status, "22007", "{query}");
+    }
+    // `date` as a variable is unchanged: a literal needs the string right after the word.
+    assert_eq!(
+        rows(&graph, "MATCH (date:x) RETURN date.d AS d"),
+        rows(&graph, "MATCH (n:x) RETURN n.d AS d")
+    );
+}
+
+#[test]
+fn bare_clocks_are_the_constructors_without_an_argument() {
+    let graph = graph();
+    assert_eq!(
+        rows(
+            &graph,
+            "RETURN CURRENT_DATE = date() AS a, CURRENT_TIME = zoned_time() AS b, \
+             CURRENT_TIMESTAMP = zoned_datetime() AS c, LOCAL_TIME = local_time() AS d, \
+             LOCAL_TIMESTAMP = local_datetime() AS e, current_date() = date() AS f, \
+             current_time() = time() AS g, current_timestamp() = datetime() AS h, \
+             local_timestamp() = localdatetime() AS i"
+        ),
+        rows(
+            &graph,
+            "RETURN true AS a, true AS b, true AS c, true AS d, true AS e, true AS f, \
+             true AS g, true AS h, true AS i"
+        )
+    );
+    let kinds = rows(
+        &graph,
+        "RETURN CURRENT_DATE AS a, CURRENT_TIME AS b, CURRENT_TIMESTAMP AS c, LOCAL_TIME AS d, \
+         LOCAL_TIMESTAMP AS e",
+    );
+    let [row] = kinds.as_slice() else {
+        panic!("{kinds:?}")
+    };
+    let kind = |key: &str| match column(row, key) {
+        ElementProperty::Temporal(value) => value.kind(),
+        other => panic!("{key}: {other:?}"),
+    };
+    assert_eq!(kind("a"), TemporalKind::Date);
+    assert_eq!(kind("b"), TemporalKind::OffsetTime);
+    assert_eq!(kind("c"), TemporalKind::DateTime);
+    assert_eq!(kind("d"), TemporalKind::Time);
+    assert_eq!(kind("e"), TemporalKind::LocalDateTime);
+    // Parentheses with an argument are no clock form.
+    let (status, _, _, compile_time) = failure(&graph, "RETURN current_date('UTC') AS x");
+    assert_eq!(status, "42001");
+    assert!(compile_time);
+}

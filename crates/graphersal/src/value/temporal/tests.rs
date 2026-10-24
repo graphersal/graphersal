@@ -578,11 +578,11 @@ fn daylight_saving_in_berlin() {
     let before_gap = Temporal::DateTime(dt("2023-03-25T12:00:00+01:00"));
     assert_same(
         add(before_gap, DT::Day, 1, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-26T12:00:00+02:00")),
+        Temporal::DateTime(dt("2023-03-26T12:00:00+02:00[Europe/Berlin]")),
     );
     assert_same(
         add(before_gap, DT::Hour, 24, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00")),
+        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00[Europe/Berlin]")),
     );
     // Without a zone a day is 24 hours at the value's own offset.
     assert_same(
@@ -592,11 +592,11 @@ fn daylight_saving_in_berlin() {
     let before_fold = Temporal::DateTime(dt("2023-10-28T12:00:00+02:00"));
     assert_same(
         add(before_fold, DT::Day, 1, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-10-29T12:00:00+01:00")),
+        Temporal::DateTime(dt("2023-10-29T12:00:00+01:00[Europe/Berlin]")),
     );
     assert_same(
         add(before_fold, DT::Hour, 24, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-10-29T11:00:00+01:00")),
+        Temporal::DateTime(dt("2023-10-29T11:00:00+01:00[Europe/Berlin]")),
     );
     // A skipped wall-clock time moves forward; a repeated one takes the earlier offset.
     assert_eq!(
@@ -610,22 +610,22 @@ fn daylight_saving_in_berlin() {
     let into_gap = Temporal::DateTime(dt("2023-03-25T02:30:00+01:00"));
     assert_same(
         add(into_gap, DT::Day, 1, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-26T03:30:00+02:00")),
+        Temporal::DateTime(dt("2023-03-26T03:30:00+02:00[Europe/Berlin]")),
     );
     // A duration of one day keeps the wall-clock time too; its hours do not.
     assert_same(
         add_duration(before_gap, dur("P1DT1H"), Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00")),
+        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00[Europe/Berlin]")),
     );
     assert_same(
         add_duration(before_gap, dur("PT24H"), Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00")),
+        Temporal::DateTime(dt("2023-03-26T13:00:00+02:00[Europe/Berlin]")),
     );
     // Truncation and parts on the zone's wall clock.
     let evening = Temporal::DateTime(dt("2023-03-26T22:30:00Z"));
     assert_same(
         trunc(evening, DT::Day, Some(&zone)).unwrap(),
-        Temporal::DateTime(dt("2023-03-27T00:00:00+02:00")),
+        Temporal::DateTime(dt("2023-03-27T00:00:00+02:00[Europe/Berlin]")),
     );
     assert_eq!(part(evening, DT::Day, Some(&zone)).unwrap(), int(27));
     assert_eq!(part(evening, DT::Offset, Some(&zone)).unwrap(), int(7200));

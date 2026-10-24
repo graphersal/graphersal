@@ -240,7 +240,7 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "Embeds the property from of every element with label into the vector property to, page by page, with the embedder of that registry name (#{embedder: name}, else the default; g.embedders() lists them), and records its model in the attached schema; other keys: element, only_missing, batch; returns the report.",
         "{ g.set_schema(g.infer_schema(), SchemaMode.open); g.embed_property(#{label: \"person\", from: \"name\", to: \"emb\", embedder: \"hash-ngram/1\"}).model }" => "hash-ngram/1";
     "traversal" "date_add":
-        "Adds n DT units or a duration, optionally in a zone (TinkerPop dateAdd()).",
+        "Adds n DT units or a duration, optionally in a zone whose IANA name the result keeps (TinkerPop dateAdd()).",
         "g.inject(date(\"2024-01-31\")).date_add(DT.month, 1).next().day" => "29";
     "traversal" "date_diff":
         "Difference in milliseconds (TinkerPop dateDiff()) or whole DT units.",
@@ -255,8 +255,8 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
         "One field as a number (PostgreSQL extract).",
         "g.inject(date(\"2023-08-17\")).date_part(DT.day_of_week).next()" => "4";
     "traversal" "at_zone":
-        "Places a date-time in a time zone.",
-        "g.inject(localdatetime(\"2023-08-02T12:00\")).at_zone(\"+02:00\").next().offset" => "7200";
+        "Places a date-time in a time zone: an IANA name (\"Europe/Berlin\") is kept in the result, a UTC offset (\"+02:00\") gives the offset only.",
+        "g.inject(datetime(\"2023-08-02T12:00Z\")).at_zone(\"Europe/Berlin\").next().timezone" => "Europe/Berlin";
     "traversal" "as_local":
         "A datetime's wall clock.",
         "g.inject(datetime(\"2023-08-02T12:00Z\")).as_local().next().hour" => "12";

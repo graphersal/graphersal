@@ -270,7 +270,7 @@ fn date_add_in_a_zone_keeps_the_wall_clock_across_daylight_saving() {
         run(&format!(
             r#"g.inject({start}).date_add(DT.day, 1, "Europe/Berlin").next()"#
         )),
-        r#"datetime("2023-03-26T12:00:00+02:00")"#
+        r#"datetime("2023-03-26T12:00:00+02:00[Europe/Berlin]")"#
     );
     // Without a zone a day is 24 hours at the value's own offset.
     assert_eq!(
@@ -282,7 +282,7 @@ fn date_add_in_a_zone_keeps_the_wall_clock_across_daylight_saving() {
         run(&format!(
             r#"g.inject({start}).dateAdd(DT.hour, 24, "Europe/Berlin").next()"#
         )),
-        r#"datetime("2023-03-26T13:00:00+02:00")"#
+        r#"datetime("2023-03-26T13:00:00+02:00[Europe/Berlin]")"#
     );
     // A duration, in the zone too.
     assert_eq!(
@@ -295,7 +295,7 @@ fn date_add_in_a_zone_keeps_the_wall_clock_across_daylight_saving() {
         run(&format!(
             r#"g.inject({start}).dateAdd(duration("P1D"), "Europe/Berlin").next()"#
         )),
-        r#"datetime("2023-03-26T12:00:00+02:00")"#
+        r#"datetime("2023-03-26T12:00:00+02:00[Europe/Berlin]")"#
     );
     // An unknown zone fails before anything runs.
     let err = fails(r#"g.inject().date_add(DT.day, 1, "Mars/Olympus").to_list()"#);
@@ -441,7 +441,7 @@ fn date_trunc_and_date_part() {
         run(
             r#"g.inject(datetime("2023-08-17T01:30:00Z")).date_trunc(DT.day, "America/New_York").next()"#
         ),
-        r#"datetime("2023-08-16T00:00:00-04:00")"#
+        r#"datetime("2023-08-16T00:00:00-04:00[America/New_York]")"#
     );
     assert_eq!(
         run(r#"g.inject(duration("P1Y5M3DT4H")).date_trunc(DT.month).next()"#),
@@ -470,7 +470,7 @@ fn at_zone_and_as_local() {
             r#"g.inject(datetime("2023-08-02T12:00:00Z")).at_zone("Europe/Berlin").next()"#,
             r#"g.inject(datetime("2023-08-02T12:00:00Z")).atZone("Europe/Berlin").next()"#,
         ),
-        r#"datetime("2023-08-02T14:00:00+02:00")"#
+        r#"datetime("2023-08-02T14:00:00+02:00[Europe/Berlin]")"#
     );
     // A wall clock in the zone: a skipped time moves forward, a repeated one takes the earlier
     // offset.
@@ -478,7 +478,7 @@ fn at_zone_and_as_local() {
         run(
             r#"g.inject(localdatetime("2023-03-26T02:30"), localdatetime("2023-10-29T02:30")).at_zone("Europe/Berlin").to_list()"#
         ),
-        r#"[datetime("2023-03-26T03:30:00+02:00"), datetime("2023-10-29T02:30:00+02:00")]"#
+        r#"[datetime("2023-03-26T03:30:00+02:00[Europe/Berlin]"), datetime("2023-10-29T02:30:00+02:00[Europe/Berlin]")]"#
     );
     assert_eq!(
         run(r#"g.inject(datetime("2023-08-02T12:00:00Z")).at_zone("-07:00").next()"#),
@@ -761,7 +761,7 @@ fn the_rust_api_builds_the_same_steps() {
             .traversal()
             .inject(vec![start.clone()])
             .date_add_in(DT::Day, 1, "Europe/Berlin")),
-        "2023-03-26T12:00:00+02:00"
+        "2023-03-26T12:00:00+02:00[Europe/Berlin]"
     );
     let p1d: Duration = "P1D".parse().unwrap();
     assert_eq!(
@@ -791,7 +791,7 @@ fn the_rust_api_builds_the_same_steps() {
     );
     assert_eq!(
         one(lock.traversal().inject(vec![start.clone()]).at_zone("UTC")),
-        "2023-03-25T11:00:00Z"
+        "2023-03-25T11:00:00Z[UTC]"
     );
     assert_eq!(
         one(lock.traversal().inject(vec![start.clone()]).as_local()),

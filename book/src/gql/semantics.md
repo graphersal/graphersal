@@ -1155,8 +1155,12 @@ the engine's [date and time values](../dates/index.md) (Cypher's `time` is the e
   zone name (in text, `[Europe/London]`, or as `timezone: 'Europe/Stockholm'`), as Neo4j does:
   `d.timezone` gives the name, `toString` writes it (`..+01:00[Europe/London]`), and later
   arithmetic, truncation and `duration.between` follow the zone's daylight saving rules
-  ([Time Zones](../dates/time_zones.md#zone-names-in-a-value)). A `time` keeps an offset only (a
-  named zone gives its offset at the query's instant).
+  ([Time Zones](../dates/time_zones.md#zone-names-in-a-value)). A `time` keeps an offset only:
+  a time of day has no date, so a named zone (`time({hour: 12, timezone: 'Europe/Berlin'})`)
+  gives the zone's offset at the query's instant, the instant every clock of the query reads
+  (`+01:00` in a Berlin winter, `+02:00` in summer). ISO GQL's zoned time carries a UTC offset
+  only, and Neo4j takes the zone's offset at the current time too; reading it at the query's
+  one instant keeps the query repeatable within itself.
 - **One clock per query.** The constructors without an argument, `X.statement()` and
   `X.transaction()` all read one instant, taken when the query starts (in nanoseconds, with the
   digits the platform clock has: [Clock precision](../dates/now_and_today.md#clock-precision));
@@ -1188,6 +1192,8 @@ g.gql("RETURN localtime({hour: 12, minute: 0, second: 0, nanosecond: 5}) AS t").
 | a duration: 64-bit months, days and seconds, plus the nanoseconds of one second | the same time part (a 64-bit count of seconds plus nanoseconds, `-PT9223372036854775808S` to `PT9223372036854775807.999999999S`); months and days are 32-bit, beyond is `22008` | the size of a stored value; a result leaving the years -9999 to 9999 is `22008` in both |
 | years -999 999 999 to 999 999 999 | years -9999 to 9999; beyond is `22008` | the engine's range ([Dates and Times](../dates/index.md)); 2 TCK cases are excluded (`year-range`) |
 | `duration.between` of two different types aligns them (a missing date: times only, a missing time: midnight, a missing zone: the other side's) | the same; the zone lent is the other side's zone name when it has one, else its offset | Neo4j's rule |
+| `time()` with a named zone takes the zone's current offset | the zone's offset at the query's instant (one instant per query) | a time of day has no date to place in the zone; one instant per query keeps every clock and constructor of a query consistent |
+| no temporal literals | the ISO GQL literals `DATE '..'`, `TIME '..'`, `DATETIME '..'` / `TIMESTAMP '..'`, `DURATION '..'` (and `ZONED` / `LOCAL` spelled out) and the clocks `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`, `LOCAL_TIMESTAMP` ([Literals](subset.md#literals)) | ISO GQL forms; a type word followed by a string means nothing in Neo4j's language |
 
 ## Ids are strings
 

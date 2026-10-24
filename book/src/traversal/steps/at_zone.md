@@ -3,7 +3,7 @@
 
 `at_zone` · `atZone` · category: [Dates and times](../../traversal/step_reference.md#dates-and-times)
 
-Places a date-time in a time zone.
+Places a date-time in a time zone: an IANA name ("Europe/Berlin") is kept in the result, a UTC offset ("+02:00") gives the offset only.
 
 ## Forms
 
@@ -14,5 +14,5 @@ at_zone(arg1: string)
 ## Example
 
 ```rhai,graph=modern
-g.inject(localdatetime("2023-08-02T12:00")).at_zone("+02:00").next().offset   // 7200
+g.inject(datetime("2023-08-02T12:00Z")).at_zone("Europe/Berlin").next().timezone   // Europe/Berlin
 ```

@@ -1301,8 +1301,8 @@ g.gql("MATCH p = (a {name: 'marko'})-[:knows]->(b) FOR x IN nodes(p) RETURN b.na
 
 ### Dates and times
 
-The temporal values are the engine's five [date and time types](../dates/index.md) (`date`,
-`time`, `localdatetime`, `datetime`, `duration`): a value `gql()` builds is the same value a
+The temporal values are the engine's six [date and time types](../dates/index.md) (`date`,
+`time`, `offsettime`, `localdatetime`, `datetime`, `duration`): a value `gql()` builds is the same value a
 Gremlin step or a stored property holds, and a stored date reads as a date (`n.born.year`). The
 functions are openCypher's (Neo4j Cypher 25) with Neo4j's meaning; the constructors also have
 their ISO GQL names. The places where an answer differs from Neo4j are on
@@ -1324,7 +1324,8 @@ projected onto the type (`date(datetime(..))` is the date at the value's own off
 `time(datetime(..))` its time of day and offset). With no argument a constructor gives the
 time the query started ([Clocks](#clocks)). A `NULL` argument, or a `NULL` field of the map,
 gives `NULL`. Values hold **nanoseconds**, as Neo4j's: up to nine fraction digits and the
-`nanosecond` field are kept exactly.
+`nanosecond` field are kept exactly. A constant can also be written as an ISO GQL literal, `DATE '2015-07-21'`
+([Literals](#literals)).
 
 ```rhai,graph=empty
 g.gql("RETURN date('2015-07-21') AS d, localtime('21:40:32.142') AS t, localdatetime('2015-07-21T21:40') AS ldt, datetime('2015-07-21T21:40+01:00') AS dt").to_list()
@@ -1542,7 +1543,9 @@ g.gql("RETURN duration.inDays(localtime('10:00'), localtime('12:00')) AS d")   /
 #### Clocks
 
 `date()`, `localtime()`, `time()`, `localdatetime()` and `datetime()` with no argument (and their ISO
-names), and `X.statement()` / `X.transaction()` (`date.statement()`, `datetime.transaction()`,
+names), the ISO clocks `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME` and
+`LOCAL_TIMESTAMP` (written without parentheses; `current_date()` with empty ones is accepted
+too), and `X.statement()` / `X.transaction()` (`date.statement()`, `datetime.transaction()`,
 ...) give the time the query started: **one instant per query**, the same for every row and
 every call, so a query is deterministic and repeatable. A zone argument or map gives that
 instant in the zone (`datetime.statement('Europe/Berlin')`, `date({timezone: '+05:00'})`); the
@@ -1552,15 +1555,43 @@ moves while the query runs, is refused like `rand()`.
 
 ```rhai,graph=empty
 g.gql("RETURN date() = date.statement() AS a, datetime.transaction() = datetime() AS b, datetime({timezone: '+05:00'}).timezone AS z").to_list()   // #{"a": true, "b": true, "z": "+05:00"}
+g.gql("RETURN CURRENT_DATE = date() AS a, CURRENT_TIMESTAMP = zoned_datetime() AS b, LOCAL_TIMESTAMP = local_datetime() AS c").to_list()   // #{"a": true, "b": true, "c": true}
 g.gql("FOR i IN [1, 2, 3] RETURN count(DISTINCT datetime()) AS instants").to_list()   // #{"instants": 1}
 g.gql("RETURN datetime.realtime() AS t")   // refused: a clock that moves while the query runs
 ```
 
+#### Literals
+
+The ISO GQL temporal literals are a type word and a string; the string is read as the
+constructor of that type reads its text:
+
+| Literal | Value | As |
+|---|---|---|
+| `DATE '2024-01-05'` | a date | `date('2024-01-05')` |
+| `TIME '10:00:00.5'` | a local time (no offset in the text) | `local_time('10:00:00.5')` |
+| `TIME '10:00+01:00'` | a zoned time (an offset in the text) | `zoned_time('10:00+01:00')` |
+| `DATETIME '2024-01-05T10:00'`, `TIMESTAMP '..'` | a local datetime (no offset or zone in the text) | `local_datetime('..')` |
+| `DATETIME '2024-01-05T10:00+01:00'`, `TIMESTAMP '..[Europe/Berlin]'` | a zoned datetime (an offset or a zone in the text, a zone name kept) | `zoned_datetime('..')` |
+| `DURATION 'P1DT2H'` | a duration | `duration('P1DT2H')` |
+| `ZONED TIME '..'`, `ZONED DATETIME '..'` / `ZONED TIMESTAMP '..'` | the zoned type; a text without an offset or zone is a syntax error (`42001`) | `zoned_time('..')`, `zoned_datetime('..')` |
+| `LOCAL TIME '..'`, `LOCAL DATETIME '..'` / `LOCAL TIMESTAMP '..'` | the local type; an offset in the text is `22007` | `local_time('..')`, `local_datetime('..')` |
+
+The type follows the text as ISO GQL defines it, never a guess from its content beyond the
+offset: `TIME '10:00'` is a local time, `TIME '10:00Z'` a zoned one. The `ZONED` / `LOCAL` forms
+spell the type out (the words of the GQL type names, as in `CAST`). A text the type cannot read
+is `22007`. The type words are no reserved words: `date` stays a variable name wherever no string
+follows it.
+
+```rhai,graph=empty
+g.gql("RETURN DATE '2024-01-31' + DURATION 'P1M' AS d, TIME '10:00:00.123456789+01:00' AS t, TIMESTAMP '2024-01-05T10:00[Europe/Berlin]' AS z").to_list()
+// #{"d": date("2024-02-29"), "t": offsettime("10:00:00.123456789+01:00"), "z": datetime("2024-01-05T10:00:00+01:00[Europe/Berlin]")}
+g.gql("RETURN ZONED TIME '10:00' AS t")   // error: a ZONED TIME literal needs a UTC offset or a time zone (42001)
+```
+
 #### Not yet
 
-`timestamp()`, `current_date()` and the other date functions named under
-[Not supported yet](#not-supported-yet); the GQL literals `DATE '..'`, `DURATION '..'` and
-`CAST(x AS DATE)`. Each is `0A000` with the alternative.
+`timestamp()` (Neo4j's milliseconds since 1970), `date_trunc()`, `datetime_trunc()` and
+`CAST(x AS DATE)` (and the other temporal `CAST` targets). Each is `0A000` with the alternative.
 
 ```rhai,graph=empty
 g.gql("RETURN timestamp() AS t")   // error: timestamp() is not yet supported
@@ -1608,9 +1639,8 @@ construct and the alternative.
 | `gql()` after other steps (`g.v().gql(..)`) | start with `g.gql(..)` and continue with Gremlin |
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
-
-| `timestamp()`, `current_date()`, `current_time()`, `current_timestamp()`, `date_trunc()`, `datetime_trunc()` | `datetime().epochMillis`, `date()`, `localtime()`, `datetime()` (the time the query started), `date.truncate(unit, d)` |
-| the literals `DATE '..'`, `DURATION '..'`, `CAST(x AS DATE)` | `date('..')`, `duration('..')` |
+| `timestamp()`, `date_trunc()`, `datetime_trunc()` | `datetime().epochMillis`, `date.truncate(unit, d)` |
+| `CAST(x AS DATE)` and the other temporal `CAST` targets | `DATE '..'` for a constant, `date(x)` for a value |
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |
 | `normalize(s)` | store normalized text |
 | GQL's `elements(p)` | `nodes(p)` and `relationships(p)` |

@@ -3,7 +3,7 @@
 
 `date_add` · `dateAdd` · category: [Dates and times](../../traversal/step_reference.md#dates-and-times)
 
-Adds n DT units or a duration, optionally in a zone (TinkerPop dateAdd()).
+Adds n DT units or a duration, optionally in a zone whose IANA name the result keeps (TinkerPop dateAdd()).
 
 ## Forms
 

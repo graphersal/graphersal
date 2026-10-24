@@ -695,8 +695,11 @@ ISO 8601 text or a map such as date({year: 2015, week: 30, dayOfWeek: 2}) or dat
 started), duration('P1M2DT3H') or duration({days: 14, hours: 16}); components x.year, x.month, \
 x.week, x.dayOfWeek, x.hour, x.epochMillis, dur.days; arithmetic d + duration('P1M'), dur * 2; \
 date.truncate('month', d) (also localtime / localdatetime / datetime.truncate); \
-duration.between(a, b), duration.inDays(a, b); values hold microseconds and a datetime keeps \
-its UTC offset, not a zone name; RETURN (mandatory; expressions \
+duration.between(a, b), duration.inDays(a, b); time('10:00+01:00') (ISO zoned_time) a time \
+of day with its offset; the ISO literals DATE '2015-07-21', TIME '10:00+01:00', TIMESTAMP \
+'2015-07-21T21:40', DURATION 'P1D' and the clocks CURRENT_DATE, CURRENT_TIMESTAMP, \
+LOCAL_TIMESTAMP; values hold nanoseconds and a datetime keeps its UTC offset and the zone name \
+it was built with; RETURN (mandatory; expressions \
 with AS aliases, DISTINCT, RETURN *); ORDER BY (ASC/DESC; NULLs last ascending), OFFSET (or \
 SKIP) and LIMIT; $name parameters read from params (values, never spliced into the text); \
 writes: INSERT (Cypher alias CREATE) of node patterns (n:Label&Other {key: expr}) and directed \

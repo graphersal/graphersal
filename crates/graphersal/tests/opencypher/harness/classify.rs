@@ -519,16 +519,17 @@ mod tests {
         })
     }
 
-    /// A "not yet" raised while the query runs (a temporal value the engine cannot hold, found
-    /// only at runtime: 3g U1-U3) is `missing`, as one raised at compile time, whatever the case
-    /// expects, and in a control query too.
+    /// A "not yet" raised while the query runs (a construct found only at runtime) is
+    /// `missing`, as one raised at compile time, whatever the case expects, and in a control
+    /// query too.
     #[test]
     fn a_runtime_not_yet_is_missing() {
         let result = "    Then the result should be, in any order:\n      | x |\n      | 1 |\n";
         let error = "    Then a TypeError should be raised at runtime: InvalidArgumentType\n";
         let mut not_yet = gql(Phase::Runtime, GqlErrorKind::NotYet, "0A000");
         not_yet.message = "GQL construct not supported yet at line 1, column 8: \
-                           sub-microsecond precision is not yet supported in this version"
+                           toIntegerList() (a list conversion function) is not yet supported \
+                           in this version"
             .to_string();
         for expected in [result, error] {
             let outcome = classify(
@@ -536,10 +537,7 @@ mod tests {
                 &ran(QueryOutcome::Error(not_yet.clone()), vec![]),
             );
             assert_eq!(outcome.class, Class::Missing, "{outcome:?}");
-            assert_eq!(
-                construct(&outcome.detail),
-                "not yet: sub-microsecond precision"
-            );
+            assert_eq!(construct(&outcome.detail), "not yet: toIntegerList()");
         }
         let refused = gql(Phase::Runtime, GqlErrorKind::Refused, "0A000");
         let outcome = classify(

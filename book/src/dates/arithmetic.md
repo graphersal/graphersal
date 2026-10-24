@@ -55,7 +55,7 @@ What each type accepts:
 
 | Type | `DT` units | A duration |
 |---|---|---|
-| `datetime` | all units; a fixed length moves the instant and keeps the offset (TinkerPop: a day is 24 hours at a fixed offset), with a zone the result takes the zone's offset; a `datetime` with a zone name computes in its zone and keeps the name ([Time Zones](time_zones.md#zone-names-in-a-value)) | any |
+| `datetime` | all units; a fixed length moves the instant and keeps the offset (TinkerPop: a day is 24 hours at a fixed offset), with a zone the result takes the zone's offset (and its name, for an IANA zone); a `datetime` with a zone name computes in its zone and keeps the name when no zone is given ([Time Zones](time_zones.md#zone-names-in-a-value)) | any |
 | `localdatetime` | all units, on the wall clock | any |
 | `date` | `day` and larger | without a time part |
 | `time` | `hour` and smaller; the clock wraps around midnight (PostgreSQL `time + interval`) | without months or days |

@@ -267,6 +267,15 @@
 //!   the function table, [`list_function`]) and parse into a [`ListComprehension`] with its
 //!   [`ComprehensionForm`]; inside `reduce` a `|` at its own bracket level ends the list, as in
 //!   a list comprehension.
+//! - **Temporal literals and clocks** (temporal v2, ISO GQL): a plain identifier `DATE`,
+//!   `DURATION`, `TIME`, `DATETIME` or `TIMESTAMP` followed by a string literal, or `LOCAL` /
+//!   `ZONED` + `TIME` / `DATETIME` / `TIMESTAMP` followed by one, is a literal parsed as the call
+//!   of its constructor on the string (`DATE '2024-01-05'` = `date('2024-01-05')`; `TIME` /
+//!   `DATETIME` the zoned type when the text holds an offset or a zone, else the local one;
+//!   `ZONED ..` without one 42001). The bare words `CURRENT_DATE`, `CURRENT_TIME`,
+//!   `CURRENT_TIMESTAMP`, `LOCAL_TIME`, `LOCAL_TIMESTAMP` are the constructors without an
+//!   argument (ISO reserved words, so never variables); with `()` they are [`FUNCTIONS`] rows.
+//!   The type words stay names everywhere else (`MATCH (date) RETURN date.x`).
 //! - **Record constructor** (stage 2c): `RECORD {k: expr, ...}` is the map literal
 //!   `{k: expr, ...}` with the ISO keyword written out ([`Parser::record_ahead`]). `RECORD` is
 //!   contextual (an identifier, any case): it is the keyword when `{` follows and then `}` or a
@@ -337,6 +346,8 @@ use super::ast::{
 };
 use super::lexer::{Keyword, LexError, Span, Token, TokenKind, tokenize};
 use crate::error::{GqlErrorBuilder, GqlErrorKind, GqlHelpTopic, TraverserError, gql_key};
+use crate::value::temporal::TemporalKind;
+use crate::value::temporal::parse::parse_extended;
 
 /// The deepest nesting accepted: recursion levels of the parser (parentheses, `NOT`, unary
 /// minus, lists, maps, `CASE`, function arguments, label expressions).
@@ -752,6 +763,32 @@ pub(crate) const FUNCTIONS: &[FunctionSpec] = &[
         1,
     ),
     temporal(TemporalFunction::Duration, &["duration"], 1, 1),
+    // ISO GQL clocks (temporal v2): written bare (`CURRENT_DATE`, `Parser::temporal_literal`);
+    // with empty parentheses they are these rows.
+    temporal(
+        TemporalFunction::Construct(TemporalType::Date),
+        &["current_date"],
+        0,
+        0,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::Time),
+        &["current_time"],
+        0,
+        0,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::DateTime),
+        &["current_timestamp"],
+        0,
+        0,
+    ),
+    temporal(
+        TemporalFunction::Construct(TemporalType::LocalDateTime),
+        &["local_timestamp"],
+        0,
+        0,
+    ),
     temporal(
         TemporalFunction::Clock(TemporalType::Date, Clock::Statement),
         &["date.statement"],
@@ -952,17 +989,11 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         refused: true,
     },
     not_yet_function(
-        &[
-            "timestamp",
-            "date_trunc",
-            "datetime_trunc",
-            "current_date",
-            "current_time",
-            "current_timestamp",
-        ],
+        &["timestamp", "date_trunc", "datetime_trunc"],
         "a date or time function",
-        "date(), localtime(), localdatetime() and datetime() with no argument give the time the \
-         query started, datetime().epochMillis its milliseconds since 1970, and X.truncate(unit, \
+        "CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP, LOCAL_TIME and LOCAL_TIMESTAMP (or date(), \
+         localtime(), localdatetime() and datetime() with no argument) give the time the query \
+         started, datetime().epochMillis its milliseconds since 1970, and X.truncate(unit, \
          value) truncates, for example date.truncate('month', date('2020-01-05'))",
     ),
     not_yet_function(
@@ -993,6 +1024,71 @@ pub(crate) const NOT_YET_FUNCTIONS: &[UnsupportedFunction] = &[
         "collect the values with collect_list(x) and compute it after gql()",
     ),
 ];
+
+/// The constructor a bare clock word stands for (ISO GQL `CURRENT_DATE`, `CURRENT_TIME`,
+/// `CURRENT_TIMESTAMP`, `LOCAL_TIME`, `LOCAL_TIMESTAMP`; temporal v2): the time the query
+/// started, like the constructor with no argument. Matched ASCII case-insensitively.
+fn temporal_clock(word: &str) -> Option<&'static str> {
+    const CLOCKS: &[(&str, &str)] = &[
+        ("current_date", "date"),
+        ("current_time", "zoned_time"),
+        ("current_timestamp", "zoned_datetime"),
+        ("local_time", "local_time"),
+        ("local_timestamp", "local_datetime"),
+    ];
+    CLOCKS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(word))
+        .map(|(_, function)| *function)
+}
+
+/// The type a temporal literal's words name ([`temporal_literal_word`]).
+#[derive(Debug, Clone, Copy)]
+enum LiteralWord {
+    /// One constructor whatever the text (`DATE`, `DURATION`, `LOCAL TIME`, ...).
+    Fixed(&'static str),
+    /// `TIME`: zoned with an offset in the text, local without.
+    Time,
+    /// `DATETIME` / `TIMESTAMP`: zoned with an offset or a zone in the text, local without.
+    DateTime,
+    /// `ZONED TIME` / `ZONED DATETIME` / `ZONED TIMESTAMP`: the text must hold an offset or a
+    /// zone (checked by reading it as the local kind).
+    Zoned(&'static str, TemporalKind),
+}
+
+/// The literal type of one or two words before a string (`DATE`, `ZONED TIME`, ...), matched
+/// ASCII case-insensitively; `None` for any other words.
+fn temporal_literal_word(first: &str, second: Option<&str>) -> Option<LiteralWord> {
+    let is = |word: &str, name: &str| word.eq_ignore_ascii_case(name);
+    let date_time = |word: &str| is(word, "datetime") || is(word, "timestamp");
+    match second {
+        None if is(first, "date") => Some(LiteralWord::Fixed("date")),
+        None if is(first, "duration") => Some(LiteralWord::Fixed("duration")),
+        None if is(first, "time") => Some(LiteralWord::Time),
+        None if date_time(first) => Some(LiteralWord::DateTime),
+        Some(second) if is(first, "local") && is(second, "time") => {
+            Some(LiteralWord::Fixed("local_time"))
+        }
+        Some(second) if is(first, "local") && date_time(second) => {
+            Some(LiteralWord::Fixed("local_datetime"))
+        }
+        Some(second) if is(first, "zoned") && is(second, "time") => {
+            Some(LiteralWord::Zoned("zoned_time", TemporalKind::Time))
+        }
+        Some(second) if is(first, "zoned") && date_time(second) => Some(LiteralWord::Zoned(
+            "zoned_datetime",
+            TemporalKind::LocalDateTime,
+        )),
+        _ => None,
+    }
+}
+
+/// Whether a literal's text holds an offset or a zone: it does not read as the local `kind`
+/// (`Time` or `LocalDateTime`), whose reader refuses exactly that. A text that reads as
+/// neither goes to the zoned constructor, whose error then names the text (22007).
+fn has_zone(kind: TemporalKind, text: &str) -> bool {
+    parse_extended(kind, text).is_err()
+}
 
 /// Cypher's list functions that bind a variable inside the call (stage 2d, D23): the predicate,
 /// or `None` for `reduce`; `None` outside them. Matched ASCII case-insensitively. They are no
@@ -5015,8 +5111,108 @@ impl<'a> Parser<'a> {
             {
                 self.function_call()
             }
+            TokenKind::Ident if self.temporal_literal_ahead() => self.temporal_literal(),
             _ => self.atom().map(|atom| (atom, 1)),
         }
+    }
+
+    /// Whether a temporal literal (`DATE '..'`, `TIME '..'`, `ZONED TIME '..'`, ...) or a bare
+    /// clock (`CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`,
+    /// `LOCAL_TIMESTAMP`) starts at the current plain identifier (temporal v2, module docs).
+    fn temporal_literal_ahead(&self) -> bool {
+        let first = self.peek().text;
+        if temporal_clock(first).is_some() {
+            return true;
+        }
+        let second = self.nth(1);
+        if temporal_literal_word(first, None).is_some() {
+            return matches!(second.kind, TokenKind::Str(_));
+        }
+        second.kind == TokenKind::Ident
+            && temporal_literal_word(first, Some(second.text)).is_some()
+            && matches!(self.nth(2).kind, TokenKind::Str(_))
+    }
+
+    /// A temporal literal or a bare clock, at its first word ([`temporal_literal_ahead`]
+    /// holds): the call of the constructor it stands for, `DATE '2024-01-05'` as
+    /// `date('2024-01-05')`, `CURRENT_TIME` as `zoned_time()`. `TIME '..'` and
+    /// `DATETIME '..'` / `TIMESTAMP '..'` are the zoned type when the text has an offset or a
+    /// zone, the local one otherwise (ISO GQL); `ZONED X '..'` needs an offset or a zone and
+    /// `LOCAL X '..'` refuses one (its constructor's error).
+    ///
+    /// [`temporal_literal_ahead`]: Parser::temporal_literal_ahead
+    #[inline(never)]
+    fn temporal_literal(&mut self) -> PResult<(Expr, usize)> {
+        let first = self.advance();
+        if let Some(function) = temporal_clock(first.text) {
+            let call = ExprKind::FunctionCall {
+                name: Identifier {
+                    name: function.to_string(),
+                    span: first.span,
+                },
+                distinct: false,
+                args: CallArgs::Exprs(Vec::new()),
+            };
+            return Ok((
+                Expr {
+                    kind: call,
+                    span: first.span,
+                },
+                1,
+            ));
+        }
+        let qualifier = match self.peek().kind {
+            TokenKind::Ident => Some(self.advance().text),
+            _ => None,
+        };
+        let text = self.advance();
+        let span = first.span.to(text.span);
+        let TokenKind::Str(value) = &text.kind else {
+            return Err(self.syntax(span, "a temporal literal needs a string literal"));
+        };
+        let Some(word) = temporal_literal_word(first.text, qualifier) else {
+            return Err(self.syntax(span, "not a temporal literal"));
+        };
+        let function = match word {
+            LiteralWord::Fixed(function) => function,
+            LiteralWord::Time if has_zone(TemporalKind::Time, value) => "zoned_time",
+            LiteralWord::Time => "local_time",
+            LiteralWord::DateTime if has_zone(TemporalKind::LocalDateTime, value) => {
+                "zoned_datetime"
+            }
+            LiteralWord::DateTime => "local_datetime",
+            LiteralWord::Zoned(function, kind) => {
+                if !has_zone(kind, value) {
+                    let written = match qualifier {
+                        Some(second) => format!("{} {}", first.text, second),
+                        None => first.text.to_string(),
+                    };
+                    return Err(self.syntax(
+                        span,
+                        format!(
+                            "a {} literal needs a UTC offset or a time zone in its text, as \
+                             in '10:00:00+01:00'",
+                            written.to_ascii_uppercase()
+                        ),
+                    ));
+                }
+                function
+            }
+        };
+        let literal = Expr {
+            kind: ExprKind::Literal(Literal::String(value.clone())),
+            span: text.span,
+        };
+        let call = ExprKind::FunctionCall {
+            name: Identifier {
+                name: function.to_string(),
+                span: first.span,
+            },
+            distinct: false,
+            args: CallArgs::Exprs(vec![literal]),
+        };
+        let height = self.height(1, span)?;
+        Ok((Expr { kind: call, span }, height))
     }
 
     /// A literal, parameter or variable (never recursive).

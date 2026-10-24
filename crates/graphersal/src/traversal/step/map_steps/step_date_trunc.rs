@@ -48,7 +48,7 @@ macro_rules! date_trunc_builders {
         }
 
         /// `date_trunc(DT, zone)`: truncates a `datetime` on its wall clock in `zone`; the
-        /// result carries the zone's offset.
+        /// result carries the zone's offset and, for an IANA zone, its name.
         pub fn date_trunc_in(self, unit: DT, zone: &str) -> Self {
             self.push_step(step(unit, Some(zone)))
         }

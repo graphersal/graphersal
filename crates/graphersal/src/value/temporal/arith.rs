@@ -12,8 +12,9 @@
 //!   offset ("compatible" disambiguation, `zone.rs`).
 //! - A `datetime` with a zone name computes in that zone when no zone argument is given, and
 //!   the result keeps the name (`2024-03-30T12:00+01:00[Europe/Berlin]` plus one day is
-//!   `2024-03-31T12:00+02:00[Europe/Berlin]`); with a zone argument the argument wins and the
-//!   result has no name, as for any `datetime`.
+//!   `2024-03-31T12:00+02:00[Europe/Berlin]`); with a zone argument the argument wins: a named
+//!   zone (`Europe/Berlin`) gives a result carrying that name, a fixed offset (`+02:00`) one
+//!   without a name.
 //! - An `offsettime` works like a `time` on its local time of day and keeps its offset; its
 //!   differences use the UTC time of day (`java.time` `OffsetTime.until`).
 //!
@@ -47,11 +48,11 @@ fn no_zone(kind: TemporalKind, zone: Option<&Zone>) -> TemporalResult<()> {
 }
 
 /// The zone a `datetime` computes in (the argument, else the value's own zone name, else none:
-/// its fixed offset) and the zone name the result keeps (the value's, only without an
-/// argument).
+/// its fixed offset) and the zone name the result keeps (the argument's when it is an IANA
+/// zone, none for a fixed-offset argument, else the value's own).
 fn zone_of(value: DateTime, zone: Option<&Zone>) -> TemporalResult<(Option<Zone>, Option<ZoneId>)> {
     match zone {
-        Some(zone) => Ok((Some(zone.clone()), None)),
+        Some(zone) => Ok((Some(zone.clone()), zone.id())),
         None => Ok((value.zone_rules()?, value.zone_id())),
     }
 }

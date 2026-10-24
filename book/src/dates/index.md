@@ -30,15 +30,19 @@ g.inject(datetime("2023-08-02T09:30Z")).is(P.typeOf(GType.DATETIME)).count().nex
   of a `datetime`, `date_diff()`) round down to milliseconds. Python's `datetime` holds
   microseconds: a value with a part below them comes back as a `pandas.Timestamp` /
   `pandas.Timedelta` ([From Python](python.md)). The store format, GraphSON, GraphML and the
-  serialized change set keep every nanosecond ([Storage and Exchange](storage.md)).
+  serialized change set keep every nanosecond ([Storage and Exchange](storage.md)). The clock
+  behind `now()` has the digits the platform gives (nanoseconds on Linux, microseconds on
+  macOS, milliseconds in the browser: [Clock precision](now_and_today.md#clock-precision)).
 - **Range:** the years -9999 to 9999 in the proleptic Gregorian calendar (`date("-0044-03-15")`
   is year 44 BC counted astronomically, year 0 = 1 BC). A value outside the range, or a result
   that would leave it, is an error, never a wrapped value.
 - **Offsets:** a `datetime` keeps its offset (±18:00, whole seconds) and shows it, unlike
   PostgreSQL's `timestamptz`, which keeps only the instant. A `datetime` written with an IANA
   zone name keeps the name too (`2024-03-31T12:00:00+02:00[Europe/Berlin]`) and follows the
-  zone's daylight saving rules in its calendar arithmetic; operations can also take a zone
-  ([Time Zones](time_zones.md)). An `offsettime` keeps its offset.
+  zone's daylight saving rules in its calendar arithmetic; a step given an IANA zone
+  (`at_zone("Europe/Berlin")`) returns a value carrying that name, one given a fixed offset
+  (`at_zone("+02:00")`) a value with the offset only ([Time Zones](time_zones.md)). An
+  `offsettime` keeps its offset.
 - **A `duration` is not normalized:** `P1M`, `P30D` and `PT720H` are three different values. A
   month has no fixed length and a day is not always 24 hours in a time zone, so the three fields
   stay apart, as in PostgreSQL's `interval`.

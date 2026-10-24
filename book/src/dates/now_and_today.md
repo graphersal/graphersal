@@ -53,7 +53,7 @@ playground.
 
 ## Clock precision
 
-`now()`, `today()`, the GQL clocks (`datetime()`, `date()`, `X.statement()`, ...) and the time a
+`now()`, `today()`, the GQL clocks (`datetime()`, `date()`, `CURRENT_TIMESTAMP`, `X.statement()`, ...) and the time a
 schema's `defaultFunction: "now"` stores all come from the system clock, taken once (at the
 start of the evaluation, or of the outermost open unit). The time is kept in nanoseconds, with
 the digits the platform clock gives and never invented ones (the digits below are zero):

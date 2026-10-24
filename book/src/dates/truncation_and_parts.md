@@ -10,7 +10,7 @@ clock of a zone given as the last argument ([Time Zones](time_zones.md)).
 
 The fields below the unit become their first value: the start of the hour, the day, the month.
 A truncated `datetime` keeps its offset (or, with a zone, takes the zone's offset at the new
-instant).
+instant, and the zone's name when it is an IANA zone).
 
 ```rhai,graph=empty
 g.inject(datetime("2023-08-17T15:47:12.5+02:00")).date_trunc(DT.hour).next()   // datetime("2023-08-17T15:00:00+02:00")

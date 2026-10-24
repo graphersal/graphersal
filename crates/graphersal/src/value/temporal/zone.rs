@@ -3,8 +3,9 @@
 //!
 //! An operation that takes a zone argument (`atZone("Europe/Berlin")`,
 //! `dateAdd(DT.day, 1, "Europe/Berlin")`) gives a [`DateTime`] carrying the zone's offset at its
-//! instant, without the name. A `datetime` written with a zone name (`[Europe/Berlin]`, the GQL
-//! `timezone` field) keeps the name as a [`ZoneId`]: a two-byte index into the table of the
+//! instant and, for an IANA zone, the zone's name (a fixed offset such as `+02:00` gives no
+//! name). A `datetime` written with a zone name (`[Europe/Berlin]`, the GQL `timezone` field)
+//! keeps the name too. The name is kept as a [`ZoneId`]: a two-byte index into the table of the
 //! bundled database's names ([`names`]), so a value stays plain integers. A wall-clock time the
 //! zone skips (a spring-forward gap) moves forward by the gap; one it repeats (a fall-back fold)
 //! takes the earlier offset, as PostgreSQL and `java.time` do ("compatible" disambiguation).

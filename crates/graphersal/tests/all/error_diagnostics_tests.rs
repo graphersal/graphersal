@@ -11757,6 +11757,26 @@ mod gql {
         ));
     }
 
+    /// A temporal literal whose text its type cannot read (temporal v2 stage 5) is the
+    /// constructor's 22007, and the advice names the literals beside the constructors (rule 6).
+    #[test]
+    fn gql_temporal_literal_errors_name_the_literals() {
+        let (err, report) =
+            gql_failure(|g| g.gql("RETURN LOCAL TIME '10:00+01:00' AS x").to_list());
+        assert_eq!(
+            kind_and_status(&err),
+            (GqlErrorKind::Data, "22007".to_string()),
+            "{report}"
+        );
+        assert!(
+            report.contains(
+                "the literals DATE '2015-07-21', TIME '21:40+01:00', TIMESTAMP \
+                 '2015-07-21T21:40' and DURATION 'P14D' read the same text"
+            ),
+            "{report}"
+        );
+    }
+
     /// The temporal constructors of stage 3g (3g.T4): text or a map that is no value of the
     /// type is 22007, a field out of its range 22008, each with advice naming the forms and
     /// ranges and runnable examples (rule 6).

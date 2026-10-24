@@ -181,10 +181,9 @@ pub fn to_tck<S: GraphStorage>(graph: &S, value: &ElementProperty) -> TckValue {
 ///
 /// - a date `YYYY-MM-DD` (a `-` before years below 1, a `+` above 9999);
 /// - a time `HH:MM`, then `:SS` only when the seconds or the fraction are not zero, then the
-///   fraction in groups of three digits (`.645`, `.645876`; nine with nanoseconds, which our
-///   values do not have);
-/// - a local date-time `<date>T<time>`, a date-time with its offset `Z` / `+HH:MM[:SS]` (a
-///   `datetime` keeps no zone name, so the `[Europe/Stockholm]` form is never written);
+///   fraction in groups of three digits (`.645`, `.645876`, `.645876123`);
+/// - a local date-time `<date>T<time>`, a date-time with its offset `Z` / `+HH:MM[:SS]`, then
+///   `[Europe/Stockholm]` when it keeps a zone name;
 /// - a duration `P[nY][nM][nD][T[nH][nM][n.fS]]` (Neo4j's `DurationValue`): years and months
 ///   from the months, the days as they are, hours / minutes / seconds from the time part
 ///   without folding into days (`PT8784H`); every component carries its own sign, the seconds

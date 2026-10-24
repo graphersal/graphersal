@@ -11,7 +11,8 @@ use crate::*;
 /// `atZoneSameInstant`/`atZone`): a `datetime` keeps its instant and takes the zone's offset at
 /// it; a `localdatetime` is read as a wall clock in the zone and becomes the `datetime` of that
 /// instant (a time the zone skips moves forward by the gap, a repeated one takes the earlier
-/// offset). `zone` is an IANA name (`"Europe/Berlin"`) or a UTC offset (`"+02:00"`).
+/// offset). `zone` is an IANA name (`"Europe/Berlin"`, kept in the result:
+/// `+02:00[Europe/Berlin]`) or a UTC offset (`"+02:00"`, the offset only).
 #[derive(Clone)]
 struct StepAtZone {
     zone: ZoneArg,
@@ -34,8 +35,9 @@ fn step<'g, S: GraphStorage + 'g>(zone: &str) -> GraphStep<'g, S> {
 
 impl<'g, S: GraphStorage + 'g> GraphTraversalSource<'g, S> {
     /// `at_zone(zone)`: a `datetime` at the same instant with the zone's offset, or a
-    /// `localdatetime` read as a wall clock in the zone. An unknown zone fails before
-    /// execution. Book part "Dates and Times".
+    /// `localdatetime` read as a wall clock in the zone; an IANA zone's name is kept in the
+    /// result, a fixed offset gives none. An unknown zone fails before execution. Book part
+    /// "Dates and Times".
     pub fn at_zone(self, zone: &str) -> Self {
         self.push_step(step(zone))
     }
@@ -65,8 +67,8 @@ impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepAtZone {
         let value = incoming_temporal(context, &source.value, "at_zone", EXPECTED)?;
         let zone = self.zone.get("at_zone")?;
         let result = match value {
-            Temporal::DateTime(v) => zone.at(v),
-            Temporal::LocalDateTime(v) => zone.resolve(v),
+            Temporal::DateTime(v) => zone.at_named(v),
+            Temporal::LocalDateTime(v) => zone.resolve_named(v),
             other => {
                 return Err(input_error(
                     "at_zone",
