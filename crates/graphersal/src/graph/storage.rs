@@ -1298,12 +1298,12 @@ impl GraphStorage for TraversalGraph {
 
     #[inline]
     fn get_vertex_by_id(&self, id: &str) -> Option<VertexHandle> {
-        self.index.get_node(id)
+        self.index.get_node(&self.graph, id)
     }
 
     #[inline]
     fn get_edge_by_id(&self, id: &str) -> Option<EdgeHandle> {
-        self.index.get_edge(id)
+        self.index.get_edge(&self.graph, id)
     }
 
     #[inline]
@@ -1440,7 +1440,7 @@ impl GraphStorage for TraversalGraph {
             None => self.next_value_node_sequence()?,
         };
 
-        if self.index.contains_node(&id) {
+        if self.index.contains_node(&self.graph, &id) {
             self.node_sequence = sequence;
             Err(GraphError::VertexIdUniqueConstraint { id: id.to_string() })
         } else {
@@ -1681,7 +1681,7 @@ impl GraphStorage for TraversalGraph {
 
         let edge_id = match id {
             Some(edge_id_str) => {
-                if self.index.get_edge(&edge_id_str).is_some() {
+                if self.index.get_edge(&self.graph, &edge_id_str).is_some() {
                     return Err(GraphError::EdgeIdUniqueConstraint {
                         id: edge_id_str.to_string(),
                     });

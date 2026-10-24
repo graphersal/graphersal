@@ -527,13 +527,13 @@ impl TraversalGraph {
     /// checks (it restores a state the schema already accepted).
     fn undo_entry(&mut self, entry: UndoEntry) {
         match entry {
-            UndoEntry::AddedVertex { id } => match self.index.get_node(&id) {
+            UndoEntry::AddedVertex { id } => match self.index.get_node(&self.graph, &id) {
                 Some(handle) => {
                     self.remove_vertex_raw(handle, false);
                 }
                 None => tracing::error!(%id, "undo: added vertex not found"),
             },
-            UndoEntry::AddedEdge { id } => match self.index.get_edge(&id) {
+            UndoEntry::AddedEdge { id } => match self.index.get_edge(&self.graph, &id) {
                 Some(handle) => {
                     self.remove_edge_raw(handle, false);
                 }
@@ -556,18 +556,18 @@ impl TraversalGraph {
             }
             UndoEntry::DroppedEdge(edge) => self.restore_edge(*edge),
             UndoEntry::VertexProperty { id, key, old } => {
-                if let Some(handle) = self.index.get_node(&id) {
+                if let Some(handle) = self.index.get_node(&self.graph, &id) {
                     self.pindex_vertex(handle, false, Some(&key));
                 }
                 let vertex = self
                     .index
-                    .get_node(&id)
+                    .get_node(&self.graph, &id)
                     .and_then(|handle| self.vertex_weight_mut(handle));
                 match vertex {
                     Some(vertex) => restore_property(&mut vertex.2, &key, old),
                     None => tracing::error!(%id, "undo: vertex of a property write not found"),
                 }
-                if let Some(handle) = self.index.get_node(&id) {
+                if let Some(handle) = self.index.get_node(&self.graph, &id) {
                     self.compression_normalize_vertex_key(handle, &key);
                     self.pindex_vertex(handle, true, Some(&key));
                 }
@@ -578,12 +578,12 @@ impl TraversalGraph {
                 old,
                 map_was_none,
             } => {
-                if let Some(handle) = self.index.get_edge(&id) {
+                if let Some(handle) = self.index.get_edge(&self.graph, &id) {
                     self.pindex_edge(handle, false, Some(&key));
                 }
                 let edge = self
                     .index
-                    .get_edge(&id)
+                    .get_edge(&self.graph, &id)
                     .and_then(|handle| self.edge_weight_mut(handle));
                 match edge {
                     Some(edge) => {
@@ -599,13 +599,13 @@ impl TraversalGraph {
                     }
                     None => tracing::error!(%id, "undo: edge of a property write not found"),
                 }
-                if let Some(handle) = self.index.get_edge(&id) {
+                if let Some(handle) = self.index.get_edge(&self.graph, &id) {
                     self.compression_normalize_edge_key(handle, &key);
                     self.pindex_edge(handle, true, Some(&key));
                 }
             }
             UndoEntry::VertexLabels { id, old } => {
-                let Some(handle) = self.index.get_node(&id) else {
+                let Some(handle) = self.index.get_node(&self.graph, &id) else {
                     tracing::error!(%id, "undo: vertex of a label change not found");
                     return;
                 };
@@ -626,7 +626,7 @@ impl TraversalGraph {
                 self.pindex_vertex(handle, true, None);
             }
             UndoEntry::EdgeLabel { id, old } => {
-                let Some(handle) = self.index.get_edge(&id) else {
+                let Some(handle) = self.index.get_edge(&self.graph, &id) else {
                     tracing::error!(%id, "undo: edge of a label change not found");
                     return;
                 };
@@ -779,7 +779,10 @@ impl TraversalGraph {
             source,
             target,
         } = edge;
-        match (self.index.get_node(&source), self.index.get_node(&target)) {
+        match (
+            self.index.get_node(&self.graph, &source),
+            self.index.get_node(&self.graph, &target),
+        ) {
             (Some(from), Some(to)) => {
                 let handle = self.insert_edge_raw(id, label, properties, from, to);
                 self.compression_normalize_edge(handle);
@@ -799,16 +802,18 @@ impl TraversalGraph {
         // The slot petgraph fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
         let index = self.graph.add_node((
-            id.clone(),
+            id,
             labels,
             properties,
             crate::graph::handle::FIRST_GENERATION,
         ));
         let generation = self.node_generations.current(index.index());
         let handle = VertexHandle::new(index, generation);
-        self.index.insert_node(id, handle);
         if let Some(vertex) = self.graph.node_weight_mut(index) {
             vertex.3 = generation;
+            // Indexed after the generation patch, so the entry's handle matches its slot (the
+            // id index keeps no copy of the id, see `GraphIndex`).
+            self.index.insert_node(&vertex.0, handle);
             self.statistics.vertex_added(&vertex.1);
             for label in &vertex.1 {
                 self.index.insert_node_label(label.clone(), handle);
@@ -836,16 +841,16 @@ impl TraversalGraph {
         let edge_index = self.graph.add_edge(
             from.index(),
             to.index(),
-            (id.clone(), label.clone(), properties, generations),
+            (id, label.clone(), properties, generations),
         );
         // See `insert_vertex_raw`: the slot is known only now.
         generations.own = self.edge_generations.current(edge_index.index());
+        let handle = EdgeHandle::new(edge_index, generations.own);
         if let Some(edge) = self.graph.edge_weight_mut(edge_index) {
             edge.3 = generations;
+            self.index.insert_edge(&edge.0, handle);
         }
-        let handle = EdgeHandle::new(edge_index, generations.own);
         self.statistics.edge_added(label.as_deref());
-        self.index.insert_edge(id, handle);
         if let Some(label) = label {
             self.index.insert_edge_label(label, handle);
         }
@@ -881,7 +886,7 @@ impl TraversalGraph {
         if let Some(label) = &label {
             self.index.remove_edge_label(label, edge);
         }
-        self.index.remove_edge(&id);
+        self.index.remove_edge(&id, edge);
         self.edge_generations.bump(index.index());
         let (source, target) = endpoints?;
         Some(EdgeImage {
@@ -926,7 +931,7 @@ impl TraversalGraph {
         self.pindex_vertex(node, false, None);
         let (id, labels, properties, _) = self.graph.remove_node(index)?;
         self.statistics.vertex_removed(&labels);
-        self.index.remove_node(&id);
+        self.index.remove_node(&id, node);
         for label in &labels {
             self.index.remove_node_label(label, node);
         }

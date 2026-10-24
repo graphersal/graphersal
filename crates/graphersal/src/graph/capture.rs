@@ -71,7 +71,7 @@ impl<'g> Shadow<'g> {
         self.vertices
             .entry(id.clone())
             .or_insert_with(|| {
-                let vertex = graph.vertex_weight(graph.index.get_node(id)?)?;
+                let vertex = graph.vertex_weight(graph.index.get_node(&graph.graph, id)?)?;
                 Some(ShadowVertex {
                     labels: vertex.1.clone(),
                     properties: vertex.2.clone(),
@@ -85,7 +85,7 @@ impl<'g> Shadow<'g> {
         self.edges
             .entry(id.clone())
             .or_insert_with(|| {
-                let index = graph.resolve_edge(graph.index.get_edge(id)?)?;
+                let index = graph.resolve_edge(graph.index.get_edge(&graph.graph, id)?)?;
                 let (from, to) = graph.graph.edge_endpoints(index)?;
                 let edge = graph.graph.edge_weight(index)?;
                 Some(ShadowEdge {

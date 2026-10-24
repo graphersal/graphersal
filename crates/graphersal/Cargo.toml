@@ -22,6 +22,7 @@ petgraph = { workspace = true }
 compact_str = { workspace = true }
 indexmap = { workspace = true }
 fnv = { workspace = true }
+hashbrown = { workspace = true }
 rand = { workspace = true }
 floating-duration = { workspace = true }
 ordered-float = { workspace = true }

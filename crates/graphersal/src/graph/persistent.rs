@@ -185,7 +185,7 @@ impl PersistentStorage for TraversalGraph {
         labels: Vec<CompactString>,
         properties: PropertyMap,
     ) -> Result<Self::VertexId, GraphError> {
-        if self.index.get_node(&id).is_some() {
+        if self.index.get_node(&self.graph, &id).is_some() {
             return Err(GraphError::duplicate_vertex_id(id.as_str()));
         }
         Ok(self.insert_vertex_raw(id, labels, properties))
@@ -199,13 +199,13 @@ impl PersistentStorage for TraversalGraph {
         to_id: &str,
         properties: PropertyMap,
     ) -> Result<Self::EdgeId, GraphError> {
-        if self.index.get_edge(&id).is_some() {
+        if self.index.get_edge(&self.graph, &id).is_some() {
             return Err(GraphError::duplicate_edge_id(id.as_str()));
         }
         let endpoint = |graph: &Self, id: &str| {
             graph
                 .index
-                .get_node(id)
+                .get_node(&graph.graph, id)
                 .ok_or_else(|| GraphError::VertexNotFound { id: id.to_string() })
         };
         let from = endpoint(self, from_id)?;

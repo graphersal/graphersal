@@ -54,6 +54,8 @@ petgraph = { version = "0.6.5", features = ["serde-1"] }
 compact_str = { version = "0.10", features = ["serde"] }
 indexmap = { version = "2.5", features = ["serde"] }
 fnv = "1.0"
+# `HashTable` for the id index (entries without keys); already in the tree via indexmap.
+hashbrown = { version = "0.17", default-features = false }
 rand = "0.8"
 floating-duration = "0.1"
 ordered-float = { version = "4.2", features = ["serde"] }

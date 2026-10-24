@@ -713,8 +713,8 @@ fn context(base: &Base, touched: &Touched, depth: usize) -> Result<TraversalGrap
     }
     for record in edges {
         let (Some(from), Some(to)) = (
-            delta.index.get_node(&record.out_id),
-            delta.index.get_node(&record.in_id),
+            delta.index.get_node(&delta.graph, &record.out_id),
+            delta.index.get_node(&delta.graph, &record.in_id),
         ) else {
             return Err(PersistError::corrupt(
                 base.path.display(),
@@ -827,7 +827,7 @@ fn put_delta(
     if kind == KIND_VERTEX {
         if let Some(vertex) = delta
             .index
-            .get_node(id)
+            .get_node(&delta.graph, id)
             .and_then(|handle| delta.vertex_weight(handle))
         {
             totals.out_memory += loaded_vertex_bytes(&vertex.0, &vertex.1, &vertex.2);
@@ -835,7 +835,7 @@ fn put_delta(
         }
         return Ok(());
     }
-    let Some(handle) = delta.index.get_edge(id) else {
+    let Some(handle) = delta.index.get_edge(&delta.graph, id) else {
         return Ok(());
     };
     let (Some(edge), Some((from, to))) = (

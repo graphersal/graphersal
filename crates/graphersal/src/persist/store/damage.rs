@@ -1107,7 +1107,7 @@ fn rebuild_range(
         let mut placeholders: BTreeSet<CompactString> = BTreeSet::new();
         let ensure =
             |graph: &mut TraversalGraph, placeholders: &mut BTreeSet<CompactString>, id: &str| {
-                if graph.index.get_node(id).is_none() {
+                if graph.index.get_node(&graph.graph, id).is_none() {
                     graph.insert_vertex_raw(id.into(), Vec::new(), Default::default());
                     placeholders.insert(id.into());
                 }
@@ -1136,8 +1136,8 @@ fn rebuild_range(
             ensure(&mut graph, &mut placeholders, &e.out_id);
             ensure(&mut graph, &mut placeholders, &e.in_id);
             let (Some(from), Some(to)) = (
-                graph.index.get_node(&e.out_id),
-                graph.index.get_node(&e.in_id),
+                graph.index.get_node(&graph.graph, &e.out_id),
+                graph.index.get_node(&graph.graph, &e.in_id),
             ) else {
                 continue;
             };
@@ -1437,7 +1437,7 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
                 |c| c.kind == kind,
                 max_depth,
                 |v| {
-                    if graph.index.get_node(&v.id).is_none() {
+                    if graph.index.get_node(&graph.graph, &v.id).is_none() {
                         graph.insert_vertex_raw(v.id, v.labels, v.properties);
                     }
                 },
@@ -1479,7 +1479,7 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
                             Rebuilt::Vertices(vertices) => {
                                 let count = vertices.len();
                                 for v in vertices {
-                                    if graph.index.get_node(&v.id).is_none() {
+                                    if graph.index.get_node(&graph.graph, &v.id).is_none() {
                                         graph.insert_vertex_raw(v.id, v.labels, v.properties);
                                     }
                                 }
@@ -1506,12 +1506,12 @@ pub(super) fn salvage(dir: &DirPath, read: &ReadOptions) -> Result<Salvage, Pers
                 }
             }
             for e in edges {
-                if graph.index.get_edge(&e.id).is_some() {
+                if graph.index.get_edge(&graph.graph, &e.id).is_some() {
                     continue;
                 }
                 match (
-                    graph.index.get_node(&e.out_id),
-                    graph.index.get_node(&e.in_id),
+                    graph.index.get_node(&graph.graph, &e.out_id),
+                    graph.index.get_node(&graph.graph, &e.in_id),
                 ) {
                     (Some(from), Some(to)) => {
                         graph.insert_edge_raw(e.id, e.label, Some(e.properties), from, to);

@@ -49,8 +49,11 @@ pub struct MemoryStats {
     /// built here).
     pub structure_bytes: u64,
     /// The label index (`node_labels`/`edge_labels`) and the ID index (`nodes`/`edges`) in
-    /// `GraphIndex`, via each collection's `.capacity()` — including every label bucket set,
-    /// not just the outer maps. Each map counts both of its allocations: the entries (cached hash,
+    /// `GraphIndex`. The ID index stores no ids (they live once, in the element): each of its two
+    /// hash tables counts its exact allocation, per bucket a handle, a cached 32-bit id hash and
+    /// one control byte (13 bytes; buckets a power of two at most 7/8 full). The label index is
+    /// sized via each collection's `.capacity()`, including every label bucket set, not just the
+    /// outer maps; each of its maps counts both of its allocations: the entries (cached hash,
     /// key, value) and the hash index (one `usize` slot and one control byte per bucket).
     pub index_bytes: u64,
     /// Estimated heap footprint of vertex/edge properties: each element's property map's own
@@ -254,7 +257,7 @@ pub(crate) fn loaded_vertex_bytes(
     use std::mem::size_of;
     let slot = size_of::<petgraph::graph::Node<Option<super::VertexData>>>() as u64;
     let mut bytes = slot
-        + index_entry_bytes::<CompactString, super::VertexHandle>()
+        + super::index::id_entry_bytes::<super::VertexHandle>()
         + compact_string_heap_bytes(id);
     // The label `Vec` slot and the entry in the label's bucket set.
     bytes += labels.len() as u64
@@ -281,7 +284,7 @@ pub(crate) fn loaded_edge_bytes(
             0
         }
     };
-    let mut bytes = slot + index_entry_bytes::<CompactString, super::EdgeHandle>() + heap(id);
+    let mut bytes = slot + super::index::id_entry_bytes::<super::EdgeHandle>() + heap(id);
     if let Some(label) = label {
         bytes += heap(label) + index_entry_bytes::<super::EdgeHandle, ()>();
     }

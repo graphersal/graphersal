@@ -669,7 +669,7 @@ impl TraversalGraph {
                         sequence: crate::error::VERTEX_ID_SEQUENCE,
                     })?;
             let candidate = CompactString::from(self.node_sequence.to_string());
-            if !self.index.contains_node(&candidate) {
+            if !self.index.contains_node(&self.graph, &candidate) {
                 return Ok(candidate);
             }
         }
@@ -686,7 +686,7 @@ impl TraversalGraph {
                         sequence: crate::error::EDGE_ID_SEQUENCE,
                     })?;
             let candidate = CompactString::from(self.edge_sequence.to_string());
-            if self.index.get_edge(&candidate).is_none() {
+            if self.index.get_edge(&self.graph, &candidate).is_none() {
                 return Ok(candidate);
             }
         }
@@ -712,7 +712,7 @@ impl TraversalGraph {
         &'a self,
         id: &str,
     ) -> Option<(VertexHandle, &'a VertexData)> {
-        if let Some(handle) = self.index.get_node(id) {
+        if let Some(handle) = self.index.get_node(&self.graph, id) {
             let vertex = self.vertex_weight(handle);
             vertex.map(|v| (handle, v))
         } else {
@@ -723,7 +723,7 @@ impl TraversalGraph {
     #[cfg(test)]
     #[inline]
     pub(crate) fn get_edge_by_id<'a>(&'a self, id: &str) -> Option<(EdgeHandle, &'a EdgeData)> {
-        if let Some(handle) = self.index.get_edge(id) {
+        if let Some(handle) = self.index.get_edge(&self.graph, id) {
             let edge = self.edge_weight(handle);
             edge.map(|e| (handle, e))
         } else {
@@ -825,18 +825,17 @@ impl TraversalGraph {
         to_id: &str,
         properties: PropertyMap,
     ) -> Result<EdgeHandle, GraphError> {
-        let from_node = self
-            .index
-            .get_node(from_id)
-            .ok_or_else(|| GraphError::VertexNotFound {
+        let from_node = self.index.get_node(&self.graph, from_id).ok_or_else(|| {
+            GraphError::VertexNotFound {
                 id: from_id.to_string(),
-            })?;
-        let to_node = self
-            .index
-            .get_node(to_id)
-            .ok_or_else(|| GraphError::VertexNotFound {
-                id: to_id.to_string(),
-            })?;
+            }
+        })?;
+        let to_node =
+            self.index
+                .get_node(&self.graph, to_id)
+                .ok_or_else(|| GraphError::VertexNotFound {
+                    id: to_id.to_string(),
+                })?;
         self.add_edge(id, label, from_node, to_node, properties)
     }
 }
@@ -857,7 +856,7 @@ mod tests {
                     PropertyMap::default(),
                 )
                 .expect("should add vertex");
-            assert_eq!(tg.index.get_node(&id), Some(idx));
+            assert_eq!(tg.index.get_node(&tg.graph, &id), Some(idx));
         }
 
         assert_eq!(tg.vertex_count(), 1000);
@@ -884,12 +883,12 @@ mod tests {
             .expect("should add vertex");
 
         assert!(tg.get_vertex_by_id("v_test").is_some());
-        assert!(tg.index.contains_node("v_test"));
+        assert!(tg.index.contains_node(&tg.graph, "v_test"));
 
         tg.drop_vertex(idx).expect("should drop vertex");
 
         assert!(tg.get_vertex_by_id("v_test").is_none());
-        assert!(!tg.index.contains_node("v_test"));
+        assert!(!tg.index.contains_node(&tg.graph, "v_test"));
 
         // Re-adding same ID must succeed after deletion
         let readd_idx = tg
@@ -917,11 +916,11 @@ mod tests {
             .expect("should add edge");
         let e_id = tg
             .index
-            .get_edge_id_by_index(e_idx)
+            .get_edge_id_by_index(&tg.graph, e_idx)
             .expect("edge id exists")
             .to_string();
 
-        assert_eq!(tg.index.get_edge(&e_id), Some(e_idx));
+        assert_eq!(tg.index.get_edge(&tg.graph, &e_id), Some(e_idx));
 
         let (found_e_idx, e_weight) = tg.get_edge_by_id(&e_id).expect("should find edge");
         assert_eq!(found_e_idx, e_idx);
@@ -930,7 +929,7 @@ mod tests {
 
         tg.drop_edge(e_idx).expect("should drop edge");
         assert!(tg.get_edge_by_id(&e_id).is_none());
-        assert_eq!(tg.index.get_edge(&e_id), None);
+        assert_eq!(tg.index.get_edge(&tg.graph, &e_id), None);
     }
 
     #[test]
