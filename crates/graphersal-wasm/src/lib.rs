@@ -275,6 +275,28 @@ impl Playground {
             .unwrap_or_else(|_| "null".to_string())
     }
 
+    /// The graph to draw for a request (JSON `{maxNodes?, maxEdges?, degrees?, filter?}`,
+    /// graphersal-session `views::GraphViewRequest`): [`Self::graph_view`]'s columns with the
+    /// filter applied before the limits (`matchedNodes`/`matchedEdges`) and, with `degrees:
+    /// true`, `vertexInDegree`/`vertexOutDegree`. An invalid filter throws its message.
+    #[wasm_bindgen(js_name = graphViewWith)]
+    pub fn graph_view_with(&self, request: &str) -> Result<String, JsError> {
+        self.session
+            .graph_view(request)
+            .map(|v| to_text(&v))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The Rhai query selecting what a Graph panel filter (JSON text) shows, as JSON text of a
+    /// string (the "Open as query" link). An invalid filter throws its message.
+    #[wasm_bindgen(js_name = graphFilterQuery)]
+    pub fn graph_filter_query(&self, filter: &str) -> Result<String, JsError> {
+        self.session
+            .graph_filter_query(filter)
+            .map(|text| to_text(&Value::String(text)))
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// One element with its properties, for the inspector: `kind` `"vertex"` or `"edge"`.
     /// `null` when it does not exist (any more); an unknown kind throws.
     pub fn element(&self, kind: &str, id: &str) -> Result<String, JsError> {

@@ -300,6 +300,40 @@ fn graph_view_is_columnar_and_element_fetches_the_properties() {
     assert!(json(&p.element("edge", "99").unwrap()).is_null());
 }
 
+/// The Graph panel's filter and degree columns: `graphViewWith`, the neighbourhood's `filter`,
+/// `graphFilterQuery`, a bad filter throws.
+#[wasm_bindgen_test]
+fn graph_view_with_a_filter_and_degrees() {
+    let mut p = modern();
+    let request = r#"{"maxNodes": 3, "degrees": true,
+        "filter": {"vertices": {"person": [{"key": "age", "op": "gt", "value": 30}], "software": []}}}"#;
+    let view = json(&p.graph_view_with(request).unwrap());
+    assert_eq!(view["matchedNodes"], 4);
+    assert_eq!(view["vertexIds"].as_array().unwrap().len(), 3);
+    assert_eq!(view["vertexOutDegree"].as_array().unwrap().len(), 3);
+    let n = json(
+        &p.neighbourhood(r#"{"ids": ["1"], "filter": {"vertices": {"software": []}}}"#)
+            .unwrap(),
+    );
+    assert_eq!(n["vertexIds"], serde_json::json!(["3"]));
+    let filter = r#"{"vertices": {"person": [{"key": "age", "op": "gt", "value": 30}]}}"#;
+    let text = json(&p.graph_filter_query(filter).unwrap());
+    let text = text
+        .as_str()
+        .unwrap()
+        .replace(".to_list()", ".id().to_list()");
+    let r = json(&p.execute(&text, "{}").unwrap());
+    assert_eq!(
+        r["execution"]["results"][0]["vertices"],
+        serde_json::json!(["4", "6"])
+    );
+    assert!(
+        p.graph_view_with(r#"{"filter": {"vertices": {"person": [{"key": "a", "op": "near"}]}}}"#)
+            .is_err()
+    );
+    assert!(p.graph_filter_query("[1]").is_err());
+}
+
 /// The engine's force layout in the browser build: slices, positions as a Float32Array (a
 /// `Vec<f32>` here), the cache, cancellation.
 #[wasm_bindgen_test]

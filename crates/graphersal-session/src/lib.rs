@@ -48,6 +48,7 @@ pub mod compression;
 pub mod create;
 pub mod display;
 pub mod edit;
+pub mod filter;
 pub mod indexes;
 pub mod layout;
 pub mod process;

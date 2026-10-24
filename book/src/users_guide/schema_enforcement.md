@@ -157,7 +157,9 @@ explicit conversion step `as_date()` keeps TinkerPop's "no offset is UTC"). This
 the explicit declaration at work, like the `uuid` coercion, never a guess from content: an
 undeclared date-like string stays a `string`. A stored string does not conform to a temporal
 format (reads never coerce), and one temporal type never conforms to another (a `date` is not a
-`datetime`). JSON Schema's `format` is an annotation for other validators, which ignore a format
+`datetime`). A front end that compares user text with stored values (the playground's Graph
+panel filter) coerces the text first with `GraphSchema::coerce_value(kind, labels, key, value)`
+in Rust: the same coercion a write applies, without writing. JSON Schema's `format` is an annotation for other validators, which ignore a format
 they do not know, so a schema with `local-date-time` stays usable with them. The part
 [Dates and Times](../dates/index.md) describes the types themselves; its page
 [Dates in a Schema](../dates/schema.md) has examples.

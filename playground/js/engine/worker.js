@@ -21,7 +21,11 @@ const JSON_METHODS = {
   execute: (script, options) => playground.execute(script, JSON.stringify(options || {})),
   schema: () => playground.schema(),
   schemaViewOf: (json) => playground.schemaViewOf(json),
-  graphView: (maxNodes, maxEdges) => playground.graphView(maxNodes, maxEdges),
+  // `request` (`{maxNodes, maxEdges, degrees?, filter?}`) only with a filter or degrees.
+  graphView: (maxNodes, maxEdges, request) => (request
+    ? playground.graphViewWith(JSON.stringify(request))
+    : playground.graphView(maxNodes, maxEdges)),
+  graphFilterQuery: (filter) => playground.graphFilterQuery(JSON.stringify(filter || {})),
   element: (kind, id) => playground.element(kind, id),
   elementForEdit: (kind, id) => playground.elementForEdit(kind, id),
   updateElement: (request) => playground.updateElement(JSON.stringify(request || {})),

@@ -16,6 +16,12 @@
 export const INDEX_COLUMNS = Object.freeze(['vertexLabel', 'edgeSource', 'edgeTarget', 'edgeLabel']);
 
 /**
+ * Number columns a view carries only when asked (`degrees: true`): per vertex its incoming and
+ * outgoing edges in the whole graph. Packed like the index columns when present.
+ */
+export const DEGREE_COLUMNS = Object.freeze(['vertexInDegree', 'vertexOutDegree']);
+
+/**
  * Turns the index columns of `view` into Uint32Arrays, in place, and returns their buffers (the
  * worker's transfer list). Columns that already are typed arrays stay; `null` returns `[]`.
  * @param {Object|null} view
@@ -24,7 +30,7 @@ export const INDEX_COLUMNS = Object.freeze(['vertexLabel', 'edgeSource', 'edgeTa
 export function packGraphView(view) {
   if (!view) return [];
   const transfer = [];
-  for (const key of INDEX_COLUMNS) {
+  for (const key of [...INDEX_COLUMNS, ...DEGREE_COLUMNS]) {
     const column = view[key];
     if (Array.isArray(column)) {
       view[key] = Uint32Array.from(column);
@@ -65,8 +71,11 @@ export function sliceGraphView(view, maxNodes) {
     keep.forEach((j, k) => { out[k] = column[j]; });
     return out;
   };
+  const degrees = {};
+  for (const key of DEGREE_COLUMNS) if (view[key]) degrees[key] = view[key].slice(0, n);
   return {
     ...view,
+    ...degrees,
     vertexIds: view.vertexIds.slice(0, n),
     vertexLabel: view.vertexLabel.slice(0, n),
     vertexName: view.vertexName.slice(0, n),

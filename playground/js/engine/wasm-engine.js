@@ -485,8 +485,17 @@ export class WasmEngine extends Engine {
     if (this.restorePoint) this.restorePoint = { ...this.restorePoint, schema: json };
   }
 
-  async graphView(limits = {}) {
-    return this.call('graphView', limits.maxNodes ?? 500, limits.maxEdges ?? 1000);
+  async graphView(limits = {}, filter = null) {
+    const maxNodes = limits.maxNodes ?? 500;
+    const maxEdges = limits.maxEdges ?? 1000;
+    if (!filter && !limits.degrees) return this.call('graphView', maxNodes, maxEdges);
+    const request = { maxNodes, maxEdges, degrees: !!limits.degrees };
+    if (filter) request.filter = plain(filter);
+    return this.call('graphView', maxNodes, maxEdges, request);
+  }
+
+  async graphFilterQuery(filter) {
+    return this.call('graphFilterQuery', plain(filter));
   }
 
   async element(kind, id) {
@@ -515,8 +524,8 @@ export class WasmEngine extends Engine {
     return this.call('deleteElement', plain(request));
   }
 
-  async neighbourhood(request) {
-    return this.call('neighbourhood', request);
+  async neighbourhood(request, filter = null) {
+    return this.call('neighbourhood', filter ? { ...plain(request), filter: plain(filter) } : request);
   }
 
   async labelSample(request) {

@@ -848,6 +848,19 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             })?;
             value(view.map_err(|err| HttpError(500, err))?)
         }
+        // The Graph panel with a filter and/or degree columns
+        // (`graphersal_session::views::GraphViewRequest`); an invalid filter is a 400 naming
+        // the label, key and operator.
+        (Method::Post, "graph-view") => {
+            let body = text_body(request)?;
+            value(context.call_fallible(move |s| s.graph_view(&body))?)
+        }
+        // The Rhai query selecting what a filter shows: `{"query": "..."}`.
+        (Method::Post, "graph-filter-query") => {
+            let body = text_body(request)?;
+            let query = context.call_fallible(move |s| s.graph_filter_query(&body))?;
+            value(serde_json::json!({ "query": query }))
+        }
         (Method::Post, "neighbourhood") => {
             let body = text_body(request)?;
             value(context.call_fallible(move |s| s.neighbourhood(&body))?)

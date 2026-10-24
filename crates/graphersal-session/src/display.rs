@@ -512,6 +512,20 @@ pub struct CompactGraph {
     /// ([`SUBGRAPH_MAX_BYTES`]); absent when nothing stopped it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped_by: Option<&'static str>,
+    /// With a filter (`crate::filter`): the vertices that pass it, before the drawing limits
+    /// (for a neighbourhood: of the neighbourhood). Absent without a filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_nodes: Option<usize>,
+    /// With a filter: the edges that pass it (between visible vertices), before the limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_edges: Option<usize>,
+    /// Asked for (`degrees: true`): per vertex, its incoming edges in the WHOLE graph (not only
+    /// the drawn ones; a self-loop counts once in and once out). Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertex_in_degree: Option<Vec<u32>>,
+    /// Asked for: per vertex, its outgoing edges in the whole graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertex_out_degree: Option<Vec<u32>>,
 }
 
 impl CompactGraph {
@@ -561,6 +575,28 @@ impl CompactGraph {
         }
         view.labels = labels.names;
         view
+    }
+}
+
+impl CompactGraph {
+    /// Adds the `vertexInDegree` / `vertexOutDegree` columns: each vertex's edges in the whole
+    /// graph, counted from its adjacency like the inspector's `inDegree`/`outDegree` (a vertex
+    /// dropped since has 0).
+    pub fn add_degrees<S: GraphStorage>(&mut self, g: &S) {
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let (mut ins, mut outs) = (
+            Vec::with_capacity(self.vertex_ids.len()),
+            Vec::with_capacity(self.vertex_ids.len()),
+        );
+        for id in &self.vertex_ids {
+            let (i, o) = g
+                .get_vertex_by_id(id)
+                .map_or((0, 0), |v| (g.in_edges(v).count(), g.out_edges(v).count()));
+            ins.push(count(i));
+            outs.push(count(o));
+        }
+        self.vertex_in_degree = Some(ins);
+        self.vertex_out_degree = Some(outs);
     }
 }
 

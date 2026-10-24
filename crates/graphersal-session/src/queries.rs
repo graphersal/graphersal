@@ -138,7 +138,7 @@ fn in_folder(folder: Option<&str>, prefix: &str) -> bool {
 
 /// A Rhai string literal that parses back to `text` (quote, backslash and control characters
 /// escaped; nothing is cut).
-fn rhai_string(text: &str) -> String {
+pub(crate) fn rhai_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {

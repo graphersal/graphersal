@@ -92,6 +92,18 @@ pub trait SessionGraph: AnyGraph {
     /// [`crate::views::graph_view`] of the graph.
     fn graph_view(&self, max_nodes: usize, max_edges: usize) -> CompactGraph;
 
+    /// [`crate::views::graph_view_request`]: the drawing with a filter and degree columns.
+    fn graph_view_request(
+        &self,
+        request: &crate::views::GraphViewRequest,
+    ) -> Result<CompactGraph, String>;
+
+    /// [`crate::views::graph_filter_query`]: the Rhai query of a filter.
+    fn graph_filter_query(&self, filter: &Value) -> Result<String, String>;
+
+    /// [`CompactGraph::add_degrees`] (a result's subgraph asked with degrees).
+    fn add_degrees(&self, view: &mut CompactGraph);
+
     /// [`crate::views::statistics_view`] of the graph.
     fn statistics_view(&self) -> Value;
 
@@ -272,6 +284,21 @@ where
 
     fn graph_view(&self, max_nodes: usize, max_edges: usize) -> CompactGraph {
         crate::views::graph_view(&*self.read(), max_nodes, max_edges)
+    }
+
+    fn graph_view_request(
+        &self,
+        request: &crate::views::GraphViewRequest,
+    ) -> Result<CompactGraph, String> {
+        crate::views::graph_view_request(&*self.read(), request)
+    }
+
+    fn graph_filter_query(&self, filter: &Value) -> Result<String, String> {
+        crate::views::graph_filter_query(&*self.read(), filter)
+    }
+
+    fn add_degrees(&self, view: &mut CompactGraph) {
+        view.add_degrees(&*self.read());
     }
 
     fn statistics_view(&self) -> Value {

@@ -218,6 +218,11 @@ pub struct NeighbourhoodRequest {
     pub max_nodes: Option<usize>,
     /// Most edges (default [`DEFAULT_SELECTION_EDGES`]).
     pub max_edges: Option<usize>,
+    /// A display filter ([`crate::filter`]): the neighbourhood is computed as without it (the
+    /// limits included), then hidden vertices and edges are dropped from the drawing.
+    pub filter: Option<serde_json::Value>,
+    /// Add the `vertexInDegree` / `vertexOutDegree` columns (degrees in the whole graph).
+    pub degrees: bool,
 }
 
 /// What the limits left out of a neighbourhood: `vertices` within the depth that are not drawn
@@ -331,9 +336,25 @@ pub fn neighbourhood<S: GraphStorage>(
         }
         frontier = next;
     }
-    let (edges, hidden_edges, edges_left_out) = edges_among(g, &vertices, max_edges, &mut ticker)?;
+    let (mut edges, hidden_edges, edges_left_out) =
+        edges_among(g, &vertices, max_edges, &mut ticker)?;
     let truncated = left_out > 0 || edges_left_out > 0;
-    let (graph, seeds) = view_of(g, &vertices, &edges, &seeds, truncated);
+    let filter = match request.filter.as_ref().filter(|f| !f.is_null()) {
+        Some(spec) => Some(crate::filter::GraphFilter::compile(g, spec)?),
+        None => None,
+    };
+    if let Some(filter) = &filter {
+        ticker.tick()?;
+        (vertices, edges) = filter_drawing(g, filter, vertices, edges)?;
+    }
+    let (mut graph, seeds) = view_of(g, &vertices, &edges, &seeds, truncated);
+    if filter.is_some() {
+        graph.matched_nodes = Some(vertices.len());
+        graph.matched_edges = Some(edges.len());
+    }
+    if request.degrees {
+        graph.add_degrees(g);
+    }
     Ok(SelectionView {
         graph,
         seeds,
@@ -346,6 +367,49 @@ pub fn neighbourhood<S: GraphStorage>(
         }),
         sample: None,
     })
+}
+
+/// The vertices and edges of a drawing.
+type Drawing<S> = (
+    Vec<<S as GraphStorage>::VertexId>,
+    Vec<<S as GraphStorage>::EdgeId>,
+);
+
+/// A drawing with what `filter` hides dropped: vertices it hides, edges it hides or whose
+/// endpoint is hidden, and with `hideIsolated` the vertices left without a visible edge. Orders
+/// are kept.
+fn filter_drawing<S: GraphStorage>(
+    g: &S,
+    filter: &crate::filter::GraphFilter,
+    vertices: Vec<S::VertexId>,
+    edges: Vec<S::EdgeId>,
+) -> Result<Drawing<S>, String> {
+    let vertices = filter.vertices(g, Some(&vertices))?.unwrap_or(vertices);
+    let visible: HashSet<S::VertexId> = vertices.iter().copied().collect();
+    let edges: Vec<S::EdgeId> = filter
+        .edges(g, Some(&edges))?
+        .unwrap_or(edges)
+        .into_iter()
+        .filter(|e| {
+            g.edge_endpoints(*e)
+                .is_some_and(|(s, t)| visible.contains(&s) && visible.contains(&t))
+        })
+        .collect();
+    if !filter.hide_isolated() {
+        return Ok((vertices, edges));
+    }
+    let mut touched = HashSet::with_capacity(edges.len());
+    for e in &edges {
+        if let Some((s, t)) = g.edge_endpoints(*e) {
+            touched.insert(s);
+            touched.insert(t);
+        }
+    }
+    let vertices = vertices
+        .into_iter()
+        .filter(|v| touched.contains(v))
+        .collect();
+    Ok((vertices, edges))
 }
 
 /// A set of vertex labels: the labels listed, or with `exclude` every label NOT listed (the
@@ -393,6 +457,8 @@ pub struct SampleRequest {
     pub max_nodes: Option<usize>,
     /// Most edges (default [`DEFAULT_SELECTION_EDGES`]).
     pub max_edges: Option<usize>,
+    /// Add the `vertexInDegree` / `vertexOutDegree` columns (degrees in the whole graph).
+    pub degrees: bool,
 }
 
 fn primary<S: GraphStorage>(g: &S, v: S::VertexId) -> &str {
@@ -424,7 +490,10 @@ pub fn label_sample<S: GraphStorage>(
             }
             let (edges, hidden_edges, cut) = edges_among(g, &vertices, max_edges, &mut ticker)?;
             let shown = vertices.len();
-            let (graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total || cut > 0);
+            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total || cut > 0);
+            if request.degrees {
+                graph.add_degrees(g);
+            }
             Ok(SelectionView {
                 graph,
                 seeds,
@@ -481,7 +550,10 @@ pub fn label_sample<S: GraphStorage>(
                 edges.push(e);
             }
             let shown = edges.len();
-            let (graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total);
+            let (mut graph, seeds) = view_of(g, &vertices, &edges, &[], shown < total);
+            if request.degrees {
+                graph.add_degrees(g);
+            }
             // Edges of the drawn vertices that are not drawn: their degree minus the drawn edges.
             let degree: usize = vertices
                 .iter()

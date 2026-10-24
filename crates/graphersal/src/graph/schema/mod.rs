@@ -163,6 +163,80 @@ impl GraphSchema {
             .iter()
             .find_map(|label| self.label_root(kind, label.as_str())?.properties.get(key))
     }
+
+    /// `value` as a write would store it in the top-level property `key` of an element of
+    /// `kind` with these `labels`: the same coercion (a canonical string to a declared `uuid`
+    /// or temporal type, an integer to a declared `float64`, a list of numbers to a declared
+    /// vector), by the declaration of the first label that declares `key`. In mode `none`,
+    /// or when no label declares `key`, the value comes back unchanged. Only coercion is
+    /// applied: constraints are not checked.
+    ///
+    /// Reads never coerce (`has("born", "2024-01-01")` compares a string), so a front end that
+    /// builds a filter from user text calls this to compare like the stored values.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::schema::PropertySchema;
+    /// use graphersal::storage::ElementKind;
+    /// use graphersal::CompactString;
+    ///
+    /// let schema = GraphSchema::new()
+    ///     .with_mode(SchemaMode::Open)
+    ///     .with_vertex("event", PropertySchema::object().with_property("day", PropertySchema::date()));
+    /// let labels = [CompactString::from("event")];
+    /// let day = schema
+    ///     .coerce_value(ElementKind::Vertex, &labels, "day", "2024-01-05".into())
+    ///     .unwrap();
+    /// assert!(matches!(day, ElementProperty::Temporal(_)));
+    /// assert!(schema
+    ///     .coerce_value(ElementKind::Vertex, &labels, "day", "05.01.2024".into())
+    ///     .is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`SchemaError::CoercionFailed`](crate::error::SchemaError::CoercionFailed) when the value
+    /// cannot be converted to the declared type (as the write would fail).
+    pub fn coerce_value(
+        &self,
+        kind: ElementKind,
+        labels: &[compact_str::CompactString],
+        key: &str,
+        value: ElementProperty,
+    ) -> Result<ElementProperty, crate::error::SchemaError> {
+        if self.mode == SchemaMode::None {
+            return Ok(value);
+        }
+        let node_kind = match kind {
+            ElementKind::Vertex => crate::graph::GraphNodeType::Vertex,
+            ElementKind::Edge => crate::graph::GraphNodeType::Edge,
+        };
+        let declaring = labels.iter().find_map(|label| {
+            self.label_root(node_kind, label.as_str())?
+                .properties
+                .get(key)
+                .map(|node| (label, node))
+        });
+        let Some((label, node)) = declaring else {
+            return Ok(value);
+        };
+        coerce::coerce_to_declared(value, node).map_err(|failure| {
+            crate::error::SchemaError::CoercionFailed {
+                element_type: match kind {
+                    ElementKind::Vertex => "vertex",
+                    ElementKind::Edge => "edge",
+                },
+                label: label.to_string(),
+                property_name: key.to_string(),
+                declared_type: node.non_null_type_name(),
+                actual_value: crate::traversal::step::barrier_steps::numeric::preview(
+                    &failure.value,
+                )
+                .into_boxed_str(),
+                reason: failure.reason,
+            }
+        })
+    }
 }
 
 #[cfg(feature = "serde")]

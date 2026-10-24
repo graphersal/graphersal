@@ -66,6 +66,9 @@ pub struct RunOptions {
     /// drawn by the Graph panel): default [`crate::display::DEFAULT_SUBGRAPH_MAX_ELEMENTS`], at
     /// most [`crate::display::SUBGRAPH_MAX_ELEMENTS`]; a byte bound applies as well.
     pub subgraph_max_elements: Option<usize>,
+    /// Add the `vertexInDegree` / `vertexOutDegree` columns (degrees in the whole graph) to the
+    /// response's `subgraph`.
+    pub subgraph_degrees: bool,
 }
 
 impl RunOptions {
@@ -705,6 +708,26 @@ impl Session {
         serde_json::to_string(&self.graph.element(kind, id)).map_err(|e| e.to_string())
     }
 
+    /// The whole graph to draw (`request`: JSON of [`crate::views::GraphViewRequest`],
+    /// `{maxNodes?, maxEdges?, degrees?, filter?}`): the drawing's columns, with a filter
+    /// ([`crate::filter`]) applied before the limits plus `matchedNodes` / `matchedEdges`, with
+    /// `degrees: true` the `vertexInDegree` / `vertexOutDegree` columns. An invalid request or
+    /// filter is an error naming the label, key and operator at fault.
+    pub fn graph_view(&self, request: &str) -> Result<Value, String> {
+        let request: crate::views::GraphViewRequest = serde_json::from_str(request)
+            .map_err(|e| format!("invalid graph view request: {e}"))?;
+        let view = self.graph.graph_view_request(&request)?;
+        serde_json::to_value(view).map_err(|e| e.to_string())
+    }
+
+    /// The Rhai query that selects the vertices and edges the filter `filter` (JSON, see
+    /// [`crate::filter`]) shows, for the Graph panel's "Open as query".
+    pub fn graph_filter_query(&self, filter: &str) -> Result<String, String> {
+        let filter: Value =
+            serde_json::from_str(filter).map_err(|e| format!("invalid filter: {e}"))?;
+        self.graph.graph_filter_query(&filter)
+    }
+
     /// The neighbourhood of vertices for the Graph panel (`request`: JSON of
     /// [`crate::selection::NeighbourhoodRequest`], `{ids, hops?, keep?, maxNodes?, maxEdges?}`):
     /// a [`crate::selection::SelectionView`] (the drawing's columns plus `seeds`, `missing`,
@@ -933,12 +956,17 @@ impl Session {
             self.graph
                 .rollback_run(mark, &RollbackReason::failed(&"the playground run failed"));
         }
-        let subgraph = self.graph.subgraph(
+        let mut subgraph = self.graph.subgraph(
             &out.results,
             options
                 .subgraph_max_elements
                 .unwrap_or(crate::display::DEFAULT_SUBGRAPH_MAX_ELEMENTS),
         );
+        if options.subgraph_degrees
+            && let Some(view) = subgraph.as_mut()
+        {
+            self.graph.add_degrees(view);
+        }
         let response = Response {
             ok: out.ok,
             terminal: out.terminal,

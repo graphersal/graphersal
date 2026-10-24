@@ -173,6 +173,61 @@ fn execute(port: u16, script: &str) -> Value {
     answer.json()
 }
 
+/// The Graph panel's filter and degree columns over HTTP: `POST /api/graph-view`, the
+/// neighbourhood's `filter`/`degrees`, `POST /api/graph-filter-query`, a bad filter's 422.
+#[test]
+fn graph_view_filter_and_degrees() {
+    let ui = ui_dir("graph-filter");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    let filter = serde_json::json!({"vertices": {"person": [{"key": "age", "op": "gt", "value": 30}], "software": []}});
+    let body = serde_json::json!({"maxNodes": 3, "degrees": true, "filter": filter});
+    let answer = post(port, "/api/graph-view", &body.to_string());
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let view = answer.json();
+    assert_eq!(view["matchedNodes"], 4, "{view}");
+    assert_eq!(view["vertexIds"].as_array().unwrap().len(), 3);
+    assert_eq!(view["truncated"], true);
+    assert_eq!(view["vertexInDegree"].as_array().unwrap().len(), 3);
+    // Without filter and degrees the plain GET answers as before (no new fields).
+    let plain = get(port, "/api/graph-view?maxNodes=100&maxEdges=100").json();
+    assert!(plain.get("matchedNodes").is_none() && plain.get("vertexInDegree").is_none());
+
+    let n = post(
+        port,
+        "/api/neighbourhood",
+        r#"{"ids": ["1"], "degrees": true, "filter": {"vertices": {"software": []}}}"#,
+    )
+    .json();
+    assert_eq!(n["vertexIds"], serde_json::json!(["3"]), "{n}");
+    assert_eq!(n["vertexInDegree"], serde_json::json!([3]));
+
+    let q = post(port, "/api/graph-filter-query", &filter.to_string());
+    assert_eq!(q.status, 200, "{}", q.body);
+    let text = q.json()["query"].as_str().unwrap().to_string();
+    assert!(text.contains(r#"has("age", P.gt(30))"#), "{text}");
+    let r = execute(port, &text.replace(".to_list()", ".id().to_list()"));
+    assert_eq!(
+        r["execution"]["results"][0]["vertices"],
+        serde_json::json!(["3", "4", "5", "6"]),
+        "{r}"
+    );
+
+    let bad =
+        serde_json::json!({"filter": {"vertices": {"person": [{"key": "age", "op": "near"}]}}});
+    let answer = post(port, "/api/graph-view", &bad.to_string());
+    assert_eq!(answer.status, 422, "{}", answer.body);
+    assert!(
+        answer.body.contains("person") && answer.body.contains("near"),
+        "{}",
+        answer.body
+    );
+    assert_eq!(
+        post(port, "/api/graph-filter-query", "{\"x\": 1}").status,
+        422
+    );
+}
+
 #[test]
 fn graph_view_is_columnar_and_element_fetches_the_properties() {
     let ui = ui_dir("graph-view");

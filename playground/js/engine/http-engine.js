@@ -474,15 +474,30 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'schema/diff', asJson(schema));
   }
 
-  async graphView(limits = {}) {
-    const q = new URLSearchParams({ maxNodes: String(limits.maxNodes ?? 500), maxEdges: String(limits.maxEdges ?? 1000) });
-    const view = await this.request('GET', `graph-view?${q}`);
+  async graphView(limits = {}, filter = null) {
+    const maxNodes = limits.maxNodes ?? 500;
+    const maxEdges = limits.maxEdges ?? 1000;
+    let view;
+    if (!filter && !limits.degrees) {
+      const q = new URLSearchParams({ maxNodes: String(maxNodes), maxEdges: String(maxEdges) });
+      view = await this.request('GET', `graph-view?${q}`);
+    } else {
+      const request = { maxNodes, maxEdges, degrees: !!limits.degrees };
+      if (filter) request.filter = filter;
+      view = await this.request('POST', 'graph-view', JSON.stringify(request));
+    }
     packGraphView(view); // the same typed index columns as the WebAssembly engine
     return view;
   }
 
-  async neighbourhood(request) {
-    const view = await this.request('POST', 'neighbourhood', JSON.stringify(request || {}));
+  async graphFilterQuery(filter) {
+    const res = await this.request('POST', 'graph-filter-query', JSON.stringify(filter || {}));
+    return res.query;
+  }
+
+  async neighbourhood(request, filter = null) {
+    const body = filter ? { ...(request || {}), filter } : (request || {});
+    const view = await this.request('POST', 'neighbourhood', JSON.stringify(body));
     packGraphView(view);
     return view;
   }

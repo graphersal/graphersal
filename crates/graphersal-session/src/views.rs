@@ -166,6 +166,111 @@ pub fn graph_view<S: GraphStorage>(g: &S, max_nodes: usize, max_edges: usize) ->
     view
 }
 
+/// A Graph panel request (`engine.graphView(limits, filter)`): `{maxNodes?, maxEdges?,
+/// degrees?, filter?}`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct GraphViewRequest {
+    /// Most vertices drawn (default 500).
+    pub max_nodes: Option<usize>,
+    /// Most edges drawn (default 1000).
+    pub max_edges: Option<usize>,
+    /// Add the `vertexInDegree` / `vertexOutDegree` columns.
+    pub degrees: bool,
+    /// The filter ([`crate::filter`]); absent or `null`: everything.
+    pub filter: Option<Value>,
+}
+
+/// [`graph_view`] for a request: without a filter exactly [`graph_view`] (no extra work), with
+/// one the filter applied BEFORE the limits: the first `maxNodes` visible vertices (labels in
+/// name order, each in the engine's order; the storage order without a vertex filter) and the
+/// visible edges between them (at most `maxEdges`), with `matchedNodes` / `matchedEdges` (every
+/// element that passes, counted exactly) next to the totals. An invalid filter is an error.
+pub fn graph_view_request<S: GraphStorage>(
+    g: &S,
+    request: &GraphViewRequest,
+) -> Result<CompactGraph, String> {
+    let max_nodes = request.max_nodes.unwrap_or(500);
+    let max_edges = request.max_edges.unwrap_or(1000);
+    let mut view = match request.filter.as_ref().filter(|f| !f.is_null()) {
+        None => graph_view(g, max_nodes, max_edges),
+        Some(spec) => {
+            let filter = crate::filter::GraphFilter::compile(g, spec)?;
+            filtered_graph_view(g, &filter, max_nodes, max_edges)?
+        }
+    };
+    if request.degrees {
+        view.add_degrees(g);
+    }
+    Ok(view)
+}
+
+/// The filtered drawing of [`graph_view_request`].
+fn filtered_graph_view<S: GraphStorage>(
+    g: &S,
+    filter: &crate::filter::GraphFilter,
+    max_nodes: usize,
+    max_edges: usize,
+) -> Result<CompactGraph, String> {
+    use std::collections::HashSet;
+    // Visible vertices: `None` = every vertex.
+    let listed = filter.vertices(g, None)?;
+    let listed_set: Option<HashSet<S::VertexId>> =
+        listed.as_ref().map(|l| l.iter().copied().collect());
+    let visible = |v: &S::VertexId| listed_set.as_ref().is_none_or(|set| set.contains(v));
+    let endpoints_visible = |e: &S::EdgeId| {
+        g.edge_endpoints(*e)
+            .is_some_and(|(s, t)| visible(&s) && visible(&t))
+    };
+    // Visible edges: passing the edge filter, both endpoints visible.
+    let edges: Vec<S::EdgeId> = match filter.edges(g, None)? {
+        Some(passing) => passing.into_iter().filter(endpoints_visible).collect(),
+        None => g.edges().filter(endpoints_visible).collect(),
+    };
+    let vertices: Vec<S::VertexId> = if filter.hide_isolated() {
+        let mut touched = HashSet::with_capacity(edges.len());
+        for e in &edges {
+            if let Some((s, t)) = g.edge_endpoints(*e) {
+                touched.insert(s);
+                touched.insert(t);
+            }
+        }
+        match listed {
+            Some(list) => list.into_iter().filter(|v| touched.contains(v)).collect(),
+            None => g.vertices().filter(|v| touched.contains(v)).collect(),
+        }
+    } else {
+        match listed {
+            Some(list) => list,
+            None => g.vertices().collect(),
+        }
+    };
+    let (matched_nodes, matched_edges) = (vertices.len(), edges.len());
+    let drawn: Vec<S::VertexId> = vertices.into_iter().take(max_nodes).collect();
+    let drawn_set: HashSet<S::VertexId> = drawn.iter().copied().collect();
+    let drawn_edges: Vec<S::EdgeId> = edges
+        .into_iter()
+        .filter(|e| {
+            g.edge_endpoints(*e)
+                .is_some_and(|(s, t)| drawn_set.contains(&s) && drawn_set.contains(&t))
+        })
+        .take(max_edges)
+        .collect();
+    let mut view = CompactGraph::build(g, &drawn, &drawn_edges);
+    view.truncated = drawn.len() < matched_nodes || drawn_edges.len() < matched_edges;
+    view.total_nodes = g.vertex_count();
+    view.total_edges = g.edge_count();
+    view.matched_nodes = Some(matched_nodes);
+    view.matched_edges = Some(matched_edges);
+    Ok(view)
+}
+
+/// The Rhai query selecting what the filter `spec` shows ([`crate::filter::filter_query`]).
+pub fn graph_filter_query<S: GraphStorage>(g: &S, spec: &Value) -> Result<String, String> {
+    let filter = crate::filter::GraphFilter::compile(g, spec)?;
+    Ok(crate::filter::filter_query(&filter))
+}
+
 /// Most labels per kind the statistics view lists (the largest counts first).
 pub const STATISTICS_MAX_LABELS: usize = 50;
 

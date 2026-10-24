@@ -42,6 +42,8 @@
  * @property {number} [max_items=100]         Display limit: items shown of every nested collection.
  * @property {boolean} [no_limit=false]       Display everything.
  * @property {string} [spelling='snake']      Step names in the profile and errors: 'snake' or 'camel'.
+ * @property {boolean} [subgraph_degrees=false]  Add `vertexInDegree`/`vertexOutDegree` to the
+ *   response's `subgraph`.
  * @property {number} [subgraph_max_elements=50000]  Most vertices + edges of the response's
  *   `subgraph` (the Graph panel's "Query result"; at most 200 000).
  */
@@ -170,6 +172,39 @@
  * @property {number} totalNodes
  * @property {number} totalEdges
  * @property {'elements'|'bytes'} [stoppedBy]  A result's subgraph: which limit stopped it.
+ * @property {number} [matchedNodes]  Only with a filter: vertices that pass it, counted exactly
+ *   before the maxNodes cut (for a neighbourhood: of the neighbourhood as computed).
+ * @property {number} [matchedEdges]  Only with a filter: edges that pass it (both endpoints
+ *   visible), before the maxEdges cut. "Filtered: matchedNodes of totalNodes".
+ * @property {Uint32Array} [vertexInDegree]   Only when asked (`degrees: true`): per vertex, its
+ *   incoming edges in the WHOLE graph (not only the drawn or filtered ones; every parallel edge
+ *   counts; a self-loop counts once in and once out). Total degree = in + out.
+ * @property {Uint32Array} [vertexOutDegree]  Only when asked: per vertex, its outgoing edges.
+ */
+
+/**
+ * @typedef {Object} GraphFilterCondition
+ * @property {string} key  The property key.
+ * @property {'eq'|'neq'|'lt'|'lte'|'gt'|'gte'|'between'|'contains'|'starts_with'|'ends_with'|'regex'|'exists'|'missing'} op
+ * @property {*} [value]  Taken literally (a number stays a number, a string a string); none for
+ *   `exists`/`missing`; `[low, high]` for `between` (low inclusive, high exclusive, the engine's
+ *   `P.between`); a string for the text operators (`regex`: Rust regex dialect, unanchored).
+ *   When the graph's schema (mode open/closed) declares the key for that label, the value is
+ *   coerced like a write (`"2024-01-01"` compares as a date for a key declared `date`).
+ */
+
+/**
+ * @typedef {Object} GraphFilter
+ * What the Graph panel draws (applied by the engine BEFORE the maxNodes/maxEdges cut; omit the
+ * filter to draw everything). Errors (unknown op, wrong value shape, bad regex, a value the
+ * schema cannot coerce) reject with a message naming `vertices.<label>[i] (key "k", op "o")`.
+ * @property {Object<string, GraphFilterCondition[]>|null} [vertices]  label -> conditions. A
+ *   listed label is visible, an unlisted one hidden; absent/null: every label, no conditions.
+ *   One label's conditions are AND, labels are OR; a vertex with several labels is shown when
+ *   any of its labels is listed and that label's conditions hold.
+ * @property {Object<string, GraphFilterCondition[]>|null} [edges]  The same for edge labels. A
+ *   hidden vertex always hides its edges.
+ * @property {boolean} [hideIsolated=false]  Also hide vertices left without a visible edge.
  */
 
 /**
@@ -365,26 +400,45 @@ export class Engine {
   /**
    * Elements to draw for the whole graph, at most `limits.maxNodes` vertices (the first ones)
    * and the edges between them (at most `limits.maxEdges`), as columns without properties.
-   * @param {{maxNodes?:number, maxEdges?:number}} [limits]
+   * With `filter`, the engine applies it first and then cuts (the first `maxNodes` VISIBLE
+   * vertices, labels in name order; `matchedNodes`/`matchedEdges` count all that pass).
+   * `limits.degrees: true` adds `vertexInDegree`/`vertexOutDegree`. Without filter and degrees
+   * it costs what it always did. Rejects for an invalid filter.
+   * @param {{maxNodes?:number, maxEdges?:number, degrees?:boolean}} [limits]
+   * @param {GraphFilter|null} [filter]
    * @returns {Promise<GraphView>}
    */
-  async graphView(limits) { throw notImplemented('graphView'); }
+  async graphView(limits, filter) { throw notImplemented('graphView'); }
+
+  /**
+   * The Rhai query that selects the vertices and edges `filter` shows (before any limit), for
+   * "Open as query": `#{ vertices: g.v()....to_list(), edges: g.e()....to_list() }`, keys and
+   * values escaped as Rhai literals. Rejects for an invalid filter.
+   * @param {GraphFilter} filter
+   * @returns {Promise<string>}
+   */
+  async graphFilterQuery(filter) { throw notImplemented('graphFilterQuery'); }
 
   /**
    * The vertices within `hops` steps (the depth, 1 to 5) along `direction` ('both', 'out',
    * 'in') of the centre `ids`, plus the vertices `keep` (a drawing being expanded), and the edges
    * between them; bounded by `maxNodes` / `maxEdges` (`leftOut: {vertices, edges, complete}`
-   * says what the limits cut). Rejects for an unknown id or a depth above 5.
-   * @param {{ids:string[], hops?:number, direction?:string, keep?:string[], maxNodes?:number, maxEdges?:number}} request
+   * says what the limits cut). Rejects for an unknown id or a depth above 5. `filter` is a
+   * DISPLAY filter: the neighbourhood is computed as without it (limits, `leftOut`,
+   * `hiddenEdges` unchanged), then hidden vertices/edges are dropped (`matchedNodes`/
+   * `matchedEdges` = what is left; a hidden centre vertex is dropped too). `degrees: true` adds
+   * the degree columns.
+   * @param {{ids:string[], hops?:number, direction?:string, keep?:string[], maxNodes?:number, maxEdges?:number, degrees?:boolean}} request
+   * @param {GraphFilter|null} [filter]
    * @returns {Promise<SelectionView>}
    */
-  async neighbourhood(request) { throw notImplemented('neighbourhood'); }
+  async neighbourhood(request, filter) { throw notImplemented('neighbourhood'); }
 
   /**
    * A sample (the first matches in storage order) of the vertices of some primary labels
    * (`{vertices: {labels, exclude?}}`, `exclude`: every label not listed) or of the edges of one
    * label pair (`{edge: {label, from?, to?}}`, `from`/`to` label filters).
-   * @param {Object} request  Also `maxNodes`, `maxEdges`.
+   * @param {Object} request  Also `maxNodes`, `maxEdges`, `degrees` (the degree columns).
    * @returns {Promise<SelectionView>}
    */
   async labelSample(request) { throw notImplemented('labelSample'); }
