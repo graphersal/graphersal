@@ -57,8 +57,8 @@ pub struct MemoryStats {
     /// key, value) and the hash index (one `usize` slot and one control byte per bucket).
     pub index_bytes: u64,
     /// Estimated heap footprint of vertex/edge properties: each element's value slice (one
-    /// [`crate::ElementProperty`] per property, 32 bytes, exactly sized), every stored value's own
-    /// owned heap data, walked recursively via [`crate::ElementProperty::estimated_heap_bytes`] (a
+    /// [`crate::ElementProperty`] per property, 32 bytes; a dropped key leaves its slot for the
+    /// next added one), every stored value's own owned heap data, walked recursively via [`crate::ElementProperty::estimated_heap_bytes`] (a
     /// nested object counts its own map: entries, hash index and keys, sized from its
     /// `.capacity()`), and the key names, which live once per distinct key sequence
     /// ([`Self::shape_bytes`]).

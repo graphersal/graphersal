@@ -841,6 +841,105 @@ pub(crate) fn read_properties<K: KeyReader>(
     Ok(properties)
 }
 
+/// The shapes of the element property maps of one chunk, by their key-reference sequence: the
+/// elements of a chunk repeat a few key sequences, so a decoded map is built `Shaped` directly (an
+/// exact value vector plus a shared key list) without an `IndexMap` and without hashing a key.
+/// The graph adopts the shape into its own table when the element is stored.
+#[derive(Default)]
+pub(crate) struct ChunkShapes {
+    /// The key references of the map being read.
+    ids: Vec<usize>,
+    /// The reader offset of each of those references (for a duplicate-key error).
+    offsets: Vec<u64>,
+    /// The sequence and shape of the previous map.
+    last: Option<(
+        Box<[usize]>,
+        std::sync::Arc<crate::value::property_map::Shape>,
+    )>,
+    /// Every sequence of the chunk seen so far.
+    known: std::collections::HashMap<
+        Box<[usize]>,
+        std::sync::Arc<crate::value::property_map::Shape>,
+        std::hash::BuildHasherDefault<fnv::FnvHasher>,
+    >,
+}
+
+impl ChunkShapes {
+    /// The shape of the key references just read; a new sequence is checked for a repeated key
+    /// (by text, so two references to equal strings count as a repeat).
+    fn shape_of(
+        &mut self,
+        table: &[CompactString],
+    ) -> DecodeResult<std::sync::Arc<crate::value::property_map::Shape>> {
+        use crate::value::property_map::Shape;
+        if let Some((ids, shape)) = &self.last
+            && **ids == *self.ids
+        {
+            return Ok(std::sync::Arc::clone(shape));
+        }
+        let shape = match self.known.get(self.ids.as_slice()) {
+            Some(shape) => std::sync::Arc::clone(shape),
+            None => {
+                let mut keys: Vec<CompactString> = Vec::with_capacity(self.ids.len());
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for (at, (index, offset)) in self.ids.iter().zip(&self.offsets).enumerate() {
+                    let key = table.get(*index).ok_or_else(|| {
+                        DecodeError::new(*offset, "string table reference out of range")
+                    })?;
+                    let repeated = if self.ids.len() <= 32 {
+                        keys.iter().take(at).any(|other| other == key)
+                    } else {
+                        !seen.insert(key.as_str())
+                    };
+                    if repeated {
+                        return Err(DecodeError::new(*offset, "duplicate property key"));
+                    }
+                    keys.push(key.clone());
+                }
+                let shape = std::sync::Arc::new(Shape::new(keys.into_boxed_slice(), 0));
+                self.known
+                    .insert(self.ids.as_slice().into(), std::sync::Arc::clone(&shape));
+                shape
+            }
+        };
+        self.last = Some((self.ids.as_slice().into(), std::sync::Arc::clone(&shape)));
+        Ok(shape)
+    }
+}
+
+/// Reads an element's property map written by [`put_properties`] with string-table keys, built
+/// `Shaped` through `shapes` (see [`ChunkShapes`]); a repeated key is an error.
+pub(crate) fn read_element_properties(
+    reader: &mut Reader<'_>,
+    table: &[CompactString],
+    max_depth: usize,
+    shapes: &mut ChunkShapes,
+) -> DecodeResult<PropertyMap> {
+    let keys = TableKeys(table);
+    let count = reader.count(2)?;
+    shapes.ids.clear();
+    shapes.offsets.clear();
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key_at = reader.offset();
+        let index = reader.uvar()?;
+        let index = usize::try_from(index)
+            .ok()
+            .filter(|index| *index < table.len())
+            .ok_or_else(|| {
+                DecodeError::new(
+                    key_at,
+                    format!("string table reference {index} out of range"),
+                )
+            })?;
+        shapes.ids.push(index);
+        shapes.offsets.push(key_at);
+        values.push(read_value(reader, &keys, max_depth)?);
+    }
+    let shape = shapes.shape_of(table)?;
+    Ok(PropertyMap::from_shaped(shape, values))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Compression
 // ---------------------------------------------------------------------------------------------
@@ -1036,5 +1135,94 @@ mod tests {
             let reason = decompress(2, &[1, 2, 3], 3).unwrap_err();
             assert!(decompress_error(2, 0, reason).unsupported);
         }
+    }
+}
+
+/// Element property maps decoded with string-table keys are built `Shaped` per chunk.
+#[cfg(test)]
+mod chunk_shape_tests {
+    use super::*;
+
+    /// `(table index, value)` entries of one map: the encoded bytes.
+    fn encode(entries: &[(u64, i64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_uvar(&mut out, entries.len() as u64);
+        for (index, value) in entries {
+            put_uvar(&mut out, *index);
+            put_value(&mut out, &ElementProperty::from(*value), &mut InlineKeys).unwrap();
+        }
+        out
+    }
+
+    fn table(keys: &[&str]) -> Vec<CompactString> {
+        keys.iter().map(|k| CompactString::from(*k)).collect()
+    }
+
+    fn read(
+        bytes: &[u8],
+        table: &[CompactString],
+        shapes: &mut ChunkShapes,
+    ) -> DecodeResult<PropertyMap> {
+        read_element_properties(&mut Reader::new(bytes), table, 8, shapes)
+    }
+
+    #[test]
+    fn maps_of_one_sequence_share_a_shape_and_read_back() {
+        let table = table(&["name", "age", "city"]);
+        let mut shapes = ChunkShapes::default();
+        let a = read(&encode(&[(0, 1), (1, 2)]), &table, &mut shapes).unwrap();
+        let b = read(&encode(&[(0, 3), (1, 4)]), &table, &mut shapes).unwrap();
+        let c = read(&encode(&[(1, 5), (0, 6)]), &table, &mut shapes).unwrap();
+        let d = read(&encode(&[(0, 7), (1, 8)]), &table, &mut shapes).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            a.shape().unwrap(),
+            b.shape().unwrap()
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            a.shape().unwrap(),
+            c.shape().unwrap()
+        ));
+        // Back to a known sequence: the shape of the chunk's table, not a new one.
+        assert!(std::sync::Arc::ptr_eq(
+            a.shape().unwrap(),
+            d.shape().unwrap()
+        ));
+        assert_eq!(
+            a,
+            PropertyMap::from([("name", ElementProperty::from(1)), ("age", 2.into())])
+        );
+        assert_eq!(
+            c.keys().map(|k| k.as_str()).collect::<Vec<_>>(),
+            ["age", "name"]
+        );
+        let empty = read(&encode(&[]), &table, &mut shapes).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_key_is_an_error_at_its_offset() {
+        let table = table(&["name", "age", "name"]);
+        let mut shapes = ChunkShapes::default();
+        let bytes = encode(&[(0, 1), (0, 2)]);
+        let err = read(&bytes, &table, &mut shapes).unwrap_err();
+        assert_eq!(err.reason, "duplicate property key");
+        // The second reference: after the count, the first key and its value.
+        let mut first = Vec::new();
+        put_uvar(&mut first, 2);
+        put_uvar(&mut first, 0);
+        put_value(&mut first, &ElementProperty::from(1), &mut InlineKeys).unwrap();
+        assert_eq!(err.offset, first.len() as u64);
+        // Two references to equal strings repeat the key as well.
+        let err = read(&encode(&[(0, 1), (2, 2)]), &table, &mut shapes).unwrap_err();
+        assert_eq!(err.reason, "duplicate property key");
+        // A wide map takes the hashed check.
+        let wide_table: Vec<CompactString> = (0..40).map(|i| format!("k{i}").into()).collect();
+        let mut entries: Vec<(u64, i64)> = (0..40).map(|i| (i, i as i64)).collect();
+        entries.push((7, 0));
+        let err = read(&encode(&entries), &wide_table, &mut shapes).unwrap_err();
+        assert_eq!(err.reason, "duplicate property key");
+        // An index outside the table.
+        let err = read(&encode(&[(9, 1)]), &table, &mut shapes).unwrap_err();
+        assert!(err.reason.contains("out of range"), "{}", err.reason);
     }
 }

@@ -34,8 +34,70 @@ pub(crate) type PropertyMapInner =
     IndexMap<CompactString, ElementProperty, BuildHasherDefault<FnvHasher>>;
 
 /// The key count above which a [`Shape`] keeps a hash index of its keys; at or below it a key is
-/// found by a linear scan of the key list (cheaper for short lists than hashing the key).
+/// found by a linear scan of the key prints (cheaper for short lists than hashing the key).
 pub(crate) const WIDE_SHAPE: usize = 16;
+
+/// The longest key a [`KeyPrint`] identifies exactly (no byte comparison needed on a match).
+const EXACT_PRINT: usize = 16;
+
+/// A cheap fingerprint of a key: its length and its first and last eight bytes (zero-padded).
+/// Two keys of at most [`EXACT_PRINT`] bytes are equal iff their prints are; longer keys with
+/// equal prints are confirmed by comparing the bytes. Comparing prints avoids a `memcmp` call per
+/// candidate key, which dominated the narrow-shape lookups.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KeyPrint {
+    len: usize,
+    head: u64,
+    tail: u64,
+}
+
+impl KeyPrint {
+    /// The print of `key`.
+    #[inline]
+    pub(crate) fn of(key: &str) -> Self {
+        let bytes = key.as_bytes();
+        let word4 = |chunk: Option<&[u8; 4]>| chunk.map_or(0, |c| u32::from_le_bytes(*c) as u64);
+        let word2 = |chunk: Option<&[u8; 2]>| chunk.map_or(0, |c| u16::from_le_bytes(*c) as u64);
+        // Overlapping head and tail words cover every byte of a key of up to 16 bytes, so with
+        // the length the print is exact for those.
+        let (head, tail) = match (bytes.first_chunk::<8>(), bytes.last_chunk::<8>()) {
+            (Some(head), Some(tail)) => (u64::from_le_bytes(*head), u64::from_le_bytes(*tail)),
+            _ if bytes.len() >= 4 => (
+                word4(bytes.first_chunk::<4>()) | (word4(bytes.last_chunk::<4>()) << 32),
+                0,
+            ),
+            _ if bytes.len() >= 2 => (
+                word2(bytes.first_chunk::<2>()) | (word2(bytes.last_chunk::<2>()) << 16),
+                0,
+            ),
+            _ => (bytes.first().map_or(0, |byte| *byte as u64), 0),
+        };
+        Self {
+            len: bytes.len(),
+            head,
+            tail,
+        }
+    }
+
+    /// Whether a key whose print equals this one is certainly `stored` (the print is exact for
+    /// short keys; a longer key compares its bytes).
+    #[inline]
+    pub(crate) fn confirms(&self, stored: &CompactString, key: &str) -> bool {
+        self.len <= EXACT_PRINT || stored.as_str() == key
+    }
+}
+
+/// The hash of a key sequence, the interning key of a [`Shape`] (FNV over each key's bytes and a
+/// terminator, the same as `str`'s `Hash`).
+#[inline]
+pub(crate) fn keys_hash<'a>(keys: impl Iterator<Item = &'a str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = FnvHasher::default();
+    for key in keys {
+        key.hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 /// An ordered key list shared by every stored property map with exactly these keys in exactly
 /// this order (crate-internal). Immutable once built; `owner` is the id of the shape table that
@@ -44,17 +106,29 @@ pub(crate) const WIDE_SHAPE: usize = 16;
 pub(crate) struct Shape {
     /// The keys in order (unique).
     pub(crate) keys: Box<[CompactString]>,
+    /// One [`KeyPrint`] per key, in order: the linear lookup compares these.
+    prints: Box<[KeyPrint]>,
     /// Key -> position for a wide shape (more than [`WIDE_SHAPE`] keys), else `None`.
     index: Option<IndexSet<CompactString, BuildHasherDefault<FnvHasher>>>,
     /// The id of the shape table that interned this shape.
     pub(crate) owner: u64,
+    /// [`keys_hash`] of the keys (the shape table rehashes with it).
+    pub(crate) hash: u64,
 }
 
 impl Shape {
     /// A shape over `keys` (unique, in order) owned by the shape table `owner`.
     pub(crate) fn new(keys: Box<[CompactString]>, owner: u64) -> Self {
         let index = (keys.len() > WIDE_SHAPE).then(|| keys.iter().cloned().collect());
-        Self { keys, index, owner }
+        let prints = keys.iter().map(|key| KeyPrint::of(key)).collect();
+        let hash = keys_hash(keys.iter().map(CompactString::as_str));
+        Self {
+            keys,
+            prints,
+            index,
+            owner,
+            hash,
+        }
     }
 
     /// The position of `key`, if present.
@@ -62,8 +136,33 @@ impl Shape {
     pub(crate) fn position(&self, key: &str) -> Option<usize> {
         match &self.index {
             Some(index) => index.get_index_of(key),
-            None => self.keys.iter().position(|k| k.as_str() == key),
+            None => self.position_of_print(KeyPrint::of(key), key),
         }
+    }
+
+    /// The position of `key` whose print is `print`, by a scan of the prints.
+    #[inline]
+    fn position_of_print(&self, print: KeyPrint, key: &str) -> Option<usize> {
+        self.prints
+            .iter()
+            .zip(self.keys.iter())
+            .position(|(candidate, stored)| *candidate == print && print.confirms(stored, key))
+    }
+
+    /// Whether the keys of this shape are exactly `keys`, in order.
+    #[inline]
+    pub(crate) fn has_keys<'a>(&self, mut keys: impl ExactSizeIterator<Item = &'a str>) -> bool {
+        keys.len() == self.keys.len()
+            && self
+                .prints
+                .iter()
+                .zip(self.keys.iter())
+                .all(|(print, stored)| {
+                    keys.next().is_some_and(|key| {
+                        let other = KeyPrint::of(key);
+                        *print == other && other.confirms(stored, key)
+                    })
+                })
     }
 
     /// The number of keys.
@@ -79,12 +178,13 @@ impl Shape {
     }
 
     /// The bytes of this shape: its `Arc` allocation (two counters plus the struct), the key
-    /// list, each heap-allocated key, and a wide shape's index (whose keys are clones: a long
-    /// key's heap counted again).
+    /// list and its prints, each heap-allocated key, and a wide shape's index (whose keys are
+    /// clones: a long key's heap counted again).
     pub(crate) fn heap_bytes(&self) -> u64 {
         use std::mem::size_of;
         let arc = (2 * size_of::<usize>() + size_of::<Self>()) as u64;
-        let keys = self.keys.len() as u64 * size_of::<CompactString>() as u64;
+        let keys =
+            self.keys.len() as u64 * (size_of::<CompactString>() + size_of::<KeyPrint>()) as u64;
         let key_heap: u64 = self.keys.iter().map(super::compact_string_heap_bytes).sum();
         let index = self.index.as_ref().map_or(0, |index| {
             index_map_heap_bytes::<CompactString, ()>(index.capacity()) + key_heap
@@ -98,8 +198,10 @@ impl Shape {
 pub(crate) struct Shaped {
     /// The key list.
     pub(crate) shape: Arc<Shape>,
-    /// The values, one per key, in key order (exactly sized: one reallocation per added key).
-    pub(crate) values: Box<[ElementProperty]>,
+    /// The values, one per key, in key order. Exactly sized when built or grown (an added key
+    /// reserves exactly one slot); a removed key keeps its slot as capacity, so a drop followed by
+    /// an add (or a rollback of either) reallocates nothing.
+    pub(crate) values: Vec<ElementProperty>,
 }
 
 /// The representation of a [`PropertyMap`] (crate-internal; see the module docs).
@@ -247,13 +349,19 @@ impl PropertyMap {
         key: impl Into<CompactString>,
         value: ElementProperty,
     ) -> Option<ElementProperty> {
-        self.insert_full(key.into(), value).1
+        match &mut self.0 {
+            Repr::Indexed(map) => map.insert(key.into(), value),
+            Repr::Shaped(_) => self.insert_full_shaped(key.into(), value).1,
+        }
     }
 
     /// Removes `key` and returns its value, keeping the order of the other entries.
     #[inline]
     pub fn shift_remove(&mut self, key: &str) -> Option<ElementProperty> {
-        self.shift_remove_full(key).map(|(_, _, value)| value)
+        match &mut self.0 {
+            Repr::Indexed(map) => map.shift_remove(key),
+            Repr::Shaped(_) => self.shift_remove_full(key).map(|(_, _, value)| value),
+        }
     }
 
     /// The entries in order.
@@ -329,17 +437,10 @@ impl PropertyMap {
 
     /// The `Indexed` map, converting a `Shaped` one first (its keys copied out of the shape):
     /// the step before a key-changing mutation outside the graph's shape table.
+    #[inline]
     pub(crate) fn indexed_mut(&mut self) -> &mut PropertyMapInner {
-        if let Repr::Shaped(shaped) = &mut self.0 {
-            let values = std::mem::take(&mut shaped.values);
-            let map: PropertyMapInner = shaped
-                .shape
-                .keys
-                .iter()
-                .cloned()
-                .zip(values.into_vec())
-                .collect();
-            self.0 = Repr::Indexed(map);
+        if let Repr::Shaped(_) = self.0 {
+            self.unshape();
         }
         match self.0 {
             Repr::Indexed(ref mut map) => map,
@@ -349,6 +450,32 @@ impl PropertyMap {
                 self.indexed_mut()
             }
         }
+    }
+
+    /// Converts a `Shaped` map to an `Indexed` one (kept out of line: the free-standing maps the
+    /// hot paths build never take it).
+    #[cold]
+    #[inline(never)]
+    fn unshape(&mut self) {
+        if let Repr::Shaped(shaped) = &mut self.0 {
+            let values = std::mem::take(&mut shaped.values);
+            let map: PropertyMapInner = shaped.shape.keys.iter().cloned().zip(values).collect();
+            self.0 = Repr::Indexed(map);
+        }
+    }
+
+    /// A `Shaped` map over `shape` with `values` in its key order (a decoder builds one with a
+    /// shape of its own; the graph adopts it when the element is stored). The value count must
+    /// equal the key count; extra values are dropped, missing ones make the map shorter.
+    pub(crate) fn from_shaped(shape: Arc<Shape>, mut values: Vec<ElementProperty>) -> Self {
+        if values.len() != shape.len() {
+            values.truncate(shape.len());
+            if values.len() < shape.len() {
+                let keys = shape.keys.iter().cloned().zip(values).collect();
+                return Self(Repr::Indexed(keys));
+            }
+        }
+        Self(Repr::Shaped(Shaped { shape, values }))
     }
 
     /// The `Indexed` map, if this map is one (tests).
@@ -371,7 +498,22 @@ impl PropertyMap {
 
     /// `insert` with the position: `(position, previous value)`. An existing key keeps its
     /// position and its representation; a new key on a `Shaped` map converts it to `Indexed`.
+    #[inline]
     pub(crate) fn insert_full(
+        &mut self,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
+        match &mut self.0 {
+            Repr::Indexed(map) => map.insert_full(key, value),
+            Repr::Shaped(_) => self.insert_full_shaped(key, value),
+        }
+    }
+
+    /// [`Self::insert_full`] of a `Shaped` map: an existing key in place, a new one after the
+    /// conversion to `Indexed`.
+    #[inline(never)]
+    fn insert_full_shaped(
         &mut self,
         key: CompactString,
         value: ElementProperty,
@@ -390,12 +532,13 @@ impl PropertyMap {
         &mut self,
         key: &str,
     ) -> Option<(usize, CompactString, ElementProperty)> {
-        if let Repr::Shaped(shaped) = &self.0
-            && shaped.shape.position(key).is_none()
-        {
-            return None;
+        match &mut self.0 {
+            Repr::Indexed(map) => map.shift_remove_full(key),
+            Repr::Shaped(shaped) => {
+                shaped.shape.position(key)?;
+                self.indexed_mut().shift_remove_full(key)
+            }
         }
-        self.indexed_mut().shift_remove_full(key)
     }
 
     /// The position, stored key and value of `key`.
@@ -449,7 +592,7 @@ impl PropertyMap {
                         .map(super::compact_string_heap_bytes)
                         .sum::<u64>()
             }
-            Repr::Shaped(shaped) => shaped_values_bytes(shaped.values.len()),
+            Repr::Shaped(shaped) => shaped_values_bytes(shaped.values.capacity()),
         }
     }
 }
@@ -515,7 +658,7 @@ impl IntoIterator for PropertyMap {
             Repr::Shaped(Shaped { shape, values }) => Either::Shaped(ShapedIntoIter {
                 keys: 0..shape.len(),
                 shape,
-                values: values.into_vec().into_iter(),
+                values: values.into_iter(),
             }),
         })
     }
@@ -1601,5 +1744,63 @@ mod shaped_tests {
             crate::value::estimated_element_heap_bytes(&with_heap),
             size_of::<ElementProperty>() as u64 + long.len() as u64
         );
+    }
+}
+
+/// Key prints: exact for keys of up to 16 bytes, confirmed by bytes beyond; lookups through them
+/// find every key of a shape and nothing else.
+#[cfg(test)]
+mod key_print_tests {
+    use super::{KeyPrint, Shape};
+    use compact_str::CompactString;
+
+    fn keys() -> Vec<String> {
+        let mut keys: Vec<String> = vec![String::new()];
+        for len in 1..=40 {
+            keys.push("a".repeat(len));
+            keys.push(format!("{}b", "a".repeat(len - 1)));
+            keys.push(format!("b{}", "a".repeat(len - 1)));
+        }
+        // Long keys that share their first and last eight bytes.
+        keys.push("prefix__MIDDLE_ONE__suffix".into());
+        keys.push("prefix__MIDDLE_TWO__suffix".into());
+        keys.push("ü".into());
+        keys.push("üü".into());
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    #[test]
+    fn prints_are_exact_up_to_sixteen_bytes() {
+        let keys = keys();
+        for a in &keys {
+            for b in &keys {
+                let same = KeyPrint::of(a) == KeyPrint::of(b);
+                if a.len() <= 16 && b.len() <= 16 {
+                    assert_eq!(same, a == b, "{a:?} vs {b:?}");
+                } else if a == b {
+                    assert!(same);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shape_finds_each_of_its_keys() {
+        let keys = keys();
+        for chunk in keys.chunks(7).chain(std::iter::once(&keys[..])) {
+            let shape = Shape::new(chunk.iter().map(CompactString::from).collect(), 0);
+            for (position, key) in chunk.iter().enumerate() {
+                assert_eq!(shape.position(key), Some(position), "{key:?}");
+            }
+            for key in &keys {
+                if !chunk.contains(key) {
+                    assert_eq!(shape.position(key), None, "{key:?}");
+                }
+            }
+            assert!(shape.has_keys(chunk.iter().map(String::as_str)));
+            assert!(!shape.has_keys(chunk.iter().rev().map(String::as_str)) || chunk.len() < 2);
+        }
     }
 }

@@ -1276,6 +1276,72 @@ mod element_properties {
             });
     }
 
+    /// Builds the graph through `insert_vertex` (every free-standing map stored by the graph).
+    #[divan::bench(args = [1, 3, 25], sample_count = 20)]
+    fn insert_build(bencher: divan::Bencher, width: usize) {
+        bencher.bench_local(|| graph(width));
+    }
+
+    /// A storage-level bulk build: 20k vertices with explicit 36-character ids and six
+    /// properties, 60k edges with two, all through `insert_vertex` / `insert_edge`.
+    #[divan::bench(sample_count = 10)]
+    fn bulk_build(bencher: divan::Bencher) {
+        let ids: Vec<String> = (0..20_000u64)
+            .map(|i| {
+                format!(
+                    "{:08x}-0000-4000-8000-{:012x}",
+                    i * 2_654_435_761 % (1 << 32),
+                    i
+                )
+            })
+            .collect();
+        bencher.bench_local(|| {
+            let mut graph = TraversalGraph::new();
+            let mut handles = Vec::with_capacity(ids.len());
+            for (i, id) in ids.iter().enumerate() {
+                let props = PropertyMap::from([
+                    ("name", ElementProperty::from(id.as_str())),
+                    ("age", ElementProperty::from(i as i64)),
+                    ("score", ElementProperty::from(i as f64 * 0.5)),
+                    ("active", ElementProperty::from(i % 2 == 0)),
+                    ("city", ElementProperty::from("berlin")),
+                    ("n", ElementProperty::from(i as i64 * 7)),
+                ]);
+                handles.push(
+                    graph
+                        .insert_vertex(Some(id.as_str().into()), vec!["person".into()], props)
+                        .unwrap(),
+                );
+            }
+            for i in 0..handles.len() * 3 {
+                let from = handles[i % handles.len()];
+                let to = handles[(i * 7 + 1) % handles.len()];
+                let props = PropertyMap::from([
+                    ("weight", ElementProperty::from(i as f64)),
+                    ("since", ElementProperty::from(i as i64)),
+                ]);
+                graph
+                    .insert_edge(None, Some("knows".into()), from, to, props)
+                    .unwrap();
+            }
+            graph
+        });
+    }
+
+    /// `vertex_properties(v).get(last key)` on every vertex.
+    #[divan::bench(args = [1, 3, 25], sample_count = 20)]
+    fn get_key(bencher: divan::Bencher, width: usize) {
+        let graph = graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            handles
+                .iter()
+                .filter_map(|&v| graph.vertex_properties(v).and_then(|p| p.get(&key)))
+                .count()
+        });
+    }
+
     /// Overwrites the last key of every vertex.
     #[divan::bench(args = [3, 25], sample_count = 20)]
     fn write_overwrite(bencher: divan::Bencher, width: usize) {

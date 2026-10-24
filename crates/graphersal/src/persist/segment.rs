@@ -498,6 +498,7 @@ pub(crate) fn decode_vertex_chunk(
 ) -> DecodeResult<Vec<VertexRecord>> {
     let (payload, table, position) = open_chunk(chunk).map_err(|e| in_chunk(chunk, e))?;
     let keys = TableKeys(&table);
+    let mut shapes = codec::ChunkShapes::default();
     let mut reader = Reader::new(&payload[position..]).with_version(chunk.version);
     let count = chunk.count as usize;
     let mut out = Vec::with_capacity(count.min(reader.remaining()));
@@ -509,7 +510,8 @@ pub(crate) fn decode_vertex_chunk(
             for _ in 0..label_count {
                 labels.push(keys_label(&keys, &mut reader)?);
             }
-            let properties = codec::read_properties(&mut reader, &keys, max_depth)?;
+            let properties =
+                codec::read_element_properties(&mut reader, &table, max_depth, &mut shapes)?;
             out.push(VertexRecord {
                 id,
                 labels,
@@ -536,7 +538,7 @@ pub(crate) fn decode_edge_chunk(
     max_depth: usize,
 ) -> DecodeResult<Vec<EdgeRecord>> {
     let (payload, table, position) = open_chunk(chunk).map_err(|e| in_chunk(chunk, e))?;
-    let keys = TableKeys(&table);
+    let mut shapes = codec::ChunkShapes::default();
     let mut reader = Reader::new(&payload[position..]).with_version(chunk.version);
     let count = chunk.count as usize;
     let mut out = Vec::with_capacity(count.min(reader.remaining()));
@@ -558,7 +560,8 @@ pub(crate) fn decode_edge_chunk(
             };
             let out_id = CompactString::from(reader.str()?);
             let in_id = CompactString::from(reader.str()?);
-            let properties = codec::read_properties(&mut reader, &keys, max_depth)?;
+            let properties =
+                codec::read_element_properties(&mut reader, &table, max_depth, &mut shapes)?;
             out.push(EdgeRecord {
                 id,
                 label,

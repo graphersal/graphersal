@@ -11,8 +11,9 @@
 //!   this table carry its id (`Shape::owner`), so "is this map's shape one of mine" is one integer
 //!   comparison.
 //! - **Transitions:** a key-adding write moves a map to the next shape through a cache
-//!   `(shape, key) -> shape`, a key-removing write through `(shape, position) -> shape`; a
-//!   positional insert (the undo log putting a key back where it was) interns directly.
+//!   `(shape, position, key) -> shape` (an added key goes to the end; the undo log puts a removed
+//!   key back at its position), a key-removing write through `(shape, position) -> shape`.
+//!   Interning looks a key sequence up without allocating, the last shape first.
 //! - **Choke points:** `insert_vertex_raw` / `insert_edge_raw` adopt every map that enters the
 //!   graph (loads, replay, undo restores, repairs, merges, imports, `add_*`); every in-graph
 //!   key-changing write goes through [`ShapeTable::insert_full`], [`ShapeTable::shift_remove_full`]
@@ -25,19 +26,67 @@
 //!   stored map, an element image in the undo log, a clone in a result) is never removed, so a
 //!   shape with this table's id is always in the table. Reads never touch the table.
 
-use std::borrow::Borrow;
-use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use compact_str::CompactString;
-use fnv::FnvHasher;
+use hashbrown::HashTable;
 
-use crate::value::property_map::{Repr, Shape, Shaped, hash_table_heap_bytes};
+use crate::value::property_map::{KeyPrint, Repr, Shape, Shaped, hash_table_heap_bytes, keys_hash};
 use crate::value::{ElementProperty, PropertyMap};
 
-type Fnv = BuildHasherDefault<FnvHasher>;
+/// A cheap hasher for the transition caches, whose keys are a shape address, a position and
+/// (for an insertion) a short key: one multiply per word instead of FNV's one per byte.
+#[derive(Default)]
+struct MixHasher(u64);
+
+impl MixHasher {
+    #[inline]
+    fn mix(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for MixHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        // Fold the well-mixed high half into the low bits hashbrown picks buckets with.
+        self.0 ^ (self.0 >> 29)
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            for (slot, byte) in word.iter_mut().zip(chunk) {
+                *slot = *byte;
+            }
+            self.mix(u64::from_le_bytes(word));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.mix(u64::from(n));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.mix(n);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.mix(n as u64);
+    }
+}
+
+type Mix = BuildHasherDefault<MixHasher>;
+
+/// The last insertion transition: `(shape address, position, key print, key, next shape)`.
+type InsertMemo = (usize, usize, KeyPrint, CompactString, Arc<Shape>);
 
 /// The smallest shape count at which the table sweeps when it has doubled.
 const MIN_SWEEP_AT: usize = 64;
@@ -45,33 +94,9 @@ const MIN_SWEEP_AT: usize = 64;
 /// The next shape table id (ids are never reused within a process).
 static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// An interned shape, hashed and compared by its key list (so the set is looked up by a
-/// `&[CompactString]`).
-struct Interned(Arc<Shape>);
-
-impl PartialEq for Interned {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.keys == other.0.keys
-    }
-}
-
-impl Eq for Interned {}
-
-impl Hash for Interned {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // The same hash as the borrowed `[CompactString]` (the `Borrow` contract).
-        self.0.keys[..].hash(state);
-    }
-}
-
-impl Borrow<[CompactString]> for Interned {
-    fn borrow(&self) -> &[CompactString] {
-        &self.0.keys
-    }
-}
-
 /// The address of a shape, the key of the transition caches. Valid while the shape is in the
 /// table (the table holds it), and the caches are cleared before a sweep removes any shape.
+#[inline]
 fn address(shape: &Arc<Shape>) -> usize {
     Arc::as_ptr(shape) as usize
 }
@@ -80,15 +105,25 @@ fn address(shape: &Arc<Shape>) -> usize {
 pub(crate) struct ShapeTable {
     /// This table's id, stamped on its shapes.
     id: u64,
-    /// The interned non-empty shapes, by key list.
-    shapes: HashSet<Interned, Fnv>,
-    /// `(shape, added key) -> next shape`.
-    added: HashMap<(usize, CompactString), Arc<Shape>, Fnv>,
+    /// The interned non-empty shapes, hashed by their key sequence ([`keys_hash`]).
+    shapes: HashTable<Arc<Shape>>,
+    /// `(shape, position, inserted key) -> next shape` (an added key is inserted at the end).
+    inserted: HashMap<(usize, usize, CompactString), Arc<Shape>, Mix>,
     /// `(shape, removed position) -> next shape`.
-    removed: HashMap<(usize, usize), Arc<Shape>, Fnv>,
+    removed: HashMap<(usize, usize), Arc<Shape>, Mix>,
+    /// The last insertion transition, tried before `inserted` (a bulk write repeats one).
+    last_insert: Option<InsertMemo>,
+    /// The last removal transition `(shape, position, next)`, tried before `removed`.
+    last_remove: Option<(usize, usize, Arc<Shape>)>,
+    /// The last foreign shape adopted and this table's shape for it (a decoded chunk hands in
+    /// one foreign shape for many elements).
+    last_foreign: Option<(Arc<Shape>, Arc<Shape>)>,
     /// The empty shape: always this table's, never in `shapes` (so a graph whose elements have
     /// no properties reports no shape bytes) and never swept.
     empty: Arc<Shape>,
+    /// The shape interned or adopted last: loads and bulk inserts repeat one key sequence, so
+    /// [`Self::adopt`] compares against it before hashing the keys.
+    last: Option<Arc<Shape>>,
     /// The shape count that triggers the next sweep.
     sweep_at: usize,
 }
@@ -109,15 +144,19 @@ impl std::fmt::Debug for ShapeTable {
 }
 
 impl ShapeTable {
-    /// An empty table holding the empty shape.
+    /// An empty table (holding only the empty shape, outside the set).
     pub(crate) fn new() -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed);
         Self {
             id,
-            shapes: HashSet::default(),
-            added: HashMap::default(),
+            shapes: HashTable::new(),
+            inserted: HashMap::default(),
             removed: HashMap::default(),
+            last_insert: None,
+            last_remove: None,
+            last_foreign: None,
             empty: Arc::new(Shape::new(Box::new([]), id)),
+            last: None,
             sweep_at: MIN_SWEEP_AT,
         }
     }
@@ -134,26 +173,44 @@ impl ShapeTable {
         shape.owner == self.id
     }
 
-    /// The interned shape of `keys` (unique, in order), interning it when new.
+    /// The interned shape of `keys` (unique, in order), interning it when new (tests).
+    #[cfg(test)]
     pub(crate) fn intern(&mut self, keys: &[CompactString]) -> Arc<Shape> {
-        if keys.is_empty() {
-            return Arc::clone(&self.empty);
-        }
-        if let Some(found) = self.shapes.get(keys) {
-            return Arc::clone(&found.0);
-        }
-        self.intern_new(keys.into())
+        self.intern_keys(keys.iter().map(CompactString::as_str), || keys.into())
     }
 
-    /// [`Self::intern`] of an owned key list (no copy when new).
-    fn intern_owned(&mut self, keys: Vec<CompactString>) -> Arc<Shape> {
-        if keys.is_empty() {
+    /// The interned shape of the key sequence `keys`; `build` makes the owned key list only when
+    /// the sequence is new (a found shape costs no allocation). The last shape is tried first,
+    /// then the hash table.
+    fn intern_keys<'a, I>(
+        &mut self,
+        keys: I,
+        build: impl FnOnce() -> Box<[CompactString]>,
+    ) -> Arc<Shape>
+    where
+        I: ExactSizeIterator<Item = &'a str> + Clone,
+    {
+        if keys.len() == 0 {
             return Arc::clone(&self.empty);
         }
-        if let Some(found) = self.shapes.get(keys.as_slice()) {
-            return Arc::clone(&found.0);
+        if let Some(last) = &self.last
+            && last.has_keys(keys.clone())
+        {
+            return Arc::clone(last);
         }
-        self.intern_new(keys.into_boxed_slice())
+        let hash = keys_hash(keys.clone());
+        let found = self
+            .shapes
+            .find(hash, |shape| {
+                shape.hash == hash && shape.has_keys(keys.clone())
+            })
+            .map(Arc::clone);
+        let shape = match found {
+            Some(shape) => shape,
+            None => self.intern_new(build()),
+        };
+        self.last = Some(Arc::clone(&shape));
+        shape
     }
 
     /// Interns a key list known to be absent, sweeping first when the table has doubled.
@@ -162,39 +219,61 @@ impl ShapeTable {
             self.sweep();
         }
         let shape = Arc::new(Shape::new(keys, self.id));
-        self.shapes.insert(Interned(Arc::clone(&shape)));
+        self.shapes
+            .insert_unique(shape.hash, Arc::clone(&shape), |shape| shape.hash);
         shape
     }
 
     /// Makes `map` a `Shaped` map of this table: an `Indexed` map is converted (its keys
-    /// interned, its values moved into an exact slice), a `Shaped` map of another table (a map
+    /// interned, its values moved into an exact vector), a `Shaped` map of another table (a map
     /// moved between graphs) gets this table's shape of the same keys. A map of this table is
     /// left alone (one integer comparison).
+    #[inline]
     pub(crate) fn adopt(&mut self, map: &mut PropertyMap) {
+        if let Repr::Shaped(shaped) = &map.0
+            && self.owns(&shaped.shape)
+        {
+            return;
+        }
+        self.adopt_slow(map);
+    }
+
+    /// [`Self::adopt`] of a map that is not one of this table's yet.
+    fn adopt_slow(&mut self, map: &mut PropertyMap) {
         match &mut map.0 {
             Repr::Shaped(shaped) => {
-                if !self.owns(&shaped.shape) {
-                    shaped.shape = self.intern(&shaped.shape.keys);
+                if let Some((theirs, ours)) = &self.last_foreign
+                    && Arc::ptr_eq(theirs, &shaped.shape)
+                {
+                    shaped.shape = Arc::clone(ours);
+                    return;
+                }
+                let theirs = Arc::clone(&shaped.shape);
+                shaped.shape = self
+                    .intern_keys(theirs.keys.iter().map(CompactString::as_str), || {
+                        theirs.keys.clone()
+                    });
+                // Only a foreign shape is remembered: the memo never names one of ours.
+                if !self.owns(&theirs) {
+                    self.last_foreign = Some((theirs, Arc::clone(&shaped.shape)));
                 }
             }
             Repr::Indexed(indexed) => {
-                let indexed = std::mem::take(indexed);
-                let mut keys = Vec::with_capacity(indexed.len());
-                let mut values = Vec::with_capacity(indexed.len());
-                for (key, value) in indexed {
-                    keys.push(key);
-                    values.push(value);
-                }
-                let shape = self.intern_owned(keys);
-                map.0 = Repr::Shaped(Shaped {
-                    shape,
-                    values: values.into_boxed_slice(),
+                let shape = self.intern_keys(indexed.keys().map(CompactString::as_str), || {
+                    indexed.keys().cloned().collect()
                 });
+                // Exactly sized: a plain `collect` would reuse the entry allocation in place (twice the
+                // size of the values).
+                let indexed = std::mem::take(indexed);
+                let mut values = Vec::with_capacity(indexed.len());
+                values.extend(indexed.into_values());
+                map.0 = Repr::Shaped(Shaped { shape, values });
             }
         }
     }
 
     /// [`Self::adopt`] of an edge's optional map.
+    #[inline]
     pub(crate) fn adopt_optional(&mut self, map: &mut Option<PropertyMap>) {
         if let Some(map) = map {
             self.adopt(map);
@@ -203,7 +282,8 @@ impl ShapeTable {
 
     /// The in-graph `insert`: `(position, previous value)`. An existing key is overwritten in
     /// place; a new key moves the map to the next shape (transition cache) and grows its values
-    /// by one (one reallocation).
+    /// by one slot (no reallocation when a removed key left one).
+    #[inline]
     pub(crate) fn insert_full(
         &mut self,
         map: &mut PropertyMap,
@@ -219,17 +299,16 @@ impl ShapeTable {
         {
             return (position, Some(std::mem::replace(slot, value)));
         }
-        let next = self.with_key(&shaped.shape, key);
-        let mut values = std::mem::take(&mut shaped.values).into_vec();
-        values.reserve_exact(1);
-        values.push(value);
-        shaped.values = values.into_boxed_slice();
-        shaped.shape = next;
-        (shaped.values.len() - 1, None)
+        let position = shaped.values.len();
+        shaped.shape = self.with_key_at(&shaped.shape, position, key);
+        shaped.values.reserve_exact(1);
+        shaped.values.push(value);
+        (position, None)
     }
 
     /// The in-graph `shift_remove`: `(position, key, value)` of the removed entry; the map moves
-    /// to the shape without that position (transition cache). An absent key changes nothing.
+    /// to the shape without that position (transition cache). The value slot stays as capacity.
+    /// An absent key changes nothing.
     pub(crate) fn shift_remove_full(
         &mut self,
         map: &mut PropertyMap,
@@ -240,18 +319,18 @@ impl ShapeTable {
             return map.shift_remove_full(key);
         };
         let position = shaped.shape.position(key)?;
+        if position >= shaped.values.len() {
+            return None;
+        }
         let stored = shaped.shape.keys.get(position)?.clone();
-        let next = self.without_position(&shaped.shape, position);
-        let mut values = std::mem::take(&mut shaped.values).into_vec();
-        let value = values.remove(position);
-        shaped.values = values.into_boxed_slice();
-        shaped.shape = next;
+        shaped.shape = self.without_position(&shaped.shape, position);
+        let value = shaped.values.remove(position);
         Some((position, stored, value))
     }
 
     /// The in-graph positional insert of an absent `key` at `position` (clamped to the length):
-    /// the undo log putting a removed key back where it was. Interns the resulting key list
-    /// directly (rare: rollbacks only). A present key is overwritten in place.
+    /// the undo log putting a removed key back where it was (transition cache). A present key is
+    /// overwritten in place.
     pub(crate) fn shift_insert(
         &mut self,
         map: &mut PropertyMap,
@@ -271,47 +350,90 @@ impl ShapeTable {
             return;
         }
         let position = position.min(shaped.values.len());
-        let mut keys = shaped.shape.keys.to_vec();
-        keys.insert(position, key);
-        let next = self.intern_owned(keys);
-        let mut values = std::mem::take(&mut shaped.values).into_vec();
-        values.reserve_exact(1);
-        values.insert(position, value);
-        shaped.values = values.into_boxed_slice();
-        shaped.shape = next;
+        shaped.shape = self.with_key_at(&shaped.shape, position, key);
+        shaped.values.reserve_exact(1);
+        shaped.values.insert(position, value);
     }
 
-    /// The shape of `shape`'s keys plus `key` at the end (`shape` is one of this table's).
-    fn with_key(&mut self, shape: &Arc<Shape>, key: CompactString) -> Arc<Shape> {
-        let probe = (address(shape), key);
-        if let Some(next) = self.added.get(&probe) {
+    /// The shape of `shape`'s keys with `key` inserted at `position` (`shape` is one of this
+    /// table's, `position <= shape.len()`).
+    fn with_key_at(
+        &mut self,
+        shape: &Arc<Shape>,
+        position: usize,
+        key: CompactString,
+    ) -> Arc<Shape> {
+        let from = address(shape);
+        let print = KeyPrint::of(&key);
+        if let Some((at, memo_position, memo_print, memo_key, next)) = &self.last_insert
+            && *at == from
+            && *memo_position == position
+            && *memo_print == print
+            && print.confirms(memo_key, &key)
+        {
             return Arc::clone(next);
         }
-        let (from, key) = probe;
-        let mut keys = Vec::with_capacity(shape.len() + 1);
-        keys.extend(shape.keys.iter().cloned());
-        keys.push(key.clone());
-        let next = self.intern_owned(keys);
-        // A sweep inside `intern_owned` clears the caches but never removes `shape` (the map
+        let probe = (from, position, key);
+        if let Some(next) = self.inserted.get(&probe) {
+            let next = Arc::clone(next);
+            let (_, _, key) = probe;
+            self.last_insert = Some((from, position, print, key, Arc::clone(&next)));
+            return next;
+        }
+        let (_, _, key) = probe;
+        let (before, after) = shape.keys.split_at(position.min(shape.len()));
+        let keys = before
+            .iter()
+            .map(CompactString::as_str)
+            .chain(std::iter::once(key.as_str()))
+            .chain(after.iter().map(CompactString::as_str));
+        let next = self.intern_keys(ExactChain(keys, shape.len() + 1), || {
+            before
+                .iter()
+                .cloned()
+                .chain(std::iter::once(key.clone()))
+                .chain(after.iter().cloned())
+                .collect()
+        });
+        // A sweep inside `intern_keys` clears the caches but never removes `shape` (the map
         // being written holds it), so `from` still names a shape of the table.
-        self.added.insert((from, key), Arc::clone(&next));
+        self.last_insert = Some((from, position, print, key.clone(), Arc::clone(&next)));
+        self.inserted
+            .insert((from, position, key), Arc::clone(&next));
         next
     }
 
     /// The shape of `shape`'s keys without the one at `position`.
     fn without_position(&mut self, shape: &Arc<Shape>, position: usize) -> Arc<Shape> {
         let probe = (address(shape), position);
-        if let Some(next) = self.removed.get(&probe) {
+        if let Some((at, memo_position, next)) = &self.last_remove
+            && *at == probe.0
+            && *memo_position == position
+        {
             return Arc::clone(next);
         }
-        let keys: Vec<CompactString> = shape
+        if let Some(next) = self.removed.get(&probe) {
+            let next = Arc::clone(next);
+            self.last_remove = Some((probe.0, position, Arc::clone(&next)));
+            return next;
+        }
+        let keys = shape
             .keys
             .iter()
             .enumerate()
-            .filter(|(at, _)| *at != position)
-            .map(|(_, key)| key.clone())
-            .collect();
-        let next = self.intern_owned(keys);
+            .filter(move |(at, _)| *at != position)
+            .map(|(_, key)| key.as_str());
+        let len = shape.len().saturating_sub(1);
+        let next = self.intern_keys(ExactChain(keys, len), || {
+            shape
+                .keys
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| *at != position)
+                .map(|(_, key)| key.clone())
+                .collect()
+        });
+        self.last_remove = Some((probe.0, position, Arc::clone(&next)));
         self.removed.insert(probe, Arc::clone(&next));
         next
     }
@@ -320,12 +442,15 @@ impl ShapeTable {
     /// transition caches (they hold shapes and are keyed by address). Returns how many shapes
     /// were removed. The next threshold sweep comes when the table has doubled again.
     pub(crate) fn sweep(&mut self) -> usize {
-        self.added.clear();
+        self.inserted.clear();
         self.removed.clear();
+        self.last_insert = None;
+        self.last_remove = None;
+        self.last_foreign = None;
+        self.last = None;
         let before = self.shapes.len();
         // Held by the table alone: one strong reference (the set's).
-        self.shapes
-            .retain(|interned| Arc::strong_count(&interned.0) > 1);
+        self.shapes.retain(|shape| Arc::strong_count(shape) > 1);
         self.sweep_at = (self.shapes.len() * 2).max(MIN_SWEEP_AT);
         before - self.shapes.len()
     }
@@ -333,8 +458,8 @@ impl ShapeTable {
     /// Sweeps and releases the spare capacity of the set and the caches.
     pub(crate) fn shrink_to_fit(&mut self) {
         self.sweep();
-        self.shapes.shrink_to_fit();
-        self.added.shrink_to_fit();
+        self.shapes.shrink_to_fit(|shape| shape.hash);
+        self.inserted.shrink_to_fit();
         self.removed.shrink_to_fit();
     }
 
@@ -343,25 +468,48 @@ impl ShapeTable {
     /// constant of every graph, is not counted.
     pub(crate) fn heap_bytes(&self) -> u64 {
         use std::mem::size_of;
-        let shapes: u64 = self.shapes.iter().map(|s| s.0.heap_bytes()).sum();
-        let added_keys: u64 = self
-            .added
+        let shapes: u64 = self.shapes.iter().map(|shape| shape.heap_bytes()).sum();
+        let inserted_keys: u64 = self
+            .inserted
             .keys()
-            .map(|(_, key)| crate::value::compact_string_heap_bytes(key))
+            .map(|(_, _, key)| crate::value::compact_string_heap_bytes(key))
             .sum();
         shapes
-            + hash_table_heap_bytes(self.shapes.capacity(), size_of::<Interned>())
+            + hash_table_heap_bytes(self.shapes.capacity(), size_of::<Arc<Shape>>())
             + hash_table_heap_bytes(
-                self.added.capacity(),
-                size_of::<((usize, CompactString), Arc<Shape>)>(),
+                self.inserted.capacity(),
+                size_of::<((usize, usize, CompactString), Arc<Shape>)>(),
             )
-            + added_keys
+            + inserted_keys
             + hash_table_heap_bytes(
                 self.removed.capacity(),
                 size_of::<((usize, usize), Arc<Shape>)>(),
             )
     }
 }
+
+/// An iterator with a known exact length (the chained and filtered key sequences of a
+/// transition, whose adapters do not implement `ExactSizeIterator` themselves).
+#[derive(Clone)]
+struct ExactChain<I>(I, usize);
+
+impl<I: Iterator> Iterator for ExactChain<I> {
+    type Item = I::Item;
+
+    #[inline]
+    fn next(&mut self) -> Option<I::Item> {
+        let item = self.0.next()?;
+        self.1 = self.1.saturating_sub(1);
+        Some(item)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.1, Some(self.1))
+    }
+}
+
+impl<I: Iterator> ExactSizeIterator for ExactChain<I> {}
 
 #[cfg(test)]
 mod tests {
