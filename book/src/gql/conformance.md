@@ -163,7 +163,7 @@ where it has one):
 | name of an unaliased column | the expression as written (Neo4j's names, such as `count(*)`, which the openCypher TCK confirms; the ISO text is still to be checked) |
 | element ids | strings, the same as Gremlin's `id()`; vertex and edge ids are separate spaces |
 | integer division | truncates toward zero; `%` takes the sign of the dividend |
-| temporal precision | microseconds; a value with a non-zero part below the microsecond is `0A000`, never cut |
+| temporal precision | nanoseconds |
 | default time zone | UTC: a `datetime` without an offset or zone, and the clocks without a zone |
 | the current date and time | one instant per query, taken when it starts; `X.realtime()` is refused |
 | `ORDER BY` of durations | by length, a month counted as 30 days (`<` on two durations is `NULL`) |

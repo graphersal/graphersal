@@ -86,7 +86,7 @@ impl GType {
     /// `GType.DATETIME` — an instant with its UTC offset (TinkerPop's date type).
     pub const DATETIME: GType = GType::Value(ValueType::DateTime);
     /// `GType.DURATION` — a length of time (TinkerPop `DURATION`; months, days and
-    /// microseconds here).
+    /// nanoseconds here).
     pub const DURATION: GType = GType::Value(ValueType::Duration);
     /// `GType.DATE` — a calendar day (a Graphersal extension).
     pub const DATE: GType = GType::Value(ValueType::Date);

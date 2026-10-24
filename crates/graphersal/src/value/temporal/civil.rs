@@ -12,16 +12,27 @@ pub(crate) const MAX_YEAR: i32 = 9999;
 /// Microseconds in one day (a day is always 24 hours outside a time zone).
 pub(crate) const MICROS_PER_DAY: i64 = 86_400_000_000;
 /// Microseconds in one second.
+#[cfg(test)]
 pub(crate) const MICROS_PER_SECOND: i64 = 1_000_000;
+/// Nanoseconds in one day (a day is always 24 hours outside a time zone).
+pub(crate) const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+/// Nanoseconds in one second.
+pub(crate) const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 /// Days since 1970-01-01 of `-9999-01-01`.
 pub(crate) const MIN_DAY: i32 = days_from_civil(MIN_YEAR, 1, 1);
 /// Days since 1970-01-01 of `9999-12-31`.
 pub(crate) const MAX_DAY: i32 = days_from_civil(MAX_YEAR, 12, 31);
 /// The first microsecond of the supported range (local or UTC).
+#[cfg(test)]
 pub(crate) const MIN_MICROS: i64 = MIN_DAY as i64 * MICROS_PER_DAY;
 /// The last microsecond of the supported range (local or UTC).
+#[cfg(test)]
 pub(crate) const MAX_MICROS: i64 = (MAX_DAY as i64 + 1) * MICROS_PER_DAY - 1;
+/// The first nanosecond of the supported range (local or UTC).
+pub(crate) const MIN_NANOS: i128 = MIN_DAY as i128 * NANOS_PER_DAY as i128;
+/// The last nanosecond of the supported range (local or UTC).
+pub(crate) const MAX_NANOS: i128 = (MAX_DAY as i128 + 1) * NANOS_PER_DAY as i128 - 1;
 
 /// Whether `year` is a leap year.
 pub(crate) const fn is_leap(year: i32) -> bool {
@@ -68,9 +79,9 @@ pub(crate) const fn day_in_range(days: i64) -> bool {
     days >= MIN_DAY as i64 && days <= MAX_DAY as i64
 }
 
-/// Whether a microsecond count (local or UTC) lies in the supported range.
-pub(crate) const fn micros_in_range(micros: i64) -> bool {
-    micros >= MIN_MICROS && micros <= MAX_MICROS
+/// Whether a nanosecond count (local or UTC) lies in the supported range.
+pub(crate) const fn nanos_in_range(nanos: i128) -> bool {
+    nanos >= MIN_NANOS && nanos <= MAX_NANOS
 }
 
 /// The day of the week, 0 = Sunday .. 6 = Saturday (PostgreSQL `dow`).
@@ -177,12 +188,11 @@ pub(crate) fn add_months(days: i32, months: i64) -> Option<i32> {
     Some(days_from_civil(new_year, new_month, new_day))
 }
 
-/// Splits a microsecond count into (days, microsecond of the day), flooring.
-pub(crate) const fn split_micros(micros: i64) -> (i64, i64) {
-    (
-        micros.div_euclid(MICROS_PER_DAY),
-        micros.rem_euclid(MICROS_PER_DAY),
-    )
+/// Splits a nanosecond count of the supported range into (days, nanosecond of the day),
+/// flooring.
+pub(crate) const fn split_nanos(nanos: i128) -> (i64, i64) {
+    let day = NANOS_PER_DAY as i128;
+    (nanos.div_euclid(day) as i64, nanos.rem_euclid(day) as i64)
 }
 
 #[cfg(test)]

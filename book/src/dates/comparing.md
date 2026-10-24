@@ -23,10 +23,10 @@ first: `as_local()` gives the wall-clock `localdatetime` ([Time Zones](time_zone
 
 ## `duration`: field-wise equal, ordered by length
 
-Two `duration`s are equal when their months, days and microseconds are equal: `P1M` is not
+Two `duration`s are equal when their months, days and nanoseconds are equal: `P1M` is not
 `P30D`, and `P1D` is not `PT24H` (a day in a time zone may have 23 or 25 hours). Sorting
 compares their length as PostgreSQL does for an `interval`, counting a month as 30 days and a day
-as 24 hours; equal lengths are ordered by months, then days, then microseconds:
+as 24 hours; equal lengths are ordered by months, then days, then the time part:
 
 ```rhai,graph=empty
 duration("P1M") == duration("P30D")   // false

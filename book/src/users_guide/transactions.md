@@ -352,7 +352,7 @@ canonical text:
 | Type | Tag |
 |---|---|
 | `datetime`, `date`, `localdatetime`, `time` | `gx:OffsetDateTime`, `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` |
-| `duration` of microseconds only (no months, no days) | `gx:Duration` (`PT26H`) |
+| `duration` of a time part only (no months, no days) | `gx:Duration` (`PT26H`) |
 | `duration` of months and days only | `gx:Period` (`P1Y2M3D`) |
 | any other `duration` | `graphersal:Interval` (`P1MT2H`) |
 | `vector` (book page [Vectors](vectors.md)) | `graphersal:Vector` with an object: `{"element": "f32", "data": [0.5, -1.0]}` (`f16` the same), `{"element": "i8", "scale": 0.007874016, "codes": [64, -127]}`, `{"element": "bit", "dimension": 3, "bits": "a0"}` (the packed bytes in hex); exact for every element kind |

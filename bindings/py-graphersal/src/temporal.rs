@@ -8,9 +8,11 @@
 //! | `time` | naive `datetime.time` (an aware `time` has no instant and is refused) |
 //! | `duration` | `datetime.timedelta` when it has no months, else [`Interval`] |
 //!
-//! Both sides count in microseconds, so nothing is rounded. The Python objects are built and read
-//! through the `datetime` module's own API (the datetime C API is not part of the stable ABI
-//! this extension is built for).
+//! Python's `datetime` counts in microseconds, the engine in nanoseconds: a value with a part
+//! below the microsecond raises `ValueError` rather than being rounded (truncate it first with
+//! `date_trunc(DT.microsecond)`); every other value converts exactly. The Python objects are
+//! built and read through the `datetime` module's own API (the datetime C API is not part of the
+//! stable ABI this extension is built for).
 
 use graphersal::temporal::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
 use pyo3::exceptions::PyValueError;
@@ -45,6 +47,9 @@ impl Interval {
                 ));
             }
             return match text.parse::<Duration>() {
+                Ok(duration) if Temporal::Duration(duration).has_sub_micros() => {
+                    Err(sub_micros_error(&Temporal::Duration(duration)))
+                }
                 Ok(duration) => Ok(Interval { duration }),
                 Err(err) => Err(PyValueError::new_err(format!(
                     "not an ISO 8601 duration: {err}"
@@ -97,8 +102,21 @@ fn datetime_module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     py.import("datetime")
 }
 
+/// The error of a value with a part below the microsecond, which Python's `datetime` types
+/// cannot hold (never rounded silently).
+fn sub_micros_error(value: &Temporal) -> PyErr {
+    PyValueError::new_err(format!(
+        "the {} {value} has a part below the microsecond, which Python's datetime types cannot \
+         hold; truncate it first, for example with date_trunc(DT.microsecond)",
+        value.kind()
+    ))
+}
+
 /// A temporal value as a Python object (see the module docs).
 pub(crate) fn temporal_to_pyobject(py: Python<'_>, value: Temporal) -> PyResult<Py<PyAny>> {
+    if value.has_sub_micros() {
+        return Err(sub_micros_error(&value));
+    }
     let module = datetime_module(py)?;
     let object = match value {
         Temporal::Date(date) => date_object(&module, date)?,

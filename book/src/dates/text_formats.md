@@ -13,7 +13,7 @@ the text `java.time` writes, so other tools read it back:
 | Type | Canonical text |
 |---|---|
 | `date` | `2023-08-02`; a year before 1 or after 9999 with its sign: `-0044-03-15` |
-| `time` | `09:30:00`; a fraction only when it is not zero, as milliseconds or microseconds: `09:30:00.500`, `09:30:00.123456` |
+| `time` | `09:30:00`; a fraction only when it is not zero, in groups of three digits (milliseconds, microseconds or nanoseconds): `09:30:00.500`, `09:30:00.123456`, `09:30:00.123456789` |
 | `localdatetime` | `2023-08-02T09:30:00` (the date, `T`, the time) |
 | `datetime` | `2023-08-02T09:30:00+02:00`; `Z` for a zero offset; an offset with seconds as `+00:19:32` |
 | `duration` | `P1Y2M3DT4H5M6S`: years and months from the months, days, then the time part; a zero part is left out, a zero duration is `PT0S`; a sign before `P` when every part is negative (`-P1M2D`), else a sign per part (`P1M-2D`) |
@@ -33,7 +33,7 @@ weeks are read as 7 days. Years and months are one field, months: `P1Y2M` is 14 
 | Type | Accepted text |
 |---|---|
 | `date` | `YYYY-MM-DD`; a year before 1 with its sign (`-0044-03-15`) |
-| `time` | `HH:MM`, `HH:MM:SS`, `HH:MM:SS.f` with 1 to 9 fraction digits (digits below the microsecond are cut off) |
+| `time` | `HH:MM`, `HH:MM:SS`, `HH:MM:SS.f` with 1 to 9 fraction digits, kept to the nanosecond |
 | `localdatetime` | a date, optionally followed by `T` (or `t`, or a space) and a time; a date alone is midnight |
 | `datetime` | a local date-time, then an offset (`Z`, `+02:00`, `+0200`, `+02`, `+00:19:32`) and/or a zone in brackets (`[Europe/Berlin]`) |
 | `duration` | `[+-]P[nY][nM][nW][nD][T[nH][nM][n[.f]S]]`, a sign per number allowed (`P1M-2D`), letters in either case |

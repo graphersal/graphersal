@@ -1118,8 +1118,9 @@ fn curated_gql_3g_scripts_give_the_same_result_on_both_storages() {
         differences.len(),
         differences.join("\n")
     );
-    // The scripts must exercise stage 3g, not fail on the way: only the two error cases fail.
-    assert_eq!(failing.len(), 2, "{failing:#?}");
+    // The scripts must exercise stage 3g, not fail on the way: only the error case fails (the
+    // nanosecond one stores its value since values hold nanoseconds).
+    assert_eq!(failing.len(), 1, "{failing:#?}");
     // The clocks of one query read one instant.
     let clocks = run_curated(reference(), Mode::Plain, GQL_CURATED_3G[8]).result;
     assert!(

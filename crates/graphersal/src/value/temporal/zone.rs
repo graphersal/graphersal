@@ -7,7 +7,7 @@
 //! by the gap; one it repeats (a fall-back fold) takes the earlier offset, as PostgreSQL and
 //! `java.time` do ("compatible" disambiguation).
 
-use super::civil::{self, MICROS_PER_SECOND};
+use super::civil::{self, NANOS_PER_SECOND};
 use super::{DateTime, LocalDateTime, TemporalError, TemporalResult};
 
 /// The longest accepted zone name (IANA names are far shorter).
@@ -41,7 +41,7 @@ impl Zone {
         match self {
             Zone::Fixed(offset) => Ok(*offset),
             Zone::Iana(tz) => {
-                let timestamp = jiff::Timestamp::from_microsecond(value.epoch_micros())
+                let timestamp = jiff::Timestamp::from_nanosecond(value.epoch_nanos())
                     .map_err(|_| TemporalError::out_of_range("the date-time"))?;
                 Ok(tz.to_offset(timestamp).seconds())
             }
@@ -58,10 +58,10 @@ impl Zone {
         match self {
             Zone::Fixed(offset) => DateTime::from_local(local, *offset),
             Zone::Iana(tz) => {
-                let (days, of_day) = civil::split_micros(local.micros());
+                let (days, of_day) = civil::split_nanos(local.nanos());
                 let (year, month, day) = civil::civil_from_days(days as i32);
-                let seconds = of_day / MICROS_PER_SECOND;
-                let nanos = (of_day % MICROS_PER_SECOND) * 1000;
+                let seconds = of_day / NANOS_PER_SECOND;
+                let nanos = of_day % NANOS_PER_SECOND;
                 let out_of_range = |_| TemporalError::out_of_range("the date-time");
                 let civil_value = jiff::civil::DateTime::new(
                     year as i16,
@@ -78,7 +78,7 @@ impl Zone {
                     .compatible()
                     .map_err(out_of_range)?;
                 let offset = tz.to_offset(timestamp).seconds();
-                DateTime::from_micros(timestamp.as_microsecond(), offset)
+                DateTime::from_nanos(timestamp.as_nanosecond(), offset)
             }
         }
     }

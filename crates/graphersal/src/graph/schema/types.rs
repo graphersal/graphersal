@@ -42,7 +42,7 @@ pub enum ValueType {
     DateTime,
     /// A time of day ([`Time`](crate::value::temporal::Time)).
     Time,
-    /// A length of time in months, days and microseconds
+    /// A length of time in months, days and nanoseconds
     /// ([`Duration`](crate::value::temporal::Duration)).
     Duration,
     /// A vector of one element kind ([`Vector`](crate::value::Vector)), any dimension.

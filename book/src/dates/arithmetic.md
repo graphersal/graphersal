@@ -15,7 +15,7 @@ and the calendar units, with PostgreSQL's field names:
 
 | Unit | Kind | Adding it |
 |---|---|---|
-| `DT.microsecond`, `DT.millisecond`, `DT.second`, `DT.minute`, `DT.hour` | a fixed length | moves the instant (or the clock) by that many microseconds |
+| `DT.nanosecond`, `DT.microsecond`, `DT.millisecond`, `DT.second`, `DT.minute`, `DT.hour` | a fixed length | moves the instant (or the clock) by that many units |
 | `DT.day`, `DT.week` | calendar days | moves the wall-clock date; in a zone the time of day is kept across a daylight saving change |
 | `DT.month`, `DT.quarter`, `DT.year`, `DT.decade`, `DT.century`, `DT.millennium` | calendar months (1, 3, 12, 120, 1200, 12000) | moves the month and clamps the day to the end of the target month |
 

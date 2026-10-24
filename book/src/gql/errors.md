@@ -153,7 +153,7 @@ the accepted forms with a runnable example:
 | `22G03` | a component the value's type does not have (`date(..).hour`; the message lists the components it has); a constructor argument of the wrong kind (`date(42)`, `localdatetime(date(..))`); arithmetic without a meaning (`date + date`, `date * 2`); a truncation or difference of a value without the part it needs (`date.truncate('day', localtime(..))`, `duration.inDays()` of two local times) |
 | `22023` | a truncation unit the type does not have (`date.truncate('hour', ..)`) or an unknown unit |
 | `22012` | a duration divided by zero |
-| `0A000` | a part below the microsecond (`'12:00:00.0000001'`, `nanosecond: 5`), Cypher's zoned `time()` and ISO `zoned_time()` (not yet); `X.realtime()` (refused) |
+| `0A000` | Cypher's zoned `time()` and ISO `zoned_time()` (not yet); `X.realtime()` (refused) |
 
 ```rhai,graph=empty
 g.gql("RETURN date('nonsense') AS d")   // error: cannot parse "nonsense" as a date (22007)
@@ -165,7 +165,7 @@ g.gql("RETURN date('2015-01-01').foo AS x")   // error: a date has no component 
 g.gql("RETURN date('2015-01-01') * 2 AS x")   // error: * with a temporal value takes a duration and a number (22G03)
 g.gql("RETURN date.truncate('fortnight', date('2017-10-11')) AS d")   // error: unknown unit 'fortnight' (22023)
 g.gql("RETURN duration('P1D') / 0 AS d")   // error: division by zero (22012)
-g.gql("RETURN localtime('12:00:00.0000001') AS t")   // error: a part below the microsecond is not yet supported (0A000)
+g.gql("RETURN time('12:00+01:00') AS t")   // error: time() (a time of day with a UTC offset) is not yet supported (0A000)
 ```
 
 ```text

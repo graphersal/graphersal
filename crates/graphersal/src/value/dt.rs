@@ -8,7 +8,7 @@ use std::fmt;
 /// `extract` field names) and the parts that are not units (`day_of_week`, `iso_day_of_week`,
 /// `day_of_year`, `iso_year`, `epoch`, `offset`), which only `datePart` accepts.
 ///
-/// - Units below a day ([`Microsecond`](DT::Microsecond) to [`Hour`](DT::Hour)) are fixed
+/// - Units below a day ([`Nanosecond`](DT::Nanosecond) to [`Hour`](DT::Hour)) are fixed
 ///   lengths: adding them moves the instant.
 /// - [`Day`](DT::Day) and [`Week`](DT::Week) add calendar days: in a time zone they keep the
 ///   wall-clock time across a daylight saving change.
@@ -19,7 +19,9 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DT {
-    /// One microsecond (the resolution of every temporal value).
+    /// One nanosecond (the resolution of every temporal value with a time).
+    Nanosecond,
+    /// One microsecond.
     Microsecond,
     /// One millisecond.
     Millisecond,
@@ -62,6 +64,7 @@ pub enum DT {
 impl DT {
     /// Every token, units first, in the order of the enum.
     pub const ALL: &'static [DT] = &[
+        DT::Nanosecond,
         DT::Microsecond,
         DT::Millisecond,
         DT::Second,
@@ -86,6 +89,7 @@ impl DT {
     /// The snake_case name of the token (`second`, `day_of_week`, ...).
     pub fn name(self) -> &'static str {
         match self {
+            DT::Nanosecond => "nanosecond",
             DT::Microsecond => "microsecond",
             DT::Millisecond => "millisecond",
             DT::Second => "second",
@@ -115,7 +119,8 @@ impl DT {
             DT::IsoDayOfWeek => "isoDayOfWeek",
             DT::DayOfYear => "dayOfYear",
             DT::IsoYear => "isoYear",
-            DT::Microsecond
+            DT::Nanosecond
+            | DT::Microsecond
             | DT::Millisecond
             | DT::Second
             | DT::Minute
@@ -150,15 +155,16 @@ impl DT {
         )
     }
 
-    /// The fixed length of a unit below a day, in microseconds; `None` for calendar units and
+    /// The fixed length of a unit below a day, in nanoseconds; `None` for calendar units and
     /// parts.
-    pub(crate) fn fixed_micros(self) -> Option<i64> {
+    pub(crate) fn fixed_nanos(self) -> Option<i64> {
         match self {
-            DT::Microsecond => Some(1),
-            DT::Millisecond => Some(1_000),
-            DT::Second => Some(1_000_000),
-            DT::Minute => Some(60_000_000),
-            DT::Hour => Some(3_600_000_000),
+            DT::Nanosecond => Some(1),
+            DT::Microsecond => Some(1_000),
+            DT::Millisecond => Some(1_000_000),
+            DT::Second => Some(1_000_000_000),
+            DT::Minute => Some(60_000_000_000),
+            DT::Hour => Some(3_600_000_000_000),
             DT::Day
             | DT::Week
             | DT::Month
@@ -181,7 +187,8 @@ impl DT {
         match self {
             DT::Day => Some(1),
             DT::Week => Some(7),
-            DT::Microsecond
+            DT::Nanosecond
+            | DT::Microsecond
             | DT::Millisecond
             | DT::Second
             | DT::Minute
@@ -210,7 +217,8 @@ impl DT {
             DT::Decade => Some(120),
             DT::Century => Some(1_200),
             DT::Millennium => Some(12_000),
-            DT::Microsecond
+            DT::Nanosecond
+            | DT::Microsecond
             | DT::Millisecond
             | DT::Second
             | DT::Minute
@@ -253,7 +261,9 @@ mod tests {
         assert!(DT::Second.is_unit());
         assert!(DT::Millennium.is_unit());
         assert!(!DT::Epoch.is_unit());
-        assert_eq!(DT::Hour.fixed_micros(), Some(3_600_000_000));
+        assert_eq!(DT::Hour.fixed_nanos(), Some(3_600_000_000_000));
+        assert_eq!(DT::Nanosecond.fixed_nanos(), Some(1));
+        assert!(DT::Nanosecond.is_unit());
         assert_eq!(DT::Week.calendar_days(), Some(7));
         assert_eq!(DT::Millennium.calendar_months(), Some(12_000));
     }

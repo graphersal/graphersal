@@ -162,8 +162,9 @@ pub enum ImportNoteKind {
         /// The value's `@type`.
         type_tag: String,
     },
-    /// A date or time value with digits below a microsecond (Java writes nanoseconds): cut to
-    /// microseconds, Graphersal's resolution.
+    /// A date or time value with digits below a microsecond, cut to microseconds. No longer
+    /// reported: values hold nanoseconds, as Java writes them, and nothing is cut. Kept so code
+    /// that matches it still compiles.
     SubMicrosecondsCut {
         /// The value's `@type`.
         type_tag: String,
@@ -552,8 +553,8 @@ fn decode_typed(
 /// - `gx:Duration` (a fixed length; a day is 24 hours) and `gx:Period` (years, months, days) ->
 ///   `duration`.
 ///
-/// Digits below a microsecond are cut ([`ImportNoteKind::SubMicrosecondsCut`]); a value outside
-/// the supported range or text that is not of the type is a malformed value.
+/// Up to nine fraction digits are kept (nanoseconds); a value outside the supported range or
+/// text that is not of the type is a malformed value.
 fn decode_temporal(
     tag: &str,
     name: &str,
@@ -602,15 +603,13 @@ fn decode_temporal(
                     "a gx:Duration has no years or months (that is a gx:Period)",
                 )));
             }
-            match (duration.days() as i64)
-                .checked_mul(86_400_000_000)
-                .and_then(|micros| micros.checked_add(duration.micros()))
-            {
-                Some(micros) => Temporal::Duration(Duration::from_micros(micros)),
-                None => return Some(Err(ValueSkip::malformed(NOT_OF_TYPE))),
+            let nanos = duration.days() as i128 * 86_400_000_000_000 + duration.nanos();
+            match Duration::from_nanos(nanos) {
+                Ok(duration) => Temporal::Duration(duration),
+                Err(_) => return Some(Err(ValueSkip::malformed(NOT_OF_TYPE))),
             }
         }
-        ("Period", Temporal::Duration(duration)) if duration.micros() != 0 => {
+        ("Period", Temporal::Duration(duration)) if duration.nanos() != 0 => {
             return Some(Err(ValueSkip::malformed(
                 "a gx:Period has no time part (that is a gx:Duration)",
             )));
@@ -619,11 +618,6 @@ fn decode_temporal(
     };
     if zone {
         notes.push(ImportNoteKind::ZoneDropped {
-            type_tag: tag.to_string(),
-        });
-    }
-    if cuts_below_micros(text) {
-        notes.push(ImportNoteKind::SubMicrosecondsCut {
             type_tag: tag.to_string(),
         });
     }
@@ -636,30 +630,6 @@ fn has_offset(text: &str) -> bool {
         Some((_, time)) => time.ends_with(['Z', 'z']) || time.contains(['+', '-']),
         None => false,
     }
-}
-
-/// Whether a text has a fraction of a second with a non-zero digit below a microsecond.
-fn cuts_below_micros(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
-        if matches!(bytes[at], b'.' | b',') {
-            let digits = bytes[at + 1..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
-            if bytes[at + 1..at + 1 + digits]
-                .iter()
-                .skip(6)
-                .any(|&b| b != b'0')
-            {
-                return true;
-            }
-            at += digits;
-        }
-        at += 1;
-    }
-    false
 }
 
 /// Decodes a property value and checks its depth.

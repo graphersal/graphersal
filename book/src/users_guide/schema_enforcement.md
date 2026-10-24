@@ -134,7 +134,7 @@ schema. The format is described by the meta-schema `graphersal-schema-v1.json`
 | `"string"` + `"format": "date"` | `date` | A calendar day (`2024-05-01`). |
 | `"string"` + `"format": "local-date-time"` | `localdatetime` | A date and time without a zone (`2024-05-01T09:30:00`). A Graphersal format name: JSON Schema has none. |
 | `"string"` + `"format": "time"` | `time` | A time of day **without** an offset (`09:30:00`). JSON Schema's own `time` requires an offset; Graphersal's is local. |
-| `"string"` + `"format": "duration"` | `duration` | ISO 8601 (`P1Y2M3DT4H`): months, days and microseconds. |
+| `"string"` + `"format": "duration"` | `duration` | ISO 8601 (`P1Y2M3DT4H`): months, days and nanoseconds. |
 | `"boolean"`, `"null"` | `boolean`, `null` | |
 | `"array"` + `items` | `array<T>` | `items` is a full schema (constraints and nullability apply to the items); without `items` any item. |
 | `"array"` + `"format": "vector"` (+ `element`, `dimension`, `metric`) | `vector<f32, 768>` | A vector of the declared element (`f32` default, `f16`, `i8`, `bit`) and dimension (optional). A list of numbers is coerced on write, a vector of another element quantized; a stored list does not conform. `items` is not allowed next to it; `metric` is an annotation; `embedder` (a label's top-level property only) records the model identity of the embedder that produced the vectors (`"hash-ngram/1"`), which `embed_property()` fills in and checks and the text queries of `nearest()`/`similarity()` read; a plain write does not check it. Book page [Vectors](vectors.md#which-model-produced-a-property). |

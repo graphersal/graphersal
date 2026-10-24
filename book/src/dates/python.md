@@ -1,7 +1,9 @@
 # From Python
 
 The Python binding converts the five types to and from the standard `datetime` module, both as
-results and as `params=`, to the microsecond (the resolution of both sides):
+results and as `params=`, to the microsecond (the resolution of Python's types). A value with a
+part below the microsecond (`time("12:00:00.000000001")`) raises `ValueError` instead of being
+rounded; truncate it first with `date_trunc(DT.microsecond)`:
 
 | Graphersal | Python |
 |---|---|

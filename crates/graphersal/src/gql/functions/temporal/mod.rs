@@ -16,9 +16,8 @@
 //! | `X.truncate(unit, value [, map])` | `truncate.rs` | [`truncate::truncate`] | 3g.T7 |
 //! | `duration.between`, `duration.inMonths` / `inDays` / `inSeconds` | `between.rs` | [`between::between`] | 3g.T8 |
 //!
-//! Until a part lands, its entry raises 0A000 "not yet" ([`not_yet`]), so a query using it is
-//! refused clearly and never answered wrongly. Cypher's zoned `time()` (U2) and `X.realtime()`
-//! (U9) never reach this module: the parser refuses them (`parser::NOT_YET_FUNCTIONS`).
+//! Cypher's zoned `time()` (U2) and `X.realtime()` (U9) never reach this module: the parser
+//! refuses them (`parser::NOT_YET_FUNCTIONS`). Values hold nanoseconds, as Neo4j's (U1).
 //!
 //! # Deliberate deviations from Neo4j (rule 18)
 //!
@@ -29,9 +28,8 @@
 //!
 //! | Neo4j | `gql()` | Where |
 //! |---|---|---|
-//! | a `datetime` keeps its zone name (`+01:00[Europe/Stockholm]`), and later arithmetic steps over daylight saving | a zone name resolves to its offset at that instant and only the offset is kept (`x.timezone` is the offset text); TCK exclusion `zone-name-not-kept` (69 cases) | `construct.rs`, `ops.rs`, `between.rs`, `truncate.rs` |
+//! | a `datetime` keeps its zone name (`+01:00[Europe/Stockholm]`), and later arithmetic steps over daylight saving | a zone name resolves to its offset at that instant and only the offset is kept (`x.timezone` is the offset text); TCK exclusion `zone-name-not-kept` (101 cases) | `construct.rs`, `ops.rs`, `between.rs`, `truncate.rs` |
 //! | years -999 999 999 to 999 999 999 | the years -9999 to 9999, 22008 beyond (the engine range); TCK exclusion `year-range` (2 cases) | `construct.rs`, `between.rs` |
-//! | nanosecond precision | microseconds; a part below them is 0A000 "not yet", never cut ([`sub_micro`]; the Gremlin side cuts) | `construct.rs`, `arith.rs`, `truncate.rs` |
 //! | `time()`, a time of day with an offset | 0A000 "not yet" (no engine type), `localtime()` / `datetime()` instead | `parser::NOT_YET_FUNCTIONS` |
 //! | `X.realtime()` reads the live clock | refused like `rand()`; every other clock reads the query's one pinned instant | `parser::NOT_YET_FUNCTIONS`, `construct::clock` |
 //!
@@ -106,8 +104,8 @@ pub(crate) fn component<E>(value: &Temporal, key: &str, span: Span) -> Result<Va
 
 /// `error` with the `help()` advice of its function family (rule 6): `topic` for a wrong kind
 /// (22G03) and, for `X.truncate()`, a unit it does not take (22023). The text and range errors
-/// (22007 / 22008) keep the advice of their GQLSTATUS, an error that chose its own topic (the
-/// sub-microsecond 0A000) keeps it.
+/// (22007 / 22008) keep the advice of their GQLSTATUS, an error that chose its own topic keeps
+/// it.
 fn advised(error: EvalError, topic: GqlHelpTopic) -> EvalError {
     let applies = error.gqlstatus == status::INVALID_VALUE_TYPE
         || (error.gqlstatus == status::INVALID_PARAMETER
@@ -117,27 +115,6 @@ fn advised(error: EvalError, topic: GqlHelpTopic) -> EvalError {
     } else {
         error
     }
-}
-
-/// The 0A000 error of a value with a part below the microsecond (3g.P0 U1: values hold
-/// microseconds, and a digit is never cut silently), its advice naming the forms that fit.
-pub(crate) fn sub_micro(span: Span) -> EvalError {
-    not_yet(
-        "a temporal value with a part below the microsecond (values hold microseconds)",
-        span,
-    )
-    .with_topic(GqlHelpTopic::TemporalPrecision)
-}
-
-/// The 0A000 error of a temporal form not supported yet: `what` names it (`date()`, `the
-/// component year of a date`), so the message reads "`what` is not yet supported in this
-/// version".
-pub(crate) fn not_yet(what: &str, span: Span) -> EvalError {
-    EvalError::new(
-        status::NOT_SUPPORTED,
-        format!("{what} is not yet supported in this version"),
-        span,
-    )
 }
 
 /// The Cypher name of `function` (`datetime`, not the ISO `zoned_datetime`) for the not-yet

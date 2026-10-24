@@ -650,26 +650,40 @@ fn bad_maps_and_text_are_22007_and_out_of_range_fields_22008() {
 }
 
 #[test]
-fn below_the_microsecond_is_not_yet_never_cut() {
+fn below_the_microsecond_is_kept() {
     let graph = graph();
-    for expr in [
-        "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})",
-        "localtime({hour: 12, minute: 31, second: 14, millisecond: 1, microsecond: 2, nanosecond: 3})",
-        "localtime('12:31:14.645876123')",
-        "datetime('2015-07-21T21:40:32.0000001Z')",
-        "duration({nanoseconds: 1})",
-        "duration('PT0.0000001S')",
-        "duration({seconds: 0.0000001})",
-        "datetime.fromepoch(416779, 999999999)",
+    use TemporalKind::{DateTime as Z, Duration as U, Time as T};
+    for (expr, kind, expected) in [
+        (
+            "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})",
+            T,
+            "12:31:14.645876123",
+        ),
+        (
+            "localtime({hour: 12, minute: 31, second: 14, millisecond: 1, microsecond: 2, nanosecond: 3})",
+            T,
+            "12:31:14.001002003",
+        ),
+        ("localtime('12:31:14.645876123')", T, "12:31:14.645876123"),
+        (
+            "datetime('2015-07-21T21:40:32.0000001Z')",
+            Z,
+            "2015-07-21T21:40:32.0000001Z",
+        ),
+        ("duration({nanoseconds: 1})", U, "PT0.000000001S"),
+        ("duration('PT0.0000001S')", U, "PT0.0000001S"),
+        ("duration({seconds: 0.0000001})", U, "PT0.0000001S"),
+        (
+            "datetime.fromepoch(416779, 999999999)",
+            Z,
+            "1970-01-05T19:46:19.999999999Z",
+        ),
     ] {
         let query = format!("MATCH (n:x) RETURN {expr} AS x");
-        let (status, kind, message, compile_time) = failure(&graph, &query);
-        assert_eq!(status, "0A000", "{query}");
-        assert_eq!(kind, GqlErrorKind::NotYet, "{query}");
-        assert!(!compile_time, "{query}");
-        assert!(
-            message.contains("below the microsecond"),
-            "{query}: {message}"
+        assert_eq!(
+            temporal_text(&graph, &query),
+            engine_text(kind, expected),
+            "{query}"
         );
     }
     // Whole microseconds written with nine digits are kept.
@@ -1199,11 +1213,6 @@ fn truncate_errors_and_null() {
             "22007",
             "unknown time zone",
         ),
-        (
-            "localtime.truncate('second', n.t, {nanosecond: 2})",
-            "0A000",
-            "below the microsecond",
-        ),
     ] {
         let query = format!("MATCH (n:t) RETURN {expr} AS x");
         let (actual, _, message, compile_time) = failure(&graph, &query);
@@ -1536,11 +1545,6 @@ fn temporal_arithmetic_errors_name_the_forms() {
             "22008",
             "outside the supported range",
         ),
-        (
-            "duration('PT1S') / 3",
-            "0A000",
-            "a part below the microsecond",
-        ),
     ] {
         let query = format!("RETURN {expr} AS x");
         let (actual, _, message, compile_time) = failure(&graph, &query);
@@ -1710,11 +1714,6 @@ fn datetime_maps_take_epoch_seconds_and_millis_as_neo4j() {
         ("date({epochSeconds: 1})", "22007", "epochSeconds"),
         ("datetime({epochSeconds: 1.5})", "22G03", "integer"),
         ("datetime({epochSeconds: 99999999999999})", "22008", "range"),
-        (
-            "datetime({epochSeconds: 1, nanosecond: 23})",
-            "0A000",
-            "below the microsecond",
-        ),
     ] {
         let (gqlstatus, _, message, _) = failure(&graph, &format!("RETURN {expr} AS x"));
         assert_eq!(gqlstatus, status, "{expr}: {message}");

@@ -12,10 +12,10 @@
 //! | [`LocalDateTime`] | a wall-clock date and time, no zone | `2023-08-02T09:30:00` |
 //! | [`DateTime`] | an instant plus the UTC offset it was written with | `2023-08-02T09:30:00+02:00` |
 //! | [`Time`] | a time of day, no zone | `09:30:00` |
-//! | [`Duration`] | months, days and microseconds (PostgreSQL `interval`) | `P1M2DT3H` |
+//! | [`Duration`] | months, days and nanoseconds (PostgreSQL `interval`) | `P1M2DT3H` |
 //!
-//! Every type has a resolution of one microsecond; the calendar types cover the years -9999 to
-//! 9999 of the proleptic Gregorian calendar. A [`DateTime`] compares by its instant only
+//! Every type with a time has a resolution of one nanosecond; the calendar types cover the years
+//! -9999 to 9999 of the proleptic Gregorian calendar. A [`DateTime`] compares by its instant only
 //! (`12:00:00Z` equals `14:00:00+02:00`, as TinkerPop and PostgreSQL compare dates); a
 //! [`Duration`] compares field by field (`P1M` is not `P30D`) and orders by its length with a
 //! month counted as 30 days. A string is never turned into a temporal value implicitly: values

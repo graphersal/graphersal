@@ -338,7 +338,7 @@ fn put_value_at<K: KeyWriter>(
                 put_value_at(out, item, keys, depth + 1)?;
             }
         }
-        ElementProperty::Temporal(value) => put_temporal(out, value),
+        ElementProperty::Temporal(value) => put_temporal(out, value)?,
         ElementProperty::Vector(vector) => put_vector(out, vector),
         ElementProperty::Vertex(_) => return Err("a vertex is not a storable value".into()),
         ElementProperty::Edge(_) => return Err("an edge is not a storable value".into()),
@@ -437,8 +437,18 @@ fn read_vector(reader: &mut Reader<'_>, start: u64) -> DecodeResult<Vector> {
     vector.map_err(|err| invalid(err.to_string()))
 }
 
-/// Writes a temporal value with its tag (format spec 3, file format version 2).
-fn put_temporal(out: &mut Vec<u8>, value: &Temporal) {
+/// Writes a temporal value with its tag (format spec 3, file format version 2). The tags hold
+/// microseconds: a value with a part below the microsecond is refused (never cut), so the unit
+/// that wrote it fails and nothing is stored.
+fn put_temporal(out: &mut Vec<u8>, value: &Temporal) -> Result<(), String> {
+    if value.has_sub_micros() {
+        return Err(format!(
+            "the {} {value} has a part below the microsecond, which this file format \
+             (version {FORMAT_VERSION}) cannot store yet; truncate it first, for example with \
+             date_trunc(DT.microsecond)",
+            value.kind()
+        ));
+    }
     match *value {
         Temporal::Date(date) => {
             put_u8(out, tag::DATE);
@@ -465,6 +475,7 @@ fn put_temporal(out: &mut Vec<u8>, value: &Temporal) {
             put_svar(out, duration.micros());
         }
     }
+    Ok(())
 }
 
 /// Writes a property map: `uvar count | (key | value)*`, insertion order kept.

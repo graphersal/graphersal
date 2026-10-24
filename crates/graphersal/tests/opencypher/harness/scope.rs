@@ -25,8 +25,9 @@
 //!
 //!    Both are documented in `src/gql/functions/temporal/mod.rs` ("Deliberate deviations from
 //!    Neo4j") and in `book/src/gql/semantics.md` ("Where dates and times differ from Neo4j").
-//!    Sub-microsecond values (U1), Cypher's zoned `time()` (U2) and `X.realtime()` (U9) are no
-//!    exclusions: those cases stay `missing` (0A000 "not yet" / refused).
+//!    Cypher's zoned `time()` (U2) and `X.realtime()` (U9) are no exclusions: those cases stay
+//!    `missing` (0A000 "not yet" / refused). Sub-microsecond values (U1) are held since temporal
+//!    v2 (nanosecond resolution); the zone-name cases they used to hide are in the list below.
 //!
 //!    The former family `type-error-at-evaluation` (131 cases expecting a compile-time
 //!    `InvalidArgumentType`) passes since stage 3f (user decision U9, the static kind checks of
@@ -111,11 +112,13 @@ pub const EXCLUSIONS: &[Exclusion] = &[
 /// The temporal cases whose expected value keeps a zone name (`[Europe/Stockholm]`) or depends
 /// on it (3g.P0 U3: a zone resolves to its offset).
 const ZONE_NAME_NOT_KEPT: &[&str] = &[
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::1",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::10",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::11",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::12",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::13",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::14",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::15",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::16",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::17",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::18",
@@ -123,6 +126,7 @@ const ZONE_NAME_NOT_KEPT: &[&str] = &[
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::2",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::20",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::21",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::22",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::23",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::24",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::25",
@@ -135,6 +139,7 @@ const ZONE_NAME_NOT_KEPT: &[&str] = &[
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::5",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::6",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::7",
+    "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::8",
     "expressions/temporal/Temporal1.feature::[10] Should construct date time with named time zone::9",
     "expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::1",
     "expressions/temporal/Temporal10.feature::[8] Should handle durations at daylight saving time day::2",
@@ -151,10 +156,13 @@ const ZONE_NAME_NOT_KEPT: &[&str] = &[
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::13",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::15",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::16",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::20",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::28",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::29",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::31",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::32",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::36",
+    "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::4",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::44",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::45",
     "expressions/temporal/Temporal3.feature::[10] Should select date and time into date time::47",
@@ -171,15 +179,40 @@ const ZONE_NAME_NOT_KEPT: &[&str] = &[
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::13",
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::15",
     "expressions/temporal/Temporal3.feature::[9] Should select time into date time::16",
+    "expressions/temporal/Temporal3.feature::[9] Should select time into date time::4",
+    "expressions/temporal/Temporal5.feature::[6] Should provide accessors for date time",
+    "expressions/temporal/Temporal6.feature::[7] Should serialize timezones correctly",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::12",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::15",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::18",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::2",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::20",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::24",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::26",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::29",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::33",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::35",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::38",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::42",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::44",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::47",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::51",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::53",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::56",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::6",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::60",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::62",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::65",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::69",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::71",
     "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::74",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::78",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::8",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::80",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::83",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::86",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::89",
+    "expressions/temporal/Temporal9.feature::[2] Should truncate datetime::92",
 ];
 
 /// The temporal cases with years beyond -9999..9999 (3g.P0 U10).

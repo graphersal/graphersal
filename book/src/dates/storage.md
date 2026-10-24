@@ -5,10 +5,10 @@ in a GraphSON file. GraphML has no date type and needs the schema.
 
 ## In memory
 
-A date is stored inline in the property value, 16 bytes at most, without a heap allocation: a
-`date` is a day number, a `time` and a `localdatetime` microseconds, a `datetime` microseconds
-since the epoch plus its offset in seconds, a `duration` its months, days and microseconds. Equality
-and ordering compare these numbers ([Comparing and Sorting](comparing.md)).
+A date is stored inline in the property value, 20 bytes at most, without a heap allocation: a
+`date` is a day number, a `time` and a `localdatetime` nanoseconds, a `datetime` nanoseconds
+since the epoch plus its offset in seconds, a `duration` its months, days and nanoseconds.
+Equality and ordering compare these numbers ([Comparing and Sorting](comparing.md)).
 
 ## Snapshots, journals and the Store
 
@@ -20,6 +20,11 @@ writes version 2 and reads versions 1 and 2, so a `.gsnap` written by 0.1.x stil
 older build refuses a version 2 file instead of misreading it. See
 [Format Versions and Upgrade](../persistence/store_versions.md) for a Store written by 0.1.x.
 
+The tags hold microseconds. A value with a part below the microsecond
+(`time("12:00:00.000000001")`) is refused when it is written: the transaction or snapshot that
+holds it fails with an error naming the value, and nothing is stored (never a cut value).
+Truncate it with `date_trunc(DT.microsecond)` to store it.
+
 ## Change sets
 
 A serialized [`ChangeSet`](../users_guide/transactions.md#serialization) (feature `serde`) writes a
@@ -30,7 +35,7 @@ schema:
 |---|---|
 | `datetime` | `{"@type": "gx:OffsetDateTime", "@value": "2024-05-01T09:30:00+02:00"}` |
 | `date`, `localdatetime`, `time` | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` |
-| `duration` of microseconds only | `gx:Duration` (`PT26H`) |
+| `duration` of a time part only | `gx:Duration` (`PT26H`) |
 | `duration` of months and days only | `gx:Period` (`P1Y2M3D`) |
 | any other `duration` | `graphersal:Interval` (`P1MT2H`) |
 
@@ -46,8 +51,8 @@ with the offset of the text (the zone id of a `gx:ZonedDateTime` is dropped and 
 a `duration`. The export writes the tags of the change set table above, which TinkerGraph's
 `g.io(file).read()` loads, with one exception: a `duration` with both months or days **and** a time
 part has no `java.time` type, so it is written as `graphersal:Interval`, which only Graphersal
-reads (a [deliberate deviation](../for_developers/tinkerpop_deviations.md)). Digits below a
-microsecond are cut and reported, and the `java.time` types Graphersal cannot hold (`gx:Year`,
+reads (a [deliberate deviation](../for_developers/tinkerpop_deviations.md)). Up to nine
+fraction digits are kept, and the `java.time` types Graphersal cannot hold (`gx:Year`,
 `gx:YearMonth`, `gx:MonthDay`, `gx:OffsetTime`, `gx:ZoneOffset`) are skipped and reported. The
 full mapping is on the [GraphSON](../users_guide/graphson.md#type-mapping) page.
 

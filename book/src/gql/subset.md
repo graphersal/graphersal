@@ -1321,8 +1321,8 @@ the same as each function on [Dates in GQL](../dates/gql.md).
 projected onto the type (`date(datetime(..))` is the date at the value's own offset,
 `datetime(localdatetime(..))` the wall clock at UTC). With no argument a constructor gives the
 time the query started ([Clocks](#clocks)). A `NULL` argument, or a `NULL` field of the map,
-gives `NULL`. Values hold **microseconds**: text or a field with a non-zero part below the
-microsecond is `0A000` "not yet", never cut ([Errors](errors.md#dates-and-times)).
+gives `NULL`. Values hold **nanoseconds**, as Neo4j's: up to nine fraction digits and the
+`nanosecond` field are kept exactly.
 
 ```rhai,graph=empty
 g.gql("RETURN date('2015-07-21') AS d, localtime('21:40:32.142') AS t, localdatetime('2015-07-21T21:40') AS ldt, datetime('2015-07-21T21:40+01:00') AS dt").to_list()
@@ -1381,7 +1381,7 @@ g.gql("RETURN date({year: 2015, month: 2, day: 30}) AS d")   // fails: the field
 ```
 
 `datetime.fromepoch(seconds, nanoseconds)` and `datetime.fromepochmillis(milliseconds)` give the
-`datetime` (UTC) of a time since 1970-01-01T00:00Z; the nanoseconds must be whole microseconds.
+`datetime` (UTC) of a time since 1970-01-01T00:00Z.
 The map form does the same as in Neo4j: `datetime({epochSeconds: s})` with an optional
 `millisecond` / `microsecond` / `nanosecond`, or `datetime({epochMillis: ms})`, each with an
 optional `timezone` (the instant shown in that zone); no other field may stand next to them.
@@ -1482,7 +1482,7 @@ qualified names are Cypher's; GQL has no spelling for them):
 - `millennium` and `century` follow Neo4j: 2017 truncates to 2000, 1984 to 1900 (Gremlin's
   `date_trunc` keeps PostgreSQL's 2001 and 1901). `weekYear` is the Monday of ISO week 1 of the
   week-numbering year (1984-01-01 gives 1983-01-03); `week` is a Monday; `nanosecond` keeps the
-  value (it holds microseconds).
+  value (it holds nanoseconds).
 - `x` may be of another temporal type and is projected first: the date of a datetime at its own
   offset, the time of day of either, midnight for a date. `datetime.truncate` keeps the offset
   of a datetime and gives UTC to a value without one.
@@ -1546,13 +1546,13 @@ g.gql("RETURN datetime.realtime() AS t")   // refused: a clock that moves while 
 
 Cypher's zoned `time()` (and `time.truncate`, `time.statement`, ...) and ISO GQL's
 `zoned_time()`: a time of day with an offset has no engine type yet; use `localtime()` or a
-`datetime()`. A temporal value below the microsecond; `timestamp()`, `current_date()` and the
+`datetime()`. `timestamp()`, `current_date()` and the
 other date functions named under [Not supported yet](#not-supported-yet); the GQL literals
 `DATE '..'`, `DURATION '..'` and `CAST(x AS DATE)`. Each is `0A000` with the alternative.
 
 ```rhai,graph=empty
 g.gql("RETURN time('12:00+01:00') AS t")   // error: time() (a time of day with a UTC offset) is not yet supported
-g.gql("RETURN localtime('12:31:14.645876123') AS t")   // error: a temporal value with a part below the microsecond is not yet supported
+g.gql("RETURN localtime('12:31:14.645876123') AS t").to_list()   // [#{"t": time("12:31:14.645876123")}]
 ```
 
 ## Parameters
@@ -1597,7 +1597,6 @@ construct and the alternative.
 | a list-comprehension or list-predicate variable read inside a subquery of its `WHERE` / `\|` part | test the variable outside the subquery, or match the pattern in the query |
 | trigonometric functions (`sin`, `cos`, ..., `pi()`, `degrees()`) | Gremlin `math()` after `gql()` |
 | Cypher's zoned `time()` / ISO `zoned_time()`, `time.truncate()`, `time.statement()` | `localtime()` (no offset) or `datetime()` (with a date) ([Dates and times](#dates-and-times)) |
-| a temporal value with a part below the microsecond (`nanosecond: 5`, `'12:00:00.000000001'`) | at most six fraction digits: values hold microseconds |
 | `timestamp()`, `current_date()`, `current_time()`, `current_timestamp()`, `date_trunc()`, `datetime_trunc()` | `datetime().epochMillis`, `date()`, `localtime()`, `datetime()` (the time the query started), `date.truncate(unit, d)` |
 | the literals `DATE '..'`, `DURATION '..'`, `CAST(x AS DATE)` | `date('..')`, `duration('..')` |
 | list conversions `toIntegerList()`, `toStringList()`, ... | `FOR t IN list RETURN collect_list(toInteger(t))`, or Gremlin `unfold()` and `as_number()` after `gql()` |

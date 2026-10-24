@@ -126,7 +126,7 @@ fn difference(form: Between, from: Temporal, to: Temporal) -> TemporalResult<Opt
     match form {
         Between::Full => arith::between_neo4j(from, to).map(Some),
         Between::InSeconds => {
-            elapsed_micros(from, to).map(|micros| Some(Duration::from_micros(micros)))
+            elapsed_nanos(from, to).and_then(|nanos| Duration::from_nanos(nanos).map(Some))
         }
         Between::InMonths | Between::InDays => {
             let Some((from, to)) = calendar_pair(from, to)? else {
@@ -190,7 +190,7 @@ fn attach_time(value: Temporal) -> TemporalResult<Temporal> {
 
 /// `00:00` (never fails: 0 is a time of day).
 fn midnight() -> TemporalResult<Time> {
-    Time::from_micros_of_day(0)
+    Time::from_nanos_of_day(0)
 }
 
 /// `value` read on `date` (a `localtime` becomes a `localdatetime`).
@@ -236,13 +236,13 @@ fn align(from: Temporal, to: Temporal, time_based: bool) -> TemporalResult<(Temp
     Ok((from, to))
 }
 
-/// The elapsed microseconds from `from` to `to` (aligned, so of one type with a time of day).
-fn elapsed_micros(from: Temporal, to: Temporal) -> TemporalResult<i64> {
-    let micros = |value: Temporal| -> TemporalResult<i64> {
+/// The elapsed nanoseconds from `from` to `to` (aligned, so of one type with a time of day).
+fn elapsed_nanos(from: Temporal, to: Temporal) -> TemporalResult<i128> {
+    let nanos = |value: Temporal| -> TemporalResult<i128> {
         match value {
-            Temporal::DateTime(v) => Ok(v.epoch_micros()),
-            Temporal::LocalDateTime(v) => Ok(v.micros()),
-            Temporal::Time(v) => Ok(v.micros_of_day()),
+            Temporal::DateTime(v) => Ok(v.epoch_nanos()),
+            Temporal::LocalDateTime(v) => Ok(v.nanos()),
+            Temporal::Time(v) => Ok(v.nanos_of_day() as i128),
             Temporal::Date(_) | Temporal::Duration(_) => Err(TemporalError::unsupported(
                 "duration.inSeconds",
                 value.kind(),
@@ -252,8 +252,8 @@ fn elapsed_micros(from: Temporal, to: Temporal) -> TemporalResult<i64> {
     match (from, to) {
         (Temporal::DateTime(_), Temporal::DateTime(_))
         | (Temporal::LocalDateTime(_), Temporal::LocalDateTime(_))
-        | (Temporal::Time(_), Temporal::Time(_)) => micros(to)?
-            .checked_sub(micros(from)?)
+        | (Temporal::Time(_), Temporal::Time(_)) => nanos(to)?
+            .checked_sub(nanos(from)?)
             .ok_or_else(out_of_range),
         _ => Err(TemporalError::unsupported(
             "duration.inSeconds",

@@ -2,7 +2,7 @@
 //!
 //! - Years are four digits with a `-` for years before 1 (`-0044-03-15`; year 0 is 1 BC).
 //! - Seconds are always written; a fraction only when it is not zero, in groups of three digits
-//!   (`.250`, `.250500`), as `java.time` writes them.
+//!   (`.250`, `.250500`, `.250500001`), as `java.time` writes them.
 //! - An offset of zero is `Z`, others `+HH:MM`, with `:SS` only when the offset has seconds.
 //! - A duration is `P[nY][nM][nD][T[nH][nM][n[.f]S]]`, `PT0S` when zero; when every non-zero
 //!   part is negative the whole is written negative (`-P1DT2H`), otherwise each negative part
@@ -12,7 +12,7 @@
 
 use std::fmt::{self, Write};
 
-use super::civil::{self, MICROS_PER_SECOND};
+use super::civil::{self, NANOS_PER_SECOND};
 use super::{Date, DateTime, Duration, LocalDateTime, Temporal, Time};
 
 fn write_date(f: &mut impl Write, days: i32) -> fmt::Result {
@@ -24,19 +24,22 @@ fn write_date(f: &mut impl Write, days: i32) -> fmt::Result {
     }
 }
 
-/// Writes a fraction of a second (`.250`, `.250500`) when it is not zero.
-fn write_fraction(f: &mut impl Write, micros: i64) -> fmt::Result {
-    if micros == 0 {
+/// Writes a fraction of a second given in nanoseconds (`.250`, `.250500`, `.250500001`) when it
+/// is not zero.
+fn write_fraction(f: &mut impl Write, nanos: i64) -> fmt::Result {
+    if nanos == 0 {
         Ok(())
-    } else if micros % 1000 == 0 {
-        write!(f, ".{:03}", micros / 1000)
+    } else if nanos % 1_000_000 == 0 {
+        write!(f, ".{:03}", nanos / 1_000_000)
+    } else if nanos % 1000 == 0 {
+        write!(f, ".{:06}", nanos / 1000)
     } else {
-        write!(f, ".{micros:06}")
+        write!(f, ".{nanos:09}")
     }
 }
 
-fn write_time(f: &mut impl Write, micros_of_day: i64) -> fmt::Result {
-    let seconds = micros_of_day / MICROS_PER_SECOND;
+fn write_time(f: &mut impl Write, nanos_of_day: i64) -> fmt::Result {
+    let seconds = nanos_of_day / NANOS_PER_SECOND;
     write!(
         f,
         "{:02}:{:02}:{:02}",
@@ -44,11 +47,11 @@ fn write_time(f: &mut impl Write, micros_of_day: i64) -> fmt::Result {
         seconds / 60 % 60,
         seconds % 60
     )?;
-    write_fraction(f, micros_of_day % MICROS_PER_SECOND)
+    write_fraction(f, nanos_of_day % NANOS_PER_SECOND)
 }
 
-fn write_local(f: &mut impl Write, micros: i64) -> fmt::Result {
-    let (days, of_day) = civil::split_micros(micros);
+fn write_local(f: &mut impl Write, nanos: i128) -> fmt::Result {
+    let (days, of_day) = civil::split_nanos(nanos);
     write_date(f, days as i32)?;
     f.write_char('T')?;
     write_time(f, of_day)
@@ -74,9 +77,9 @@ pub(crate) fn write_offset(f: &mut impl Write, offset_seconds: i32) -> fmt::Resu
 
 /// The time of day as `java.time` `LocalTime.toString` writes it: `HH:MM`, `:SS` only when the
 /// seconds or the fraction are not zero, the fraction in groups of three digits.
-fn write_neo4j_time(f: &mut impl Write, micros_of_day: i64) -> fmt::Result {
-    let seconds = micros_of_day / MICROS_PER_SECOND;
-    let fraction = micros_of_day % MICROS_PER_SECOND;
+fn write_neo4j_time(f: &mut impl Write, nanos_of_day: i64) -> fmt::Result {
+    let seconds = nanos_of_day / NANOS_PER_SECOND;
+    let fraction = nanos_of_day % NANOS_PER_SECOND;
     write!(f, "{:02}:{:02}", seconds / 3600, seconds / 60 % 60)?;
     if seconds % 60 != 0 || fraction != 0 {
         write!(f, ":{:02}", seconds % 60)?;
@@ -85,8 +88,8 @@ fn write_neo4j_time(f: &mut impl Write, micros_of_day: i64) -> fmt::Result {
 }
 
 /// A local date-time in the Neo4j text: `<date>T<time>` with the short time.
-fn write_neo4j_local(f: &mut impl Write, micros: i64) -> fmt::Result {
-    let (days, of_day) = civil::split_micros(micros);
+fn write_neo4j_local(f: &mut impl Write, nanos: i128) -> fmt::Result {
+    let (days, of_day) = civil::split_nanos(nanos);
     write_date(f, days as i32)?;
     f.write_char('T')?;
     write_neo4j_time(f, of_day)
@@ -101,8 +104,8 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
         return f.write_str("PT0S");
     }
     f.write_char('P')?;
-    let months = value.months as i64;
-    let part = |f: &mut dyn Write, n: i64, unit: char| -> fmt::Result {
+    let months = value.months as i128;
+    let part = |f: &mut dyn Write, n: i128, unit: char| -> fmt::Result {
         if n != 0 {
             write!(f, "{n}{unit}")?;
         }
@@ -110,19 +113,14 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
     };
     part(f, months / 12, 'Y')?;
     part(f, months % 12, 'M')?;
-    part(f, value.days as i64, 'D')?;
-    let micros = value.micros;
-    if micros != 0 {
+    part(f, value.days as i128, 'D')?;
+    let nanos = value.nanos();
+    if nanos != 0 {
         f.write_char('T')?;
+        let second = NANOS_PER_SECOND as i128;
         // Truncating division: every component takes the sign of the time part.
-        let (hours, rest) = (
-            micros / (3600 * MICROS_PER_SECOND),
-            micros % (3600 * MICROS_PER_SECOND),
-        );
-        let (minutes, rest) = (
-            rest / (60 * MICROS_PER_SECOND),
-            rest % (60 * MICROS_PER_SECOND),
-        );
+        let (hours, rest) = (nanos / (3600 * second), nanos % (3600 * second));
+        let (minutes, rest) = (rest / (60 * second), rest % (60 * second));
         part(f, hours, 'H')?;
         part(f, minutes, 'M')?;
         if rest != 0 {
@@ -130,11 +128,11 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
                 f.write_char('-')?;
             }
             let rest = rest.unsigned_abs();
-            let micro = MICROS_PER_SECOND as u64;
-            write!(f, "{}", rest / micro)?;
-            let fraction = rest % micro;
+            let unit = NANOS_PER_SECOND as u128;
+            write!(f, "{}", rest / unit)?;
+            let fraction = rest % unit;
             if fraction != 0 {
-                let digits = format!("{fraction:06}");
+                let digits = format!("{fraction:09}");
                 write!(f, ".{}", digits.trim_end_matches('0'))?;
             }
             f.write_char('S')?;
@@ -155,10 +153,10 @@ fn write_neo4j_duration(f: &mut impl Write, value: Duration) -> fmt::Result {
 pub(crate) fn write_neo4j(f: &mut impl Write, value: &Temporal) -> fmt::Result {
     match *value {
         Temporal::Date(v) => write_date(f, v.days),
-        Temporal::Time(v) => write_neo4j_time(f, v.micros),
-        Temporal::LocalDateTime(v) => write_neo4j_local(f, v.micros),
+        Temporal::Time(v) => write_neo4j_time(f, v.nanos),
+        Temporal::LocalDateTime(v) => write_neo4j_local(f, v.nanos()),
         Temporal::DateTime(v) => {
-            write_neo4j_local(f, v.local().micros)?;
+            write_neo4j_local(f, v.local().nanos())?;
             write_offset(f, v.offset_seconds)
         }
         Temporal::Duration(v) => write_neo4j_duration(f, v),
@@ -185,19 +183,19 @@ impl fmt::Display for Date {
 
 impl fmt::Display for Time {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_time(f, self.micros)
+        write_time(f, self.nanos)
     }
 }
 
 impl fmt::Display for LocalDateTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_local(f, self.micros)
+        write_local(f, self.nanos())
     }
 }
 
 impl fmt::Display for DateTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_local(f, self.local().micros)?;
+        write_local(f, self.local().nanos())?;
         write_offset(f, self.offset_seconds)
     }
 }
@@ -207,16 +205,16 @@ impl fmt::Display for Duration {
         if self.is_zero() {
             return f.write_str("PT0S");
         }
-        // Wide integers: `i64::MIN` micros and `i32::MIN` months negate without overflow.
+        // Wide integers: the smallest time part and `i32::MIN` months negate without overflow.
         let mut months = self.months as i128;
         let mut days = self.days as i128;
-        let mut micros = self.micros as i128;
-        let all_negative = months <= 0 && days <= 0 && micros <= 0;
+        let mut nanos = self.nanos();
+        let all_negative = months <= 0 && days <= 0 && nanos <= 0;
         if all_negative {
             f.write_char('-')?;
             months = -months;
             days = -days;
-            micros = -micros;
+            nanos = -nanos;
         }
         f.write_char('P')?;
         let (years, months) = (months / 12, months % 12);
@@ -229,10 +227,10 @@ impl fmt::Display for Duration {
         if days != 0 {
             write!(f, "{days}D")?;
         }
-        if micros != 0 {
+        if nanos != 0 {
             f.write_char('T')?;
-            let second = MICROS_PER_SECOND as i128;
-            let (hours, rest) = (micros / (3600 * second), micros % (3600 * second));
+            let second = NANOS_PER_SECOND as i128;
+            let (hours, rest) = (nanos / (3600 * second), nanos % (3600 * second));
             let (minutes, rest) = (rest / (60 * second), rest % (60 * second));
             if hours != 0 {
                 write!(f, "{hours}H")?;

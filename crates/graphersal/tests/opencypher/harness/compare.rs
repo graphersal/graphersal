@@ -229,7 +229,7 @@ fn write_date(out: &mut String, d: Date) {
 
 fn write_time(out: &mut String, t: Time) {
     let _ = write!(out, "{:02}:{:02}", t.hour(), t.minute());
-    let nanos = t.microsecond() as u64 * 1000;
+    let nanos = t.nanosecond() as u64;
     if t.second() != 0 || nanos != 0 {
         let _ = write!(out, ":{:02}", t.second());
     }
@@ -264,8 +264,9 @@ fn write_offset(out: &mut String, seconds: i32) {
 fn write_duration(out: &mut String, d: Duration) {
     let months = d.months() as i64;
     let days = d.days() as i64;
-    let mut seconds = d.micros().div_euclid(1_000_000);
-    let mut nanos = d.micros().rem_euclid(1_000_000) * 1000;
+    // The time part holds at most an i64 of microseconds: the seconds fit an i64.
+    let mut seconds = d.nanos().div_euclid(1_000_000_000) as i64;
+    let mut nanos = d.nanos().rem_euclid(1_000_000_000) as i64;
     if months == 0 && days == 0 && seconds == 0 && nanos == 0 {
         out.push_str("PT0S");
         return;
@@ -1018,18 +1019,7 @@ mod tests {
         if shape == "time" {
             return Some("a time with an offset");
         }
-        // Digits below the microsecond.
-        let mut rest = s;
-        while let Some(at) = rest.find('.') {
-            let fraction: String = rest[at + 1..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            if fraction.len() > 6 && fraction[6..].bytes().any(|c| c != b'0') {
-                return Some("nanoseconds");
-            }
-            rest = &rest[at + 1..];
-        }
+
         // Years beyond four digits, or a count beyond our fields.
         if s.split(|c: char| !c.is_ascii_digit()).any(|n| n.len() > 9)
             || (shape != "duration" && s.trim_start_matches(['-', '+']).find('-') > Some(4))
@@ -1118,7 +1108,7 @@ mod tests {
                 "too few {shape} texts: {rendered:?}, skipped {skipped:?}"
             );
         }
-        for reason in ["a zone name", "a time with an offset", "nanoseconds"] {
+        for reason in ["a zone name", "a time with an offset"] {
             assert!(skipped.contains_key(reason), "{skipped:?}");
         }
     }

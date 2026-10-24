@@ -1628,6 +1628,11 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","name":"get$months","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"i64"}
 {"access":"public","name":"get$mult","namespace":"global","numParams":1,"params":[{"type":"&mut OperatorTokens"}],"returnType":"Operator"}
 {"access":"public","name":"get$mutated","namespace":"global","numParams":1,"params":[{"type":"&mut Execution"}],"returnType":"bool"}
+{"access":"public","name":"get$nanos","namespace":"global","numParams":1,"params":[{"type":"&mut duration"}],"returnType":"core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut DTTokens"}],"returnType":"DT"}
+{"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut datetime"}],"returnType":"i64"}
+{"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut localdatetime"}],"returnType":"i64"}
+{"access":"public","name":"get$nanosecond","namespace":"global","numParams":1,"params":[{"type":"&mut time"}],"returnType":"i64"}
 {"access":"public","name":"get$none","namespace":"global","numParams":1,"params":[{"type":"&mut Pick"}],"returnType":"Pick"}
 {"access":"public","name":"get$none","namespace":"global","numParams":1,"params":[{"type":"&mut SchemaModeTokens"}],"returnType":"SchemaMode"}
 {"access":"public","name":"get$none","namespace":"global","numParams":1,"params":[{"type":"&mut WithOptionsTokens"}],"returnType":"WithOptions"}
@@ -2628,6 +2633,11 @@ get$month(_: &mut localdatetime) -> i64
 get$months(_: &mut duration) -> i64
 get$mult(_: &mut OperatorTokens) -> Operator
 get$mutated(_: &mut Execution) -> bool
+get$nanos(_: &mut duration) -> core::result::Result<i64,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+get$nanosecond(_: &mut DTTokens) -> DT
+get$nanosecond(_: &mut datetime) -> i64
+get$nanosecond(_: &mut localdatetime) -> i64
+get$nanosecond(_: &mut time) -> i64
 get$none(_: &mut Pick) -> Pick
 get$none(_: &mut SchemaModeTokens) -> SchemaMode
 get$none(_: &mut WithOptionsTokens) -> WithOptions

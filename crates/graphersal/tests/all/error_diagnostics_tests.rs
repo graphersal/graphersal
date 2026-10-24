@@ -11766,7 +11766,7 @@ mod gql {
 
     /// The temporal constructors of stage 3g (3g.T4): text or a map that is no value of the
     /// type is 22007, a field out of its range 22008, each with advice naming the forms and
-    /// ranges and runnable examples (rule 6); a part below the microsecond is 0A000 (U1).
+    /// ranges and runnable examples (rule 6).
     #[test]
     fn gql_temporal_constructor_errors_name_the_forms_and_ranges() {
         for (expr, status, caret, advice) in [
@@ -11839,33 +11839,11 @@ mod gql {
             assert!(help.starts_with(advice), "{query}: {help}");
             assert_examples_run(&help);
         }
-        // Below the microsecond: not yet, never cut.
-        for expr in [
-            "localtime({hour: 12, nanosecond: 5})",
-            "localtime('12:00:00.123456789')",
-            "duration({nanoseconds: 1})",
-            "datetime.fromepoch(0, 1)",
-        ] {
-            let query = format!("RETURN {expr} AS x");
-            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
-            assert_eq!(
-                kind_and_status(&err),
-                (GqlErrorKind::NotYet, "0A000".to_string()),
-                "{query}: {report}"
-            );
-            assert!(
-                report.contains(
-                    "a temporal value with a part below the microsecond (values hold \
-                     microseconds) is not yet supported in this version"
-                ),
-                "{report}"
-            );
-        }
     }
 
     /// The temporal functions of stage 3g.T9 (rule 6): a constructor, a component, a
     /// truncation and a difference given what they cannot take each name their forms with a
-    /// runnable example; a part below the microsecond (0A000, U1) names the forms that fit.
+    /// runnable example.
     #[test]
     fn gql_temporal_function_errors_name_their_forms() {
         for (expr, status, caret, advice) in [
@@ -11970,31 +11948,6 @@ mod gql {
             ),
             "{help}"
         );
-        // Below the microsecond: the help names the forms that fit, never Gremlin.
-        for expr in [
-            "localtime('12:00:00.123456789')",
-            "localtime({hour: 12, minute: 0, second: 0, nanosecond: 5})",
-            "duration('PT1S') / 3",
-            "date.truncate('day', localdatetime('2015-07-21T12:00'), {}) + duration({nanoseconds: 1})",
-        ] {
-            let query = format!("RETURN {expr} AS x");
-            let (err, report) = gql_failure(|g| g.gql(&query).to_list());
-            assert_eq!(
-                kind_and_status(&err),
-                (GqlErrorKind::NotYet, "0A000".to_string()),
-                "{query}: {report}"
-            );
-            let help = err.help().expect("help");
-            assert!(
-                help.starts_with(
-                    "Temporal values hold microseconds, and gql() never cuts digits silently: \
-                     give at most six fraction digits"
-                ),
-                "{query}: {help}"
-            );
-            assert!(!help.contains("Gremlin"), "{query}: {help}");
-            assert_examples_run(&help);
-        }
     }
 
     /// Stage 3h (rule 6): the errors of a GQL call of a saved query point at the call and name

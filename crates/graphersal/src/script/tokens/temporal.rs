@@ -88,6 +88,17 @@ fn script_duration(text: &str) -> Rhai<Duration> {
         .map_err(|error| temporal_failure("duration", error))
 }
 
+/// `d.nanos`: the time part of a duration in nanoseconds; beyond an integer (about 292 years)
+/// a range error.
+fn duration_nanos(duration: &Duration) -> Rhai<i64> {
+    i64::try_from(duration.nanos()).map_err(|_| {
+        temporal_failure(
+            "nanos",
+            TemporalError::out_of_range("the nanoseconds of the duration"),
+        )
+    })
+}
+
 /// `today()`: the date of `now()` in UTC (PostgreSQL `current_date` in a UTC session);
 /// `today(zone)`: its date in that zone (an offset such as `+02:00` or an IANA name).
 fn script_today(ctx: &NativeCallContext, zone: Option<&str>) -> Rhai<Date> {
@@ -105,18 +116,14 @@ fn script_today(ctx: &NativeCallContext, zone: Option<&str>) -> Rhai<Date> {
 /// `time`s the elapsed time.
 fn difference(a: Temporal, b: Temporal) -> Result<Duration, TemporalError> {
     let elapsed: i128 = match (a, b) {
-        (Temporal::DateTime(a), Temporal::DateTime(b)) => {
-            a.epoch_micros() as i128 - b.epoch_micros() as i128
-        }
-        (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => {
-            a.micros() as i128 - b.micros() as i128
-        }
+        (Temporal::DateTime(a), Temporal::DateTime(b)) => a.epoch_nanos() - b.epoch_nanos(),
+        (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => a.nanos() - b.nanos(),
         (Temporal::Date(a), Temporal::Date(b)) => {
             let days = a.days_since_epoch() as i64 - b.days_since_epoch() as i64;
             return Ok(Duration::new(0, days as i32, 0));
         }
         (Temporal::Time(a), Temporal::Time(b)) => {
-            return Ok(Duration::from_micros(a.micros_of_day() - b.micros_of_day()));
+            return Duration::from_nanos(a.nanos_of_day() as i128 - b.nanos_of_day() as i128);
         }
         (Temporal::Duration(a), Temporal::Duration(b)) => {
             return b.checked_neg().and_then(|b| a.checked_add(b));
@@ -128,11 +135,11 @@ fn difference(a: Temporal, b: Temporal) -> Result<Duration, TemporalError> {
             ));
         }
     };
-    const DAY: i128 = 86_400_000_000;
+    const DAY: i128 = 86_400_000_000_000;
     let days = elapsed / DAY;
-    let micros = elapsed % DAY;
+    let nanos = elapsed % DAY;
     match i32::try_from(days) {
-        Ok(days) => Ok(Duration::new(0, days, micros as i64)),
+        Ok(days) => Duration::with_nanos(0, days, nanos),
         Err(_) => Err(TemporalError::out_of_range("the result")),
     }
 }
@@ -248,6 +255,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
         .register_get("microsecond", |v: &mut DateTime| {
             v.local().time().microsecond() as i64
         })
+        .register_get("nanosecond", |v: &mut DateTime| {
+            v.local().time().nanosecond() as i64
+        })
         .register_get("offset", |v: &mut DateTime| v.offset_seconds() as i64)
         .register_get("epoch_millis", |v: &mut DateTime| v.epoch_millis())
         .register_get("epochMillis", |v: &mut DateTime| v.epoch_millis())
@@ -260,6 +270,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
         .register_get("microsecond", |v: &mut LocalDateTime| {
             v.time().microsecond() as i64
         })
+        .register_get("nanosecond", |v: &mut LocalDateTime| {
+            v.time().nanosecond() as i64
+        })
         .register_get("year", |v: &mut Date| v.year() as i64)
         .register_get("month", |v: &mut Date| v.month() as i64)
         .register_get("day", |v: &mut Date| v.day() as i64)
@@ -267,9 +280,11 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
         .register_get("minute", |v: &mut Time| v.minute() as i64)
         .register_get("second", |v: &mut Time| v.second() as i64)
         .register_get("microsecond", |v: &mut Time| v.microsecond() as i64)
+        .register_get("nanosecond", |v: &mut Time| v.nanosecond() as i64)
         .register_get("months", |v: &mut Duration| v.months() as i64)
         .register_get("days", |v: &mut Duration| v.days() as i64)
-        .register_get("micros", |v: &mut Duration| v.micros());
+        .register_get("micros", |v: &mut Duration| v.micros())
+        .register_get("nanos", |v: &mut Duration| duration_nanos(v));
 
     // The `DT` token: `DT.day` (dot, on the scope marker; both spellings of the multi-word
     // names) and `DT::day` (static module); the bare `second`/`minute`/`hour`/`day` are scope

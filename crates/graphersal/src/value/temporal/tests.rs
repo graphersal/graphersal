@@ -125,8 +125,8 @@ fn canonical_text_of_every_type() {
 }
 
 #[test]
-fn fractions_beyond_the_microsecond_are_cut() {
-    assert_eq!(time("10:00:00.123456789").to_string(), "10:00:00.123456");
+fn fractions_beyond_the_microsecond_are_kept() {
+    assert_eq!(time("10:00:00.123456789").to_string(), "10:00:00.123456789");
     assert_eq!(
         dt("2023-08-02T10:00:00,5Z").to_string(),
         "2023-08-02T10:00:00.500Z"
@@ -1087,7 +1087,7 @@ fn parts_follow_postgres_extract() {
 
 /// Whether an operation is defined for a kind and a unit (the documented matrix).
 fn defined(operation: &str, kind: TemporalKind, unit: DT) -> bool {
-    let fixed = unit.fixed_micros().is_some();
+    let fixed = unit.fixed_nanos().is_some();
     let is_unit = unit.is_unit();
     match (operation, kind) {
         ("add" | "trunc" | "diff", TemporalKind::DateTime | TemporalKind::LocalDateTime) => is_unit,
@@ -1306,9 +1306,7 @@ fn the_physical_form_is_the_canonical_text_and_lifts_back_by_kind() {
 // ---------------------------------------------------------------------------------------------
 
 mod gql_helpers {
-    use super::super::arith::{
-        Amount, Cascaded, DurationParts, between_neo4j, cascade, scale_duration,
-    };
+    use super::super::arith::{Amount, DurationParts, between_neo4j, cascade, scale_duration};
     use super::super::format::neo4j;
     use super::super::parse::{Extended, parse_extended};
     use super::*;
@@ -1421,43 +1419,36 @@ mod gql_helpers {
             ],
         );
         let named = parse_extended(TemporalKind::DateTime, "2015-07-21T21:40[Europe/London]");
-        assert!(named.is_ok_and(|p| p.zone_name && !p.sub_micro));
+        assert!(named.is_ok_and(|p| p.zone_name));
         let fixed = parse_extended(TemporalKind::DateTime, "2015-07-21T21:40+01:00");
         assert!(fixed.is_ok_and(|p| !p.zone_name));
     }
 
     #[test]
-    fn digits_below_the_microsecond_are_reported_never_kept() {
+    fn digits_below_the_microsecond_are_kept() {
         let parsed = parse_extended(TemporalKind::Time, "12:31:14.645876123");
-        let Ok(Extended {
-            value, sub_micro, ..
-        }) = parsed
-        else {
+        let Ok(Extended { value, .. }) = parsed else {
             panic!("{parsed:?}");
         };
-        assert!(sub_micro);
-        assert_eq!(neo4j(&value), "12:31:14.645876");
-        for (kind, text) in [
-            (TemporalKind::Time, "12:31:14.645876000"),
-            (TemporalKind::Time, "12:31:14.6"),
-            (TemporalKind::LocalDateTime, "1984-10-11T12:31:14.645876"),
-            (TemporalKind::Duration, "PT0.000001S"),
+        assert_eq!(neo4j(&value), "12:31:14.645876123");
+        for (kind, text, expected) in [
+            (TemporalKind::Time, "12:31:14.645876000", "12:31:14.645876"),
+            (TemporalKind::Time, "12:31:14.6", "12:31:14.600"),
+            (
+                TemporalKind::LocalDateTime,
+                "1984-10-11T12:31:14.645876123",
+                "1984-10-11T12:31:14.645876123",
+            ),
+            (
+                TemporalKind::DateTime,
+                "1984-10-11T12:31:14.000000001Z",
+                "1984-10-11T12:31:14.000000001Z",
+            ),
+            (TemporalKind::Duration, "PT0.000000001S", "PT0.000000001S"),
+            // A billionth of a day is 86.4 microseconds.
+            (TemporalKind::Duration, "P0.000000001D", "PT0.0000864S"),
         ] {
-            assert!(
-                parse_extended(kind, text).is_ok_and(|p| !p.sub_micro),
-                "{text}"
-            );
-        }
-        for (kind, text) in [
-            (TemporalKind::LocalDateTime, "1984-10-11T12:31:14.645876123"),
-            (TemporalKind::DateTime, "1984-10-11T12:31:14.000000001Z"),
-            (TemporalKind::Duration, "PT0.000000001S"),
-            (TemporalKind::Duration, "P0.000000001D"),
-        ] {
-            assert!(
-                parse_extended(kind, text).is_ok_and(|p| p.sub_micro),
-                "{text}"
-            );
+            assert_eq!(ext(kind, text), expected, "{text}");
         }
     }
 
@@ -1590,7 +1581,7 @@ mod gql_helpers {
             let parsed = parse_extended(value.kind(), &canonical)
                 .unwrap_or_else(|e| panic!("{canonical}: {e}"));
             assert_same(parsed.value, value);
-            assert!(!parsed.sub_micro && !parsed.zone_name);
+            assert!(!parsed.zone_name);
             let text = neo4j(&value);
             let back =
                 parse_extended(value.kind(), &text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -1648,9 +1639,7 @@ mod gql_helpers {
     }
 
     fn cascaded(parts: DurationParts) -> String {
-        let c = cascade(&parts).unwrap();
-        assert!(!c.sub_micro);
-        neo4j(&c.duration.into())
+        neo4j(&cascade(&parts).unwrap().into())
     }
 
     #[test]
@@ -1742,7 +1731,7 @@ mod gql_helpers {
             }),
             "P12Y11M15DT5H14M33S"
         );
-        // A nanosecond is reported, not kept.
+        // A nanosecond is kept.
         let ns = cascade(&DurationParts {
             days: whole(14),
             seconds: whole(70),
@@ -1750,8 +1739,7 @@ mod gql_helpers {
             ..p()
         })
         .unwrap();
-        assert!(ns.sub_micro);
-        assert_eq!(neo4j(&ns.duration.into()), "P14DT1M10S");
+        assert_eq!(neo4j(&ns.into()), "P14DT1M10.000000001S");
         // Beyond the fields.
         assert!(
             cascade(&DurationParts {
@@ -1778,7 +1766,7 @@ mod gql_helpers {
     #[test]
     fn durations_scale_by_numbers_as_neo4j() {
         let d = dur("P12Y5M14DT16H13M10S");
-        let text = |c: Cascaded| neo4j(&c.duration.into());
+        let text = |c: Duration| neo4j(&c.into());
         // Temporal8 [7], without the nanosecond.
         for (factor, divide, expected) in [
             (whole(1), false, "P12Y5M14DT16H13M10S"),
@@ -1800,9 +1788,9 @@ mod gql_helpers {
         );
         assert!(scale_duration(d, whole(0), true).is_err());
         assert!(scale_duration(d, whole(i64::MAX), false).is_err());
+        // Whole nanoseconds, truncated toward zero (Neo4j).
         let third = scale_duration(dur("PT1S"), whole(3), true).unwrap();
-        assert!(third.sub_micro);
-        assert_eq!(text(third), "PT0.333333S");
+        assert_eq!(text(third), "PT0.333333333S");
     }
 
     #[test]

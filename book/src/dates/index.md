@@ -15,7 +15,7 @@ standard; the part TinkerPop defines (`datetime()`, `asDate()`, `dateAdd()`, `da
 | `localdatetime` (`GType.LOCALDATETIME`) | a wall-clock date and time, no zone | `localdatetime("2023-08-02T09:30")` | `timestamp` | `TIMESTAMP` | naive `datetime.datetime` | `LocalDateTime` |
 | `date` (`GType.DATE`) | a calendar day | `date("2023-08-02")` | `date` | `DATE` | `datetime.date` | `LocalDate` |
 | `time` (`GType.TIME`) | a time of day, no zone | `time("09:30:15.5")` | `time` | `TIME` | naive `datetime.time` | `LocalTime` |
-| `duration` (`GType.DURATION`) | months, days and microseconds, each with its own sign | `duration("P1Y2M3DT4H")` | `interval` | `INTERVAL` | `datetime.timedelta`, or `graphersal.Interval` with months | `Duration`, `Period` |
+| `duration` (`GType.DURATION`) | months, days and nanoseconds, each with its own sign | `duration("P1Y2M3DT4H")` | `interval` | `INTERVAL` | `datetime.timedelta`, or `graphersal.Interval` with months | `Duration`, `Period` |
 
 ```rhai,graph=empty
 type_of(datetime("2023-08-02T09:30:00+02:00"))   // "datetime"
@@ -24,8 +24,12 @@ duration("P1Y2M3DT4H").months   // 14
 g.inject(datetime("2023-08-02T09:30Z")).is(P.typeOf(GType.DATETIME)).count().next()   // 1
 ```
 
-- **Resolution:** one microsecond for every type, as in PostgreSQL and Python. TinkerPop's
-  millisecond views (`as_number()` of a `datetime`, `date_diff()`) round down to milliseconds.
+- **Resolution:** one nanosecond for every type with a time, as in `java.time` and TinkerPop
+  (PostgreSQL and Python stop at the microsecond). TinkerPop's millisecond views (`as_number()`
+  of a `datetime`, `date_diff()`) round down to milliseconds. Python's `datetime` holds
+  microseconds: a value with a part below them does not convert ([From Python](python.md)),
+  and the binary store format of this release refuses it too ([Storage and
+  Exchange](storage.md)).
 - **Range:** the years -9999 to 9999 in the proleptic Gregorian calendar (`date("-0044-03-15")`
   is year 44 BC counted astronomically, year 0 = 1 BC). A value outside the range, or a result
   that would leave it, is an error, never a wrapped value.
@@ -46,11 +50,15 @@ In a script each type is a value of its own Rhai type with getters and operators
 
 | Type | Getters |
 |---|---|
-| `datetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond` (on its own wall clock), `offset` (seconds), `epoch_millis` |
-| `localdatetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond` |
+| `datetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond`, `nanosecond` (on its own wall clock), `offset` (seconds), `epoch_millis` |
+| `localdatetime` | `year`, `month`, `day`, `hour`, `minute`, `second`, `microsecond`, `nanosecond` |
 | `date` | `year`, `month`, `day` |
-| `time` | `hour`, `minute`, `second`, `microsecond` |
-| `duration` | `months`, `days`, `micros` |
+| `time` | `hour`, `minute`, `second`, `microsecond`, `nanosecond` |
+| `duration` | `months`, `days`, `micros` (the time part in whole microseconds), `nanos` (in nanoseconds) |
+
+`microsecond` is the whole microseconds of the second (0-999999), `nanosecond` all its
+nanoseconds (0-999999999): `time("12:00:00.123456789")` has `microsecond` 123456 and
+`nanosecond` 123456789.
 
 ```rhai,graph=empty
 let d = datetime("2023-08-02T09:30:15.25+02:00"); [d.hour, d.offset, d.microsecond]   // [9, 7200, 250000]

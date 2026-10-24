@@ -1,7 +1,7 @@
 //! Arithmetic on temporal values: adding units and durations, differences, truncation and parts
 //! (book "Dates and Times").
 //!
-//! - Units below a day ([`DT::Microsecond`] to [`DT::Hour`]) are fixed lengths: they move the
+//! - Units below a day ([`DT::Nanosecond`] to [`DT::Hour`]) are fixed lengths: they move the
 //!   instant of a `datetime` (whose offset stays, or becomes the zone's offset at the new instant
 //!   when a zone is given) and wrap a `time` modulo 24 hours (PostgreSQL).
 //! - [`DT::Day`] and [`DT::Week`] add calendar days to the wall-clock date: in a zone the
@@ -16,7 +16,7 @@
 //! offset of a `time`, a part-only token as a unit) is [`TemporalError::Unsupported`]. A zone is
 //! accepted for a `datetime` only: the other types have no instant to place in a zone.
 
-use super::civil::{self, MICROS_PER_DAY, MICROS_PER_SECOND};
+use super::civil;
 use super::zone::Zone;
 use super::{
     Date, DateTime, Duration, LocalDateTime, Temporal, TemporalError, TemporalKind, TemporalResult,
@@ -61,15 +61,21 @@ fn from_local_of(
     }
 }
 
-/// `n` units of `len` microseconds, checked.
+/// `n` calendar units of `len` days or months, checked.
 fn scaled(n: i64, len: i64) -> TemporalResult<i64> {
     n.checked_mul(len).ok_or_else(out_of_range)
 }
 
-/// A local microsecond count plus `delta`, in range.
-fn shift_local(local: LocalDateTime, delta: i64) -> TemporalResult<LocalDateTime> {
-    let micros = local.micros().checked_add(delta).ok_or_else(out_of_range)?;
-    LocalDateTime::from_micros(micros).map_err(|_| out_of_range())
+/// `n` units of `len` nanoseconds (never overflows: both factors are below 2^63, `len` below
+/// 2^42).
+fn scaled_nanos(n: i64, len: i64) -> i128 {
+    n as i128 * len as i128
+}
+
+/// A local nanosecond count plus `delta`, in range.
+fn shift_local(local: LocalDateTime, delta: i128) -> TemporalResult<LocalDateTime> {
+    let nanos = local.nanos().checked_add(delta).ok_or_else(out_of_range)?;
+    LocalDateTime::from_nanos(nanos).map_err(|_| out_of_range())
 }
 
 /// A day number plus `days`, in range.
@@ -91,8 +97,7 @@ fn local_add_months(local: LocalDateTime, months: i64) -> TemporalResult<LocalDa
 
 /// A local date-time plus `days` calendar days.
 fn local_add_days(local: LocalDateTime, days: i64) -> TemporalResult<LocalDateTime> {
-    let micros = days.checked_mul(MICROS_PER_DAY).ok_or_else(out_of_range)?;
-    shift_local(local, micros)
+    shift_local(local, days as i128 * NANOS_PER_DAY)
 }
 
 /// The operation text of a unit.
@@ -112,23 +117,20 @@ pub(crate) fn add(
     if !unit.is_unit() {
         return Err(TemporalError::unsupported(adding(unit), kind));
     }
-    let fixed = unit.fixed_micros();
+    let fixed = unit.fixed_nanos();
     let days = unit.calendar_days();
     let months = unit.calendar_months();
     match value {
         Temporal::DateTime(v) => {
             if let Some(len) = fixed {
-                let micros = v
-                    .epoch_micros()
-                    .checked_add(scaled(n, len)?)
-                    .ok_or_else(out_of_range)?;
-                let instant = DateTime::from_micros(micros, 0).map_err(|_| out_of_range())?;
+                let nanos = v.epoch_nanos() + scaled_nanos(n, len);
+                let instant = DateTime::from_nanos(nanos, 0).map_err(|_| out_of_range())?;
                 let offset = match zone {
                     Some(zone) => zone.offset_at(instant)?,
                     None => v.offset_seconds(),
                 };
                 return Ok(Temporal::DateTime(
-                    DateTime::from_micros(micros, offset).map_err(|_| out_of_range())?,
+                    DateTime::from_nanos(nanos, offset).map_err(|_| out_of_range())?,
                 ));
             }
             let local = local_of(v, zone)?;
@@ -144,7 +146,7 @@ pub(crate) fn add(
         Temporal::LocalDateTime(v) => {
             no_zone(kind, zone)?;
             let shifted = match (fixed, days, months) {
-                (Some(len), _, _) => shift_local(v, scaled(n, len)?)?,
+                (Some(len), _, _) => shift_local(v, scaled_nanos(n, len))?,
                 (None, Some(k), _) => local_add_days(v, scaled(n, k)?)?,
                 (None, None, Some(k)) => local_add_months(v, scaled(n, k)?)?,
                 (None, None, None) => {
@@ -169,16 +171,17 @@ pub(crate) fn add(
             let Some(len) = fixed else {
                 return Err(TemporalError::unsupported(adding(unit), kind));
             };
-            let micros =
-                (v.micros as i128 + n as i128 * len as i128).rem_euclid(MICROS_PER_DAY as i128);
+            let nanos = (v.nanos as i128 + scaled_nanos(n, len)).rem_euclid(NANOS_PER_DAY);
             Ok(Temporal::Time(Time {
-                micros: micros as i64,
+                nanos: nanos as i64,
             }))
         }
         Temporal::Duration(v) => {
             no_zone(kind, zone)?;
             let delta = match (fixed, days, months) {
-                (Some(len), _, _) => Duration::from_micros(scaled(n, len)?),
+                (Some(len), _, _) => {
+                    Duration::from_nanos(scaled_nanos(n, len)).map_err(|_| out_of_range())?
+                }
                 (None, Some(k), _) => Duration::new(0, to_i32(scaled(n, k)?)?, 0),
                 (None, None, Some(k)) => Duration::new(to_i32(scaled(n, k)?)?, 0, 0),
                 (None, None, None) => {
@@ -196,17 +199,17 @@ fn to_i32(value: i64) -> TemporalResult<i32> {
     i32::try_from(value).map_err(|_| out_of_range())
 }
 
-/// Adds a duration: its months, then its days, then its microseconds (PostgreSQL order).
+/// Adds a duration: its months, then its days, then its time part (PostgreSQL order).
 pub(crate) fn add_duration(
     value: Temporal,
     duration: Duration,
     zone: Option<&Zone>,
 ) -> TemporalResult<Temporal> {
     let kind = value.kind();
-    let (months, days, micros) = (
+    let (months, days, nanos) = (
         duration.months as i64,
         duration.days as i64,
-        duration.micros,
+        duration.nanos(),
     );
     match value {
         Temporal::DateTime(v) => {
@@ -214,26 +217,26 @@ pub(crate) fn add_duration(
             let local = local_add_days(local_add_months(local, months)?, days)?;
             let shifted = from_local_of(local, v, zone).map_err(|_| out_of_range())?;
             let instant = shifted
-                .epoch_micros()
-                .checked_add(micros)
+                .epoch_nanos()
+                .checked_add(nanos)
                 .ok_or_else(out_of_range)?;
-            let probe = DateTime::from_micros(instant, 0).map_err(|_| out_of_range())?;
+            let probe = DateTime::from_nanos(instant, 0).map_err(|_| out_of_range())?;
             let offset = match zone {
                 Some(zone) => zone.offset_at(probe)?,
                 None => v.offset_seconds(),
             };
             Ok(Temporal::DateTime(
-                DateTime::from_micros(instant, offset).map_err(|_| out_of_range())?,
+                DateTime::from_nanos(instant, offset).map_err(|_| out_of_range())?,
             ))
         }
         Temporal::LocalDateTime(v) => {
             no_zone(kind, zone)?;
             let local = local_add_days(local_add_months(v, months)?, days)?;
-            Ok(Temporal::LocalDateTime(shift_local(local, micros)?))
+            Ok(Temporal::LocalDateTime(shift_local(local, nanos)?))
         }
         Temporal::Date(v) => {
             no_zone(kind, zone)?;
-            if micros != 0 {
+            if nanos != 0 {
                 return Err(TemporalError::unsupported(
                     "adding a duration with a time part",
                     kind,
@@ -252,9 +255,9 @@ pub(crate) fn add_duration(
                     kind,
                 ));
             }
-            let micros = (v.micros as i128 + micros as i128).rem_euclid(MICROS_PER_DAY as i128);
+            let nanos = (v.nanos as i128 + nanos).rem_euclid(NANOS_PER_DAY);
             Ok(Temporal::Time(Time {
-                micros: micros as i64,
+                nanos: nanos as i64,
             }))
         }
         Temporal::Duration(v) => {
@@ -280,15 +283,15 @@ fn same_kind(a: Temporal, b: Temporal, operation: &str) -> TemporalResult<Tempor
 
 /// `a - b` in milliseconds, rounded down per operand (TinkerPop `dateDiff`: the difference of
 /// the epoch milliseconds of two `datetime`s); for the local types the same on their wall-clock
-/// microseconds (a `date` at midnight, a `time` within the day).
+/// nanoseconds (a `date` at midnight, a `time` within the day).
 pub(crate) fn diff_millis(a: Temporal, b: Temporal) -> TemporalResult<i64> {
     let kind = same_kind(a, b, "the difference")?;
     let millis = |value: Temporal| -> TemporalResult<i64> {
         match value {
             Temporal::DateTime(v) => Ok(v.epoch_millis()),
-            Temporal::LocalDateTime(v) => Ok(v.micros.div_euclid(1000)),
+            Temporal::LocalDateTime(v) => Ok(v.nanos().div_euclid(1_000_000) as i64),
             Temporal::Date(v) => Ok(v.days as i64 * 86_400_000),
-            Temporal::Time(v) => Ok(v.micros / 1000),
+            Temporal::Time(v) => Ok(v.nanos / 1_000_000),
             Temporal::Duration(_) => Err(TemporalError::unsupported("the difference", kind)),
         }
     };
@@ -298,7 +301,7 @@ pub(crate) fn diff_millis(a: Temporal, b: Temporal) -> TemporalResult<i64> {
 /// Whole calendar days from `from` to `to` (truncated toward zero by the time of day).
 pub(crate) fn days_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
     let mut days = to.date().days as i64 - from.date().days as i64;
-    let (from_time, to_time) = (from.time().micros, to.time().micros);
+    let (from_time, to_time) = (from.time().nanos, to.time().nanos);
     if days > 0 && to_time < from_time {
         days -= 1;
     } else if days < 0 && to_time > from_time {
@@ -314,7 +317,7 @@ pub(crate) fn days_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
 pub(crate) fn months_between(from: LocalDateTime, to: LocalDateTime) -> i64 {
     let from_day = from.date().days;
     let mut end = to.date().days;
-    let (from_time, to_time) = (from.time().micros, to.time().micros);
+    let (from_time, to_time) = (from.time().nanos, to.time().nanos);
     // `LocalDateTime.until`: an end whose time is before the start's counts from the day before.
     if end > from_day && to_time < from_time {
         end -= 1;
@@ -354,8 +357,8 @@ fn local_pair(
         (Temporal::Date(a), Temporal::Date(b)) => {
             no_zone(kind, zone)?;
             Ok((
-                LocalDateTime::new(a, Time { micros: 0 }),
-                LocalDateTime::new(b, Time { micros: 0 }),
+                LocalDateTime::new(a, Time::MIDNIGHT),
+                LocalDateTime::new(b, Time::MIDNIGHT),
             ))
         }
         _ => Err(TemporalError::unsupported(operation.to_string(), kind)),
@@ -363,7 +366,7 @@ fn local_pair(
 }
 
 /// `a - b` in whole units, truncated toward zero (PostgreSQL / `java.time` `ChronoUnit.between`):
-/// fixed units from the elapsed microseconds, days and weeks from the wall-clock dates and
+/// fixed units from the elapsed nanoseconds, days and weeks from the wall-clock dates and
 /// times, months and larger from whole months (a month counts once the day of the month and the
 /// time of day are reached: January 31 to February 28 is 0 months).
 pub(crate) fn diff(a: Temporal, b: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalResult<i64> {
@@ -372,18 +375,16 @@ pub(crate) fn diff(a: Temporal, b: Temporal, unit: DT, zone: Option<&Zone>) -> T
     if !unit.is_unit() {
         return Err(TemporalError::unsupported(operation, kind));
     }
-    if let Some(len) = unit.fixed_micros() {
+    if let Some(len) = unit.fixed_nanos() {
         let elapsed: i128 = match (a, b) {
-            (Temporal::DateTime(a), Temporal::DateTime(b)) => {
-                a.epoch_micros() as i128 - b.epoch_micros() as i128
-            }
+            (Temporal::DateTime(a), Temporal::DateTime(b)) => a.epoch_nanos() - b.epoch_nanos(),
             (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => {
                 no_zone(kind, zone)?;
-                a.micros as i128 - b.micros as i128
+                a.nanos() - b.nanos()
             }
             (Temporal::Time(a), Temporal::Time(b)) => {
                 no_zone(kind, zone)?;
-                a.micros as i128 - b.micros as i128
+                a.nanos as i128 - b.nanos as i128
             }
             _ => return Err(TemporalError::unsupported(operation, kind)),
         };
@@ -408,7 +409,7 @@ pub(crate) fn age(a: Temporal, b: Temporal, zone: Option<&Zone>) -> TemporalResu
     let kind = same_kind(a, b, "the age")?;
     if let (Temporal::Time(a), Temporal::Time(b)) = (a, b) {
         no_zone(kind, zone)?;
-        return Ok(Duration::from_micros(a.micros - b.micros));
+        return Duration::from_nanos(a.nanos as i128 - b.nanos as i128);
     }
     let (la, lb) = local_pair(a, b, zone, "the age")?;
     let negative = la < lb;
@@ -418,12 +419,12 @@ pub(crate) fn age(a: Temporal, b: Temporal, zone: Option<&Zone>) -> TemporalResu
     let (yb, mb, db) = civil::civil_from_days(lb.date().days);
     let (ye, me, _) = civil::civil_from_days(earlier.date().days);
     let sign = if negative { -1 } else { 1 };
-    let mut time = (la.time().micros - lb.time().micros) * sign;
+    let mut time = (la.time().nanos - lb.time().nanos) * sign;
     let mut days = (da as i64 - db as i64) * sign;
     let mut months = (ma as i64 - mb as i64) * sign;
     let mut years = (ya as i64 - yb as i64) * sign;
     if time < 0 {
-        time += MICROS_PER_DAY;
+        time += civil::NANOS_PER_DAY;
         days -= 1;
     }
     while days < 0 {
@@ -434,11 +435,11 @@ pub(crate) fn age(a: Temporal, b: Temporal, zone: Option<&Zone>) -> TemporalResu
         months += 12;
         years -= 1;
     }
-    Ok(Duration::new(
+    Duration::with_nanos(
         to_i32((years * 12 + months) * sign)?,
         to_i32(days * sign)?,
-        time * sign,
-    ))
+        (time * sign) as i128,
+    )
 }
 
 /// The first year of the decade of `year`.
@@ -459,9 +460,10 @@ fn millennium_start(year: i32) -> i32 {
 
 /// A local date-time truncated to a unit (PostgreSQL `date_trunc`; `week` starts on Monday).
 fn trunc_local(local: LocalDateTime, unit: DT) -> TemporalResult<LocalDateTime> {
-    if let Some(len) = unit.fixed_micros() {
-        let micros = local.micros.div_euclid(len) * len;
-        return LocalDateTime::from_micros(micros).map_err(|_| out_of_range());
+    if let Some(len) = unit.fixed_nanos() {
+        let len = len as i128;
+        let nanos = local.nanos().div_euclid(len) * len;
+        return LocalDateTime::from_nanos(nanos).map_err(|_| out_of_range());
     }
     let days = local.date().days;
     let (year, month, _) = civil::civil_from_days(days);
@@ -479,7 +481,8 @@ fn trunc_local(local: LocalDateTime, unit: DT) -> TemporalResult<LocalDateTime> 
             Date::from_ymd(millennium_start(year), 1, 1).map_err(|_| out_of_range())?
         }
         // Units below a day returned above; parts are refused by the callers.
-        DT::Microsecond
+        DT::Nanosecond
+        | DT::Microsecond
         | DT::Millisecond
         | DT::Second
         | DT::Minute
@@ -491,7 +494,7 @@ fn trunc_local(local: LocalDateTime, unit: DT) -> TemporalResult<LocalDateTime> 
         | DT::Epoch
         | DT::Offset => return Err(out_of_range()),
     };
-    Ok(LocalDateTime::new(date, Time { micros: 0 }))
+    Ok(LocalDateTime::new(date, Time::MIDNIGHT))
 }
 
 /// Truncates a value to a unit (PostgreSQL `date_trunc`): the fields below the unit become
@@ -517,26 +520,28 @@ pub(crate) fn trunc(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalR
         }
         Temporal::Date(v) => {
             no_zone(kind, zone)?;
-            if unit.fixed_micros().is_some() {
+            if unit.fixed_nanos().is_some() {
                 return Err(TemporalError::unsupported(operation(), kind));
             }
             Ok(Temporal::Date(
-                trunc_local(LocalDateTime::new(v, Time { micros: 0 }), unit)?.date(),
+                trunc_local(LocalDateTime::new(v, Time::MIDNIGHT), unit)?.date(),
             ))
         }
         Temporal::Time(v) => {
             no_zone(kind, zone)?;
-            let Some(len) = unit.fixed_micros() else {
+            let Some(len) = unit.fixed_nanos() else {
                 return Err(TemporalError::unsupported(operation(), kind));
             };
             Ok(Temporal::Time(Time {
-                micros: v.micros / len * len,
+                nanos: v.nanos / len * len,
             }))
         }
         Temporal::Duration(v) => {
             no_zone(kind, zone)?;
-            let truncated = if let Some(len) = unit.fixed_micros() {
-                Duration::new(v.months, v.days, v.micros / len * len)
+            let truncated = if let Some(len) = unit.fixed_nanos() {
+                let len = len as i128;
+                // Toward zero: the magnitude only shrinks, so the result is in range.
+                Duration::with_nanos(v.months, v.days, v.nanos() / len * len)?
             } else if unit == DT::Day {
                 Duration::new(v.months, v.days, 0)
             } else if let Some(k) = unit.calendar_months() {
@@ -574,14 +579,15 @@ fn millennium_of(year: i32) -> i64 {
 fn local_part(local: LocalDateTime, unit: DT) -> Option<Number> {
     let days = local.date().days;
     let (year, month, day) = civil::civil_from_days(days);
-    let of_day = local.time().micros;
+    let of_day = local.time().nanos;
     let int = |v: i64| Some(Number::from_i64(v));
     match unit {
-        DT::Microsecond => int(of_day % MICROS_PER_SECOND),
-        DT::Millisecond => int(of_day % MICROS_PER_SECOND / 1000),
-        DT::Second => int(of_day / MICROS_PER_SECOND % 60),
-        DT::Minute => int(of_day / (60 * MICROS_PER_SECOND) % 60),
-        DT::Hour => int(of_day / (3600 * MICROS_PER_SECOND)),
+        DT::Nanosecond => int(of_day % civil::NANOS_PER_SECOND),
+        DT::Microsecond => int(of_day % civil::NANOS_PER_SECOND / 1000),
+        DT::Millisecond => int(of_day % civil::NANOS_PER_SECOND / 1_000_000),
+        DT::Second => int(of_day / civil::NANOS_PER_SECOND % 60),
+        DT::Minute => int(of_day / (60 * civil::NANOS_PER_SECOND) % 60),
+        DT::Hour => int(of_day / (3600 * civil::NANOS_PER_SECOND)),
         DT::Day => int(day as i64),
         DT::Week => int(civil::iso_week(days).1 as i64),
         DT::Month => int(month as i64),
@@ -594,29 +600,39 @@ fn local_part(local: LocalDateTime, unit: DT) -> Option<Number> {
         DT::IsoDayOfWeek => int(civil::iso_day_of_week(days) as i64),
         DT::DayOfYear => int(civil::day_of_year(days) as i64),
         DT::IsoYear => int(civil::iso_week(days).0 as i64),
-        DT::Epoch => Some(Number::from_f64(
-            local.micros as f64 / MICROS_PER_SECOND as f64,
-        )),
+        DT::Epoch => Some(Number::from_f64(epoch_seconds(local.nanos()))),
         DT::Offset => None,
     }
 }
 
-/// A part of a value (PostgreSQL `extract`), except that `second`, `millisecond` and
-/// `microsecond` are the plain fields (0-59, 0-999, 0-999999), not PostgreSQL's seconds with
-/// their fraction scaled. `epoch` is a float of seconds; `offset` (a `datetime` only) the offset
-/// in seconds (in the zone when one is given). Parts of a `duration` are those of PostgreSQL's
-/// `interval` (`year` = months / 12, `month` = months % 12, `day` = days, `hour` and below from
-/// the microseconds, each with the sign of its field; `epoch` counts a year as 365.25 days and a
-/// month as 30).
+/// Seconds of a nanosecond count as a float: the whole microseconds over 10^6 (the float a
+/// value without a sub-microsecond part has always given), plus the nanoseconds below them.
+fn epoch_seconds(nanos: i128) -> f64 {
+    let micros = nanos.div_euclid(1000);
+    let sub = nanos.rem_euclid(1000);
+    let seconds = micros as f64 / 1e6;
+    if sub == 0 {
+        seconds
+    } else {
+        seconds + sub as f64 / 1e9
+    }
+}
+
+/// A part of a value (PostgreSQL `extract`), except that `second`, `millisecond`, `microsecond`
+/// and `nanosecond` are the plain fields within their next larger unit (0-59, 0-999, 0-999999,
+/// 0-999999999: `java.time` `MILLI_OF_SECOND`, `MICRO_OF_SECOND`, `NANO_OF_SECOND`), not
+/// PostgreSQL's seconds with their fraction scaled. `epoch` is a float of seconds; `offset` (a
+/// `datetime` only) the offset in seconds (in the zone when one is given). Parts of a `duration`
+/// are those of PostgreSQL's `interval` (`year` = months / 12, `month` = months % 12, `day` =
+/// days, `hour` and below from the time part, each with the sign of its field; `epoch` counts a
+/// year as 365.25 days and a month as 30).
 pub(crate) fn part(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalResult<Number> {
     let kind = value.kind();
     let unsupported = || TemporalError::unsupported(format!("the part {unit}"), kind);
     match value {
         Temporal::DateTime(v) => {
             if unit == DT::Epoch {
-                return Ok(Number::from_f64(
-                    v.epoch_micros() as f64 / MICROS_PER_SECOND as f64,
-                ));
+                return Ok(Number::from_f64(epoch_seconds(v.epoch_nanos())));
             }
             if unit == DT::Offset {
                 let offset = match zone {
@@ -633,17 +649,17 @@ pub(crate) fn part(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalRe
         }
         Temporal::Date(v) => {
             no_zone(kind, zone)?;
-            if unit.fixed_micros().is_some() {
+            if unit.fixed_nanos().is_some() {
                 return Err(unsupported());
             }
-            local_part(LocalDateTime::new(v, Time { micros: 0 }), unit).ok_or_else(unsupported)
+            local_part(LocalDateTime::new(v, Time::MIDNIGHT), unit).ok_or_else(unsupported)
         }
         Temporal::Time(v) => {
             no_zone(kind, zone)?;
-            if unit.fixed_micros().is_none() && unit != DT::Epoch {
+            if unit.fixed_nanos().is_none() && unit != DT::Epoch {
                 return Err(unsupported());
             }
-            local_part(LocalDateTime { micros: v.micros }, unit).ok_or_else(unsupported)
+            local_part(LocalDateTime::new(Date { days: 0 }, v), unit).ok_or_else(unsupported)
         }
         Temporal::Duration(v) => {
             no_zone(kind, zone)?;
@@ -656,25 +672,33 @@ pub(crate) fn part(value: Temporal, unit: DT, zone: Option<&Zone>) -> TemporalRe
 fn duration_part(v: Duration, unit: DT) -> Option<Number> {
     let months = v.months as i64;
     let years = months / 12;
-    let int = |x: i64| Some(Number::from_i64(x));
+    let int = |x: i128| Some(Number::from_i64(x as i64));
+    let nanos = v.nanos();
+    let second = NANOS_PER_SECOND;
     match unit {
-        DT::Microsecond => int(v.micros % MICROS_PER_SECOND),
-        DT::Millisecond => int(v.micros % MICROS_PER_SECOND / 1000),
-        DT::Second => int(v.micros / MICROS_PER_SECOND % 60),
-        DT::Minute => int(v.micros / (60 * MICROS_PER_SECOND) % 60),
-        DT::Hour => int(v.micros / (3600 * MICROS_PER_SECOND)),
-        DT::Day => int(v.days as i64),
-        DT::Month => int(months % 12),
-        DT::Quarter => int(months % 12 / 3 + 1),
-        DT::Year => int(years),
-        DT::Decade => int(years / 10),
-        DT::Century => int(years / 100),
-        DT::Millennium => int(years / 1000),
+        DT::Nanosecond => int(nanos % second),
+        DT::Microsecond => int(nanos % second / 1000),
+        DT::Millisecond => int(nanos % second / 1_000_000),
+        DT::Second => int(nanos / second % 60),
+        DT::Minute => int(nanos / (60 * second) % 60),
+        // At most i64::MAX microseconds: the hours fit an i64.
+        DT::Hour => int(nanos / (3600 * second)),
+        DT::Day => int(v.days as i128),
+        DT::Month => int((months % 12) as i128),
+        DT::Quarter => int((months % 12 / 3 + 1) as i128),
+        DT::Year => int(years as i128),
+        DT::Decade => int((years / 10) as i128),
+        DT::Century => int((years / 100) as i128),
+        DT::Millennium => int((years / 1000) as i128),
         DT::Epoch => {
-            let seconds = years as f64 * 365.25 * 86_400.0
+            let sub = nanos % 1000;
+            let mut seconds = years as f64 * 365.25 * 86_400.0
                 + (months % 12) as f64 * 30.0 * 86_400.0
                 + v.days as f64 * 86_400.0
-                + v.micros as f64 / MICROS_PER_SECOND as f64;
+                + (nanos / 1000) as f64 / 1e6;
+            if sub != 0 {
+                seconds += sub as f64 / 1e9;
+            }
             Some(Number::from_f64(seconds))
         }
         DT::Week | DT::DayOfWeek | DT::IsoDayOfWeek | DT::DayOfYear | DT::IsoYear | DT::Offset => {
@@ -770,18 +794,6 @@ pub(crate) struct DurationParts {
     pub(crate) nanoseconds: Amount,
 }
 
-/// A duration computed by [`cascade`] or [`scale_duration`], with whether non-zero digits below
-/// the microsecond were cut (truncated toward zero): our durations hold microseconds, and the
-/// GQL layer answers such a value with "not yet" rather than cut it silently.
-#[cfg_attr(not(feature = "gql"), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Cascaded {
-    /// The duration (microseconds truncated toward zero).
-    pub(crate) duration: Duration,
-    /// Whether a non-zero part below the microsecond was cut.
-    pub(crate) sub_micro: bool,
-}
-
 /// `a * b` on `i128`, the range error on overflow.
 fn mul(a: i128, b: i128) -> TemporalResult<i128> {
     a.checked_mul(b).ok_or_else(out_of_range)
@@ -797,7 +809,7 @@ fn plus(a: i128, b: i128) -> TemporalResult<i128> {
 /// a fraction of a month is worth [`NANOS_PER_AVERAGE_MONTH`] and joins the days, the whole
 /// days stay days, a fraction of a day joins the time part, and the time part is truncated
 /// toward zero to whole nanoseconds. Seconds are never folded into days (`PT49H` stays).
-fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalResult<Cascaded> {
+fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalResult<Duration> {
     if den == 0 {
         return Err(out_of_range());
     }
@@ -817,15 +829,12 @@ fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalRe
     let whole_days = day_total / day_unit;
     let rest = plus(day_total - whole_days * day_unit, nanos)?;
     let total_nanos = rest / den;
-    let duration = Duration::new(
+    Duration::with_nanos(
         i32::try_from(whole_months).map_err(|_| out_of_range())?,
         i32::try_from(whole_days).map_err(|_| out_of_range())?,
-        i64::try_from(total_nanos / 1000).map_err(|_| out_of_range())?,
-    );
-    Ok(Cascaded {
-        duration,
-        sub_micro: total_nanos % 1000 != 0,
-    })
+        total_nanos,
+    )
+    .map_err(|_| out_of_range())
 }
 
 /// The duration of the given components (the GQL `duration({..})` map and the unit text
@@ -835,7 +844,7 @@ fn cascade_ratio(months: i128, days: i128, nanos: i128, den: i128) -> TemporalRe
 /// `P1DT12H`, `PT1.5M` = `PT1M30S`). A result outside the fields is
 /// [`TemporalError::OutOfRange`].
 #[cfg_attr(not(feature = "gql"), allow(dead_code))]
-pub(crate) fn cascade(parts: &DurationParts) -> TemporalResult<Cascaded> {
+pub(crate) fn cascade(parts: &DurationParts) -> TemporalResult<Duration> {
     let months = plus(mul(parts.years.0, 12)?, parts.months.0)?;
     let days = plus(mul(parts.weeks.0, 7)?, parts.days.0)?;
     // Nanoseconds times 10^9.
@@ -858,7 +867,7 @@ pub(crate) fn scale_duration(
     duration: Duration,
     factor: Amount,
     divide: bool,
-) -> TemporalResult<Cascaded> {
+) -> TemporalResult<Duration> {
     let (num, den) = if divide {
         (Amount::SCALE, factor.0)
     } else {
@@ -867,7 +876,7 @@ pub(crate) fn scale_duration(
     cascade_ratio(
         mul(duration.months as i128, num)?,
         mul(duration.days as i128, num)?,
-        mul(mul(duration.micros as i128, 1000)?, num)?,
+        mul(duration.nanos(), num)?,
         den,
     )
 }
@@ -892,11 +901,11 @@ pub(crate) fn between_neo4j(from: Temporal, to: Temporal) -> TemporalResult<Dura
     let kind = same_kind(from, to, "duration.between")?;
     let (from, to) = match (from, to) {
         (Temporal::Time(a), Temporal::Time(b)) => {
-            return Ok(Duration::from_micros(b.micros - a.micros));
+            return Duration::from_nanos(b.nanos as i128 - a.nanos as i128);
         }
         (Temporal::Date(a), Temporal::Date(b)) => (
-            LocalDateTime::new(a, Time { micros: 0 }),
-            LocalDateTime::new(b, Time { micros: 0 }),
+            LocalDateTime::new(a, Time::MIDNIGHT),
+            LocalDateTime::new(b, Time::MIDNIGHT),
         ),
         (Temporal::LocalDateTime(a), Temporal::LocalDateTime(b)) => (a, b),
         (Temporal::DateTime(a), Temporal::DateTime(b)) => {
@@ -908,9 +917,9 @@ pub(crate) fn between_neo4j(from: Temporal, to: Temporal) -> TemporalResult<Dura
     let after_months = local_add_months(from, months)?;
     let days = days_between(after_months, to);
     let after_days = local_add_days(after_months, days)?;
-    Ok(Duration::new(
+    Duration::with_nanos(
         to_i32(months)?,
         to_i32(days)?,
-        to.micros() - after_days.micros(),
-    ))
+        to.nanos() - after_days.nanos(),
+    )
 }

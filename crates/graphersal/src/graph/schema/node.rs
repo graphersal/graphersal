@@ -109,7 +109,7 @@ pub enum SchemaFormat {
     /// `format: "time"`: a time of day without a zone, the logical `time` type (JSON Schema's
     /// `time` has an offset; this one has none).
     Time,
-    /// `format: "duration"`: months, days and microseconds (ISO 8601 text), the logical
+    /// `format: "duration"`: months, days and nanoseconds (ISO 8601 text), the logical
     /// `duration` type.
     Duration,
 }

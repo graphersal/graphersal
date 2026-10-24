@@ -891,7 +891,7 @@ fn temporal_help(step: &str, error: &crate::value::temporal::TemporalError) -> S
     match error {
         TemporalError::OutOfRange { .. } => format!(
             "Dates and times cover the years -9999 to 9999 with a resolution of one \
-             microsecond; {step}() left that range. Check the amount (date_add(DT.year, 10000) \
+             nanosecond; {step}() left that range. Check the amount (date_add(DT.year, 10000) \
              goes too far) or keep the extreme values out with a filter such as \
              is(P.gt(datetime(\"1900-01-01T00:00:00Z\")))."
         ),
@@ -4441,9 +4441,6 @@ pub(crate) enum GqlHelpTopic {
     TemporalTruncate,
     /// An operand `duration.between()` and `duration.in*()` cannot take (22G03, stage 3g).
     TemporalBetween,
-    /// A temporal value with a part below the microsecond (0A000 "not yet", stage 3g, 3g.P0
-    /// U1): values hold microseconds.
-    TemporalPrecision,
     /// A call of a saved query, `CALL folder.name(args) [YIELD ..]` (stage 3h): its name and
     /// folder, its arguments, its `YIELD` items.
     Procedure,
@@ -6982,10 +6979,6 @@ fn gql_help(
             "Graphersal does not support this construct in gql(); write this part of the query \
              as Gremlin steps, for example g.v().has_label(\"person\").values(\"name\").",
         ),
-        // Stage 3g (U1): values hold microseconds; the fix is fewer digits, not Gremlin.
-        GqlErrorKind::NotYet if topic == GqlHelpTopic::TemporalPrecision => {
-            help.push_str(GQL_TEMPORAL_PRECISION_ADVICE)
-        }
         GqlErrorKind::NotYet => help.push_str(
             "This construct comes in a later version of gql(); until then, write the query \
              without it or as Gremlin steps.",
@@ -7208,16 +7201,6 @@ const GQL_TEMPORAL_BETWEEN_ADVICE: &str = "duration.between(a, b), duration.inMo
      months or days: use duration.inSeconds(a, b) or duration.between(a, b) for them, as in \
      g.gql(\"RETURN duration.between(date('2015-01-01'), localdatetime('2015-03-15T12:00')) \
      AS u, duration.inSeconds(localtime('12:00'), localtime('13:30')) AS s\"). ";
-
-/// The advice of a temporal value with a part below the microsecond
-/// ([`GqlHelpTopic::TemporalPrecision`], stage 3g, 3g.P0 U1).
-#[cfg(feature = "gql")]
-const GQL_TEMPORAL_PRECISION_ADVICE: &str = "Temporal values hold microseconds, and gql() \
-     never cuts digits silently: give at most six fraction digits, or the fields millisecond \
-     and microsecond (nanosecond only in whole thousands, nanoseconds of a duration likewise), \
-     as in g.gql(\"RETURN localtime('12:31:14.645876') AS t, localtime({hour: 12, minute: \
-     31, second: 14, microsecond: 645876}) AS u, duration({seconds: 1, microseconds: 5}) AS \
-     d\"). Nanosecond precision comes in a later version.";
 
 /// The advice of temporal arithmetic without a meaning ([`GqlHelpTopic::TemporalArithmetic`],
 /// stage 3g): the forms `+`, `-`, `*` and `/` take, and `duration.between` for the time between
@@ -7798,8 +7781,7 @@ fn gql_semantic_advice(topic: GqlHelpTopic) -> &'static str {
         | GqlHelpTopic::TemporalConstruct
         | GqlHelpTopic::TemporalComponent
         | GqlHelpTopic::TemporalTruncate
-        | GqlHelpTopic::TemporalBetween
-        | GqlHelpTopic::TemporalPrecision => {
+        | GqlHelpTopic::TemporalBetween => {
             "Declare every variable in a MATCH pattern before WHERE, RETURN or ORDER BY uses \
              it (LET, WITH and FOR define variables too), for example \
              g.gql(\"MATCH (p:person)-[:knows]->(f) RETURN p.name, f.name\"), and give every \

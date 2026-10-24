@@ -27,8 +27,8 @@
 //!   `datetime: x`) and `timezone` converts; both together, or next to `date` / `time` /
 //!   `datetime`, is 22007.
 //! - A zone name resolves to its offset at that time; the value keeps the offset only (U3).
-//! - A non-zero part below the microsecond is 0A000 "not yet" (U1): our values hold
-//!   microseconds, and a silently cut value would be a wrong answer.
+//! - Values hold nanoseconds (U1): up to nine fraction digits, and the `nanosecond` field, are
+//!   kept exactly.
 //! - Errors: a `NULL` argument (or a `NULL` field in the map) gives `NULL` (F2); text that is
 //!   no value of the type, an unknown or conflicting map field and an unknown zone are 22007; a
 //!   field or result out of range (month 13, the year 10000) 22008; a value of the wrong kind
@@ -38,7 +38,7 @@ use super::super::super::eval::{Env, EvalError, Value, function_name, status};
 use super::super::super::lexer::Span;
 use super::super::super::parser::{Clock, Function, TemporalFunction, TemporalType};
 use super::super::{Arg, any_null, integer_arg, wrong_kind};
-use super::{kind_name, sub_micro};
+use super::kind_name;
 use crate::ElementProperty;
 use crate::value::number::N;
 use crate::value::temporal::arith::{Amount, DurationParts, cascade};
@@ -131,9 +131,6 @@ pub(crate) fn construct<En: Env>(
 /// `text` read as a value of `kind` (the ISO 8601 forms of `parse_extended`).
 fn from_text(kind: TemporalKind, text: &str, span: Span) -> Result<Temporal, EvalError> {
     let read = parse_extended(kind, text).map_err(|e| temporal_error(e, span))?;
-    if read.sub_micro {
-        return Err(sub_micro(span));
-    }
     Ok(read.value)
 }
 
@@ -573,10 +570,10 @@ impl Build<'_> {
             }
             TemporalType::LocalTime => {
                 let base = f.time.map(|t| self.time_of(t, Key::Time)).transpose()?;
-                let micros = self
+                let nanos = self
                     .time_part(base)?
                     .ok_or_else(|| self.needs("hour or time"))?;
-                Ok(Temporal::Time(self.time(micros)?))
+                Ok(Temporal::Time(self.time(nanos)?))
             }
             TemporalType::LocalDateTime => self.local().map(Temporal::LocalDateTime),
             TemporalType::DateTime => self.datetime().map(Temporal::DateTime),
@@ -603,15 +600,15 @@ impl Build<'_> {
             (None, None) => None,
         };
         let time_base = match (base, f.time) {
-            (Some(base), _) => Some(base.time().micros_of_day()),
+            (Some(base), _) => Some(base.time().nanos_of_day()),
             (None, Some(t)) => Some(self.time_of(t, Key::Time)?),
             (None, None) => None,
         };
         let days = self
             .date_part(date_base)?
             .ok_or_else(|| self.needs("year, date or datetime"))?;
-        let micros = self.time_part(time_base)?.unwrap_or(0);
-        Ok(LocalDateTime::new(self.date(days)?, self.time(micros)?))
+        let nanos = self.time_part(time_base)?.unwrap_or(0);
+        Ok(LocalDateTime::new(self.date(days)?, self.time(nanos)?))
     }
 
     /// A `datetime` map: the local value, at the base's offset when a `datetime` or `time` base
@@ -645,12 +642,11 @@ impl Build<'_> {
         let f = self.fields;
         let error = |e| temporal_error(e, self.span);
         match (f.epoch_seconds, f.epoch_millis) {
-            (Some(seconds), _) => seconds
-                .checked_mul(civil::MICROS_PER_SECOND)
-                .ok_or_else(|| TemporalError::out_of_range("the date-time"))
-                .and_then(|micros| DateTime::from_micros(micros, 0))
-                .map(Some)
-                .map_err(error),
+            (Some(seconds), _) => {
+                DateTime::from_nanos(seconds as i128 * civil::NANOS_PER_SECOND as i128, 0)
+                    .map(Some)
+                    .map_err(error)
+            }
             (None, Some(millis)) => DateTime::from_epoch_millis(millis).map(Some).map_err(error),
             (None, None) => Ok(None),
         }
@@ -668,8 +664,8 @@ impl Build<'_> {
         Date::from_days_since_epoch(days).map_err(|e| temporal_error(e, self.span))
     }
 
-    fn time(&self, micros: i64) -> Result<Time, EvalError> {
-        Time::from_micros_of_day(micros).map_err(|e| temporal_error(e, self.span))
+    fn time(&self, nanos: i64) -> Result<Time, EvalError> {
+        Time::from_nanos_of_day(nanos).map_err(|e| temporal_error(e, self.span))
     }
 
     /// The days since the epoch of a `date` base (a date, a local datetime, a datetime at its
@@ -683,12 +679,12 @@ impl Build<'_> {
         }
     }
 
-    /// The microseconds of the day of a `time` base.
+    /// The nanoseconds of the day of a `time` base.
     fn time_of(&self, value: Temporal, key: Key) -> Result<i64, EvalError> {
         match value {
-            Temporal::Time(t) => Ok(t.micros_of_day()),
-            Temporal::LocalDateTime(v) => Ok(v.time().micros_of_day()),
-            Temporal::DateTime(v) => Ok(v.local().time().micros_of_day()),
+            Temporal::Time(t) => Ok(t.nanos_of_day()),
+            Temporal::LocalDateTime(v) => Ok(v.time().nanos_of_day()),
+            Temporal::DateTime(v) => Ok(v.local().time().nanos_of_day()),
             Temporal::Date(_) | Temporal::Duration(_) => Err(self.base_kind(key, &value)),
         }
     }
@@ -939,22 +935,19 @@ impl Build<'_> {
         Ok(Some(ms * 1_000_000 + us * 1000 + ns))
     }
 
-    /// The time part: the microseconds of the day, from `base` with the time fields applied, or
+    /// The time part: the nanoseconds of the day, from `base` with the time fields applied, or
     /// from the fields alone; `None` when neither gives a time.
     fn time_part(&self, base: Option<i64>) -> Result<Option<i64>, EvalError> {
         let f = self.fields;
         let fraction = self.fraction()?;
-        if fraction.is_some_and(|nanos| nanos % 1000 != 0) {
-            return Err(sub_micro(self.span));
-        }
-        let (hour, minute, second, micros) = match base {
+        let (hour, minute, second, nanos) = match base {
             Some(base) => {
-                let seconds = base / civil::MICROS_PER_SECOND;
+                let seconds = base / civil::NANOS_PER_SECOND;
                 (
                     seconds / 3600,
                     seconds / 60 % 60,
                     seconds % 60,
-                    base % civil::MICROS_PER_SECOND,
+                    base % civil::NANOS_PER_SECOND,
                 )
             }
             None => {
@@ -985,9 +978,9 @@ impl Build<'_> {
             Some(s) => self.within(Key::Second, s, 0, 59)?,
             None => second,
         };
-        let micros = fraction.map_or(micros, |nanos| nanos / 1000);
+        let nanos = fraction.unwrap_or(nanos);
         Ok(Some(
-            ((hour * 60 + minute) * 60 + second) * civil::MICROS_PER_SECOND + micros,
+            ((hour * 60 + minute) * 60 + second) * civil::NANOS_PER_SECOND + nanos,
         ))
     }
 }
@@ -1093,11 +1086,8 @@ fn duration_map<E>(
         };
         *slot = amount;
     }
-    let cascaded = cascade(&parts).map_err(|e| temporal_error(e, span))?;
-    if cascaded.sub_micro {
-        return Err(sub_micro(span));
-    }
-    Ok(Some(Temporal::Duration(cascaded.duration)))
+    let duration = cascade(&parts).map_err(|e| temporal_error(e, span))?;
+    Ok(Some(Temporal::Duration(duration)))
 }
 
 /// `X.statement([zone])` / `X.transaction([zone])`: the execution's pinned `now()` (both
@@ -1136,16 +1126,9 @@ pub(crate) fn from_epoch<En: Env>(
     };
     let seconds_value = integer_arg(function, seconds, "integer seconds")?;
     let nanos_value = integer_arg(function, nanos, "integer nanoseconds")?;
-    if nanos_value % 1000 != 0 {
-        return Err(sub_micro(nanos.span));
-    }
-    let micros = seconds_value
-        .checked_mul(civil::MICROS_PER_SECOND)
-        .and_then(|micros| micros.checked_add(nanos_value / 1000));
-    let value = micros
-        .ok_or_else(|| TemporalError::out_of_range("the date-time"))
-        .and_then(|micros| DateTime::from_micros(micros, 0))
-        .map_err(|e| temporal_error(e, span))?;
+    // Both below 2^63: no overflow in i128.
+    let total = seconds_value as i128 * civil::NANOS_PER_SECOND as i128 + nanos_value as i128;
+    let value = DateTime::from_nanos(total, 0).map_err(|e| temporal_error(e, span))?;
     Ok(temporal(Temporal::DateTime(value)))
 }
 

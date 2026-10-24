@@ -772,7 +772,10 @@ mod graphson {
         let (got, report) = one_value(
             r#"{"@type":"gx:ZonedDateTime","@value":"2016-12-23T12:12:24.000000036+02:00[GMT+02:00]"}"#,
         );
-        assert_eq!(got.as_deref(), Some("datetime(2016-12-23T12:12:24+02:00)"));
+        assert_eq!(
+            got.as_deref(),
+            Some("datetime(2016-12-23T12:12:24.000000036+02:00)")
+        );
         let kinds: Vec<&ImportNoteKind> = report.notes.iter().map(|n| &n.kind).collect();
         assert!(
             kinds.contains(&&ImportNoteKind::ZoneDropped {
@@ -781,7 +784,7 @@ mod graphson {
             "{report}"
         );
         assert!(
-            kinds.contains(&&ImportNoteKind::SubMicrosecondsCut {
+            !kinds.contains(&&ImportNoteKind::SubMicrosecondsCut {
                 type_tag: "gx:ZonedDateTime".into()
             }),
             "{report}"

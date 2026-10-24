@@ -44,7 +44,7 @@ g.inject(datetime("2015-07-21T23:40:32+02:00")).as_date(GType.DATE).next()   // 
 | `x.year`, `x.month`, `x.day`, `x.hour`, `x.minute`, `x.second` | [`date_part(DT.year)`](truncation_and_parts.md#date_part), ..., or the getters `d.year` of a script value | the same |
 | `x.quarter`, `x.week`, `x.weekYear`, `x.ordinalDay` | `date_part(DT.quarter)`, `DT.week`, `DT.iso_year`, `DT.day_of_year` | the same (ISO 8601 weeks) |
 | `x.dayOfWeek` (1 = Monday) | `date_part(DT.iso_day_of_week)` | `DT.day_of_week` is PostgreSQL's 0 = Sunday |
-| `x.millisecond`, `x.microsecond` | `date_part(DT.millisecond)`, `DT.microsecond` | the same: the fraction of the second |
+| `x.millisecond`, `x.microsecond`, `x.nanosecond` | `date_part(DT.millisecond)`, `DT.microsecond`, `DT.nanosecond` | the same: the fraction of the second |
 | `x.epochSeconds`, `x.epochMillis` | `date_part(DT.epoch)` (seconds with the fraction), the getter `epoch_millis` | |
 | `x.offset`, `x.timezone` (`'+01:00'`), `x.offsetSeconds` | `date_part(DT.offset)` (seconds) | GQL writes the offset as text |
 | `dur.months`, `dur.years`, `dur.days`, `dur.hours`, ... (totals) | `date_part(DT.month)` of a duration is the remainder field (PostgreSQL: `P1Y` has month 0); the getters `months`, `days`, `micros` | GQL's names are Neo4j's totals (`duration('P1Y').months` is 12); its remainders are `monthsOfYear`, `minutesOfHour`, ... |
@@ -103,5 +103,5 @@ g.inject(time("12:00")).as_string().next()   // "12:00:00"
 
 ## Not in GQL yet
 
-Cypher's zoned `time()` (a time of day with an offset; neither side has the type), values below
-the microsecond, and named zones kept in a value: [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j).
+Cypher's zoned `time()` (a time of day with an offset; neither side has the type) and named
+zones kept in a value: [Semantics](../gql/semantics.md#where-dates-and-times-differ-from-neo4j).

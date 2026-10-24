@@ -1148,11 +1148,9 @@ The [temporal functions](subset.md#dates-and-times) are openCypher's, with Neo4j
 the engine's [date and time values](../dates/index.md). Three properties of those values shape
 the answers:
 
-- **Microseconds.** A value holds microseconds; Neo4j holds nanoseconds. `gql()` never cuts
-  digits: text, a map field or a computed duration with a non-zero part below the microsecond
-  is `0A000` "not yet". The Rhai constructors cut such digits
-  ([Text Formats](../dates/text_formats.md)); a value built in Rhai therefore reaches `gql()`
-  already cut.
+- **Nanoseconds.** A value holds nanoseconds, as Neo4j's: text, a map field and a computed
+  duration keep up to nine fraction digits; a duration scaled by a number keeps whole
+  nanoseconds, truncated toward zero, as Neo4j does.
 - **Offsets, not zone names.** A `datetime` keeps a fixed UTC offset. A zone name (in text,
   `[Europe/London]`, or as `timezone: 'Europe/Stockholm'`) resolves to the zone's offset at that
   instant, and the name is not kept: `d.timezone` gives the offset text, and later arithmetic
@@ -1170,16 +1168,15 @@ beside the Gremlin step that does the same.
 g.gql("RETURN datetime('2015-07-21T21:40:32.142[Europe/London]') AS d, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}).timezone AS z").to_list()
 // #{"d": datetime("2015-07-21T21:40:32.142+01:00"), "z": "+01:00"}
 g.gql("RETURN datetime('2015-03-29T01:30+01:00') + duration('PT1H') AS d").to_list()   // #{"d": datetime("2015-03-29T02:30:00+01:00")}
-g.gql("RETURN localtime({hour: 12, nanosecond: 5}) AS t")   // error: a part below the microsecond is not yet supported
+g.gql("RETURN localtime({hour: 12, minute: 0, second: 0, nanosecond: 5}) AS t").to_list()   // [#{"t": time("12:00:00.000000005")}]
 ```
 
 ### Where dates and times differ from Neo4j
 
 | Neo4j | `gql()` | Why |
 |---|---|---|
-| values hold nanoseconds (`localtime({nanosecond: 645876123})`) | microseconds; a non-zero part below the microsecond is `0A000` "not yet", never cut (the Rhai constructors cut it) | the engine's resolution; a silently cut value would be a wrong answer |
 | `time()`: a time of day with an offset (`'12:00+01:00'`) | `time()`, `time.*` and ISO `zoned_time()` are `0A000` "not yet"; use `localtime()` or `datetime()` | the engine has no time-with-offset type yet |
-| a `datetime` keeps its zone name: `'..+01:00[Europe/London]'`, `d.timezone` is `'Europe/London'`, arithmetic and `duration.between` follow the zone's daylight saving rules | the name resolves to its offset at that instant and is not kept: `'..+01:00'`, `d.timezone` is `'+01:00'`, later arithmetic stays at the offset | a value keeps an offset only, as in Gremlin; 69 TCK cases that print or need the name are excluded (`zone-name-not-kept`) |
+| a `datetime` keeps its zone name: `'..+01:00[Europe/London]'`, `d.timezone` is `'Europe/London'`, arithmetic and `duration.between` follow the zone's daylight saving rules | the name resolves to its offset at that instant and is not kept: `'..+01:00'`, `d.timezone` is `'+01:00'`, later arithmetic stays at the offset | a value keeps an offset only, as in Gremlin; 101 TCK cases that print or need the name are excluded (`zone-name-not-kept`) |
 | `X.truncate('millennium' \| 'century', ..)`: 2017 gives 2000, 1984 gives 1900 | the same | Neo4j's rule in `gql()`; Gremlin's `date_trunc(DT.millennium)` keeps PostgreSQL's (2001, 1901) |
 | `date + duration` takes months, days and the whole days of the time part; `localtime + duration` only the time part, wrapping | the same | Neo4j's rule in `gql()`; Gremlin's `date_add` refuses a duration with a time part on a date |
 | `toString(temporal)` writes `'12:00'`, `'PT-1M-0.001S'` | the same; `CAST(x AS STRING)` writes the engine's ISO text (`'12:00:00'`, `'-PT1M0.001S'`) | `toString` is the Cypher compatibility function, `CAST` the ISO one |
@@ -1229,7 +1226,7 @@ these differences is a deliberate decision, described in its section:
 | `'a' + 1` is `'a1'` | an error (`22G03`): convert explicitly | [Comparisons across types](#comparisons-across-types) |
 | some functions saturate, give `NaN` / infinity or take floats | errors or GQL's types | [Where functions differ from Neo4j](#where-functions-differ-from-neo4j) |
 | `id(x)` is an integer; `rand()` | ids are strings (`element_id(x)`); `id()` and `rand()` are refused | [Ids are strings](#ids-are-strings), [Refused Constructs](refused.md) |
-| a `datetime` keeps a zone name; values hold nanoseconds; years up to ±999 999 999; zoned `time()` | a `datetime` keeps the offset (the zone name's TCK cases excluded); microseconds, finer is `0A000`; years -9999 to 9999 (TCK cases excluded); `time()` not yet | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
+| a `datetime` keeps a zone name; years up to ±999 999 999; zoned `time()` | a `datetime` keeps the offset (the zone name's TCK cases excluded); years -9999 to 9999 (TCK cases excluded); `time()` not yet | [Where dates and times differ from Neo4j](#where-dates-and-times-differ-from-neo4j) |
 | `X.realtime()` | refused; one clock per query | [Dates and times](#dates-and-times) |
 | a procedure argument may read the row; procedures are vendor or user code (`db.*`, `apoc.*`, Java) | `CALL folder.name(..)` calls a saved GQL query with constant or `$parameter` arguments only, positional in the order its body first reads them; a saved query in Rhai, or a call inside `EXISTS` / `COUNT` / `COLLECT`, is `0A000`; `db`, `dbms`, `apoc`, `gds` are refused | [Calls of saved queries](#calls-of-saved-queries) |
 | procedure names are qualified, one per namespace | saved-query names are unique across all folders: a name in another folder is a "did you mean" error | [Calls of saved queries](#calls-of-saved-queries) |

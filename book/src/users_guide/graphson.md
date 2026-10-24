@@ -62,7 +62,7 @@ if report.has_skips() {
 | `gx:Instant`, `gx:OffsetDateTime` | `datetime` with the offset of the text (a text without an offset is malformed and skipped, never read as UTC) | `gx:OffsetDateTime` |
 | `gx:ZonedDateTime` (`2007-12-03T10:15:30+01:00[Europe/Paris]`) | `datetime` with the offset of the text; the zone id is dropped (reported) | `gx:OffsetDateTime` |
 | `gx:LocalDate`, `gx:LocalDateTime`, `gx:LocalTime` | `date`, `localdatetime`, `time` | the same tags |
-| `gx:Duration` (a fixed length; `P2DT3H` reads a day as 24 hours) | `duration` of microseconds | `gx:Duration` for a duration of microseconds only (`PT26H`) |
+| `gx:Duration` (a fixed length; `P2DT3H` reads a day as 24 hours) | `duration` of a time part only | `gx:Duration` for a duration of a time part only (`PT26H`) |
 | `gx:Period` (`P1Y2M3D`, weeks as 7 days) | `duration` of months and days | `gx:Period` for a duration of months and days only |
 | `graphersal:Interval` (Graphersal's own tag) | `duration` | `graphersal:Interval` for a duration with both months or days and a time part (`P1MT2H`): no `java.time` type holds it, so TinkerGraph cannot load such a value |
 | `g:List` of numbers, read as a list; a vector where the target graph's schema declares one (mode `open` or `closed`, coerced on write); `graphersal:Vector` (Graphersal's own exact tag, as a serialized `ChangeSet` writes it) | `vector` (book page [Vectors](vectors.md)) | `g:List` of `g:Float`, which TinkerGraph loads; an `i8` or `bit` vector as its dequantized values |
@@ -75,8 +75,8 @@ schema to store it as a date), and a value whose type Graphersal cannot hold is 
 never converted to a string or a number. The `java.time` types map to the date and time types
 by their tag (both the `gx:` and the `g:` prefix are read; the types are described in
 [Dates and Times](../dates/index.md)); their text is read as `java.time`
-writes it (seconds may be missing, up to nine fraction digits). Graphersal's resolution is one
-microsecond: digits below it are cut, and the import reports it. A date outside the years
+writes it (seconds may be missing, up to nine fraction digits), and kept to the nanosecond,
+Graphersal's resolution. A date outside the years
 -9999 to 9999, or text that is not of the tag's type, is skipped as malformed. The export writes
 each value's canonical text, which `java.time`'s parsers read: TinkerGraph's `g.io(file).read()`
 loads it (except `graphersal:Interval`). A skipped value inside a container skips the whole
@@ -137,7 +137,7 @@ representation:
 | `SkippedReservedMeta` | a `_meta` property of a vertex that also has meta-properties |
 | `MultiValuedToArray`, `MetaPropertiesToMeta`, `LabelSplit`, `VertexWithoutId`, `EdgeCopiesDisagree`, `IgnoredKey { key }` | representation changes |
 | `ZoneDropped { type_tag }` | a `gx:ZonedDateTime` imported as a `datetime` with its offset; the zone id is not kept |
-| `SubMicrosecondsCut { type_tag }` | a date/time value with digits below a microsecond, cut to microseconds |
+| `SubMicrosecondsCut { type_tag }` | no longer reported: values keep nanoseconds (kept for code that matches it) |
 
 Its `Display` is the text the CLI, Rhai and Python show: a first line with the counts and one line
 per note.
@@ -232,8 +232,8 @@ Listed in [TinkerPop Deviations](../for_developers/tinkerpop_deviations.md#graph
   them.
 - **Skipped values**: the types listed above as skipped (`gx:Year`, `gx:BigDecimal`, ...) are
   skipped and reported where TinkerPop reads them.
-- **Dates**: a `gx:ZonedDateTime` keeps its offset but not its zone id, digits below a
-  microsecond are cut (both reported), and a duration with both months or days and a time part
+- **Dates**: a `gx:ZonedDateTime` keeps its offset but not its zone id (reported), and a
+  duration with both months or days and a time part
   is exported as `graphersal:Interval`, which TinkerPop cannot read.
 - **Lenient structure**: an edge to a missing vertex is skipped (TinkerPop's `readGraph` fails), a
   duplicate vertex id keeps the first vertex, and vertex-property ids are not kept.

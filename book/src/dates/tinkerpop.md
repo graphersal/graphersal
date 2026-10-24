@@ -27,9 +27,10 @@ Everything else on the pages of this part is a Graphersal extension, modelled on
 
 - the types `date`, `localdatetime` and `time` (`GType.DATE`, `LOCALDATETIME`, `TIME`; `typeOf`
   names `LocalDate`, `LocalDateTime`, `LocalTime`), and `duration` as a value with months, days
-  and microseconds (PostgreSQL's `interval`, broader than Java's `Duration`), with their
+  and nanoseconds (PostgreSQL's `interval`, broader than Java's `Duration`), with their
   constructors;
-- the units `DT.microsecond`, `DT.millisecond`, `DT.week` to `DT.millennium` and the parts
+- the units `DT.nanosecond`, `DT.microsecond`, `DT.millisecond`, `DT.week` to `DT.millennium`
+  and the parts
   `DT.day_of_week`, `DT.iso_day_of_week`, `DT.day_of_year`, `DT.iso_year`, `DT.epoch`,
   `DT.offset`;
 - `date_add(duration)`, zone arguments, `date_diff(other, DT.unit)`, `age()`, `date_trunc()`,

@@ -1045,11 +1045,14 @@ enum IndexKey {
     Uuid(u64, u64),
     /// Days since 1970-01-01.
     Date(i32),
-    /// Wall-clock microseconds since 1970-01-01T00:00:00.
-    LocalDateTime(i64),
-    /// The instant: microseconds since 1970-01-01T00:00:00Z (the offset is not part of the key).
-    DateTime(i64),
-    /// Microseconds after midnight.
+    /// Wall-clock nanoseconds since 1970-01-01T00:00:00 as `(whole microseconds rounded down,
+    /// the nanoseconds above them 0..=999)`: ordered like the nanoseconds, the key stays
+    /// 8-aligned.
+    LocalDateTime(i64, u16),
+    /// The instant as `(microseconds since 1970-01-01T00:00:00Z rounded down, the nanoseconds
+    /// above them)` (the offset is not part of the key).
+    DateTime(i64, u16),
+    /// Nanoseconds after midnight.
     Time(i64),
     /// The duration itself (its `Ord` is the length, then the fields).
     Duration(Duration),
@@ -1087,9 +1090,13 @@ impl IndexKey {
             ElementProperty::Uuid(bits) => Some(IndexKey::Uuid((*bits >> 64) as u64, *bits as u64)),
             ElementProperty::Temporal(value) => Some(match *value {
                 Temporal::Date(date) => IndexKey::Date(date.days_since_epoch()),
-                Temporal::LocalDateTime(local) => IndexKey::LocalDateTime(local.micros()),
-                Temporal::DateTime(instant) => IndexKey::DateTime(instant.epoch_micros()),
-                Temporal::Time(time) => IndexKey::Time(time.micros_of_day()),
+                Temporal::LocalDateTime(local) => {
+                    IndexKey::LocalDateTime(local.micros(), sub_micros(local.nanos()))
+                }
+                Temporal::DateTime(instant) => {
+                    IndexKey::DateTime(instant.epoch_micros(), sub_micros(instant.epoch_nanos()))
+                }
+                Temporal::Time(time) => IndexKey::Time(time.nanos_of_day()),
                 Temporal::Duration(duration) => IndexKey::Duration(duration),
             }),
             // A vector is not an index key (book `users_guide/vectors.md`): `has(key, vector)` finds it
@@ -1111,8 +1118,8 @@ impl IndexKey {
             IndexKey::Str(_) => KeyKind::Str,
             IndexKey::Uuid(..) => KeyKind::Uuid,
             IndexKey::Date(_) => KeyKind::Date,
-            IndexKey::LocalDateTime(_) => KeyKind::LocalDateTime,
-            IndexKey::DateTime(_) => KeyKind::DateTime,
+            IndexKey::LocalDateTime(..) => KeyKind::LocalDateTime,
+            IndexKey::DateTime(..) => KeyKind::DateTime,
             IndexKey::Time(_) => KeyKind::Time,
             IndexKey::Duration(_) => KeyKind::Duration,
         }
@@ -1144,13 +1151,18 @@ fn kind_start(kind: KeyKind) -> (IndexKey, u64) {
         KeyKind::Str => IndexKey::Str(CompactString::default()),
         KeyKind::Uuid => IndexKey::Uuid(0, 0),
         KeyKind::Date => IndexKey::Date(i32::MIN),
-        KeyKind::LocalDateTime => IndexKey::LocalDateTime(i64::MIN),
-        KeyKind::DateTime => IndexKey::DateTime(i64::MIN),
+        KeyKind::LocalDateTime => IndexKey::LocalDateTime(i64::MIN, 0),
+        KeyKind::DateTime => IndexKey::DateTime(i64::MIN, 0),
         KeyKind::Time => IndexKey::Time(i64::MIN),
         // Every part at its minimum is the shortest length and the smallest fields.
         KeyKind::Duration => IndexKey::Duration(Duration::new(i32::MIN, i32::MIN, i64::MIN)),
     };
     (key, 0)
+}
+
+/// The nanoseconds of a count above its whole microseconds (rounded down), `0..=999`.
+fn sub_micros(nanos: i128) -> u16 {
+    nanos.rem_euclid(1000) as u16
 }
 
 /// The bound just past a key kind: the first entry of the next kind, excluded.

@@ -176,3 +176,23 @@ def test_readme_example():
         == "2023-09-02T09:30:00+02:00"
     )
     assert repr(graph.query('duration("P1Y2M")')) == "Interval('P1Y2M')"
+
+
+def test_a_value_below_the_microsecond_is_refused_never_rounded(graph):
+    for script in [
+        'time("12:00:00.000000001")',
+        'localdatetime("2024-01-01T00:00:00.123456789")',
+        'datetime("2024-01-01T00:00:00.000000500Z")',
+        'duration("PT0.000000001S")',
+        'duration("P1MT0.000000001S")',
+    ]:
+        with pytest.raises(ValueError, match="below the microsecond"):
+            graph.query(script)
+    with pytest.raises(ValueError, match="below the microsecond"):
+        graphersal.Interval("P1MT0.000000001S")
+    # Whole microseconds written with nine digits convert as before.
+    assert graph.query('time("12:00:00.000001000")') == dt.time(12, 0, 0, 1)
+    # Truncated in the engine first, the value converts.
+    assert graph.query(
+        'g.inject(time("12:00:00.123456789")).date_trunc(DT.microsecond).next()'
+    ) == dt.time(12, 0, 0, 123456)

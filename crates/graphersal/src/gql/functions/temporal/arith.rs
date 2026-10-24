@@ -20,8 +20,8 @@
 //! advice names `duration.between(a, b)` for the time between two values), a number with a
 //! temporal value only multiplies or divides a duration (22G03), a zero divisor is 22012 before
 //! anything else, a result outside the years -9999 to 9999 or the duration fields 22008, a
-//! factor that is no finite number below 2^63 22003, and a scaled duration with a part below
-//! the microsecond 0A000 (U1: values hold microseconds; never cut silently). Each 22G03 error
+//! factor that is no finite number below 2^63 22003; a scaled duration keeps whole nanoseconds
+//! (truncated toward zero, as Neo4j). Each 22G03 error
 //! carries [`GqlHelpTopic::TemporalArithmetic`]. The evaluator calls [`binary`] for `+`, `-`,
 //! `*` and `/` when an operand is a temporal value (neither `NULL`), and [`sign`] for a unary
 //! `-` / `+` on one.
@@ -30,12 +30,11 @@ use super::super::super::ast::{BinaryOp, UnaryOp};
 use super::super::super::eval::{EvalError, Value};
 use super::super::super::lexer::Span;
 use super::construct::temporal_error;
-use super::sub_micro;
 use crate::ElementProperty;
 use crate::error::GqlHelpTopic;
 use crate::value::number::{N, Number};
 use crate::value::temporal::arith::{self, Amount};
-use crate::value::temporal::civil::MICROS_PER_DAY;
+use crate::value::temporal::civil::NANOS_PER_DAY;
 use crate::value::temporal::{Duration, Temporal, TemporalError};
 
 /// `left op right` with at least one temporal operand, none `NULL`.
@@ -125,12 +124,12 @@ fn add(x: Temporal, d: Duration, negate: bool, span: Span) -> Result<Temporal, E
     let d = match x {
         Temporal::Date(_) => {
             // The whole days of the time part (truncated toward zero), nothing below.
-            let extra = d.micros() / MICROS_PER_DAY;
-            let days = i32::try_from(d.days() as i64 + extra)
+            let extra = d.nanos() / NANOS_PER_DAY as i128;
+            let days = i32::try_from(d.days() as i128 + extra)
                 .map_err(|_| error(TemporalError::out_of_range("the duration")))?;
             Duration::new(d.months(), days, 0)
         }
-        Temporal::Time(_) => Duration::new(0, 0, d.micros()),
+        Temporal::Time(_) => Duration::from_nanos(d.nanos()).map_err(error)?,
         Temporal::LocalDateTime(_) | Temporal::DateTime(_) | Temporal::Duration(_) => d,
     };
     arith::add_duration(x, d, None).map_err(error)
@@ -153,10 +152,7 @@ fn scale(d: Duration, n: &Number, divide: bool, span: Span) -> Result<Temporal, 
         return Err(EvalError::out_of_range(span));
     };
     let scaled = arith::scale_duration(d, factor, divide).map_err(|e| temporal_error(e, span))?;
-    if scaled.sub_micro {
-        return Err(sub_micro(span));
-    }
-    Ok(Temporal::Duration(scaled.duration))
+    Ok(Temporal::Duration(scaled))
 }
 
 /// The symbol of an arithmetic operator.

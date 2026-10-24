@@ -8,11 +8,11 @@
 //! | `date` | `gx:LocalDate` |
 //! | `localdatetime` | `gx:LocalDateTime` |
 //! | `time` | `gx:LocalTime` |
-//! | `duration` of microseconds only (no months, no days) | `gx:Duration` (`PT26H`) |
+//! | `duration` of a time part only (no months, no days) | `gx:Duration` (`PT26H`) |
 //! | `duration` of months and days only | `gx:Period` (`P1Y2M3D`) |
 //! | any other `duration` | `graphersal:Interval` (`P1MT2H`) |
 //!
-//! The canonical text of each case is also valid `java.time` text of its tag: a microsecond-only
+//! The canonical text of each case is also valid `java.time` text of its tag: a time-only
 //! duration is written in hours, minutes and seconds (`java.time.Duration` has no Y/M/D units), a
 //! months-and-days one in years, months and days (`java.time.Period` has no time part). A zero
 //! duration is `gx:Duration` `PT0S`.
@@ -27,21 +27,21 @@ pub(crate) const LOCAL_DATE: &str = "gx:LocalDate";
 pub(crate) const LOCAL_DATE_TIME: &str = "gx:LocalDateTime";
 /// `time`.
 pub(crate) const LOCAL_TIME: &str = "gx:LocalTime";
-/// A `duration` of microseconds only (`java.time.Duration`).
+/// A `duration` of a time part only (`java.time.Duration`).
 pub(crate) const DURATION: &str = "gx:Duration";
 /// A `duration` of months and days only (`java.time.Period`).
 pub(crate) const PERIOD: &str = "gx:Period";
 /// Any other `duration` (PostgreSQL `interval`; no `java.time` type holds it).
 pub(crate) const INTERVAL: &str = "graphersal:Interval";
 
-/// Whether a duration is a `java.time.Duration` (microseconds only; zero included).
+/// Whether a duration is a `java.time.Duration` (a time part only; zero included).
 pub(crate) fn is_fixed_length(duration: Duration) -> bool {
     duration.months() == 0 && duration.days() == 0
 }
 
 /// Whether a duration is a `java.time.Period` (months and days only, not zero).
 pub(crate) fn is_period(duration: Duration) -> bool {
-    duration.micros() == 0 && !is_fixed_length(duration)
+    duration.nanos() == 0 && !is_fixed_length(duration)
 }
 
 /// The tag of a value.
@@ -73,7 +73,7 @@ pub(crate) fn is_tag(tag: &str) -> bool {
 }
 
 /// Reads a value written with [`tag_of`] and its canonical text, strictly: the text must parse as
-/// the tag's type, and a `gx:Duration` must hold microseconds only, a `gx:Period` months and days
+/// the tag's type, and a `gx:Duration` must hold a time part only, a `gx:Period` months and days
 /// only. `None` when `tag` is not one of the tags.
 pub(crate) fn read_tagged(tag: &str, text: &str) -> Option<TemporalResult<Temporal>> {
     let kind = match tag {

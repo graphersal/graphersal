@@ -22,7 +22,7 @@ g.inject(duration("P1Y2M3DT4H5M")).date_trunc(DT.day).next()   // duration("P1Y2
 
 | Unit | Truncates to |
 |---|---|
-| `microsecond` ... `hour` | the start of that unit of the clock |
+| `nanosecond` ... `hour` | the start of that unit of the clock (`nanosecond` keeps the value) |
 | `day` | midnight |
 | `week` | Monday, midnight (ISO 8601 weeks) |
 | `month`, `quarter`, `year` | the first day of the month, of the quarter (January, April, July, October), of the year |
@@ -40,7 +40,7 @@ One field as a number: an `int64`, except `DT.epoch`, a `float64` of seconds.
 | Part | Value |
 |---|---|
 | `DT.year`, `DT.month` (1-12), `DT.day` (1-31), `DT.hour`, `DT.minute`, `DT.second` (0-59) | the field |
-| `DT.millisecond` (0-999), `DT.microsecond` (0-999999) | the fraction of the second; unlike PostgreSQL, not the seconds with the fraction |
+| `DT.millisecond` (0-999), `DT.microsecond` (0-999999), `DT.nanosecond` (0-999999999) | the fraction of the second in that unit; unlike PostgreSQL, not the seconds with the fraction |
 | `DT.quarter` (1-4) | the quarter |
 | `DT.week` (1-53) | the ISO 8601 week number |
 | `DT.iso_year` | the ISO 8601 week-numbering year (2023-01-01 is in week 52 of 2022) |

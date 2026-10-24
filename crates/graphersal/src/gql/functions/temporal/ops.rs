@@ -29,8 +29,8 @@ use super::super::super::lexer::Span;
 use super::kind_name;
 use crate::value::temporal::{Date, DateTime, Duration, Temporal, Time, civil, format};
 
-/// Microseconds in one second.
-const MICROS_PER_SECOND: i64 = 1_000_000;
+/// Nanoseconds in one second.
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
 /// A component of a temporal value (Neo4j's names, matched in any ASCII case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,14 +248,14 @@ fn date_field(date: Date, field: Field) -> Result<Component, Missing> {
 
 /// A component of a time of day; the fractions count from the start of the second.
 fn time_field(time: Time, field: Field) -> Result<Component, Missing> {
-    let micro = i64::from(time.microsecond());
+    let nano = i64::from(time.nanosecond());
     let number = match field {
         Field::Hour => i64::from(time.hour()),
         Field::Minute => i64::from(time.minute()),
         Field::Second => i64::from(time.second()),
-        Field::Millisecond => micro / 1000,
-        Field::Microsecond => micro,
-        Field::Nanosecond => micro * 1000,
+        Field::Millisecond => nano / 1_000_000,
+        Field::Microsecond => nano / 1000,
+        Field::Nanosecond => nano,
         _ => return Err(Missing::NoSuchComponent),
     };
     Ok(Component::Integer(number))
@@ -274,8 +274,8 @@ fn zoned_field(instant: DateTime, field: Field) -> Result<Component, Missing> {
         }
         Field::OffsetMinutes => i64::from(offset / 60),
         Field::OffsetSeconds => i64::from(offset),
-        Field::EpochSeconds => instant.epoch_micros().div_euclid(MICROS_PER_SECOND),
-        Field::EpochMillis => instant.epoch_micros().div_euclid(1000),
+        Field::EpochSeconds => instant.epoch_nanos().div_euclid(NANOS_PER_SECOND) as i64,
+        Field::EpochMillis => instant.epoch_millis(),
         _ => return Err(Missing::NoSuchComponent),
     };
     Ok(Component::Integer(number))
@@ -286,8 +286,8 @@ fn duration_field(duration: Duration, field: Field) -> Result<Component, Missing
     let months = i64::from(duration.months());
     let days = i64::from(duration.days());
     // Neo4j's normalized pair: whole seconds rounded down, a non-negative fraction.
-    let seconds = i128::from(duration.micros().div_euclid(MICROS_PER_SECOND));
-    let micros = i128::from(duration.micros().rem_euclid(MICROS_PER_SECOND));
+    let seconds = duration.nanos().div_euclid(NANOS_PER_SECOND);
+    let nanos = duration.nanos().rem_euclid(NANOS_PER_SECOND);
     let number: i128 = match field {
         Field::Years => i128::from(months / 12),
         Field::Quarters => i128::from(months / 3),
@@ -297,18 +297,18 @@ fn duration_field(duration: Duration, field: Field) -> Result<Component, Missing
         Field::Hours => seconds / 3600,
         Field::Minutes => seconds / 60,
         Field::Seconds => seconds,
-        Field::Milliseconds => seconds * 1000 + micros / 1000,
-        Field::Microseconds => seconds * 1_000_000 + micros,
-        Field::Nanoseconds => seconds * 1_000_000_000 + micros * 1000,
+        Field::Milliseconds => seconds * 1000 + nanos / 1_000_000,
+        Field::Microseconds => seconds * 1_000_000 + nanos / 1000,
+        Field::Nanoseconds => seconds * 1_000_000_000 + nanos,
         Field::QuartersOfYear => i128::from(months / 3 % 4),
         Field::MonthsOfQuarter => i128::from(months % 3),
         Field::MonthsOfYear => i128::from(months % 12),
         Field::DaysOfWeek => i128::from(days % 7),
         Field::MinutesOfHour => seconds / 60 % 60,
         Field::SecondsOfMinute => seconds % 60,
-        Field::MillisecondsOfSecond => micros / 1000,
-        Field::MicrosecondsOfSecond => micros,
-        Field::NanosecondsOfSecond => micros * 1000,
+        Field::MillisecondsOfSecond => nanos / 1_000_000,
+        Field::MicrosecondsOfSecond => nanos / 1000,
+        Field::NanosecondsOfSecond => nanos,
         _ => return Err(Missing::NoSuchComponent),
     };
     i64::try_from(number)

@@ -6,7 +6,7 @@
 //!   `second`, `millisecond`, `microsecond`, `nanosecond` for the types with a time of day (on a
 //!   `localtime`, `day` gives midnight). A unit the type lacks (`date.truncate('hour', ..)`,
 //!   `localtime.truncate('month', ..)`) and an unknown unit are 22023. `nanosecond` keeps the
-//!   value as it is (values hold microseconds).
+//!   value as it is (values hold nanoseconds).
 //! - **Millennium and century as Neo4j** (U4): `2017` truncates to `2000`, `1984` to `1900`
 //!   (`year div 1000 x 1000`, `div 100 x 100`, floor division for negative years). Rhai
 //!   `date_trunc` keeps PostgreSQL's rule (2001, 1901); `weekYear` is the Monday of ISO week 1
@@ -27,7 +27,7 @@
 //!   `microsecond` a `nanosecond` to the kept microseconds, as Neo4j); `timezone` for
 //!   `datetime.truncate` keeps the wall clock and resolves it in that zone (a zone name gives
 //!   its offset at that time, U3). A key the type lacks or groups that conflict are 22007, a
-//!   field out of range 22008, a part below the microsecond 0A000 (U1), a `NULL` field `NULL`.
+//!   field out of range 22008, a `NULL` field `NULL`.
 //! - `NULL` in any argument gives `NULL` (F2).
 
 use super::super::super::eval::{Env, EvalError, Value, status};
@@ -35,7 +35,7 @@ use super::super::super::lexer::Span;
 use super::super::super::parser::{TemporalFunction, TemporalType};
 use super::super::{Arg, any_null};
 use super::construct::temporal_error;
-use super::{cypher_name, kind_name, sub_micro};
+use super::{cypher_name, kind_name};
 use crate::CompactString;
 use crate::ElementProperty;
 use crate::value::dt::DT;
@@ -148,7 +148,8 @@ impl Unit {
             Unit::Second => Some(DT::Second),
             Unit::Millisecond => Some(DT::Millisecond),
             Unit::Microsecond => Some(DT::Microsecond),
-            Unit::Millennium | Unit::Century | Unit::WeekYear | Unit::Nanosecond => None,
+            Unit::Nanosecond => Some(DT::Nanosecond),
+            Unit::Millennium | Unit::Century | Unit::WeekYear => None,
         }
     }
 }
@@ -275,7 +276,7 @@ impl Parts {
         source: Temporal,
         arg: &Arg<E>,
     ) -> Result<Parts, EvalError> {
-        let midnight = Time::from_micros_of_day(0).map_err(|e| engine_error(name, e, arg.span))?;
+        let midnight = Time::from_nanos_of_day(0).map_err(|e| engine_error(name, e, arg.span))?;
         let (date, time, offset, has_time) = match source {
             Temporal::Date(date) => (Some(date), midnight, None, false),
             Temporal::Time(time) => (None, time, None, true),
@@ -311,7 +312,7 @@ impl Parts {
     fn truncate(self, name: &str, unit: Unit, span: Span) -> Result<Parts, EvalError> {
         let range = |_| TemporalError::out_of_range("the truncated value");
         let error = |e| engine_error(name, e, span);
-        let midnight = Time::from_micros_of_day(0).map_err(error)?;
+        let midnight = Time::from_nanos_of_day(0).map_err(error)?;
         if let Some(engine) = unit.engine() {
             return match self.date {
                 // `day` on a time of day alone gives midnight.
@@ -343,7 +344,6 @@ impl Parts {
             Date::from_ymd(year, 1, 1).map_err(|_| error(range(())))
         };
         let date = match (unit, self.date) {
-            (Unit::Nanosecond, _) => return Ok(self),
             (_, None) => return Err(error(range(()))),
             (Unit::Millennium, Some(date)) => {
                 start_of((date.year() as i64).div_euclid(1000) * 1000)?
@@ -365,7 +365,8 @@ impl Parts {
                 | Unit::Minute
                 | Unit::Second
                 | Unit::Millisecond
-                | Unit::Microsecond,
+                | Unit::Microsecond
+                | Unit::Nanosecond,
                 Some(_),
             ) => return Err(error(range(()))),
         };
@@ -652,20 +653,21 @@ impl Override {
             59,
             span,
         )?;
-        let kept = time.microsecond() as i64;
+        // The kept nanoseconds of the second.
+        let kept = time.nanosecond() as i64;
         let mut millisecond = self.millisecond;
         let mut microsecond = self.microsecond;
         if unit == Unit::Millisecond
             && millisecond.is_none()
             && (microsecond.is_some() || self.nanosecond.is_some())
         {
-            millisecond = Some(kept / 1000);
+            millisecond = Some(kept / 1_000_000);
         }
         if unit == Unit::Microsecond && microsecond.is_none() && self.nanosecond.is_some() {
             // The kept microseconds of the second, in place of a millisecond field.
-            microsecond = Some(kept - millisecond.unwrap_or(0) * 1000);
+            microsecond = Some(kept / 1000 - millisecond.unwrap_or(0) * 1000);
         }
-        let micro = if millisecond.is_none() && microsecond.is_none() && self.nanosecond.is_none() {
+        let nanos = if millisecond.is_none() && microsecond.is_none() && self.nanosecond.is_none() {
             kept
         } else {
             let ms = millisecond.map_or(Ok(0), |v| field(name, "millisecond", v, 0, 999, span))?;
@@ -680,13 +682,9 @@ impl Override {
             let ns = self
                 .nanosecond
                 .map_or(Ok(0), |v| field(name, "nanosecond", v, 0, ns_max, span))?;
-            let nanos = ms * 1_000_000 + us * 1000 + ns;
-            if nanos % 1000 != 0 {
-                return Err(sub_micro(span));
-            }
-            nanos / 1000
+            ms * 1_000_000 + us * 1000 + ns
         };
-        Time::from_hms_micro(hour as u8, minute as u8, second as u8, micro as u32)
+        Time::from_hms_nano(hour as u8, minute as u8, second as u8, nanos as u32)
             .map_err(|e| engine_error(name, e, span))
     }
 }
@@ -1012,7 +1010,7 @@ mod tests {
             ok(TemporalType::LocalTime, "hour", source, fields("minute", 7)),
             lt(12, 7, 0, 0)
         );
-        // A whole microsecond in nanoseconds is fine; a part below it is not yet (U1).
+        // Nanosecond fields are kept exactly (U1).
         assert_eq!(
             ok(
                 TemporalType::LocalTime,
@@ -1031,15 +1029,20 @@ mod tests {
             ),
             lt(12, 31, 14, 3)
         );
-        for unit in ["microsecond", "millisecond", "day"] {
+        let lt_ns = |h, m, s, ns| Temporal::Time(Time::from_hms_nano(h, m, s, ns).expect("a time"));
+        for (unit, expected) in [
+            ("microsecond", lt_ns(12, 31, 14, 645_876_002)),
+            ("millisecond", lt_ns(12, 31, 14, 645_000_002)),
+            ("day", lt_ns(0, 0, 0, 2)),
+        ] {
             assert_eq!(
-                status_of(
+                ok(
                     TemporalType::LocalTime,
                     unit,
-                    temporal(source),
+                    source,
                     fields("nanosecond", 2)
                 ),
-                status::NOT_SUPPORTED,
+                expected,
                 "{unit}"
             );
         }

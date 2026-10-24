@@ -13,7 +13,7 @@ use crate::*;
 enum Amount {
     /// `n` units (`date_add(DT.hour, 2)`; a negative `n` subtracts).
     Units(DT, i64),
-    /// A duration: its months, then its days, then its microseconds (PostgreSQL).
+    /// A duration: its months, then its days, then its time part (PostgreSQL).
     Duration(Duration),
 }
 
@@ -78,7 +78,7 @@ macro_rules! date_add_builders {
         }
 
         /// `date_add(duration)`: adds a duration: its months, then its days, then its
-        /// microseconds (PostgreSQL `value + interval`).
+        /// time part (PostgreSQL `value + interval`).
         pub fn date_add_duration(self, duration: Duration) -> Self {
             self.push_step(step(Amount::Duration(duration), None))
         }

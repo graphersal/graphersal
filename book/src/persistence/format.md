@@ -122,7 +122,9 @@ One encoding is shared by segment chunks and WAL records. A value starts with a 
 - The order of object entries (and of property maps, 7.3) is the insertion order and MUST be
   preserved. A repeated key in one object or property map is invalid.
 - **Temporal values** (tags 9 to 13) use the proleptic Gregorian calendar and a resolution of one
-  microsecond. Their ranges are normative; a value outside its range is invalid:
+  microsecond. An engine value with a part below the microsecond has no encoding in these tags:
+  a writer refuses it (the write fails, nothing is cut). Their ranges are normative; a value
+  outside its range is invalid:
 
   | Tag | Valid payload |
   |---:|---|

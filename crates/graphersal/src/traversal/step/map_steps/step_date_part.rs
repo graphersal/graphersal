@@ -13,9 +13,10 @@ use crate::*;
 /// field as an `int64` (`DT.year`, `DT.month`, `DT.day`, `DT.hour`, ..., `DT.day_of_week` 0 =
 /// Sunday, `DT.iso_day_of_week` 1 = Monday, `DT.day_of_year`, `DT.week` (ISO), `DT.iso_year`,
 /// `DT.quarter`, `DT.decade`, `DT.century`, `DT.millennium`, `DT.offset` in seconds), except
-/// `DT.epoch`, a `float64` of seconds. `second`, `millisecond` and `microsecond` are the plain
-/// fields (0-59, 0-999, 0-999999), not PostgreSQL's seconds with a fraction. A `datetime` is read
-/// on its own wall clock, or in `zone`; a `duration` gives PostgreSQL's `interval` fields.
+/// `DT.epoch`, a `float64` of seconds. `second`, `millisecond`, `microsecond` and `nanosecond` are
+/// the plain fields (0-59, 0-999, 0-999999, 0-999999999), not PostgreSQL's seconds with a
+/// fraction. A `datetime` is read on its own wall clock, or in `zone`; a `duration` gives
+/// PostgreSQL's `interval` fields.
 #[derive(Clone)]
 struct StepDatePart {
     part: DT,

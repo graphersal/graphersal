@@ -3,8 +3,7 @@
 //! where a temporal value is asked for).
 //!
 //! - date: `YYYY-MM-DD`, a year before 1 or after 9999 with its sign (`-0044-03-15`);
-//! - time: `HH:MM`, `HH:MM:SS`, `HH:MM:SS.f` (1-9 fraction digits; beyond the microsecond they
-//!   are cut off);
+//! - time: `HH:MM`, `HH:MM:SS`, `HH:MM:SS.f` (1-9 fraction digits, kept to the nanosecond);
 //! - local date-time: a date, optionally `T` (or `t`, or a space) and a time; a date alone is
 //!   midnight;
 //! - date-time: a local date-time, then an offset (`Z`, `+02:00`, `+0200`, `+02`, `+00:19:32`)
@@ -16,7 +15,7 @@
 //!   of its own (`P1M-2D`), letters in either case.
 
 use super::arith::{Amount, DurationParts, cascade};
-use super::civil::{self, MICROS_PER_SECOND};
+use super::civil::{self, NANOS_PER_DAY, NANOS_PER_SECOND};
 use super::zone::Zone;
 use super::{
     Date, DateTime, Duration, LocalDateTime, MAX_OFFSET_SECONDS, Temporal, TemporalError,
@@ -149,16 +148,16 @@ fn read_date(c: &mut Cursor) -> TemporalResult<i32> {
     Ok(civil::days_from_civil(year, month as u8, day as u8))
 }
 
-/// Up to nine fraction digits after a `.` or `,`, as microseconds (cut, not rounded).
+/// Up to nine fraction digits after a `.` or `,`, as nanoseconds (exact).
 fn read_fraction(c: &mut Cursor) -> TemporalResult<i64> {
     if !(c.eat(b'.') || c.eat(b',')) {
         return Ok(0);
     }
-    let mut micros = 0i64;
+    let mut nanos = 0i64;
     let mut count = 0;
     while let Some(b @ b'0'..=b'9') = c.peek() {
-        if count < 6 {
-            micros = micros * 10 + (b - b'0') as i64;
+        if count < 9 {
+            nanos = nanos * 10 + (b - b'0') as i64;
         }
         count += 1;
         c.pos += 1;
@@ -169,10 +168,10 @@ fn read_fraction(c: &mut Cursor) -> TemporalResult<i64> {
     if count == 0 {
         return c.fail("expected digits after the decimal point");
     }
-    for _ in count..6 {
-        micros *= 10;
+    for _ in count..9 {
+        nanos *= 10;
     }
-    Ok(micros)
+    Ok(nanos)
 }
 
 fn read_time(c: &mut Cursor) -> TemporalResult<i64> {
@@ -194,18 +193,18 @@ fn read_time(c: &mut Cursor) -> TemporalResult<i64> {
     if second > 59 {
         return c.fail("the seconds are not 00-59");
     }
-    Ok(((hour as i64 * 60 + minute as i64) * 60 + second as i64) * MICROS_PER_SECOND + fraction)
+    Ok(((hour as i64 * 60 + minute as i64) * 60 + second as i64) * NANOS_PER_SECOND + fraction)
 }
 
-/// A date, optionally followed by a separator and a time; local microseconds.
-fn read_local(c: &mut Cursor) -> TemporalResult<i64> {
+/// A date, optionally followed by a separator and a time; local nanoseconds.
+fn read_local(c: &mut Cursor) -> TemporalResult<i128> {
     let days = read_date(c)?;
-    let mut micros = days as i64 * civil::MICROS_PER_DAY;
+    let mut nanos = days as i128 * NANOS_PER_DAY as i128;
     if matches!(c.peek(), Some(b'T' | b't' | b' ')) {
         c.pos += 1;
-        micros += read_time(c)?;
+        nanos += read_time(c)? as i128;
     }
-    Ok(micros)
+    Ok(nanos)
 }
 
 /// `Z`, `+HH:MM[:SS]`, `+HHMM`, `+HH`; `None` when no offset follows.
@@ -271,22 +270,22 @@ pub(super) fn date(text: &str) -> TemporalResult<Date> {
 
 pub(super) fn time(text: &str) -> TemporalResult<Time> {
     let mut c = Cursor::new(text, "time");
-    let micros = read_time(&mut c)?;
+    let nanos = read_time(&mut c)?;
     if !c.at_end() && matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-')) {
         return c.fail("a time has no UTC offset");
     }
     c.finish()?;
-    Ok(Time { micros })
+    Ok(Time { nanos })
 }
 
 pub(super) fn local_date_time(text: &str) -> TemporalResult<LocalDateTime> {
     let mut c = Cursor::new(text, "localdatetime");
-    let micros = read_local(&mut c)?;
+    let nanos = read_local(&mut c)?;
     if !c.at_end() && matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-' | b'[')) {
         return c.fail("a local date-time has no UTC offset or time zone (use a datetime)");
     }
     c.finish()?;
-    Ok(LocalDateTime { micros })
+    LocalDateTime::from_nanos(nanos)
 }
 
 pub(super) fn date_time(text: &str) -> TemporalResult<DateTime> {
@@ -306,7 +305,7 @@ fn read_date_time(text: &str, strict: bool) -> TemporalResult<DateTime> {
     let offset = read_offset(&mut c)?;
     let zone = read_zone(&mut c)?;
     c.finish()?;
-    let local = LocalDateTime { micros: local };
+    let local = LocalDateTime::from_nanos(local)?;
     match (offset, zone) {
         (Some(offset), None) => DateTime::from_local(local, offset),
         (None, None) if strict => c.fail(
@@ -338,11 +337,11 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
         return c.fail("expected 'P' (ISO 8601 duration such as P1DT2H)");
     }
     // Wide accumulators: the parts are summed and the leading sign applied before the range
-    // check, so `-P178956970Y8M` (i32::MIN months) and `-PT2562047788H0M54.775808S` (i64::MIN
-    // microseconds) parse back.
+    // check, so `-P178956970Y8M` (i32::MIN months) and `-PT2562047788H0M54.775808S` (the
+    // smallest time part, i64::MIN microseconds) parse back.
     let mut months: i128 = 0;
     let mut days: i128 = 0;
-    let mut micros: i128 = 0;
+    let mut nanos: i128 = 0;
     let mut any = false;
     let mut in_time = false;
     // The units in their required order; the index only grows.
@@ -384,19 +383,20 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
         if fraction != 0 && unit != b'S' {
             return c.fail("only seconds may have a fraction");
         }
-        // `number` is at most i64::MAX and at most seven parts are summed: no i128 overflow.
+        // `number` is at most i64::MAX (an hour of nanoseconds is below 2^42, the product below
+        // 2^105) and at most seven parts are summed: no i128 overflow.
         let n = number as i128 * sign;
-        let second = MICROS_PER_SECOND as i128;
+        let second = NANOS_PER_SECOND as i128;
         match (in_time, unit) {
             (false, b'Y') => months += n * 12,
             (false, b'M') => months += n,
             (false, b'W') => days += n * 7,
             (false, _) => days += n,
-            (true, b'H') => micros += n * 3600 * second,
-            (true, b'M') => micros += n * 60 * second,
-            (true, _) => micros += n * second + fraction as i128 * sign,
+            (true, b'H') => nanos += n * 3600 * second,
+            (true, b'M') => nanos += n * 60 * second,
+            (true, _) => nanos += n * second + fraction as i128 * sign,
         }
-        if months.abs() > LIMIT || days.abs() > LIMIT || micros.abs() > LIMIT {
+        if months.abs() > LIMIT || days.abs() > LIMIT || nanos.abs() > LIMIT {
             return c.fail("the duration is too large");
         }
         any = true;
@@ -407,14 +407,13 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
     if negative {
         months = -months;
         days = -days;
-        micros = -micros;
+        nanos = -nanos;
     }
-    match (
-        i32::try_from(months),
-        i32::try_from(days),
-        i64::try_from(micros),
-    ) {
-        (Ok(months), Ok(days), Ok(micros)) => Ok(Duration::new(months, days, micros)),
+    match (i32::try_from(months), i32::try_from(days)) {
+        (Ok(months), Ok(days)) => match Duration::with_nanos(months, days, nanos) {
+            Ok(duration) => Ok(duration),
+            Err(_) => c.fail("the duration is too large"),
+        },
         _ => c.fail("the duration is too large"),
     }
 }
@@ -429,21 +428,11 @@ pub(super) fn duration(text: &str) -> TemporalResult<Duration> {
 #[cfg_attr(not(feature = "gql"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Extended {
-    /// The value (a fraction below the microsecond truncated toward zero).
+    /// The value.
     pub(crate) value: Temporal,
-    /// Whether non-zero digits below the microsecond were cut (`.645876123`): the GQL layer
-    /// answers that with "not yet" (3g U1) instead of keeping the cut value.
-    pub(crate) sub_micro: bool,
     /// Whether the text named an IANA zone (`[Europe/London]`), resolved to its offset at that
     /// time: the value keeps only the offset (3g U3).
     pub(crate) zone_name: bool,
-}
-
-/// Up to nine fraction digits after `.` or `,` (none: zero): the microseconds (cut) and whether
-/// a non-zero digit below the microsecond was cut.
-fn read_fraction_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
-    let nanos = read_nano_fraction(c)?;
-    Ok(((nanos / 1000) as i64, nanos % 1000 != 0))
 }
 
 /// The number of ASCII digits from the cursor on, without consuming them.
@@ -541,19 +530,19 @@ fn read_date_extended(c: &mut Cursor) -> TemporalResult<i32> {
 }
 
 /// A time of day, each `:` optional: `21:40:32.142`, `214032.142`, `21:40`, `2140`, `21`.
-/// Microseconds of the day and whether digits below the microsecond were cut.
-fn read_time_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
+/// Nanoseconds of the day.
+fn read_time_extended(c: &mut Cursor) -> TemporalResult<i64> {
     let hour = c.digits(2, "expected a two-digit hour")?;
     let mut minute = 0;
     let mut second = 0;
-    let mut fraction = (0, false);
+    let mut fraction = 0;
     let colon = c.eat(b':');
     if colon || matches!(c.peek(), Some(b'0'..=b'9')) {
         minute = c.digits(2, "expected two-digit minutes")?;
         let colon = c.eat(b':');
         if colon || matches!(c.peek(), Some(b'0'..=b'9')) {
             second = c.digits(2, "expected two-digit seconds")?;
-            fraction = read_fraction_extended(c)?;
+            fraction = read_nano_fraction(c)? as i64;
         }
     }
     if hour > 23 {
@@ -565,22 +554,17 @@ fn read_time_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
     if second > 59 {
         return c.fail("the seconds are not 00-59");
     }
-    let micros =
-        ((hour as i64 * 60 + minute as i64) * 60 + second as i64) * MICROS_PER_SECOND + fraction.0;
-    Ok((micros, fraction.1))
+    Ok(((hour as i64 * 60 + minute as i64) * 60 + second as i64) * NANOS_PER_SECOND + fraction)
 }
 
-/// A date, then optionally `T` and a time: local microseconds and the sub-microsecond flag.
-fn read_local_extended(c: &mut Cursor) -> TemporalResult<(i64, bool)> {
+/// A date, then optionally `T` and a time: local nanoseconds.
+fn read_local_extended(c: &mut Cursor) -> TemporalResult<i128> {
     let days = read_date_extended(c)?;
-    let mut micros = days as i64 * civil::MICROS_PER_DAY;
-    let mut sub_micro = false;
+    let mut nanos = days as i128 * NANOS_PER_DAY as i128;
     if c.eat(b'T') || c.eat(b't') {
-        let (time, cut) = read_time_extended(c)?;
-        micros += time;
-        sub_micro = cut;
+        nanos += read_time_extended(c)? as i128;
     }
-    Ok((micros, sub_micro))
+    Ok(nanos)
 }
 
 /// Up to nine fraction digits after `.` or `,` as billionths (none: zero).
@@ -715,13 +699,12 @@ fn duration_extended(text: &str) -> TemporalResult<Extended> {
     c.finish()?;
     let cascaded = cascade(&parts)?;
     let duration = if negative {
-        cascaded.duration.checked_neg()?
+        cascaded.checked_neg()?
     } else {
-        cascaded.duration
+        cascaded
     };
     Ok(Extended {
         value: Temporal::Duration(duration),
-        sub_micro: cascaded.sub_micro,
         zone_name: false,
     })
 }
@@ -745,13 +728,11 @@ fn duration_extended(text: &str) -> TemporalResult<Extended> {
 ///
 /// Never a guess from the content: the caller names the type. A year outside -9999..9999 or a
 /// duration beyond the fields is [`TemporalError::OutOfRange`], any other bad text
-/// [`TemporalError::Parse`]. Digits below the microsecond are cut and reported in
-/// [`Extended::sub_micro`].
+/// [`TemporalError::Parse`]. Up to nine fraction digits are kept exactly.
 #[cfg_attr(not(feature = "gql"), allow(dead_code))]
 pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<Extended> {
-    let plain = |value: Temporal, sub_micro: bool| Extended {
+    let plain = |value: Temporal| Extended {
         value,
-        sub_micro,
         zone_name: false,
     };
     match kind {
@@ -760,36 +741,35 @@ pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<E
             let mut c = Cursor::new(text, "date");
             let days = read_date_extended(&mut c)?;
             c.finish()?;
-            Ok(plain(Temporal::Date(Date { days }), false))
+            Ok(plain(Temporal::Date(Date { days })))
         }
         TemporalKind::Time => {
             let mut c = Cursor::new(text, "time");
-            let (micros, sub_micro) = read_time_extended(&mut c)?;
+            let nanos = read_time_extended(&mut c)?;
             if matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-' | b'[')) {
                 return c.fail("a local time has no UTC offset or time zone");
             }
             c.finish()?;
-            Ok(plain(Temporal::Time(Time { micros }), sub_micro))
+            Ok(plain(Temporal::Time(Time { nanos })))
         }
         TemporalKind::LocalDateTime => {
             let mut c = Cursor::new(text, "localdatetime");
-            let (micros, sub_micro) = read_local_extended(&mut c)?;
+            let nanos = read_local_extended(&mut c)?;
             if matches!(c.peek(), Some(b'Z' | b'z' | b'+' | b'-' | b'[')) {
                 return c.fail("a local date-time has no UTC offset or time zone (use a datetime)");
             }
             c.finish()?;
-            Ok(plain(
-                Temporal::LocalDateTime(LocalDateTime { micros }),
-                sub_micro,
-            ))
+            Ok(plain(Temporal::LocalDateTime(LocalDateTime::from_nanos(
+                nanos,
+            )?)))
         }
         TemporalKind::DateTime => {
             let mut c = Cursor::new(text, "datetime");
-            let (local, sub_micro) = read_local_extended(&mut c)?;
+            let local = read_local_extended(&mut c)?;
             let offset = read_offset(&mut c)?;
             let zone = read_zone(&mut c)?;
             c.finish()?;
-            let local = LocalDateTime { micros: local };
+            let local = LocalDateTime::from_nanos(local)?;
             let value = match (offset, zone) {
                 (Some(offset), None) => DateTime::from_local(local, offset)?,
                 (None, None) => DateTime::from_local(local, 0)?,
@@ -804,7 +784,6 @@ pub(crate) fn parse_extended(kind: TemporalKind, text: &str) -> TemporalResult<E
             };
             Ok(Extended {
                 value: Temporal::DateTime(value),
-                sub_micro,
                 zone_name: zone.is_some(),
             })
         }
