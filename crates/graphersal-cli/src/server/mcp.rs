@@ -45,6 +45,9 @@
 //! user opens a read-only view of a past state there, the view is server-wide: `graph_info`
 //! carries a `note` saying so, and every tool error carries it too (a write is refused).
 //!
+//! `memory_report` (reading, also in read-only mode) answers the session's memory report
+//! (`Session::memory_report`), at most 50 property rows unless `max_rows` says otherwise.
+//!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
 //! `define_compression`, `drop_compression` and `recompress` (refused in read-only mode) wrap
@@ -491,7 +494,8 @@ Saved queries marked `writes: true` change data (their `effects` say what); run 
 the user asked for that change. Large text that queries rarely read (CVs, descriptions) can be kept \
 compressed in memory with a compression rule: `list_compressions`, `estimate_compression` \
 (measures the candidate rules on the current data first, changes nothing), \
-`define_compression`, `drop_compression`, `recompress` (reads stay plain). A query that filters a label on a \
+`define_compression`, `drop_compression`, `recompress` (reads stay plain); `memory_report` \
+shows where the memory goes per label and property. A query that filters a label on a \
 property (`g.v().has_label(\"person\").has(\"age\", P.gt(30))`) and is slow on a large \
 graph can be served by a property index: `list_indexes`, `create_index` {label, key, \
 element?, type?, transform?}, `drop_index`; results never change, `.profile()` names the index \
@@ -1112,6 +1116,31 @@ fn all_tools() -> Vec<Tool> {
             no_args(),
         ),
         tool(
+            "memory_report",
+            "Memory report",
+            Kind::Read,
+            "Where the graph's memory goes, WITHOUT changing it: one row per (element, label, \
+             top-level property) with elements having the key, value types, bytes (slots + \
+             heap), a size histogram (non-empty buckets by heap bytes), max value bytes, string \
+             figures (inline values, plain bytes, distinct_estimate by HyperLogLog), vectors by \
+             element kind and dimension, compressed and deduplicated values, the rules and \
+             indexes on it; one row per label (elements, id and label bytes, slot bytes, \
+             property bytes, degree max/p95 for vertices); shapes; each property index and \
+             compression rule with its bytes; the structure (slots live/tombstoned/spare, id \
+             and label index bytes, totals). Facts, not advice. max_elements samples a large \
+             graph (figures extrapolated per label, distinct counts then unreliable); max_rows \
+             and max_labels keep the rows with the most bytes (default 50 each).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Keep the property rows with the most bytes (default 50); rows_omitted counts the rest."},
+                    "max_labels": {"type": "integer", "minimum": 1, "description": "Keep the label rows with the most bytes (default 50); labels_omitted counts the rest."},
+                    "max_elements": {"type": "integer", "minimum": 1, "description": "Sample so that about this many elements are read, at least one per label (default: all)."},
+                    "sample_every": {"type": "integer", "minimum": 1, "description": "Read every k-th element only (default 1)."},
+                },
+            }),
+        ),
+        tool(
             "graph_info",
             "Graph info",
             Kind::Read,
@@ -1559,6 +1588,32 @@ fn run_tool(
             context,
             context.call(|s| s.statistics()).map_err(http_failed)?,
         ))),
+        "memory_report" => {
+            let mut spec = match args {
+                Value::Object(map) => Value::Object(map.clone()),
+                _ => json!({}),
+            };
+            // A bounded answer by default: the 50 property and label rows with the most bytes.
+            if let Some(map) = spec.as_object_mut() {
+                map.entry("max_rows").or_insert(json!(50));
+                map.entry("max_labels").or_insert(json!(50));
+            }
+            let answer = context
+                .call(move |s| s.memory_report(&spec))
+                .map_err(http_failed)?;
+            if answer["ok"] == json!(true) {
+                Ok(format!(
+                    "Memory report (the graph was not changed; bytes are estimates, rows sorted \
+                     by bytes):\n{}",
+                    compact(&answer["report"])
+                ))
+            } else {
+                Err(format!(
+                    "The memory report was refused:\n{}",
+                    answer["error"].as_str().unwrap_or_default()
+                ))
+            }
+        }
         "list_saved_queries" => list_saved_queries(context, caller.read_only, args),
         "run_saved_query" => run_saved_query(context, caller, args),
         "list_compressions" => {

@@ -295,10 +295,16 @@ impl GraphIndex {
         self.edge_labels.clear();
     }
 
+    /// The id index alone (the two id tables' exact allocations).
+    pub(crate) fn id_index_heap_bytes(&self) -> u64 {
+        self.nodes.heap_bytes() + self.edges.heap_bytes()
+    }
+
     /// Estimated heap footprint of this index's four collections, in bytes: the two id tables'
-    /// exact allocations (buckets of `(handle, cached hash)` plus control bytes), the label maps
-    /// and each label bucket `IndexSet` sized from its own `.capacity()`
-    /// ([`crate::value::property_map::index_map_heap_bytes`]), plus heap-allocated label strings.
+    /// exact allocations (buckets of `(handle, cached hash)` plus control bytes, see
+    /// [`Self::id_index_heap_bytes`]), the label maps and each label bucket `IndexSet` sized
+    /// from its own `.capacity()` ([`crate::value::property_map::index_map_heap_bytes`]), plus
+    /// heap-allocated label strings.
     /// Used by [`crate::graph::MemoryStats::index_bytes`] (D1 of the memory-inspection spec);
     /// walking every bucket, not just the outer maps, is deliberate — the bucket sets are where a
     /// heavily-labeled graph's memory actually lives.

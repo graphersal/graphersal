@@ -1758,6 +1758,66 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         self.storage.memory_usage()
     }
 
+    /// The memory report (book page "Memory Usage", section "The memory report"): where the
+    /// graph's memory goes, per element kind and label and per top-level property, with the
+    /// property indexes, compression rules and, when the storage reports it
+    /// ([`GraphStorage::memory_structure`]), slots and index bytes. One walk over the elements
+    /// under the caller's read access, read-only; full or sampled
+    /// ([`MemoryReportRequest`](crate::graph::MemoryReportRequest)). Works for any storage: the
+    /// per-label and per-property parts use the read methods only.
+    ///
+    /// Asks an attached authorizer for `Read` on `Data`. Fails with
+    /// [`GraphError::Unsupported`](crate::error::GraphError::Unsupported) for an invalid request
+    /// and with [`TraverserError::Cancelled`](crate::TraverserError::Cancelled) when the
+    /// request's token (or the running thread's [`CancelToken`](crate::CancelToken)) is
+    /// cancelled.
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    /// use graphersal::storage::{ElementKind, MemoryReportRequest, PropertyTarget};
+    ///
+    /// let graph = TraversalGraph::tinkerpop_modern();
+    /// let report = graph.traversal().memory_report(&MemoryReportRequest::new()).unwrap();
+    /// let name = PropertyTarget::top_level(ElementKind::Vertex, Some("person"), "name");
+    /// let row = report.property(&name).unwrap();
+    /// assert_eq!((row.elements, row.label_elements), (4, 4));
+    /// assert_eq!(row.value_types[0].name, "string");
+    /// // The rows add up to the property bytes of `memory_usage()`.
+    /// assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().property_bytes);
+    /// ```
+    pub fn memory_report(
+        &self,
+        request: &crate::graph::MemoryReportRequest,
+    ) -> TraverserResult<crate::graph::MemoryReport> {
+        if let Some(restrictions) = &self.restrictions {
+            restrictions.authorize(
+                "memory_report",
+                &crate::graph::AccessRequest::new(
+                    crate::graph::Action::Read,
+                    crate::graph::Resource::data(None, None),
+                ),
+            )?;
+        }
+        request.validate()?;
+        let (report, cancelled) = match (
+            request.cancel_token(),
+            crate::traversal::cancel::CancelToken::current(),
+        ) {
+            (None, Some(token)) => crate::graph::memory_report::walk::compute(
+                &self.storage,
+                &request.clone().with_cancel(token),
+            ),
+            _ => crate::graph::memory_report::walk::compute(&self.storage, request),
+        };
+        if cancelled {
+            return Err(TraverserError::Cancelled {
+                elapsed_ms: report.elapsed_micros / 1000,
+            }
+            .into());
+        }
+        Ok(report)
+    }
+
     /// The element counts the underlying storage keeps up to date, or `None` if the backing
     /// [`GraphStorage`] keeps none (the trait default). A thin pass-through to
     /// [`GraphStorage::statistics`]; like [`Self::memory_usage`] a plain method call, not a step.

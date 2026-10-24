@@ -469,6 +469,15 @@ impl Playground {
         to_text(&statistics)
     }
 
+    /// The memory report from a spec (JSON text, `{sample_every?, max_elements?, max_rows?, max_labels?}`;
+    /// `{}`: a full report): `{ok: true, report}` or `{ok: false, error}` (see
+    /// [`Session::memory_report`]).
+    #[wasm_bindgen(js_name = memoryReport)]
+    pub fn memory_report(&self, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.memory_report(&spec)))
+    }
+
     /// Every DSL function, from the Rhai engine's metadata (completion catalogue).
     pub fn completions(&self) -> String {
         to_text(&views::completions(self.session.engine()))

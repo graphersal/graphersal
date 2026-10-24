@@ -33,6 +33,8 @@ pub mod hooks;
 pub(crate) mod index;
 /// A graph's own memory footprint (`memory_usage()`).
 pub mod memory;
+/// The memory report: where a graph's memory goes, per label and per property path.
+pub mod memory_report;
 #[cfg(feature = "persist")]
 pub(crate) mod persistent;
 /// Property indexes: declared, ordered indexes on `(element kind, label, key)`
@@ -71,6 +73,7 @@ pub use hooks::{
 pub(crate) use index::GraphIndex;
 pub(crate) use index::{EdgeIndex, NodeIndex};
 pub use memory::MemoryStats;
+pub use memory_report::{MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
 pub use persistent::PersistentStorage;
 pub use property_index::{

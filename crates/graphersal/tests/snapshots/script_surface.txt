@@ -964,6 +964,10 @@ WithOptions::{"access":"public","docComments":["/// Printing"],"name":"to_string
 {"access":"public","docComments":["/// Replaces every incoming value with the given constant.","///","/// Example: `g.v().has_label(\"software\").constant(\"app\").to_list()` returns `[\"app\", \"app\"]`"],"name":"constant","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Replaces every occurrence of a substring in each string.","///","/// Example: `g.v(1).values(\"name\").replace(\"ar\", \"AR\").next()` returns `mARko`"],"name":"replace","namespace":"global","numParams":3,"params":[{"type":"&mut GraphTraversalSource"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Replaces every occurrence of a substring in each string.","///","/// Example: `g.v(1).values(\"name\").replace(\"ar\", \"AR\").next()` returns `mARko`"],"name":"replace","namespace":"global","numParams":4,"params":[{"type":"&mut GraphTraversalSource"},{"type":"Scope"},{"type":"types::dynamic::Dynamic"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements, max_rows, max_labels} sample or cut it.","///","/// Example: `g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)` returns `[4, 2]`"],"name":"memoryReport","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements, max_rows, max_labels} sample or cut it.","///","/// Example: `g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)` returns `[4, 2]`"],"name":"memoryReport","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements, max_rows, max_labels} sample or cut it.","///","/// Example: `g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)` returns `[4, 2]`"],"name":"memory_report","namespace":"global","numParams":1,"params":[{"type":"&mut GraphTraversalSource"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
+{"access":"public","docComments":["/// Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements, max_rows, max_labels} sample or cut it.","///","/// Example: `g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)` returns `[4, 2]`"],"name":"memory_report","namespace":"global","numParams":2,"params":[{"type":"&mut GraphTraversalSource"},{"type":"types::dynamic::Dynamic"}],"returnType":"core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>"}
 {"access":"public","docComments":["/// Return the current variant of `ArgP`."],"name":"get$enum_type","namespace":"global","numParams":1,"params":[{"name":"arg_p","type":"&mut ArgP"}],"returnType":"String"}
 {"access":"public","docComments":["/// Return the inner value."],"name":"get$value","namespace":"global","numParams":1,"params":[{"name":"arg_p","type":"&mut ArgP"}],"returnType":"Dynamic"}
 {"access":"public","docComments":["/// Returns a new random UUID value.","///","/// Example: `type_of(UUID())` returns `Uuid`"],"name":"UUID","namespace":"global","numParams":0,"returnType":"graphersal::script::tokens::uuid::ScriptUuid"}
@@ -2987,7 +2991,11 @@ max(_: &mut GraphTraversalSource, _: Scope) -> GraphTraversalSource
 mean(_: &mut GraphTraversalSource) -> GraphTraversalSource
 mean(_: &mut GraphTraversalSource, _: Scope) -> GraphTraversalSource
 median(_: &mut GraphTraversalSource) -> GraphTraversalSource
+memoryReport(_: &mut GraphTraversalSource) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+memoryReport(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 memoryUsage(_: &mut GraphTraversalSource) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+memory_report(_: &mut GraphTraversalSource) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
+memory_report(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 memory_usage(_: &mut GraphTraversalSource) -> core::result::Result<rhai::types::dynamic::Dynamic,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 merge(_: &mut GraphTraversalSource, _: types::dynamic::Dynamic) -> core::result::Result<graphersal::script::source::ScriptGraphTraversalSource,alloc::boxed::Box<rhai::types::error::EvalAltResult>>
 mergeE(_: &mut GraphTraversalSource) -> GraphTraversalSource
@@ -4058,7 +4066,9 @@ math
 max
 mean
 median
+memoryReport
 memoryUsage
+memory_report
 memory_usage
 merge
 mergeE

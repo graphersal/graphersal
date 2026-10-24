@@ -116,8 +116,31 @@ const COMMANDS: &[(&str, &str, &str)] = &[
         "<option> [value]",
         "change a session setting (/help set lists them)",
     ),
+    (
+        "memory",
+        "[max_elements]",
+        "where the graph's memory goes per label and property (g.memory_report()); \
+         with a number: sampled",
+    ),
     ("exit", "", "close the graph and leave the shell"),
 ];
+
+/// The text of `/memory [max_elements]`: the memory report of `graph`, sampled when a number is
+/// given.
+fn memory_report(graph: &graphersal::storage::Graph, args: &str) -> String {
+    let mut request = graphersal::storage::MemoryReportRequest::new();
+    let args = args.trim();
+    if !args.is_empty() {
+        match args.parse::<u64>() {
+            Ok(n) if n > 0 => request = request.with_max_elements(n),
+            _ => return "Usage: /memory [max_elements] (a positive number samples)".to_string(),
+        }
+    }
+    match graphersal::storage::AnyGraph::memory_report(graph, &request) {
+        Ok(report) => report.to_string(),
+        Err(err) => graphersal::error::format_diagnostic(&*err),
+    }
+}
 
 /// Rhai keywords offered at the start of an expression.
 const KEYWORDS: &[&str] = &[
@@ -795,6 +818,7 @@ Use /exit or CTRL-D to exit; CTRL-C breaks the line input
                                 }
                                 exit(0);
                             }
+                            "memory" => outln!("{}", memory_report(&arc_graph, args)),
                             "help" => {
                                 if let Some(helper) = rl.helper() {
                                     outln!("{}", helper.catalogue.help(args, spelling));
@@ -1114,11 +1138,23 @@ mod tests {
     }
 
     #[test]
+    fn memory_prints_the_report_summary() {
+        let graph = graphersal::storage::Graph::new(graphersal::TraversalGraph::tinkerpop_modern());
+        let full = memory_report(&graph, "");
+        assert!(full.starts_with("Memory report at commit 0:"), "{full}");
+        assert!(full.contains("vertex person $.name"), "{full}");
+        let sampled = memory_report(&graph, " 3 ");
+        assert!(sampled.contains("Sampled:"), "{sampled}");
+        assert!(memory_report(&graph, "lots").starts_with("Usage: /memory"));
+        assert!(memory_report(&graph, "0").starts_with("Usage: /memory"));
+    }
+
+    #[test]
     fn slash_commands_and_their_arguments_complete() {
         let c = catalogue();
         assert_eq!(
             displays(&c, "/", Spelling::Snake),
-            ["/exit", "/help", "/set"]
+            ["/exit", "/help", "/memory", "/set"]
         );
         assert_eq!(displays(&c, "/s", Spelling::Snake), ["/set"]);
         let set = displays(&c, "/set ", Spelling::Snake);

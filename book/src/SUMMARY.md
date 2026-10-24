@@ -257,6 +257,7 @@
   - [max](traversal/steps/max.md)
   - [mean](traversal/steps/mean.md)
   - [median](traversal/steps/median.md)
+  - [memory_report](traversal/steps/memory_report.md)
   - [memory_usage](traversal/steps/memory_usage.md)
   - [merge](traversal/steps/merge.md)
   - [merge_e](traversal/steps/merge_e.md)

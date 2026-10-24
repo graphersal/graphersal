@@ -3109,6 +3109,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "set_schema",
             "patch_schema",
             "statistics",
+            "memory_report",
             "graph_info",
         ]
     );

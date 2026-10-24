@@ -629,6 +629,33 @@ mod access_policy {
     }
 
     #[test]
+    fn the_memory_report_asks_for_read_on_data() {
+        let graph = modern();
+        assert_denied(
+            run(&graph, "g.memory_report()", AccessPolicy::deny_all()),
+            "memory_report",
+            "Read Data",
+        );
+        assert_denied(
+            run(
+                &graph,
+                "g.memoryReport(#{max_rows: 1})",
+                AccessPolicy::deny_all(),
+            ),
+            "memory_report",
+            "Read Data",
+        );
+        assert!(
+            run(
+                &graph,
+                "g.memory_report(#{max_rows: 1})",
+                AccessPolicy::read_only()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn deny_all_denies_the_graph_but_not_plain_computation() {
         let graph = modern();
         let none = AccessPolicy::deny_all;

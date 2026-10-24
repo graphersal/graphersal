@@ -101,6 +101,89 @@ bookkeeping are not counted. Two caveats worth knowing:
 a `GraphTraversalSource` gets it uniformly — not just `TraversalGraph`. A backend that doesn't
 support introspection returns `None`.
 
+## The memory report
+
+`memory_usage()` says how much; the memory report says **where**: per element kind and label and
+per top-level property, with the property indexes, the compression rules and the slots. It
+reports facts, not advice: what a key holds, how big its values are, how many distinct strings it
+has, which vectors. It is computed on demand by one walk over the elements and changes nothing.
+
+```rhai,graph=modern
+g.memory_report().properties.filter(|p| p.path == "$.name").map(|p| [p.label, p.elements, p.bytes])
+```
+
+The answer is a map:
+
+- `properties`: one row per `(element, label, path)`, most bytes first. `elements` have the key
+  out of `label_elements` (sparsity); `value_types` counts the values per logical type (`string`,
+  `int64`, `date`, `vector`, `object`, `null`, ...); `bytes` = `slot_bytes` (one 32-byte slot per
+  value) + `heap_bytes` (what the values own: strings above 24 bytes, compressed blocks, vectors,
+  arrays, nested objects with everything in them); `sizes` is a histogram of the values by their
+  heap bytes (`max_bytes` 0 = no heap, then 32 B up to 1 MiB, `null` = above 1 MiB; each bucket
+  with `values` and `bytes`, so "how many bytes sit in values above 2 KiB" is a sum);
+  `max_value_bytes`; `strings` (`values`, `inline_values`, `heap_bytes`, `plain_bytes` and a
+  `distinct_estimate` from a HyperLogLog sketch, about 6.5 % standard error); `vectors` per element
+  kind and dimension; `compressed_*` and `deduped_*` values with the `rules` and `indexes` on the
+  key. `leaf` is `false` when some value is an object: the row then aggregates the nested keys
+  (`nested_values` counts them). `path` is a jpath (`$.name`); rows are top-level keys today.
+- `labels`: per `(element, label)` the `elements`, `id_heap_bytes` (ids above 24 bytes),
+  `label_bytes` (a vertex's label list), `slot_bytes` (for edges this is the adjacency),
+  `property_bytes` (its rows plus `map_overhead_bytes`: value slots kept for reuse after a key was
+  dropped) and, for vertices, `degree` (`max_out`, `max_in`, `max`, `p95`: supernodes).
+- `shapes`: the number of key sequences met and a histogram of elements per shape.
+- `indexes` (each property index with its `entries` and `bytes`) and `compression_rules` (each
+  rule with its values and plain, stored and dictionary bytes).
+- `structure`: what only the storage knows: `vertex_slots`/`edge_slots` (`live`, `tombstoned`:
+  vacant slots of removed elements below the highest live one, `spare`: allocated above it,
+  `slot_bytes`), `id_index_bytes`, `label_index_bytes`, `shape_table_shapes` and the `totals` of
+  `memory_usage()`. `null` for a storage that does not report one; everything else is computed
+  for any storage.
+- `property_bytes` (equal to `memory_usage().property_bytes` for a full report),
+  `estimated_total_bytes`, `tracked_live_bytes` (the process heap where a tracking allocator is
+  installed: the CLI, the playground, Python) and `unattributed_bytes` (that heap minus the
+  estimate: allocator overhead and the rest of the process), `sampled`, `sample_every`,
+  `visited_elements`, `commit_seq`, `elapsed_ms`.
+
+A vertex with several labels counts once, under its **first** (primary) label.
+
+Options, all optional: `#{max_elements: n}` or `#{sample_every: k}` sample a large graph,
+`#{max_rows: n}` and `#{max_labels: n}` keep the rows with the most bytes (`rows_omitted`,
+`labels_omitted` count the rest; the totals stay complete). A sample is stratified by label: the
+walk still passes every element and counts it under its label, but reads the properties of only
+every k-th element of each label (always the first), and scales each label by its exact count. So
+a small label is never missed; distinct counts from a sample are flagged `distinct_reliable:
+false`. A graph with very many labels reads about one element per label.
+
+```rhai,graph=modern
+g.memory_report(#{sample_every: 2, max_rows: 3, max_labels: 2}).sampled   // true
+```
+
+The walk runs under a read lock: writers wait while it runs. A full report of about 1 million
+elements took about 0.9 s in a release build, a sample of 20 000 elements about 50 ms.
+
+Elsewhere: Rust `g.memory_report(&MemoryReportRequest::new())` (a `MemoryReport` with typed
+rows, `Display` as a terminal summary, `to_property()`/`to_json()` as this map; a
+`CancelToken` stops it); the REPL's `/memory [max_elements]` prints the summary; the dev server
+`POST /api/memory/report` and the MCP tool `memory_report` (at most 50 property and label rows
+unless `max_rows`/`max_labels` say otherwise); Python `graph.memory_report(max_elements=..)`.
+
+```rust
+use graphersal::prelude::*;
+use graphersal::storage::{ElementKind, MemoryReportRequest, PropertyTarget};
+
+let graph = TraversalGraph::tinkerpop_modern();
+let report = graph.traversal().memory_report(&MemoryReportRequest::new()).unwrap();
+let name = report
+    .property(&PropertyTarget::top_level(ElementKind::Vertex, Some("person"), "name"))
+    .unwrap();
+assert_eq!(name.elements, 4);
+assert_eq!(report.property_bytes(), graph.memory_usage().unwrap().property_bytes);
+println!("{report}");
+```
+
+A storage of your own gets every part except `structure` without any work; it fills that one by
+overriding `GraphStorage::memory_structure` (default `None`).
+
 ## Graph statistics
 
 ```rhai,graph=modern

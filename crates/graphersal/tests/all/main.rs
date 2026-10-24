@@ -116,6 +116,7 @@ mod math_tests;
 mod mem_store_tests;
 mod memory_budget_tests;
 mod memory_inspection_tests;
+mod memory_report_tests;
 mod merge_checkpoint_fuzz_tests;
 mod merge_checkpoint_tests;
 mod merge_e_tests;

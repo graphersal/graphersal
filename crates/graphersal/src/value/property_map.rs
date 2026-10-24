@@ -490,6 +490,14 @@ impl PropertyMap {
         }
     }
 
+    /// The shape and the values of a `Shaped` map (the memory report aggregates by shape).
+    pub(crate) fn shaped_parts(&self) -> Option<(&Arc<Shape>, &[ElementProperty])> {
+        match &self.0 {
+            Repr::Indexed(_) => None,
+            Repr::Shaped(shaped) => Some((&shaped.shape, &shaped.values)),
+        }
+    }
+
     /// The shape of a `Shaped` map (tests).
     #[cfg(test)]
     pub(crate) fn shape(&self) -> Option<&Arc<Shape>> {

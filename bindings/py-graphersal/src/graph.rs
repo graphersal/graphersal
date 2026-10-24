@@ -1138,6 +1138,42 @@ impl Graph {
         self.run(py, &script, Some(&params), false, policy.as_deref())
     }
 
+    /// The memory report, like the DSL's ``g.memory_report(#{..})``: where the graph's memory
+    /// goes per label and top-level property, without changing the graph. A ``dict`` with
+    /// ``properties`` (one per element kind, label and path: ``elements``, ``value_types``,
+    /// ``bytes``, ``sizes``, ``strings``, ``vectors``, ...), ``labels``, ``shapes``,
+    /// ``indexes``, ``compression_rules``, ``structure``, ``property_bytes``,
+    /// ``estimated_total_bytes``, ``tracked_live_bytes``, ``sampled``, ... (book page "Memory
+    /// Usage"). ``max_elements``/``sample_every`` sample a large graph (figures extrapolated per
+    /// label), ``max_rows``/``max_labels`` keep the rows with the most bytes.
+    #[pyo3(signature = (*, sample_every=None, max_elements=None, max_rows=None, max_labels=None, policy=None))]
+    fn memory_report(
+        &self,
+        py: Python<'_>,
+        sample_every: Option<i64>,
+        max_elements: Option<i64>,
+        max_rows: Option<i64>,
+        max_labels: Option<i64>,
+        policy: Option<PyRef<'_, AccessPolicy>>,
+    ) -> PyResult<Py<PyAny>> {
+        let params = PyDict::new(py);
+        let mut fields = Vec::new();
+        for (key, value) in [
+            ("sample_every", sample_every),
+            ("max_elements", max_elements),
+            ("max_rows", max_rows),
+            ("max_labels", max_labels),
+        ] {
+            if let Some(value) = value {
+                let name = format!("mr_{key}");
+                params.set_item(name.as_str(), value)?;
+                fields.push(format!("{key}: {name}"));
+            }
+        }
+        let script = format!("g.memory_report(#{{{}}})", fields.join(", "));
+        self.run(py, &script, Some(&params), false, policy.as_deref())
+    }
+
     /// ``graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", *,
     /// transform=None, policy=None)``: declares (or replaces) a property index, like the DSL's
     /// ``g.create_index(#{..})``: the ``element``s labelled ``label``, ordered by their

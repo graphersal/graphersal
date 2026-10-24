@@ -111,6 +111,10 @@ const EXCLUDED_STEPS: &[&str] = &[
     "file_tree",
     "tinkerpop_modern",
     "empty",
+    // A report of the whole graph, not a step (like `memory_usage`); excluded rather than a
+    // terminal so that the pinned seeds keep generating the same scripts.
+    "memory_report",
+    "memoryReport",
 ];
 
 /// Steps that end a traversal (they return data, a rendering or a report, not a traversal): the
