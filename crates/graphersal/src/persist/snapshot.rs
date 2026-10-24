@@ -1216,6 +1216,16 @@ pub(crate) fn load_snapshot<S: PersistentStorage + ?Sized, R: Read>(
         .map_err(|err| err.at("schema.json", schema_at))?;
 
     graph.load_schema(schema)?;
+    // Allocate the slots once when the counts agree with the manifest's own memory estimate (a
+    // damaged manifest claiming billions of elements reserves nothing; the load then fails on
+    // the count check below).
+    let claimed_slots = fixed
+        .vertex_count
+        .saturating_add(fixed.edge_count)
+        .saturating_mul(64);
+    if claimed_slots <= fixed.memory_bytes {
+        graph.reserve_load(fixed.vertex_count, fixed.edge_count);
+    }
     let max_depth = options.max_value_depth;
     restore_definitions(graph, &manifest, max_depth)?;
 

@@ -62,7 +62,7 @@ pub(crate) const MIN_DEFAULT_HEADROOM: u64 = 64 * 1024 * 1024;
 const CGROUP_UNLIMITED_FROM: u64 = 1 << 62;
 
 /// The smallest size the estimate assumes for one element a run adds (an empty graph has no
-/// average to take): a petgraph slot, a handle generation and an index entry.
+/// average to take): a topology slot, a handle generation and an index entry.
 const MIN_ELEMENT_BYTES: u64 = 128;
 
 /// The default headroom `"auto"` keeps below a cgroup limit of `limit` bytes: a tenth of it, at

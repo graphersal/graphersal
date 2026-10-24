@@ -19,7 +19,7 @@
 //! Entries hold string ids and element images, never handles: an undone drop puts the element
 //! back into a (possibly different) slot with a new generation, so every handle taken before the
 //! drop stays stale (section 1a). Rolling back replays the entries in reverse order down to the
-//! unit's mark; each step restores the petgraph structure AND the id index, the label index (and
+//! unit's mark; each step restores the topology AND the id index, the label index (and
 //! with them the label counts). The auto-id sequences are NOT restored: an id once handed out is
 //! never reused, as with database sequences (gaps are fine). Because the replay is strictly
 //! reverse, the graph is in exactly the state right after the mutation being undone, so every id
@@ -34,8 +34,6 @@
 //! (drops), which the mutation already owns. Reads never touch the log.
 
 use compact_str::CompactString;
-use petgraph::Direction;
-use petgraph::visit::EdgeRef;
 
 use crate::error::GraphError;
 use crate::graph::change::{ChangeSet, CommitMetadata, CommitStamp};
@@ -44,6 +42,7 @@ use crate::graph::handle::EdgeGenerations;
 use crate::graph::hooks::{CommitHooks, RollbackReason};
 use crate::graph::schema::GraphSchema;
 use crate::graph::storage::UnitMark;
+use crate::graph::topology::Direction;
 use crate::graph::{EdgeHandle, EdgeIndex, TraversalGraph, VertexHandle};
 use crate::traversal::memory_budget::MemoryBudget;
 use crate::value::{ElementProperty, PropertyMap};
@@ -827,7 +826,7 @@ impl TraversalGraph {
     ) -> VertexHandle {
         // Every map that enters the graph shares its key list through the shape table.
         self.shapes.adopt(&mut properties);
-        // The slot petgraph fills is known only after `add_node`: insert with a placeholder
+        // The slot the topology fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
         let index = self.graph.add_node((
             id,
@@ -868,11 +867,16 @@ impl TraversalGraph {
             source: from.generation(),
             target: to.generation(),
         };
-        let edge_index = self.graph.add_edge(
+        let Some(edge_index) = self.graph.add_edge(
             from.index(),
             to.index(),
             (id, label.clone(), properties, generations),
-        );
+        ) else {
+            // Unreachable: every caller resolved both endpoints. A handle to no slot reads as
+            // removed, and nothing was stored.
+            tracing::error!("insert_edge_raw: an endpoint is not a live vertex");
+            return EdgeHandle::new(EdgeIndex::end(), crate::graph::handle::FIRST_GENERATION);
+        };
         // See `insert_vertex_raw`: the slot is known only now.
         generations.own = self.edge_generations.current(edge_index.index());
         let handle = EdgeHandle::new(edge_index, generations.own);
@@ -937,7 +941,7 @@ impl TraversalGraph {
     ) -> Option<UndoEntry> {
         let index = self.resolve_vertex(node)?;
         // The incident edges, each once: a self-loop shows up in both directions and is taken
-        // from the outgoing side only. Removed one by one (not by `StableGraph::remove_node`), so
+        // from the outgoing side only. Removed one by one (not by `Topology::remove_node`), so
         // their index entries go too and their images can be captured. Left behind, freed edge
         // slots would be reused by later edges and stale ids would resolve to a different edge.
         let mut incident: Vec<EdgeHandle> = Vec::new();

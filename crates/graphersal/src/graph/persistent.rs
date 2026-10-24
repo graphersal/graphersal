@@ -88,6 +88,13 @@ pub trait PersistentStorage: GraphStorage + Send + Sync + 'static {
     /// committed; a definition of an unknown kind stays opaque).
     fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError>;
 
+    /// Load sink: the load is about to store about `vertices` vertices and `edges` edges (the
+    /// counts of a snapshot's manifest, checked against its memory estimate but not trusted):
+    /// a storage may allocate for them at once. Default: nothing.
+    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+        let _ = (vertices, edges);
+    }
+
     /// Ends a load: derived state is built here ([`TraversalGraph`] runs its compression pass
     /// and shrinks its indexes). Default: nothing.
     fn finish_load(&mut self) {}
@@ -226,6 +233,11 @@ impl PersistentStorage for TraversalGraph {
     /// The compression load pass (the rules' dictionaries and compressed values), the build of
     /// every property index from the data (entries are never persisted), then
     /// [`TraversalGraph::shrink_to_fit`].
+    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+        let room = |n: u64| usize::try_from(n).unwrap_or(0);
+        self.graph.reserve_exact(room(vertices), room(edges));
+    }
+
     fn finish_load(&mut self) {
         self.compression_load_pass();
         self.property_index_rebuild_all();

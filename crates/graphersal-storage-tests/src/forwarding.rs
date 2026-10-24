@@ -450,6 +450,9 @@ impl graphersal::storage::PersistentStorage for Forwarding {
     fn load_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
         graphersal::storage::PersistentStorage::load_definition(&mut self.0, definition)
     }
+    fn reserve_load(&mut self, vertices: u64, edges: u64) {
+        graphersal::storage::PersistentStorage::reserve_load(&mut self.0, vertices, edges)
+    }
     fn finish_load(&mut self) {
         graphersal::storage::PersistentStorage::finish_load(&mut self.0)
     }

@@ -545,12 +545,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
-name = "fixedbitset"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
-
-[[package]]
 name = "floating-duration"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,7 +627,6 @@ dependencies = [
  "model2vec-rs",
  "ordered-float",
  "parking_lot",
- "petgraph",
  "quick-xml",
  "rand 0.8.8",
  "regex",
@@ -1150,18 +1143,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "petgraph"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
-dependencies = [
- "fixedbitset",
- "indexmap",
- "serde",
- "serde_derive",
-]
 
 [[package]]
 name = "pin-project-lite"

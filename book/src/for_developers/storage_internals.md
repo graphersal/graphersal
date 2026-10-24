@@ -8,6 +8,26 @@ representation. A [custom storage](custom_storage.md) is not affected by anythin
 user sees of it (`memory_usage()`, `shape_bytes`, the advice about property order) is on
 [Memory Inspection](../users_guide/memory_and_profiling.md#how-property-memory-works).
 
+## Slots and adjacency
+
+Vertices and edges live in two vectors of slots (`graph/topology.rs`, an own store that replaced
+petgraph's `StableGraph` and keeps its behaviour). A slot index never changes while the element
+lives: a removed element leaves its slot vacant, and the next insertion of that kind reuses the
+most recently freed slot first, else appends. `g.V()` and `g.E()` walk the slots in order, which is
+why their order is stable but not insertion order after removals.
+
+Each edge slot holds its source and target and two links: the next edge of the source's outgoing
+list and the next edge of the target's incoming list. A vertex slot holds the heads of its two
+lists. A new edge goes to the front of both lists, so `out()`/`in()` see the newest edge first; a
+self-loop is in both lists of its vertex. Removing an edge unlinks it from both lists; removing a
+vertex removes its edges first.
+
+The vectors grow by doubling, so a graph built element by element can carry up to half its slots
+as spare capacity. A snapshot load reserves the slots from the manifest's counts, and every load
+(snapshot, Store, GraphSON, GraphML) ends with `shrink_to_fit`, which releases the spare capacity
+(vacant slots stay: indices are stable). The memory report shows `live`, `tombstoned` (vacant) and
+`spare` slots per kind.
+
 ## Property maps: `Indexed` and `Shaped`
 
 `PropertyMap` is a newtype over a crate-internal `Repr` with two variants:
@@ -121,7 +141,7 @@ The invariant that makes this sound, kept by the raw insert and remove helpers o
 
 An entry is inserted after its slot's generation is patched and removed by handle right after the
 element left the graph. Cloning the index together with the graph keeps it valid, since a
-`StableGraph` clone keeps every slot. Nothing iterates the ID index; it serves point lookups only,
+topology clone keeps every slot. Nothing iterates the ID index; it serves point lookups only,
 so it keeps no insertion order.
 
 ## Measured effect

@@ -17,7 +17,7 @@
 /// own `.capacity()` where available.
 ///
 /// `#[non_exhaustive]`: these three fields are, honestly, modeled on [`crate::TraversalGraph`]'s
-/// specific internals (a petgraph `StableGraph` plus a `GraphIndex` plus inline `PropertyMap`
+/// specific internals (a slot topology plus a `GraphIndex` plus inline `PropertyMap`
 /// properties). A genuinely different [`crate::graph::GraphStorage`] backend's memory model might
 /// not map onto exactly these three buckets — it may have no separate "index" at all, or an
 /// entirely different structure. This is not a settled, backend-agnostic taxonomy; `#[non_exhaustive]`
@@ -28,25 +28,14 @@
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct MemoryStats {
-    /// Vertex and edge storage: an estimate of the underlying petgraph `StableGraph`'s retained
-    /// slot capacity (node/edge count times each slot's approximate size), **not** just
-    /// `vertex_count() * size_of::<VertexData>()`.
+    /// Vertex and edge storage: the slot vectors of the graph's topology (their allocated
+    /// capacity times the slot size, so vacant slots of removed elements and spare capacity
+    /// count), plus each element's id and label heap and the handle generation arrays.
     ///
-    /// **Known, documented undercount risk:** `StableGraph` never releases a removed vertex/edge's
-    /// slot — it tombstones it to keep other indices stable — so a live-count-based estimate could
-    /// be arbitrarily smaller than the graph's actual retained slot count on a graph with heavy
-    /// add/remove churn. This field instead uses `StableGraph::capacity()`, which reports the
-    /// underlying `Vec`s' raw capacity (including tombstoned slots), specifically to avoid that
-    /// undercount. It is still an approximation: petgraph's internal `Node`/`Edge` wrapper types
-    /// (`petgraph::graph::Node<N>`/`Edge<E>`) carry bookkeeping beyond the payload (edge-list
-    /// links, endpoint indices) which this field's per-slot size accounts for via
-    /// `size_of::<petgraph::graph::Node<Option<VertexData>>>()`/`Edge<..>`, since those wrapper
-    /// types are public even though their private fields aren't. [`crate::TraversalGraph::shrink_to_fit`]
-    /// today only shrinks the index (see [`Self::index_bytes`]); it does nothing to reclaim
-    /// `StableGraph`'s tombstoned slots, so a heavily-churned graph should not treat this field as
-    /// tight — no operation currently exists to reclaim that space (a future
-    /// `TraversalGraph::compact()` rebuilding the underlying graph is a plausible follow-up, not
-    /// built here).
+    /// A removed vertex or edge leaves its slot vacant (other indices stay stable) until a later
+    /// insertion reuses it; [`crate::TraversalGraph::shrink_to_fit`] (also run at the end of
+    /// every load) releases the spare capacity above the last slot, not vacant slots. The
+    /// memory report splits the slots into live, vacant (`tombstoned`) and spare.
     pub structure_bytes: u64,
     /// The label index (`node_labels`/`edge_labels`) and the ID index (`nodes`/`edges`) in
     /// `GraphIndex`. The ID index stores no ids (they live once, in the element): each of its two
@@ -149,19 +138,18 @@ impl MemoryStats {
 /// `graph/storage.rs`'s `impl GraphStorage for TraversalGraph`, purely to keep that file's trait
 /// impl list uncluttered.
 ///
-/// `structure_bytes` uses `StableGraph::capacity()` — the underlying node/edge `Vec`s' raw
+/// `structure_bytes` uses the topology's capacity — the underlying node/edge `Vec`s' raw
 /// capacity, which includes tombstoned (removed-but-not-reclaimed) slots — rather than
 /// `node_count()`/`edge_count()`, specifically to avoid undercounting a graph with heavy
 /// add/remove churn; see [`MemoryStats::structure_bytes`]'s doc comment for the full reasoning.
 /// Each vertex's primary label and multi-label set are counted here too (structural data, not a
 /// property), while `property_bytes` walks only each element's `PropertyMap`.
 pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
-    use super::{EdgeData, VertexData};
     use crate::value::compact_string_heap_bytes as string_heap;
 
     let (node_cap, edge_cap) = graph.graph.capacity();
-    let node_slot_size = std::mem::size_of::<petgraph::graph::Node<Option<VertexData>>>() as u64;
-    let edge_slot_size = std::mem::size_of::<petgraph::graph::Edge<Option<EdgeData>>>() as u64;
+    let node_slot_size = super::GraphType::node_slot_bytes() as u64;
+    let edge_slot_size = super::GraphType::edge_slot_bytes() as u64;
     let mut structure_bytes = node_cap as u64 * node_slot_size + edge_cap as u64 * edge_slot_size;
 
     let mut property_bytes = 0u64;
@@ -217,33 +205,24 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
 }
 
 /// The structure part of the memory report for a [`crate::TraversalGraph`]: the totals of
-/// [`compute`], the slots (live; tombstoned: vacant below the slot bound, which petgraph computes
-/// as the highest live slot + 1; spare: allocated above it), the id and label indexes and the
-/// shape table.
+/// [`compute`], the slots (live; tombstoned: vacant slots of removed elements; spare: allocated,
+/// never used), the id and label indexes and the shape table.
 pub(crate) fn structure(graph: &super::TraversalGraph) -> super::StructureMemory {
     use super::memory_report::SlotUsage;
-    use super::{EdgeData, VertexData};
-    use petgraph::visit::{EdgeIndexable, NodeIndexable};
     let (node_cap, edge_cap) = graph.graph.capacity();
-    let slots = |live: usize, bound: usize, capacity: usize, slot: usize| {
-        SlotUsage::new(
-            live as u64,
-            bound.saturating_sub(live) as u64,
-            capacity.saturating_sub(bound) as u64,
-            slot as u64,
-        )
-    };
-    let vertices = slots(
-        graph.graph.node_count(),
-        NodeIndexable::node_bound(&graph.graph),
-        node_cap,
-        std::mem::size_of::<petgraph::graph::Node<Option<VertexData>>>(),
+    let (nodes, edges) = (graph.graph.node_count(), graph.graph.edge_count());
+    let (vacant_nodes, vacant_edges) = (graph.graph.vacant_nodes(), graph.graph.vacant_edges());
+    let vertices = SlotUsage::new(
+        nodes as u64,
+        vacant_nodes as u64,
+        node_cap.saturating_sub(nodes + vacant_nodes) as u64,
+        super::GraphType::node_slot_bytes() as u64,
     );
-    let edges = slots(
-        graph.graph.edge_count(),
-        EdgeIndexable::edge_bound(&graph.graph),
-        edge_cap,
-        std::mem::size_of::<petgraph::graph::Edge<Option<EdgeData>>>(),
+    let edges = SlotUsage::new(
+        edges as u64,
+        vacant_edges as u64,
+        edge_cap.saturating_sub(edges + vacant_edges) as u64,
+        super::GraphType::edge_slot_bytes() as u64,
     );
     let id_index = graph.index.id_index_heap_bytes();
     let label_index = graph.index.estimated_heap_bytes().saturating_sub(id_index);
@@ -303,7 +282,7 @@ pub(crate) fn loaded_vertex_bytes(
     use crate::value::compact_string_heap_bytes;
     use compact_str::CompactString;
     use std::mem::size_of;
-    let slot = size_of::<petgraph::graph::Node<Option<super::VertexData>>>() as u64;
+    let slot = super::GraphType::node_slot_bytes() as u64;
     let mut bytes = slot
         + super::index::id_entry_bytes::<super::VertexHandle>()
         + compact_string_heap_bytes(id);
@@ -334,7 +313,7 @@ pub(crate) fn loaded_edge_bytes(
 ) -> u64 {
     use compact_str::CompactString;
     use std::mem::size_of;
-    let slot = size_of::<petgraph::graph::Edge<Option<super::EdgeData>>>() as u64;
+    let slot = super::GraphType::edge_slot_bytes() as u64;
     let heap = |text: &str| -> u64 {
         // A `CompactString` keeps up to its own size inline (24 bytes on 64-bit targets).
         if text.len() > size_of::<CompactString>() {

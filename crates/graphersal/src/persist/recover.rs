@@ -480,6 +480,11 @@ fn replay_journals<'a, S: PersistentStorage + ?Sized>(
             }
             _ => {}
         }
+        // The replayed elements grew the slot vectors past the snapshot's exact reservation:
+        // release the spare capacity, as the end of a load does.
+        if report.commits_replayed > 0 {
+            graph.shrink_to_fit();
+        }
         Ok(report)
     }
 }

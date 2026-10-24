@@ -60,7 +60,6 @@ graphersal-session = { path = "crates/graphersal-session", version = "0.2.3" }
 graphersal-storage-tests = { path = "crates/graphersal-storage-tests", version = "0.2.3" }
 
 # Core Graph & Algorithms
-petgraph = { version = "0.6.5", features = ["serde-1"] }
 compact_str = { version = "0.10", features = ["serde"] }
 indexmap = { version = "2.5", features = ["serde"] }
 fnv = "1.0"

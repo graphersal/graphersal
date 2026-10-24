@@ -1,6 +1,5 @@
+use crate::graph::topology::Direction;
 use compact_str::CompactString;
-use petgraph::Direction;
-use petgraph::visit::{EdgeRef, IntoEdgeReferences, IntoNodeReferences};
 use std::sync::Arc;
 
 use crate::error::GraphError;
@@ -1685,7 +1684,7 @@ impl GraphStorage for TraversalGraph {
         to: VertexHandle,
         mut properties: PropertyMap,
     ) -> Result<EdgeHandle, GraphError> {
-        // Both endpoints must be live vertices: petgraph panics on a removed index, and a stale
+        // Both endpoints must be live vertices: the topology refuses a removed index, and a stale
         // handle must be an error, never a panic, and never reach the vertex that reuses its slot.
         let (Some(source), Some(target)) = (self.vertex_weight(from), self.vertex_weight(to))
         else {
