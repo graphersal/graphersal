@@ -13,9 +13,11 @@
 // condition also keeps the `type` its key had when chosen, so a stored filter applies after a
 // reload before the schema is inferred again (inference runs only when the drawer opens).
 //
-// The engine's filter lists the visible labels (an unlisted label is hidden, an absent field shows
-// every label): a field without hidden labels and without conditions is left out, so the
-// unfiltered case costs nothing.
+// The panel sends the engine's "others visible" form (`buildFilter(.., {othersVisible: true})`):
+// the hidden labels by name, conditions where there are any, every other label visible, so a label
+// beyond the statistics' list (they name only the largest) is never hidden by accident. Without the
+// option the allow-list form is built (the visible labels listed, the others hidden). A side
+// without hidden labels and without conditions is left out, so the unfiltered case costs nothing.
 
 /** Timing and size thresholds of the filter drawer. */
 export const FILTER_TUNING = Object.freeze({
@@ -218,11 +220,45 @@ export function keyType(types, kind, label, cond) {
 
 const FIELDS = Object.freeze([['vertices', 'vertex'], ['edges', 'edge']]);
 
+/** The "others visible" form's field names per side. */
+const OTHER_FIELDS = Object.freeze({
+  vertices: Object.freeze({ other: 'otherVertices', hidden: 'hiddenVertices' }),
+  edges: Object.freeze({ other: 'otherEdges', hidden: 'hiddenEdges' }),
+});
+
+/**
+ * The engine conditions of `label` on `side` (complete ones, converted by key type); wrong values
+ * go to `problems`, the UI rows of the sent ones to `sent["<field>.<label>"]`.
+ */
+function sendConditions(side, field, kind, label, types, problems, sent) {
+  const list = [];
+  const indices = [];
+  ((side.conds || {})[label] || []).forEach((cond, index) => {
+    if (!cond.key) return;
+    const type = keyType(types, kind, label, cond);
+    const v = conditionValue(cond, type);
+    if (v.error) {
+      problems.push({ field, label, index, message: v.error });
+      return;
+    }
+    if (v.incomplete) return;
+    const c = { key: cond.key, op: cond.op };
+    if ('value' in v) c.value = v.value;
+    list.push(c);
+    indices.push(index);
+  });
+  if (list.length) sent[`${field}.${label}`] = indices;
+  return list;
+}
+
 /**
  * The engine filter of filter state `model` over the known labels.
  * @param {Object} model  The filter state.
- * @param {{vertexLabels?: string[], edgeLabels?: string[], types?: {vertex: Object, edge: Object}}} known
- *   The labels of the graph (statistics) and the key types (`keyTypesOf`).
+ * @param {{vertexLabels?: string[], edgeLabels?: string[], types?: {vertex: Object, edge: Object}, othersVisible?: boolean}} known
+ *   The labels of the graph (statistics) and the key types (`keyTypesOf`). `othersVisible`: build
+ *   the engine's "others visible" form (`otherVertices: 'visible'`, `hiddenVertices: [..]`, the
+ *   conditioned labels in `vertices`; the same for edges), which does not depend on the label
+ *   list (the badge still counts only hidden labels of the list); else the allow-list form.
  * @returns {{spec: Object|null, count: number, problems: Array<{field, label, index, message}>,
  *   sent: Object<string, number[]>}} `spec`: the GraphFilter (null: nothing is filtered; it is
  *   built whether or not the state is enabled); `count`: the active restrictions (hidden labels +
@@ -246,28 +282,32 @@ export function buildFilter(model, known = {}) {
     let restricted = hidden.length > 0;
     count += hidden.length;
     const map = {};
+    if (known.othersVisible) {
+      // The "others visible" form: hidden labels by name, conditions only where there are any,
+      // every other label visible (also those the statistics do not list).
+      const conditioned = [...new Set([...labels, ...Object.keys(side.conds || {})])];
+      for (const label of conditioned) {
+        if (off.has(label)) continue;
+        const list = sendConditions(side, field, kind, label, types, problems, sent);
+        if (list.length) {
+          count += list.length;
+          map[label] = list;
+        }
+      }
+      const names = OTHER_FIELDS[field];
+      if (off.size || Object.keys(map).length) {
+        spec[names.other] = 'visible';
+        if (off.size) spec[names.hidden] = [...off];
+        if (Object.keys(map).length) spec[field] = map;
+      }
+      continue;
+    }
     for (const label of labels) {
       if (off.has(label)) continue;
-      const list = [];
-      const indices = [];
-      ((side.conds || {})[label] || []).forEach((cond, index) => {
-        if (!cond.key) return;
-        const type = keyType(types, kind, label, cond);
-        const v = conditionValue(cond, type);
-        if (v.error) {
-          problems.push({ field, label, index, message: v.error });
-          return;
-        }
-        if (v.incomplete) return;
-        const c = { key: cond.key, op: cond.op };
-        if ('value' in v) c.value = v.value;
-        list.push(c);
-        indices.push(index);
-      });
+      const list = sendConditions(side, field, kind, label, types, problems, sent);
       if (list.length) {
         restricted = true;
         count += list.length;
-        sent[`${field}.${label}`] = indices;
       }
       map[label] = list;
     }
@@ -355,10 +395,20 @@ export function createApplyQueue(run, { onResult = () => {}, onError = () => {} 
   };
 }
 
-/** Whether `label` of `field` ('vertices' | 'edges') is visible under GraphFilter `spec`. */
+/**
+ * Whether `label` of `field` ('vertices' | 'edges') is visible under GraphFilter `spec` (either
+ * form: hidden by name, listed, or visible as one of the others).
+ */
 export function labelVisible(spec, field, label) {
-  if (!spec || !spec[field]) return true;
-  return Object.prototype.hasOwnProperty.call(spec[field], label);
+  if (!spec) return true;
+  const names = OTHER_FIELDS[field];
+  if (names && Array.isArray(spec[names.hidden]) && spec[names.hidden].includes(label)) return false;
+  const listed = !!spec[field] && Object.prototype.hasOwnProperty.call(spec[field], label);
+  if (listed) return true;
+  const other = names && spec[names.other];
+  if (other === 'visible') return true;
+  if (other === 'hidden') return false;
+  return !spec[field];
 }
 
 /**
@@ -422,7 +472,8 @@ const SCOPE_NAMES = Object.freeze({ neighbourhood: 'the neighbourhood', result: 
 /**
  * The "Filtered: ..." strip above the drawing for `view` (with `matchedNodes`/`matchedEdges`), or
  * null when the view is not filtered. `scope`: 'graph' (X of the graph's totals), 'neighbourhood',
- * 'result' or 'sample' (what is left of that drawing; `before` = `{vertices, edges}` it had).
+ * 'result' or 'sample' (what is left of that drawing; `before` = `{vertices, edges}` it had; a
+ * neighbourhood's own `unfiltered` counts serve when `before` is not given).
  */
 export function filteredText(view, scope = 'graph', before = null) {
   if (!view || !Number.isFinite(view.matchedNodes)) return null;
@@ -432,6 +483,9 @@ export function filteredText(view, scope = 'graph', before = null) {
   const e = (k) => (k === 1 ? 'edge' : 'edges');
   if (scope === 'graph') {
     return `Filtered: ${fmt(x)} of ${fmt(view.totalNodes)} ${v(view.totalNodes)}, ${fmt(a)} of ${fmt(view.totalEdges)} ${e(view.totalEdges)}`;
+  }
+  if (!before && view.unfiltered && Number.isFinite(view.unfiltered.nodes)) {
+    before = { vertices: view.unfiltered.nodes, edges: view.unfiltered.edges };
   }
   if (before) {
     return `Filtered: ${fmt(x)} of ${fmt(before.vertices)} ${v(before.vertices)}, ${fmt(a)} of ${fmt(before.edges)} ${e(before.edges)} of ${SCOPE_NAMES[scope] || SCOPE_NAMES.neighbourhood}`;

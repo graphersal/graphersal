@@ -355,8 +355,9 @@ impl Playground {
     /// The neighbourhood of vertices for the Graph panel: `request` is JSON `{ids, hops?,
     /// direction?, keep?, maxNodes?, maxEdges?}` (`hops` the depth, at most 5; `direction`
     /// `both`, `out` or `in`); answers the drawing's columns plus `seeds`, `missing`,
-    /// `hiddenEdges` and, when the limits cut it, `leftOut: {vertices, edges, complete}`
-    /// (graphersal-session `selection::SelectionView`). An unknown id or a
+    /// `hiddenEdges`, when the limits cut it `leftOut: {vertices, edges, complete}` and with a
+    /// `filter` `unfiltered: {nodes, edges, vertexIds}` (graphersal-session
+    /// `selection::SelectionView`). An unknown id or a
     /// malformed request throws.
     pub fn neighbourhood(&self, request: &str) -> Result<String, JsError> {
         self.session

@@ -268,8 +268,11 @@ drawn. It lists the graph's vertex and edge labels with their counts: uncheck a 
 (**all** / **none** check or uncheck every label of that side). **+ condition** under a label adds
 a condition on one of its properties, such as `age > 30` or `name contains "an"`; several
 conditions of one label must all hold, and an element is drawn when its label is checked and its
-conditions hold. A hidden vertex hides its edges; **Hide vertices without visible edges** hides
-vertices left alone as well.
+conditions hold. Every label you do not touch stays visible, including labels the drawer does not
+list (on a graph with very many labels it lists only the largest ones). A vertex with several
+labels is drawn when none of its labels is unchecked and the conditions of each of its labels
+hold. A hidden vertex hides its edges; **Hide vertices without visible edges** hides vertices
+left alone as well.
 
 - The operators depend on the property's type, which comes from the schema (the stored one, or
   the schema inferred from the data when the drawer opens): numbers and dates offer `=`, `≠`, `<`,
@@ -283,14 +286,17 @@ vertices left alone as well.
 - A condition the engine refuses (a bad regular expression, a value the schema cannot convert)
   is marked in red at that condition; the drawing keeps showing the last filter that worked.
 - While a filter is on, a strip above the drawing says what passes, for example
-  `Filtered: 3 of 6 vertices, 1 of 6 edges`. **Clear** there, and the switch next to the Filter
+  `Filtered: 3 of 6 vertices, 1 of 6 edges` (for a neighbourhood: of the vertices and edges it
+  holds without the filter). **Clear** there, and the switch next to the Filter
   button or in the drawer's header, turn the filter off without deleting it (the button then shows
   `· off`); the same switch turns it on again. **Reset** in the drawer deletes it.
 - **Open as query** opens a new query tab with the query that selects what the filter shows.
 - The filter applies to the **Whole graph** (the engine filters first and then draws up to the
   limits, so a filter makes a large graph drawable) and to the **Neighbourhood**. A **Query
   result** and a label sample carry no properties, so they are filtered by label only, and the
-  **Labels** overview draws hidden labels faded.
+  **Labels** overview draws hidden labels faded. A neighbourhood keeps every vertex you expanded
+  into when the filter changes: vertices it hid come back when they pass the new filter, and the
+  count of edges leading out of the drawing counts only edges to vertices the filter shows.
 - The filter, including whether it is on, is kept per graph in the browser.
 - A graph with very many labels lists the largest ones (the drawer says so); while a label is
   hidden or has a condition, the labels not listed are hidden too.

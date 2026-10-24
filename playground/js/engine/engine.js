@@ -198,12 +198,23 @@
  * What the Graph panel draws (applied by the engine BEFORE the maxNodes/maxEdges cut; omit the
  * filter to draw everything). Errors (unknown op, wrong value shape, bad regex, a value the
  * schema cannot coerce) reject with a message naming `vertices.<label>[i] (key "k", op "o")`.
- * @property {Object<string, GraphFilterCondition[]>|null} [vertices]  label -> conditions. A
- *   listed label is visible, an unlisted one hidden; absent/null: every label, no conditions.
- *   One label's conditions are AND, labels are OR; a vertex with several labels is shown when
- *   any of its labels is listed and that label's conditions hold.
- * @property {Object<string, GraphFilterCondition[]>|null} [edges]  The same for edge labels. A
- *   hidden vertex always hides its edges.
+ * @property {Object<string, GraphFilterCondition[]>|null} [vertices]  label -> conditions (one
+ *   label's conditions are AND). What an UNLISTED label does is `otherVertices`.
+ * @property {'visible'|'hidden'} [otherVertices]  Default 'hidden' when `vertices` is given,
+ *   'visible' when it is absent/null (no field at all: every label, no conditions).
+ *   'hidden' (allow list): a listed label is visible, an unlisted one hidden; labels are OR, a
+ *   vertex with several labels is shown when any of its labels is listed with conditions that
+ *   hold. 'visible' (restrictions): every label is visible unless `hiddenVertices` names it; a
+ *   listed label's conditions restrict the vertices carrying it (a label listed without
+ *   conditions restricts nothing); a vertex with several labels is shown when none of them is
+ *   hidden and the conditions of every listed one hold. The engine never enumerates the
+ *   graph's labels for this form (one scan of the elements), so it covers labels the
+ *   statistics do not list.
+ * @property {string[]} [hiddenVertices]  Labels hidden in either form (wins over a listing).
+ * @property {Object<string, GraphFilterCondition[]>|null} [edges]  The same for edge labels,
+ *   with `otherEdges` and `hiddenEdges`. A hidden vertex always hides its edges.
+ * @property {'visible'|'hidden'} [otherEdges]
+ * @property {string[]} [hiddenEdges]
  * @property {boolean} [hideIsolated=false]  Also hide vertices left without a visible edge.
  */
 
@@ -213,7 +224,12 @@
  * count the whole graph, plus:
  * @property {number[]} seeds        Indices of the vertices the request started from.
  * @property {string[]} missing      Requested ids that name no vertex (any more).
- * @property {number} hiddenEdges    Edges from drawn vertices to vertices not drawn.
+ * @property {number} hiddenEdges    Edges from drawn vertices to vertices not drawn (with a
+ *   filter: only edges the filter shows, to vertices the filter shows).
+ * @property {{nodes:number, edges:number, vertexIds:string[]}} [unfiltered]  A filtered
+ *   neighbourhood before its filter (after the limits): the strip's "X of Y" and the vertex set
+ *   to keep (`{ids: [], keep: vertexIds, hops: 0}`) when the filter changes or a vertex is
+ *   expanded, so vertices the filter hid come back.
  * @property {{vertices:number, edges:number, complete:boolean}} [leftOut]  A neighbourhood the
  *   limits cut: vertices within the depth and edges between drawn vertices that are not drawn.
  * @property {{kind:'vertices'|'edges', shown:number, total:number, complete:boolean}} [sample]
@@ -401,7 +417,8 @@ export class Engine {
    * Elements to draw for the whole graph, at most `limits.maxNodes` vertices (the first ones)
    * and the edges between them (at most `limits.maxEdges`), as columns without properties.
    * With `filter`, the engine applies it first and then cuts (the first `maxNodes` VISIBLE
-   * vertices, labels in name order; `matchedNodes`/`matchedEdges` count all that pass).
+   * vertices: in storage order, or labels in name order for the allow-list form;
+   * `matchedNodes`/`matchedEdges` count all that pass).
    * `limits.degrees: true` adds `vertexInDegree`/`vertexOutDegree`. Without filter and degrees
    * it costs what it always did. Rejects for an invalid filter.
    * @param {{maxNodes?:number, maxEdges?:number, degrees?:boolean}} [limits]
@@ -424,10 +441,10 @@ export class Engine {
    * 'in') of the centre `ids`, plus the vertices `keep` (a drawing being expanded), and the edges
    * between them; bounded by `maxNodes` / `maxEdges` (`leftOut: {vertices, edges, complete}`
    * says what the limits cut). Rejects for an unknown id or a depth above 5. `filter` is a
-   * DISPLAY filter: the neighbourhood is computed as without it (limits, `leftOut`,
-   * `hiddenEdges` unchanged), then hidden vertices/edges are dropped (`matchedNodes`/
-   * `matchedEdges` = what is left; a hidden centre vertex is dropped too). `degrees: true` adds
-   * the degree columns.
+   * DISPLAY filter: the neighbourhood is computed as without it (limits and `leftOut`
+   * unchanged), then hidden vertices/edges are dropped (`matchedNodes`/`matchedEdges` = what is
+   * left, `unfiltered` = what there was; a hidden centre vertex is dropped too; `hiddenEdges`
+   * counts what the filter shows). `degrees: true` adds the degree columns.
    * @param {{ids:string[], hops?:number, direction?:string, keep?:string[], maxNodes?:number, maxEdges?:number, degrees?:boolean}} request
    * @param {GraphFilter|null} [filter]
    * @returns {Promise<SelectionView>}

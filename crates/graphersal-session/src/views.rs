@@ -182,8 +182,8 @@ pub struct GraphViewRequest {
 }
 
 /// [`graph_view`] for a request: without a filter exactly [`graph_view`] (no extra work), with
-/// one the filter applied BEFORE the limits: the first `maxNodes` visible vertices (labels in
-/// name order, each in the engine's order; the storage order without a vertex filter) and the
+/// one the filter applied BEFORE the limits: the first `maxNodes` visible vertices (allow-list
+/// form: labels in name order, each in the engine's order; otherwise the storage order) and the
 /// visible edges between them (at most `maxEdges`), with `matchedNodes` / `matchedEdges` (every
 /// element that passes, counted exactly) next to the totals. An invalid filter is an error.
 pub fn graph_view_request<S: GraphStorage>(

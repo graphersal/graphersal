@@ -195,13 +195,39 @@ export function neighbourhoodRequest(ids, hops, limits, direction = 'both') {
   return { ids: ids.map(String), hops, direction: normalizeDirection(direction), maxNodes: limits.maxNodes, maxEdges: limits.maxEdges };
 }
 
-/** The request that expands vertex `index` of `view` by one hop along `direction`, keeping everything drawn. */
+/**
+ * The vertex ids of a neighbourhood drawing as the engine selected them: before a filter
+ * (`view.unfiltered.vertexIds` of a filtered answer), else the drawn ones. Kept by expansions and
+ * redraws, so vertices a filter hides come back when it changes.
+ */
+export function neighbourhoodIds(view) {
+  if (!view) return [];
+  const all = view.unfiltered && Array.isArray(view.unfiltered.vertexIds) ? view.unfiltered.vertexIds : view.vertexIds;
+  return Array.from(all, String);
+}
+
+/** The request that expands vertex `index` of `view` by one hop along `direction`, keeping everything drawn (before a filter). */
 export function expandRequest(view, index, limits, direction = 'both') {
   return {
     ids: [String(view.vertexIds[index])],
     hops: 1,
     direction: normalizeDirection(direction),
-    keep: Array.from(view.vertexIds, String),
+    keep: neighbourhoodIds(view),
+    maxNodes: limits.maxNodes,
+    maxEdges: limits.maxEdges,
+  };
+}
+
+/**
+ * The request that draws the same neighbourhood again (a filter change, a graph change): every
+ * vertex it held before any filter (`neighbourhoodIds`, so all expansions stay) at depth 0, the
+ * centre `ids` first named again so it stays the seed.
+ */
+export function redrawRequest(view, ids, limits) {
+  return {
+    ids: (ids || []).map(String),
+    hops: 0,
+    keep: neighbourhoodIds(view),
     maxNodes: limits.maxNodes,
     maxEdges: limits.maxEdges,
   };

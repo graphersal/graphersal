@@ -228,6 +228,46 @@ fn graph_view_filter_and_degrees() {
     );
 }
 
+/// The filter's "others visible" form over HTTP: hidden labels by name, every other label visible
+/// (`matchedNodes` covers labels no list names), the neighbourhood's `unfiltered` counts and ids,
+/// its query text.
+#[test]
+fn graph_filter_with_hidden_labels_and_neighbourhood_counts() {
+    let ui = ui_dir("graph-filter-others");
+    let server = start(&["--graph", "modern", "--ui-dir", ui.to_str().unwrap()]);
+    let port = server.port;
+    let filter = serde_json::json!({"otherVertices": "visible", "hiddenVertices": ["software"],
+        "vertices": {"person": [{"key": "age", "op": "gt", "value": 30}]}});
+    let body = serde_json::json!({"maxNodes": 100, "filter": filter});
+    let answer = post(port, "/api/graph-view", &body.to_string());
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let view = answer.json();
+    assert_eq!(view["matchedNodes"], 2, "{view}");
+    assert_eq!(view["totalNodes"], 6);
+
+    let request = serde_json::json!({"ids": ["1"], "hops": 1,
+        "filter": {"otherVertices": "visible", "hiddenVertices": ["software"]}});
+    let n = post(port, "/api/neighbourhood", &request.to_string()).json();
+    assert_eq!(n["matchedNodes"], 3, "{n}");
+    assert_eq!(n["unfiltered"]["nodes"], 4);
+    assert_eq!(n["unfiltered"]["edges"], 4);
+    assert_eq!(n["unfiltered"]["vertexIds"].as_array().unwrap().len(), 4);
+    assert_eq!(n["hiddenEdges"], 0);
+
+    let q = post(port, "/api/graph-filter-query", &filter.to_string());
+    assert_eq!(q.status, 200, "{}", q.body);
+    let text = q.json()["query"].as_str().unwrap().to_string();
+    assert!(text.contains(r#"not(__.has_label("software"))"#), "{text}");
+    let r = execute(port, &text.replace(".to_list()", ".id().to_list()"));
+    assert_eq!(
+        r["execution"]["results"][0]["vertices"],
+        serde_json::json!(["4", "6"]),
+        "{r}"
+    );
+    let bad = serde_json::json!({"filter": {"otherVertices": "maybe"}});
+    assert_eq!(post(port, "/api/graph-view", &bad.to_string()).status, 422);
+}
+
 #[test]
 fn graph_view_is_columnar_and_element_fetches_the_properties() {
     let ui = ui_dir("graph-view");

@@ -150,9 +150,9 @@ export const GraphFilterDrawer = {
             <span class="fd-all"><a href="#" @click.prevent="all(side.field, true)">all</a> · <a href="#" @click.prevent="all(side.field, false)">none</a></span>
           </div>
           <div v-if="!rows[side.field].length && !loading" class="faint fd-empty">No {{ side.field === 'vertices' ? 'vertex' : 'edge' }} labels.</div>
-          <div v-if="(side.field === 'vertices' ? vertexLabelTotal : edgeLabelTotal) > rows[side.field].length && rows[side.field].length" class="notice fd-partial">
+          <div v-if="(side.field === 'vertices' ? vertexLabelTotal : edgeLabelTotal) > rows[side.field].length && rows[side.field].length" class="faint fd-partial">
             The graph has {{ fmt(side.field === 'vertices' ? vertexLabelTotal : edgeLabelTotal) }} {{ side.field === 'vertices' ? 'vertex' : 'edge' }} labels;
-            the {{ fmt(rows[side.field].length) }} largest are listed. While a label here is hidden or has a condition, the labels not listed are hidden.</div>
+            the {{ fmt(rows[side.field].length) }} largest are listed. The labels not listed stay visible.</div>
           <div v-for="row in rows[side.field]" :key="row.label" class="fd-label" :class="{ off: !row.on }">
             <label class="fd-label-line">
               <input type="checkbox" :checked="row.on" @change="setOn(side.field, row.label, $event.target.checked)">

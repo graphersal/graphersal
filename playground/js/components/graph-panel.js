@@ -52,7 +52,7 @@ import {
 } from '../graph/tiers.js';
 import {
   VIEW_SOURCES, SELECTION_TUNING, DIRECTIONS, normalizeSource, normalizeDirection, normalizeDepth, wholeGraphPlan, metaGraphDrawing, metaNotice, sampleRequestFor,
-  neighbourhoodRequest, expandRequest, carryPositions, selectionNotice, resultNotice,
+  neighbourhoodRequest, expandRequest, redrawRequest, neighbourhoodIds, carryPositions, selectionNotice, resultNotice,
 } from '../graph/selection.js';
 import { editModeState, applyEdit } from '../graph/edit-mode.js';
 import { resultHighlight, createDismissals } from '../graph/highlight.js';
@@ -118,13 +118,15 @@ export const GraphPanel = {
       vertexLabels: vocab.value.vertexLabels.map((l) => l.label),
       edgeLabels: vocab.value.edgeLabels.map((l) => l.label),
       types: vocab.value.types,
+      othersVisible: true, // hidden labels by name: labels beyond the statistics' list stay visible
     }));
     const wanted = computed(() => activeSpec(fstate.value, built.value));
     const applied = ref(null);
     let appliedBuilt = null;
     const filterError = ref(null); // {message, target: {field, label, index}|null}
-    // A stored filter with restrictions needs the label list before the first drawing (the spec
-    // lists the visible labels): drawings wait until `filterSettled`.
+    // A stored filter with restrictions is applied once the labels and key types are read (the
+    // badge and the drawer need them; the spec itself names only hidden labels and conditions):
+    // drawings wait until `filterSettled`.
     const needsLabels = (m) => !!m && m.enabled && (m.hideIsolated || (m.vertices.off.length + m.edges.off.length) > 0
       || Object.keys(m.vertices.conds).length + Object.keys(m.edges.conds).length > 0);
     const filterSettled = ref(!needsLabels(fstate.value));
@@ -351,7 +353,7 @@ export const GraphPanel = {
       const cur = nb.value;
       if (!cur || !state.engine) return;
       const before = cyRef.value ? cyRef.value.positions() : null;
-      const keep = Array.from(cur.view.vertexIds, String);
+      const keep = neighbourhoodIds(cur.view);
       if (!keep.length) return;
       select(() => state.engine.neighbourhood(deg({ ids: [], keep, hops: 0, ...limits.value }), filterSpec()), {
         ...cur,
@@ -539,7 +541,7 @@ export const GraphPanel = {
           // Filtered: the engine draws the first vertices that pass, up to the limit.
           const v = view.value;
           if (!v || !v.truncated) return null;
-          return { text: `${fmt(v.matchedNodes ?? 0)} vertices and ${fmt(v.matchedEdges ?? 0)} edges pass the filter, more than the limits of ${fmt(limits.value.maxNodes)} vertices and ${fmt(limits.value.maxEdges)} edges: the first ones (labels in name order) are drawn. Narrow the filter or use the Neighbourhood view.`, links: [{ id: 'raise', label: 'Double the limits' }] };
+          return { text: `${fmt(v.matchedNodes ?? 0)} vertices and ${fmt(v.matchedEdges ?? 0)} edges pass the filter, more than the limits of ${fmt(limits.value.maxNodes)} vertices and ${fmt(limits.value.maxEdges)} edges: the first ones are drawn. Narrow the filter or use the Neighbourhood view.`, links: [{ id: 'raise', label: 'Double the limits' }] };
         }
         if (p.mode === 'slice') return { text: p.notice, links: [{ id: 'overview', label: 'Back to the labels' }, { id: 'raise', label: 'Double the limits' }] };
         return null;
@@ -653,7 +655,7 @@ export const GraphPanel = {
       else if (source.value === 'graph') await loadView();
       else if (source.value === 'neighbourhood' && nb.value) {
         nbPositions.value = null;
-        await select(() => state.engine.neighbourhood(deg({ ids: [], keep: Array.from(nb.value.view.vertexIds, String), hops: 0, ...limits.value }), filterSpec()), { ...nb.value });
+        await select(() => state.engine.neighbourhood(deg({ ids: [], keep: neighbourhoodIds(nb.value.view), hops: 0, ...limits.value }), filterSpec()), { ...nb.value });
       }
       if (cyRef.value) cyRef.value.relayout();
     }
@@ -827,14 +829,12 @@ export const GraphPanel = {
         return;
       }
       if (cur.sampleTitle || !cur.spec || cur.spec.kind !== 'neighbourhood') return; // a sample: by label, on the client
-      // From its centre again (the drawn vertices passed the OLD filter), keeping the positions of
-      // the vertices that stay.
-      const spec = cur.spec;
+      // The same vertices before any filter (the centre with every expansion the user drilled into:
+      // `unfiltered.vertexIds` of a filtered answer, selection.js `redrawRequest`), filtered anew,
+      // keeping the positions of the vertices that stay.
       const before = source.value === 'neighbourhood' && !drill.value && cyRef.value ? cyRef.value.positions() : null;
-      const direction = normalizeDirection(spec.direction);
-      select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(spec.ids, normalizeDepth(spec.hops), limits.value, direction)), filterSpec()), {
+      select(() => state.engine.neighbourhood(deg(redrawRequest(cur.view, cur.spec.ids, limits.value)), filterSpec()), {
         ...cur,
-        expanded: 0,
         positions: (next) => carryPositions(cur.view, before, next),
       });
     }

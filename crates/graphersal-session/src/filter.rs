@@ -1,6 +1,6 @@
 //! The Graph panel's filter: which vertices and edges a drawing shows.
 //!
-//! A filter is JSON (`engine.js` `GraphFilter`):
+//! A filter is JSON (`engine.js` `GraphFilter`). Every field is optional; two forms:
 //!
 //! ```json
 //! { "vertices": { "person": [ {"key": "age", "op": "gt", "value": 30} ], "software": [] },
@@ -8,20 +8,36 @@
 //!   "hideIsolated": false }
 //! ```
 //!
-//! - `vertices` / `edges` map a label to a list of conditions. A listed label is visible, an
-//!   unlisted one hidden; the field absent (or `null`) shows every label without conditions.
-//!   The conditions of one label must all hold (AND); an element is shown when its label is
-//!   listed and that label's conditions hold (labels are OR). A vertex with several labels is
-//!   shown when ANY of its labels is listed with conditions that hold (the engine's
-//!   `has_label` sees the whole label set).
+//! ```json
+//! { "otherVertices": "visible", "hiddenVertices": ["city"],
+//!   "vertices": { "person": [ {"key": "age", "op": "gt", "value": 30} ] },
+//!   "otherEdges": "visible", "hiddenEdges": ["created"] }
+//! ```
+//!
+//! - `vertices` / `edges` map a label to a list of conditions; the conditions of one label must
+//!   all hold (AND).
+//! - `otherVertices` / `otherEdges` (`"visible"` | `"hidden"`) say what happens to a label the
+//!   map does not list. The default is `"hidden"` when the map is given and `"visible"` when it
+//!   is absent (or `null`): the first form above, unchanged.
+//!   - **Others hidden** (an allow list): a listed label is visible, an unlisted one hidden. An
+//!     element is shown when its label is listed and that label's conditions hold (labels are
+//!     OR); a vertex with several labels is shown when ANY of its labels is listed with
+//!     conditions that hold (the engine's `has_label` sees the whole label set).
+//!   - **Others visible** (restrictions): every label is visible unless `hidden*` names it; the
+//!     conditions of a listed label restrict the elements carrying it (a listed label without
+//!     conditions restricts nothing). A vertex is shown when NONE of its labels is hidden and the
+//!     conditions of EVERY listed label it carries hold. For an edge (one label) and a vertex
+//!     with one label both forms agree label by label.
+//! - `hiddenVertices` / `hiddenEdges` (a list of labels) hide those labels in either form; a
+//!   hidden label stays hidden when the map lists it too.
 //! - A hidden vertex hides its edges. A hidden edge hides no vertex, except with
 //!   `hideIsolated: true`: a vertex without a visible edge is hidden too (applied after the edge
 //!   filter, before any drawing limit).
 //! - `op`: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `between` (`value: [low, high]`, low
 //!   inclusive, high exclusive: the engine's `P.between`), `contains`, `starts_with`,
-//!   `ends_with`, `regex` (the engine's `TextP.regex`, Rust `regex` dialect, unanchored) take a
-//!   `value`; `exists` / `missing` (the key is present / absent) take none. The text operators
-//!   take a string.
+//!   `ends_with` (the engine's `TextP.containing` / `starting_with` / `ending_with`), `regex`
+//!   (the engine's `TextP.regex`, Rust `regex` dialect, unanchored) take a `value`; `exists` /
+//!   `missing` (the key is present / absent) take none. The text operators take a string.
 //! - `value` is taken literally (a number stays a number, a string a string; never sniffed). When
 //!   the graph's schema (mode `open`/`closed`) declares the key for that label, the value is
 //!   coerced like a write would store it ([`GraphSchema::coerce_value`]): `"2024-01-01"`
@@ -29,16 +45,21 @@
 //!
 //! The filter is evaluated by the engine itself: one read-only traversal per listed label with
 //! conditions (`g.v().has_label(L).has(k, P)...`, so property indexes and the label index serve
-//! it like the equivalent query), a label without conditions is read from the label index.
-//! [`filter_query`] writes that equivalent query as Rhai text. Every check runs against a
-//! read-only view (`&S`): a filter can never write.
+//! it like the equivalent query). With others hidden, a listed label without conditions is read
+//! from the label index. With others visible, the elements (of the whole graph, or the
+//! candidates of a neighbourhood) are scanned once, each checked against the hidden set and
+//! against the passing set of every conditioned label it carries: one pass over the elements
+//! plus one traversal per conditioned label, independent of how many labels the graph has (its
+//! labels are never enumerated). [`filter_query`] writes the equivalent query as Rhai text.
+//! Every check runs against a read-only view (`&S`): a filter can never write.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 
 use graphersal::error::format_diagnostic;
 use graphersal::prelude::*;
 use graphersal::storage::ElementKind;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// One condition of a label, compiled: the property key and its test.
 #[derive(Debug, Clone)]
@@ -61,11 +82,27 @@ enum Test {
 /// Labels with their conditions; `BTreeMap`: labels in name order.
 type LabelConditions = BTreeMap<String, Vec<Condition>>;
 
+/// What one side (vertices or edges) of a filter shows.
+#[derive(Debug, Clone, Default)]
+enum Side {
+    /// Every element.
+    #[default]
+    All,
+    /// Others hidden: the listed labels only, each with its conditions.
+    Listed(LabelConditions),
+    /// Others visible: every element without a `hidden` label whose `conditioned` labels'
+    /// conditions hold (only labels with at least one condition are kept here).
+    Restricted {
+        hidden: BTreeSet<String>,
+        conditioned: LabelConditions,
+    },
+}
+
 /// A checked, compiled filter (see the module docs). Build it with [`GraphFilter::compile`].
 #[derive(Debug, Clone, Default)]
 pub struct GraphFilter {
-    vertices: Option<LabelConditions>,
-    edges: Option<LabelConditions>,
+    vertices: Side,
+    edges: Side,
     hide_isolated: bool,
 }
 
@@ -73,17 +110,32 @@ pub struct GraphFilter {
 const OPS: &str = "eq, neq, lt, lte, gt, gte, between, contains, starts_with, ends_with, regex, \
                    exists, missing";
 
+/// The filter's fields.
+const FIELDS: [&str; 7] = [
+    "vertices",
+    "edges",
+    "hiddenVertices",
+    "hiddenEdges",
+    "otherVertices",
+    "otherEdges",
+    "hideIsolated",
+];
+
 impl GraphFilter {
     /// Checks and compiles the JSON filter `spec` against the schema of `g` (for the coercion
     /// of values of declared keys). An error names the label, key and operator at fault.
     pub fn compile<S: GraphStorage>(g: &S, spec: &Value) -> Result<GraphFilter, String> {
         let Value::Object(fields) = spec else {
-            return Err("the filter is a JSON object {vertices?, edges?, hideIsolated?}".into());
+            return Err(format!(
+                "the filter is a JSON object {{{}}} (every field optional)",
+                FIELDS.join(", ")
+            ));
         };
         for key in fields.keys() {
-            if !matches!(key.as_str(), "vertices" | "edges" | "hideIsolated") {
+            if !FIELDS.contains(&key.as_str()) {
                 return Err(format!(
-                    "unknown filter field \"{key}\" (expected vertices, edges, hideIsolated)"
+                    "unknown filter field \"{key}\" (expected {})",
+                    FIELDS.join(", ")
                 ));
             }
         }
@@ -94,15 +146,16 @@ impl GraphFilter {
             Some(_) => return Err("filter: hideIsolated is true or false".into()),
         };
         Ok(GraphFilter {
-            vertices: labels_of(fields.get("vertices"), ElementKind::Vertex, schema.as_ref())?,
-            edges: labels_of(fields.get("edges"), ElementKind::Edge, schema.as_ref())?,
+            vertices: side_of(fields, ElementKind::Vertex, schema.as_ref())?,
+            edges: side_of(fields, ElementKind::Edge, schema.as_ref())?,
             hide_isolated,
         })
     }
 
-    /// Whether the filter hides nothing (no field, no `hideIsolated`).
+    /// Whether the filter hides nothing (every label visible without conditions, no
+    /// `hideIsolated`).
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_none() && self.edges.is_none() && !self.hide_isolated
+        matches!(self.vertices, Side::All) && matches!(self.edges, Side::All) && !self.hide_isolated
     }
 
     /// Whether vertices without a visible edge are hidden.
@@ -112,68 +165,67 @@ impl GraphFilter {
 
     /// Whether the filter restricts vertices.
     pub fn filters_vertices(&self) -> bool {
-        self.vertices.is_some()
+        !matches!(self.vertices, Side::All)
     }
 
     /// Whether the filter restricts edges by label/conditions.
     pub fn filters_edges(&self) -> bool {
-        self.edges.is_some()
+        !matches!(self.edges, Side::All)
     }
 
     /// The visible vertices: of the whole graph (`candidates` `None`; `Ok(None)` when the
     /// filter does not restrict vertices), or the visible ones among `candidates`, in their
-    /// order. Labels in name order, each in the engine's order, without duplicates.
+    /// order. Of the whole graph with others hidden: labels in name order, each in the engine's
+    /// order, without duplicates; with others visible: the storage order.
     pub fn vertices<S: GraphStorage>(
         &self,
         g: &S,
         candidates: Option<&[S::VertexId]>,
     ) -> Result<Option<Vec<S::VertexId>>, String> {
-        let Some(labels) = &self.vertices else {
+        if matches!(self.vertices, Side::All) {
             return Ok(None);
-        };
+        }
         let ids = candidates.map(|c| {
             c.iter()
                 .filter_map(|v| g.vertex_id(*v))
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         });
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for (label, conditions) in labels {
-            let found: Vec<S::VertexId> = if conditions.is_empty() {
-                match candidates {
-                    None => g.vertices_by_label(label).collect(),
-                    Some(c) => c
-                        .iter()
-                        .copied()
-                        .filter(|v| g.vertex_has_label(*v, label))
-                        .collect(),
-                }
-            } else {
-                if ids.as_ref().is_some_and(Vec::is_empty) {
-                    continue;
-                }
-                let start = GraphTraversalSource::new(g);
-                let start = match &ids {
-                    None => start.v(None::<()>),
-                    Some(ids) => start.v(ids.clone()),
-                };
-                let traversal = with_conditions(start.has_label(label.as_str()), conditions);
+        let passing = |label: &str, conditions: &[Condition]| -> Result<Vec<S::VertexId>, String> {
+            if ids.as_ref().is_some_and(Vec::is_empty) {
+                return Ok(Vec::new());
+            }
+            let start = GraphTraversalSource::new(g);
+            let start = match &ids {
+                None => start.v(None::<()>),
+                Some(ids) => start.v(ids.clone()),
+            };
+            let traversal = with_conditions(start.has_label(label), conditions);
+            Ok(
                 element_ids(traversal.id().to_list(), label, ElementKind::Vertex)?
                     .iter()
                     .filter_map(|id| g.get_vertex_by_id(id))
-                    .collect()
-            };
-            out.extend(found.into_iter().filter(|v| seen.insert(*v)));
-        }
-        if let Some(c) = candidates {
-            // Keep the candidates' order (the drawing's breadth-first order).
-            let visible: HashSet<_> = out.into_iter().collect();
-            return Ok(Some(
-                c.iter().copied().filter(|v| visible.contains(v)).collect(),
-            ));
-        }
-        Ok(Some(out))
+                    .collect(),
+            )
+        };
+        let label_index = |label: &str| -> Vec<S::VertexId> {
+            match candidates {
+                None => g.vertices_by_label(label).collect(),
+                Some(c) => c
+                    .iter()
+                    .copied()
+                    .filter(|v| g.vertex_has_label(*v, label))
+                    .collect(),
+            }
+        };
+        evaluate(
+            &self.vertices,
+            candidates,
+            || g.vertices(),
+            label_index,
+            passing,
+            |v, keep| g.vertex_labels(v).iter().all(|l| keep(l.as_str())),
+        )
     }
 
     /// The edges passing the edge filter (labels and conditions; endpoints are NOT checked
@@ -184,51 +236,111 @@ impl GraphFilter {
         g: &S,
         candidates: Option<&[S::EdgeId]>,
     ) -> Result<Option<Vec<S::EdgeId>>, String> {
-        let Some(labels) = &self.edges else {
+        if matches!(self.edges, Side::All) {
             return Ok(None);
-        };
+        }
         let ids = candidates.map(|c| {
             c.iter()
                 .filter_map(|e| g.edge_id(*e))
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         });
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for (label, conditions) in labels {
-            let found: Vec<S::EdgeId> = if conditions.is_empty() {
-                match candidates {
-                    None => g.edges_by_label(label).collect(),
-                    Some(c) => c
-                        .iter()
-                        .copied()
-                        .filter(|e| g.edge_label(*e) == Some(label.as_str()))
-                        .collect(),
-                }
-            } else {
-                if ids.as_ref().is_some_and(Vec::is_empty) {
-                    continue;
-                }
-                let start = GraphTraversalSource::new(g);
-                let start = match &ids {
-                    None => start.e(None::<()>),
-                    Some(ids) => start.e(ids.clone()),
-                };
-                let traversal = with_conditions(start.has_label(label.as_str()), conditions);
+        let passing = |label: &str, conditions: &[Condition]| -> Result<Vec<S::EdgeId>, String> {
+            if ids.as_ref().is_some_and(Vec::is_empty) {
+                return Ok(Vec::new());
+            }
+            let start = GraphTraversalSource::new(g);
+            let start = match &ids {
+                None => start.e(None::<()>),
+                Some(ids) => start.e(ids.clone()),
+            };
+            let traversal = with_conditions(start.has_label(label), conditions);
+            Ok(
                 element_ids(traversal.id().to_list(), label, ElementKind::Edge)?
                     .iter()
                     .filter_map(|id| g.get_edge_by_id(id))
-                    .collect()
+                    .collect(),
+            )
+        };
+        let label_index = |label: &str| -> Vec<S::EdgeId> {
+            match candidates {
+                None => g.edges_by_label(label).collect(),
+                Some(c) => c
+                    .iter()
+                    .copied()
+                    .filter(|e| g.edge_label(*e) == Some(label))
+                    .collect(),
+            }
+        };
+        evaluate(
+            &self.edges,
+            candidates,
+            || g.edges(),
+            label_index,
+            passing,
+            |e, keep| keep(g.edge_label(e).unwrap_or("")),
+        )
+    }
+}
+
+/// The visible elements of one side: `all` iterates the whole graph, `label_index` reads one
+/// label (among the candidates), `passing` runs one label's conditions (among the candidates),
+/// `labels_ok(element, keep)` is true when `keep` holds for every label of the element.
+fn evaluate<Id, I>(
+    side: &Side,
+    candidates: Option<&[Id]>,
+    all: impl FnOnce() -> I,
+    label_index: impl Fn(&str) -> Vec<Id>,
+    passing: impl Fn(&str, &[Condition]) -> Result<Vec<Id>, String>,
+    labels_ok: impl Fn(Id, &dyn Fn(&str) -> bool) -> bool,
+) -> Result<Option<Vec<Id>>, String>
+where
+    Id: Copy + Eq + Hash,
+    I: Iterator<Item = Id>,
+{
+    match side {
+        Side::All => Ok(None),
+        Side::Listed(labels) => {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for (label, conditions) in labels {
+                let found = if conditions.is_empty() {
+                    label_index(label)
+                } else {
+                    passing(label, conditions)?
+                };
+                out.extend(found.into_iter().filter(|x| seen.insert(*x)));
+            }
+            if let Some(c) = candidates {
+                // Keep the candidates' order (the drawing's breadth-first order).
+                let visible: HashSet<_> = out.into_iter().collect();
+                return Ok(Some(
+                    c.iter().copied().filter(|x| visible.contains(x)).collect(),
+                ));
+            }
+            Ok(Some(out))
+        }
+        Side::Restricted {
+            hidden,
+            conditioned,
+        } => {
+            let mut sets: HashMap<&str, HashSet<Id>> = HashMap::with_capacity(conditioned.len());
+            for (label, conditions) in conditioned {
+                sets.insert(
+                    label.as_str(),
+                    passing(label, conditions)?.into_iter().collect(),
+                );
+            }
+            let visible = |x: &Id| {
+                labels_ok(*x, &|label: &str| {
+                    !hidden.contains(label) && sets.get(label).is_none_or(|set| set.contains(x))
+                })
             };
-            out.extend(found.into_iter().filter(|e| seen.insert(*e)));
+            Ok(Some(match candidates {
+                None => all().filter(visible).collect(),
+                Some(c) => c.iter().copied().filter(visible).collect(),
+            }))
         }
-        if let Some(c) = candidates {
-            let visible: HashSet<_> = out.into_iter().collect();
-            return Ok(Some(
-                c.iter().copied().filter(|e| visible.contains(e)).collect(),
-            ));
-        }
-        Ok(Some(out))
     }
 }
 
@@ -273,11 +385,56 @@ fn kind_name(kind: ElementKind) -> &'static str {
     }
 }
 
-fn field_name(kind: ElementKind) -> &'static str {
+/// The field names of one side: (label map, hidden list, others).
+fn field_names(kind: ElementKind) -> (&'static str, &'static str, &'static str) {
     match kind {
-        ElementKind::Vertex => "vertices",
-        ElementKind::Edge => "edges",
+        ElementKind::Vertex => ("vertices", "hiddenVertices", "otherVertices"),
+        ElementKind::Edge => ("edges", "hiddenEdges", "otherEdges"),
     }
+}
+
+fn field_name(kind: ElementKind) -> &'static str {
+    field_names(kind).0
+}
+
+/// One side of the filter from its three fields (see the module docs).
+fn side_of(
+    fields: &Map<String, Value>,
+    kind: ElementKind,
+    schema: Option<&GraphSchema>,
+) -> Result<Side, String> {
+    let (map_name, hidden_name, other_name) = field_names(kind);
+    let listed = labels_of(fields.get(map_name), kind, schema)?;
+    let hidden: BTreeSet<String> = match fields.get(hidden_name) {
+        None | Some(Value::Null) => BTreeSet::new(),
+        Some(Value::Array(list)) => list
+            .iter()
+            .map(|l| match l {
+                Value::String(l) => Ok(l.clone()),
+                _ => Err(format!("filter: {hidden_name} is a list of label names")),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(format!("filter: {hidden_name} is a list of label names")),
+    };
+    let others_visible = match fields.get(other_name) {
+        None | Some(Value::Null) => listed.is_none(),
+        Some(Value::String(s)) if s == "visible" => true,
+        Some(Value::String(s)) if s == "hidden" => false,
+        Some(_) => return Err(format!("filter: {other_name} is \"visible\" or \"hidden\"")),
+    };
+    let mut labels = listed.unwrap_or_default();
+    labels.retain(|label, _| !hidden.contains(label));
+    if !others_visible {
+        return Ok(Side::Listed(labels));
+    }
+    labels.retain(|_, conditions| !conditions.is_empty());
+    if hidden.is_empty() && labels.is_empty() {
+        return Ok(Side::All);
+    }
+    Ok(Side::Restricted {
+        hidden,
+        conditioned: labels,
+    })
 }
 
 /// The labels of `vertices` / `edges`: `None` when the field is absent or `null`.
@@ -445,9 +602,14 @@ fn pvalue_of(value: ElementProperty) -> Result<PValue, String> {
 /// The Rhai query that selects the vertices and edges `filter` shows (before any drawing
 /// limit): `#{vertices: g.v()..., edges: g.e()...}`, every key and value a Rhai literal
 /// (strings escaped). Values of declared keys are written coerced (`date("2024-01-01")`).
+///
+/// Others hidden: `.has_label(..)` for labels without conditions, `.or(__.has_label(L).has(..),
+/// ..)` with conditions. Others visible: `.not(__.has_label(<hidden>))` and per conditioned label
+/// `.or(__.not(__.has_label(L)), __.has(..)...)`. More than [`MAX_LABEL_ARGS`] labels are written
+/// as one `P.within([..])` argument.
 pub fn filter_query(filter: &GraphFilter) -> String {
-    let vertex_pred = filter.vertices.as_ref().map(predicate_text);
-    let edge_pred = filter.edges.as_ref().map(predicate_text);
+    let vertex_pred = predicate_text(&filter.vertices);
+    let edge_pred = predicate_text(&filter.edges);
     let mut vertices = String::from("g.v()");
     if let Some(p) = &vertex_pred {
         vertices.push_str(&p.inline);
@@ -476,26 +638,67 @@ pub fn filter_query(filter: &GraphFilter) -> String {
     format!("#{{\n  vertices: {vertices}.to_list(),\n  edges: {edges}.to_list()\n}}")
 }
 
-/// The steps that keep an element of the listed labels whose conditions hold, appended to a
-/// traversal (`inline`, starting with `.`).
+/// Most labels written as separate `has_label` arguments (the DSL's variadic steps take at most
+/// ten); more become one `P.within([..])`.
+pub const MAX_LABEL_ARGS: usize = 8;
+
+/// The steps that keep an element one side shows, appended to a traversal (`inline`, starting
+/// with `.`).
 struct PredicateText {
     inline: String,
 }
 
-fn predicate_text(labels: &LabelConditions) -> PredicateText {
+/// The arguments of `has_label` naming `labels`.
+fn label_args<'a>(labels: impl ExactSizeIterator<Item = &'a String>) -> String {
+    let many = labels.len() > MAX_LABEL_ARGS;
+    let names: Vec<String> = labels.map(|l| crate::queries::rhai_string(l)).collect();
+    if many {
+        format!("P.within([{}])", names.join(", "))
+    } else {
+        names.join(", ")
+    }
+}
+
+fn predicate_text(side: &Side) -> Option<PredicateText> {
+    match side {
+        Side::All => None,
+        Side::Listed(labels) => Some(listed_text(labels)),
+        Side::Restricted {
+            hidden,
+            conditioned,
+        } => {
+            let mut inline = String::new();
+            if !hidden.is_empty() {
+                inline.push_str(&format!(
+                    ".not(__.has_label({}))",
+                    label_args(hidden.iter())
+                ));
+            }
+            for (label, conditions) in conditioned {
+                let mut test = String::from("__");
+                for c in conditions {
+                    test.push_str(&condition_text(c));
+                }
+                inline.push_str(&format!(
+                    ".or(__.not(__.has_label({})), {test})",
+                    crate::queries::rhai_string(label)
+                ));
+            }
+            Some(PredicateText { inline })
+        }
+    }
+}
+
+fn listed_text(labels: &LabelConditions) -> PredicateText {
     if labels.is_empty() {
         return PredicateText {
             inline: ".limit(0)".into(),
         };
     }
     let plain = labels.values().all(Vec::is_empty);
-    let names: Vec<String> = labels
-        .keys()
-        .map(|l| crate::queries::rhai_string(l))
-        .collect();
     if plain {
         return PredicateText {
-            inline: format!(".has_label({})", names.join(", ")),
+            inline: format!(".has_label({})", label_args(labels.keys())),
         };
     }
     let branch = |label: &str, conditions: &[Condition]| {
