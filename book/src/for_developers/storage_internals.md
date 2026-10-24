@@ -84,6 +84,15 @@ string. These chunk-local shapes belong to no table; the graph re-interns them o
 one-entry memo (`last_foreign`) makes a run of elements with the same chunk shape cost one pointer
 comparison each.
 
+**Imports and change sets.** The GraphSON and GraphML readers do the same without a string table:
+they collect each element's keys and values in order in a `MapBuilder` (`graph/shape.rs`; a
+repeated key keeps its first position and its last value, as `PropertyMap::insert` does) and
+intern the key sequence in an importer-own table, one per element kind, so the graph adopts the
+maps through the same `last_foreign` memo. `TraversalGraph::apply_change_set` and every replay
+path copy each added map straight into the graph's own table (`ShapeTable::shaped_copy`); other
+storages receive ordinary maps. Coercion, validation, compression, property indexes and change
+capture run inside `insert_vertex`/`insert_edge` as for any write.
+
 **Memory accounting.** `MemoryStats::shape_bytes` is `ShapeTable::heap_bytes`: every interned
 shape once (its `Arc` allocation, keys and prints, heap-allocated keys, a wide shape's index) plus
 the table's and the caches' hash tables. A stored map adds only its value vector (by capacity) and
