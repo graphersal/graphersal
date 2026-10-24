@@ -15,22 +15,33 @@ use crate::graph::change::{ChangeSet, ElementRef, Mutation};
 use crate::graph::schema::ElementKind;
 use crate::graph::storage::GraphStorage;
 use crate::traversal::memory_budget::UnitBudget;
-use crate::value::ElementProperty;
+use crate::value::{ElementProperty, PropertyMap};
 
 /// Applies every mutation of `changes` in order; stops at the first failure (the caller rolls
 /// back or drops the graph). With a memory `budget` (a live apply under a configured
 /// `memory.limit`), every [`UNIT_CHECK_INTERVAL`](crate::traversal::memory_budget::UNIT_CHECK_INTERVAL)-th
 /// mutation checks it.
+///
+/// `copy` makes the map an added element is inserted with from the mutation's map:
+/// [`clone_map`] for any storage, [`TraversalGraph::stored_copy`](crate::graph::TraversalGraph)
+/// for a `TraversalGraph` (a `Shaped` map of its own table, no `IndexMap` round trip).
 pub(crate) fn apply_mutations<S: GraphStorage + ?Sized>(
     storage: &mut S,
     changes: &ChangeSet,
     budget: &mut Option<UnitBudget>,
+    copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
 ) -> Result<(), GraphError> {
     for mutation in changes.mutations() {
-        apply_mutation(storage, mutation)?;
+        apply_mutation_with(storage, mutation, copy)?;
         crate::traversal::memory_budget::tick(budget, &*storage)?;
     }
     Ok(())
+}
+
+/// The map an added element is inserted with on any storage: a clone of the mutation's.
+#[inline]
+pub(crate) fn clone_map<S: ?Sized>(_: &mut S, map: &PropertyMap) -> PropertyMap {
+    map.clone()
 }
 
 fn vertex_of<S: GraphStorage + ?Sized>(storage: &S, id: &str) -> Result<S::VertexId, GraphError> {
@@ -49,6 +60,16 @@ pub(crate) fn apply_mutation<S: GraphStorage + ?Sized>(
     storage: &mut S,
     mutation: &Mutation,
 ) -> Result<(), GraphError> {
+    apply_mutation_with(storage, mutation, &mut clone_map)
+}
+
+/// [`apply_mutation`] whose added elements are inserted with `copy`'s map (see
+/// [`apply_mutations`]).
+pub(crate) fn apply_mutation_with<S: GraphStorage + ?Sized>(
+    storage: &mut S,
+    mutation: &Mutation,
+    copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
+) -> Result<(), GraphError> {
     match mutation {
         Mutation::AddVertex {
             id,
@@ -56,7 +77,8 @@ pub(crate) fn apply_mutation<S: GraphStorage + ?Sized>(
             properties,
         } => {
             let labels = labels.iter().map(CompactString::from).collect();
-            storage.insert_vertex(Some(id.into()), labels, properties.clone())?;
+            let properties = copy(storage, properties);
+            storage.insert_vertex(Some(id.into()), labels, properties)?;
         }
         Mutation::DropVertex { id, .. } => {
             let vertex = vertex_of(storage, id)?;
@@ -71,12 +93,13 @@ pub(crate) fn apply_mutation<S: GraphStorage + ?Sized>(
         } => {
             let from = vertex_of(storage, out_id)?;
             let to = vertex_of(storage, in_id)?;
+            let properties = copy(storage, properties);
             storage.insert_edge(
                 Some(id.into()),
                 label.as_deref().map(CompactString::from),
                 from,
                 to,
-                properties.clone(),
+                properties,
             )?;
         }
         Mutation::DropEdge { id, .. } => {
@@ -148,10 +171,19 @@ pub(crate) fn apply_mutation<S: GraphStorage + ?Sized>(
 }
 
 impl crate::graph::TraversalGraph {
+    /// The map a change set's added element is inserted with: a `Shaped` copy in this graph's
+    /// own shape table ([`ShapeTable::shaped_copy`](crate::graph::shape::ShapeTable::shaped_copy)),
+    /// so the insert adopts it with one comparison.
+    pub(crate) fn stored_copy(&mut self, map: &PropertyMap) -> PropertyMap {
+        self.shapes.shaped_copy(map)
+    }
+
     /// The body of [`Self::replay`] on a graph in place: every mutation outside units, then the
     /// position and the id sequences raised to the change set's.
     pub(crate) fn replay_in_place(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
-        self.load_outside_units(|graph| apply_mutations(graph, changes, &mut None))?;
+        self.load_outside_units(|graph| {
+            apply_mutations(graph, changes, &mut None, &mut Self::stored_copy)
+        })?;
         self.raise_replayed_position(changes);
         Ok(())
     }
@@ -206,7 +238,7 @@ impl crate::graph::TraversalGraph {
                         reason,
                     });
                 }
-                if let Err(err) = apply_mutation(graph, mutation) {
+                if let Err(err) = apply_mutation_with(graph, mutation, &mut Self::stored_copy) {
                     match mutation {
                         Mutation::SetSchema { after, .. } => {
                             *graph.schema.write() = (**after).clone();
@@ -242,7 +274,8 @@ impl crate::graph::TraversalGraph {
                 if let Some(reason) = before_mismatch(&*graph, mutation, true) {
                     return Err(format!("{}: {reason}", subject()));
                 }
-                apply_mutation(graph, mutation).map_err(|err| format!("{}: {err}", subject()))?;
+                apply_mutation_with(graph, mutation, &mut Self::stored_copy)
+                    .map_err(|err| format!("{}: {err}", subject()))?;
             }
             Ok(())
         });

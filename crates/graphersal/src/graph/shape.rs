@@ -489,6 +489,153 @@ impl ShapeTable {
                 size_of::<((usize, usize), Arc<Shape>)>(),
             )
     }
+
+    /// The last shape interned or adopted, when its keys are exactly `keys` (no hashing).
+    #[inline]
+    fn last_with_keys<'a>(
+        &self,
+        keys: impl ExactSizeIterator<Item = &'a str>,
+    ) -> Option<Arc<Shape>> {
+        self.last
+            .as_ref()
+            .filter(|last| last.has_keys(keys))
+            .map(Arc::clone)
+    }
+
+    /// A `Shaped` copy of `map` in this table, the map a change set's insert hands to the
+    /// graph: an `Indexed` map's keys are interned (no allocation for a known key sequence, the
+    /// last one tried first) and its values cloned into an exact vector, so neither an
+    /// `IndexMap` clone nor the conversion at adoption is paid. A `Shaped` map is cloned (one
+    /// `Arc` and its value vector); the graph adopts it when it is stored.
+    pub(crate) fn shaped_copy(&mut self, map: &PropertyMap) -> PropertyMap {
+        let Repr::Indexed(indexed) = &map.0 else {
+            return map.clone();
+        };
+        if indexed.is_empty() {
+            return PropertyMap::default();
+        }
+        let shape = self.intern_keys(indexed.keys().map(CompactString::as_str), || {
+            indexed.keys().cloned().collect()
+        });
+        let mut values = Vec::with_capacity(indexed.len());
+        values.extend(indexed.values().cloned());
+        PropertyMap::from_shaped(shape, values)
+    }
+}
+
+/// An element property map being decoded by an importer (GraphSON, GraphML), built `Shaped`
+/// without an `IndexMap`: keys and values are collected in order, then [`Self::finish`] interns
+/// the key sequence in a shape table and moves the values into an exact vector.
+///
+/// The map behaves exactly like a [`PropertyMap`] filled with `insert`: a repeated key keeps its
+/// FIRST position and its LAST value ([`Self::get`] and [`Self::shift_remove`] see the last
+/// value; the repeat is merged when the map is finished). An importer interns into a table of
+/// its own (one per element kind, so each keeps its last shape), which the target graph does
+/// not own: it adopts the shape through its foreign-shape memo, one comparison per element
+/// while the elements repeat a key sequence, and the shape works the same for any storage.
+#[derive(Default)]
+pub(crate) struct MapBuilder {
+    /// The keys in arrival order (a repeated key appears again).
+    keys: Vec<CompactString>,
+    /// One value per entry of `keys`.
+    values: Vec<ElementProperty>,
+}
+
+impl MapBuilder {
+    /// Adds `key` with `value` (a repeated key: see the type docs).
+    #[inline]
+    pub(crate) fn insert(&mut self, key: CompactString, value: ElementProperty) {
+        self.keys.push(key);
+        self.values.push(value);
+    }
+
+    /// Whether `key` is present.
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.keys.iter().any(|stored| stored == key)
+    }
+
+    /// The value of `key` (its last one), if present.
+    pub(crate) fn get(&self, key: &str) -> Option<&ElementProperty> {
+        let position = self.keys.iter().rposition(|stored| stored == key)?;
+        self.values.get(position)
+    }
+
+    /// Removes `key` (every entry of it) and returns its value (the last one), keeping the
+    /// order of the other entries.
+    pub(crate) fn shift_remove(&mut self, key: &str) -> Option<ElementProperty> {
+        let mut removed = None;
+        let mut at = 0;
+        while let Some(stored) = self.keys.get(at) {
+            if stored == key {
+                self.keys.remove(at);
+                if at < self.values.len() {
+                    removed = Some(self.values.remove(at));
+                }
+            } else {
+                at += 1;
+            }
+        }
+        removed
+    }
+
+    /// Removes every entry (the buffers are kept for the next map).
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.keys.clear();
+        self.values.clear();
+    }
+
+    /// The map, `Shaped` with a shape of `table` (empty: an empty free-standing map, as
+    /// `PropertyMap::default()`), and this builder emptied. A key sequence equal to the table's
+    /// last shape is taken without hashing (its keys are unique, so nothing repeated); any
+    /// other is first merged by the `insert` rule, then interned.
+    pub(crate) fn finish(&mut self, table: &mut ShapeTable) -> PropertyMap {
+        if self.keys.is_empty() {
+            self.values.clear();
+            return PropertyMap::default();
+        }
+        let shape = match table.last_with_keys(self.keys.iter().map(CompactString::as_str)) {
+            Some(shape) => shape,
+            None => {
+                self.merge_repeated_keys();
+                let keys = &self.keys;
+                table.intern_keys(keys.iter().map(CompactString::as_str), || {
+                    keys.as_slice().into()
+                })
+            }
+        };
+        self.keys.clear();
+        let mut values = Vec::with_capacity(self.values.len());
+        values.append(&mut self.values);
+        PropertyMap::from_shaped(shape, values)
+    }
+
+    /// Merges repeated keys by `PropertyMap::insert`'s rule (first position, last value).
+    fn merge_repeated_keys(&mut self) {
+        let len = self.keys.len();
+        let repeated = if len <= 32 {
+            self.keys
+                .iter()
+                .enumerate()
+                .any(|(at, key)| self.keys.iter().take(at).any(|other| other == key))
+        } else {
+            let mut seen = std::collections::HashSet::with_capacity(len);
+            !self.keys.iter().all(|key| seen.insert(key.as_str()))
+        };
+        if !repeated {
+            return;
+        }
+        let mut merged = PropertyMap::with_capacity(len);
+        for (key, value) in self.keys.drain(..).zip(self.values.drain(..)) {
+            merged.insert(key, value);
+        }
+        self.keys.clear();
+        self.values.clear();
+        for (key, value) in merged {
+            self.keys.push(key);
+            self.values.push(value);
+        }
+    }
 }
 
 /// An iterator with a known exact length (the chained and filtered key sequences of a
@@ -843,5 +990,227 @@ mod graph_tests {
         // Two short values per vertex: 2 x 32 bytes of slots each, no key bytes.
         let per_vertex = (large_stats.property_bytes - large_stats.shape_bytes) / 1000;
         assert_eq!(per_vertex, 2 * size_of::<ElementProperty>() as u64);
+    }
+}
+
+/// [`MapBuilder`] and [`ShapeTable::shaped_copy`], and the importers' maps in the graph's
+/// shapes.
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::graph::{GraphStorage, TraversalGraph};
+
+    fn entries(map: &PropertyMap) -> Vec<(String, ElementProperty)> {
+        map.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn expected(list: &[(&str, i64)]) -> Vec<(String, ElementProperty)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), ElementProperty::from(*v)))
+            .collect()
+    }
+
+    /// The same entries through `PropertyMap::insert`.
+    fn reference(list: &[(&str, i64)]) -> PropertyMap {
+        let mut map = PropertyMap::new();
+        for (k, v) in list {
+            map.insert(*k, ElementProperty::from(*v));
+        }
+        map
+    }
+
+    fn built(table: &mut ShapeTable, list: &[(&str, i64)]) -> PropertyMap {
+        let mut builder = MapBuilder::default();
+        for (k, v) in list {
+            builder.insert((*k).into(), ElementProperty::from(*v));
+        }
+        builder.finish(table)
+    }
+
+    #[test]
+    fn the_builder_follows_insert() {
+        let mut table = ShapeTable::new();
+        let cases: &[&[(&str, i64)]] = &[
+            &[],
+            &[("a", 1)],
+            &[("a", 1), ("b", 2), ("c", 3)],
+            &[("a", 1), ("b", 2), ("a", 3)],
+            &[("a", 1), ("a", 2), ("a", 3)],
+            &[("b", 1), ("a", 2), ("b", 3), ("c", 4), ("a", 5)],
+        ];
+        for list in cases {
+            // Twice: the second build takes the last shape (or merges again).
+            for _ in 0..2 {
+                let map = built(&mut table, list);
+                assert_eq!(entries(&map), entries(&reference(list)), "{list:?}");
+                if !list.is_empty() {
+                    let shape = map.shape().expect("shaped");
+                    assert_eq!(shape.owner, table.id);
+                    assert_eq!(shape.len(), map.len());
+                }
+            }
+        }
+        // Wide maps (the hash check of repeats).
+        let wide: Vec<(String, i64)> = (0..40).map(|i| (format!("k{i}"), i)).collect();
+        let mut list: Vec<(&str, i64)> = wide.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        list.push(("k3", 99));
+        let map = built(&mut table, &list);
+        assert_eq!(entries(&map), entries(&reference(&list)));
+        assert_eq!(map.len(), 40);
+    }
+
+    #[test]
+    fn the_builder_reads_and_removes_like_a_map() {
+        let mut builder = MapBuilder::default();
+        builder.insert("a".into(), 1.into());
+        builder.insert("labelV".into(), 2.into());
+        builder.insert("b".into(), 3.into());
+        builder.insert("labelV".into(), 4.into());
+        assert!(builder.contains_key("a"));
+        assert!(!builder.contains_key("c"));
+        assert_eq!(builder.get("labelV"), Some(&4.into()));
+        assert_eq!(builder.shift_remove("labelV"), Some(4.into()));
+        assert_eq!(builder.shift_remove("labelV"), None);
+        let mut table = ShapeTable::new();
+        assert_eq!(
+            entries(&builder.finish(&mut table)),
+            expected(&[("a", 1), ("b", 3)])
+        );
+        // Emptied for the next map.
+        assert!(builder.finish(&mut table).is_empty());
+        builder.insert("x".into(), 1.into());
+        builder.clear();
+        assert!(builder.finish(&mut table).is_empty());
+    }
+
+    #[test]
+    fn shaped_copy_interns_in_the_table() {
+        let mut table = ShapeTable::new();
+        let free = reference(&[("a", 1), ("b", 2)]);
+        let one = table.shaped_copy(&free);
+        let two = table.shaped_copy(&free);
+        assert_eq!(one, free);
+        assert_eq!(entries(&one), entries(&free));
+        assert!(Arc::ptr_eq(one.shape().unwrap(), two.shape().unwrap()));
+        assert_eq!(one.shape().unwrap().owner, table.id);
+        assert!(table.shaped_copy(&PropertyMap::new()).is_empty());
+        // A shaped map is cloned as it is.
+        let three = table.shaped_copy(&one);
+        assert!(Arc::ptr_eq(one.shape().unwrap(), three.shape().unwrap()));
+    }
+
+    fn shape_of(map: &PropertyMap) -> Arc<Shape> {
+        Arc::clone(map.shape().expect("a stored map is shaped"))
+    }
+
+    /// Every element map of `graph` is shaped in its table, and the vertex maps with the keys
+    /// `z, a, m` share one shape.
+    fn assert_shared(graph: &TraversalGraph, how: &str) {
+        let mut shared: Option<Arc<Shape>> = None;
+        let mut sharing = 0;
+        for v in GraphStorage::vertices(graph) {
+            let shape = shape_of(graph.vertex_properties(v).expect("live"));
+            assert_eq!(shape.owner, graph.shapes.id, "{how}");
+            let keys: Vec<&str> = shape.keys.iter().map(CompactString::as_str).collect();
+            if keys == ["z", "a", "m"] {
+                sharing += 1;
+                match &shared {
+                    Some(first) => assert!(Arc::ptr_eq(first, &shape), "{how}"),
+                    None => shared = Some(shape),
+                }
+            }
+        }
+        assert!(sharing > 2, "{how}");
+        let mut edges = 0;
+        for e in GraphStorage::edges(graph) {
+            if let Some(map) = graph.edge_properties(e).filter(|m| !m.is_empty()) {
+                assert_eq!(shape_of(map).owner, graph.shapes.id, "{how}");
+                edges += 1;
+            }
+        }
+        assert!(edges > 0, "{how}");
+    }
+
+    /// A graph holding one `z, a, m` vertex already.
+    fn with_existing() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        graph
+            .insert_vertex(
+                Some("old".into()),
+                vec!["p".into()],
+                reference(&[("z", 0), ("a", 0), ("m", 0)]),
+            )
+            .expect("insert");
+        graph
+    }
+
+    #[cfg(feature = "io")]
+    #[test]
+    fn imported_maps_are_shaped_in_the_graphs_table() {
+        use crate::io::GraphImport;
+        // Every third vertex repeats `m` (first position kept): the shapes alternate.
+        let lines: String = (0..20)
+            .map(|i| {
+                let first = if i % 3 == 0 { "m" } else { "z" };
+                format!(
+                    r#"{{"id":"{i}","label":"p","properties":{{"{first}":[{{"value":1}}],"a":[{{"value":2}}],"m":[{{"value":3}}],"z":[{{"value":4}}]}},"outE":{{"e":[{{"id":"e{i}","inV":"0","properties":{{"w":1}}}}]}}}}"#
+                ) + "\n"
+            })
+            .collect();
+        let mut graph = with_existing();
+        graph
+            .import_graphson_reader(lines.as_bytes())
+            .expect("import");
+        assert_shared(&graph, "GraphSON");
+
+        let nodes: String = (0..20)
+            .map(|i| {
+                format!(
+                    r#"<node id="{i}"><data key="z">1</data><data key="a">2</data><data key="m">3</data></node>"#
+                )
+            })
+            .collect();
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="z" for="node" attr.name="z" attr.type="long"/>
+  <key id="a" for="node" attr.name="a" attr.type="long"/>
+  <key id="m" for="node" attr.name="m" attr.type="long"/>
+  <key id="w" for="edge" attr.name="w" attr.type="long"/>
+  <graph id="G" edgedefault="directed">{nodes}<edge source="0" target="1"><data key="w">1</data></edge></graph>
+</graphml>
+"#
+        );
+        let mut graph = with_existing();
+        graph.import_graphml_reader(xml.as_bytes()).expect("import");
+        assert_shared(&graph, "GraphML");
+    }
+
+    #[test]
+    fn change_set_maps_are_shaped_in_the_graphs_table() {
+        use crate::graph::change::{ChangeSet, Mutation};
+        let mut builder = ChangeSet::builder(1, 1);
+        for i in 0..10 {
+            builder.push(Mutation::add_vertex(
+                i.to_string(),
+                ["p"],
+                reference(&[("z", i), ("a", 1), ("m", 2)]),
+            ));
+        }
+        builder.push(Mutation::add_edge(
+            "e",
+            Some("e"),
+            "0",
+            "1",
+            reference(&[("w", 1)]),
+        ));
+        let changes = builder.build().expect("valid");
+        let mut graph = with_existing();
+        graph.apply_change_set(&changes).expect("apply");
+        assert_shared(&graph, "apply_change_set");
+        let graph = with_existing().replay(&changes).expect("replay");
+        assert_shared(&graph, "replay");
     }
 }

@@ -10,6 +10,7 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 
 use crate::error::{GraphError, IOError};
+use crate::graph::shape::{MapBuilder, ShapeTable};
 use crate::graph::{GraphNodeType, GraphStorage, JsonType, SchemaFormat};
 use crate::traversal::memory_budget::UnitBudget;
 use crate::value::depth::DEFAULT_MAX_VALUE_DEPTH;
@@ -219,7 +220,11 @@ impl GraphMLImport {
 
         let mut node: Node = Node::default();
         let mut edge: Edge = Edge::default();
-        let mut data = PropertyMap::default();
+        // The property map being read, built `Shaped` (see `MapBuilder`) in the importer's own
+        // shape tables, one per element kind (the graph adopts the shapes).
+        let mut data = MapBuilder::default();
+        let mut node_shapes = ShapeTable::new();
+        let mut edge_shapes = ShapeTable::new();
         let mut data_key: Option<CompactString> = None;
         let mut node_map: HashMap<CompactString, S::VertexId> = HashMap::with_capacity(65536);
 
@@ -328,6 +333,7 @@ impl GraphMLImport {
                                     g,
                                     &mut node,
                                     &mut data,
+                                    &mut node_shapes,
                                     &mut node_map,
                                     &keys,
                                     has_defaults,
@@ -342,6 +348,7 @@ impl GraphMLImport {
                                     g,
                                     &mut edge,
                                     &mut data,
+                                    &mut edge_shapes,
                                     &node_map,
                                     &keys,
                                     has_defaults,
@@ -376,6 +383,7 @@ impl GraphMLImport {
                                 g,
                                 &mut node,
                                 &mut data,
+                                &mut node_shapes,
                                 &mut node_map,
                                 &keys,
                                 has_defaults,
@@ -389,6 +397,7 @@ impl GraphMLImport {
                             g,
                             &mut edge,
                             &mut data,
+                            &mut edge_shapes,
                             &node_map,
                             &keys,
                             has_defaults,
@@ -419,7 +428,7 @@ impl GraphMLImport {
         in_default: &mut bool,
         node: &mut Node,
         edge: &mut Edge,
-        data: &mut PropertyMap,
+        data: &mut MapBuilder,
         data_key: &mut Option<CompactString>,
     ) -> Result<(), IOError> {
         match e.name().as_ref() {
@@ -483,7 +492,8 @@ impl GraphMLImport {
         &self,
         g: &mut S,
         node: &mut Node,
-        data: &mut PropertyMap,
+        data: &mut MapBuilder,
+        shapes: &mut ShapeTable,
         node_map: &mut HashMap<CompactString, S::VertexId>,
         keys: &HashMap<CompactString, Key>,
         has_defaults: bool,
@@ -507,11 +517,7 @@ impl GraphMLImport {
             data.shift_remove("labelV");
         }
 
-        let vertex_data = if data.is_empty() {
-            PropertyMap::default()
-        } else {
-            std::mem::take(data)
-        };
+        let vertex_data = data.finish(shapes);
 
         let v_id = std::mem::take(&mut node.id);
         // Multiple labels are encoded as a single "::"-delimited `labelV` value (D9); split it
@@ -539,7 +545,8 @@ impl GraphMLImport {
         &self,
         g: &mut S,
         edge: &mut Edge,
-        data: &mut PropertyMap,
+        data: &mut MapBuilder,
+        shapes: &mut ShapeTable,
         node_map: &HashMap<CompactString, S::VertexId>,
         keys: &HashMap<CompactString, Key>,
         has_defaults: bool,
@@ -575,11 +582,7 @@ impl GraphMLImport {
             })
         })?;
 
-        let edge_data = if data.is_empty() {
-            PropertyMap::default()
-        } else {
-            std::mem::take(data)
-        };
+        let edge_data = data.finish(shapes);
         // An absent or empty `id` lets the graph assign one.
         let edge_id = edge.id.take().filter(|id| !id.is_empty());
         let edge_label = edge.label.take();
@@ -1179,7 +1182,7 @@ fn lift_declared_properties<S: GraphStorage>(
 /// text is not a number or a boolean). Always clears `data_key`.
 fn insert_empty_data(
     keys: &HashMap<CompactString, Key>,
-    data: &mut PropertyMap,
+    data: &mut MapBuilder,
     data_key: &mut Option<CompactString>,
 ) -> Result<(), IOError> {
     if let Some(k_id) = data_key.take()

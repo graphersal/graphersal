@@ -102,6 +102,7 @@ mod has_label_no_args_tests;
 mod has_traversal_tests;
 mod id_arguments_tests;
 mod id_lookup_tests;
+mod import_shape_tests;
 mod index_tests;
 mod inject_tests;
 mod integration_tests;

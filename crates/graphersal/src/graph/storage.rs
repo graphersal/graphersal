@@ -1131,24 +1131,34 @@ pub trait GraphStorage: Send + Sync {
     /// To rebuild a graph nobody sees yet (recovery from a snapshot plus the write-ahead log),
     /// use [`TraversalGraph::replay`] instead: it runs outside units and fires no hooks.
     fn apply_change_set(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
-        let mut budget =
-            crate::traversal::memory_budget::UnitBudget::start(&*self, None, CHANGE_SET_OPERATION);
-        let mark = self.begin_unit();
-        let applied = close_on_unwind(
-            self,
-            |this| {
-                crate::graph::replay::apply_mutations(this, changes, &mut budget)?;
-                crate::traversal::memory_budget::check(&budget, &*this)?;
-                this.raise_id_sequences(changes.node_sequence(), changes.edge_sequence())
-            },
-            |this| this.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)),
-        );
-        match applied {
-            Ok(()) => self.commit_unit(mark),
-            Err(err) => {
-                self.rollback_unit(mark, &RollbackReason::failed(&err));
-                Err(err)
-            }
+        apply_change_set_with(self, changes, &mut crate::graph::replay::clone_map)
+    }
+}
+
+/// The body of [`GraphStorage::apply_change_set`]: one unit applying every mutation, added
+/// elements inserted with `copy`'s map (see `graph::replay::apply_mutations`).
+pub(crate) fn apply_change_set_with<S: GraphStorage + ?Sized>(
+    storage: &mut S,
+    changes: &ChangeSet,
+    copy: &mut impl FnMut(&mut S, &PropertyMap) -> PropertyMap,
+) -> Result<(), GraphError> {
+    let mut budget =
+        crate::traversal::memory_budget::UnitBudget::start(&*storage, None, CHANGE_SET_OPERATION);
+    let mark = storage.begin_unit();
+    let applied = close_on_unwind(
+        storage,
+        |this| {
+            crate::graph::replay::apply_mutations(this, changes, &mut budget, copy)?;
+            crate::traversal::memory_budget::check(&budget, &*this)?;
+            this.raise_id_sequences(changes.node_sequence(), changes.edge_sequence())
+        },
+        |this| this.rollback_unit(mark, &RollbackReason::failed(&UNWOUND)),
+    );
+    match applied {
+        Ok(()) => storage.commit_unit(mark),
+        Err(err) => {
+            storage.rollback_unit(mark, &RollbackReason::failed(&err));
+            Err(err)
         }
     }
 }
@@ -1405,6 +1415,12 @@ impl GraphStorage for TraversalGraph {
     #[inline]
     fn statistics(&self) -> Option<&GraphStatistics> {
         Some(&self.statistics)
+    }
+
+    /// The default's unit, with every added element's map copied `Shaped` into this graph's
+    /// shape table (no `IndexMap` clone, adopted with one comparison).
+    fn apply_change_set(&mut self, changes: &ChangeSet) -> Result<(), GraphError> {
+        apply_change_set_with(self, changes, &mut TraversalGraph::stored_copy)
     }
 
     #[inline]

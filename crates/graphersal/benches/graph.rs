@@ -1427,3 +1427,136 @@ mod element_properties {
         bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
     }
 }
+
+/// The internal importers on the `element_properties::bulk_build` graph (20k vertices with six
+/// properties and 36-character ids, 60k edges with two): GraphSON and GraphML loads, a live
+/// GraphSON import, and `apply_change_set` / `replay` of the equivalent change set (built from
+/// free-standing maps, as a decoded or foreign one is).
+mod imports {
+    use graphersal::changes::{ChangeSet, Mutation};
+    use graphersal::io::{GraphExport, GraphImport, GraphSONImport};
+    use graphersal::prelude::*;
+
+    /// The 20k-vertex / 60k-edge graph.
+    fn source() -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        let mut handles = Vec::with_capacity(20_000);
+        for i in 0..20_000u64 {
+            let id = format!(
+                "{:08x}-0000-4000-8000-{:012x}",
+                i * 2_654_435_761 % (1 << 32),
+                i
+            );
+            let props = PropertyMap::from([
+                ("name", ElementProperty::from(id.as_str())),
+                ("age", ElementProperty::from(i as i64)),
+                ("score", ElementProperty::from(i as f64 * 0.5)),
+                ("active", ElementProperty::from(i % 2 == 0)),
+                ("city", ElementProperty::from("berlin")),
+                ("n", ElementProperty::from(i as i64 * 7)),
+            ]);
+            handles.push(
+                graph
+                    .insert_vertex(Some(id.as_str().into()), vec!["person".into()], props)
+                    .unwrap(),
+            );
+        }
+        for i in 0..handles.len() * 3 {
+            let from = handles[i % handles.len()];
+            let to = handles[(i * 7 + 1) % handles.len()];
+            let props = PropertyMap::from([
+                ("weight", ElementProperty::from(i as f64)),
+                ("since", ElementProperty::from(i as i64)),
+            ]);
+            graph
+                .insert_edge(None, Some("knows".into()), from, to, props)
+                .unwrap();
+        }
+        graph
+    }
+
+    /// The source graph as one change set of free-standing maps.
+    fn change_set(graph: &TraversalGraph) -> ChangeSet {
+        let mut builder = ChangeSet::builder(1, 1);
+        for v in GraphStorage::vertices(graph) {
+            let props: PropertyMap = graph
+                .vertex_properties(v)
+                .unwrap()
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.clone()))
+                .collect();
+            builder.push(Mutation::add_vertex(
+                graph.vertex_id(v).unwrap(),
+                ["person"],
+                props,
+            ));
+        }
+        for e in GraphStorage::edges(graph) {
+            let props: PropertyMap = graph
+                .edge_properties(e)
+                .unwrap()
+                .iter()
+                .map(|(k, val)| (k.as_str(), val.clone()))
+                .collect();
+            let (from, to) = graph.edge_endpoints(e).unwrap();
+            builder.push(Mutation::add_edge(
+                graph.edge_id(e).unwrap(),
+                Some("knows"),
+                graph.vertex_id(from).unwrap(),
+                graph.vertex_id(to).unwrap(),
+                props,
+            ));
+        }
+        builder.build().unwrap()
+    }
+
+    /// `GraphSONImport::load` (a new graph, outside units).
+    #[divan::bench(sample_count = 10)]
+    fn graphson_load(bencher: divan::Bencher) {
+        let mut text = Vec::new();
+        source().export_graphson_writer(&mut text).unwrap();
+        bencher.bench_local(|| GraphSONImport::new().load(text.as_slice()).unwrap());
+    }
+
+    /// A live GraphSON import (one unit) into an empty graph.
+    #[divan::bench(sample_count = 10)]
+    fn graphson_import(bencher: divan::Bencher) {
+        let mut text = Vec::new();
+        source().export_graphson_writer(&mut text).unwrap();
+        bencher
+            .with_inputs(TraversalGraph::new)
+            .bench_local_values(|mut graph| {
+                graph.import_graphson_reader(text.as_slice()).unwrap();
+                graph
+            });
+    }
+
+    /// `GraphSource::from_graphml_reader` (a new graph, outside units).
+    #[divan::bench(sample_count = 10)]
+    fn graphml_load(bencher: divan::Bencher) {
+        let mut text = Vec::new();
+        source().export_graphml_writer(&mut text).unwrap();
+        bencher.bench_local(|| GraphSource::from_graphml_reader(text.as_slice()).unwrap());
+    }
+
+    /// `apply_change_set` (one captured unit) of free-standing maps into an empty graph.
+    #[divan::bench(sample_count = 10)]
+    fn apply_change_set(bencher: divan::Bencher) {
+        let changes = change_set(&source());
+        bencher
+            .with_inputs(TraversalGraph::new)
+            .bench_local_values(|mut graph| {
+                graph.apply_change_set(&changes).unwrap();
+                graph
+            });
+    }
+
+    /// `TraversalGraph::replay` (recovery's path) of the same change set.
+    #[divan::bench(sample_count = 10)]
+    fn replay(bencher: divan::Bencher) {
+        let changes = change_set(&source());
+        bencher
+            .with_inputs(TraversalGraph::new)
+            .bench_local_values(|graph| graph.replay(&changes).unwrap());
+    }
+}

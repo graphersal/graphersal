@@ -54,6 +54,7 @@ use compact_str::CompactString;
 use indexmap::IndexMap;
 
 use crate::error::IOError;
+use crate::graph::shape::{MapBuilder, ShapeTable};
 use crate::graph::{Graph, GraphStorage, TraversalGraph};
 use crate::traversal::memory_budget::UnitBudget;
 use crate::value::depth::{DEFAULT_MAX_VALUE_DEPTH, property_exceeds_depth};
@@ -799,6 +800,14 @@ struct Importer<'g, S: GraphStorage> {
     edge_count: usize,
     /// The memory budget of a live import (`None`: a load, or no budget configured).
     budget: &'g mut Option<UnitBudget>,
+    /// The vertex property map being decoded (built `Shaped`, see [`MapBuilder`]).
+    vertex_map: MapBuilder,
+    /// The importer's own shapes of vertex maps (the graph adopts them).
+    vertex_shapes: ShapeTable,
+    /// The edge property map being decoded.
+    edge_map: MapBuilder,
+    /// The importer's own shapes of edge maps.
+    edge_shapes: ShapeTable,
 }
 
 impl GraphSONImport {
@@ -928,6 +937,10 @@ impl GraphSONImport {
             has_out_e: HashSet::new(),
             vertex_count: 0,
             edge_count: 0,
+            vertex_map: MapBuilder::default(),
+            vertex_shapes: ShapeTable::new(),
+            edge_map: MapBuilder::default(),
+            edge_shapes: ShapeTable::new(),
         };
         let mut lines = Lines {
             limit: self.max_text_bytes,
@@ -1242,10 +1255,12 @@ impl<S: GraphStorage> Importer<'_, S> {
         at: &str,
         vertex: &str,
     ) -> PropertyMap {
-        let mut data = PropertyMap::default();
         let Some(PhysicalValue::Object(fields)) = properties else {
-            return data;
+            return PropertyMap::default();
         };
+        // Taken out for the loop (it borrows `self` for the report); put back when finished.
+        let mut data = std::mem::take(&mut self.vertex_map);
+        data.clear();
         let mut meta = PropertyMap::default();
         let mut file_meta = None;
         for (key, field) in fields {
@@ -1319,7 +1334,9 @@ impl<S: GraphStorage> Importer<'_, S> {
         } else if let Some(value) = file_meta {
             data.insert(CompactString::from(META_KEY), value);
         }
-        data
+        let map = data.finish(&mut self.vertex_shapes);
+        self.vertex_map = data;
+        map
     }
 
     /// Decodes one vertex-property entry `{"id": .., "value": .., "properties": {..}}`.
@@ -1460,7 +1477,8 @@ impl<S: GraphStorage> Importer<'_, S> {
                     });
                     continue;
                 };
-                let mut properties = PropertyMap::default();
+                let mut properties = std::mem::take(&mut self.edge_map);
+                properties.clear();
                 if let Some(PhysicalValue::Object(prop_fields)) = props {
                     let mut notes = Vec::new();
                     for (key, value) in prop_fields {
@@ -1482,6 +1500,9 @@ impl<S: GraphStorage> Importer<'_, S> {
                         }
                     }
                 }
+                let properties_map = properties.finish(&mut self.edge_shapes);
+                self.edge_map = properties;
+                let properties = properties_map;
                 let (from, to) = if out {
                     (this.clone(), other)
                 } else {
