@@ -584,3 +584,377 @@ mod tests {
         );
     }
 }
+
+/// The semantics of `PropertyMap` as callers observe them today, pinned before its
+/// representation changes: order rules, order-independent equality, `Debug` text, `Clone`, the
+/// auto traits, serde, and wide maps.
+#[cfg(test)]
+mod semantics_tests {
+    use super::{IntoIter, Iter, IterMut, Keys, PropertyMap, Values, ValuesMut};
+    use crate::value::ElementProperty;
+
+    fn keys(map: &PropertyMap) -> Vec<&str> {
+        map.keys().map(|k| k.as_str()).collect()
+    }
+
+    fn owned_keys(map: &PropertyMap) -> Vec<String> {
+        map.keys().map(|k| k.to_string()).collect()
+    }
+
+    fn sample() -> PropertyMap {
+        PropertyMap::from([
+            ("name", ElementProperty::from("marko")),
+            ("age", ElementProperty::from(29)),
+            ("ok", ElementProperty::from(true)),
+        ])
+    }
+
+    #[test]
+    fn insert_overwrite_remove_and_readd_follow_the_order_rules() {
+        let mut map = sample();
+        assert_eq!(keys(&map), ["name", "age", "ok"]);
+        // Overwrite: same position, previous value returned.
+        assert_eq!(
+            map.insert("name", ElementProperty::from("vadas")),
+            Some(ElementProperty::from("marko"))
+        );
+        assert_eq!(keys(&map), ["name", "age", "ok"]);
+        // New key: the end.
+        assert_eq!(map.insert("city", ElementProperty::Null), None);
+        assert_eq!(keys(&map), ["name", "age", "ok", "city"]);
+        // Remove the first, a middle one: the rest keep their order.
+        assert_eq!(
+            map.shift_remove("name"),
+            Some(ElementProperty::from("vadas"))
+        );
+        assert_eq!(map.shift_remove("ok"), Some(ElementProperty::from(true)));
+        assert_eq!(map.shift_remove("absent"), None);
+        assert_eq!(keys(&map), ["age", "city"]);
+        // Re-added: the end.
+        map.insert("name", ElementProperty::from(1));
+        assert_eq!(keys(&map), ["age", "city", "name"]);
+        // `get_mut`, `iter_mut` and `values_mut` change values, never the order.
+        *map.get_mut("age").unwrap() = ElementProperty::from(30);
+        assert!(map.get_mut("absent").is_none());
+        for (key, value) in map.iter_mut() {
+            if key == "city" {
+                *value = ElementProperty::from("rome");
+            }
+        }
+        for value in map.values_mut() {
+            if *value == ElementProperty::from(1) {
+                *value = ElementProperty::from(2);
+            }
+        }
+        assert_eq!(
+            map.iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect::<Vec<_>>(),
+            [
+                ("age", ElementProperty::from(30)),
+                ("city", ElementProperty::from("rome")),
+                ("name", ElementProperty::from(2)),
+            ]
+        );
+        assert_eq!(
+            map.values().cloned().collect::<Vec<_>>(),
+            [
+                ElementProperty::from(30),
+                ElementProperty::from("rome"),
+                ElementProperty::from(2)
+            ]
+        );
+        // `clear` empties; a later insert starts a fresh order.
+        map.clear();
+        assert!(map.is_empty());
+        map.insert("z", ElementProperty::Null);
+        map.insert("a", ElementProperty::Null);
+        assert_eq!(keys(&map), ["z", "a"]);
+    }
+
+    #[test]
+    fn iterators_are_ordered_double_ended_and_exact() {
+        let mut map = sample();
+        assert_eq!(map.iter().len(), 3);
+        assert_eq!(
+            map.keys().rev().map(|k| k.as_str()).collect::<Vec<_>>(),
+            ["ok", "age", "name"]
+        );
+        assert_eq!(map.values().next_back(), Some(&ElementProperty::from(true)));
+        let mut iter = map.iter();
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("name"));
+        assert_eq!(iter.next_back().map(|(k, _)| k.as_str()), Some("ok"));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("age"));
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none(), "fused");
+        assert_eq!(map.iter_mut().len(), 3);
+        assert_eq!(map.values_mut().rev().count(), 3);
+        assert_eq!((&mut map).into_iter().len(), 3);
+        assert_eq!(
+            (&map)
+                .into_iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            ["name", "age", "ok"]
+        );
+        let mut owned = map.clone().into_iter();
+        assert_eq!(owned.len(), 3);
+        assert_eq!(
+            owned.next_back().map(|(k, _)| k.to_string()),
+            Some("ok".into())
+        );
+        assert_eq!(
+            owned.map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+            ["name", "age"]
+        );
+    }
+
+    #[test]
+    fn construction_with_duplicate_keys_keeps_the_first_position_and_the_last_value() {
+        let collected: PropertyMap = [
+            ("b", ElementProperty::from(1)),
+            ("a", ElementProperty::from(2)),
+            ("b", ElementProperty::from(3)),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(keys(&collected), ["b", "a"]);
+        assert_eq!(collected["b"], ElementProperty::from(3));
+        let from_array = PropertyMap::from([
+            ("b", ElementProperty::from(1)),
+            ("a", ElementProperty::from(2)),
+            ("b", ElementProperty::from(3)),
+        ]);
+        assert_eq!(keys(&from_array), ["b", "a"]);
+        assert_eq!(from_array["b"], ElementProperty::from(3));
+        let mut extended = PropertyMap::from([("x", ElementProperty::Null)]);
+        extended.extend([
+            ("y", ElementProperty::from(1)),
+            ("x", ElementProperty::from(2)),
+            ("z", ElementProperty::from(3)),
+        ]);
+        assert_eq!(keys(&extended), ["x", "y", "z"]);
+        assert_eq!(extended["x"], ElementProperty::from(2));
+        let presized = PropertyMap::with_capacity(8);
+        assert!(presized.is_empty());
+        assert_eq!(presized, PropertyMap::new());
+        assert_eq!(PropertyMap::default(), PropertyMap::new());
+    }
+
+    #[test]
+    #[should_panic]
+    fn indexing_an_absent_key_panics() {
+        let _ = &sample()["absent"];
+    }
+
+    #[test]
+    fn equality_ignores_order_but_not_keys_values_or_length() {
+        let a = sample();
+        let reversed: PropertyMap = a
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert_eq!(keys(&reversed), ["ok", "age", "name"]);
+        assert_eq!(a, reversed);
+        assert_eq!(reversed, a);
+        let mut other_value = a.clone();
+        other_value.insert("age", ElementProperty::from(30));
+        assert_ne!(a, other_value);
+        let mut longer = a.clone();
+        longer.insert("extra", ElementProperty::Null);
+        assert_ne!(a, longer);
+        assert_ne!(longer, a);
+        let mut other_key = a.clone();
+        other_key.shift_remove("ok");
+        other_key.insert("ko", ElementProperty::from(true));
+        assert_ne!(a, other_key);
+        // A removed and re-added key: other order, equal.
+        let mut readded = a.clone();
+        let value = readded.shift_remove("name").unwrap();
+        readded.insert("name", value);
+        assert_eq!(keys(&readded), ["age", "ok", "name"]);
+        assert_eq!(a, readded);
+        // Nested objects compare unordered as well.
+        let nested = |map: PropertyMap| {
+            PropertyMap::from([("inner", ElementProperty::Object(Box::new(map)))])
+        };
+        assert_eq!(nested(a.clone()), nested(reversed.clone()));
+        assert_ne!(nested(a.clone()), nested(longer));
+        assert_eq!(
+            ElementProperty::Object(Box::new(a.clone())),
+            ElementProperty::Object(Box::new(reversed))
+        );
+        // Empty maps are equal however they were made.
+        let mut emptied = a.clone();
+        emptied.clear();
+        assert_eq!(emptied, PropertyMap::new());
+        assert_eq!(PropertyMap::with_capacity(4), PropertyMap::new());
+    }
+
+    #[test]
+    fn debug_is_the_map_text_in_order() {
+        assert_eq!(format!("{:?}", PropertyMap::new()), "{}");
+        assert_eq!(
+            format!("{:?}", sample()),
+            r#"{"name": "marko", "age": 29, "ok": true}"#
+        );
+        let nested = PropertyMap::from([
+            ("z", ElementProperty::Null),
+            ("o", ElementProperty::Object(Box::new(sample()))),
+            (
+                "l",
+                ElementProperty::Array(vec![ElementProperty::from(1.5)]),
+            ),
+        ]);
+        assert_eq!(
+            format!("{nested:?}"),
+            r#"{"z": null, "o": {"name": "marko", "age": 29, "ok": true}, "l": [1.5]}"#
+        );
+        assert_eq!(
+            format!("{:#?}", sample()),
+            "{\n    \"name\": \"marko\",\n    \"age\": 29,\n    \"ok\": true,\n}"
+        );
+        let map = sample();
+        assert_eq!(
+            format!("{:?}", map.iter()),
+            r#"[("name", "marko"), ("age", 29), ("ok", true)]"#
+        );
+        assert_eq!(format!("{:?}", map.keys()), r#"["name", "age", "ok"]"#);
+        assert_eq!(format!("{:?}", map.values()), r#"["marko", 29, true]"#);
+        let mut map = map;
+        assert_eq!(format!("{:?}", map.iter_mut()), "IterMut { remaining: 3 }");
+        assert_eq!(
+            format!("{:?}", map.values_mut()),
+            "ValuesMut { remaining: 3 }"
+        );
+        assert_eq!(
+            format!("{:?}", map.into_iter()),
+            "IntoIter { remaining: 3 }"
+        );
+    }
+
+    #[test]
+    fn clone_keeps_order_and_is_independent() {
+        let original = sample();
+        let mut copy = original.clone();
+        assert_eq!(keys(&copy), keys(&original));
+        copy.insert("new", ElementProperty::Null);
+        copy.shift_remove("name");
+        assert_eq!(keys(&original), ["name", "age", "ok"]);
+        assert_eq!(keys(&copy), ["age", "ok", "new"]);
+        let mut target = PropertyMap::from([("zz", ElementProperty::Null)]);
+        target.clone_from(&original);
+        assert_eq!(keys(&target), ["name", "age", "ok"]);
+        let mut wide = PropertyMap::new();
+        for i in 0..40 {
+            wide.insert(format!("k{i}"), ElementProperty::from(i));
+        }
+        target.clone_from(&wide);
+        assert_eq!(owned_keys(&target), owned_keys(&wide));
+        assert_eq!(target, wide);
+    }
+
+    #[test]
+    fn wide_maps_find_insert_remove_and_keep_order() {
+        for n in [20usize, 25, 100] {
+            let order: Vec<usize> = (0..n).map(|i| (i * 37 + 11) % n).collect();
+            let mut map = PropertyMap::new();
+            for &i in &order {
+                assert_eq!(map.insert(format!("k{i}"), ElementProperty::from(i)), None);
+            }
+            assert_eq!(map.len(), n);
+            let expected: Vec<String> = order.iter().map(|i| format!("k{i}")).collect();
+            assert_eq!(owned_keys(&map), expected);
+            for &i in &order {
+                assert_eq!(map.get(&format!("k{i}")), Some(&ElementProperty::from(i)));
+                assert!(map.contains_key(&format!("k{i}")));
+            }
+            assert!(map.get("k-missing").is_none());
+            // Overwrite all in reverse: order unchanged.
+            for &i in order.iter().rev() {
+                assert_eq!(
+                    map.insert(format!("k{i}"), ElementProperty::Null),
+                    Some(ElementProperty::from(i))
+                );
+            }
+            assert_eq!(owned_keys(&map), expected);
+            // Remove every third, re-add the first removed one: it goes to the end.
+            let mut remaining = expected.clone();
+            for key in expected.iter().step_by(3) {
+                assert_eq!(map.shift_remove(key), Some(ElementProperty::Null));
+                remaining.retain(|k| k != key);
+            }
+            map.insert(expected[0].as_str(), ElementProperty::from(1));
+            remaining.push(expected[0].clone());
+            assert_eq!(owned_keys(&map), remaining);
+            assert_eq!(map.len(), remaining.len());
+            // Equal to the same entries in sorted order.
+            let mut sorted: Vec<_> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(sorted.into_iter().collect::<PropertyMap>(), map);
+        }
+    }
+
+    /// `PropertyMap` implements no `Hash` today (`ElementProperty` holds floats). The check
+    /// compiles only while that is so: a `Hash` type gets a second candidate impl of
+    /// `AmbiguousIfHash`, and the inferred `_` becomes ambiguous.
+    #[test]
+    fn property_map_does_not_implement_hash() {
+        trait AmbiguousIfHash<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfHash<()> for T {}
+        #[allow(dead_code)]
+        struct Invalid;
+        impl<T: ?Sized + std::hash::Hash> AmbiguousIfHash<Invalid> for T {}
+        <PropertyMap as AmbiguousIfHash<_>>::some_item();
+    }
+
+    #[test]
+    fn the_map_and_its_iterators_keep_their_auto_traits() {
+        fn all_auto<T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe + Unpin>() {
+        }
+        all_auto::<PropertyMap>();
+        all_auto::<Iter<'static>>();
+        all_auto::<Keys<'static>>();
+        all_auto::<Values<'static>>();
+        all_auto::<IntoIter>();
+        fn send_sync<T: Send + Sync + Unpin>() {}
+        send_sync::<IterMut<'static>>();
+        send_sync::<ValuesMut<'static>>();
+        fn clone<T: Clone>() {}
+        clone::<Iter<'static>>();
+        clone::<Keys<'static>>();
+        clone::<Values<'static>>();
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_is_a_json_object_in_order_and_round_trips() {
+        let map = PropertyMap::from([
+            ("zeta", ElementProperty::from(1)),
+            ("alpha", ElementProperty::from("a")),
+            (
+                "mid",
+                ElementProperty::Object(Box::new(PropertyMap::from([
+                    ("y", ElementProperty::Null),
+                    ("b", ElementProperty::from(true)),
+                ]))),
+            ),
+        ]);
+        let text = serde_json::to_string(&map).unwrap();
+        assert_eq!(text, r#"{"zeta":1,"alpha":"a","mid":{"y":null,"b":true}}"#);
+        let back: PropertyMap = serde_json::from_str(&text).unwrap();
+        assert_eq!(keys(&back), ["zeta", "alpha", "mid"]);
+        assert_eq!(back, map);
+        assert_eq!(serde_json::to_string(&back).unwrap(), text);
+        // Reading keeps the order of the document; a duplicate key keeps its first position.
+        let read: PropertyMap = serde_json::from_str(r#"{"b":1,"a":2,"b":3}"#).unwrap();
+        assert_eq!(keys(&read), ["b", "a"]);
+        assert_eq!(read["b"], ElementProperty::from(3));
+        assert_eq!(serde_json::to_string(&PropertyMap::new()).unwrap(), "{}");
+    }
+}

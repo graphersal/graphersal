@@ -1225,3 +1225,139 @@ fn out_out_large_no_lazy_barrier(bencher: divan::Bencher, _args: usize) {
         let _ = g.v(None).out(None).out(None).to_list();
     });
 }
+
+/// Element property writes, drops, rollbacks and reads on narrow (3 keys) and wide (25 keys)
+/// vertices: the baseline for a change of the stored property representation.
+mod element_properties {
+    use graphersal::changes::RollbackReason;
+    use graphersal::prelude::*;
+    use graphersal::storage::VertexHandle;
+
+    /// Vertices per graph.
+    const VERTICES: usize = 10_000;
+
+    /// `VERTICES` vertices labelled `item`, each with `width` keys `k0..k<width>` (int values).
+    fn graph(width: usize) -> TraversalGraph {
+        let mut graph = TraversalGraph::new();
+        let keys: Vec<String> = (0..width).map(|k| format!("k{k}")).collect();
+        for i in 0..VERTICES {
+            let props: PropertyMap = keys
+                .iter()
+                .enumerate()
+                .map(|(k, key)| (key.as_str(), ElementProperty::from((i * width + k) as i64)))
+                .collect();
+            graph
+                .insert_vertex(None, vec!["item".into()], props)
+                .unwrap();
+        }
+        graph
+    }
+
+    fn handles(graph: &TraversalGraph) -> Vec<VertexHandle> {
+        GraphStorage::vertices(graph).collect()
+    }
+
+    /// Adds a new key to every vertex (a fresh graph per sample).
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn write_add_key(bencher: divan::Bencher, width: usize) {
+        bencher
+            .with_inputs(|| {
+                let graph = graph(width);
+                let handles = handles(&graph);
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for &v in &handles {
+                    graph
+                        .set_vertex_property(v, "added".into(), ElementProperty::from(1))
+                        .unwrap();
+                }
+                graph
+            });
+    }
+
+    /// Overwrites the last key of every vertex.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn write_overwrite(bencher: divan::Bencher, width: usize) {
+        let mut graph = graph(width);
+        let handles = handles(&graph);
+        let key = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            for &v in &handles {
+                graph
+                    .set_vertex_property(v, key.as_str().into(), ElementProperty::from(7))
+                    .unwrap();
+            }
+        });
+    }
+
+    /// Drops the first key of every vertex (a fresh graph per sample).
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn drop_key(bencher: divan::Bencher, width: usize) {
+        bencher
+            .with_inputs(|| {
+                let graph = graph(width);
+                let handles = handles(&graph);
+                (graph, handles)
+            })
+            .bench_local_values(|(mut graph, handles)| {
+                for &v in &handles {
+                    graph.drop_vertex_property("k0", v).unwrap();
+                }
+                graph
+            });
+    }
+
+    /// One unit that overwrites, drops and adds a key on every vertex, rolled back.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn rollback_property_changes(bencher: divan::Bencher, width: usize) {
+        let mut graph = graph(width);
+        let handles = handles(&graph);
+        let last = format!("k{}", width - 1);
+        bencher.bench_local(|| {
+            let mark = graph.begin_unit();
+            for &v in &handles {
+                graph
+                    .set_vertex_property(v, last.as_str().into(), ElementProperty::Null)
+                    .unwrap();
+                graph.drop_vertex_property("k1", v).unwrap();
+                graph
+                    .set_vertex_property(v, "added".into(), ElementProperty::from(1))
+                    .unwrap();
+            }
+            graph.rollback_unit(mark, &RollbackReason::failed(&"bench"));
+        });
+    }
+
+    /// `v().element_map().to_list()`.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn element_map(bencher: divan::Bencher, width: usize) {
+        let graph = graph(width);
+        bencher.bench_local(|| graph.traversal().v(None).element_map(None).to_list());
+    }
+
+    /// `v().value_map().to_list()`.
+    #[divan::bench(args = [3, 25], sample_count = 20)]
+    fn value_map(bencher: divan::Bencher, width: usize) {
+        let graph = graph(width);
+        bencher.bench_local(|| graph.traversal().v(None).value_map(None).to_list());
+    }
+
+    /// `v().values(key).to_list()` on wide vertices: the first, a middle and the last key.
+    #[divan::bench(args = ["k0", "k12", "k24"], sample_count = 20)]
+    fn values_key_wide(bencher: divan::Bencher, key: &str) {
+        let graph = graph(25);
+        bencher.bench_local(|| graph.traversal().v(None).values(key).to_list());
+    }
+
+    /// `read_snapshot` of a graph whose vertices carry `width` keys. Needs `persist`, which the
+    /// bench's required features leave out: run with `--features io,script,display,serde,persist`.
+    #[cfg(feature = "persist")]
+    #[divan::bench(args = [3, 25], sample_count = 10)]
+    fn snapshot_load(bencher: divan::Bencher, width: usize) {
+        use graphersal::persist::{self, WriteOptions};
+        let mut bytes = Vec::new();
+        persist::write_snapshot(&graph(width), &mut bytes, &WriteOptions::new()).unwrap();
+        bencher.bench_local(|| TraversalGraph::read_snapshot(bytes.as_slice()).unwrap());
+    }
+}
