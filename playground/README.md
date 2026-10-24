@@ -99,6 +99,7 @@ playground/
   tests/palette.test.mjs       Node tests of the label palette
   tests/tiers.test.mjs         Node tests of the tier choice: thresholds, hysteresis, switch, no-WebGL, controls
   tests/fast-tier.test.mjs     Node tests of the tier switch (positions kept), drill-down helpers, Stop registry
+  tests/graph-toolbar.test.mjs Node tests of the Graph toolbar's fit (what collapses into the Display menu), Filter badge
   tests/ai-chat.test.mjs       Node tests of the AI Chat tab model and controller (fake server), the wasm stub, the HTTP calls
   tests/link.test.mjs          Node tests of playground links: parse/build, graph data encoding, damage, share size
   tests/markdown.test.mjs      Node tests of the chat's Markdown renderer and the table -> Markdown copy
@@ -142,6 +143,7 @@ playground/
       palette.js           the label colours: collision-free slots, light/dark (pure, Node-tested)
       highlight.js         the result highlight: when it shows, its Clear/Esc dismissal per result (pure, Node-tested)
       edit-mode.js         the edit mode: switch state, connect drag, in-place patch, positions (pure, Node-tested)
+      toolbar.js           the Graph toolbar: which items fit in the row, the rest in the Display menu (pure, Node-tested)
     saved-queries.js       saved queries: folder tree, editor draft <-> spec, run form (pure, Node-tested)
     element-editor.js      the property editor: typed values <-> form tree, raw JSON, schema fields, diff (pure, Node-tested)
     schema/                the schema editor's logic (no Vue, tested under Node)
@@ -476,6 +478,15 @@ data model is `js/graph-data.js`. All of it except the two adapters is pure and 
 (`tests/renderer.test.mjs` and `tests/fast-tier.test.mjs` run the panel's behaviour against fake
 renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
 
+- **Toolbar** (`js/graph/toolbar.js`, `tests/graph-toolbar.test.mjs`). The row holds the frequent
+  actions: `[Filter] [Layout] [✎ Edit] ... [✕ Clear highlight] [Fit] [Export ▾] [⚙ ▾]`. The ⚙
+  **Display** menu holds the drawing tier (Auto/Detailed/Fast with the automatic pick), Vertex IDs,
+  Edge labels, Edge IDs, Highlight result and the mouse help. The panel measures the row
+  (ResizeObserver) and `toolbarFit` moves Layout, then Edit, then Filter into the Display menu, and
+  finally shortens Clear highlight, Fit, Export and Display to their icons, so the row never wraps or
+  scrolls (down to a 320 px panel). Filter is a slot for the coming filter drawer
+  (`FILTER_ENABLED = false`: a split button with the badge `filterBadge` and an on/off switch).
+
 - **Tiers.** `chooseTier` (`js/graph/tiers.js`) picks by the number of elements drawn (vertices +
   edges): **Detailed below 2000, Fast from 2000**, and once Fast, Detailed again only below 1600
   (hysteresis, so a drawing that grows and shrinks around the threshold does not flip). The panel's
@@ -588,8 +599,8 @@ renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
   rest faded, both tiers). **✕ Clear highlight** (toolbar end, only while a highlight is shown)
   and `Esc` dismiss it for that result: a dismissal is keyed by the result's subgraph object in a
   module-level `WeakSet` (the panel is re-mounted on a tab switch), so a new result, or another
-  tab's, highlights again and a cleared tab stays cleared; the "highlight result" checkbox is the
-  lasting switch. The canvas reports `Esc` as `clear-highlight`; it focuses itself on press and on
+  tab's, highlights again and a cleared tab stays cleared; the Display menu's "Highlight result" checkbox
+  is the lasting switch. The canvas reports `Esc` as `clear-highlight`; it focuses itself on press and on
   release (Cytoscape blurs the active element on mousedown).
 - **Long values** (`js/value-view.js`, Node tests `tests/value-view.test.mjs`; view
   `components/value-text.js`). The inspector and the Results table collapse a text above the

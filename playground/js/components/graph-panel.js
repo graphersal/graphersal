@@ -15,10 +15,16 @@
 // After a change the panel patches the drawing it shows (`applyEdit`): the whole graph and a
 // neighbourhood are then read again from the engine (the neighbourhood keeps the new vertex), the
 // query result's drawing and a drill-down stay patched.
+//
+// Toolbar (js/graph/toolbar.js): the row holds [Filter] [Layout] [Edit] ... [Clear highlight] [Fit]
+// [Export] [⚙ ▾]; the Display menu (⚙) holds the drawing tier, the ID and label switches, the
+// highlight switch and the mouse help. The row is measured (a ResizeObserver): when it is narrow,
+// Layout, Edit and Filter move into the Display menu and the right-hand buttons shrink to icons.
 
-import { ref, computed, watch, onMounted, markRaw, toRaw } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, markRaw, toRaw } from 'vue';
 import { state, saveSettings } from '../store.js';
 import { PanelFrame, PanelTabs, FitButton, ExportMenu } from './panel-frame.js';
+import { DropMenu } from './drop-menu.js';
 import { exportFileName, downloadBlob } from '../export.js';
 import { GraphCanvas, LAYOUTS } from './graph-canvas.js';
 import { storage } from '../util.js';
@@ -35,6 +41,7 @@ import {
 } from '../graph/selection.js';
 import { editModeState, applyEdit } from '../graph/edit-mode.js';
 import { resultHighlight, createDismissals } from '../graph/highlight.js';
+import { FILTER_ENABLED, TOOLBAR_GAP, SHORTENED, toolbarFit, filterBadge, GRAPH_HELP, displayTitle } from '../graph/toolbar.js';
 
 const LAYOUT_IDS = LAYOUTS.map((l) => l.id);
 const HOP_CHOICES = Array.from({ length: SELECTION_TUNING.maxHops }, (_, i) => i + 1);
@@ -45,7 +52,7 @@ const dismissVersion = ref(0);
 const message = (err) => (err && err.message ? err.message : String(err));
 
 export const GraphPanel = {
-  components: { PanelFrame, PanelTabs, GraphCanvas, FitButton, ExportMenu },
+  components: { PanelFrame, PanelTabs, GraphCanvas, FitButton, ExportMenu, DropMenu },
   setup() {
     const source = ref(normalizeSource(storage.get('graph.source', 'graph')));
     const layout = ref(storage.get('graph.layout', 'cose'));
@@ -578,6 +585,59 @@ export const GraphPanel = {
       if (source.value === 'graph' && view.value) view.value = markRaw(applyEdit(view.value, change));
     }
 
+    // ------------------------------------------------------------------ toolbar
+    // The row's fit (js/graph/toolbar.js): which items stay inline, which the Display menu shows.
+    const toolbarEl = ref(null);
+    const itemWidths = {}; // natural widths of the items, kept while an item is collapsed
+    const compactWidths = {}; // widths of the shortened items (measured while compact)
+    const fitState = ref({ inline: [], inMenu: [], compact: false });
+    const inMenu = (id) => fitState.value.inMenu.includes(id);
+    let refits = 0; // re-fits in a row without a new outside cause (a guard against flip-flopping)
+    function measureToolbar(again = false) {
+      refits = again ? refits + 1 : 0;
+      if (refits > 4) return;
+      const row = toolbarEl.value;
+      if (!row || !row.isConnected) return;
+      const cs = getComputedStyle(row);
+      // One gap more: the flex gap between the left and the right group.
+      const available = row.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - TOOLBAR_GAP;
+      if (available <= 0) return; // hidden (a collapsed panel)
+      for (const el of row.querySelectorAll('[data-tb]')) {
+        const id = el.dataset.tb;
+        // Shortened items are not measured: their natural width is the full one.
+        const into = fitState.value.compact && SHORTENED.has(id) ? compactWidths : itemWidths;
+        const w = el.getBoundingClientRect().width;
+        if (w > 0) into[id] = Math.ceil(w);
+      }
+      const next = toolbarFit({ available, widths: itemWidths, compactWidths, show: { filter: FILTER_ENABLED, clear: !!highlight.value } });
+      const cur = fitState.value;
+      if (next.compact !== cur.compact || next.inMenu.join() !== cur.inMenu.join() || next.inline.join() !== cur.inline.join()) {
+        fitState.value = next;
+        nextTick(() => measureToolbar(true)); // an item shown again is measured anew
+      }
+    }
+    let toolbarObserver = null;
+    onMounted(() => {
+      if (typeof ResizeObserver === 'function' && toolbarEl.value) {
+        toolbarObserver = new ResizeObserver(() => measureToolbar());
+        toolbarObserver.observe(toolbarEl.value);
+      }
+      measureToolbar();
+    });
+    onBeforeUnmount(() => { if (toolbarObserver) toolbarObserver.disconnect(); });
+    watch(() => [!!highlight.value, layout.value, exportBusy.value], () => nextTick(measureToolbar), { flush: 'post' });
+    const displayTitleText = computed(() => {
+      const drawn = drill.value || isMeta.value ? 'Detailed' : (tier.value === 'fast' ? 'Fast' : 'Detailed');
+      const choice = TIER_CHOICES.find((c) => c.id === tierChoice.value);
+      return displayTitle(tierChoice.value === 'auto' ? `Auto · ${drawn}` : (choice ? choice.label : drawn));
+    });
+
+    // The Filter button (FILTER_ENABLED in js/graph/toolbar.js): a placeholder for the filter
+    // drawer. `count` = active conditions, `enabled` = the button's toggle, `open` = the drawer.
+    const filter = ref({ count: 0, enabled: true, open: false });
+    function openFilter() { filter.value = { ...filter.value, open: !filter.value.open }; }
+    function toggleFilter() { filter.value = { ...filter.value, enabled: !filter.value.enabled }; }
+
     function raiseLimit() {
       saveSettings({ graphMaxNodes: state.settings.graphMaxNodes * 2, graphMaxEdges: state.settings.graphMaxEdges * 2 });
     }
@@ -593,44 +653,88 @@ export const GraphPanel = {
       fit: () => cyRef.value && cyRef.value.fit(),
       refresh, EXPORT_FORMATS, onExport, exportBusy, exportError,
       editOn, edit, editTitle, onEdited,
+      toolbarEl, fitState, inMenu, displayTitleText, GRAPH_HELP, FILTER_ENABLED, filter, filterBadge, openFilter, toggleFilter,
     };
   },
   template: `
   <panel-frame title="Graph" refresh-title="Reload the drawing from the engine and run the layout again" @refresh="refresh">
     <template #tabs><panel-tabs :tabs="SOURCES" v-model="source"></panel-tabs></template>
     <div class="graph-wrap">
-      <div class="panel-toolbar">
+      <div ref="toolbarEl" class="panel-toolbar graph-toolbar">
         <div class="toolbar-main">
-        <span class="segmented" role="group" aria-label="Drawing tier">
-          <button v-for="c in TIER_CHOICES" :key="c.id" type="button" class="seg-btn" :class="{ active: tierChoice === c.id }"
-                  :aria-pressed="String(tierChoice === c.id)" @click="setTier(c.id)"
-                  :disabled="isMeta || (c.id === 'fast' && (!webgl || !!fastError))"
-                  :title="isMeta ? 'The label overview is always drawn in the Detailed tier' : (c.id === 'fast' && (!webgl || fastError) ? 'The Fast tier is not available: ' + (fastError || 'this browser has no WebGL') : c.title)">
-            {{ c.label }}<template v-if="c.id === 'auto' && tierChoice === 'auto'"> · {{ drill || isMeta ? 'Detailed' : (tier === 'fast' ? 'Fast' : 'Detailed') }}</template>
-          </button>
-        </span>
-        <span :title="editTitle" class="edit-toggle-wrap"><button type="button" class="btn small edit-toggle" :class="{ active: edit.active }"
-                :aria-pressed="String(editOn && !edit.disabled)" :disabled="edit.disabled" @click="editOn = !editOn"
-                :aria-label="'Edit mode' + (edit.disabled ? ' (' + edit.reason + ')' : '')">✎ Edit mode</button></span>
-        <label>Layout
-          <select v-model="layout">
-            <option v-for="l in LAYOUTS" :key="l.id" :value="l.id" :disabled="controls.layouts[l.id].disabled" :title="controls.layouts[l.id].reason || ''">{{ l.label }}</option>
-          </select>
-        </label>
-        <label title="Show each vertex id on its node"><input type="checkbox" v-model="showIds" :disabled="isMeta"> Show IDs</label>
-        <label :title="controls.edgeLabels.reason || 'Draw each edge with its label'"><input type="checkbox" v-model="edgeLabels" :disabled="controls.edgeLabels.disabled"> edge labels</label>
-        <label :title="controls.edgeIds.reason || 'Show each edge id next to its label'"><input type="checkbox" v-model="edgeIds" :disabled="!edgeLabels || controls.edgeIds.disabled || isMeta"> Edge IDs</label>
-        <label v-if="source === 'graph' && !drill && !isMeta" :title="subgraph ? 'Fade everything the last result does not refer to' : 'Run a query that returns elements'">
-          <input type="checkbox" v-model="highlightResult" :disabled="!subgraph"> highlight result
-        </label>
+          <!-- The Filter slot (FILTER_ENABLED in js/graph/toolbar.js): a split button; its main part
+               opens the filter drawer, its right part switches the filter on and off. -->
+          <span v-if="FILTER_ENABLED && !inMenu('filter')" data-tb="filter" class="split-btn filter-btn" :class="{ off: !filter.enabled }">
+            <button type="button" class="btn small split-main" :class="{ active: filter.open }" :aria-expanded="String(filter.open)"
+                    title="Filter what the drawing shows" @click="openFilter">⚲ Filter<span v-if="filterBadge(filter)" class="filter-badge"> {{ filterBadge(filter) }}</span></button>
+            <button type="button" class="btn small split-toggle" role="switch" :aria-checked="String(filter.enabled)"
+                    :aria-label="filter.enabled ? 'Switch the filter off' : 'Switch the filter on'" :title="filter.enabled ? 'Switch the filter off' : 'Switch the filter on'"
+                    @click="toggleFilter"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>
+          </span>
+          <label v-if="!inMenu('layout')" data-tb="layout">Layout
+            <select v-model="layout">
+              <option v-for="l in LAYOUTS" :key="l.id" :value="l.id" :disabled="controls.layouts[l.id].disabled" :title="controls.layouts[l.id].reason || ''">{{ l.label }}</option>
+            </select>
+          </label>
+          <span v-if="!inMenu('edit')" data-tb="edit" :title="editTitle" class="edit-toggle-wrap"><button type="button" class="btn small edit-toggle" :class="{ active: edit.active }"
+                  :aria-pressed="String(editOn && !edit.disabled)" :disabled="edit.disabled" @click="editOn = !editOn"
+                  :aria-label="'Edit mode' + (edit.disabled ? ' (' + edit.reason + ')' : '')">✎ Edit</button></span>
         </div>
         <div class="toolbar-end">
-          <button v-if="highlight" type="button" class="btn small clear-highlight" @click="clearHighlight"
-                  title="Show the graph normally again (also Esc on the drawing). The next query result highlights again.">✕ Clear highlight</button>
-          <span class="info-tip" tabindex="0" role="note" aria-label="Click an element for its properties. Double-click a vertex to select its neighbours (again: one hop more); in the Neighbourhood view it fetches them from the engine; in the Labels view double-click a label or an edge to draw a sample. Pinch or wheel to zoom, drag to pan, double-click empty space to fit."
-                title="Click an element for its properties. Double-click a vertex to select its neighbours (again: one hop more); in the Neighbourhood view it fetches them from the engine; in the Labels view double-click a label or an edge to draw a sample. Pinch or wheel to zoom, drag to pan, double-click empty space to fit.">ⓘ</span>
-          <fit-button @fit="fit"></fit-button>
-          <export-menu :formats="EXPORT_FORMATS" :busy="exportBusy" @export="onExport"></export-menu>
+          <span v-if="highlight" data-tb="clear" class="tb-item"><button type="button" class="btn small clear-highlight" @click="clearHighlight"
+                  aria-label="Clear highlight"
+                  title="Show the graph normally again (also Esc on the drawing). The next query result highlights again.">✕ {{ fitState.compact ? 'Clear' : 'Clear highlight' }}</button></span>
+          <span data-tb="fit" class="tb-item"><fit-button :compact="fitState.compact" @fit="fit"></fit-button></span>
+          <span data-tb="export" class="tb-item"><export-menu :formats="EXPORT_FORMATS" :busy="exportBusy" :compact="fitState.compact" @export="onExport"></export-menu></span>
+          <span data-tb="display" class="tb-item"><drop-menu button-class="btn small display-btn" :title="displayTitleText" aria-label="Display settings" menu-style="width: 300px">
+            <template #trigger>
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/>
+              </svg>
+              {{ fitState.compact ? '▾' : 'Display ▾' }}
+            </template>
+            <template v-if="fitState.inMenu.length">
+              <div class="menu-title">Toolbar</div>
+              <button v-if="FILTER_ENABLED && inMenu('filter')" type="button" class="menu-item" @click="openFilter">⚲ Filter<span v-if="filterBadge(filter)" class="filter-badge"> {{ filterBadge(filter) }}</span></button>
+              <label v-if="inMenu('layout')" class="menu-item menu-field">Layout
+                <select v-model="layout">
+                  <option v-for="l in LAYOUTS" :key="l.id" :value="l.id" :disabled="controls.layouts[l.id].disabled" :title="controls.layouts[l.id].reason || ''">{{ l.label }}</option>
+                </select>
+              </label>
+              <div v-if="inMenu('edit')" :title="editTitle"><button type="button" class="menu-item edit-toggle" :class="{ active: edit.active }"
+                      :aria-pressed="String(editOn && !edit.disabled)" :disabled="edit.disabled" @click="editOn = !editOn"
+                      :aria-label="'Edit mode' + (edit.disabled ? ' (' + edit.reason + ')' : '')">✎ Edit mode{{ editOn && !edit.disabled ? ' (on)' : '' }}</button>
+                <div v-if="edit.disabled && edit.reason" class="menu-note">Unavailable: {{ edit.reason }}</div>
+              </div>
+              <div class="menu-sep"></div>
+            </template>
+            <div class="menu-title">Drawing tier</div>
+            <div class="menu-row">
+              <span class="segmented" role="group" aria-label="Drawing tier">
+                <button v-for="c in TIER_CHOICES" :key="c.id" type="button" class="seg-btn" :class="{ active: tierChoice === c.id }"
+                        :aria-pressed="String(tierChoice === c.id)" @click="setTier(c.id)"
+                        :disabled="isMeta || (c.id === 'fast' && (!webgl || !!fastError))"
+                        :title="isMeta ? 'The label overview is always drawn in the Detailed tier' : (c.id === 'fast' && (!webgl || fastError) ? 'The Fast tier is not available: ' + (fastError || 'this browser has no WebGL') : c.title)">
+                  {{ c.label }}<template v-if="c.id === 'auto' && tierChoice === 'auto'"> · {{ drill || isMeta ? 'Detailed' : (tier === 'fast' ? 'Fast' : 'Detailed') }}</template>
+                </button>
+              </span>
+            </div>
+            <div v-if="isMeta" class="menu-note">The label overview is always drawn in the Detailed tier.</div>
+            <div v-else-if="!webgl || fastError" class="menu-note">The Fast tier is not available: {{ fastError || 'this browser has no WebGL' }}.</div>
+            <div class="menu-sep"></div>
+            <div class="menu-title">Show</div>
+            <label class="menu-item" title="Show each vertex id on its node"><input type="checkbox" v-model="showIds" :disabled="isMeta"> Vertex IDs</label>
+            <label class="menu-item" :title="controls.edgeLabels.reason || 'Draw each edge with its label'"><input type="checkbox" v-model="edgeLabels" :disabled="controls.edgeLabels.disabled"> Edge labels</label>
+            <label class="menu-item menu-indent" :title="controls.edgeIds.reason || 'Show each edge id next to its label'"><input type="checkbox" v-model="edgeIds" :disabled="!edgeLabels || controls.edgeIds.disabled || isMeta"> Edge IDs</label>
+            <label v-if="source === 'graph' && !drill && !isMeta" class="menu-item" :title="subgraph ? 'Fade everything the last result does not refer to' : 'Run a query that returns elements'">
+              <input type="checkbox" v-model="highlightResult" :disabled="!subgraph"> Highlight result
+            </label>
+            <div class="menu-sep"></div>
+            <div class="menu-title">Mouse</div>
+            <ul class="menu-help">
+              <li v-for="h in GRAPH_HELP" :key="h">{{ h }}</li>
+            </ul>
+          </drop-menu></span>
         </div>
       </div>
       <form v-if="source === 'neighbourhood' && !drill" class="panel-toolbar nb-form" @submit.prevent="showNeighbourhood(nbInput)">

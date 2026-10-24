@@ -70,8 +70,12 @@ export const PanelTabs = {
   `,
 };
 
-/** The "Fit" button of every drawing (graph, schema graph, Mermaid): same icon, text and tooltip. */
+/**
+ * The "Fit" button of every drawing (graph, schema graph, Mermaid): same icon, text and tooltip.
+ * `compact` shows the icon only (a narrow Graph toolbar).
+ */
 export const FitButton = {
+  props: { compact: { type: Boolean, default: false } },
   emits: ['fit'],
   template: `
     <button class="btn small" @click="$emit('fit')" title="Fit the drawing to the panel (or double-click empty space)"
@@ -79,7 +83,7 @@ export const FitButton = {
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
         <path d="M2 5.5V2h3.5M10.5 2H14v3.5M14 10.5V14h-3.5M5.5 14H2v-3.5"/>
       </svg>
-      Fit
+      <template v-if="!compact">Fit</template>
     </button>
   `,
 };
@@ -118,10 +122,11 @@ export const CopyButton = {
 /**
  * The "Export" menu of every drawing toolbar (same icon everywhere). `formats` lists what the
  * drawing offers, e.g. [{id: 'png', label: 'PNG (whole drawing)'}, {id: 'svg', label: 'SVG'}];
- * choosing one emits `export(id, {transparent})`. The background choice is remembered.
+ * choosing one emits `export(id, {transparent})`. The background choice is remembered. `compact`
+ * shows the icon and the arrow only (a narrow Graph toolbar).
  */
 export const ExportMenu = {
-  props: { formats: { type: Array, required: true }, busy: { type: Boolean, default: false } },
+  props: { formats: { type: Array, required: true }, busy: { type: Boolean, default: false }, compact: { type: Boolean, default: false } },
   emits: ['export'],
   components: { DropMenu },
   setup(props, { emit }) {
@@ -138,7 +143,7 @@ export const ExportMenu = {
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
           <path d="M8 2v8M4.5 6.5L8 10l3.5-3.5M2.5 11v2.5h11V11"/>
         </svg>
-        {{ busy ? 'Exporting…' : 'Export' }} ▾
+        {{ compact ? '▾' : (busy ? 'Exporting…' : 'Export') + ' ▾' }}
       </template>
       <div class="menu-title">Export as</div>
       <button v-for="f in formats" :key="f.id" class="menu-item" :disabled="busy" @click="choose(f.id)">{{ f.label }}</button>

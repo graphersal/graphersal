@@ -96,7 +96,9 @@ answers questions by querying the served graph. In the WebAssembly playground th
   vectors are collapsed with an expand button, see [Long values](#what-the-panel-shows));
   double-clicking a vertex in the neighbourhood or the query result expands it by one hop from
   the engine (in the whole graph: selects it with its neighbours, again for one hop more),
-  double-clicking empty space fits the drawing. Above 200 vertices the engine lays the drawing out (with progress
+  double-clicking empty space fits the drawing. The toolbar keeps Layout, Edit, Fit and Export;
+  the ⚙ **Display** menu holds the drawing tier, vertex and edge IDs, edge labels and a short mouse
+  help (a narrow panel moves Layout and Edit there too). Above 200 vertices the engine lays the drawing out (with progress
   and Stop) instead of the browser. See [The graph drawing](#the-graph-drawing) below for what
   the panel shows and its two drawing tiers.
 - **Run** (or `Ctrl`/`⌘`+`Enter`) runs the selected text when the editor has a selection, else the
@@ -232,8 +234,8 @@ panel's tabs choose a meaningful part instead:
   neighbourhood instead).
 
 **Result highlight.** In the **Whole graph** tab the elements the active tab's last query result
-refers to are highlighted and everything else is faded (the **highlight result** checkbox turns
-this off for good). **✕ Clear highlight** in the toolbar, shown while a highlight is active, or
+refers to are highlighted and everything else is faded (**Highlight result** in the toolbar's ⚙
+Display menu turns this off for good). **✕ Clear highlight** in the toolbar, shown while a highlight is active, or
 `Esc` on the drawing (click it first) shows the graph normally again; `Esc` also clears a
 double-click selection. Clearing applies to that result only: the next query result highlights
 again, and switching to another query tab shows that tab's result highlighted, while the tab you
@@ -277,7 +279,8 @@ tooltip, while a query runs and when the graph cannot be written: a read-only vi
 
 ### Edit mode
 
-The **Edit mode** switch in the Graph panel's toolbar turns the mouse into an editor of the graph:
+The **✎ Edit** switch in the Graph panel's toolbar (in the ⚙ Display menu when the panel is narrow)
+turns the mouse into an editor of the graph:
 
 - **Add a vertex:** double-click empty space. A dialog asks for the label (a menu of the labels the
   schema declares and the graph already has; any label can be typed unless the schema is
@@ -321,7 +324,7 @@ The Graph panel draws in one of two tiers:
 | Export | PNG | PNG |
 | Pans smoothly up to | about 2000 elements | 100 000 elements (the largest measured) |
 
-The switch **Auto / Detailed / Fast** in the panel's toolbar (also in Settings) chooses the tier;
+The switch **Auto / Detailed / Fast** in the toolbar's ⚙ Display menu (also in Settings) chooses the tier;
 Auto decides by size, with a margin so a drawing does not flip back and forth around the
 threshold. Switching keeps the drawing's positions. In the Fast tier a banner says what it lacks,
 and the controls it cannot honour (edge labels, the Concentric and Tree layouts) are disabled with

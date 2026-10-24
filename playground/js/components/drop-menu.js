@@ -127,7 +127,11 @@ export const DropMenu = {
       if (trigger.value) observer.observe(trigger.value);
       await nextTick();
       place();
-      const first = pop.value && pop.value.querySelector('button, input, [tabindex]');
+      // The menu is `visibility: hidden` until the position from place() is rendered, and a hidden
+      // element cannot take focus.
+      await nextTick();
+      if (!open.value) return;
+      const first = pop.value && pop.value.querySelector('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]');
       if (first) first.focus({ preventScroll: true });
     }
 

@@ -665,6 +665,33 @@ table.data-table.store-changes th, table.data-table.store-changes td { vertical-
 .toolbar-end { flex: none; display: flex; align-items: center; gap: 6px; }
 .info-tip { color: var(--text-faint); cursor: help; font-size: 14px; line-height: 1; padding: 0 2px; }
 .info-tip:hover, .info-tip:focus-visible { color: var(--accent); outline: none; }
+/* The Graph panel's toolbar (js/graph/toolbar.js): the panel measures the row and moves items into
+   the Display menu, so it never scrolls or wraps; the gap is TOOLBAR_GAP. */
+.graph-toolbar { overflow: hidden; min-height: 37px; } /* the same height with or without the Layout select */
+.graph-toolbar .toolbar-main { gap: 6px; overflow: hidden; }
+.tb-item { display: inline-flex; flex: none; }
+/* The Layout select sizes to the chosen layout where the browser can, else it is capped. */
+.graph-toolbar select { field-sizing: content; max-width: 13em; }
+/* The Filter slot: a split button, "⚲ Filter · 2" opens the drawer, the switch on its right. */
+.split-btn { display: inline-flex; flex: none; }
+.split-btn .split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-btn .split-toggle { border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 6px; }
+.split-btn .split-main.active { background: var(--accent-soft); color: var(--accent); }
+.filter-badge { color: var(--accent); font-weight: 600; }
+.split-btn.off .filter-badge, .split-btn.off .split-main { color: var(--text-faint); }
+.switch-track { position: relative; display: inline-block; width: 22px; height: 12px; border-radius: 6px; background: var(--accent); }
+.switch-knob { position: absolute; top: 2px; left: 12px; width: 8px; height: 8px; border-radius: 50%; background: var(--surface); transition: left .12s; }
+.split-btn.off .switch-track { background: var(--border); }
+.split-btn.off .switch-knob { left: 2px; }
+/* Display menu parts (also usable by other menus). */
+.menu-row { padding: 4px 8px; }
+.menu-note { padding: 0 8px 4px; color: var(--text-faint); font-size: 12px; line-height: 1.4; }
+.menu-item.menu-indent { padding-left: 28px; }
+.menu-item.menu-field { justify-content: space-between; cursor: default; }
+.menu-item:disabled { opacity: .5; cursor: not-allowed; }
+.menu-item:disabled:hover { background: none; }
+.menu-help { margin: 0; padding: 2px 8px 6px 26px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+.menu-help li + li { margin-top: 3px; }
 .menu-list.popover {
   position: fixed;
   right: auto;
