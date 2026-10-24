@@ -90,7 +90,7 @@ export function processMemoryRows(process) {
  * @param {Object|null} raw  The engine's `statistics()` answer.
  * @returns {{counts: null|{vertices:number, edges:number, vertexLabels:Array, edgeLabels:Array,
  *   vertexLabelTotal:number, edgeLabelTotal:number, truncated:boolean},
- *   memory: null|Array<{name:string, text:string}>,
+ *   memory: null|Array<{name:string, text:string, hint?:string}>,
  *   process: null|Array<{name:string, text:string}>,
  *   limits: Array<{key:string, text:string, source:'preset'|'default'|'script'}>,
  *   noPresets: boolean}}
@@ -119,6 +119,16 @@ export function statisticsModel(raw) {
         { name: 'Structure', text: formatBytes(m.structure_bytes) },
         { name: 'Indexes', text: formatBytes(m.index_bytes) },
         { name: 'Properties', text: formatBytes(m.property_bytes) },
+        // The shared key lists ("shapes"): part of Properties, never added to the total again.
+        ...(m.shape_bytes
+          ? [
+              {
+                name: 'of which key lists (shapes)',
+                text: formatBytes(m.shape_bytes),
+                hint: 'Every distinct property key sequence is stored once per graph and shared by the elements with exactly these keys in this order; each element keeps only its values. Part of Properties.',
+              },
+            ]
+          : []),
         // Compression rules (Catalog ▸ Compression): only when something is compressed.
         ...(m.compressed_values || m.compression_dictionary_bytes
           ? [

@@ -2437,6 +2437,21 @@ mod tests {
         );
     }
 
+    /// The memory section carries the parts of `property_bytes` the Statistics tab shows: the
+    /// shared key lists (`shape_bytes`) and the dedup fields (all `0` without dedup rules).
+    #[test]
+    fn statistics_memory_carries_shape_and_dedup_bytes() {
+        let s = modern();
+        let stats = s.statistics();
+        let memory = &stats["memory"];
+        let shapes = memory["shape_bytes"].as_u64().expect("shape_bytes");
+        let properties = memory["property_bytes"].as_u64().expect("property_bytes");
+        assert!(shapes > 0 && shapes <= properties, "{memory}");
+        for key in ["deduped_values", "deduped_plain_bytes", "dedup_table_bytes"] {
+            assert_eq!(memory[key], 0, "{key}: {memory}");
+        }
+    }
+
     /// The statistics panel's data: counts, memory, and the limits (presets and defaults).
     #[test]
     fn statistics_report_counts_memory_and_limits() {

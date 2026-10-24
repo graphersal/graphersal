@@ -170,3 +170,31 @@ test('the process memory section shows the RSS with its peak, the live heap and 
   ]);
   assert.equal(rows({ source: 'none' }), null);
 });
+
+test('the shared key lists (shapes) show under Properties and are not counted twice', () => {
+  const memory = { ...WASM.memory, shape_bytes: 512 };
+  const m = statisticsModel({ ...WASM, memory });
+  assert.deepEqual(m.memory.map((r) => r.name), [
+    'Structure', 'Indexes', 'Properties', 'of which key lists (shapes)', 'Total',
+  ]);
+  assert.equal(m.memory[3].text, '512 B');
+  assert.match(m.memory[3].hint, /Part of Properties/);
+  // The total is the engine's total_bytes (shapes already inside property_bytes), unchanged.
+  assert.equal(m.memory[4].text, '4 KiB');
+  // Hidden when the graph has no shapes (no element has a property, or an older engine).
+  const none = statisticsModel({ ...WASM, memory: { ...WASM.memory, shape_bytes: 0 } });
+  assert.deepEqual(none.memory.map((r) => r.name), ['Structure', 'Indexes', 'Properties', 'Total']);
+});
+
+test('dedup and shapes together keep their order', () => {
+  const memory = {
+    ...WASM.memory,
+    shape_bytes: 256,
+    deduped_values: 4,
+    deduped_plain_bytes: 4096,
+    dedup_table_bytes: 1024,
+  };
+  assert.deepEqual(statisticsModel({ ...WASM, memory }).memory.map((r) => r.name), [
+    'Structure', 'Indexes', 'Properties', 'of which key lists (shapes)', 'Shared strings (dedup)', 'Total',
+  ]);
+});
