@@ -333,10 +333,11 @@ impl ScriptGraphTraversalSource {
     /// Rhai binding for `GraphStorage::memory_usage()`. Returns a Rhai map with keys
     /// `structure_bytes`, `index_bytes`, `property_bytes`, `total_bytes`, `total_mb` and the
     /// compressed-property counters `compressed_values`, `compressed_plain_bytes`,
-    /// `compressed_stored_bytes`, `compression_dictionary_bytes` and the property indexes'
-    /// `property_index_bytes` and the shared property key lists' `shape_bytes` (part of
-    /// `property_bytes`) when the backing storage supports introspection (`graphersal::TraversalGraph` always does), or `()`
-    /// (Rhai unit) otherwise. This is a plain method call, not a traversal step — it is not
+    /// `compressed_stored_bytes`, `compression_dictionary_bytes`, the `dedup` rules' counters
+    /// `deduped_values`, `deduped_plain_bytes` and `dedup_table_bytes` (part of
+    /// `property_bytes`), the property indexes' `property_index_bytes` and the shared property
+    /// key lists' `shape_bytes` (part of `property_bytes`) when the backing storage supports
+    /// introspection (`graphersal::TraversalGraph` always does), or `()` (Rhai unit) otherwise. This is a plain method call, not a traversal step — it is not
     /// chained with `.to_list()`/`.next()`. Asks for `Read` on `Data`.
     pub fn memory_usage(&mut self) -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
         self.require(
@@ -387,6 +388,9 @@ impl ScriptGraphTraversalSource {
             "property_index_bytes".into(),
             int(stats.property_index_bytes),
         );
+        map.insert("deduped_values".into(), int(stats.deduped_values));
+        map.insert("deduped_plain_bytes".into(), int(stats.deduped_plain_bytes));
+        map.insert("dedup_table_bytes".into(), int(stats.dedup_table_bytes));
         map.insert("shape_bytes".into(), int(stats.shape_bytes));
         map.insert("total_mb".into(), Dynamic::from_float(stats.total_mb()));
         Ok(Dynamic::from_map(map))

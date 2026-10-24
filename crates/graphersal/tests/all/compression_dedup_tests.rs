@@ -893,6 +893,41 @@ fn memory_usage_counts_each_shared_text_once() {
 }
 
 #[test]
+fn the_dsl_memory_usage_reports_the_dedup_counters() {
+    let graph = shared(deduped_graph(400));
+    let stats = graph.read().memory_usage().unwrap();
+    assert!(stats.deduped_values > 0, "{stats:?}");
+    assert!(stats.deduped_plain_bytes > 0, "{stats:?}");
+    assert!(stats.dedup_table_bytes > 0, "{stats:?}");
+    assert!(stats.dedup_table_bytes <= stats.property_bytes, "{stats:?}");
+    let reported = eval_value(
+        graph.clone(),
+        r#"let m = g.memory_usage();
+           [m.deduped_values, m.deduped_plain_bytes, m.dedup_table_bytes, m.property_bytes]"#,
+    )
+    .unwrap()
+    .to_string();
+    assert_eq!(
+        reported,
+        format!(
+            "[{}, {}, {}, {}]",
+            stats.deduped_values,
+            stats.deduped_plain_bytes,
+            stats.dedup_table_bytes,
+            stats.property_bytes
+        )
+    );
+    // Without a dedup rule the keys are present and zero.
+    let plain = eval_value(
+        shared(graph_of(40)),
+        r#"let m = g.memory_usage(); [m.deduped_values, m.deduped_plain_bytes, m.dedup_table_bytes]"#,
+    )
+    .unwrap()
+    .to_string();
+    assert_eq!(plain, "[0, 0, 0]");
+}
+
+#[test]
 fn a_property_index_on_a_dedup_path_still_serves() {
     let query = |graph: TraversalGraph| {
         let shared = shared(graph);
