@@ -9,11 +9,12 @@
 // ResizeObserver) and asks `toolbarFit` which items stay inline.
 
 /**
- * The Filter button (an upcoming filter drawer). While false the button is not rendered; its slot
- * is the first item of the row (`graph-panel.js`, `data-tb="filter"`). The drawer's agent sets
- * this to true and wires `openFilter` / `toggleFilter` there.
+ * The Filter button: its main part opens the filter drawer (components/graph-filter.js), its
+ * switch turns the filter off and on without losing it (`graph-panel.js` `openFilter` /
+ * `toggleFilter`). While false the button is not rendered; its slot is the first item of the row
+ * (`data-tb="filter"`).
  */
-export const FILTER_ENABLED = false;
+export const FILTER_ENABLED = true;
 
 /** Left-hand items that can move into the Display menu, in the order they move. */
 export const COLLAPSIBLE = Object.freeze(['layout', 'edit', 'filter']);

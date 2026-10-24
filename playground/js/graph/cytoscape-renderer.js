@@ -88,6 +88,8 @@ function buildStyle(kind, plan, dark) {
     },
     { selector: 'edge.no-label', style: { label: '' } },
     { selector: '.faded', style: { opacity: 0.22 } },
+    // A label the Graph panel's filter hides, in the label overview (a schema drawing).
+    { selector: '.filtered-out', style: { opacity: 0.25 } },
     { selector: 'node.hl', style: { 'border-width': 3, 'border-color': selected } },
     { selector: 'edge.hl', style: { 'line-color': selected, 'target-arrow-color': selected, width: 2.6 } },
     { selector: 'node:selected', style: { 'border-width': 3, 'border-color': selected, 'overlay-opacity': 0 } },
@@ -104,7 +106,7 @@ function schemaToCy(els, slotOf, positions) {
     const scale = n.scale || 1; // the meta-graph sizes a label by its vertex count
     const def = {
       group: 'nodes',
-      classes: 's' + slotOf(n.label),
+      classes: 's' + slotOf(n.label) + (n.faded ? ' filtered-out' : ''),
       data: { id: 'n' + n.id, index, caption, w: Math.max(70 * scale, longest * 8 + 24), h: 46 * scale },
     };
     if (positions) def.position = { x: positions[2 * index], y: positions[2 * index + 1] };
@@ -116,6 +118,7 @@ function schemaToCy(els, slotOf, positions) {
     if (!ids.has(e.source) || !ids.has(e.target)) return;
     edges.push({
       group: 'edges',
+      classes: e.faded ? 'filtered-out' : '',
       data: {
         id: 'e' + e.id,
         index,

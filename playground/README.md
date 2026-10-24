@@ -484,8 +484,30 @@ renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
   Edge labels, Edge IDs, Highlight result and the mouse help. The panel measures the row
   (ResizeObserver) and `toolbarFit` moves Layout, then Edit, then Filter into the Display menu, and
   finally shortens Clear highlight, Fit, Export and Display to their icons, so the row never wraps or
-  scrolls (down to a 320 px panel). Filter is a slot for the coming filter drawer
-  (`FILTER_ENABLED = false`: a split button with the badge `filterBadge` and an on/off switch).
+  scrolls (down to a 320 px panel). Filter is a split button (badge `filterBadge`: `· N` active
+  restrictions, `· off`) whose switch turns the filter off and on without losing it.
+
+- **Filter** (model `js/graph/filter-model.js`, `tests/graph-filter.test.mjs`; drawer
+  `components/graph-filter.js`, an overlay over the drawing, Esc closes, never docked). The drawer
+  edits a filter STATE `{enabled, hideIsolated, vertices/edges: {off: [hidden labels], conds:
+  {label: [{key, op, value, value2, type}]}}}`, kept per graph in localStorage
+  (`graph.filter.<kind>:<name>`, `filterStorageKey`); `buildFilter` turns it into the engine's
+  `GraphFilter` over the labels of `statistics()` (a side with no hidden label and no condition is
+  left out, so no filter costs nothing). Key types come from the stored schema, else the inferred
+  one (inferred only when the drawer opens; each condition keeps its key's type so a stored filter
+  applies after a reload without inferring); a number key sends a JSON number, every other value
+  a string (never sniffed). Applying: 300 ms after the last edit, on a graph above
+  `FILTER_TUNING.manualApplyAbove` (100 000 elements) only on Apply; the on/off switch, Clear and
+  Reset apply at once. The whole graph and the neighbourhood go through the engine
+  (`graphView(limits, filter)`, `neighbourhood(request, filter)`, one whole-graph request at a
+  time via `createApplyQueue`, a newer selection supersedes an older one); a query result and a
+  label sample are filtered by label on the client (`labelFilterView`); the label overview draws
+  hidden labels faded (`faded` on the schema drawing's elements, class `filtered-out`). An engine
+  error names `vertices.<label>[i]`: `errorTarget` maps it back to the drawer row through the sent
+  indices, and the drawing keeps the last good result. "Open as query" writes
+  `graphFilterQuery(filter)` into a new tab. Known limit: the spec lists the visible labels, so on a
+  graph whose statistics list only the largest labels the unlisted ones are hidden while a side is
+  filtered (the drawer says so).
 
 - **Tiers.** `chooseTier` (`js/graph/tiers.js`) picks by the number of elements drawn (vertices +
   edges): **Detailed below 2000, Fast from 2000**, and once Fast, Detailed again only below 1600

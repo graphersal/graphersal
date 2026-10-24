@@ -1675,3 +1675,62 @@ input.ve-null { color: var(--text-muted); }
 .ex-last { margin-left: 6px; padding: 0 5px; border-radius: 3px; background: var(--accent); color: var(--accent-contrast); font-size: 10.5px; font-style: normal; vertical-align: 1px; white-space: nowrap; }
 .ex-snippet { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 11.5px; }
 .examples-panel mark { padding: 0 1px; border-radius: 2px; background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+
+/* The Graph panel's filter drawer (components/graph-filter.js): an overlay over the drawing, on
+   the right below the toolbar (its top is set by the panel); it never moves the layout. */
+.filter-drawer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  top: 34px;
+  z-index: 5; /* above the drawing, the legend and the inspector */
+  display: flex;
+  flex-direction: column;
+  width: min(340px, 100%);
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow), -8px 0 24px rgba(20, 30, 50, .10);
+  font-size: 12.5px;
+  animation: ex-slide-in .14s ease-out;
+}
+@media (prefers-reduced-motion: reduce) { .filter-drawer { animation: none; } }
+.fd-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.fd-title { font-weight: 600; }
+.fd-switch { display: inline-flex; align-items: center; gap: 5px; }
+.fd-switch.off .switch-track { background: var(--border); }
+.fd-switch.off .switch-knob { left: 2px; }
+.fd-mode { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.fd-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 8px; }
+.fd-loading, .fd-empty { padding: 6px 10px; }
+.fd-side { padding: 4px 0; }
+.fd-side + .fd-side { border-top: 1px solid var(--border); }
+.fd-side-head { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 10px; }
+.fd-side-title { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); }
+.fd-all { font-size: 11.5px; }
+.fd-label { padding: 1px 10px 3px; }
+.fd-label-line { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.fd-label.off .fd-label-name { color: var(--text-faint); }
+.fd-label-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fd-count { font-variant-numeric: tabular-nums; }
+.fd-cond { margin: 3px 0 0 22px; }
+.fd-cond-line { display: flex; align-items: center; gap: 4px; }
+.fd-cond input, .fd-cond select {
+  height: 24px; min-width: 0; padding: 0 5px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+}
+.fd-key { width: 82px; flex: none; }
+.fd-op { flex: none; max-width: 96px; }
+.fd-value { flex: 1; width: 60px; }
+.fd-value.half { width: 40px; }
+.fd-cond.has-problem input, .fd-cond.has-problem select { border-color: var(--danger); }
+.fd-remove { flex: none; width: 22px; height: 22px; border: 0; border-radius: 4px; background: none; color: var(--text-muted); cursor: pointer; }
+.fd-remove:hover { background: var(--surface-2); color: var(--danger); }
+.fd-type { margin-top: 1px; font-size: 11px; }
+.fd-problem { margin-top: 2px; color: var(--danger); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.fd-add { margin: 3px 0 0 22px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; }
+.fd-add:hover { text-decoration: underline; }
+.fd-isolated { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding: 6px 10px 0; border-top: 1px solid var(--border); cursor: pointer; }
+.fd-foot { flex: none; padding: 6px 10px; border-top: 1px solid var(--border); }
+.filtered-strip a { font-weight: 600; }
+.fd-partial { margin: 0 10px 4px; border: 0; border-radius: 5px; font-size: 11.5px; line-height: 1.4; }

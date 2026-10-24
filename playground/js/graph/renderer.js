@@ -42,7 +42,9 @@
  * @property {(data:Object|null, options:{kind:'data'|'schema', showIds?:boolean, edgeIds?:boolean,
  *            edgeLabels?:boolean, palette:{slot:(label:string)=>number}}) => void} setData
  *   Replaces what is drawn (clears the selection). Nothing is drawn before the first
- *   `setPositions` or `setLayout` after it, so a large drawing is painted once, in place.
+ *   `setPositions` or `setLayout` after it, so a large drawing is painted once, in place. A
+ *   schema drawing's nodes and edges may carry `faded: true` (a label the Graph panel's filter
+ *   hides, drawn faded in the label overview).
  * @property {(xy:Float32Array|number[]) => void} setPositions
  *   Places vertex `i` at `(xy[2i], xy[2i+1])` (a preset layout).
  * @property {() => Float32Array|null} getPositions   The current positions (`null`: nothing drawn).
