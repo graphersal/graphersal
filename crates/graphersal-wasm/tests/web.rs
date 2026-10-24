@@ -334,6 +334,39 @@ fn graph_view_with_a_filter_and_degrees() {
     assert!(p.graph_filter_query("[1]").is_err());
 }
 
+/// The filter's "others visible" form and the neighbourhood's `unfiltered` answer in the browser
+/// build.
+#[wasm_bindgen_test]
+fn graph_filter_with_hidden_labels_and_neighbourhood_counts() {
+    let mut p = modern();
+    let request = r#"{"maxNodes": 100,
+        "filter": {"otherVertices": "visible", "hiddenVertices": ["person"]}}"#;
+    let view = json(&p.graph_view_with(request).unwrap());
+    assert_eq!(view["matchedNodes"], 2);
+    let n = json(
+        &p.neighbourhood(
+            r#"{"ids": ["1"], "filter": {"otherVertices": "visible", "hiddenVertices": ["software"]}}"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(n["matchedNodes"], 3);
+    assert_eq!(n["unfiltered"]["nodes"], 4);
+    assert_eq!(n["unfiltered"]["vertexIds"].as_array().unwrap().len(), 4);
+    let text = json(
+        &p.graph_filter_query(r#"{"otherVertices": "visible", "hiddenVertices": ["person"]}"#)
+            .unwrap(),
+    );
+    let text = text
+        .as_str()
+        .unwrap()
+        .replace(".to_list()", ".id().to_list()");
+    let r = json(&p.execute(&text, "{}").unwrap());
+    assert_eq!(
+        r["execution"]["results"][0]["vertices"],
+        serde_json::json!(["3", "5"])
+    );
+}
+
 /// The engine's force layout in the browser build: slices, positions as a Float32Array (a
 /// `Vec<f32>` here), the cache, cancellation.
 #[wasm_bindgen_test]

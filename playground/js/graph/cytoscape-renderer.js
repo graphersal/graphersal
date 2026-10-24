@@ -22,6 +22,7 @@ import { toCyElements, drawPlan, vertexCaption, edgeCaption } from '../graph-dat
 import { PALETTE_SIZE, slotColor } from './palette.js';
 import { TIER_CAPABILITIES } from './renderer.js';
 import { ConnectGesture } from './edit-mode.js';
+import { SIZE_RANGE, sizeOf } from './size-by.js';
 
 const FIT_PADDING = 36;
 
@@ -66,6 +67,8 @@ function buildStyle(kind, plan, dark) {
       },
     },
     ...slots,
+    // Vertex size by degree (`options.nodeScale`, js/graph/size-by.js): a node with a `size`.
+    ...(schema ? [] : [{ selector: 'node[size]', style: { width: 'data(size)', height: 'data(size)' } }]),
     {
       selector: 'edge',
       style: {
@@ -88,6 +91,8 @@ function buildStyle(kind, plan, dark) {
     },
     { selector: 'edge.no-label', style: { label: '' } },
     { selector: '.faded', style: { opacity: 0.22 } },
+    // A label the Graph panel's filter hides, in the label overview (a schema drawing).
+    { selector: '.filtered-out', style: { opacity: 0.25 } },
     { selector: 'node.hl', style: { 'border-width': 3, 'border-color': selected } },
     { selector: 'edge.hl', style: { 'line-color': selected, 'target-arrow-color': selected, width: 2.6 } },
     { selector: 'node:selected', style: { 'border-width': 3, 'border-color': selected, 'overlay-opacity': 0 } },
@@ -104,7 +109,7 @@ function schemaToCy(els, slotOf, positions) {
     const scale = n.scale || 1; // the meta-graph sizes a label by its vertex count
     const def = {
       group: 'nodes',
-      classes: 's' + slotOf(n.label),
+      classes: 's' + slotOf(n.label) + (n.faded ? ' filtered-out' : ''),
       data: { id: 'n' + n.id, index, caption, w: Math.max(70 * scale, longest * 8 + 24), h: 46 * scale },
     };
     if (positions) def.position = { x: positions[2 * index], y: positions[2 * index + 1] };
@@ -116,6 +121,7 @@ function schemaToCy(els, slotOf, positions) {
     if (!ids.has(e.source) || !ids.has(e.target)) return;
     edges.push({
       group: 'edges',
+      classes: e.faded ? 'filtered-out' : '',
       data: {
         id: 'e' + e.id,
         index,
@@ -227,7 +233,9 @@ export class CytoscapeRenderer {
   setData(data, options = {}) {
     this.data = data;
     this.kind = options.kind || 'data';
-    this.options = { showIds: !!options.showIds, edgeIds: !!options.edgeIds, edgeLabels: options.edgeLabels !== false };
+    this.options = {
+      showIds: !!options.showIds, edgeIds: !!options.edgeIds, edgeLabels: options.edgeLabels !== false, nodeScale: options.nodeScale || null,
+    };
     this.palette = options.palette;
     this.added = false;
     this.cy.batch(() => {
@@ -248,6 +256,7 @@ export class CytoscapeRenderer {
           : toCyElements(data, { showIds: this.options.showIds, edgeIds: this.options.edgeIds, slotOf, positions });
         this.cy.add(defs);
         this.cy.edges().toggleClass('no-label', !this.options.edgeLabels);
+        this.applySizes();
       }
     });
     this.added = true;
@@ -297,9 +306,25 @@ export class CytoscapeRenderer {
     });
   }
 
+  /**
+   * Vertex sizes from `options.nodeScale` (a scale in [0, 1] per vertex, js/graph/size-by.js):
+   * `SIZE_RANGE.detailed`; without scales (or scales of another drawing) the fixed size.
+   */
+  applySizes() {
+    if (this.kind === 'schema' || !this.data) return;
+    const scale = this.options.nodeScale;
+    const ok = scale && scale.length === this.data.vertexIds.length;
+    const { min, max } = SIZE_RANGE.detailed;
+    this.cy.nodes().forEach((n) => {
+      if (ok) n.data('size', Math.round(sizeOf(scale[n.data('index')], min, max) * 10) / 10);
+      else if (n.data('size') !== undefined) n.removeData('size');
+    });
+  }
+
   setOptions(options) {
     Object.assign(this.options, options);
     if (!this.added || !this.data) return;
+    if ('nodeScale' in options) this.cy.batch(() => this.applySizes());
     if ('edgeLabels' in options) this.cy.edges().toggleClass('no-label', !this.options.edgeLabels);
     if (this.kind === 'schema' || !('showIds' in options || 'edgeIds' in options)) return;
     const view = this.data;

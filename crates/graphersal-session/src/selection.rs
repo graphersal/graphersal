@@ -66,14 +66,32 @@ pub struct SelectionView {
     /// Requested ids that name no vertex (dropped since they were drawn, or mistyped).
     pub missing: Vec<String>,
     /// Edges of the graph that touch a drawn vertex but lead to one that is not drawn (how much
-    /// expanding could still add).
+    /// expanding could still add). With a filter, only the edges the filter shows that lead
+    /// from a drawn vertex to one the filter shows.
     pub hidden_edges: usize,
+    /// A filtered neighbourhood: what it held before the filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unfiltered: Option<Unfiltered>,
     /// A neighbourhood the limits cut: how much is not drawn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left_out: Option<LeftOut>,
     /// Set for a sample of a label or a label pair: what was sampled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample: Option<SampleInfo>,
+}
+
+/// A filtered neighbourhood before its filter (after the limits): the strip's "X of Y" and the
+/// vertex set a later request keeps (`keep` with `hops: 0`, so a filter change or an expansion
+/// redraws every vertex the user drilled into, hidden ones included).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unfiltered {
+    /// Vertices of the neighbourhood.
+    pub nodes: usize,
+    /// Edges among them.
+    pub edges: usize,
+    /// The ids of its vertices, in the drawing's (breadth-first) order.
+    pub vertex_ids: Vec<String>,
 }
 
 /// What a sample shows: `kind` `"vertices"` (of a label filter) or `"edges"` (of a label pair),
@@ -343,9 +361,21 @@ pub fn neighbourhood<S: GraphStorage>(
         Some(spec) => Some(crate::filter::GraphFilter::compile(g, spec)?),
         None => None,
     };
+    let mut hidden_edges = hidden_edges;
+    let mut unfiltered = None;
     if let Some(filter) = &filter {
         ticker.tick()?;
+        unfiltered = Some(Unfiltered {
+            nodes: vertices.len(),
+            edges: edges.len(),
+            vertex_ids: vertices
+                .iter()
+                .filter_map(|v| g.vertex_id(*v))
+                .map(str::to_string)
+                .collect(),
+        });
         (vertices, edges) = filter_drawing(g, filter, vertices, edges)?;
+        hidden_edges = edges_leading_out(g, filter, &vertices, &mut ticker)?;
     }
     let (mut graph, seeds) = view_of(g, &vertices, &edges, &seeds, truncated);
     if filter.is_some() {
@@ -360,6 +390,7 @@ pub fn neighbourhood<S: GraphStorage>(
         seeds,
         missing,
         hidden_edges,
+        unfiltered,
         left_out: truncated.then_some(LeftOut {
             vertices: left_out,
             edges: edges_left_out,
@@ -367,6 +398,54 @@ pub fn neighbourhood<S: GraphStorage>(
         }),
         sample: None,
     })
+}
+
+/// The edges a filtered drawing could still show by expanding: edges the filter shows that lead
+/// from a drawn vertex to a vertex not drawn that the filter shows (each counted once; the
+/// `hideIsolated` rule is not applied to the far vertex, the edge itself would keep it).
+fn edges_leading_out<S: GraphStorage>(
+    g: &S,
+    filter: &crate::filter::GraphFilter,
+    vertices: &[S::VertexId],
+    ticker: &mut Ticker<'_>,
+) -> Result<usize, String> {
+    let inside: HashSet<S::VertexId> = vertices.iter().copied().collect();
+    let mut leading: Vec<(S::EdgeId, S::VertexId)> = Vec::new();
+    for v in vertices {
+        for e in g.out_edges(*v).chain(g.in_edges(*v)) {
+            ticker.tick()?;
+            if let Some((s, t)) = g.edge_endpoints(e) {
+                let far = if s == *v { t } else { s };
+                if !inside.contains(&far) {
+                    leading.push((e, far));
+                }
+            }
+        }
+    }
+    if leading.is_empty() {
+        return Ok(0);
+    }
+    let edge_ids: Vec<S::EdgeId> = leading.iter().map(|(e, _)| *e).collect();
+    let shown_edges: Option<HashSet<S::EdgeId>> = filter
+        .edges(g, Some(&edge_ids))?
+        .map(|l| l.into_iter().collect());
+    let mut far: Vec<S::VertexId> = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, v) in &leading {
+        if seen.insert(*v) {
+            far.push(*v);
+        }
+    }
+    let shown_far: Option<HashSet<S::VertexId>> = filter
+        .vertices(g, Some(&far))?
+        .map(|l| l.into_iter().collect());
+    Ok(leading
+        .iter()
+        .filter(|(e, v)| {
+            shown_edges.as_ref().is_none_or(|s| s.contains(e))
+                && shown_far.as_ref().is_none_or(|s| s.contains(v))
+        })
+        .count())
 }
 
 /// The vertices and edges of a drawing.
@@ -499,6 +578,7 @@ pub fn label_sample<S: GraphStorage>(
                 seeds,
                 missing: Vec::new(),
                 hidden_edges,
+                unfiltered: None,
                 left_out: None,
                 sample: Some(SampleInfo {
                     kind: "vertices",
@@ -564,6 +644,7 @@ pub fn label_sample<S: GraphStorage>(
                 seeds,
                 missing: Vec::new(),
                 hidden_edges: degree.saturating_sub(2 * shown),
+                unfiltered: None,
                 left_out: None,
                 sample: Some(SampleInfo {
                     kind: "edges",

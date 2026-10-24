@@ -16,13 +16,28 @@
 // neighbourhood are then read again from the engine (the neighbourhood keeps the new vertex), the
 // query result's drawing and a drill-down stay patched.
 //
+// Filter (js/graph/filter-model.js, drawer components/graph-filter.js): the Filter button opens the
+// drawer, its switch turns the filter off and on without losing it. The filter state is kept per
+// graph in localStorage; the applied filter goes to the engine for the whole graph and the
+// neighbourhood (`graphView(limits, filter)`, `neighbourhood(request, filter)`), and is applied by
+// label on the client to a query result and a label sample (they carry no properties); the label
+// overview draws hidden labels faded. Edits apply after 300 ms, on a graph above
+// `FILTER_TUNING.manualApplyAbove` elements only on Apply; one filtered request at a time, the
+// newest wins, and an engine error is shown at the condition it names while the drawing keeps the
+// last good result.
+//
+// Vertex size (the Display menu, js/graph/size-by.js, `graph.sizeBy`): Off, Degree, In, Out. Only
+// while it is not Off are the degree columns requested (`degrees: true`, `subgraph_degrees` in
+// store.js `run`); the canvas gets a scale per vertex (`nodeScale`) that each renderer maps into
+// its own size range.
+//
 // Toolbar (js/graph/toolbar.js): the row holds [Filter] [Layout] [Edit] ... [Clear highlight] [Fit]
 // [Export] [⚙ ▾]; the Display menu (⚙) holds the drawing tier, the ID and label switches, the
 // highlight switch and the mouse help. The row is measured (a ResizeObserver): when it is narrow,
 // Layout, Edit and Filter move into the Display menu and the right-hand buttons shrink to icons.
 
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, markRaw, toRaw } from 'vue';
-import { state, saveSettings } from '../store.js';
+import { state, saveSettings, newTab, reveal } from '../store.js';
 import { PanelFrame, PanelTabs, FitButton, ExportMenu } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
 import { exportFileName, downloadBlob } from '../export.js';
@@ -37,11 +52,18 @@ import {
 } from '../graph/tiers.js';
 import {
   VIEW_SOURCES, SELECTION_TUNING, DIRECTIONS, normalizeSource, normalizeDirection, normalizeDepth, wholeGraphPlan, metaGraphDrawing, metaNotice, sampleRequestFor,
-  neighbourhoodRequest, expandRequest, carryPositions, selectionNotice, resultNotice,
+  neighbourhoodRequest, expandRequest, redrawRequest, neighbourhoodIds, carryPositions, selectionNotice, resultNotice,
 } from '../graph/selection.js';
 import { editModeState, applyEdit } from '../graph/edit-mode.js';
 import { resultHighlight, createDismissals } from '../graph/highlight.js';
 import { FILTER_ENABLED, TOOLBAR_GAP, SHORTENED, toolbarFit, filterBadge, GRAPH_HELP, displayTitle } from '../graph/toolbar.js';
+import {
+  FILTER_TUNING, emptyFilter, normalizeFilter, filterStorageKey, buildFilter, activeSpec, errorTarget, applyMode,
+  createApplyQueue, labelVisible, labelFilterView, filteredText, keyTypesOf,
+} from '../graph/filter-model.js';
+import { statisticsModel } from '../statistics.js';
+import { GraphFilterDrawer } from './graph-filter.js';
+import { SIZE_BY_CHOICES, normalizeSizeBy, nodeScaleFor } from '../graph/size-by.js';
 
 const LAYOUT_IDS = LAYOUTS.map((l) => l.id);
 const HOP_CHOICES = Array.from({ length: SELECTION_TUNING.maxHops }, (_, i) => i + 1);
@@ -52,7 +74,7 @@ const dismissVersion = ref(0);
 const message = (err) => (err && err.message ? err.message : String(err));
 
 export const GraphPanel = {
-  components: { PanelFrame, PanelTabs, GraphCanvas, FitButton, ExportMenu, DropMenu },
+  components: { PanelFrame, PanelTabs, GraphCanvas, FitButton, ExportMenu, DropMenu, GraphFilterDrawer },
   setup() {
     const source = ref(normalizeSource(storage.get('graph.source', 'graph')));
     const layout = ref(storage.get('graph.layout', 'cose'));
@@ -60,6 +82,9 @@ export const GraphPanel = {
     const showIds = ref(storage.get('graph.showIds', true));
     const edgeIds = ref(storage.get('graph.edgeIds', false));
     const highlightResult = ref(true);
+    const sizeBy = ref(normalizeSizeBy(storage.get('graph.sizeBy', 'off')));
+    /** `request` asking for the degree columns too, while the vertex size uses them. */
+    const deg = (request) => (sizeBy.value !== 'off' ? { ...request, degrees: true } : request);
     const view = ref(null); // the whole graph (or its first-N slice)
     const loading = ref(false);
     const error = ref(null);
@@ -80,6 +105,33 @@ export const GraphPanel = {
     const pick = ref(null);
     const drill = ref(null); // {view, title, hops, from}
 
+    // ------------------------------------------------------------------ filter (state)
+    // `fstate`: the filter state as edited (filter-model.js), persisted per graph; `applied`: the
+    // GraphFilter the drawings use now (null: the whole graph), `appliedBuilt` the build it came
+    // from (to place an engine error at its condition).
+    const filterKey = computed(() => filterStorageKey(state.graph));
+    const fstate = ref(normalizeFilter(storage.get(filterKey.value, null)));
+    const vocab = ref({ vertexLabels: [], edgeLabels: [], types: { vertex: {}, edge: {} }, labelsFor: null, typesFor: null });
+    const vocabLoading = ref(null); // 'labels' | 'keys' | null
+    const vocabError = ref(null);
+    const built = computed(() => buildFilter(fstate.value, {
+      vertexLabels: vocab.value.vertexLabels.map((l) => l.label),
+      edgeLabels: vocab.value.edgeLabels.map((l) => l.label),
+      types: vocab.value.types,
+      othersVisible: true, // hidden labels by name: labels beyond the statistics' list stay visible
+    }));
+    const wanted = computed(() => activeSpec(fstate.value, built.value));
+    const applied = ref(null);
+    let appliedBuilt = null;
+    const filterError = ref(null); // {message, target: {field, label, index}|null}
+    // A stored filter with restrictions is applied once the labels and key types are read (the
+    // badge and the drawer need them; the spec itself names only hidden labels and conditions):
+    // drawings wait until `filterSettled`.
+    const needsLabels = (m) => !!m && m.enabled && (m.hideIsolated || (m.vertices.off.length + m.edges.off.length) > 0
+      || Object.keys(m.vertices.conds).length + Object.keys(m.edges.conds).length > 0);
+    const filterSettled = ref(!needsLabels(fstate.value));
+    const filterSpec = () => (applied.value ? toRaw(applied.value) : null);
+
     // ------------------------------------------------------------------ whole graph
     const sliceRequested = ref(false); // the user asked for the first N vertices of a large graph
     const plan = computed(() => {
@@ -88,7 +140,8 @@ export const GraphPanel = {
         vertexCount: state.graph.vertexCount,
         edgeCount: state.graph.edgeCount,
         ...limits.value,
-        sliceRequested: sliceRequested.value,
+        // A filter draws what passes it, the engine cutting at the limits: never the overview.
+        sliceRequested: sliceRequested.value || !!applied.value,
       });
     });
     const overview = computed(() => source.value === 'labels' || (source.value === 'graph' && plan.value.mode === 'overview'));
@@ -106,7 +159,27 @@ export const GraphPanel = {
       return !!d.confirm && d.confirm.size > allowed.value;
     });
 
-    async function loadView() {
+    // One whole-graph request at a time, the newest wins (filter-model.js `createApplyQueue`).
+    const viewQueue = createApplyQueue(
+      ({ limits: l, filter: f }) => state.engine.graphView(l, f),
+      {
+        onResult(v) {
+          view.value = markRaw(v);
+          filterError.value = null;
+          loading.value = false;
+        },
+        onError(err, { filter: f, built: b }) {
+          loading.value = false;
+          if (f && isFilterError(err)) {
+            filterError.value = { message: message(err), target: errorTarget(message(err), b) };
+            return; // the drawing keeps the last good result
+          }
+          error.value = message(err);
+          view.value = null;
+        },
+      },
+    );
+    function loadView() {
       if (source.value === 'graph') drill.value = null;
       if (!state.engine || !state.graph || plan.value.mode === 'overview') {
         view.value = null;
@@ -116,16 +189,10 @@ export const GraphPanel = {
         view.value = null; // not even fetched until the user agrees
         return;
       }
+      if (!filterSettled.value) return; // the stored filter's labels are read first
       loading.value = true;
       error.value = null;
-      try {
-        view.value = markRaw(await state.engine.graphView(limits.value));
-      } catch (err) {
-        error.value = message(err);
-        view.value = null;
-      } finally {
-        loading.value = false;
-      }
+      viewQueue.push({ limits: deg({ ...limits.value }), filter: filterSpec(), built: appliedBuilt });
     }
 
     // ------------------------------------------------------------------ labels (meta-graph)
@@ -148,7 +215,23 @@ export const GraphPanel = {
         loading.value = false;
       }
     }
-    const metaDrawing = computed(() => (meta.value ? markRaw(metaGraphDrawing(meta.value)) : null));
+    // The label overview: labels the applied filter hides are drawn faded (an edge pair when its
+    // label or one of its ends is hidden).
+    const metaDrawing = computed(() => {
+      if (!meta.value) return null;
+      const d = metaGraphDrawing(meta.value);
+      const f = applied.value;
+      if (f) {
+        const m = meta.value;
+        const hidden = d.nodes.map((n) => n.pick.kind === 'label' && !labelVisible(f, 'vertices', m.labels[n.pick.index].label));
+        d.nodes.forEach((n, i) => { if (hidden[i]) n.faded = true; });
+        d.edges.forEach((e, j) => {
+          const pair = m.edges[j];
+          if (!labelVisible(f, 'edges', pair.label) || hidden[pair.from] || hidden[pair.to]) e.faded = true;
+        });
+      }
+      return markRaw(d);
+    });
 
     // ------------------------------------------------------------------ neighbourhood / sample
     // `nb`: {view, title?, hops, expanded, sampleTitle?, from?, spec}; `spec` re-creates it after
@@ -167,11 +250,17 @@ export const GraphPanel = {
       if (spec && spec.kind === 'neighbourhood') showNeighbourhood(spec.ids[0], hops);
     });
 
+    let selectSeq = 0;
     async function select(fetch, next) {
+      const seq = ++selectSeq;
+      const f = filterSpec();
+      const b = appliedBuilt;
       nbBusy.value = true;
       error.value = null;
       try {
         const v = await fetch();
+        if (seq !== selectSeq) return false; // a newer selection superseded this one
+        filterError.value = null;
         const { positions, ...rest } = next;
         const xy = positions ? positions(v) : null;
         nbPositions.value = xy ? markRaw(xy) : null;
@@ -179,10 +268,12 @@ export const GraphPanel = {
         if (next.spec) storage.set('graph.selection', next.spec);
         return true;
       } catch (err) {
-        error.value = message(err);
+        if (seq !== selectSeq) return false;
+        if (f && isFilterError(err)) filterError.value = { message: message(err), target: errorTarget(message(err), b) };
+        else error.value = message(err);
         return false;
       } finally {
-        nbBusy.value = false;
+        if (seq === selectSeq) nbBusy.value = false;
       }
     }
 
@@ -195,7 +286,7 @@ export const GraphPanel = {
       storage.set('graph.neighbourhood.id', ids[0]);
       source.value = 'neighbourhood';
       const direction = nbDirection.value;
-      return select(() => state.engine.neighbourhood(neighbourhoodRequest(ids, hops, limits.value, direction)), {
+      return select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(ids, hops, limits.value, direction)), filterSpec()), {
         hops, direction, expanded: 0, spec: { kind: 'neighbourhood', ids, hops, direction },
       });
     }
@@ -209,7 +300,7 @@ export const GraphPanel = {
       if (!s) return;
       const from = source.value;
       source.value = 'neighbourhood';
-      select(() => state.engine.labelSample(s.request), {
+      select(() => state.engine.labelSample(deg(s.request)), {
         hops: 0, expanded: 0, sampleTitle: s.title, from, spec: { kind: 'sample', request: s.request, title: s.title, from },
       });
     }
@@ -230,7 +321,7 @@ export const GraphPanel = {
       if (!cur) return;
       const anchor = cur.view.vertexIds[index];
       const before = cyRef.value ? cyRef.value.positions() : null;
-      select(() => state.engine.neighbourhood(expandRequest(cur.view, index, limits.value, nbDirection.value)), {
+      select(() => state.engine.neighbourhood(deg(expandRequest(cur.view, index, limits.value, nbDirection.value)), filterSpec()), {
         ...cur,
         expanded: cur.expanded + 1,
         positions: (next) => carryPositions(cur.view, before, next, anchor),
@@ -247,7 +338,7 @@ export const GraphPanel = {
       const anchor = view.vertexIds[index];
       const before = cyRef.value ? cyRef.value.positions() : null;
       const direction = nbDirection.value;
-      const ok = await select(() => state.engine.neighbourhood(expandRequest(view, index, limits.value, direction)), {
+      const ok = await select(() => state.engine.neighbourhood(deg(expandRequest(view, index, limits.value, direction)), filterSpec()), {
         hops: 1, direction, expanded: 1, title: 'the query result, expanded', from: 'result',
         spec: { kind: 'neighbourhood', ids: [String(anchor)], hops: 1, direction },
         positions: (next) => carryPositions(view, before, next, anchor),
@@ -262,9 +353,9 @@ export const GraphPanel = {
       const cur = nb.value;
       if (!cur || !state.engine) return;
       const before = cyRef.value ? cyRef.value.positions() : null;
-      const keep = Array.from(cur.view.vertexIds, String);
+      const keep = neighbourhoodIds(cur.view);
       if (!keep.length) return;
-      select(() => state.engine.neighbourhood({ ids: [], keep, hops: 0, ...limits.value }), {
+      select(() => state.engine.neighbourhood(deg({ ids: [], keep, hops: 0, ...limits.value }), filterSpec()), {
         ...cur,
         positions: (next) => carryPositions(cur.view, before, next),
       });
@@ -273,15 +364,15 @@ export const GraphPanel = {
     /** Restores the last neighbourhood or sample after a reload. */
     function restoreSelection() {
       const spec = storage.get('graph.selection', null);
-      if (!spec || nb.value || !state.engine || !state.graph) return;
+      if (!spec || nb.value || !state.engine || !state.graph || !filterSettled.value) return;
       if (spec.kind === 'neighbourhood' && Array.isArray(spec.ids)) {
         const hops = normalizeDepth(spec.hops);
         const direction = normalizeDirection(spec.direction);
-        select(() => state.engine.neighbourhood(neighbourhoodRequest(spec.ids, hops, limits.value, direction)), {
+        select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(spec.ids, hops, limits.value, direction)), filterSpec()), {
           hops, direction, expanded: 0, spec,
         });
       } else if (spec.kind === 'sample' && spec.request) {
-        select(() => state.engine.labelSample({ ...spec.request, ...limits.value, maxNodes: Math.min(SELECTION_TUNING.sampleNodes, limits.value.maxNodes) }), {
+        select(() => state.engine.labelSample(deg({ ...spec.request, ...limits.value, maxNodes: Math.min(SELECTION_TUNING.sampleNodes, limits.value.maxNodes) })), {
           hops: 0, expanded: 0, sampleTitle: spec.title, from: spec.from, spec,
         });
       }
@@ -325,6 +416,20 @@ export const GraphPanel = {
     watch(edgeLabels, (v) => storage.set('graph.edgeLabels', v));
     watch(showIds, (v) => storage.set('graph.showIds', v));
     watch(edgeIds, (v) => storage.set('graph.edgeIds', v));
+    watch(sizeBy, (v, before) => {
+      storage.set('graph.sizeBy', v);
+      // Switched on: read the drawings again with the degree columns (a query result keeps the
+      // degrees within the drawing until it runs again). Switched between modes or off: nothing to read.
+      if (before !== 'off' || v === 'off') return;
+      // The same vertices come back: keep their positions (unless a layout is still running).
+      if (cyRef.value && !(layoutState.value && layoutState.value.running)) cyRef.value.keepPositions();
+      loadView();
+      const cur = nb.value;
+      if (cur && cur.spec && cur.spec.kind === 'neighbourhood') refreshNeighbourhood();
+      else if (cur && cur.spec && cur.spec.kind === 'sample') {
+        select(() => state.engine.labelSample(deg(cur.spec.request)), { ...cur });
+      }
+    });
 
     const subgraph = computed(() => (state.tab.result ? state.tab.result.subgraph || null : null));
     watch(subgraph, () => { if (source.value === 'result') drill.value = null; });
@@ -338,10 +443,17 @@ export const GraphPanel = {
 
     // ------------------------------------------------------------------ what is drawn
     /** `{data, kind}` of the source before the tier decision (data null: nothing yet). */
+    // A query result and a label sample carry no properties: the filter applies by label there.
+    const filteredResult = computed(() => (applied.value && resultView.value ? markRaw(labelFilterView(resultView.value, applied.value)) : resultView.value));
+    const nbView = computed(() => {
+      const cur = nb.value;
+      if (!cur) return null;
+      return cur.sampleTitle && applied.value ? markRaw(labelFilterView(cur.view, applied.value)) : cur.view;
+    });
     const base = computed(() => {
       if (overview.value) return { data: metaDrawing.value, kind: 'schema' };
-      if (source.value === 'result') return { data: resultView.value, kind: 'data' };
-      if (source.value === 'neighbourhood') return { data: nb.value ? nb.value.view : null, kind: 'data' };
+      if (source.value === 'result') return { data: filteredResult.value, kind: 'data' };
+      if (source.value === 'neighbourhood') return { data: nbView.value, kind: 'data' };
       return { data: view.value, kind: 'data' };
     });
     const isMeta = computed(() => base.value.kind === 'schema' && !drill.value);
@@ -395,6 +507,8 @@ export const GraphPanel = {
       const cap = decision.value.cap;
       return cap && els ? markRaw(capToElements(els, cap)) : els;
     });
+    /** Vertex size by degree: a scale per vertex of the data drawing (null: Off, or the overview). */
+    const nodeScale = computed(() => (kind.value === 'data' && elements.value ? nodeScaleFor(elements.value, sizeBy.value) : null));
     /** Positions for the next drawing (an expanded neighbourhood keeps its vertices in place). */
     const initialPositions = computed(() => (source.value === 'neighbourhood' && !drill.value ? nbPositions.value : null));
     const expandFromEngine = computed(() => (source.value === 'neighbourhood' || source.value === 'result') && !drill.value);
@@ -422,6 +536,12 @@ export const GraphPanel = {
         const p = plan.value;
         if (p.mode === 'overview') {
           return { text: p.notice, links: [{ id: 'slice', label: `Draw the first ${fmt(limits.value.maxNodes)} vertices anyway` }, { id: 'raise', label: 'Double the limits' }] };
+        }
+        if (p.mode === 'slice' && applied.value && !sliceRequested.value) {
+          // Filtered: the engine draws the first vertices that pass, up to the limit.
+          const v = view.value;
+          if (!v || !v.truncated) return null;
+          return { text: `${fmt(v.matchedNodes ?? 0)} vertices and ${fmt(v.matchedEdges ?? 0)} edges pass the filter, more than the limits of ${fmt(limits.value.maxNodes)} vertices and ${fmt(limits.value.maxEdges)} edges: the first ones are drawn. Narrow the filter or use the Neighbourhood view.`, links: [{ id: 'raise', label: 'Double the limits' }] };
         }
         if (p.mode === 'slice') return { text: p.notice, links: [{ id: 'overview', label: 'Back to the labels' }, { id: 'raise', label: 'Double the limits' }] };
         return null;
@@ -535,7 +655,7 @@ export const GraphPanel = {
       else if (source.value === 'graph') await loadView();
       else if (source.value === 'neighbourhood' && nb.value) {
         nbPositions.value = null;
-        await select(() => state.engine.neighbourhood({ ids: [], keep: Array.from(nb.value.view.vertexIds, String), hops: 0, ...limits.value }), { ...nb.value });
+        await select(() => state.engine.neighbourhood(deg({ ids: [], keep: neighbourhoodIds(nb.value.view), hops: 0, ...limits.value }), filterSpec()), { ...nb.value });
       }
       if (cyRef.value) cyRef.value.relayout();
     }
@@ -632,11 +752,203 @@ export const GraphPanel = {
       return displayTitle(tierChoice.value === 'auto' ? `Auto · ${drawn}` : (choice ? choice.label : drawn));
     });
 
-    // The Filter button (FILTER_ENABLED in js/graph/toolbar.js): a placeholder for the filter
-    // drawer. `count` = active conditions, `enabled` = the button's toggle, `open` = the drawer.
-    const filter = ref({ count: 0, enabled: true, open: false });
-    function openFilter() { filter.value = { ...filter.value, open: !filter.value.open }; }
-    function toggleFilter() { filter.value = { ...filter.value, enabled: !filter.value.enabled }; }
+    // ------------------------------------------------------------------ filter (drawer, applying)
+    const filterOpen = ref(false);
+    const drawerTop = ref(34); // below the toolbar (measured when the drawer opens)
+    /** The Filter button's state: `count` = active restrictions, `enabled`, `open` (the drawer). */
+    const filter = computed(() => ({ count: built.value.count, enabled: fstate.value.enabled, open: filterOpen.value }));
+    const graphSize = computed(() => (state.graph ? state.graph.vertexCount + state.graph.edgeCount : 0));
+    const filterMode = computed(() => applyMode(graphSize.value));
+    const specText = (f) => (f ? JSON.stringify(f) : '');
+    const filterDirty = computed(() => specText(wanted.value) !== specText(applied.value));
+    const filterBusy = computed(() => !!applied.value && (loading.value || nbBusy.value));
+
+    /** Reads the graph's labels (statistics) and, with `keys`, the property keys and types (schema). */
+    let vocabSeq = 0;
+    async function loadVocab({ keys = false, force = false } = {}) {
+      if (!state.engine || !state.graph) return;
+      const version = `${state.graphEpoch}:${state.graphVersion}:${state.dataVersion}`;
+      const keysVersion = `${state.graphEpoch}:${state.dataVersion}`;
+      const needLabels = force || vocab.value.labelsFor !== version;
+      const needKeys = keys && (force || vocab.value.typesFor !== keysVersion);
+      if (!needLabels && !needKeys) return;
+      const seq = ++vocabSeq;
+      vocabError.value = null;
+      try {
+        if (needLabels) {
+          vocabLoading.value = 'labels';
+          const counts = statisticsModel(await state.engine.statistics()).counts;
+          if (seq !== vocabSeq) return;
+          vocab.value = {
+            ...vocab.value,
+            vertexLabels: counts ? counts.vertexLabels.map((l) => ({ label: l.label, count: l.count })) : [],
+            edgeLabels: counts ? counts.edgeLabels.map((l) => ({ label: l.label, count: l.count })) : [],
+            // More labels than statistics() lists: the filter cannot name the others.
+            vertexLabelTotal: counts ? counts.vertexLabelTotal : 0,
+            edgeLabelTotal: counts ? counts.edgeLabelTotal : 0,
+            labelsFor: version,
+          };
+        }
+        if (needKeys) {
+          // The stored schema when it declares labels, else the inferred one (walks the graph:
+          // only when the drawer opens, never on every change).
+          vocabLoading.value = 'keys';
+          const stored = await state.engine.getSchema().catch(() => null);
+          const declares = !!stored && ['vertices', 'edges'].some((k) => stored[k] && Object.keys(stored[k]).length);
+          const schema = declares ? stored : await state.engine.inferSchema();
+          if (seq !== vocabSeq) return;
+          vocab.value = { ...vocab.value, types: keyTypesOf(schema), typesFor: keysVersion };
+        }
+      } catch (err) {
+        if (seq === vocabSeq) vocabError.value = `The filter could not read the graph's labels or keys: ${message(err)}`;
+      } finally {
+        if (seq === vocabSeq) vocabLoading.value = null;
+      }
+    }
+
+    /** Whether an engine rejection is about the filter (its messages start with "filter"). */
+    function isFilterError(err) {
+      return /\bfilter\b/.test(message(err));
+    }
+
+    /** Makes the edited filter the applied one and redraws what depends on it. */
+    function applyFilter() {
+      clearTimeout(applyTimer);
+      const next = wanted.value;
+      if (specText(next) === specText(applied.value)) return;
+      applied.value = next ? markRaw(JSON.parse(JSON.stringify(next))) : null;
+      appliedBuilt = built.value;
+      filterError.value = null;
+      redrawFiltered();
+    }
+    function redrawFiltered() {
+      loadView(); // the whole graph's view, also while another view is shown (it is kept)
+      const cur = nb.value;
+      if (!cur) {
+        if (source.value === 'neighbourhood') restoreSelection();
+        return;
+      }
+      if (cur.sampleTitle || !cur.spec || cur.spec.kind !== 'neighbourhood') return; // a sample: by label, on the client
+      // The same vertices before any filter (the centre with every expansion the user drilled into:
+      // `unfiltered.vertexIds` of a filtered answer, selection.js `redrawRequest`), filtered anew,
+      // keeping the positions of the vertices that stay.
+      const before = source.value === 'neighbourhood' && !drill.value && cyRef.value ? cyRef.value.positions() : null;
+      select(() => state.engine.neighbourhood(deg(redrawRequest(cur.view, cur.spec.ids, limits.value)), filterSpec()), {
+        ...cur,
+        positions: (next) => carryPositions(cur.view, before, next),
+      });
+    }
+    let applyTimer = null;
+    watch(() => specText(wanted.value), () => {
+      if (!filterSettled.value) return;
+      if (filterMode.value === 'auto') {
+        clearTimeout(applyTimer);
+        applyTimer = setTimeout(applyFilter, FILTER_TUNING.debounceMs);
+      }
+    });
+    watch(fstate, (m) => storage.set(filterKey.value, m), { deep: true });
+    watch(filterKey, (k) => {
+      clearTimeout(applyTimer);
+      fstate.value = normalizeFilter(storage.get(k, null));
+      applied.value = null;
+      appliedBuilt = null;
+      filterError.value = null;
+      filterSettled.value = !needsLabels(fstate.value);
+      if (!filterSettled.value) settleFilter();
+    });
+    /** A stored filter with restrictions: read the labels, apply it, then draw. */
+    async function settleFilter() {
+      await loadVocab();
+      filterSettled.value = true;
+      clearTimeout(applyTimer);
+      const next = wanted.value;
+      applied.value = next ? markRaw(JSON.parse(JSON.stringify(next))) : null;
+      appliedBuilt = built.value;
+      loadAll();
+    }
+    onMounted(() => { if (!filterSettled.value) settleFilter(); });
+    // New labels may appear with a change of the data: re-read them while the drawer is open or a
+    // filter is applied (statistics only; the keys are read again when the drawer opens).
+    watch(() => [state.graphVersion, state.dataVersion, state.graphEpoch], () => {
+      if (filterOpen.value || applied.value) loadVocab();
+    });
+
+    function openFilter() {
+      filterOpen.value = !filterOpen.value;
+      if (filterOpen.value && toolbarEl.value) drawerTop.value = toolbarEl.value.offsetTop + toolbarEl.value.offsetHeight;
+      if (filterOpen.value) loadVocab({ keys: true });
+      else nextTick(focusFilterButton);
+    }
+    function closeFilter() {
+      filterOpen.value = false;
+      nextTick(focusFilterButton);
+    }
+    function focusFilterButton() {
+      const el = toolbarEl.value && toolbarEl.value.querySelector(inMenu('filter') ? '.display-btn' : '.filter-btn .split-main');
+      if (el) el.focus({ preventScroll: true });
+    }
+    /** On/off without losing the filter: applies at once, also on a large graph. */
+    function toggleFilter() {
+      fstate.value = { ...fstate.value, enabled: !fstate.value.enabled };
+      if (fstate.value.enabled && !vocab.value.labelsFor) {
+        loadVocab().then(applyFilter);
+        return;
+      }
+      applyFilter();
+    }
+    /** The strip's Clear: switches the filter off (it is kept). */
+    function clearFilter() {
+      if (!fstate.value.enabled) return;
+      fstate.value = { ...fstate.value, enabled: false };
+      applyFilter();
+    }
+    /** The drawer's Reset: deletes every condition and shows every label. */
+    function resetFilter() {
+      fstate.value = emptyFilter();
+      applyFilter();
+    }
+    function onFilterUpdate(next) {
+      fstate.value = next;
+    }
+    async function openFilterQuery() {
+      if (!state.engine) return;
+      try {
+        const text = await state.engine.graphFilterQuery(built.value.spec || {});
+        const tab = newTab({ script: `// The vertices and edges the Graph panel's filter shows (before any drawing limit).\n${text}`, name: 'Graph filter' });
+        if (tab) reveal('editor');
+      } catch (err) {
+        filterError.value = { message: message(err), target: errorTarget(message(err), built.value) };
+      }
+    }
+
+    /** The "Filtered: X of Y" strip above the drawing (an applied filter only). */
+    const filteredStrip = computed(() => {
+      if (!applied.value || drill.value || held.value) return null;
+      if (overview.value) {
+        const f = applied.value;
+        const hidden = vocab.value.vertexLabels.filter((l) => !labelVisible(f, 'vertices', l.label)).length
+          + vocab.value.edgeLabels.filter((l) => !labelVisible(f, 'edges', l.label)).length;
+        return `Filtered: ${hidden} label${hidden === 1 ? '' : 's'} hidden, drawn faded in the overview`;
+      }
+      if (source.value === 'result') {
+        const r = resultView.value;
+        const f = filteredResult.value;
+        if (!r || !f) return null;
+        if (f === r) return `Filtered by label: all ${fmt(vertexCount(r))} vertices and ${fmt(edgeCount(r))} edges of the query result pass`;
+        return filteredText(f, 'result', { vertices: vertexCount(r), edges: edgeCount(r) });
+      }
+      if (source.value === 'neighbourhood') {
+        const cur = nb.value;
+        if (!cur) return null;
+        if (cur.sampleTitle) {
+          const f = nbView.value;
+          if (f === cur.view) return 'Filtered by label: everything in this sample passes';
+          return filteredText(f, 'sample', { vertices: vertexCount(cur.view), edges: edgeCount(cur.view) });
+        }
+        return filteredText(cur.view, 'neighbourhood');
+      }
+      return view.value ? filteredText(view.value, 'graph') : null;
+    });
 
     function raiseLimit() {
       saveSettings({ graphMaxNodes: state.settings.graphMaxNodes * 2, graphMaxEdges: state.settings.graphMaxEdges * 2 });
@@ -654,6 +966,9 @@ export const GraphPanel = {
       refresh, EXPORT_FORMATS, onExport, exportBusy, exportError,
       editOn, edit, editTitle, onEdited,
       toolbarEl, fitState, inMenu, displayTitleText, GRAPH_HELP, FILTER_ENABLED, filter, filterBadge, openFilter, toggleFilter,
+      sizeBy, SIZE_BY_CHOICES, nodeScale,
+      fstate, vocab, vocabLoading, vocabError, built, filterError, filterMode, filterDirty, filterBusy, filterOpen,
+      closeFilter, clearFilter, resetFilter, drawerTop, onFilterUpdate, applyFilter, openFilterQuery, filteredStrip,
     };
   },
   template: `
@@ -696,6 +1011,8 @@ export const GraphPanel = {
             <template v-if="fitState.inMenu.length">
               <div class="menu-title">Toolbar</div>
               <button v-if="FILTER_ENABLED && inMenu('filter')" type="button" class="menu-item" @click="openFilter">⚲ Filter<span v-if="filterBadge(filter)" class="filter-badge"> {{ filterBadge(filter) }}</span></button>
+              <label v-if="FILTER_ENABLED && inMenu('filter') && filter.count" class="menu-item menu-indent" title="Switch the filter off and on (it is kept)">
+                <input type="checkbox" :checked="filter.enabled" @change="toggleFilter"> Filter on</label>
               <label v-if="inMenu('layout')" class="menu-item menu-field">Layout
                 <select v-model="layout">
                   <option v-for="l in LAYOUTS" :key="l.id" :value="l.id" :disabled="controls.layouts[l.id].disabled" :title="controls.layouts[l.id].reason || ''">{{ l.label }}</option>
@@ -730,6 +1047,15 @@ export const GraphPanel = {
               <input type="checkbox" v-model="highlightResult" :disabled="!subgraph"> Highlight result
             </label>
             <div class="menu-sep"></div>
+            <div class="menu-title">Vertex size</div>
+            <div class="menu-row">
+              <span class="segmented" role="group" aria-label="Vertex size">
+                <button v-for="c in SIZE_BY_CHOICES" :key="c.id" type="button" class="seg-btn" :class="{ active: sizeBy === c.id }"
+                        :aria-pressed="String(sizeBy === c.id)" :disabled="isMeta && c.id !== 'off'"
+                        :title="isMeta ? 'The label overview sizes a label by its vertex count' : c.title" @click="sizeBy = c.id">{{ c.label }}</button>
+              </span>
+            </div>
+            <div class="menu-sep"></div>
             <div class="menu-title">Mouse</div>
             <ul class="menu-help">
               <li v-for="h in GRAPH_HELP" :key="h">{{ h }}</li>
@@ -750,6 +1076,12 @@ export const GraphPanel = {
           <span v-if="nbBusy" class="faint">Fetching from the engine…</span>
         </div>
       </form>
+      <div v-if="filteredStrip" class="notice info filtered-strip" role="status">{{ filteredStrip }} ·
+        <a href="#" @click.prevent="clearFilter" title="Switch the filter off (it is kept: the Filter switch turns it on again)">Clear</a>
+        <template v-if="!filterOpen"> · <a href="#" @click.prevent="openFilter">Edit</a></template>
+      </div>
+      <div v-if="filterError && !filterOpen" class="notice" role="alert">The filter was not applied: {{ filterError.message }}
+        <a href="#" @click.prevent="openFilter">Edit the filter</a></div>
       <div v-if="drill" class="notice info" role="status">
         Neighbourhood of <b>{{ drill.title }}</b> ({{ drill.view.vertexIds.length }} vertices, {{ drill.view.edgeIds.length }} edges
         within {{ drill.hops }} hop{{ drill.hops === 1 ? '' : 's' }}) in the Detailed tier.
@@ -787,7 +1119,7 @@ export const GraphPanel = {
         {{ Math.round(layoutState.progress * 100) }} %
         <a href="#" @click.prevent="stopLayout" title="Stop the layout and draw the positions reached so far">Stop</a>
       </div>
-      <graph-canvas ref="cyRef" :elements="elements" :kind="kind" :tier="tier" :layout="layout" :edge-labels="edgeLabels" :show-ids="showIds" :edge-ids="edgeIds" :highlight="highlight" :empty-text="emptyText"
+      <graph-canvas ref="cyRef" :elements="elements" :kind="kind" :tier="tier" :layout="layout" :edge-labels="edgeLabels" :show-ids="showIds" :edge-ids="edgeIds" :node-scale="nodeScale" :highlight="highlight" :empty-text="emptyText"
                     :expand-from-engine="expandFromEngine" :initial-positions="initialPositions" :edit-mode="edit.active" @edited="onEdited"
                     @layout-note="layoutNote = $event" @layout-state="layoutState = $event" @tier-failed="onTierFailed" @pick="pick = $event"
                     @activate="openSample" @expand="expand" @clear-highlight="clearHighlight">
@@ -797,6 +1129,12 @@ export const GraphPanel = {
           </div>
         </template>
       </graph-canvas>
+      <graph-filter-drawer v-if="filterOpen" :style="{ top: drawerTop + 'px' }" :model="fstate" :vertex-labels="vocab.vertexLabels" :edge-labels="vocab.edgeLabels"
+                           :vertex-label-total="vocab.vertexLabelTotal || 0" :edge-label-total="vocab.edgeLabelTotal || 0"
+                           :types="vocab.types" :built="built" :engine-error="filterError" :mode="filterMode" :dirty="filterDirty"
+                           :busy="filterBusy" :loading="vocabLoading" :load-error="vocabError" :source="overview ? 'labels' : source"
+                           @update="onFilterUpdate" @close="closeFilter" @apply="applyFilter" @toggle="toggleFilter"
+                           @reset="resetFilter" @open-query="openFilterQuery"></graph-filter-drawer>
     </div>
   </panel-frame>
   `,

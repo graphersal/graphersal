@@ -481,11 +481,48 @@ renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
 - **Toolbar** (`js/graph/toolbar.js`, `tests/graph-toolbar.test.mjs`). The row holds the frequent
   actions: `[Filter] [Layout] [✎ Edit] ... [✕ Clear highlight] [Fit] [Export ▾] [⚙ ▾]`. The ⚙
   **Display** menu holds the drawing tier (Auto/Detailed/Fast with the automatic pick), Vertex IDs,
-  Edge labels, Edge IDs, Highlight result and the mouse help. The panel measures the row
+  Edge labels, Edge IDs, Highlight result, Vertex size and the mouse help. The panel measures the row
   (ResizeObserver) and `toolbarFit` moves Layout, then Edit, then Filter into the Display menu, and
   finally shortens Clear highlight, Fit, Export and Display to their icons, so the row never wraps or
-  scrolls (down to a 320 px panel). Filter is a slot for the coming filter drawer
-  (`FILTER_ENABLED = false`: a split button with the badge `filterBadge` and an on/off switch).
+  scrolls (down to a 320 px panel). Filter is a split button (badge `filterBadge`: `· N` active
+  restrictions, `· off`) whose switch turns the filter off and on without losing it.
+
+- **Vertex size** (`js/graph/size-by.js`, `tests/graph-size.test.mjs`; Display menu, stored as
+  `graph.sizeBy`: `off` | `degree` | `in` | `out`). Only while it is not Off does the panel ask for
+  the degree columns (`degrees: true` on `graphView` limits, neighbourhood and sample requests;
+  `subgraph_degrees` in `store.js` `run`). `nodeScaleFor` gives the canvas a scale per vertex,
+  `t = log1p(d) / log1p(dMax)` over the drawn vertices (whole-graph degrees from
+  `vertexInDegree`/`vertexOutDegree`; a drawing without them, e.g. an older result or one patched by
+  edit mode, counts its drawn edges), passed to the renderer as `nodeScale` (`setData` /
+  `setOptions`, sizes change in place). Each renderer maps it into `SIZE_RANGE`: Cytoscape 12 to
+  40 px (fixed size 24; the `node[size]` style, so cose lays out with the real sizes), sigma 0.5x to
+  1.6x of its size for the vertex count (`nodeSizeFor`). Switching it on reads the drawing again
+  with the degrees and keeps the vertices where they are (`graph-canvas.js` `keepPositions`).
+
+- **Filter** (model `js/graph/filter-model.js`, `tests/graph-filter.test.mjs`; drawer
+  `components/graph-filter.js`, an overlay over the drawing, Esc closes, never docked). The drawer
+  edits a filter STATE `{enabled, hideIsolated, vertices/edges: {off: [hidden labels], conds:
+  {label: [{key, op, value, value2, type}]}}}`, kept per graph in localStorage
+  (`graph.filter.<kind>:<name>`, `filterStorageKey`); `buildFilter` turns it into the engine's
+  `GraphFilter` in its "others visible" form (`othersVisible: true`: `hiddenVertices`/`hiddenEdges`
+  by name, `otherVertices`/`otherEdges: "visible"`, only the conditioned labels in the maps), so a
+  label beyond the largest ones `statistics()` lists stays visible (a side with no hidden label and
+  no condition is left out, so no filter costs nothing). Key types come from the stored schema, else the inferred
+  one (inferred only when the drawer opens; each condition keeps its key's type so a stored filter
+  applies after a reload without inferring); a number key sends a JSON number, every other value
+  a string (never sniffed). Applying: 300 ms after the last edit, on a graph above
+  `FILTER_TUNING.manualApplyAbove` (100 000 elements) only on Apply; the on/off switch, Clear and
+  Reset apply at once. The whole graph and the neighbourhood go through the engine
+  (`graphView(limits, filter)`, `neighbourhood(request, filter)`, one whole-graph request at a
+  time via `createApplyQueue`, a newer selection supersedes an older one); a query result and a
+  label sample are filtered by label on the client (`labelFilterView`); the label overview draws
+  hidden labels faded (`faded` on the schema drawing's elements, class `filtered-out`). An engine
+  error names `vertices.<label>[i]`: `errorTarget` maps it back to the drawer row through the sent
+  indices, and the drawing keeps the last good result. "Open as query" writes
+  `graphFilterQuery(filter)` into a new tab. A filtered neighbourhood answers `unfiltered: {nodes,
+  edges, vertexIds}`: the strip says "X of Y", and expansions and filter changes keep
+  `unfiltered.vertexIds` (`neighbourhoodIds`, `expandRequest`, `redrawRequest` with `hops: 0` in
+  `js/graph/selection.js`), so every vertex the user expanded into is filtered anew.
 
 - **Tiers.** `chooseTier` (`js/graph/tiers.js`) picks by the number of elements drawn (vertices +
   edges): **Detailed below 2000, Fast from 2000**, and once Fast, Detailed again only below 1600

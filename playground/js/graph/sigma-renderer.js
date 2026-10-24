@@ -20,6 +20,7 @@ import { vertexCaption, edgeCaption, vertexCount, edgeCount, adjacencyOf, circle
 import { PALETTE_SIZE, slotColor } from './palette.js';
 import { TIER_CAPABILITIES } from './renderer.js';
 import { detectWebGL } from './tiers.js';
+import { SIZE_RANGE, sizeOf } from './size-by.js';
 
 /** The pinned scripts (cdnjs, exact versions, SRI hashes from cdnjs). */
 export const FAST_LIBRARIES = Object.freeze([
@@ -285,7 +286,7 @@ export class SigmaRenderer {
   setData(data, options = {}) {
     if (options.kind === 'schema') throw new Error('the Fast tier does not draw the schema graph');
     this.data = data;
-    this.options = { showIds: !!options.showIds, edgeIds: !!options.edgeIds };
+    this.options = { showIds: !!options.showIds, edgeIds: !!options.edgeIds, nodeScale: options.nodeScale || null };
     this.palette = options.palette;
     this.added = false;
     this.hoverNodes = new Set();
@@ -303,7 +304,7 @@ export class SigmaRenderer {
     const graph = new this.libs.Graph({ allowSelfLoops: true });
     if (view) {
       const [n, m] = this.counts();
-      const size = nodeSizeFor(n);
+      const sizeAt = this.sizer(n);
       const slots = view.labels.map((l) => (this.palette ? this.palette.slot(l) : PALETTE_SIZE));
       for (let i = 0; i < n; i++) {
         const slot = slots[view.vertexLabel[i]];
@@ -312,7 +313,7 @@ export class SigmaRenderer {
           slot,
           x: xy && 2 * i + 1 < xy.length ? xy[2 * i] : 0,
           y: xy && 2 * i + 1 < xy.length ? Y_SIGN * xy[2 * i + 1] : 0,
-          size,
+          size: sizeAt(i),
           color: this.slotColors[slot],
           label: vertexCaption(view, i, this.options.showIds),
         });
@@ -365,8 +366,28 @@ export class SigmaRenderer {
     this.setPositions(xy);
   }
 
+  /**
+   * The size of vertex `i` of a drawing of `n` vertices: `nodeSizeFor(n)`, or with
+   * `options.nodeScale` (js/graph/size-by.js) between `SIZE_RANGE.fast` factors of it.
+   */
+  sizer(n) {
+    const base = nodeSizeFor(n);
+    const scale = this.options.nodeScale;
+    if (!scale || scale.length !== n) return () => base;
+    const min = base * SIZE_RANGE.fast.minFactor;
+    const max = base * SIZE_RANGE.fast.maxFactor;
+    return (i) => sizeOf(scale[i], min, max);
+  }
+
   setOptions(options) {
     Object.assign(this.options, options);
+    if (this.added && this.data && 'nodeScale' in options) {
+      const sizeAt = this.sizer(vertexCount(this.data));
+      this.graph.updateEachNodeAttributes((key, attrs) => {
+        attrs.size = sizeAt(attrs.i);
+        return attrs;
+      }, { attributes: ['size'] });
+    }
     if (!this.added || !this.data || !('showIds' in options)) return;
     const view = this.data;
     this.graph.updateEachNodeAttributes((key, attrs) => {

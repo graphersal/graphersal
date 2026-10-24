@@ -89,7 +89,7 @@ GRAPHERSAL_UPDATE_SURFACE=1 cargo test -p graphersal --features script,io,displa
 GRAPHERSAL_UPDATE_BOOK=1 cargo test -p graphersal-session --test book_step_reference                           # generated step reference
 ```
 
-The workspace includes `bindings/py-graphersal` (PyO3, `abi3-py310`): building it needs a Python >= 3.10 interpreter. If `python3` is older (the macOS system Python is 3.9), set `PYO3_PYTHON=/path/to/python3.12` for workspace-wide commands, or add `--exclude py-graphersal`.
+The workspace includes `bindings/py-graphersal` (PyO3, `abi3-py310`) but not in `default-members`: a bare `cargo build`/`test`/`check` skips it. Building it (`--workspace`, `-p py-graphersal`) needs a Python >= 3.10 interpreter. If `python3` is older (the macOS system Python is 3.9), set `PYO3_PYTHON=/path/to/python3.12` for workspace-wide commands, or add `--exclude py-graphersal`.
 
 Python binding tests (venv in the git-ignored `bindings/py-graphersal/.venv`; details in `bindings/py-graphersal/README.md`):
 ```bash

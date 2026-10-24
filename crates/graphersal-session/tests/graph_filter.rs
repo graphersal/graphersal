@@ -560,3 +560,291 @@ fn a_foreign_storage_draws_the_same() {
         );
     }
 }
+
+// ------------------------------------------------------------------ others visible, hidden labels
+
+#[test]
+fn others_visible_shows_every_label_not_hidden_or_restricted() {
+    let mut s = modern();
+    // Hidden labels only: everything else shows, with no condition.
+    let filter = json!({"otherVertices": "visible", "hiddenVertices": ["software"]});
+    let (vertices, edges) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["1", "2", "4", "6"]));
+    assert_eq!(
+        edges,
+        set(&["0", "2"]),
+        "knows edges only (both ends persons)"
+    );
+    // A condition on one label restricts that label; every other label is visible unconditionally.
+    let filter = json!({"otherVertices": "visible",
+        "vertices": {"person": [{"key": "age", "op": "gt", "value": 30}]}});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["3", "4", "5", "6"]));
+    // A listed label without conditions restricts nothing; a hidden label wins over a listing.
+    let filter = json!({"otherVertices": "visible", "hiddenVertices": ["person"],
+        "vertices": {"person": [{"key": "age", "op": "gt", "value": 30}], "software": []}});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["3", "5"]));
+    // Edges: the same rules, endpoints still checked.
+    let filter = json!({"otherEdges": "visible", "hiddenEdges": ["created"],
+        "edges": {"knows": [{"key": "weight", "op": "gte", "value": 0.5}]}});
+    let (vertices, edges) = check_equivalent(&mut s, &filter);
+    assert_eq!(edges, set(&["0", "2"]));
+    assert_eq!(vertices.len(), 6);
+    let filter = json!({"otherEdges": "visible", "hiddenEdges": ["knows"],
+        "otherVertices": "visible", "vertices": {"software": [{"key": "lang", "op": "eq", "value": "nope"}]},
+        "hideIsolated": true});
+    let (vertices, edges) = check_equivalent(&mut s, &filter);
+    assert!(edges.is_empty(), "created edges end at hidden software");
+    assert!(vertices.is_empty());
+    // Nothing hidden and no condition: nothing is restricted.
+    let filter =
+        json!({"otherVertices": "visible", "otherEdges": "visible", "vertices": {"person": []}});
+    let (vertices, edges) = check_equivalent(&mut s, &filter);
+    assert_eq!((vertices.len(), edges.len()), (6, 6));
+}
+
+#[test]
+fn hidden_labels_apply_to_the_allow_list_form_too() {
+    let mut s = modern();
+    // The default of `otherVertices` with a map is "hidden": the old form, unchanged.
+    let old =
+        json!({"vertices": {"person": [{"key": "age", "op": "gt", "value": 28}], "software": []}});
+    let explicit = json!({"otherVertices": "hidden",
+        "vertices": {"person": [{"key": "age", "op": "gt", "value": 28}], "software": []}});
+    assert_eq!(
+        check_equivalent(&mut s, &old),
+        check_equivalent(&mut s, &explicit)
+    );
+    let filter =
+        json!({"vertices": {"person": [], "software": []}, "hiddenVertices": ["software"]});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["1", "2", "4", "6"]));
+    // Without a map the default is "visible": hidden labels alone hide just those.
+    let (vertices, _) = check_equivalent(&mut s, &json!({"hiddenVertices": ["person"]}));
+    assert_eq!(vertices, set(&["3", "5"]));
+    // "hidden" without a map lists nothing: every vertex hidden.
+    let (vertices, _) = check_equivalent(&mut s, &json!({"otherVertices": "hidden"}));
+    assert!(vertices.is_empty());
+}
+
+#[test]
+fn others_visible_with_several_labels_needs_every_restriction() {
+    let mut s = modern();
+    run(&mut s, r#"g.v("1").add_label("employee").iterate()"#);
+    // marko carries person (condition holds) and employee (condition fails): hidden.
+    let filter = json!({"otherVertices": "visible", "vertices": {
+        "employee": [{"key": "age", "op": "gt", "value": 100}],
+        "person": [{"key": "name", "op": "eq", "value": "marko"}],
+    }});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["3", "5"]));
+    // A hidden second label hides the vertex.
+    let filter = json!({"otherVertices": "visible", "hiddenVertices": ["employee"]});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices, set(&["2", "3", "4", "5", "6"]));
+}
+
+/// Many labels (more than the statistics list and than a variadic step takes): the counts cover
+/// every label, and the query text stays runnable.
+#[test]
+fn others_visible_covers_labels_beyond_any_list() {
+    let mut s = Session::new();
+    s.load_sample("empty").unwrap();
+    run(
+        &mut s,
+        r#"for i in 0..300 { g.add_v("l" + i).property("n", i).iterate(); }
+           let ids = g.v().id().to_list();
+           for i in 1..300 { g.v(ids[i - 1]).add_e("e" + (i % 20)).to(ids[i]).property("w", i).iterate(); }"#,
+    );
+    let hidden: Vec<String> = (0..12).map(|i| format!("l{i}")).collect();
+    let filter = json!({"otherVertices": "visible", "hiddenVertices": hidden,
+        "vertices": {"l50": [{"key": "n", "op": "lt", "value": 0}]}});
+    let cut = view(
+        &s,
+        json!({"maxNodes": 10, "maxEdges": 10, "filter": filter}),
+    );
+    assert_eq!(cut["matchedNodes"], 300 - 12 - 1, "{cut}");
+    assert_eq!(cut["totalNodes"], 300);
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices.len(), 287);
+    let text = s.graph_filter_query(&filter.to_string()).unwrap();
+    assert!(
+        text.contains(".not(__.has_label(P.within([\"l0\", \"l1\", "),
+        "{text}"
+    );
+    // The allow-list form with many plain labels is runnable too (one P.within argument).
+    let listed: serde_json::Map<String, Value> =
+        (0..20).map(|i| (format!("l{i}"), json!([]))).collect();
+    let filter = json!({"vertices": listed, "otherEdges": "visible",
+        "edges": {"e3": [{"key": "w", "op": "gt", "value": 100}]}});
+    let (vertices, _) = check_equivalent(&mut s, &filter);
+    assert_eq!(vertices.len(), 20);
+}
+
+#[test]
+fn others_visible_equivalence_on_a_generated_graph() {
+    let mut s = Session::new();
+    s.load_sample("empty").unwrap();
+    run(
+        &mut s,
+        r#"let f = Fake(11);
+           for i in 0..150 {
+               let l = if i % 3 == 0 { "a" } else if i % 3 == 1 { "b" } else { "c" };
+               g.add_v(l).property("n", i).property("name", f.first_name()).iterate();
+           }
+           let ids = g.v().id().to_list();
+           for i in 0..300 {
+               let s = ids[(i * 7) % 150]; let t = ids[(i * 13 + 5) % 150];
+               let l = if i % 2 == 0 { "x" } else { "y" };
+               g.v(s).add_e(l).to(t).property("w", i % 10).iterate();
+           }"#,
+    );
+    let filters = [
+        json!({"otherVertices": "visible", "hiddenVertices": ["c"],
+               "vertices": {"a": [{"key": "n", "op": "lt", "value": 60}]}}),
+        json!({"otherVertices": "visible", "vertices": {"b": [{"key": "name", "op": "contains", "value": "a"}]},
+               "otherEdges": "visible", "edges": {"y": [{"key": "w", "op": "between", "value": [2, 6]}]},
+               "hideIsolated": true}),
+        json!({"otherEdges": "visible", "hiddenEdges": ["x"], "hideIsolated": true}),
+        json!({"vertices": {"a": [], "b": []}, "hiddenVertices": ["b"], "hiddenEdges": ["y"]}),
+    ];
+    for filter in filters {
+        check_equivalent(&mut s, &filter);
+    }
+}
+
+#[test]
+fn invalid_new_fields_are_errors() {
+    let s = modern();
+    let cases = [
+        (json!({"otherVertices": "maybe"}), "otherVertices"),
+        (json!({"otherEdges": true}), "otherEdges"),
+        (json!({"hiddenVertices": "person"}), "hiddenVertices"),
+        (json!({"hiddenEdges": [1]}), "hiddenEdges"),
+    ];
+    for (filter, needle) in cases {
+        let err = s
+            .graph_view(&json!({"filter": filter}).to_string())
+            .unwrap_err();
+        assert!(err.contains(needle), "{filter}: {err}");
+        assert!(s.graph_filter_query(&filter.to_string()).is_err());
+    }
+}
+
+#[test]
+fn query_text_uses_the_text_predicates_and_not_for_hidden_labels() {
+    let s = modern();
+    let text = s
+        .graph_filter_query(
+            &json!({"vertices": {"person": [
+                {"key": "name", "op": "contains", "value": "ar"},
+                {"key": "name", "op": "starts_with", "value": "m"},
+                {"key": "name", "op": "ends_with", "value": "o"},
+                {"key": "name", "op": "regex", "value": "^m"},
+            ]}})
+            .to_string(),
+        )
+        .unwrap();
+    assert!(
+        text.starts_with(
+            "#{\n  vertices: g.v().has_label(\"person\").has(\"name\", TextP.containing(\"ar\"))\
+             .has(\"name\", TextP.starting_with(\"m\")).has(\"name\", TextP.ending_with(\"o\"))\
+             .has(\"name\", TextP.regex(\"^m\")).to_list(),"
+        ),
+        "{text}"
+    );
+    let text = s
+        .graph_filter_query(
+            &json!({"otherVertices": "visible", "hiddenVertices": ["software"],
+                "vertices": {"person": [{"key": "age", "op": "gt", "value": 30}]}})
+            .to_string(),
+        )
+        .unwrap();
+    assert!(
+        text.starts_with(
+            "#{\n  vertices: g.v().not(__.has_label(\"software\"))\
+             .or(__.not(__.has_label(\"person\")), __.has(\"age\", P.gt(30))).to_list(),"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_filtered_neighbourhood_reports_what_it_held_before() {
+    let s = modern();
+    let request = json!({
+        "ids": ["1"], "hops": 1,
+        "filter": {"otherVertices": "visible", "hiddenVertices": ["software"]},
+    });
+    let view = s.neighbourhood(&request.to_string()).unwrap();
+    assert_eq!(strings(&view["vertexIds"]), set(&["1", "2", "4"]));
+    assert_eq!(view["unfiltered"]["nodes"], 4);
+    assert_eq!(view["unfiltered"]["edges"], 4);
+    assert_eq!(
+        strings(&view["unfiltered"]["vertexIds"]),
+        set(&["1", "2", "3", "4"])
+    );
+    // Edges leading out of the filtered drawing count only what the filter would show: josh's
+    // created edges end at hidden software (unfiltered: josh->ripple and peter->lop).
+    assert_eq!(view["hiddenEdges"], 0, "{view}");
+    let plain = s.neighbourhood(r#"{"ids": ["1"], "hops": 1}"#).unwrap();
+    assert!(plain.get("unfiltered").is_none());
+    assert_eq!(plain["hiddenEdges"], 2);
+    let request = json!({"ids": ["1"], "hops": 1,
+        "filter": {"hiddenEdges": ["knows"], "otherEdges": "visible"}});
+    let view = s.neighbourhood(&request.to_string()).unwrap();
+    assert_eq!(
+        view["hiddenEdges"], 2,
+        "josh->ripple and peter->lop are created edges"
+    );
+    // Redrawing the unfiltered set (`keep`, `hops: 0`) under another filter brings back what the
+    // first one hid: every vertex drilled into, not only the centre's neighbours.
+    let grown = s
+        .neighbourhood(r#"{"ids": ["4"], "hops": 1, "keep": ["1", "2", "3", "4"]}"#)
+        .unwrap();
+    let all = strings(&grown["vertexIds"]);
+    assert!(all.contains("5"));
+    let filtered = s
+        .neighbourhood(
+            &json!({"ids": ["4"], "hops": 1, "keep": ["1", "2", "3", "4"],
+                "filter": {"vertices": {"person": []}}})
+            .to_string(),
+        )
+        .unwrap();
+    let kept = filtered["unfiltered"]["vertexIds"].clone();
+    let again = s
+        .neighbourhood(
+            &json!({"ids": [], "keep": kept, "hops": 0,
+                "filter": {"vertices": {"software": []}}})
+            .to_string(),
+        )
+        .unwrap();
+    assert_eq!(strings(&again["vertexIds"]), set(&["3", "5"]));
+    assert_eq!(strings(&again["unfiltered"]["vertexIds"]), all);
+}
+
+#[test]
+fn a_foreign_storage_draws_the_new_form_the_same() {
+    use graphersal::prelude::*;
+    use graphersal_session::views::{GraphViewRequest, graph_filter_query, graph_view_request};
+    use graphersal_storage_tests::forwarding::Forwarding;
+    let tg = TraversalGraph::tinkerpop_modern();
+    let fw = Forwarding::new(TraversalGraph::tinkerpop_modern());
+    let filter = json!({"otherVertices": "visible", "hiddenVertices": ["software"],
+        "vertices": {"person": [{"key": "age", "op": "gt", "value": 28}]},
+        "otherEdges": "visible", "hiddenEdges": ["created"]});
+    let request = GraphViewRequest {
+        max_nodes: Some(3),
+        filter: Some(filter.clone()),
+        ..GraphViewRequest::default()
+    };
+    let a = serde_json::to_value(graph_view_request(&tg, &request).unwrap()).unwrap();
+    let b = serde_json::to_value(graph_view_request(&fw, &request).unwrap()).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a["matchedNodes"], 3);
+    assert_eq!(
+        graph_filter_query(&tg, &filter).unwrap(),
+        graph_filter_query(&fw, &filter).unwrap()
+    );
+}
