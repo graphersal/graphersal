@@ -684,11 +684,10 @@ fn t14_memory_profile_renders_aligned_columns() {
     );
 }
 
-/// `property_bytes` counts both allocations of every property map: the entries (hash, key and
-/// value per slot) and the hash index. A graph of many small vertices therefore reports more
-/// than the bare entry size per property, within what a real allocator measures for this shape
-/// (about 106 bytes per property for five small properties on a 64-bit target, measured with the
-/// tracking allocator).
+/// `property_bytes` counts the storage of every property: a stored element keeps one value slot
+/// per property (its keys live once per distinct key sequence, in `shape_bytes`, which is part
+/// of `property_bytes`). A graph of many small vertices therefore reports at least the value
+/// slot per property, and far less than a map per element would cost.
 #[test]
 fn property_bytes_count_the_hash_index_of_every_map() {
     let mut graph = TraversalGraph::new();
@@ -705,13 +704,13 @@ fn property_bytes_count_the_hash_index_of_every_map() {
     }
     let stats = graph.memory_usage().unwrap();
     let per_slot = stats.property_bytes as f64 / (vertices * per_vertex) as f64;
-    // Never below the entries alone: a slot holds a cached hash, a key and a value.
-    let entry =
-        (size_of::<usize>() + size_of::<CompactString>() + size_of::<ElementProperty>()) as f64;
-    assert!(per_slot > entry, "{per_slot} per slot");
+    // Never below the value slot alone.
+    let entry = size_of::<ElementProperty>() as f64;
+    assert!(per_slot >= entry, "{per_slot} per slot");
+    assert!(stats.shape_bytes > 0 && stats.shape_bytes < stats.property_bytes);
     #[cfg(target_pointer_width = "64")]
     assert!(
-        (64.0..160.0).contains(&per_slot),
+        (32.0..64.0).contains(&per_slot),
         "{per_slot} bytes per property slot"
     );
 

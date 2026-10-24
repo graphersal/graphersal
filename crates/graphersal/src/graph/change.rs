@@ -617,7 +617,7 @@ impl CommitMetadata {
             self.principal = other.principal;
         }
         for (key, value) in other.attributes {
-            self.attributes.0.entry(key).or_insert(value);
+            self.attributes.insert_if_absent(&key, || value);
         }
     }
 }

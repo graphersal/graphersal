@@ -1,23 +1,121 @@
 //! [`PropertyMap`], a graph element's insertion-ordered property map.
 //!
-//! A newtype over the internal map so that the map crate behind it (`indexmap` with an FNV hasher
-//! today) stays out of the public API: a major version of that crate cannot break a user. It is
-//! `#[repr(transparent)]`, so it costs nothing at run time; the crate's own hot paths reach the
-//! inner map through the `pub(crate)` field.
+//! A newtype over an internal representation so that the map crate behind it (`indexmap` with an
+//! FNV hasher) stays out of the public API: a major version of that crate cannot break a user.
+//!
+//! The representation is one of two (crate-internal [`Repr`]):
+//!
+//! - `Indexed`: an `IndexMap`, for every free-standing map (nested objects, catalog payloads,
+//!   change sets, results, schema values) and every map a caller builds.
+//! - `Shaped`: a shared, interned key list ([`Shape`], held through an `Arc`) plus the values in
+//!   key order (`Box<[ElementProperty]>`), for the maps a `TraversalGraph` stores per element:
+//!   elements with the same key sequence share one key list, so a property slot costs the value
+//!   alone. The graph's shape table (`graph/shape.rs`) interns the shapes and moves a stored map
+//!   from shape to shape on key-adding and key-removing writes.
+//!
+//! Both representations behave identically through the public API (order rules, order-independent
+//! equality, `Debug` text, serde). A key-changing mutation of a `Shaped` map through the public API
+//! (outside the graph's shape table) turns it into an `Indexed` map first; a value-only mutation
+//! (an existing key, `get_mut`, `iter_mut`, `values_mut`) keeps it `Shaped`.
 
 use std::fmt;
 use std::hash::BuildHasherDefault;
 use std::iter::FusedIterator;
+use std::sync::Arc;
 
 use compact_str::CompactString;
 use fnv::FnvHasher;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 use super::ElementProperty;
 
-/// The map behind a [`PropertyMap`] (crate-internal).
+/// The `IndexMap` behind an `Indexed` [`PropertyMap`] (crate-internal).
 pub(crate) type PropertyMapInner =
     IndexMap<CompactString, ElementProperty, BuildHasherDefault<FnvHasher>>;
+
+/// The key count above which a [`Shape`] keeps a hash index of its keys; at or below it a key is
+/// found by a linear scan of the key list (cheaper for short lists than hashing the key).
+pub(crate) const WIDE_SHAPE: usize = 16;
+
+/// An ordered key list shared by every stored property map with exactly these keys in exactly
+/// this order (crate-internal). Immutable once built; `owner` is the id of the shape table that
+/// interned it (`graph/shape.rs`). No interior mutability, so the map and its iterators keep
+/// their auto traits.
+pub(crate) struct Shape {
+    /// The keys in order (unique).
+    pub(crate) keys: Box<[CompactString]>,
+    /// Key -> position for a wide shape (more than [`WIDE_SHAPE`] keys), else `None`.
+    index: Option<IndexSet<CompactString, BuildHasherDefault<FnvHasher>>>,
+    /// The id of the shape table that interned this shape.
+    pub(crate) owner: u64,
+}
+
+impl Shape {
+    /// A shape over `keys` (unique, in order) owned by the shape table `owner`.
+    pub(crate) fn new(keys: Box<[CompactString]>, owner: u64) -> Self {
+        let index = (keys.len() > WIDE_SHAPE).then(|| keys.iter().cloned().collect());
+        Self { keys, index, owner }
+    }
+
+    /// The position of `key`, if present.
+    #[inline]
+    pub(crate) fn position(&self, key: &str) -> Option<usize> {
+        match &self.index {
+            Some(index) => index.get_index_of(key),
+            None => self.keys.iter().position(|k| k.as_str() == key),
+        }
+    }
+
+    /// The number of keys.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether this shape keeps a hash index of its keys (tests).
+    #[cfg(test)]
+    pub(crate) fn is_wide(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// The bytes of this shape: its `Arc` allocation (two counters plus the struct), the key
+    /// list, each heap-allocated key, and a wide shape's index (whose keys are clones: a long
+    /// key's heap counted again).
+    pub(crate) fn heap_bytes(&self) -> u64 {
+        use std::mem::size_of;
+        let arc = (2 * size_of::<usize>() + size_of::<Self>()) as u64;
+        let keys = self.keys.len() as u64 * size_of::<CompactString>() as u64;
+        let key_heap: u64 = self.keys.iter().map(super::compact_string_heap_bytes).sum();
+        let index = self.index.as_ref().map_or(0, |index| {
+            index_map_heap_bytes::<CompactString, ()>(index.capacity()) + key_heap
+        });
+        arc + keys + key_heap + index
+    }
+}
+
+/// The parts of a `Shaped` [`PropertyMap`] (crate-internal): the shared shape and the values in
+/// its key order. Invariant: `values.len() == shape.len()`.
+pub(crate) struct Shaped {
+    /// The key list.
+    pub(crate) shape: Arc<Shape>,
+    /// The values, one per key, in key order (exactly sized: one reallocation per added key).
+    pub(crate) values: Box<[ElementProperty]>,
+}
+
+/// The representation of a [`PropertyMap`] (crate-internal; see the module docs).
+pub(crate) enum Repr {
+    /// A free-standing map.
+    Indexed(PropertyMapInner),
+    /// A map stored in a `TraversalGraph`: shared keys, own values.
+    Shaped(Shaped),
+}
+
+impl Default for Repr {
+    #[inline]
+    fn default() -> Self {
+        Repr::Indexed(PropertyMapInner::default())
+    }
+}
 
 /// A graph element's property map: property name to [`ElementProperty`] value, in insertion order.
 ///
@@ -36,30 +134,44 @@ pub(crate) type PropertyMapInner =
 /// assert_eq!(props["name"], ElementProperty::from("marko"));
 /// assert_eq!(props.keys().map(|k| k.as_str()).collect::<Vec<_>>(), ["name", "age"]);
 /// ```
-#[repr(transparent)]
-#[derive(Default, Eq)]
-pub struct PropertyMap(pub(crate) PropertyMapInner);
+#[derive(Default)]
+pub struct PropertyMap(pub(crate) Repr);
+
+impl Eq for PropertyMap {}
 
 // `Clone` and `PartialEq` recurse through nested values (`ElementProperty::Object` holds a
 // `PropertyMap`); `#[inline(always)]` keeps the wrapper from adding a stack frame per nesting
 // level in unoptimized builds, where the deepest values (`traversal.max_value_depth`) run close to
-// the 2 MiB test-thread stack.
+// the 2 MiB test-thread stack. The match is written out here (no helper call), and nested maps are
+// always `Indexed`, so the recursion goes through the same frames as a plain `IndexMap`.
 impl Clone for PropertyMap {
     #[inline(always)]
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        match &self.0 {
+            Repr::Indexed(map) => Self(Repr::Indexed(map.clone())),
+            Repr::Shaped(shaped) => Self(Repr::Shaped(Shaped {
+                shape: Arc::clone(&shaped.shape),
+                values: shaped.values.clone(),
+            })),
+        }
     }
 
     #[inline(always)]
     fn clone_from(&mut self, source: &Self) {
-        self.0.clone_from(&source.0);
+        match (&mut self.0, &source.0) {
+            (Repr::Indexed(target), Repr::Indexed(source)) => target.clone_from(source),
+            (target, _) => *target = source.clone().0,
+        }
     }
 }
 
 impl PartialEq for PropertyMap {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        match (&self.0, &other.0) {
+            (Repr::Indexed(a), Repr::Indexed(b)) => a == b,
+            _ => self.eq_mixed(other),
+        }
     }
 }
 
@@ -67,46 +179,64 @@ impl PropertyMap {
     /// An empty map.
     #[inline]
     pub fn new() -> Self {
-        Self(PropertyMapInner::default())
+        Self(Repr::Indexed(PropertyMapInner::default()))
     }
 
     /// An empty map with room for `capacity` entries.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(PropertyMapInner::with_capacity_and_hasher(
+        Self(Repr::Indexed(PropertyMapInner::with_capacity_and_hasher(
             capacity,
             BuildHasherDefault::default(),
-        ))
+        )))
     }
 
     /// The number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.0.len()
+        match &self.0 {
+            Repr::Indexed(map) => map.len(),
+            Repr::Shaped(shaped) => shaped.values.len(),
+        }
     }
 
     /// Whether the map has no entries.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
 
     /// The value of `key`, if present.
     #[inline]
     pub fn get(&self, key: &str) -> Option<&ElementProperty> {
-        self.0.get(key)
+        match &self.0 {
+            Repr::Indexed(map) => map.get(key),
+            Repr::Shaped(shaped) => shaped
+                .shape
+                .position(key)
+                .and_then(|position| shaped.values.get(position)),
+        }
     }
 
     /// The value of `key`, mutably, if present.
     #[inline]
     pub fn get_mut(&mut self, key: &str) -> Option<&mut ElementProperty> {
-        self.0.get_mut(key)
+        match &mut self.0 {
+            Repr::Indexed(map) => map.get_mut(key),
+            Repr::Shaped(shaped) => shaped
+                .shape
+                .position(key)
+                .and_then(|position| shaped.values.get_mut(position)),
+        }
     }
 
     /// Whether `key` is present.
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
-        self.0.contains_key(key)
+        match &self.0 {
+            Repr::Indexed(map) => map.contains_key(key),
+            Repr::Shaped(shaped) => shaped.shape.position(key).is_some(),
+        }
     }
 
     /// Inserts `value` under `key` and returns the previous value. A new key goes to the end; an
@@ -117,55 +247,222 @@ impl PropertyMap {
         key: impl Into<CompactString>,
         value: ElementProperty,
     ) -> Option<ElementProperty> {
-        self.0.insert(key.into(), value)
+        self.insert_full(key.into(), value).1
     }
 
     /// Removes `key` and returns its value, keeping the order of the other entries.
     #[inline]
     pub fn shift_remove(&mut self, key: &str) -> Option<ElementProperty> {
-        self.0.shift_remove(key)
+        self.shift_remove_full(key).map(|(_, _, value)| value)
     }
 
     /// The entries in order.
     #[inline]
     pub fn iter(&self) -> Iter<'_> {
-        Iter(self.0.iter())
+        Iter(match &self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.iter()),
+            Repr::Shaped(shaped) => {
+                Either::Shaped(shaped.shape.keys.iter().zip(shaped.values.iter()))
+            }
+        })
     }
 
     /// The entries in order, values mutable.
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_> {
-        IterMut(self.0.iter_mut())
+        IterMut(match &mut self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.iter_mut()),
+            Repr::Shaped(shaped) => {
+                Either::Shaped(shaped.shape.keys.iter().zip(shaped.values.iter_mut()))
+            }
+        })
     }
 
     /// The keys in order.
     #[inline]
     pub fn keys(&self) -> Keys<'_> {
-        Keys(self.0.keys())
+        Keys(match &self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.keys()),
+            Repr::Shaped(shaped) => Either::Shaped(shaped.shape.keys.iter()),
+        })
     }
 
     /// The values in order.
     #[inline]
     pub fn values(&self) -> Values<'_> {
-        Values(self.0.values())
+        Values(match &self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.values()),
+            Repr::Shaped(shaped) => Either::Shaped(shaped.values.iter()),
+        })
     }
 
     /// The values in order, mutable.
     #[inline]
     pub fn values_mut(&mut self) -> ValuesMut<'_> {
-        ValuesMut(self.0.values_mut())
+        ValuesMut(match &mut self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.values_mut()),
+            Repr::Shaped(shaped) => Either::Shaped(shaped.values.iter_mut()),
+        })
     }
 
     /// Removes every entry, keeping the allocated capacity.
     #[inline]
     pub fn clear(&mut self) {
-        self.0.clear();
+        match &mut self.0 {
+            Repr::Indexed(map) => map.clear(),
+            Repr::Shaped(_) => self.0 = Repr::default(),
+        }
     }
 }
 
+/// Crate-internal operations: positions (the undo log restores a key at its old position), the
+/// representation, and the heap estimate.
+impl PropertyMap {
+    /// Order-independent equality across representations (the same rule as `IndexMap`'s).
+    #[inline(never)]
+    fn eq_mixed(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .all(|(key, value)| other.get(key).is_some_and(|other| value == other))
+    }
+
+    /// The `Indexed` map, converting a `Shaped` one first (its keys copied out of the shape):
+    /// the step before a key-changing mutation outside the graph's shape table.
+    pub(crate) fn indexed_mut(&mut self) -> &mut PropertyMapInner {
+        if let Repr::Shaped(shaped) = &mut self.0 {
+            let values = std::mem::take(&mut shaped.values);
+            let map: PropertyMapInner = shaped
+                .shape
+                .keys
+                .iter()
+                .cloned()
+                .zip(values.into_vec())
+                .collect();
+            self.0 = Repr::Indexed(map);
+        }
+        match self.0 {
+            Repr::Indexed(ref mut map) => map,
+            // Not reached: converted above. Starting over from an empty map keeps this total.
+            Repr::Shaped(_) => {
+                self.0 = Repr::default();
+                self.indexed_mut()
+            }
+        }
+    }
+
+    /// The `Indexed` map, if this map is one (tests).
+    #[cfg(test)]
+    pub(crate) fn as_indexed(&self) -> Option<&PropertyMapInner> {
+        match &self.0 {
+            Repr::Indexed(map) => Some(map),
+            Repr::Shaped(_) => None,
+        }
+    }
+
+    /// The shape of a `Shaped` map (tests).
+    #[cfg(test)]
+    pub(crate) fn shape(&self) -> Option<&Arc<Shape>> {
+        match &self.0 {
+            Repr::Indexed(_) => None,
+            Repr::Shaped(shaped) => Some(&shaped.shape),
+        }
+    }
+
+    /// `insert` with the position: `(position, previous value)`. An existing key keeps its
+    /// position and its representation; a new key on a `Shaped` map converts it to `Indexed`.
+    pub(crate) fn insert_full(
+        &mut self,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> (usize, Option<ElementProperty>) {
+        if let Repr::Shaped(shaped) = &mut self.0
+            && let Some(position) = shaped.shape.position(&key)
+            && let Some(slot) = shaped.values.get_mut(position)
+        {
+            return (position, Some(std::mem::replace(slot, value)));
+        }
+        self.indexed_mut().insert_full(key, value)
+    }
+
+    /// `shift_remove` with the position and the stored key. An absent key changes nothing.
+    pub(crate) fn shift_remove_full(
+        &mut self,
+        key: &str,
+    ) -> Option<(usize, CompactString, ElementProperty)> {
+        if let Repr::Shaped(shaped) = &self.0
+            && shaped.shape.position(key).is_none()
+        {
+            return None;
+        }
+        self.indexed_mut().shift_remove_full(key)
+    }
+
+    /// The position, stored key and value of `key`.
+    pub(crate) fn get_full(&self, key: &str) -> Option<(usize, &CompactString, &ElementProperty)> {
+        match &self.0 {
+            Repr::Indexed(map) => map.get_full(key),
+            Repr::Shaped(shaped) => {
+                let position = shaped.shape.position(key)?;
+                Some((
+                    position,
+                    shaped.shape.keys.get(position)?,
+                    shaped.values.get(position)?,
+                ))
+            }
+        }
+    }
+
+    /// Inserts `key` (absent) at `position` (clamped to the length).
+    pub(crate) fn shift_insert(
+        &mut self,
+        position: usize,
+        key: CompactString,
+        value: ElementProperty,
+    ) {
+        let map = self.indexed_mut();
+        let position = position.min(map.len());
+        map.shift_insert(position, key, value);
+    }
+
+    /// Inserts `key` with the value `make` returns, only when `key` is absent.
+    pub(crate) fn insert_if_absent(
+        &mut self,
+        key: &CompactString,
+        make: impl FnOnce() -> ElementProperty,
+    ) {
+        if !self.contains_key(key) {
+            self.indexed_mut().insert(key.clone(), make());
+        }
+    }
+
+    /// The heap bytes of the map's own storage, without the values' heap: for an `Indexed` map
+    /// its two allocations sized from its capacity ([`index_map_heap_bytes`]) and each
+    /// heap-allocated key; for a `Shaped` map its value slice alone (the shared shape is counted
+    /// once, by the shape table: `MemoryStats::shape_bytes`).
+    pub(crate) fn own_heap_bytes(&self) -> u64 {
+        match &self.0 {
+            Repr::Indexed(map) => {
+                index_map_heap_bytes::<CompactString, ElementProperty>(map.capacity())
+                    + map
+                        .keys()
+                        .map(super::compact_string_heap_bytes)
+                        .sum::<u64>()
+            }
+            Repr::Shaped(shaped) => shaped_values_bytes(shaped.values.len()),
+        }
+    }
+}
+
+/// The bytes of a `Shaped` map's value slice of `len` values.
+pub(crate) fn shaped_values_bytes(len: usize) -> u64 {
+    len as u64 * std::mem::size_of::<ElementProperty>() as u64
+}
+
 impl fmt::Debug for PropertyMap {
+    /// The text of the `IndexMap` debug form (`{"k": v, ...}` in order) for both representations.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        f.debug_map().entries(self.iter()).finish()
     }
 }
 
@@ -176,21 +473,27 @@ impl std::ops::Index<&str> for PropertyMap {
 
     #[inline]
     fn index(&self, key: &str) -> &ElementProperty {
-        &self.0[key]
+        match self.get(key) {
+            Some(value) => value,
+            None => panic!("PropertyMap: key not found"),
+        }
     }
 }
 
 impl<K: Into<CompactString>> FromIterator<(K, ElementProperty)> for PropertyMap {
     #[inline]
     fn from_iter<I: IntoIterator<Item = (K, ElementProperty)>>(iter: I) -> Self {
-        Self(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
+        Self(Repr::Indexed(
+            iter.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+        ))
     }
 }
 
 impl<K: Into<CompactString>> Extend<(K, ElementProperty)> for PropertyMap {
     #[inline]
     fn extend<I: IntoIterator<Item = (K, ElementProperty)>>(&mut self, iter: I) {
-        self.0.extend(iter.into_iter().map(|(k, v)| (k.into(), v)));
+        self.indexed_mut()
+            .extend(iter.into_iter().map(|(k, v)| (k.into(), v)));
     }
 }
 
@@ -207,7 +510,14 @@ impl IntoIterator for PropertyMap {
 
     #[inline]
     fn into_iter(self) -> IntoIter {
-        IntoIter(self.0.into_iter())
+        IntoIter(match self.0 {
+            Repr::Indexed(map) => Either::Indexed(map.into_iter()),
+            Repr::Shaped(Shaped { shape, values }) => Either::Shaped(ShapedIntoIter {
+                keys: 0..shape.len(),
+                shape,
+                values: values.into_vec().into_iter(),
+            }),
+        })
     }
 }
 
@@ -231,10 +541,81 @@ impl<'a> IntoIterator for &'a mut PropertyMap {
     }
 }
 
-/// Implements the iterator traits of a wrapper around an `indexmap` iterator.
+/// The iterator of one representation or the other (crate-internal).
+#[derive(Clone)]
+enum Either<I, S> {
+    Indexed(I),
+    Shaped(S),
+}
+
+impl<T, I: Iterator<Item = T>, S: Iterator<Item = T>> Iterator for Either<I, S> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<T> {
+        match self {
+            Either::Indexed(iter) => iter.next(),
+            Either::Shaped(iter) => iter.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Either::Indexed(iter) => iter.size_hint(),
+            Either::Shaped(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl<T, I: DoubleEndedIterator<Item = T>, S: DoubleEndedIterator<Item = T>> DoubleEndedIterator
+    for Either<I, S>
+{
+    #[inline]
+    fn next_back(&mut self) -> Option<T> {
+        match self {
+            Either::Indexed(iter) => iter.next_back(),
+            Either::Shaped(iter) => iter.next_back(),
+        }
+    }
+}
+
+/// The owned entries of a `Shaped` map: the keys are cloned out of the shared shape.
+struct ShapedIntoIter {
+    shape: Arc<Shape>,
+    keys: std::ops::Range<usize>,
+    values: std::vec::IntoIter<ElementProperty>,
+}
+
+impl Iterator for ShapedIntoIter {
+    type Item = (CompactString, ElementProperty);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.values.next()?;
+        let key = self.shape.keys.get(self.keys.next()?)?;
+        Some((key.clone(), value))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.values.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for ShapedIntoIter {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let value = self.values.next_back()?;
+        let key = self.shape.keys.get(self.keys.next_back()?)?;
+        Some((key.clone(), value))
+    }
+}
+
+/// Implements the iterator traits of a public wrapper around an [`Either`] iterator.
 macro_rules! wrap_iter {
-    ($name:ident<$lt:lifetime>, $item:ty) => {
-        impl<$lt> Iterator for $name<$lt> {
+    ($name:ident $(<$lt:lifetime>)?, $item:ty) => {
+        impl$(<$lt>)? Iterator for $name$(<$lt>)? {
             type Item = $item;
 
             #[inline]
@@ -248,22 +629,29 @@ macro_rules! wrap_iter {
             }
         }
 
-        impl<$lt> DoubleEndedIterator for $name<$lt> {
+        impl$(<$lt>)? DoubleEndedIterator for $name$(<$lt>)? {
             #[inline]
             fn next_back(&mut self) -> Option<$item> {
                 self.0.next_back()
             }
         }
 
-        impl<$lt> ExactSizeIterator for $name<$lt> {}
+        impl$(<$lt>)? ExactSizeIterator for $name$(<$lt>)? {}
 
-        impl<$lt> FusedIterator for $name<$lt> {}
+        impl$(<$lt>)? FusedIterator for $name$(<$lt>)? {}
     };
 }
 
+type KeySlice<'a> = std::slice::Iter<'a, CompactString>;
+
 /// The entries of a [`PropertyMap`] in order ([`PropertyMap::iter`]).
 #[derive(Clone)]
-pub struct Iter<'a>(indexmap::map::Iter<'a, CompactString, ElementProperty>);
+pub struct Iter<'a>(
+    Either<
+        indexmap::map::Iter<'a, CompactString, ElementProperty>,
+        std::iter::Zip<KeySlice<'a>, std::slice::Iter<'a, ElementProperty>>,
+    >,
+);
 wrap_iter!(Iter<'a>, (&'a CompactString, &'a ElementProperty));
 
 impl fmt::Debug for Iter<'_> {
@@ -273,20 +661,25 @@ impl fmt::Debug for Iter<'_> {
 }
 
 /// The entries of a [`PropertyMap`] in order, values mutable ([`PropertyMap::iter_mut`]).
-pub struct IterMut<'a>(indexmap::map::IterMut<'a, CompactString, ElementProperty>);
+pub struct IterMut<'a>(
+    Either<
+        indexmap::map::IterMut<'a, CompactString, ElementProperty>,
+        std::iter::Zip<KeySlice<'a>, std::slice::IterMut<'a, ElementProperty>>,
+    >,
+);
 wrap_iter!(IterMut<'a>, (&'a CompactString, &'a mut ElementProperty));
 
 impl fmt::Debug for IterMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IterMut")
-            .field("remaining", &self.0.len())
+            .field("remaining", &self.len())
             .finish()
     }
 }
 
 /// The keys of a [`PropertyMap`] in order ([`PropertyMap::keys`]).
 #[derive(Clone)]
-pub struct Keys<'a>(indexmap::map::Keys<'a, CompactString, ElementProperty>);
+pub struct Keys<'a>(Either<indexmap::map::Keys<'a, CompactString, ElementProperty>, KeySlice<'a>>);
 wrap_iter!(Keys<'a>, &'a CompactString);
 
 impl fmt::Debug for Keys<'_> {
@@ -297,7 +690,12 @@ impl fmt::Debug for Keys<'_> {
 
 /// The values of a [`PropertyMap`] in order ([`PropertyMap::values`]).
 #[derive(Clone)]
-pub struct Values<'a>(indexmap::map::Values<'a, CompactString, ElementProperty>);
+pub struct Values<'a>(
+    Either<
+        indexmap::map::Values<'a, CompactString, ElementProperty>,
+        std::slice::Iter<'a, ElementProperty>,
+    >,
+);
 wrap_iter!(Values<'a>, &'a ElementProperty);
 
 impl fmt::Debug for Values<'_> {
@@ -307,49 +705,32 @@ impl fmt::Debug for Values<'_> {
 }
 
 /// The values of a [`PropertyMap`] in order, mutable ([`PropertyMap::values_mut`]).
-pub struct ValuesMut<'a>(indexmap::map::ValuesMut<'a, CompactString, ElementProperty>);
+pub struct ValuesMut<'a>(
+    Either<
+        indexmap::map::ValuesMut<'a, CompactString, ElementProperty>,
+        std::slice::IterMut<'a, ElementProperty>,
+    >,
+);
 wrap_iter!(ValuesMut<'a>, &'a mut ElementProperty);
 
 impl fmt::Debug for ValuesMut<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ValuesMut")
-            .field("remaining", &self.0.len())
+            .field("remaining", &self.len())
             .finish()
     }
 }
 
 /// The entries of a [`PropertyMap`] by value, in order (its `IntoIterator`).
-pub struct IntoIter(indexmap::map::IntoIter<CompactString, ElementProperty>);
-
-impl Iterator for IntoIter {
-    type Item = (CompactString, ElementProperty);
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
-impl DoubleEndedIterator for IntoIter {
-    #[inline]
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.0.next_back()
-    }
-}
-
-impl ExactSizeIterator for IntoIter {}
-
-impl FusedIterator for IntoIter {}
+pub struct IntoIter(
+    Either<indexmap::map::IntoIter<CompactString, ElementProperty>, ShapedIntoIter>,
+);
+wrap_iter!(IntoIter, (CompactString, ElementProperty));
 
 impl fmt::Debug for IntoIter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoIter")
-            .field("remaining", &self.0.len())
+            .field("remaining", &self.len())
             .finish()
     }
 }
@@ -414,23 +795,37 @@ pub(crate) fn index_map_heap_bytes<K, V>(capacity: usize) -> u64 {
     entries + slots + buckets + HASH_GROUP_WIDTH as u64
 }
 
+/// The heap bytes of a `hashbrown` table (a `std` `HashMap`/`HashSet`) whose `.capacity()` is
+/// `capacity` and whose entries are `entry` bytes: the bucket array (rounded up to the control
+/// alignment) plus one control byte per bucket and one trailing group. A table that never
+/// allocated owns nothing.
+pub(crate) fn hash_table_heap_bytes(capacity: usize, entry: usize) -> u64 {
+    use std::mem::align_of;
+    let buckets = hash_table_buckets(capacity);
+    if buckets == 0 {
+        return 0;
+    }
+    let ctrl_align = align_of::<usize>().max(HASH_GROUP_WIDTH) as u64;
+    (buckets * entry as u64).next_multiple_of(ctrl_align) + buckets + HASH_GROUP_WIDTH as u64
+}
+
 #[cfg(feature = "serde")]
 mod serde_impl {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{PropertyMap, PropertyMapInner};
+    use super::{PropertyMap, PropertyMapInner, Repr};
 
     /// Serializes as a JSON object, entries in order.
     impl Serialize for PropertyMap {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.0.serialize(serializer)
+            serializer.collect_map(self.iter())
         }
     }
 
     /// Deserializes a JSON object, entries in order.
     impl<'de> Deserialize<'de> for PropertyMap {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            PropertyMapInner::deserialize(deserializer).map(PropertyMap)
+            PropertyMapInner::deserialize(deserializer).map(|map| PropertyMap(Repr::Indexed(map)))
         }
     }
 }
@@ -558,7 +953,11 @@ mod tests {
             for key in 0..len {
                 map.insert(format!("k{key}"), ElementProperty::from(key));
             }
-            assert_eq!(map.0.capacity(), capacity, "len {len}");
+            assert_eq!(
+                map.as_indexed().map(|m| m.capacity()),
+                Some(capacity),
+                "len {len}"
+            );
             assert_eq!(
                 crate::value::estimated_element_heap_bytes(&map),
                 capacity as u64 * bucket + table(buckets),
@@ -956,5 +1355,251 @@ mod semantics_tests {
         assert_eq!(keys(&read), ["b", "a"]);
         assert_eq!(read["b"], ElementProperty::from(3));
         assert_eq!(serde_json::to_string(&PropertyMap::new()).unwrap(), "{}");
+    }
+}
+
+/// The `Shaped` representation (a map stored in a graph) behaves exactly like the `Indexed` one
+/// through the public API: equality across representations, `Debug` text, iterators, serde, and
+/// the conversion to `Indexed` on a key-changing mutation outside the graph's shape table.
+#[cfg(test)]
+mod shaped_tests {
+    use super::{PropertyMap, Repr};
+    use crate::graph::shape::ShapeTable;
+    use crate::value::ElementProperty;
+
+    fn sample() -> PropertyMap {
+        PropertyMap::from([
+            ("name", ElementProperty::from("marko")),
+            ("age", ElementProperty::from(29)),
+            ("ok", ElementProperty::from(true)),
+        ])
+    }
+
+    fn shaped(table: &mut ShapeTable, map: &PropertyMap) -> PropertyMap {
+        let mut copy = map.clone();
+        table.adopt(&mut copy);
+        assert!(matches!(copy.0, Repr::Shaped(_)));
+        copy
+    }
+
+    fn is_indexed(map: &PropertyMap) -> bool {
+        matches!(map.0, Repr::Indexed(_))
+    }
+
+    fn keys(map: &PropertyMap) -> Vec<&str> {
+        map.keys().map(|k| k.as_str()).collect()
+    }
+
+    #[test]
+    fn equality_holds_across_representations_and_ignores_order() {
+        let mut table = ShapeTable::new();
+        let indexed = sample();
+        let shaped_map = shaped(&mut table, &indexed);
+        assert_eq!(indexed, shaped_map);
+        assert_eq!(shaped_map, indexed);
+        assert_eq!(shaped_map, shaped_map.clone());
+        let reversed: PropertyMap = indexed
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let shaped_reversed = shaped(&mut table, &reversed);
+        assert_eq!(shaped_map, shaped_reversed);
+        assert_eq!(shaped_reversed, indexed);
+        let mut other_value = indexed.clone();
+        other_value.insert("age", ElementProperty::from(30));
+        assert_ne!(shaped_map, other_value);
+        assert_ne!(shaped(&mut table, &other_value), shaped_map);
+        let mut longer = indexed.clone();
+        longer.insert("extra", ElementProperty::Null);
+        assert_ne!(shaped_map, longer);
+        assert_ne!(longer, shaped_map);
+        assert_eq!(shaped(&mut table, &PropertyMap::new()), PropertyMap::new());
+        // Nested inside an object value.
+        assert_eq!(
+            ElementProperty::Object(Box::new(shaped_map.clone())),
+            ElementProperty::Object(Box::new(reversed))
+        );
+    }
+
+    #[test]
+    fn debug_text_is_identical() {
+        let mut table = ShapeTable::new();
+        let indexed = sample();
+        let mut shaped_map = shaped(&mut table, &indexed);
+        assert_eq!(format!("{shaped_map:?}"), format!("{indexed:?}"));
+        assert_eq!(format!("{shaped_map:#?}"), format!("{indexed:#?}"));
+        assert_eq!(
+            format!("{:?}", shaped_map.iter()),
+            format!("{:?}", indexed.iter())
+        );
+        assert_eq!(
+            format!("{:?}", shaped_map.keys()),
+            format!("{:?}", indexed.keys())
+        );
+        assert_eq!(
+            format!("{:?}", shaped_map.values()),
+            format!("{:?}", indexed.values())
+        );
+        assert_eq!(
+            format!("{:?}", shaped_map.iter_mut()),
+            "IterMut { remaining: 3 }"
+        );
+        assert_eq!(
+            format!("{:?}", shaped_map.values_mut()),
+            "ValuesMut { remaining: 3 }"
+        );
+        assert_eq!(
+            format!("{:?}", shaped_map.into_iter()),
+            "IntoIter { remaining: 3 }"
+        );
+        assert_eq!(
+            format!("{:?}", shaped(&mut table, &PropertyMap::new())),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn iterators_are_ordered_double_ended_and_exact() {
+        let mut table = ShapeTable::new();
+        let mut map = shaped(&mut table, &sample());
+        assert_eq!(keys(&map), ["name", "age", "ok"]);
+        assert_eq!(map.iter().len(), 3);
+        assert_eq!(
+            map.keys().rev().map(|k| k.as_str()).collect::<Vec<_>>(),
+            ["ok", "age", "name"]
+        );
+        assert_eq!(map.values().next_back(), Some(&ElementProperty::from(true)));
+        let mut iter = map.iter();
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("name"));
+        assert_eq!(iter.next_back().map(|(k, _)| k.as_str()), Some("ok"));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next().map(|(k, _)| k.as_str()), Some("age"));
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none(), "fused");
+        assert_eq!(map.iter_mut().len(), 3);
+        assert_eq!(map.values_mut().rev().count(), 3);
+        let mut owned = map.clone().into_iter();
+        assert_eq!(owned.len(), 3);
+        assert_eq!(
+            owned.next_back().map(|(k, _)| k.to_string()),
+            Some("ok".into())
+        );
+        assert_eq!(
+            owned.map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+            ["name", "age"]
+        );
+        assert_eq!(map["age"], ElementProperty::from(29));
+        assert!(map.contains_key("ok"));
+        assert!(!map.contains_key("absent"));
+        assert!(map.get("absent").is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn indexing_an_absent_key_panics() {
+        let mut table = ShapeTable::new();
+        let _ = &shaped(&mut table, &sample())["absent"];
+    }
+
+    #[test]
+    fn value_mutations_keep_the_shape() {
+        let mut table = ShapeTable::new();
+        let mut map = shaped(&mut table, &sample());
+        *map.get_mut("age").unwrap() = ElementProperty::from(30);
+        for (key, value) in map.iter_mut() {
+            if key == "ok" {
+                *value = ElementProperty::from(false);
+            }
+        }
+        for value in map.values_mut() {
+            if *value == ElementProperty::from("marko") {
+                *value = ElementProperty::from("vadas");
+            }
+        }
+        // Overwriting an existing key and removing an absent one change no key.
+        assert_eq!(
+            map.insert("name", ElementProperty::from("josh")),
+            Some(ElementProperty::from("vadas"))
+        );
+        assert_eq!(map.shift_remove("absent"), None);
+        assert!(!is_indexed(&map));
+        assert_eq!(keys(&map), ["name", "age", "ok"]);
+        assert_eq!(map["age"], ElementProperty::from(30));
+        assert_eq!(map["ok"], ElementProperty::from(false));
+    }
+
+    #[test]
+    fn key_changing_mutations_outside_the_graph_convert_to_indexed() {
+        let mut table = ShapeTable::new();
+        let base = shaped(&mut table, &sample());
+
+        let mut added = base.clone();
+        assert_eq!(added.insert("city", ElementProperty::from("rome")), None);
+        assert!(is_indexed(&added));
+        assert_eq!(keys(&added), ["name", "age", "ok", "city"]);
+
+        let mut removed = base.clone();
+        assert_eq!(removed.shift_remove("age"), Some(ElementProperty::from(29)));
+        assert!(is_indexed(&removed));
+        assert_eq!(keys(&removed), ["name", "ok"]);
+
+        let mut extended = base.clone();
+        extended.extend([("z", ElementProperty::Null)]);
+        assert!(is_indexed(&extended));
+        assert_eq!(keys(&extended), ["name", "age", "ok", "z"]);
+
+        let mut cleared = base.clone();
+        cleared.clear();
+        assert!(cleared.is_empty());
+        assert!(is_indexed(&cleared));
+        cleared.insert("a", ElementProperty::Null);
+        assert_eq!(keys(&cleared), ["a"]);
+
+        // The original is untouched and still shares its shape.
+        assert!(!is_indexed(&base));
+        assert_eq!(base, sample());
+
+        let mut target = PropertyMap::from([("zz", ElementProperty::Null)]);
+        target.clone_from(&base);
+        assert_eq!(keys(&target), ["name", "age", "ok"]);
+        let mut shaped_target = base.clone();
+        shaped_target.clone_from(&PropertyMap::from([("q", ElementProperty::Null)]));
+        assert_eq!(keys(&shaped_target), ["q"]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_text_is_identical() {
+        let mut table = ShapeTable::new();
+        let indexed = sample();
+        let shaped_map = shaped(&mut table, &indexed);
+        assert_eq!(
+            serde_json::to_string(&shaped_map).unwrap(),
+            serde_json::to_string(&indexed).unwrap()
+        );
+        let back: PropertyMap =
+            serde_json::from_str(&serde_json::to_string(&shaped_map).unwrap()).unwrap();
+        assert!(is_indexed(&back));
+        assert_eq!(back, shaped_map);
+    }
+
+    #[test]
+    fn heap_estimate_of_a_shaped_map_is_its_value_slice() {
+        let mut table = ShapeTable::new();
+        let map = shaped(&mut table, &sample());
+        assert_eq!(
+            crate::value::estimated_element_heap_bytes(&map),
+            3 * size_of::<ElementProperty>() as u64
+        );
+        let long = "a string far longer than the inline limit";
+        let with_heap = shaped(
+            &mut table,
+            &PropertyMap::from([("text", ElementProperty::from(long))]),
+        );
+        assert_eq!(
+            crate::value::estimated_element_heap_bytes(&with_heap),
+            size_of::<ElementProperty>() as u64 + long.len() as u64
+        );
     }
 }

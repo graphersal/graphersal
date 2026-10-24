@@ -1741,7 +1741,7 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                let (position, old) = node_ref.2.0.insert_full(key, value);
+                let (position, old) = self.shapes.insert_full(&mut node_ref.2, key, value);
                 if let Some(index_key) = &index_key {
                     self.property_indexes.vertex_entries(
                         true,
@@ -1803,11 +1803,11 @@ impl GraphStorage for TraversalGraph {
                         Some(&key),
                     );
                 }
-                let (position, old) = edge_ref
-                    .2
-                    .get_or_insert_with(PropertyMap::default)
-                    .0
-                    .insert_full(key, value);
+                let (position, old) = self.shapes.insert_full(
+                    edge_ref.2.get_or_insert_with(PropertyMap::default),
+                    key,
+                    value,
+                );
                 if let Some(index_key) = &index_key {
                     self.property_indexes.edge_entries(
                         true,
@@ -1847,10 +1847,13 @@ impl GraphStorage for TraversalGraph {
         ) {
             self.record_vertex_property(node, name);
             self.pindex_vertex(node, false, Some(name));
-            let written = match self.vertex_weight_mut(node) {
-                Some(node_ref) => write_path_in(&mut node_ref.2, path, value),
-                None => Err(GraphError::vertex_removed()),
-            };
+            let written = self
+                .with_vertex_map(node, |shapes, map| {
+                    let written = write_path_in(map, path, value);
+                    shapes.adopt(map);
+                    written
+                })
+                .unwrap_or_else(|| Err(GraphError::vertex_removed()));
             self.compression_normalize_vertex_key(node, name);
             self.pindex_vertex(node, true, Some(name));
             return written;
@@ -1873,9 +1876,9 @@ impl GraphStorage for TraversalGraph {
         };
         self.record_vertex_property(node, &key);
         self.pindex_vertex(node, false, Some(&key));
-        if let Some(vertex) = self.vertex_weight_mut(node) {
-            vertex.2.insert(key.clone(), resulting);
-        }
+        self.with_vertex_map(node, |shapes, map| {
+            shapes.insert_full(map, key.clone(), resulting)
+        });
         self.compression_normalize_vertex_key(node, &key);
         self.pindex_vertex(node, true, Some(&key));
         Ok(())
@@ -1896,13 +1899,14 @@ impl GraphStorage for TraversalGraph {
         ) {
             self.record_edge_property(edge, name);
             self.pindex_edge(edge, false, Some(name));
-            let written = match self.edge_weight_mut(edge) {
-                Some(edge_ref) => {
-                    let properties = edge_ref.2.get_or_insert_with(PropertyMap::default);
-                    write_path_in(properties, path, value)
-                }
-                None => Err(GraphError::edge_removed()),
-            };
+            let written = self
+                .with_edge_map(edge, |shapes, map| {
+                    let properties = map.get_or_insert_with(PropertyMap::default);
+                    let written = write_path_in(properties, path, value);
+                    shapes.adopt(properties);
+                    written
+                })
+                .unwrap_or_else(|| Err(GraphError::edge_removed()));
             self.compression_normalize_edge_key(edge, name);
             self.pindex_edge(edge, true, Some(name));
             return written;
@@ -1935,12 +1939,13 @@ impl GraphStorage for TraversalGraph {
         };
         self.record_edge_property(edge, &key);
         self.pindex_edge(edge, false, Some(&key));
-        if let Some(edge_ref) = self.edge_weight_mut(edge) {
-            edge_ref
-                .2
-                .get_or_insert_with(PropertyMap::default)
-                .insert(key.clone(), resulting);
-        }
+        self.with_edge_map(edge, |shapes, map| {
+            shapes.insert_full(
+                map.get_or_insert_with(PropertyMap::default),
+                key.clone(),
+                resulting,
+            )
+        });
         self.compression_normalize_edge_key(edge, &key);
         self.pindex_edge(edge, true, Some(&key));
         Ok(())
@@ -1978,13 +1983,12 @@ impl GraphStorage for TraversalGraph {
             if let Some(top) = &top {
                 self.pindex_vertex(node, false, Some(top));
             }
-            let removed = match self.vertex_weight_mut(node) {
-                Some(vertex) => {
-                    crate::graph::write_checks::remove_path_in(&mut vertex.2, path);
-                    Ok(())
-                }
-                None => Err(GraphError::vertex_removed()),
-            };
+            let removed = self
+                .with_vertex_map(node, |shapes, map| {
+                    crate::graph::write_checks::remove_path_in(map, path);
+                    shapes.adopt(map);
+                })
+                .ok_or_else(GraphError::vertex_removed);
             if let Some(top) = &top {
                 self.pindex_vertex(node, true, Some(top));
             }
@@ -2012,9 +2016,9 @@ impl GraphStorage for TraversalGraph {
                 )?;
                 self.record_vertex_property(node, &key);
                 self.pindex_vertex(node, false, Some(&key));
-                if let Some(vertex) = self.vertex_weight_mut(node) {
-                    vertex.2.insert(key.clone(), resulting);
-                }
+                self.with_vertex_map(node, |shapes, map| {
+                    shapes.insert_full(map, key.clone(), resulting)
+                });
                 self.pindex_vertex(node, true, Some(&key));
                 Ok(())
             }
@@ -2055,15 +2059,14 @@ impl GraphStorage for TraversalGraph {
             if let Some(top) = &top {
                 self.pindex_edge(edge, false, Some(top));
             }
-            let removed = match self.edge_weight_mut(edge) {
-                Some(edge_ref) => {
-                    if let Some(properties) = edge_ref.2.as_mut() {
+            let removed = self
+                .with_edge_map(edge, |shapes, map| {
+                    if let Some(properties) = map.as_mut() {
                         crate::graph::write_checks::remove_path_in(properties, path);
+                        shapes.adopt(properties);
                     }
-                    Ok(())
-                }
-                None => Err(GraphError::edge_removed()),
-            };
+                })
+                .ok_or_else(GraphError::edge_removed);
             if let Some(top) = &top {
                 self.pindex_edge(edge, true, Some(top));
             }
@@ -2089,12 +2092,13 @@ impl GraphStorage for TraversalGraph {
                 )?;
                 self.record_edge_property(edge, &key);
                 self.pindex_edge(edge, false, Some(&key));
-                if let Some(edge_ref) = self.edge_weight_mut(edge) {
-                    edge_ref
-                        .2
-                        .get_or_insert_with(PropertyMap::default)
-                        .insert(key.clone(), resulting);
-                }
+                self.with_edge_map(edge, |shapes, map| {
+                    shapes.insert_full(
+                        map.get_or_insert_with(PropertyMap::default),
+                        key.clone(),
+                        resulting,
+                    )
+                });
                 self.pindex_edge(edge, true, Some(&key));
                 Ok(())
             }
@@ -2128,11 +2132,14 @@ impl GraphStorage for TraversalGraph {
         }
         let recording = self.undo.is_recording();
         self.pindex_vertex(node, false, Some(prop));
-        let entry = match self.vertex_weight_mut(node) {
-            Some(vertex) => vertex
-                .2
-                .0
-                .shift_remove_full(prop)
+        let entry = match self
+            .graph
+            .node_weight_mut(node.index())
+            .filter(|vertex| vertex.3 == node.generation())
+        {
+            Some(vertex) => self
+                .shapes
+                .shift_remove_full(&mut vertex.2, prop)
                 .filter(|_| recording)
                 .map(|(position, key, value)| UndoEntry::VertexProperty {
                     id: vertex.0.clone(),
@@ -2172,11 +2179,15 @@ impl GraphStorage for TraversalGraph {
         }
         let recording = self.undo.is_recording();
         self.pindex_edge(edge, false, Some(prop));
-        let entry = match self.edge_weight_mut(edge) {
+        let entry = match self
+            .graph
+            .edge_weight_mut(edge.index())
+            .filter(|weight| weight.3.own == edge.generation())
+        {
             Some(edge_weight) => edge_weight
                 .2
                 .as_mut()
-                .and_then(|props| props.0.shift_remove_full(prop))
+                .and_then(|props| self.shapes.shift_remove_full(props, prop))
                 .filter(|_| recording)
                 .map(|(position, key, value)| UndoEntry::EdgeProperty {
                     id: edge_weight.0.clone(),

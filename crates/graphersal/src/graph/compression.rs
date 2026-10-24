@@ -394,7 +394,7 @@ impl CompressionDefinition {
         map.insert("min_bytes", ElementProperty::from(self.min_bytes() as i64));
         map.insert("dictionary", ElementProperty::Boolean(self.dictionary()));
         for (key, value) in &self.extra {
-            map.0.entry(key.clone()).or_insert_with(|| value.clone());
+            map.insert_if_absent(key, || value.clone());
         }
         map
     }

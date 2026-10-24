@@ -897,20 +897,20 @@ pub(crate) fn logical_element(element: &PropertyMap) -> PropertyMap {
         .collect()
 }
 
-/// Estimated heap footprint of a [`PropertyMap`] (a vertex/edge property map): the map's own two
-/// allocations, its entries and its hash index, sized from its `.capacity()` by
-/// [`property_map::index_map_heap_bytes`], plus each key's heap bytes (via
-/// [`CompactString::is_heap_allocated`]) and each value's [`ElementProperty::estimated_heap_bytes`].
-/// Shared by [`crate::graph::GraphStorage::memory_usage`]'s `property_bytes` walk and `.profile()`'s
-/// per-step estimation (D1/D3).
+/// Estimated heap footprint of a [`PropertyMap`] (a vertex/edge property map): the map's own
+/// storage ([`PropertyMap::own_heap_bytes`]: for a free-standing map its two allocations, its
+/// entries and its hash index, sized from its `.capacity()` by
+/// [`property_map::index_map_heap_bytes`], plus each key's heap bytes; for a map stored in a
+/// graph its value slice, the shared key list being counted once by the shape table) and each
+/// value's [`ElementProperty::estimated_heap_bytes`]. Shared by
+/// [`crate::graph::GraphStorage::memory_usage`]'s `property_bytes` walk and `.profile()`'s per-step
+/// estimation (D1/D3).
 pub(crate) fn estimated_element_heap_bytes(element: &PropertyMap) -> u64 {
-    let mut total =
-        property_map::index_map_heap_bytes::<CompactString, ElementProperty>(element.0.capacity());
-    for (key, value) in element.iter() {
-        total += compact_string_heap_bytes(key);
-        total += value.estimated_heap_bytes();
-    }
-    total
+    element.own_heap_bytes()
+        + element
+            .values()
+            .map(ElementProperty::estimated_heap_bytes)
+            .sum::<u64>()
 }
 
 /// The heap bytes of a [`CompactString`]: its capacity when it spilled to the heap, `0` when it
@@ -1666,7 +1666,7 @@ impl<S: GraphStorage> TraverserValue<S> {
                         }
                         other => {
                             let mut map = ValueMap::with_capacity(res.len() + 1);
-                            for (k, v) in res.0.drain(..) {
+                            for (k, v) in res.indexed_mut().drain(..) {
                                 map.insert(ElementProperty::String(k), v);
                             }
                             map.insert(other, val);

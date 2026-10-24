@@ -685,7 +685,7 @@ impl PropertyIndexDefinition {
             map.insert("transform", transform.as_str().into());
         }
         for (key, value) in &self.extra {
-            map.0.entry(key.clone()).or_insert_with(|| value.clone());
+            map.insert_if_absent(key, || value.clone());
         }
         map
     }

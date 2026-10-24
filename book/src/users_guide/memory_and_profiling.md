@@ -12,9 +12,9 @@ snapshot of a graph's own footprint, and a per-step memory figure inside `.profi
 g.memory_usage()
 ```
 
-Returns a map with `structure_bytes`, `index_bytes`, `property_bytes`, `total_bytes`, and
-`total_mb` — an on-demand, opt-in-by-call snapshot of the graph's own vertex/edge storage, its
-label/ID indexes, and its property store. It is entirely separate from traversal execution: it
+Returns a map with `structure_bytes`, `index_bytes`, `property_bytes` (with its part
+`shape_bytes`), `total_bytes`, and `total_mb` — an on-demand, opt-in-by-call snapshot of the
+graph's own vertex/edge storage, its label/ID indexes, and its property store. It is entirely separate from traversal execution: it
 never touches a running query and cannot regress query performance.
 
 With [compression rules](compressed_properties.md) it also reports `compressed_values` (strings
@@ -26,14 +26,21 @@ directly. All four are `0` without rules.
 With [property indexes](property_indexes.md) it reports `property_index_bytes`, an estimate of
 their entries (part of `total_bytes`; `0` without indexes).
 
+Element properties share their key names: every distinct sequence of keys (a "shape", say
+`name, age` in that order) is stored once per graph, and each vertex or edge keeps only its values
+in that order. `shape_bytes` reports the shared key lists (part of `property_bytes`); a property
+slot itself costs one value (32 bytes on a 64-bit target) plus whatever heap the value owns (a
+string longer than 24 bytes, an array, a nested object). Insertion order stays what every step
+reports (`valueMap()`, `elementMap()`, `properties()`). A key list no element uses any more is
+released by `shrink_to_fit()`, after a load, or when the table has doubled since the last
+release; until then `shape_bytes` still counts it.
+
 All figures are **estimates**: they sum `std::mem::size_of`/capacity-based arithmetic over the
-structures that back the graph, not a true allocator-level accounting. Every hash map (an
-element's property map, a nested object, the ID and label indexes) counts both of its allocations:
-the entries (per slot a cached hash, the key and the value; 64 bytes for a property on a 64-bit
-target) and the hash index (a pointer-sized slot and a control byte per bucket, at most 7/8 full).
-A vertex with five small properties thus costs about 106 bytes per property, which is what the
-allocator reports for it. Allocator rounding and bookkeeping are not counted. Two caveats worth
-knowing:
+structures that back the graph, not a true allocator-level accounting. Every hash map (a nested
+object, a free-standing map, the ID and label indexes) counts both of its allocations: the entries
+(per slot a cached hash, the key and the value; 64 bytes on a 64-bit target) and the hash index (a
+pointer-sized slot and a control byte per bucket, at most 7/8 full). Allocator rounding and
+bookkeeping are not counted. Two caveats worth knowing:
 
 - **`structure_bytes` can be a loose bound on a heavily churned graph.** The underlying storage
   never releases a removed vertex/edge's slot immediately (it keeps the slot to preserve other

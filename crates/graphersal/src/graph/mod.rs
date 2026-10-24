@@ -41,6 +41,8 @@ pub mod property_index;
 pub(crate) mod replay;
 /// Schemas: the format, validation, inference, diff, patch and visualization.
 pub mod schema;
+/// Interned property key lists shared by the stored property maps.
+pub(crate) mod shape;
 mod shared;
 mod statistics;
 /// The [`GraphStorage`] trait and its implementations.
@@ -152,6 +154,9 @@ pub struct TraversalGraph {
     /// The cached total of the last footprint walk (see `memory::footprint_bytes`), read by the
     /// memory budget at the start of every run.
     pub(crate) footprint: memory::FootprintCache,
+    /// The interned key lists of the stored property maps (see [`shape`]): every stored map is
+    /// `Shaped` over one of them.
+    pub(crate) shapes: shape::ShapeTable,
 }
 
 /// Whether an element is a vertex or an edge.
@@ -191,6 +196,7 @@ impl TraversalGraph {
             compression: compression::CompressionRules::default(),
             property_indexes: property_index::PropertyIndexes::default(),
             footprint: memory::FootprintCache::default(),
+            shapes: shape::ShapeTable::new(),
         }
     }
 
@@ -341,9 +347,11 @@ impl TraversalGraph {
         Ok(self)
     }
 
-    /// Shrinks the capacity of the graph indices as much as possible.
+    /// Shrinks the capacity of the graph indices as much as possible, and releases the shared
+    /// property key lists no element uses any more.
     pub fn shrink_to_fit(&mut self) {
         self.index.shrink_to_fit();
+        self.shapes.shrink_to_fit();
         self.node_generations.shrink_to_fit();
         self.edge_generations.shrink_to_fit();
     }
@@ -376,6 +384,36 @@ impl TraversalGraph {
         self.graph
             .node_weight_mut(handle.index())
             .filter(|vertex| vertex.3 == handle.generation())
+    }
+
+    /// Runs `write` on the stored property map of a live vertex with the shape table beside it
+    /// (a key-changing write goes through the table, or re-adopts the map after a generic
+    /// helper); `None` when the vertex is gone.
+    #[inline]
+    pub(crate) fn with_vertex_map<R>(
+        &mut self,
+        handle: VertexHandle,
+        write: impl FnOnce(&mut shape::ShapeTable, &mut PropertyMap) -> R,
+    ) -> Option<R> {
+        let vertex = self
+            .graph
+            .node_weight_mut(handle.index())
+            .filter(|vertex| vertex.3 == handle.generation())?;
+        Some(write(&mut self.shapes, &mut vertex.2))
+    }
+
+    /// Edge counterpart of [`Self::with_vertex_map`] (the map is optional on an edge).
+    #[inline]
+    pub(crate) fn with_edge_map<R>(
+        &mut self,
+        handle: EdgeHandle,
+        write: impl FnOnce(&mut shape::ShapeTable, &mut Option<PropertyMap>) -> R,
+    ) -> Option<R> {
+        let edge = self
+            .graph
+            .edge_weight_mut(handle.index())
+            .filter(|edge| edge.3.own == handle.generation())?;
+        Some(write(&mut self.shapes, &mut edge.2))
     }
 
     /// The stored data of a live edge ([`Self::resolve_edge`] plus the read).

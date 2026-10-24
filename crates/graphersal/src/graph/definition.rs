@@ -1031,7 +1031,7 @@ impl QueryDefinition {
             map.insert("meta", ElementProperty::from(meta.as_str()));
         }
         for (key, value) in &self.extra {
-            map.0.entry(key.clone()).or_insert_with(|| value.clone());
+            map.insert_if_absent(key, || value.clone());
         }
     }
 
@@ -1327,7 +1327,7 @@ impl QueryParam {
             map.insert("default", default.clone());
         }
         for (key, value) in &self.extra {
-            map.0.entry(key.clone()).or_insert_with(|| value.clone());
+            map.insert_if_absent(key, || value.clone());
         }
         ElementProperty::Object(Box::new(map))
     }

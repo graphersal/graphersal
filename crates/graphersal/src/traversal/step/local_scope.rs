@@ -318,7 +318,7 @@ pub(crate) fn slice_local<S: GraphStorage>(
         }
         TraverserValue::Computed(ElementProperty::Object(mut entries), node) => {
             let (start, end) = bounds(entries.len());
-            keep_map(&mut entries.0, start, end);
+            keep_map(entries.indexed_mut(), start, end);
             TraverserValue::Computed(ElementProperty::Object(entries), node)
         }
         TraverserValue::Path(_) => return LocalSlice::Path,

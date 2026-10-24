@@ -56,12 +56,12 @@ pub struct MemoryStats {
     /// outer maps; each of its maps counts both of its allocations: the entries (cached hash,
     /// key, value) and the hash index (one `usize` slot and one control byte per bucket).
     pub index_bytes: u64,
-    /// Estimated heap footprint of vertex/edge properties: each element's property map's own
-    /// two allocations, sized from its `.capacity()` — the entries (per slot the cached hash, the
-    /// key and the value: 64 bytes on 64-bit targets) and the hash index (per bucket a `usize`
-    /// and a control byte, buckets a power of two at most 7/8 full) — plus each heap-allocated
-    /// key and every stored [`crate::ElementProperty`]'s own owned heap data, walked recursively
-    /// via [`crate::ElementProperty::estimated_heap_bytes`] (nested objects the same way).
+    /// Estimated heap footprint of vertex/edge properties: each element's value slice (one
+    /// [`crate::ElementProperty`] per property, 32 bytes, exactly sized), every stored value's own
+    /// owned heap data, walked recursively via [`crate::ElementProperty::estimated_heap_bytes`] (a
+    /// nested object counts its own map: entries, hash index and keys, sized from its
+    /// `.capacity()`), and the key names, which live once per distinct key sequence
+    /// ([`Self::shape_bytes`]).
     ///
     /// The shared texts of the `dedup` rules are included once ([`Self::dedup_table_bytes`]).
     ///
@@ -97,6 +97,13 @@ pub struct MemoryStats {
     /// Part of [`Self::property_bytes`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub dedup_table_bytes: u64,
+    /// The shared property key lists ("shapes"): every distinct key sequence of the stored
+    /// property maps once (its key names, a wide shape's key index, the shared allocation) plus
+    /// the shape table's own hash tables (`0` while no element has a property). Part of [`Self::property_bytes`] (like
+    /// [`Self::dedup_table_bytes`]), so part of [`Self::total_bytes`]. Shapes no element uses any more are counted until the next
+    /// sweep (`shrink_to_fit`, a load, or the table doubling).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shape_bytes: u64,
 }
 
 impl MemoryStats {
@@ -189,6 +196,9 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
     // The shared texts: once, in their tables (a reference counts 0 in the walk above).
     let dedup_table_bytes = graph.compression.dedup_table_bytes();
     property_bytes += dedup_table_bytes;
+    // The shared key lists: once, in the shape table (a stored map counts its values only).
+    let shape_bytes = graph.shapes.heap_bytes();
+    property_bytes += shape_bytes;
 
     MemoryStats {
         structure_bytes,
@@ -202,6 +212,7 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
         deduped_values: compressed.deduped,
         deduped_plain_bytes: compressed.deduped_plain,
         dedup_table_bytes,
+        shape_bytes,
     }
 }
 
@@ -263,7 +274,18 @@ pub(crate) fn loaded_vertex_bytes(
     bytes += labels.len() as u64
         * (size_of::<CompactString>() as u64 + index_entry_bytes::<super::VertexHandle, ()>());
     bytes += labels.iter().map(compact_string_heap_bytes).sum::<u64>();
-    bytes + crate::value::estimated_element_heap_bytes(properties)
+    bytes + stored_properties_bytes(properties)
+}
+
+/// What a property map adds to [`compute`]'s `property_bytes` once stored: its exact value slice
+/// and its values' heap (the map arrives free-standing; the graph keeps it `Shaped`, the shared
+/// key list counted in `shape_bytes`, which a per-element estimate leaves out).
+fn stored_properties_bytes(properties: &crate::value::PropertyMap) -> u64 {
+    crate::value::property_map::shaped_values_bytes(properties.len())
+        + properties
+            .values()
+            .map(crate::value::ElementProperty::estimated_heap_bytes)
+            .sum::<u64>()
 }
 
 /// The edge counterpart of [`loaded_vertex_bytes`].
@@ -288,7 +310,7 @@ pub(crate) fn loaded_edge_bytes(
     if let Some(label) = label {
         bytes += heap(label) + index_entry_bytes::<super::EdgeHandle, ()>();
     }
-    bytes + properties.map_or(0, crate::value::estimated_element_heap_bytes)
+    bytes + properties.map_or(0, stored_properties_bytes)
 }
 
 /// What a cached footprint was taken at: the commit position and the element counts. A

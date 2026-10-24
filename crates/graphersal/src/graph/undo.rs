@@ -246,14 +246,24 @@ pub(crate) fn mark_position(mark: UnitMark) -> usize {
 }
 
 /// Puts a property map back to `old` for `key`: removes what the mutation left and re-inserts
-/// the old value at its old position.
+/// the old value at its old position (a free-standing map: the change-capture shadow).
 pub(crate) fn restore_property(properties: &mut PropertyMap, key: &str, old: OldProperty) {
     properties.shift_remove(key);
     if let Some((position, value)) = old {
-        let position = position.min(properties.len());
-        properties
-            .0
-            .shift_insert(position, CompactString::from(key), value);
+        properties.shift_insert(position, CompactString::from(key), value);
+    }
+}
+
+/// [`restore_property`] of a map stored in the graph: the map moves between shapes of `shapes`.
+pub(crate) fn restore_stored_property(
+    shapes: &mut crate::graph::shape::ShapeTable,
+    properties: &mut PropertyMap,
+    key: &str,
+    old: OldProperty,
+) {
+    shapes.shift_remove_full(properties, key);
+    if let Some((position, value)) = old {
+        shapes.shift_insert(properties, position, CompactString::from(key), value);
     }
 }
 
@@ -559,12 +569,15 @@ impl TraversalGraph {
                 if let Some(handle) = self.index.get_node(&self.graph, &id) {
                     self.pindex_vertex(handle, false, Some(&key));
                 }
-                let vertex = self
-                    .index
-                    .get_node(&self.graph, &id)
-                    .and_then(|handle| self.vertex_weight_mut(handle));
+                let vertex = self.index.get_node(&self.graph, &id).and_then(|handle| {
+                    self.graph
+                        .node_weight_mut(handle.index())
+                        .filter(|vertex| vertex.3 == handle.generation())
+                });
                 match vertex {
-                    Some(vertex) => restore_property(&mut vertex.2, &key, old),
+                    Some(vertex) => {
+                        restore_stored_property(&mut self.shapes, &mut vertex.2, &key, old)
+                    }
                     None => tracing::error!(%id, "undo: vertex of a property write not found"),
                 }
                 if let Some(handle) = self.index.get_node(&self.graph, &id) {
@@ -581,16 +594,18 @@ impl TraversalGraph {
                 if let Some(handle) = self.index.get_edge(&self.graph, &id) {
                     self.pindex_edge(handle, false, Some(&key));
                 }
-                let edge = self
-                    .index
-                    .get_edge(&self.graph, &id)
-                    .and_then(|handle| self.edge_weight_mut(handle));
+                let edge = self.index.get_edge(&self.graph, &id).and_then(|handle| {
+                    self.graph
+                        .edge_weight_mut(handle.index())
+                        .filter(|edge| edge.3.own == handle.generation())
+                });
                 match edge {
                     Some(edge) => {
                         if map_was_none {
                             edge.2 = None;
                         } else {
-                            restore_property(
+                            restore_stored_property(
+                                &mut self.shapes,
                                 edge.2.get_or_insert_with(PropertyMap::default),
                                 &key,
                                 old,
@@ -742,7 +757,6 @@ impl TraversalGraph {
             key: CompactString::from(key),
             old: vertex
                 .2
-                .0
                 .get_full(key)
                 .map(|(position, _, value)| (position, value.clone())),
         };
@@ -763,7 +777,7 @@ impl TraversalGraph {
             old: edge
                 .2
                 .as_ref()
-                .and_then(|properties| properties.0.get_full(key))
+                .and_then(|properties| properties.get_full(key))
                 .map(|(position, _, value)| (position, value.clone())),
             map_was_none: edge.2.is_none(),
         };
@@ -797,8 +811,10 @@ impl TraversalGraph {
         &mut self,
         id: CompactString,
         labels: Vec<CompactString>,
-        properties: PropertyMap,
+        mut properties: PropertyMap,
     ) -> VertexHandle {
+        // Every map that enters the graph shares its key list through the shape table.
+        self.shapes.adopt(&mut properties);
         // The slot petgraph fills is known only after `add_node`: insert with a placeholder
         // generation and patch it right after (nothing reads in between).
         let index = self.graph.add_node((
@@ -829,10 +845,12 @@ impl TraversalGraph {
         &mut self,
         id: CompactString,
         label: Option<CompactString>,
-        properties: Option<PropertyMap>,
+        mut properties: Option<PropertyMap>,
         from: VertexHandle,
         to: VertexHandle,
     ) -> EdgeHandle {
+        // See `insert_vertex_raw`.
+        self.shapes.adopt_optional(&mut properties);
         let mut generations = EdgeGenerations {
             own: crate::graph::handle::FIRST_GENERATION,
             source: from.generation(),
@@ -983,12 +1001,35 @@ mod tests {
         props.insert("a", 1.into());
         props.insert("b", 2.into());
         props.insert("c", 3.into());
-        let (position, _, value) = props.0.shift_remove_full("b").expect("b");
+        let (position, _, value) = props.shift_remove_full("b").expect("b");
         restore_property(&mut props, "b", Some((position, value)));
         let keys: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
         assert_eq!(keys, ["a", "b", "c"]);
         props.insert("d", 4.into());
         restore_property(&mut props, "d", None);
         assert_eq!(props.len(), 3);
+    }
+
+    /// The stored-map variant: a `Shaped` map comes back to the very shape it had.
+    #[test]
+    fn restore_stored_property_returns_to_the_same_shape() {
+        let mut shapes = crate::graph::shape::ShapeTable::new();
+        let mut props = PropertyMap::from([("a", 1.into()), ("b", 2.into()), ("c", 3.into())]);
+        shapes.adopt(&mut props);
+        let before = std::sync::Arc::clone(props.shape().expect("shaped"));
+        let (position, _, value) = shapes.shift_remove_full(&mut props, "b").expect("b");
+        restore_stored_property(&mut shapes, &mut props, "b", Some((position, value)));
+        assert!(std::sync::Arc::ptr_eq(
+            props.shape().expect("shaped"),
+            &before
+        ));
+        let keys: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+        shapes.insert_full(&mut props, "d".into(), 4.into());
+        restore_stored_property(&mut shapes, &mut props, "d", None);
+        assert!(std::sync::Arc::ptr_eq(
+            props.shape().expect("shaped"),
+            &before
+        ));
     }
 }
