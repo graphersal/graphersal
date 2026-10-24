@@ -13,6 +13,7 @@ import * as tabs from './tabs.js';
 import { createReadyGate } from './ready.js';
 import { changedData } from './statistics.js';
 import { createPoller, readChanges } from './change-feed.js';
+import { createBurst, burstAnnouncement } from './change-burst.js';
 import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
@@ -105,6 +106,10 @@ export const state = reactive({
   // milliseconds (`now` ticks while it runs), or null; one at a time.
   storeTask: null,
   storeAnnounce: '', // the Store menu's polite live region: "Verifying the store started." ...
+  // The change feed's burst banner (js/change-burst.js `banner()`): {kind: 'burst'|'paused',
+  // text}, or null in normal mode; `changeBurstAnnounce` is its polite live region's text.
+  changeBurst: null,
+  changeBurstAnnounce: '',
   // The saved queries of the graph (engine.listQueries), reloaded with the graph
   // (refreshSavedQueries); null before the first load.
   savedQueries: null,
@@ -776,12 +781,20 @@ export async function attachServerGraph() {
 
 let feedPoller = null;
 let knownVersion = null;
+// The change feed's burst state machine (js/change-burst.js): throttles reloads while the graph
+// changes fast elsewhere.
+const burst = createBurst();
+let lastCommitSeq = 0;
+// Reloads never overlap: the poller awaits applyChanges, Refresh now waits for this chain.
+let reloadChain = Promise.resolve();
 
 /** Reads the feed's position once (the baseline); a server without the feed is ignored. */
 async function baselineChangeFeed() {
   if (!state.engine || typeof state.engine.changes !== 'function') return;
   try {
-    knownVersion = readChanges(await state.engine.changes(), null, state.engine.clientId).version;
+    const first = readChanges(await state.engine.changes(), null, state.engine.clientId);
+    knownVersion = first.version;
+    lastCommitSeq = first.commitSeq;
   } catch (err) {
     /* the first poll sets it */
   }
@@ -791,8 +804,9 @@ async function baselineChangeFeed() {
  * Polls the dev server's change feed (js/change-feed.js) while the page is visible. A change
  * this page did not make (another tab, an AI agent over MCP) reloads the graph info, the Graph,
  * Schema and Statistics panels and the Store menu, follows a view opened or closed elsewhere,
- * marks every tab's result as possibly stale and says "changed: commit N". The MCP badge follows
- * the feed's `mcp` (the connected agent's name).
+ * marks every tab's result as possibly stale and says "changed: commit N". While the graph changes
+ * fast elsewhere, reloads are throttled (js/change-burst.js; banner `state.changeBurst`). The MCP
+ * badge follows the feed's `mcp` (the connected agent's name).
  */
 export function startChangeFeed() {
   if (feedPoller || !state.engine || typeof state.engine.changes !== 'function') return;
@@ -819,19 +833,73 @@ async function applyChanges(answer) {
   }
   const seen = readChanges(answer, knownVersion, state.engine.clientId);
   knownVersion = seen.version;
-  if (!seen.external) return;
+  // How many commits the answer covers (the burst banner's count; at least 1 when external).
+  const commits = seen.external ? Math.max(1, seen.commitSeq - lastCommitSeq) : 0;
+  lastCommitSeq = seen.commitSeq;
   const view = answer.view || null;
-  // A view opened or closed elsewhere replaces the shown graph; other changes only change it.
-  const replaced = JSON.stringify(state.storeView || null) !== JSON.stringify(view);
-  if (state.engine.serverInfo) state.engine.serverInfo = { ...state.engine.serverInfo, view };
-  state.storeView = view;
-  state.graph = await state.engine.graphInfo();
-  if (replaced) state.graphEpoch++;
-  state.graphVersion++;
-  state.dataVersion++;
-  state.storeVersion++;
-  tabs.markOthersStale(state, null);
-  toast(`changed: commit ${seen.commitSeq}`, 'info', 4000);
+  // A view opened or closed elsewhere replaces the shown graph: always followed at once.
+  const replaced = seen.external && JSON.stringify(state.storeView || null) !== JSON.stringify(view);
+  const decision = burst.observe(seen.external, commits);
+  if (replaced || decision === 'refresh') {
+    const quiet = burst.mode === 'normal' && !burst.paused;
+    await reloadFromFeed(view, replaced);
+    // In burst mode the banner replaces the toast per change.
+    if (quiet) toast(`changed: commit ${seen.commitSeq}`, 'info', 4000);
+  }
+  showBurst();
+}
+
+/** Reloads the graph info, the panels and the Store menu after changes made elsewhere. */
+function reloadFromFeed(view, replaced) {
+  const run = async () => {
+    const token = burst.beginRefresh();
+    if (view !== undefined) {
+      if (state.engine.serverInfo) state.engine.serverInfo = { ...state.engine.serverInfo, view };
+      state.storeView = view;
+    }
+    state.graph = await state.engine.graphInfo();
+    if (replaced) state.graphEpoch++;
+    state.graphVersion++;
+    state.dataVersion++;
+    state.storeVersion++;
+    tabs.markOthersStale(state, null);
+    burst.refreshed(token);
+  };
+  const next = reloadChain.then(run, run);
+  reloadChain = next.catch(() => {});
+  return next;
+}
+
+/** Mirrors the burst banner into the state; announces it when its kind changes. */
+function showBurst() {
+  const banner = burst.banner();
+  const kind = banner ? banner.kind : null;
+  const was = state.changeBurst ? state.changeBurst.kind : null;
+  if (kind !== was) state.changeBurstAnnounce = burstAnnouncement(banner);
+  if (JSON.stringify(banner) !== JSON.stringify(state.changeBurst)) state.changeBurst = banner;
+}
+
+/** The burst banner's Refresh now: reloads at once (and restarts the 30 s interval). */
+export async function refreshFromFeedNow() {
+  if (!state.engine) return;
+  try {
+    await reloadFromFeed(undefined, false);
+  } catch (err) {
+    toast(`Refresh failed: ${err && err.message ? err.message : err}`, 'error', 7000);
+  }
+  showBurst();
+}
+
+/** The burst banner's Pause auto refresh: no automatic reload until Resume. */
+export function pauseFeedRefresh() {
+  burst.pause();
+  showBurst();
+}
+
+/** The burst banner's Resume: automatic reloads again (one now when it is due). */
+export async function resumeFeedRefresh() {
+  if (burst.resume() === 'refresh') await refreshFromFeedNow();
+  else showBurst();
 }
 
 // ------------------------------------------------------------------ AI Chat tabs

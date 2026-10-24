@@ -21,6 +21,7 @@ import { DropMenu, LAYOUT_EVENT } from './drop-menu.js';
 import { StoreMenu } from './store-menu.js';
 import { CatalogMenu, CatalogDialogs } from './catalog.js';
 import { ShareDialog } from './share-dialog.js';
+import { ChangeBurstBanner } from './change-burst-banner.js';
 
 export const PANELS = [
   { id: 'editor', title: 'Query', column: 'left', key: 'Alt+1' },
@@ -65,7 +66,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, ShareDialog },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, ShareDialog, ChangeBurstBanner },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -407,6 +408,7 @@ export const Workspace = {
       Queries read this past state of the store; writes are refused. The live graph is unchanged.
       <button class="btn small" :disabled="state.storeBusy || !!state.storeTask" :aria-busy="String(!!state.storeTask && state.storeTask.id === 'live')" @click="leaveView">{{ state.storeTask && state.storeTask.id === 'live' ? 'Going back…' : 'Back to the live graph' }}</button>
     </div>
+    <change-burst-banner v-if="serverMode"></change-burst-banner>
 
     <div class="ws-main" :class="{ vertical: narrow }" ref="main" v-show="leftCount + rightCount > 0">
       <div class="ws-col" ref="left" v-show="leftCount > 0">

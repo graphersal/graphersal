@@ -27,7 +27,11 @@ when it has one. No `pkg/` build is needed in that mode. Every request names the
 (`X-Graphersal-Client`), and the page polls the server's change feed (`GET api/changes`, every
 2 s while visible, `js/change-feed.js`): a change it did not make (another tab, an AI agent over
 the server's MCP endpoint, `--mcp`) reloads the graph, schema, statistics and Store menu, marks
-the tabs' results as possibly stale and shows "changed: commit N". With `--mcp` the top bar shows
+the tabs' results as possibly stale and shows "changed: commit N". When such changes arrive in
+three polls within 10 s (a bulk load), the page reloads at most every 30 s instead
+(`js/change-burst.js`) and a banner says so, with **Refresh now** and **Pause auto refresh**
+(manual mode until **Resume**); after 10 s without a change it reloads once more and returns to
+normal. With `--mcp` the top bar shows
 an **MCP** badge naming the connected agent. See the book page "Dev Server and MCP"
 (`book/src/persistence/dev_server.md`).
 
@@ -152,6 +156,7 @@ playground/
       http-engine.js       the dev server implementation (graphersal --server): one HTTP call per method
     ready.js               the engine readiness gate (pure, Node-tested)
     change-feed.js         the dev server's change feed: own vs. other changes, the poller (Node-tested)
+    change-burst.js        throttled reloads while the graph changes fast elsewhere (Node-tested)
     editor/
       dsl-language.js      CodeMirror highlighting for the Rhai/Gremlin DSL
       completion.js        step/predicate/token completion with signatures and docs

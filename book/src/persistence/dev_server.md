@@ -163,7 +163,11 @@ graphersal --graph data/ --server --mcp --embedder potion=minishlab/potion-base-
 - Several browser tabs share the one graph. Queries run one after the other. A change made in
   another tab (or by an AI agent, see [MCP](#mcp-an-ai-agent-on-the-same-graph) and
   [AI Chat](#ai-chat)) reloads the
-  page by itself within about 2 seconds and shows "changed: commit N".
+  page by itself within about 2 seconds and shows "changed: commit N". While the graph changes
+  fast (a bulk load: changes from elsewhere in three polls within 10 seconds), the page reloads at
+  most every 30 seconds instead and a banner says so, with **Refresh now** and **Pause auto
+  refresh** (no automatic reloads until **Resume**); 10 seconds after the last change it reloads
+  once more and goes back to normal.
 - **Stop** cancels the running query on the server: it stops at its next check (where
   `evaluationTimeout` is checked, plus the script loop), fails with "cancelled", and everything it
   changed is rolled back. The graph stays as it was before the query; nothing restarts. Stop
