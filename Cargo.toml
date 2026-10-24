@@ -8,6 +8,16 @@ members = [
     "crates/graphersal-wasm",
     "bindings/py-graphersal",
 ]
+# A bare `cargo build`/`test`/`check` leaves out the Python binding: its build needs a Python
+# >= 3.10 (the macOS system python3 is 3.9) and its lib target is also named `graphersal`.
+# `--workspace` and `-p py-graphersal` still include it; maturin builds it for Python.
+default-members = [
+    "crates/graphersal",
+    "crates/graphersal-cli",
+    "crates/graphersal-session",
+    "crates/graphersal-storage-tests",
+    "crates/graphersal-wasm",
+]
 
 [workspace.package]
 version = "0.2.3"
