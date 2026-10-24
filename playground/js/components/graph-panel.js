@@ -26,6 +26,11 @@
 // newest wins, and an engine error is shown at the condition it names while the drawing keeps the
 // last good result.
 //
+// Vertex size (the Display menu, js/graph/size-by.js, `graph.sizeBy`): Off, Degree, In, Out. Only
+// while it is not Off are the degree columns requested (`degrees: true`, `subgraph_degrees` in
+// store.js `run`); the canvas gets a scale per vertex (`nodeScale`) that each renderer maps into
+// its own size range.
+//
 // Toolbar (js/graph/toolbar.js): the row holds [Filter] [Layout] [Edit] ... [Clear highlight] [Fit]
 // [Export] [⚙ ▾]; the Display menu (⚙) holds the drawing tier, the ID and label switches, the
 // highlight switch and the mouse help. The row is measured (a ResizeObserver): when it is narrow,
@@ -58,6 +63,7 @@ import {
 } from '../graph/filter-model.js';
 import { statisticsModel } from '../statistics.js';
 import { GraphFilterDrawer } from './graph-filter.js';
+import { SIZE_BY_CHOICES, normalizeSizeBy, nodeScaleFor } from '../graph/size-by.js';
 
 const LAYOUT_IDS = LAYOUTS.map((l) => l.id);
 const HOP_CHOICES = Array.from({ length: SELECTION_TUNING.maxHops }, (_, i) => i + 1);
@@ -76,6 +82,9 @@ export const GraphPanel = {
     const showIds = ref(storage.get('graph.showIds', true));
     const edgeIds = ref(storage.get('graph.edgeIds', false));
     const highlightResult = ref(true);
+    const sizeBy = ref(normalizeSizeBy(storage.get('graph.sizeBy', 'off')));
+    /** `request` asking for the degree columns too, while the vertex size uses them. */
+    const deg = (request) => (sizeBy.value !== 'off' ? { ...request, degrees: true } : request);
     const view = ref(null); // the whole graph (or its first-N slice)
     const loading = ref(false);
     const error = ref(null);
@@ -181,7 +190,7 @@ export const GraphPanel = {
       if (!filterSettled.value) return; // the stored filter's labels are read first
       loading.value = true;
       error.value = null;
-      viewQueue.push({ limits: { ...limits.value }, filter: filterSpec(), built: appliedBuilt });
+      viewQueue.push({ limits: deg({ ...limits.value }), filter: filterSpec(), built: appliedBuilt });
     }
 
     // ------------------------------------------------------------------ labels (meta-graph)
@@ -275,7 +284,7 @@ export const GraphPanel = {
       storage.set('graph.neighbourhood.id', ids[0]);
       source.value = 'neighbourhood';
       const direction = nbDirection.value;
-      return select(() => state.engine.neighbourhood(neighbourhoodRequest(ids, hops, limits.value, direction), filterSpec()), {
+      return select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(ids, hops, limits.value, direction)), filterSpec()), {
         hops, direction, expanded: 0, spec: { kind: 'neighbourhood', ids, hops, direction },
       });
     }
@@ -289,7 +298,7 @@ export const GraphPanel = {
       if (!s) return;
       const from = source.value;
       source.value = 'neighbourhood';
-      select(() => state.engine.labelSample(s.request), {
+      select(() => state.engine.labelSample(deg(s.request)), {
         hops: 0, expanded: 0, sampleTitle: s.title, from, spec: { kind: 'sample', request: s.request, title: s.title, from },
       });
     }
@@ -310,7 +319,7 @@ export const GraphPanel = {
       if (!cur) return;
       const anchor = cur.view.vertexIds[index];
       const before = cyRef.value ? cyRef.value.positions() : null;
-      select(() => state.engine.neighbourhood(expandRequest(cur.view, index, limits.value, nbDirection.value), filterSpec()), {
+      select(() => state.engine.neighbourhood(deg(expandRequest(cur.view, index, limits.value, nbDirection.value)), filterSpec()), {
         ...cur,
         expanded: cur.expanded + 1,
         positions: (next) => carryPositions(cur.view, before, next, anchor),
@@ -327,7 +336,7 @@ export const GraphPanel = {
       const anchor = view.vertexIds[index];
       const before = cyRef.value ? cyRef.value.positions() : null;
       const direction = nbDirection.value;
-      const ok = await select(() => state.engine.neighbourhood(expandRequest(view, index, limits.value, direction), filterSpec()), {
+      const ok = await select(() => state.engine.neighbourhood(deg(expandRequest(view, index, limits.value, direction)), filterSpec()), {
         hops: 1, direction, expanded: 1, title: 'the query result, expanded', from: 'result',
         spec: { kind: 'neighbourhood', ids: [String(anchor)], hops: 1, direction },
         positions: (next) => carryPositions(view, before, next, anchor),
@@ -344,7 +353,7 @@ export const GraphPanel = {
       const before = cyRef.value ? cyRef.value.positions() : null;
       const keep = Array.from(cur.view.vertexIds, String);
       if (!keep.length) return;
-      select(() => state.engine.neighbourhood({ ids: [], keep, hops: 0, ...limits.value }, filterSpec()), {
+      select(() => state.engine.neighbourhood(deg({ ids: [], keep, hops: 0, ...limits.value }), filterSpec()), {
         ...cur,
         positions: (next) => carryPositions(cur.view, before, next),
       });
@@ -357,11 +366,11 @@ export const GraphPanel = {
       if (spec.kind === 'neighbourhood' && Array.isArray(spec.ids)) {
         const hops = normalizeDepth(spec.hops);
         const direction = normalizeDirection(spec.direction);
-        select(() => state.engine.neighbourhood(neighbourhoodRequest(spec.ids, hops, limits.value, direction), filterSpec()), {
+        select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(spec.ids, hops, limits.value, direction)), filterSpec()), {
           hops, direction, expanded: 0, spec,
         });
       } else if (spec.kind === 'sample' && spec.request) {
-        select(() => state.engine.labelSample({ ...spec.request, ...limits.value, maxNodes: Math.min(SELECTION_TUNING.sampleNodes, limits.value.maxNodes) }), {
+        select(() => state.engine.labelSample(deg({ ...spec.request, ...limits.value, maxNodes: Math.min(SELECTION_TUNING.sampleNodes, limits.value.maxNodes) })), {
           hops: 0, expanded: 0, sampleTitle: spec.title, from: spec.from, spec,
         });
       }
@@ -405,6 +414,20 @@ export const GraphPanel = {
     watch(edgeLabels, (v) => storage.set('graph.edgeLabels', v));
     watch(showIds, (v) => storage.set('graph.showIds', v));
     watch(edgeIds, (v) => storage.set('graph.edgeIds', v));
+    watch(sizeBy, (v, before) => {
+      storage.set('graph.sizeBy', v);
+      // Switched on: read the drawings again with the degree columns (a query result keeps the
+      // degrees within the drawing until it runs again). Switched between modes or off: nothing to read.
+      if (before !== 'off' || v === 'off') return;
+      // The same vertices come back: keep their positions (unless a layout is still running).
+      if (cyRef.value && !(layoutState.value && layoutState.value.running)) cyRef.value.keepPositions();
+      loadView();
+      const cur = nb.value;
+      if (cur && cur.spec && cur.spec.kind === 'neighbourhood') refreshNeighbourhood();
+      else if (cur && cur.spec && cur.spec.kind === 'sample') {
+        select(() => state.engine.labelSample(deg(cur.spec.request)), { ...cur });
+      }
+    });
 
     const subgraph = computed(() => (state.tab.result ? state.tab.result.subgraph || null : null));
     watch(subgraph, () => { if (source.value === 'result') drill.value = null; });
@@ -482,6 +505,8 @@ export const GraphPanel = {
       const cap = decision.value.cap;
       return cap && els ? markRaw(capToElements(els, cap)) : els;
     });
+    /** Vertex size by degree: a scale per vertex of the data drawing (null: Off, or the overview). */
+    const nodeScale = computed(() => (kind.value === 'data' && elements.value ? nodeScaleFor(elements.value, sizeBy.value) : null));
     /** Positions for the next drawing (an expanded neighbourhood keeps its vertices in place). */
     const initialPositions = computed(() => (source.value === 'neighbourhood' && !drill.value ? nbPositions.value : null));
     const expandFromEngine = computed(() => (source.value === 'neighbourhood' || source.value === 'result') && !drill.value);
@@ -628,7 +653,7 @@ export const GraphPanel = {
       else if (source.value === 'graph') await loadView();
       else if (source.value === 'neighbourhood' && nb.value) {
         nbPositions.value = null;
-        await select(() => state.engine.neighbourhood({ ids: [], keep: Array.from(nb.value.view.vertexIds, String), hops: 0, ...limits.value }, filterSpec()), { ...nb.value });
+        await select(() => state.engine.neighbourhood(deg({ ids: [], keep: Array.from(nb.value.view.vertexIds, String), hops: 0, ...limits.value }), filterSpec()), { ...nb.value });
       }
       if (cyRef.value) cyRef.value.relayout();
     }
@@ -807,7 +832,7 @@ export const GraphPanel = {
       const spec = cur.spec;
       const before = source.value === 'neighbourhood' && !drill.value && cyRef.value ? cyRef.value.positions() : null;
       const direction = normalizeDirection(spec.direction);
-      select(() => state.engine.neighbourhood(neighbourhoodRequest(spec.ids, normalizeDepth(spec.hops), limits.value, direction), filterSpec()), {
+      select(() => state.engine.neighbourhood(deg(neighbourhoodRequest(spec.ids, normalizeDepth(spec.hops), limits.value, direction)), filterSpec()), {
         ...cur,
         expanded: 0,
         positions: (next) => carryPositions(cur.view, before, next),
@@ -941,6 +966,7 @@ export const GraphPanel = {
       refresh, EXPORT_FORMATS, onExport, exportBusy, exportError,
       editOn, edit, editTitle, onEdited,
       toolbarEl, fitState, inMenu, displayTitleText, GRAPH_HELP, FILTER_ENABLED, filter, filterBadge, openFilter, toggleFilter,
+      sizeBy, SIZE_BY_CHOICES, nodeScale,
       fstate, vocab, vocabLoading, vocabError, built, filterError, filterMode, filterDirty, filterBusy, filterOpen,
       closeFilter, clearFilter, resetFilter, drawerTop, onFilterUpdate, applyFilter, openFilterQuery, filteredStrip,
     };
@@ -1021,6 +1047,15 @@ export const GraphPanel = {
               <input type="checkbox" v-model="highlightResult" :disabled="!subgraph"> Highlight result
             </label>
             <div class="menu-sep"></div>
+            <div class="menu-title">Vertex size</div>
+            <div class="menu-row">
+              <span class="segmented" role="group" aria-label="Vertex size">
+                <button v-for="c in SIZE_BY_CHOICES" :key="c.id" type="button" class="seg-btn" :class="{ active: sizeBy === c.id }"
+                        :aria-pressed="String(sizeBy === c.id)" :disabled="isMeta && c.id !== 'off'"
+                        :title="isMeta ? 'The label overview sizes a label by its vertex count' : c.title" @click="sizeBy = c.id">{{ c.label }}</button>
+              </span>
+            </div>
+            <div class="menu-sep"></div>
             <div class="menu-title">Mouse</div>
             <ul class="menu-help">
               <li v-for="h in GRAPH_HELP" :key="h">{{ h }}</li>
@@ -1084,7 +1119,7 @@ export const GraphPanel = {
         {{ Math.round(layoutState.progress * 100) }} %
         <a href="#" @click.prevent="stopLayout" title="Stop the layout and draw the positions reached so far">Stop</a>
       </div>
-      <graph-canvas ref="cyRef" :elements="elements" :kind="kind" :tier="tier" :layout="layout" :edge-labels="edgeLabels" :show-ids="showIds" :edge-ids="edgeIds" :highlight="highlight" :empty-text="emptyText"
+      <graph-canvas ref="cyRef" :elements="elements" :kind="kind" :tier="tier" :layout="layout" :edge-labels="edgeLabels" :show-ids="showIds" :edge-ids="edgeIds" :node-scale="nodeScale" :highlight="highlight" :empty-text="emptyText"
                     :expand-from-engine="expandFromEngine" :initial-positions="initialPositions" :edit-mode="edit.active" @edited="onEdited"
                     @layout-note="layoutNote = $event" @layout-state="layoutState = $event" @tier-failed="onTierFailed" @pick="pick = $event"
                     @activate="openSample" @expand="expand" @clear-highlight="clearHighlight">

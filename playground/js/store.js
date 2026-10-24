@@ -25,6 +25,7 @@ import {
 } from './gql-tab.js';
 import { mapPosition } from './editor/run-selection.js';
 import { keysBySchema } from './editor/gql-complete.js';
+import { normalizeSizeBy } from './graph/size-by.js';
 
 const HISTORY_MAX = 100;
 
@@ -462,6 +463,8 @@ export async function run(script, tabId = state.activeId, { selection = null } =
       no_limit: noLimit,
       spelling: spelling === 'camel' ? 'camel' : 'snake',
       subgraph_max_elements: graphResultMax,
+      // The Graph panel sizes vertices by degree (Display menu, js/graph/size-by.js): only then.
+      subgraph_degrees: normalizeSizeBy(storage.get('graph.sizeBy', 'off')) !== 'off',
     });
     const runId = ++state.runCount;
     res.run_id = runId;

@@ -109,6 +109,8 @@ export const GraphCanvas = {
     initialPositions: { type: Object, default: null },
     /** Edit mode (the panel decides whether it is allowed: js/graph/edit-mode.js `editModeState`). */
     editMode: { type: Boolean, default: false },
+    /** Vertex size by degree: a scale in [0, 1] per vertex of `elements` (js/graph/size-by.js), or null. */
+    nodeScale: { type: Object, default: null },
   },
   emits: ['layout-note', 'layout-state', 'renderer', 'tier-failed', 'pick', 'activate', 'expand', 'edited', 'clear-highlight'],
   setup(props, { expose, emit }) {
@@ -205,6 +207,7 @@ export const GraphCanvas = {
         showIds: props.showIds,
         edgeIds: props.edgeIds,
         edgeLabels: props.edgeLabels,
+        nodeScale: isSchema() ? null : props.nodeScale,
         palette: labelPalette,
         positions: kept || props.initialPositions,
         keepView: !!kept,
@@ -632,6 +635,10 @@ export const GraphCanvas = {
     watch(() => [props.edgeLabels, props.showIds, props.edgeIds], () => {
       if (controller) controller.setOptions({ edgeLabels: props.edgeLabels, showIds: props.showIds, edgeIds: props.edgeIds });
     });
+    watch(() => props.nodeScale, (scale) => {
+      // A new drawing brings its own scales with show(); this is a change of the same drawing.
+      if (controller && props.elements === shown && !isSchema()) controller.setOptions({ nodeScale: scale });
+    });
     watch(() => [state.theme, state.systemDark], () => {
       // Wait for the theme attribute to apply before reading the CSS tokens.
       requestAnimationFrame(() => { if (renderer) renderer.setTheme(isDark()); });
@@ -647,6 +654,11 @@ export const GraphCanvas = {
       relayout: () => { if (controller) { userMoved = false; return controller.applyLayout(props.layout); } return null; },
       cancelLayout: () => { if (controller) controller.cancelLayout(); },
       exportPng,
+      /**
+       * The next drawings (within a few seconds) keep the current positions of the vertices they
+       * share with this one: the same view read again with more columns (vertex size by degree).
+       */
+      keepPositions: () => beginCommit(),
       /** The drawing's positions (`x, y` per vertex), or null before it is laid out. */
       positions: () => (renderer ? renderer.getPositions() : null),
       /** The vertex indices of the double-click selection (null: none). */

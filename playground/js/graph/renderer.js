@@ -40,18 +40,19 @@
  * @typedef {Object} Renderer
  * @property {RendererCapabilities} capabilities
  * @property {(data:Object|null, options:{kind:'data'|'schema', showIds?:boolean, edgeIds?:boolean,
- *            edgeLabels?:boolean, palette:{slot:(label:string)=>number}}) => void} setData
+ *            edgeLabels?:boolean, nodeScale?:?Float32Array, palette:{slot:(label:string)=>number}}) => void} setData
  *   Replaces what is drawn (clears the selection). Nothing is drawn before the first
- *   `setPositions` or `setLayout` after it, so a large drawing is painted once, in place. A
- *   schema drawing's nodes and edges may carry `faded: true` (a label the Graph panel's filter
- *   hides, drawn faded in the label overview).
+ *   `setPositions` or `setLayout` after it, so a large drawing is painted once, in place.
+ *   `nodeScale`: vertex size by degree (js/graph/size-by.js), a scale in [0, 1] per vertex that
+ *   the renderer maps into its own `SIZE_RANGE`; null (or another length) = the fixed size. A
+ *   schema drawing's nodes and edges may carry `faded: true` (a label the filter hides).
  * @property {(xy:Float32Array|number[]) => void} setPositions
  *   Places vertex `i` at `(xy[2i], xy[2i+1])` (a preset layout).
  * @property {() => Float32Array|null} getPositions   The current positions (`null`: nothing drawn).
  * @property {(name:string, options?:{iterations?:number}) => Promise<void>} setLayout
  *   Runs one of `capabilities.layouts`; resolves when it has finished.
- * @property {(options:{showIds?:boolean, edgeIds?:boolean, edgeLabels?:boolean}) => void} setOptions
- *   Caption options of the current data.
+ * @property {(options:{showIds?:boolean, edgeIds?:boolean, edgeLabels?:boolean, nodeScale?:?Float32Array}) => void} setOptions
+ *   Caption and size options of the current data (sizes change in place, no new layout).
  * @property {() => void} fit          Fits the drawing into the view.
  * @property {() => void} resize       The container changed size.
  * @property {(ids:{nodes:string[], edges:string[]}|null) => void} select

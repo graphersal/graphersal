@@ -253,6 +253,14 @@ element's details copies the full value. **Collapse values above** in the Settin
 number of characters (20 to 100 000), 0 shows every value in full. A vector in the Results table
 keeps its own disclosure (`vector[768 f32]`, the JSON tab has every value).
 
+**Vertex size.** **Vertex size** in the toolbar's ⚙ Display menu sizes each vertex by its number
+of edges in the whole graph: **Degree** (incoming + outgoing), **In** or **Out**; **Off** (the
+default) draws every vertex the same size. The size grows with the logarithm of the degree,
+relative to the largest degree among the drawn vertices, so a few hubs do not shrink everything
+else to dots. The choice is kept in the browser; while it is Off the engine counts no degrees. A
+query result run before the option was switched on is sized by its edges within the drawing until
+it runs again.
+
 ### Filtering the drawing
 
 **⚲ Filter** in the Graph panel's toolbar opens a drawer over the drawing that decides what is

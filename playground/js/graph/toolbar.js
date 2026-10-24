@@ -2,10 +2,10 @@
 // tests/graph-toolbar.test.mjs).
 //
 // The row keeps the frequent actions: [Filter] [Layout] [Edit] ... [Clear highlight] [Fit] [Export]
-// [Display]. The settings (drawing tier, IDs, edge labels, highlight, help) live in the Display
-// menu. When the panel is narrow, `toolbarFit` moves Layout, then Edit, then Filter into the
-// Display menu, and as a last step shortens the labels of the right-hand buttons, so the row never
-// wraps or overflows. The panel measures the row and the natural width of each item (a
+// [Display]. The settings (drawing tier, IDs, edge labels, highlight, vertex size, help) live in
+// the Display menu. When the panel is narrow, `toolbarFit` moves Layout, then Edit, then Filter
+// into the Display menu, and as a last step shortens the labels of the right-hand buttons, so the
+// row never wraps or overflows. The panel measures the row and the natural width of each item (a
 // ResizeObserver) and asks `toolbarFit` which items stay inline.
 
 /**
@@ -104,5 +104,5 @@ export const GRAPH_HELP = Object.freeze([
 
 /** The Display button's tooltip: what it holds and the tier in use (`tierLabel`, e.g. "Auto · Fast"). */
 export function displayTitle(tierLabel) {
-  return `Display: drawing tier (${tierLabel}), vertex and edge IDs, edge labels, highlight, help`;
+  return `Display: drawing tier (${tierLabel}), vertex and edge IDs, edge labels, highlight, vertex size, help`;
 }

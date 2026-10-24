@@ -351,7 +351,8 @@ export function neighbourhood(view, seeds, hops = 1, maxNodes = Infinity) {
 
 /**
  * The view of the vertices `indices` (in that order) and the edges between them, re-indexed;
- * `of[k]` is the old index of new vertex `k`.
+ * `of[k]` is the old index of new vertex `k`. The degree columns (`DEGREE_COLUMNS`) are carried
+ * when the view has them.
  * @param {Object} view
  * @param {number[]} indices
  * @returns {Object} a compact view with `truncated: false` and `of: Uint32Array`
@@ -363,7 +364,12 @@ export function subView(view, indices) {
   for (let j = 0; j < edgeCount(view); j++) {
     if (map[view.edgeSource[j]] >= 0 && map[view.edgeTarget[j]] >= 0) keep.push(j);
   }
+  const degrees = {};
+  for (const key of DEGREE_COLUMNS) {
+    if (view[key] && view[key].length === vertexCount(view)) degrees[key] = Uint32Array.from(indices, (i) => view[key][i]);
+  }
   return {
+    ...degrees,
     vertexIds: indices.map((i) => view.vertexIds[i]),
     vertexLabel: Uint32Array.from(indices, (i) => view.vertexLabel[i]),
     vertexName: indices.map((i) => view.vertexName[i]),
