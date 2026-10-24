@@ -315,20 +315,26 @@ outside the int64 range (it is never widened to a float). A key that is not a `s
 
 ## Dates and times
 
-The engine's six date and time types (book part "Dates and Times") convert both ways, to the
-microsecond (the engine holds nanoseconds: a value with digits below the microsecond raises
-`ValueError`):
+The engine's six date and time types (book part "Dates and Times") convert both ways. Python's
+`datetime` counts microseconds, the engine nanoseconds: a value with digits below the
+microsecond comes back as a `pandas.Timestamp` / `pandas.Timedelta` (subclasses of `datetime` /
+`timedelta` that hold nanoseconds) when the optional extra is installed
+(`pip install graphersal[pandas]`), else it raises `ImportError` naming the extra. Nothing is
+ever rounded, and the type depends on the value only.
 
-| Graphersal | Python |
-|---|---|
-| `datetime` (an instant with its UTC offset) | aware `datetime.datetime`, `tzinfo=datetime.timezone(timedelta(seconds=offset))` |
-| `datetime` with a zone name (`..+02:00[Europe/Berlin]`) | aware `datetime.datetime`, `tzinfo=zoneinfo.ZoneInfo(name)` |
-| `localdatetime` (a wall-clock time) | naive `datetime.datetime` |
-| `date` | `datetime.date` |
-| `time` (a time of day) | naive `datetime.time` |
-| `offsettime` (a time of day with its UTC offset) | `datetime.time` with `tzinfo=datetime.timezone(..)` |
-| `duration` without months | `datetime.timedelta` |
-| `duration` with months (`P1M`) | `graphersal.Interval` |
+| Graphersal | Python | With digits below the microsecond |
+|---|---|---|
+| `datetime` (an instant with its UTC offset) | aware `datetime.datetime`, `tzinfo=datetime.timezone(timedelta(seconds=offset))` | aware `pandas.Timestamp`, the same `tzinfo` |
+| `datetime` with a zone name (`..+02:00[Europe/Berlin]`) | aware `datetime.datetime`, `tzinfo=zoneinfo.ZoneInfo(name)` | aware `pandas.Timestamp` in the `ZoneInfo` |
+| `localdatetime` (a wall-clock time) | naive `datetime.datetime` | naive `pandas.Timestamp` |
+| `date` | `datetime.date` | - |
+| `time` (a time of day) | naive `datetime.time` | `ValueError` (no Python type holds a time of day in nanoseconds) |
+| `offsettime` (a time of day with its UTC offset) | `datetime.time` with `tzinfo=datetime.timezone(..)` | `ValueError` |
+| `duration` without months | `datetime.timedelta` | `pandas.Timedelta` (an `Interval` beyond an int64 of nanoseconds, about 292 years) |
+| `duration` with months (`P1M`) | `graphersal.Interval` | `graphersal.Interval` |
+
+A `pandas.Timestamp` holds nanoseconds only from 1677-09-21 to 2262-04-11: such a value outside
+those years raises (read it with `as_string()`, or `date_trunc(DT.microsecond)` it first).
 
 ```python
 import datetime as dt
@@ -362,10 +368,13 @@ graph.query('duration("P1Y2M")')
   `timedelta(hours=-1)` is `-PT1H` (Python itself writes it as `days=-1, seconds=82800`); a
   duration comes back as the equal `timedelta`, or as an `Interval` when it is longer than a
   `timedelta` holds (999999999 days; a duration's time part reaches an int64 of seconds).
-- `graphersal.Interval(months, days=0, micros=0)` or `graphersal.Interval("P1Y2M3DT4H")` holds a
-  duration with months (a month has no fixed length, so `timedelta` cannot). It is immutable,
-  equal when all three fields are equal (`P1M` is not `P30D`, as in the engine), and has
-  `months`, `days`, `micros` (exact, also beyond an int64) and `to_iso()`.
+- `graphersal.Interval(months, days=0, micros=0)` or `graphersal.Interval("P1Y2M3DT4H")` (up to
+  nine fraction digits) holds a duration with months (a month has no fixed length, so
+  `timedelta` cannot). It is immutable, equal when all three fields are equal (`P1M` is not
+  `P30D`, as in the engine), and has `months`, `days`, `micros` (exact, also beyond an int64;
+  `ValueError` for a time part with digits below the microsecond), `nanos` and `to_iso()`.
+- `pandas.Timestamp` and `pandas.Timedelta` parameters keep their nanoseconds; a `pytz` zone
+  keeps its name like a `ZoneInfo`; `pandas.NaT` is refused (pass `None`).
 - Python's `datetime` holds the years 1 to 9999; a Graphersal date before year 1 raises
   `GraphersalError` when it is returned (read it as text with `as_string()`).
 - Saved queries (`call_query`) take the same values; they travel as their ISO 8601 text, and the
@@ -769,6 +778,10 @@ PYO3_PYTHON=$PWD/bindings/py-graphersal/.venv/bin/python cargo test -p py-graphe
 (`cargo test -p py-graphersal`, workspace-wide `cargo check`/`cargo clippy`); otherwise exclude it
 with `--exclude py-graphersal`. `import graphersal` is then available in the virtualenv
 (`source bindings/py-graphersal/.venv/bin/activate`).
+
+`tests/test_temporal_pandas.py` covers both sides of the optional `pandas` extra: run the suite
+once in a virtualenv without pandas and once in one with it (`pip install pandas`); each test
+that needs the other environment is skipped.
 
 ### A wheel to install elsewhere
 

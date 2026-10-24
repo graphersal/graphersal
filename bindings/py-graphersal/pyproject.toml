@@ -26,6 +26,10 @@ classifiers = [
 dynamic = ["version"]
 authors = [{ name = "Aleksandr Dederer", email = "aleks@graphersal.dev" }]
 
+[project.optional-dependencies]
+# Values with digits below the microsecond as pandas.Timestamp / pandas.Timedelta (nanoseconds).
+pandas = ["pandas>=2"]
+
 [project.urls]
 Homepage = "https://graphersal.dev"
 Documentation = "https://graphersal.dev"

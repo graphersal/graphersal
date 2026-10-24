@@ -1,5 +1,5 @@
-"""Dates and times: the five engine types convert to and from the `datetime` module (and
-`graphersal.Interval`), to the microsecond."""
+"""Dates and times: the six engine types convert to and from the `datetime` module (and
+`graphersal.Interval`), to the microsecond. Values with nanoseconds: test_temporal_pandas.py."""
 
 import datetime as dt
 import zoneinfo
@@ -206,17 +206,15 @@ def test_readme_example():
 
 
 def test_a_value_below_the_microsecond_is_refused_never_rounded(graph):
+    # Temporal v2 stage 4: a time of day has no Python type with nanoseconds (pandas has none
+    # either), so it stays refused; a datetime, localdatetime and duration become pandas types
+    # (test_temporal_pandas.py), and an Interval holds nanoseconds itself.
     for script in [
         'time("12:00:00.000000001")',
-        'localdatetime("2024-01-01T00:00:00.123456789")',
-        'datetime("2024-01-01T00:00:00.000000500Z")',
-        'duration("PT0.000000001S")',
-        'duration("P1MT0.000000001S")',
+        'offsettime("12:00:00.000000001+02:00")',
     ]:
         with pytest.raises(ValueError, match="below the microsecond"):
             graph.query(script)
-    with pytest.raises(ValueError, match="below the microsecond"):
-        graphersal.Interval("P1MT0.000000001S")
     # Whole microseconds written with nine digits convert as before.
     assert graph.query('time("12:00:00.000001000")') == dt.time(12, 0, 0, 1)
     # Truncated in the engine first, the value converts.

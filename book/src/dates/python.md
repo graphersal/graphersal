@@ -1,20 +1,37 @@
 # From Python
 
 The Python binding converts the six types to and from the standard `datetime` module, both as
-results and as `params=`, to the microsecond (the resolution of Python's types). A value with a
-part below the microsecond (`time("12:00:00.000000001")`) raises `ValueError` instead of being
-rounded; truncate it first with `date_trunc(DT.microsecond)`:
+results and as `params=`. Python's types count microseconds, the engine nanoseconds: a value
+with digits below the microsecond becomes a [pandas](https://pandas.pydata.org/) type, which
+holds nanoseconds and subclasses the standard type, when the optional extra is installed
+(`pip install graphersal[pandas]`); without pandas it raises `ImportError` naming the extra.
+Nothing is ever rounded.
 
-| Graphersal | Python |
-|---|---|
-| `datetime` | aware `datetime.datetime` with `tzinfo=datetime.timezone(timedelta(seconds=offset))` |
-| `datetime` with a zone name | aware `datetime.datetime` with `tzinfo=zoneinfo.ZoneInfo(name)` |
-| `localdatetime` | naive `datetime.datetime` |
-| `date` | `datetime.date` |
-| `time` | naive `datetime.time` |
-| `offsettime` | `datetime.time` with `tzinfo=datetime.timezone(timedelta(seconds=offset))` |
-| `duration` without months | `datetime.timedelta` (an `Interval` beyond 999999999 days) |
-| `duration` with months | `graphersal.Interval(months, days, micros)` |
+| Graphersal | Python | With digits below the microsecond |
+|---|---|---|
+| `datetime` | aware `datetime.datetime` with `tzinfo=datetime.timezone(timedelta(seconds=offset))` | aware `pandas.Timestamp`, the same `tzinfo` |
+| `datetime` with a zone name | aware `datetime.datetime` with `tzinfo=zoneinfo.ZoneInfo(name)` | aware `pandas.Timestamp` in the `ZoneInfo` |
+| `localdatetime` | naive `datetime.datetime` | naive `pandas.Timestamp` |
+| `date` | `datetime.date` | - |
+| `time` | naive `datetime.time` | `ValueError` |
+| `offsettime` | `datetime.time` with `tzinfo=datetime.timezone(timedelta(seconds=offset))` | `ValueError` |
+| `duration` without months | `datetime.timedelta` (an `Interval` beyond 999999999 days) | `pandas.Timedelta` (an `Interval` beyond an int64 of nanoseconds, about 292 years) |
+| `duration` with months | `graphersal.Interval` | `graphersal.Interval` |
+
+Why pandas: `pandas.Timestamp` and `pandas.Timedelta` are subclasses of `datetime.datetime` and
+`datetime.timedelta`, so code written for the standard types keeps working; they hold
+nanoseconds, fixed offsets and `ZoneInfo` zones, and pandas is the most widely installed library
+that has them. [`whenever`](https://whenever.readthedocs.io/) holds nanoseconds too (also a time
+of day) but its types are not the standard ones, and `numpy.datetime64` has neither offsets,
+zones nor a time of day. Which type comes back depends on the value only, never on what is
+installed. Limits:
+
+- A time of day (`time`, `offsettime`) with digits below the microsecond raises `ValueError`:
+  no common Python type holds one (pandas has no time of day; a `pandas.Timedelta` since
+  midnight would come back as a duration). Truncate it with `date_trunc(DT.microsecond)` or read
+  it with `as_string()`.
+- A `pandas.Timestamp` holds nanoseconds only from 1677-09-21 to 2262-04-11: a `datetime` or
+  `localdatetime` with digits below the microsecond outside these years raises.
 
 ```python
 import datetime as dt
@@ -39,9 +56,13 @@ graph.query('duration("P1Y2M")')
 - A `timedelta` becomes whole days and the rest, both with the sign of the whole
   (`timedelta(hours=-1)` is `-PT1H`).
 - `graphersal.Interval` is immutable, equal when its three fields are equal (`Interval("P1M") !=
-  Interval(0, 30)`, as in the engine), has `months`, `days`, `micros` (a Python `int`, exact
-  over the whole range of a duration) and `to_iso()`, and is
-  built from the fields or from ISO 8601 text (`Interval("P1Y2M3DT4H")`).
+  Interval(0, 30)`, as in the engine), has `months`, `days`, `micros` and `nanos` (Python `int`s,
+  exact over the whole range of a duration; `micros` raises `ValueError` for a time part with
+  digits below the microsecond) and `to_iso()`, and is built from the fields or from ISO 8601
+  text with up to nine fraction digits (`Interval("P1Y2M3DT4.000000001H")`).
+- A `pandas.Timestamp` or `pandas.Timedelta` parameter keeps its nanoseconds; a `pandas.Timestamp`
+  in a `pytz` zone keeps the zone name as a `ZoneInfo` one does. `pandas.NaT` is refused (pass
+  `None`).
 - Python's `datetime` holds the years 1 to 9999; a date before year 1 cannot be returned as one
   (read it with `as_string()`).
 

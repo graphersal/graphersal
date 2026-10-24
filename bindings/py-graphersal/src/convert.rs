@@ -275,7 +275,7 @@ fn python_value_to_element_property(value: &Bound<'_, PyAny>) -> Result<ElementP
         return Ok(ElementProperty::Vector(vector));
     }
     Err(format!(
-        "unsupported parameter type '{}'; only int, float, str, bool, None, uuid.UUID, datetime.datetime, datetime.date, datetime.time, datetime.timedelta, graphersal.Interval, graphersal.Vector (or a float32/float64 numpy array), Vertex and Edge are accepted",
+        "unsupported parameter type '{}'; only int, float, str, bool, None, uuid.UUID, datetime.datetime, datetime.date, datetime.time, datetime.timedelta (pandas.Timestamp and pandas.Timedelta too), graphersal.Interval, graphersal.Vector (or a float32/float64 numpy array), Vertex and Edge are accepted",
         value
             .get_type()
             .name()

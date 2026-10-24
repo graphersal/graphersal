@@ -28,9 +28,9 @@ g.inject(datetime("2023-08-02T09:30Z")).is(P.typeOf(GType.DATETIME)).count().nex
 - **Resolution:** one nanosecond for every type with a time, as in `java.time` and TinkerPop
   (PostgreSQL and Python stop at the microsecond). TinkerPop's millisecond views (`as_number()`
   of a `datetime`, `date_diff()`) round down to milliseconds. Python's `datetime` holds
-  microseconds: a value with a part below them does not convert ([From Python](python.md)),
-  and the binary store format of this release refuses it too ([Storage and
-  Exchange](storage.md)).
+  microseconds: a value with a part below them comes back as a `pandas.Timestamp` /
+  `pandas.Timedelta` ([From Python](python.md)). The store format, GraphSON, GraphML and the
+  serialized change set keep every nanosecond ([Storage and Exchange](storage.md)).
 - **Range:** the years -9999 to 9999 in the proleptic Gregorian calendar (`date("-0044-03-15")`
   is year 44 BC counted astronomically, year 0 = 1 BC). A value outside the range, or a result
   that would leave it, is an error, never a wrapped value.

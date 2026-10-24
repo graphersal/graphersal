@@ -29,8 +29,14 @@ __all__ = [
 #: time values map to the engine's ``datetime`` (an aware ``datetime.datetime``),
 #: ``localdatetime`` (a naive one), ``date``, ``time`` (a naive ``datetime.time``), ``offsettime``
 #: (a ``datetime.time`` with a ``datetime.timezone``) and
-#: ``duration`` (a ``timedelta`` or an ``Interval``). A one-dimensional ``float32``/``float64``
-#: buffer (a ``numpy.ndarray``) is accepted as an f32 ``Vector`` too.
+#: ``duration`` (a ``timedelta`` or an ``Interval``); a ``pandas.Timestamp`` / ``pandas.Timedelta``
+#: (subclasses of ``datetime`` / ``timedelta``) passes with its nanoseconds. A one-dimensional
+#: ``float32``/``float64`` buffer (a ``numpy.ndarray``) is accepted as an f32 ``Vector`` too.
+#:
+#: A returned value with digits below the microsecond is a ``pandas.Timestamp`` (a ``datetime`` or
+#: ``localdatetime``) or ``pandas.Timedelta`` (a ``duration`` without months within an int64 of
+#: nanoseconds, else an ``Interval``) and needs the extra ``graphersal[pandas]`` (else
+#: ``ImportError``); a ``time`` or ``offsettime`` with such digits raises ``ValueError``.
 _ParamValue = Union[
     int,
     float,
@@ -51,13 +57,14 @@ _ParamValue = Union[
 class Interval:
     """A ``duration`` with months (PostgreSQL ``interval``), which ``datetime.timedelta`` cannot
     hold because a month has no fixed length. A query returns a duration without months as a
-    ``timedelta`` and one with months as an ``Interval``; both are accepted as parameters.
+    ``timedelta`` (a ``pandas.Timedelta`` with nanoseconds), and one with months, or one longer
+    than those hold, as an ``Interval``; all are accepted as parameters.
     Immutable; equal when all three fields are equal (``Interval("P1M") != Interval(0, 30)``, as
     in the engine). ``repr`` is ``Interval('P1Y2M')``, ``str`` the ISO 8601 text."""
 
     def __init__(self, months: Union[int, str], days: int = 0, micros: int = 0) -> None:
         """``Interval(months, days=0, micros=0)`` (int32 months and days, int64 microseconds) or
-        ``Interval("P1Y2M3DT4H")`` from ISO 8601 text."""
+        ``Interval("P1Y2M3DT4H")`` from ISO 8601 text (up to nine fraction digits)."""
     @property
     def months(self) -> int:
         """The months (a year is 12)."""
@@ -67,7 +74,11 @@ class Interval:
     @property
     def micros(self) -> int:
         """The time part in microseconds, exact over the whole range (up to an int64 of
-        seconds, beyond an int64 of microseconds)."""
+        seconds, beyond an int64 of microseconds). ``ValueError`` when the time part has digits
+        below the microsecond (read ``nanos``): never cut."""
+    @property
+    def nanos(self) -> int:
+        """The time part in nanoseconds, exact over the whole range."""
     def to_iso(self) -> str:
         """The ISO 8601 text (``P1Y2M3DT4H``), the engine's canonical form."""
     def __eq__(self, other: object) -> bool: ...
