@@ -64,9 +64,9 @@ const TEMPORAL_RE = {
 };
 const TEMPORAL_HELP = {
   date: 'a date is YYYY-MM-DD, e.g. 2023-08-02',
-  time: 'a time is HH:MM[:SS[.ffffff]], e.g. 09:30:00',
-  offsettime: 'an offsettime is HH:MM[:SS[.ffffff]] with its UTC offset, e.g. 09:30:00+02:00',
-  localdatetime: 'a localdatetime is YYYY-MM-DDTHH:MM[:SS[.ffffff]] without an offset, e.g. 2023-08-02T09:30:00',
+  time: 'a time is HH:MM[:SS[.f]] (up to nine fraction digits), e.g. 09:30:00',
+  offsettime: 'an offsettime is HH:MM[:SS[.f]] with its UTC offset, e.g. 09:30:00+02:00',
+  localdatetime: 'a localdatetime is YYYY-MM-DDTHH:MM[:SS[.f]] without an offset, e.g. 2023-08-02T09:30:00',
   datetime: 'a datetime needs its UTC offset or zone, e.g. 2023-08-02T09:30:00+02:00 or 2023-08-02T09:30[Europe/Berlin]',
   duration: 'a duration is ISO 8601, e.g. P1Y2M3DT4H5M6S or PT90M',
 };

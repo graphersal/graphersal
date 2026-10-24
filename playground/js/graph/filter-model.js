@@ -70,7 +70,7 @@ export function opInfo(id) {
   return OP_BY_ID.get(id);
 }
 
-const TEMPORAL_FORMATS = new Set(['date', 'date-time', 'local-date-time', 'time', 'duration']);
+const TEMPORAL_FORMATS = new Set(['date', 'date-time', 'local-date-time', 'time', 'offset-time', 'duration']);
 
 /**
  * The filter type of one schema property node (`{"type": "integer"}`, `{"type": "string",

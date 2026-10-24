@@ -12,7 +12,7 @@
 // ['vertices', 'person', 'schema', 'properties', 'address', 'properties', 'zip'].
 
 /** The date and time types (book "Dates and Times"): a string node with their `format`. */
-export const TEMPORAL_BASES = Object.freeze(['datetime', 'localdatetime', 'date', 'time', 'duration']);
+export const TEMPORAL_BASES = Object.freeze(['datetime', 'localdatetime', 'date', 'time', 'offsettime', 'duration']);
 
 /** The base types of the type dropdown, in menu order. */
 export const BASE_TYPES = Object.freeze(['string', 'integer', 'number', 'boolean', 'uuid', ...TEMPORAL_BASES, 'vector', 'array', 'object', 'null', 'any']);
@@ -28,7 +28,8 @@ export const MAX_VECTOR_DIMENSION = 65536;
 
 /** The `format` of a base type written as `{"type": "string", "format": ..}`. */
 export const FORMAT_OF_BASE = Object.freeze({
-  uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time', duration: 'duration',
+  uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time',
+  offsettime: 'offset-time', duration: 'duration',
 });
 const BASE_OF_FORMAT = Object.freeze(Object.fromEntries(Object.entries(FORMAT_OF_BASE).map(([b, f]) => [f, b])));
 
@@ -599,7 +600,8 @@ export function violationQuery(group) {
 function placeholder(base) {
   return {
     string: '', integer: 0, number: 0, boolean: false, array: [], object: {}, uuid: '00000000-0000-0000-0000-000000000000',
-    datetime: '1970-01-01T00:00:00Z', localdatetime: '1970-01-01T00:00:00', date: '1970-01-01', time: '00:00:00', duration: 'PT0S',
+    datetime: '1970-01-01T00:00:00Z', localdatetime: '1970-01-01T00:00:00', date: '1970-01-01', time: '00:00:00',
+    offsettime: '00:00:00Z', duration: 'PT0S',
   }[base] ?? null;
 }
 

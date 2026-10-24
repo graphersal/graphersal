@@ -35,7 +35,8 @@ export const GQL_DRAFT_BODY = 'MATCH (p:person)\nRETURN p.name AS name\nORDER BY
  * types (book "Dates and Times"); an argument is written as its text, the format reads it back.
  */
 export const FORMAT_OF = Object.freeze({
-  uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time', duration: 'duration',
+  uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time',
+  offsettime: 'offset-time', duration: 'duration',
 });
 const TYPE_OF_FORMAT = Object.fromEntries(Object.entries(FORMAT_OF).map(([t, f]) => [f, t]));
 /** The parameter types written as text: plain strings and the formats. */
@@ -51,7 +52,8 @@ export const ITEM_TYPES = ['string', 'integer', 'number', 'boolean', ...Object.k
 export function formatExample(type) {
   return {
     uuid: '01234567-89ab-cdef-0123-456789abcdef', datetime: '2023-08-02T09:30:00+02:00',
-    localdatetime: '2023-08-02T09:30:00', date: '2023-08-02', time: '09:30:00', duration: 'P1DT2H',
+    localdatetime: '2023-08-02T09:30:00', date: '2023-08-02', time: '09:30:00', offsettime: '09:30:00+02:00',
+    duration: 'P1DT2H',
   }[type] || '';
 }
 
@@ -289,6 +291,7 @@ export function parseDefault(type, text) {
     case 'localdatetime':
     case 'date':
     case 'time':
+    case 'offsettime':
     case 'duration':
       // The text; the engine reads it as the format when the query is stored.
       return { value: t.trim() };
@@ -722,7 +725,7 @@ function baseType(schema) {
  * The fields of the run form, one per parameter: `{name, kind, required, hint, schema, min,
  * max, options, itemsKind, defaultValue, hasDefault}`. `kind`: 'select' (enum), 'integer',
  * 'number', 'checkbox' (boolean), 'uuid', a date and time type ('datetime', 'localdatetime',
- * 'date', 'time', 'duration': its ISO 8601 text), 'list' (array of simple items, one per line),
+ * 'date', 'time', 'offsettime', 'duration': its ISO 8601 text), 'list' (array of simple items, one per line),
  * 'json' (objects and anything else), 'text' (string).
  */
 export function formFields(entry) {
@@ -771,6 +774,7 @@ function fieldText(field, value) {
     case 'localdatetime':
     case 'date':
     case 'time':
+    case 'offsettime':
     case 'duration':
       return typeof value === 'string' ? value : JSON.stringify(value);
     case 'integer':

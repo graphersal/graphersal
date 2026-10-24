@@ -36,7 +36,8 @@ const CONSTRAINT_LABELS = {
 const TEXT_KEYWORDS = new Set(['pattern', 'formatMinimum', 'formatMaximum', 'formatExclusiveMinimum', 'formatExclusiveMaximum']);
 /** An example bound of a date and time type (the field's placeholder). */
 const BOUND_EXAMPLE = {
-  datetime: '2000-01-01T00:00:00Z', localdatetime: '2000-01-01T00:00:00', date: '2000-01-01', time: '08:00:00', duration: 'PT1H',
+  datetime: '2000-01-01T00:00:00Z', localdatetime: '2000-01-01T00:00:00', date: '2000-01-01', time: '08:00:00',
+  offsettime: '08:00:00+02:00', duration: 'PT1H',
 };
 const INTEGER_KEYWORDS = new Set(['minLength', 'maxLength', 'minItems', 'maxItems']);
 

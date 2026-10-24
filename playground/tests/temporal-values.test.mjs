@@ -120,7 +120,8 @@ test('saved query parameters offer the date formats as types', () => {
     assert.ok(formatExample(t), t);
   }
   assert.deepEqual(FORMAT_OF, {
-    uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time', duration: 'duration',
+    uuid: 'uuid', datetime: 'date-time', localdatetime: 'local-date-time', date: 'date', time: 'time',
+    offsettime: 'offset-time', duration: 'duration',
   });
   const entry = { name: 'since', schema: { type: 'string', format: 'date-time' }, default: '2023-01-01T00:00:00Z' };
   const param = paramFromEntry(entry);
@@ -200,4 +201,53 @@ test('backfill writes a date placeholder through its constructor', () => {
   draft.vertices.event.schema.properties.at.default = '2024-02-29';
   const withDefault = backfillScript(draft, [{ kind: 'missing_required', element: 'vertex', label: 'event', field: 'at', count: 2 }]);
   assert.match(withDefault.script, /\.property\("at", date\("2024-02-29"\)\)/);
+});
+
+// ------------------------------------------------------------------ temporal v2: offset-time, ns, zone names
+
+test('offset-time is a parameter type, a schema base type and a filter type', async () => {
+  const { typeOfSchemaNode } = await import('../js/graph/filter-model.js');
+  assert.ok(PARAM_TYPES.includes('offsettime'));
+  assert.ok(ITEM_TYPES.includes('offsettime'));
+  assert.equal(formatExample('offsettime'), '09:30:00+02:00');
+  assert.deepEqual(parseDefault('offsettime', ' 10:00+01:00 '), { value: '10:00+01:00' });
+  const entry = { name: 'opens', schema: { type: 'string', format: 'offset-time' }, default: '08:00:00Z' };
+  const param = paramFromEntry(entry);
+  assert.equal(param.type, 'offsettime');
+  assert.deepEqual(paramDeclaration(param), { declaration: entry });
+  const fields = formFields({ params: [entry] });
+  assert.equal(fields[0].kind, 'offsettime');
+  assert.deepEqual(formArgs(fields, initialValues(fields)).args, { opens: '08:00:00Z' });
+
+  assert.ok(TEMPORAL_BASES.includes('offsettime'));
+  assert.ok(BASE_TYPES.includes('offsettime'));
+  assert.deepEqual(CONSTRAINTS.offsettime, ['formatMinimum', 'formatMaximum', 'formatExclusiveMinimum', 'formatExclusiveMaximum']);
+  assert.equal(describe({ type: 'string', format: 'offset-time' }).base, 'offsettime');
+  assert.equal(typeText({ type: 'array', items: { type: 'string', format: 'offset-time' } }), 'array of offsettime');
+  const schema = schemaWith({ type: 'string' });
+  setBaseType(schema, AT, 'offsettime');
+  assert.deepEqual(getAt(schema, AT), { type: 'string', format: 'offset-time' });
+
+  assert.equal(typeOfSchemaNode({ type: 'string', format: 'offset-time' }), 'temporal');
+});
+
+test('nine fraction digits and zone names round-trip through the property editor', () => {
+  const values = {
+    datetime: '2024-10-27T02:30:00.000000001+01:00[Europe/Berlin]',
+    localdatetime: '9999-12-31T23:59:59.999999999',
+    time: '23:59:59.999999999',
+    offsettime: '10:00:00.000000001+05:45',
+    duration: '-PT2562047788015215H30M8S',
+  };
+  for (const [type, value] of Object.entries(values)) {
+    assert.equal(scalarError(type, value), null, `${type} ${value}`);
+    const node = nodeFromTyped({ type, value });
+    assert.equal(node.text, value);
+    assert.deepEqual(typedFromNode(node), { typed: { type, value } });
+  }
+  // Ten digits are more than the engine reads.
+  assert.notEqual(scalarError('time', '23:59:59.9999999999'), null);
+  // An offset time needs its offset, and takes no zone name.
+  assert.notEqual(scalarError('offsettime', '10:00:00'), null);
+  assert.notEqual(scalarError('offsettime', '10:00:00+02:00[Europe/Berlin]'), null);
 });
