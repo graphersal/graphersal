@@ -94,8 +94,8 @@ test('the Filter badge: count, off, nothing', () => {
   assert.equal(filterBadge({ count: -1 }), '');
 });
 
-test('the Filter button is a placeholder for now; help and title texts', () => {
-  assert.equal(FILTER_ENABLED, false);
+test('the Filter button is enabled; help and title texts', () => {
+  assert.equal(FILTER_ENABLED, true);
   assert.ok(GRAPH_HELP.length >= 3 && GRAPH_HELP.every((s) => s.endsWith('.')));
   assert.match(displayTitle('Auto · Fast'), /Auto · Fast/);
 });
