@@ -6284,7 +6284,11 @@ fn zoned_time_parses_and_realtime_is_refused() {
         );
     }
     // The other spellings of the old not-yet row name the supported forms.
-    for call in ["timestamp()", "current_date()", "date_trunc('day', n.d)"] {
+    for call in [
+        "timestamp()",
+        "datetime_trunc('day', n.d)",
+        "date_trunc('day', n.d)",
+    ] {
         let f = fail(&format!("MATCH (n) RETURN {call}"));
         assert_eq!(f.kind, GqlErrorKind::NotYet, "{call}");
         let alternative = f.alternative.unwrap_or_default();
