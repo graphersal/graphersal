@@ -766,6 +766,8 @@ impl GraphSource {
                 }
             }
         }
+        // Built element by element: release the spare slots, as a load does.
+        g.shrink_to_fit();
         Graph::new(g)
     }
 }

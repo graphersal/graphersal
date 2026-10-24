@@ -7,7 +7,7 @@
 
 use std::num::NonZeroU32;
 
-use petgraph::graph::{EdgeIndex, NodeIndex};
+use crate::graph::topology::{EdgeIndex, NodeIndex};
 
 /// The first generation of a never-used slot.
 pub(crate) const FIRST_GENERATION: NonZeroU32 = NonZeroU32::MIN;
@@ -59,7 +59,7 @@ impl VertexHandle {
         }
     }
 
-    /// The petgraph slot; NOT validated, see `TraversalGraph::resolve_vertex`.
+    /// The topology slot; NOT validated, see `TraversalGraph::resolve_vertex`.
     #[inline]
     pub(crate) fn index(self) -> NodeIndex {
         NodeIndex::new(self.slot as usize)
@@ -89,7 +89,7 @@ impl EdgeHandle {
         }
     }
 
-    /// The petgraph slot; NOT validated, see `TraversalGraph::resolve_edge`.
+    /// The topology slot; NOT validated, see `TraversalGraph::resolve_edge`.
     #[inline]
     pub(crate) fn index(self) -> EdgeIndex {
         EdgeIndex::new(self.slot as usize)

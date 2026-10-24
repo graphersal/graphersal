@@ -3,7 +3,6 @@ use compact_str::CompactString;
 use fnv::FnvBuildHasher;
 use hashbrown::HashTable;
 use indexmap::IndexSet;
-pub(crate) use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::HashMap;
 use std::hash::Hasher;
 
@@ -119,7 +118,7 @@ pub(crate) const fn id_entry_bytes<H>() -> u64 {
 ///
 /// An entry is inserted after its slot's generation is patched, and removed by handle (no graph
 /// read) right after its element left the graph. Cloning the index together with the graph keeps
-/// it valid: a `StableGraph` clone keeps every slot. Nothing iterates the id index; it serves
+/// it valid: a topology clone keeps every slot. Nothing iterates the id index; it serves
 /// point lookups only, so it keeps no insertion order.
 ///
 /// Design and invariants: the book page "In-Memory Storage Internals"

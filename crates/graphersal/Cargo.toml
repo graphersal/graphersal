@@ -18,7 +18,6 @@ include = ["/src/**", "!/src/**/CLAUDE.md", "/README.md", "/LICENSE-APACHE", "/N
 all-features = true
 
 [dependencies]
-petgraph = { workspace = true }
 compact_str = { workspace = true }
 indexmap = { workspace = true }
 fnv = { workspace = true }

@@ -26,10 +26,6 @@ use std::fmt;
 /// assert_eq!(Direction::Out.to_string(), "OUT");
 /// ```
 ///
-/// Name clash: `petgraph::Direction` has the same name. Code that glob-imports
-/// `graphersal::prelude::*` and also needs petgraph's type imports it explicitly (an explicit
-/// import shadows the glob one) or uses the full path `graphersal::prelude::Direction`.
-///
 /// Closed set, so deliberately not `#[non_exhaustive]`: a directed edge has exactly two ends, plus
 /// "either".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

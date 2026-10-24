@@ -1,5 +1,4 @@
 use compact_str::CompactString;
-use petgraph::prelude::StableGraph;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -50,6 +49,7 @@ mod statistics;
 /// The [`GraphStorage`] trait and its implementations.
 pub mod storage;
 pub(crate) mod subgraph;
+pub(crate) mod topology;
 mod transaction;
 pub(crate) mod undo;
 pub mod write_checks;
@@ -71,7 +71,6 @@ pub use hooks::{
     CommitHook, CommitHooks, HookError, HookRefusal, JournalSlot, Mark, RollbackReason,
 };
 pub(crate) use index::GraphIndex;
-pub(crate) use index::{EdgeIndex, NodeIndex};
 pub use memory::MemoryStats;
 pub use memory_report::{MemoryReport, MemoryReportRequest, StructureMemory};
 #[cfg(feature = "persist")]
@@ -80,6 +79,7 @@ pub use property_index::{
     PropertyIndexDefinition, PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats,
     PropertyIndexTransform,
 };
+pub(crate) use topology::{EdgeIndex, NodeIndex};
 // Only the script layer names it through the crate glob.
 #[cfg(feature = "script")]
 pub use property_index::PropertyIndexType;
@@ -89,7 +89,7 @@ pub use statistics::GraphStatistics;
 pub use storage::{GraphStorage, UnitChanges, UnitMark};
 pub use transaction::Transactional;
 
-/// Vertex weight stored in the underlying petgraph storage: `(id, labels, properties,
+/// Vertex weight stored in the topology: `(id, labels, properties,
 /// generation)`.
 ///
 /// `labels` is an ordered, deduplicated set: empty means no labels, and the first entry is the
@@ -97,7 +97,7 @@ pub use transaction::Transactional;
 /// returning. See [`storage::GraphStorage::vertex_labels`]. `generation` is the slot generation
 /// the vertex was created with; a [`VertexHandle`] is valid iff it carries the same one.
 pub(crate) type VertexData = (CompactString, Vec<CompactString>, PropertyMap, NonZeroU32);
-/// Edge weight stored in the underlying petgraph storage: `(id, label, properties,
+/// Edge weight stored in the topology: `(id, label, properties,
 /// generations)`; see [`handle::EdgeGenerations`].
 pub(crate) type EdgeData = (
     CompactString,
@@ -106,8 +106,9 @@ pub(crate) type EdgeData = (
     handle::EdgeGenerations,
 );
 
-/// The underlying petgraph storage type: a stable-indexed directed graph of vertices/edges.
-pub(crate) type GraphType = StableGraph<VertexData, EdgeData>;
+/// The slot store of vertices and edges: stable indices, free lists, linked adjacency lists
+/// (`graph/topology.rs`).
+pub(crate) type GraphType = topology::Topology<VertexData, EdgeData>;
 
 /// In-memory graph structure holding vertices, edges, and property maps.
 ///
@@ -350,16 +351,20 @@ impl TraversalGraph {
         Ok(self)
     }
 
-    /// Shrinks the capacity of the graph indices as much as possible, and releases the shared
-    /// property key lists no element uses any more.
+    /// Releases spare capacity: the vertex and edge slots above the last used one, the indexes,
+    /// the handle generation arrays, and the shared property key lists no element uses any
+    /// more. Vacant slots of removed elements stay (handles and indices are stable).
     pub fn shrink_to_fit(&mut self) {
+        // The slot vectors: spare capacity above the last slot (vacant slots stay, indices are
+        // stable). Every load ends here, so a loaded graph keeps no spare slots.
+        self.graph.shrink_to_fit();
         self.index.shrink_to_fit();
         self.shapes.shrink_to_fit();
         self.node_generations.shrink_to_fit();
         self.edge_generations.shrink_to_fit();
     }
 
-    /// The petgraph slot of a vertex handle, iff the vertex still exists: the slot is occupied
+    /// The topology slot of a vertex handle, iff the vertex still exists: the slot is occupied
     /// and its occupant has the handle's generation. THE validation of every handle-taking
     /// method; a stale handle never resolves to the element that reuses its slot.
     #[inline]
@@ -460,15 +465,14 @@ impl TraversalGraph {
     /// would make an incident edge violate the connections). Other modes check nothing.
     pub(crate) fn check_incident_topology(
         &self,
-        node: petgraph::graph::NodeIndex,
+        node: NodeIndex,
         new_labels: &[CompactString],
     ) -> Result<(), SchemaError> {
-        use petgraph::visit::EdgeRef;
         let schema = self.schema.read();
         if !matches!(schema.mode, SchemaMode::Closed) {
             return Ok(());
         }
-        let labels_of = |idx: petgraph::graph::NodeIndex| -> &[CompactString] {
+        let labels_of = |idx: NodeIndex| -> &[CompactString] {
             if idx == node {
                 new_labels
             } else {
@@ -478,7 +482,7 @@ impl TraversalGraph {
                     .unwrap_or(&[])
             }
         };
-        for direction in [petgraph::Direction::Outgoing, petgraph::Direction::Incoming] {
+        for direction in [topology::Direction::Outgoing, topology::Direction::Incoming] {
             for edge in self.graph.edges_directed(node, direction) {
                 SchemaValidator::check_topology(
                     &schema,
