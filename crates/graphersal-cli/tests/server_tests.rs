@@ -2138,10 +2138,7 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
         "set_schema",
         serde_json::json!({"schema": inferred.to_string(), "mode": "open"}),
     );
-    assert!(
-        !error && text.contains("\"schemaMode\": \"open\""),
-        "{text}"
-    );
+    assert!(!error && text.contains("\"schemaMode\":\"open\""), "{text}");
     let patch = serde_json::json!({"vertices": {"person": {"schema": {"properties": {"email": {"type": "string"}}}}}});
     let (error, text) = mcp.call("validate_schema_patch", serde_json::json!({"patch": patch}));
     assert!(!error && text.contains("violations"), "{text}");
@@ -2158,7 +2155,7 @@ fn mcp_lifecycle_tools_resources_and_the_change_feed() {
     let (error, text) = mcp.call("statistics", serde_json::json!({}));
     assert!(!error && text.contains("limits"), "{text}");
     let (error, text) = mcp.call("graph_info", serde_json::json!({}));
-    assert!(!error && text.contains("\"mcpReadOnly\": false"), "{text}");
+    assert!(!error && text.contains("\"mcpReadOnly\":false"), "{text}");
 
     // Unknown tools and methods are JSON-RPC errors.
     let unknown = mcp.rpc(
@@ -2597,7 +2594,7 @@ fn mcp_property_index_tools_and_read_only() {
     let (error, text) = mcp.call("create_index", serde_json::json!({"label": "person"}));
     assert!(error && text.contains("\"key\""), "{text}");
     let (error, text) = mcp.call("list_indexes", serde_json::json!({}));
-    assert!(!error && text.contains("\"entries\": 4"), "{text}");
+    assert!(!error && text.contains("\"entries\":4"), "{text}");
     let (error, text) = mcp.call(
         "query",
         serde_json::json!({"script": r#"g.v().has_label("person").has("age", 29).values("name").profile()"#}),
@@ -2715,7 +2712,7 @@ fn property_index_types_over_http_and_mcp() {
         serde_json::json!({"label": "software", "key": "lang", "type": "memory-ordered"}),
     );
     assert!(
-        !error && text.contains("\"type\": \"memory-ordered\""),
+        !error && text.contains("\"type\":\"memory-ordered\""),
         "{text}"
     );
     let (error, text) = mcp.call(
@@ -2730,7 +2727,7 @@ fn property_index_types_over_http_and_mcp() {
     assert!(error && text.contains("vector<f32>"), "{text}");
     let (error, text) = mcp.call("list_indexes", serde_json::json!({}));
     assert!(
-        !error && text.matches("\"type\": \"memory-ordered\"").count() == 2,
+        !error && text.matches("\"type\":\"memory-ordered\"").count() == 2,
         "{text}"
     );
 }
@@ -2911,7 +2908,7 @@ fn saved_queries_that_write_over_http_and_mcp() {
     );
     let (error, text) = mcp.call("list_saved_queries", serde_json::json!({}));
     assert!(!error, "{text}");
-    assert!(text.contains("\"writes\": true"), "{text}");
+    assert!(text.contains("\"writes\":true"), "{text}");
     assert!(text.contains(r#"Create Data(vertex \"ghost\")"#), "{text}");
     let tools = mcp.rpc("tools/list", serde_json::json!({}));
     let own = tools["result"]["tools"]
@@ -3003,9 +3000,9 @@ fn saved_queries_written_in_gql_over_http_and_mcp() {
     assert!(!error, "{text}");
     let (error, text) = mcp.call("list_saved_queries", serde_json::json!({}));
     assert!(!error, "{text}");
-    assert!(text.contains("\"language\": \"gql\""), "{text}");
-    assert!(text.contains("\"dialect\": \"graphersal-gql/1\""), "{text}");
-    assert!(text.contains("\"dialect\": \"graphersal-gql/2\""), "{text}");
+    assert!(text.contains("\"language\":\"gql\""), "{text}");
+    assert!(text.contains("\"dialect\":\"graphersal-gql/1\""), "{text}");
+    assert!(text.contains("\"dialect\":\"graphersal-gql/2\""), "{text}");
     assert!(text.contains(r#"Create Data(vertex \"person\")"#), "{text}");
     let (error, text) = mcp.call(
         "run_saved_query",
@@ -3013,7 +3010,7 @@ fn saved_queries_written_in_gql_over_http_and_mcp() {
     );
     assert!(!error, "{text}");
     assert!(
-        text.contains("\"name\": \"josh\"") && text.contains("\"name\": \"peter\""),
+        text.contains("\"name\":\"josh\"") && text.contains("\"name\":\"peter\""),
         "{text}"
     );
     let (error, text) = mcp.call("older", serde_json::json!({"min": 33}));
@@ -3144,7 +3141,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
     );
     assert!(!error, "{text}"); // commit 1
     let (error, text) = mcp.call("graph_info", serde_json::json!({}));
-    assert!(!error && text.contains("\"view\": null"), "{text}");
+    assert!(!error && text.contains("\"view\":null"), "{text}");
     assert!(!text.contains("\"note\""), "{text}");
 
     // The browser opens a read-only view: the whole server serves it, MCP too.
@@ -3887,7 +3884,7 @@ fn backups_over_http_and_damage_found_while_served() {
     let mut mcp = McpClient::connect(port, &[]);
     let (error, text) = mcp.call("graph_info", serde_json::json!({}));
     assert!(
-        !error && text.contains("damageFound") && text.contains("\"frozen\": true"),
+        !error && text.contains("damageFound") && text.contains("\"frozen\":true"),
         "{text}"
     );
     // Saved from memory, restored: the live graph.
@@ -4949,7 +4946,7 @@ fn property_index_transforms_over_http_and_mcp() {
         serde_json::json!({"label": "software", "key": "name", "transform": "to_lower"}),
     );
     assert!(
-        !error && text.contains("\"name\": \"software_name_to_lower\""),
+        !error && text.contains("\"name\":\"software_name_to_lower\""),
         "{text}"
     );
     let (error, text) = mcp.call(
@@ -4959,7 +4956,7 @@ fn property_index_transforms_over_http_and_mcp() {
     assert!(error && text.contains("\"transform\""), "{text}");
     let (error, text) = mcp.call("list_indexes", serde_json::json!({}));
     assert!(
-        !error && text.matches("\"transform\": \"to_lower\"").count() == 2,
+        !error && text.matches("\"transform\":\"to_lower\"").count() == 2,
         "{text}"
     );
 }
@@ -5155,7 +5152,7 @@ fn a_compression_estimate_over_http_and_mcp_changes_nothing() {
     );
     assert!(!error, "{text}");
     assert!(text.contains("not changed"), "{text}");
-    assert!(text.contains("\"valuesFound\": 4"), "{text}");
+    assert!(text.contains("\"valuesFound\":4"), "{text}");
     let (error, text) = mcp.call("estimate_compression", serde_json::json!({"path": "name"}));
     assert!(error, "{text}");
     assert!(text.contains("label"), "{text}");
@@ -5382,7 +5379,7 @@ fn mcp_gql_tool_writes_unless_read_only() {
         "gql",
         serde_json::json!({"query": "MATCH (t:tag) RETURN count(t) AS tags"}),
     );
-    assert!(!error && text.contains("\"tags\": 0"), "{text}");
+    assert!(!error && text.contains("\"tags\":0"), "{text}");
     assert_eq!(changes(port)["version"], 0, "nothing was committed");
 }
 
