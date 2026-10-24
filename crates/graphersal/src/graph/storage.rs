@@ -883,6 +883,16 @@ pub trait GraphStorage: Send + Sync {
         None
     }
 
+    /// What only the storage can tell about its memory for the memory report
+    /// ([`MemoryReport::structure`](crate::graph::MemoryReport::structure)): the totals of
+    /// [`Self::memory_usage`], the vertex and edge slots (live, tombstoned, spare), the id and
+    /// label index bytes and the shape table, or `None` (the default) when the storage does not
+    /// report them. The rest of the memory report (per label and per property, indexes, rules) is
+    /// computed for any storage through the read methods; a storage needs nothing for it.
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        None
+    }
+
     /// The total of [`Self::memory_usage`] ([`MemoryStats::total_bytes`]), or `None` without
     /// introspection: the figure the estimated memory budget (`memory.limit` without a tracking
     /// allocator) starts every run from. A storage may cache it by its commit position
@@ -2332,6 +2342,10 @@ impl GraphStorage for TraversalGraph {
         Some(crate::graph::memory::compute(self))
     }
 
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        Some(crate::graph::memory::structure(self))
+    }
+
     #[inline]
     fn memory_footprint_bytes(&self) -> Option<u64> {
         Some(crate::graph::memory::footprint_bytes(self))
@@ -2781,6 +2795,11 @@ impl<G: GraphStorage> GraphStorage for &G {
     }
 
     #[inline]
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        (**self).memory_structure()
+    }
+
+    #[inline]
     fn memory_footprint_bytes(&self) -> Option<u64> {
         (**self).memory_footprint_bytes()
     }
@@ -3168,6 +3187,11 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     #[inline]
     fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
         (**self).memory_usage()
+    }
+
+    #[inline]
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        (**self).memory_structure()
     }
 
     #[inline]
@@ -3606,6 +3630,11 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
         (**self).memory_usage()
+    }
+
+    #[inline]
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        (**self).memory_structure()
     }
 
     #[inline]
@@ -4183,6 +4212,11 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn memory_usage(&self) -> Option<crate::graph::MemoryStats> {
         self.as_ref().memory_usage()
+    }
+
+    #[inline]
+    fn memory_structure(&self) -> Option<crate::graph::StructureMemory> {
+        self.as_ref().memory_structure()
     }
 
     #[inline]

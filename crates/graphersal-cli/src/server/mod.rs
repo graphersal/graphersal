@@ -910,6 +910,11 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "completions") => value(context.call(|s| views::completions(s.engine()))?),
         (Method::Get, "token-values") => value(context.call(|s| s.token_values())?),
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
+        // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
+        (Method::Post, "memory/report") => {
+            let body = json_body(request)?;
+            value(context.call(move |s| s.memory_report(&body))?)
+        }
         (Method::Get, "statistics") => value(with_process_memory(
             context,
             context.call(|s| s.statistics())?,
@@ -1064,6 +1069,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "completions"
             | "token-values"
             | "memory"
+            | "memory/report"
             | "statistics"
             | "export"
             | "save"

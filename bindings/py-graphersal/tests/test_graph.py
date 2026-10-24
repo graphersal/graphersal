@@ -516,6 +516,27 @@ def test_compression_estimate_changes_nothing_and_matches_the_rule():
     assert unknown["warnings"][0]["code"] == "unknown_label"
 
 
+def test_the_memory_report_shows_where_the_memory_goes():
+    graph = graphersal.Graph()
+    for i in range(30):
+        graph.execute(
+            'g.add_v("doc").property("title", t).property("body", b).to_list()',
+            {"t": f"t{i}", "b": "lorem ipsum " * (10 + i)},
+        )
+    report = graph.memory_report()
+    body = next(r for r in report["properties"] if r["path"] == "$.body")
+    assert (body["element"], body["label"], body["elements"]) == ("vertex", "doc", 30)
+    assert body["value_types"] == [{"type": "string", "count": 30}]
+    assert body["strings"]["inline_values"] == 0
+    assert body["bytes"] == body["slot_bytes"] + body["heap_bytes"]
+    assert report["properties"][0]["path"] == "$.body"  # the most bytes first
+    assert report["structure"]["totals"]["property_bytes"] == report["property_bytes"]
+    assert report["sampled"] is False
+    small = graph.memory_report(max_rows=1, max_elements=10)
+    assert len(small["properties"]) == 1 and small["rows_omitted"] == 1
+    assert small["sampled"] is True
+
+
 def test_a_dedup_rule_shares_repeated_values_and_the_estimate_matches():
     graph = graphersal.Graph()
     for i in range(12):

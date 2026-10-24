@@ -168,6 +168,11 @@ pub use crate::error::GraphError;
 pub use crate::graph::PersistentStorage;
 pub use crate::graph::compression::CompressionStats;
 pub use crate::graph::compression_estimate::{CompressionEstimate, CompressionEstimateRequest};
+pub use crate::graph::memory_report::{
+    DegreeStats, LabelMemory, MemoryReport, MemoryReportProgress, MemoryReportRequest,
+    PropertyMemory, PropertyTarget, RuleMemory, SIZE_BUCKET_BOUNDS, ShapeBucket, ShapeSummary,
+    SizeBucket, SlotUsage, StringMemory, StructureMemory, ValueTypeCount, VectorMemory,
+};
 pub use crate::graph::property_index::{
     PropertyIndexInfo, PropertyIndexRange, PropertyIndexStats, PropertyIndexTransform,
 };

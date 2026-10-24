@@ -97,6 +97,16 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`GraphStorage::memory_usage`] of the storage.
     fn memory_usage(&self) -> Option<MemoryStats>;
 
+    /// The memory report of the storage
+    /// ([`GraphTraversalSource::memory_report`](crate::GraphTraversalSource::memory_report)),
+    /// computed under one read lock. Fails for an invalid request and when cancelled (the
+    /// request's or the running thread's [`CancelToken`](crate::CancelToken)). Unauthorized:
+    /// the front end asks its authorizer first.
+    fn memory_report(
+        &self,
+        request: &crate::graph::MemoryReportRequest,
+    ) -> TraverserResult<crate::graph::MemoryReport>;
+
     /// The graph as one value, `{"vertices": [..], "edges": [..]}`, with at most `keep`
     /// vertices and `keep` edges (all with `None`): what a script host shows for a graph value
     /// as a script's final value. Internal to the script layer.
@@ -302,6 +312,13 @@ where
 
     fn memory_usage(&self) -> Option<MemoryStats> {
         self.read().memory_usage()
+    }
+
+    fn memory_report(
+        &self,
+        request: &crate::graph::MemoryReportRequest,
+    ) -> TraverserResult<crate::graph::MemoryReport> {
+        GraphTraversalSource::new(&*self.read()).memory_report(request)
     }
 
     fn listing(&self, keep: Option<usize>) -> TraverserResult<crate::value::ElementProperty> {

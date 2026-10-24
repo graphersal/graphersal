@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use graphersal::prelude::*;
 use graphersal::schema::PropertySchema;
 use graphersal::script::rhai;
+use graphersal::storage::MemoryReportRequest;
 use serde_json::{Map, Value, json};
 
 use crate::display::{CompactGraph, Table};
@@ -343,6 +344,65 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
         }),
         None => Value::Null,
     }
+}
+
+/// The request of a memory report spec `{sample_every?, max_elements?, max_rows?,
+/// path_depth?}` (`null`: a full report; [`crate::Session::memory_report`]), or what is wrong
+/// with it.
+pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, String> {
+    const KEYS: [&str; 5] = [
+        "sample_every",
+        "max_elements",
+        "max_rows",
+        "max_labels",
+        "path_depth",
+    ];
+    let mut request = MemoryReportRequest::new();
+    let fields = match spec {
+        Value::Null => return Ok(request),
+        Value::Object(fields) => fields,
+        _ => {
+            return Err(
+                "the memory report spec is a JSON object {sample_every?, max_elements?, \
+                 max_rows?, max_labels?, path_depth?}"
+                    .into(),
+            );
+        }
+    };
+    if let Some(unknown) = fields.keys().find(|key| !KEYS.contains(&key.as_str())) {
+        return Err(format!(
+            "unknown key '{unknown}' in the memory report spec (keys: {})",
+            KEYS.join(", ")
+        ));
+    }
+    let positive = |key: &str| -> Result<Option<u64>, String> {
+        match fields.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => match value.as_u64() {
+                Some(n) if n > 0 => Ok(Some(n)),
+                _ => Err(format!("{key} must be a positive integer, not {value}")),
+            },
+        }
+    };
+    if let Some(k) = positive("sample_every")? {
+        request = request.with_sample_every(k);
+    }
+    if let Some(n) = positive("max_elements")? {
+        request = request.with_max_elements(n);
+    }
+    if let Some(n) = positive("max_rows")? {
+        request = request.with_max_rows(usize::try_from(n).unwrap_or(usize::MAX));
+    }
+    if let Some(n) = positive("max_labels")? {
+        request = request.with_max_labels(usize::try_from(n).unwrap_or(usize::MAX));
+    }
+    if let Some(depth) = positive("path_depth")? {
+        request = request.with_path_depth(u32::try_from(depth).unwrap_or(u32::MAX));
+    }
+    request
+        .validate()
+        .map_err(|err| graphersal::error::format_diagnostic(&err))?;
+    Ok(request)
 }
 
 /// The receiver a DSL function is called on, from the Rhai type of its first parameter (the

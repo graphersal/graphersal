@@ -26,6 +26,7 @@
 // - `compression.rs`: compression rules (`define_compression`, `compressions`,
 //   `drop_compression`, `recompress`).
 // - `property_index.rs`: property indexes (`create_index`, `indexes`, `drop_index`).
+// - `memory_report.rs`: `memory_report` (the per-label, per-property memory report).
 // - `dynamic.rs`: `Dynamic` conversions and the shared argument diagnostics.
 // - `render.rs`: `render_value`/`try_render_value`/`debug_value`, display limits, `RenderedText`.
 // - `execution.rs`, `limits.rs`: `ScriptExecution`/metrics, `ScriptLimits`.
@@ -60,6 +61,7 @@ mod eval;
 mod execution;
 mod fake;
 mod limits;
+mod memory_report;
 mod mutating;
 pub(crate) mod plan;
 mod property_index;

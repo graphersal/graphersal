@@ -216,18 +216,55 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
     }
 }
 
+/// The structure part of the memory report for a [`crate::TraversalGraph`]: the totals of
+/// [`compute`], the slots (live; tombstoned: vacant below the slot bound, which petgraph computes
+/// as the highest live slot + 1; spare: allocated above it), the id and label indexes and the
+/// shape table.
+pub(crate) fn structure(graph: &super::TraversalGraph) -> super::StructureMemory {
+    use super::memory_report::SlotUsage;
+    use super::{EdgeData, VertexData};
+    use petgraph::visit::{EdgeIndexable, NodeIndexable};
+    let (node_cap, edge_cap) = graph.graph.capacity();
+    let slots = |live: usize, bound: usize, capacity: usize, slot: usize| {
+        SlotUsage::new(
+            live as u64,
+            bound.saturating_sub(live) as u64,
+            capacity.saturating_sub(bound) as u64,
+            slot as u64,
+        )
+    };
+    let vertices = slots(
+        graph.graph.node_count(),
+        NodeIndexable::node_bound(&graph.graph),
+        node_cap,
+        std::mem::size_of::<petgraph::graph::Node<Option<VertexData>>>(),
+    );
+    let edges = slots(
+        graph.graph.edge_count(),
+        EdgeIndexable::edge_bound(&graph.graph),
+        edge_cap,
+        std::mem::size_of::<petgraph::graph::Edge<Option<EdgeData>>>(),
+    );
+    let id_index = graph.index.id_index_heap_bytes();
+    let label_index = graph.index.estimated_heap_bytes().saturating_sub(id_index);
+    super::StructureMemory::new(compute(graph))
+        .with_slots(vertices, edges)
+        .with_index_bytes(id_index, label_index)
+        .with_shape_table_shapes(graph.shapes.len() as u64)
+}
+
 /// The compressed strings of a walk (only objects can hold one: rule paths name keys).
-#[derive(Default)]
-struct CompressedCount {
-    values: u64,
-    plain: u64,
-    stored: u64,
-    deduped: u64,
-    deduped_plain: u64,
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CompressedCount {
+    pub(crate) values: u64,
+    pub(crate) plain: u64,
+    pub(crate) stored: u64,
+    pub(crate) deduped: u64,
+    pub(crate) deduped_plain: u64,
 }
 
 impl CompressedCount {
-    fn add(&mut self, value: &crate::value::ElementProperty) {
+    pub(crate) fn add(&mut self, value: &crate::value::ElementProperty) {
         use crate::value::ElementProperty;
         match value {
             ElementProperty::Compressed(text) => {

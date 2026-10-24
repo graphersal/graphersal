@@ -165,7 +165,6 @@ impl ShapeTable {
     }
 
     /// The number of interned non-empty shapes.
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shapes.len()
     }

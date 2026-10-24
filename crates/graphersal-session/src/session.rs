@@ -694,6 +694,28 @@ impl Session {
         })
     }
 
+    /// The memory report ([`graphersal::storage::MemoryReport::to_property`] as JSON, snake_case
+    /// keys like the DSL's `g.memory_report()`): `{ok: true, report}` or `{ok: false, error}`
+    /// (an invalid spec, a cancelled report). `spec` is `{sample_every?, max_elements?,
+    /// max_rows?, max_labels?, path_depth?}` (or `null`: a full report); cancellable through
+    /// [`Self::cancel_token`]. Read-only.
+    pub fn memory_report(&self, spec: &Value) -> Value {
+        let answer = crate::views::memory_report_request(spec).and_then(|request| {
+            let cancel = self.cancel_token();
+            cancel.reset();
+            self.graph
+                .memory_report(&request.with_cancel(cancel))
+                .map_err(|err| graphersal::error::format_diagnostic(&*err))
+        });
+        match answer {
+            Ok(report) => json!({
+                "ok": true,
+                "report": serde_json::from_str::<Value>(&report.to_json()).unwrap_or(Value::Null),
+            }),
+            Err(error) => json!({"ok": false, "error": error}),
+        }
+    }
+
     /// One element for the inspector, fetched when it is clicked (the drawings carry no
     /// properties), as JSON text: `kind` `"vertex"` or `"edge"`, `id` its id. `{kind, id, label,
     /// labels, properties, inDegree, outDegree}` for a vertex (the degrees count the edges in the
@@ -2099,6 +2121,33 @@ mod tests {
         let error = &r["execution"]["error"];
         assert_eq!(error["position"]["line"], 2, "{error}");
         assert!(!error["message"].as_str().unwrap().starts_with("Error: "));
+    }
+
+    #[test]
+    fn the_memory_report_answers_the_report_or_an_error() {
+        let s = modern();
+        let full = s.memory_report(&Value::Null);
+        assert_eq!(full["ok"], true, "{full}");
+        let report = &full["report"];
+        assert_eq!(report["properties"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            report["property_bytes"],
+            report["structure"]["totals"]["property_bytes"]
+        );
+        let capped = s.memory_report(&json!({"max_rows": 1, "max_labels": 2}));
+        assert_eq!(capped["report"]["rows_omitted"], 5);
+        assert_eq!(capped["report"]["labels_omitted"], 2);
+        for (spec, needle) in [
+            (json!({"rows": 1}), "unknown key 'rows'"),
+            (json!({"max_rows": 0}), "positive integer"),
+            (json!([1]), "JSON object"),
+            (json!({"path_depth": 2}), "path depth"),
+        ] {
+            let answer = s.memory_report(&spec);
+            assert_eq!(answer["ok"], false);
+            let error = answer["error"].as_str().unwrap();
+            assert!(error.contains(needle), "{spec}: {error}");
+        }
     }
 
     #[test]

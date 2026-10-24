@@ -128,7 +128,7 @@ pub(crate) fn resolve_auto(headroom: Option<u64>) -> Option<u64> {
 /// The exact live heap bytes of the process when a `TrackingAllocator` is installed (feature
 /// `alloc-tracking`); `None` otherwise (the counter reads `0` when no tracking allocator counts).
 #[inline]
-fn tracked_live_bytes() -> Option<u64> {
+pub(crate) fn tracked_live_bytes() -> Option<u64> {
     #[cfg(feature = "alloc-tracking")]
     {
         let live = crate::alloc_tracking::global_live_bytes();

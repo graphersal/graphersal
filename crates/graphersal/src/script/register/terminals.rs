@@ -27,6 +27,14 @@ pub(super) fn register(registry: &mut Registry) {
             &["memory_usage", "memoryUsage"],
             ScriptGraphTraversalSource::memory_usage,
         )
+        .register_fn_as(
+            &["memory_report", "memoryReport"],
+            ScriptGraphTraversalSource::memory_report,
+        )
+        .register_fn_as(
+            &["memory_report", "memoryReport"],
+            ScriptGraphTraversalSource::memory_report_with,
+        )
         // One word, so one spelling serves both conventions.
         .register_fn("statistics", ScriptGraphTraversalSource::statistics)
         .register_fn("embedders", ScriptGraphTraversalSource::embedders)

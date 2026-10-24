@@ -567,6 +567,18 @@ class Graph:
         none."""
     def recompress(self, name: str, *, policy: Optional[AccessPolicy] = None) -> None:
         """Rebuilds the rule's dictionary from the current values and re-encodes them."""
+    def memory_report(
+        self,
+        *,
+        sample_every: Optional[int] = None,
+        max_elements: Optional[int] = None,
+        max_rows: Optional[int] = None,
+        max_labels: Optional[int] = None,
+        policy: Optional[AccessPolicy] = None,
+    ) -> dict[str, Any]:
+        """Where the graph's memory goes per label and top-level property (rows, labels,
+        shapes, indexes, compression rules, structure); changes nothing. ``max_elements`` /
+        ``sample_every`` sample, ``max_rows`` / ``max_labels`` keep the largest rows."""
     def estimate_compression(
         self,
         label: str,

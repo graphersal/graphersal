@@ -543,6 +543,9 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "median":
         "Yields the median of the numbers in the stream.",
         "g.v().values(\"age\").median().next()" => "30.5";
+    "traversal" "memory_report":
+        "Reports where the graph's memory goes per label and top-level property (elements, value types, bytes, size histogram, distinct strings, vectors), with indexes, compression rules and slots; #{sample_every, max_elements, max_rows, max_labels} sample or cut it.",
+        "g.memory_report().properties.filter(|p| p.path == \"$.name\").map(|p| p.elements)" => "[4, 2]";
     "traversal" "memory_usage":
         "Returns the graph's own memory footprint in bytes (structure, indexes, properties).",
         "g.memory_usage().total_bytes > 0" => "true";
