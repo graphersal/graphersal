@@ -16,9 +16,10 @@
 // neighbourhood are then read again from the engine (the neighbourhood keeps the new vertex), the
 // query result's drawing and a drill-down stay patched.
 //
-// Filter (js/graph/filter-model.js, drawer components/graph-filter.js): the Filter button opens the
-// drawer, its switch turns the filter off and on without losing it. The filter state is kept per
-// graph in localStorage; the applied filter goes to the engine for the whole graph and the
+// Filter (js/graph/filter-model.js, popover components/graph-filter.js): the Filter button opens
+// the popover under itself at the panel's left edge (never over the inspector on the right), its
+// switch turns the filter off and on without losing it. The filter state is kept per graph in
+// localStorage; the applied filter goes to the engine for the whole graph and the
 // neighbourhood (`graphView(limits, filter)`, `neighbourhood(request, filter)`), and is applied by
 // label on the client to a query result and a label sample (they carry no properties); the label
 // overview draws hidden labels faded. Edits apply after 300 ms, on a graph above
@@ -37,7 +38,8 @@
 // Layout, Edit and Filter move into the Display menu and the right-hand buttons shrink to icons.
 
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, markRaw, toRaw } from 'vue';
-import { state, saveSettings, newTab, reveal } from '../store.js';
+import { state, saveSettings, newTab, reveal, isDark } from '../store.js';
+import { labelPalette, labelSwatch, paletteLabels } from '../graph/palette.js';
 import { PanelFrame, PanelTabs, FitButton, ExportMenu } from './panel-frame.js';
 import { DropMenu } from './drop-menu.js';
 import { exportFileName, downloadBlob } from '../export.js';
@@ -754,12 +756,27 @@ export const GraphPanel = {
 
     // ------------------------------------------------------------------ filter (drawer, applying)
     const filterOpen = ref(false);
-    const drawerTop = ref(34); // below the toolbar (measured when the drawer opens)
+    // The popover's top: just below the toolbar, under the Filter button (measured when it opens;
+    // also when Filter sits in the Display menu, the popover opens at the left under the toolbar).
+    const drawerTop = ref(38);
+    const drawerStyle = computed(() => ({ top: drawerTop.value + 'px', maxHeight: `calc(100% - ${drawerTop.value + 8}px)` }));
     /** The Filter button's state: `count` = active restrictions, `enabled`, `open` (the drawer). */
     const filter = computed(() => ({ count: built.value.count, enabled: fstate.value.enabled, open: filterOpen.value }));
     const graphSize = computed(() => (state.graph ? state.graph.vertexCount + state.graph.edgeCount : 0));
     const filterMode = computed(() => applyMode(graphSize.value));
     const specText = (f) => (f ? JSON.stringify(f) : '');
+    // The popover's colour swatch per vertex label (palette.js `labelSwatch`): the colour the
+    // drawings give the label. The current drawing's labels are assigned first, through the same
+    // `paletteLabels` order graph-canvas.js uses, so the swatch never waits for the canvas; a label
+    // never drawn in this page has no slot yet and shows a neutral outline (its slot depends on the
+    // order labels are first drawn). Recomputed with the drawing, the labels and the theme.
+    const vertexSwatches = computed(() => {
+      const dark = isDark();
+      if (elements.value) labelPalette.assign(paletteLabels(elements.value, kind.value));
+      const out = {};
+      for (const l of vocab.value.vertexLabels) out[l.label] = labelSwatch(labelPalette, l.label, dark);
+      return out;
+    });
     const filterDirty = computed(() => specText(wanted.value) !== specText(applied.value));
     const filterBusy = computed(() => !!applied.value && (loading.value || nbBusy.value));
 
@@ -875,7 +892,7 @@ export const GraphPanel = {
 
     function openFilter() {
       filterOpen.value = !filterOpen.value;
-      if (filterOpen.value && toolbarEl.value) drawerTop.value = toolbarEl.value.offsetTop + toolbarEl.value.offsetHeight;
+      if (filterOpen.value && toolbarEl.value) drawerTop.value = toolbarEl.value.offsetTop + toolbarEl.value.offsetHeight + 4;
       if (filterOpen.value) loadVocab({ keys: true });
       else nextTick(focusFilterButton);
     }
@@ -968,7 +985,7 @@ export const GraphPanel = {
       toolbarEl, fitState, inMenu, displayTitleText, GRAPH_HELP, FILTER_ENABLED, filter, filterBadge, openFilter, toggleFilter,
       sizeBy, SIZE_BY_CHOICES, nodeScale,
       fstate, vocab, vocabLoading, vocabError, built, filterError, filterMode, filterDirty, filterBusy, filterOpen,
-      closeFilter, clearFilter, resetFilter, drawerTop, onFilterUpdate, applyFilter, openFilterQuery, filteredStrip,
+      closeFilter, clearFilter, resetFilter, drawerStyle, vertexSwatches, onFilterUpdate, applyFilter, openFilterQuery, filteredStrip,
     };
   },
   template: `
@@ -1129,8 +1146,8 @@ export const GraphPanel = {
           </div>
         </template>
       </graph-canvas>
-      <graph-filter-drawer v-if="filterOpen" :style="{ top: drawerTop + 'px' }" :model="fstate" :vertex-labels="vocab.vertexLabels" :edge-labels="vocab.edgeLabels"
-                           :vertex-label-total="vocab.vertexLabelTotal || 0" :edge-label-total="vocab.edgeLabelTotal || 0"
+      <graph-filter-drawer v-if="filterOpen" :style="drawerStyle" :model="fstate" :vertex-labels="vocab.vertexLabels" :edge-labels="vocab.edgeLabels"
+                           :vertex-swatches="vertexSwatches" :vertex-label-total="vocab.vertexLabelTotal || 0" :edge-label-total="vocab.edgeLabelTotal || 0"
                            :types="vocab.types" :built="built" :engine-error="filterError" :mode="filterMode" :dirty="filterDirty"
                            :busy="filterBusy" :loading="vocabLoading" :load-error="vocabError" :source="overview ? 'labels' : source"
                            @update="onFilterUpdate" @close="closeFilter" @apply="applyFilter" @toggle="toggleFilter"

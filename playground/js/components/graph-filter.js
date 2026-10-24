@@ -1,10 +1,13 @@
-// The Graph panel's filter drawer: an overlay drawer over the drawing (never a docked panel),
-// opened by the toolbar's Filter button. The panel (graph-panel.js) owns the filter state, applies
-// it and persists it; this component only shows it and emits the edited state. Model:
-// js/graph/filter-model.js (rows, operator lists by key type, value conversion).
+// The Graph panel's filter popover: an overlay over the drawing (never a docked panel), opened by
+// the toolbar's Filter button and anchored under it at the panel's left edge, below the toolbar
+// (position and max-height: graph-panel.js `drawerStyle`, CSS `.filter-drawer`), so it never
+// covers the inspector on the right except in a very narrow panel. The panel (graph-panel.js)
+// owns the filter state, applies it and persists it; this component only shows it and emits the
+// edited state. Model: js/graph/filter-model.js (rows, operator lists by key type, value
+// conversion).
 //
 // Esc closes it (the panel returns the focus to the Filter button); on open the focus moves into
-// the drawer. It stays open while the drawing is used (clicks on the drawing do not close it), so
+// the popover. It stays open while the drawing is used (clicks on the drawing do not close it), so
 // the effect of a change can be watched.
 
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
@@ -22,6 +25,12 @@ export const GraphFilterDrawer = {
     /** `[{label, count}]` of the graph's vertex / edge labels (statistics). */
     vertexLabels: { type: Array, default: () => [] },
     edgeLabels: { type: Array, default: () => [] },
+    /**
+     * `{label: {color, assigned, other}}` (palette.js `labelSwatch`): the drawing colour of each
+     * vertex label, shown as a decorative swatch before its name. Edges are drawn in one neutral
+     * colour, so edge labels have none.
+     */
+    vertexSwatches: { type: Object, default: () => ({}) },
     /** How many vertex / edge labels the graph has (more than listed: statistics() lists the largest). */
     vertexLabelTotal: { type: Number, default: 0 },
     edgeLabelTotal: { type: Number, default: 0 },
@@ -87,6 +96,17 @@ export const GraphFilterDrawer = {
     function removeCondition(field, label, index) {
       update(setConditions(props.model, field, label, condsOf(field, label).filter((c, i) => i !== index)));
     }
+    /** The swatch: filled while the label is shown, hollow (its colour as a ring) while hidden,
+     * a dashed neutral outline while it has no colour yet. */
+    function swatchClass(row) {
+      const sw = props.vertexSwatches[row.label];
+      return { hollow: !row.on, unassigned: !sw || !sw.assigned };
+    }
+    function swatchTitle(row) {
+      const sw = props.vertexSwatches[row.label];
+      if (!sw || !sw.assigned) return 'Gets its colour when it is first drawn';
+      return sw.other ? 'More labels than colours: drawn in the shared "other" colour' : null;
+    }
     function setHideIsolated(on) { update({ ...props.model, hideIsolated: !!on }); }
 
     function onKey(e) {
@@ -119,7 +139,7 @@ export const GraphFilterDrawer = {
     });
 
     return {
-      root, rows, generalError, all, setOn, addCondition, changeCondition, removeCondition, setHideIsolated, onKey,
+      root, rows, generalError, all, swatchClass, swatchTitle, setOn, addCondition, changeCondition, removeCondition, setHideIsolated, onKey,
       TYPE_HINT, fmt, opsForType, conditionErrorText,
     };
   },
@@ -156,6 +176,9 @@ export const GraphFilterDrawer = {
           <div v-for="row in rows[side.field]" :key="row.label" class="fd-label" :class="{ off: !row.on }">
             <label class="fd-label-line">
               <input type="checkbox" :checked="row.on" @change="setOn(side.field, row.label, $event.target.checked)">
+              <span v-if="side.field === 'vertices'" class="fd-swatch" aria-hidden="true" :class="swatchClass(row)"
+                    :style="vertexSwatches[row.label] && vertexSwatches[row.label].color ? { '--sw': vertexSwatches[row.label].color } : null"
+                    :title="swatchTitle(row)"></span>
               <span class="fd-label-name">{{ row.label === '' ? '(no label)' : row.label }}</span>
               <span class="fd-count faint">({{ fmt(row.count) }})</span>
             </label>

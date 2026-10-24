@@ -263,10 +263,13 @@ it runs again.
 
 ### Filtering the drawing
 
-**⚲ Filter** in the Graph panel's toolbar opens a drawer over the drawing that decides what is
-drawn. It lists the graph's vertex and edge labels with their counts: uncheck a label to hide it
-(**all** / **none** check or uncheck every label of that side). **+ condition** under a label adds
-a condition on one of its properties, such as `age > 30` or `name contains "an"`; several
+**⚲ Filter** in the Graph panel's toolbar opens a popover under the button, at the left of the
+drawing, that decides what is drawn; it stays open while you click the drawing, does not cover
+the details of the selected element on the right, and Esc closes it. It lists the graph's vertex
+and edge labels with their counts; a dot before each vertex label shows its colour in the drawing
+(a ring while the label is hidden, a dashed outline while the label has not been drawn yet).
+Uncheck a label to hide it (**all** / **none** check or uncheck every label of that side).
+**+ condition** under a label adds a condition on one of its properties, such as `age > 30` or `name contains "an"`; several
 conditions of one label must all hold, and an element is drawn when its label is checked and its
 conditions hold. Every label you do not touch stays visible, including labels the drawer does not
 list (on a graph with very many labels it lists only the largest ones). A vertex with several
@@ -288,7 +291,7 @@ left alone as well.
 - While a filter is on, a strip above the drawing says what passes, for example
   `Filtered: 3 of 6 vertices, 1 of 6 edges` (for a neighbourhood: of the vertices and edges it
   holds without the filter). **Clear** there, and the switch next to the Filter
-  button or in the drawer's header, turn the filter off without deleting it (the button then shows
+  button or in the popover's header, turn the filter off without deleting it (the button then shows
   `· off`); the same switch turns it on again. **Reset** in the drawer deletes it.
 - **Open as query** opens a new query tab with the query that selects what the filter shows.
 - The filter applies to the **Whole graph** (the engine filters first and then draws up to the

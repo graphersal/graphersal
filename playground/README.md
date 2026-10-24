@@ -97,6 +97,7 @@ playground/
   tests/edit-mode.test.mjs     Node tests of the Graph panel's edit mode (js/graph/edit-mode.js, the creation form)
   tests/renderer.test.mjs      Node tests of the renderer interface, the graph controller and the layout client
   tests/palette.test.mjs       Node tests of the label palette
+  tests/filter-swatch.test.mjs Node tests of the filter popover's vertex label swatches (labelSwatch)
   tests/tiers.test.mjs         Node tests of the tier choice: thresholds, hysteresis, switch, no-WebGL, controls
   tests/fast-tier.test.mjs     Node tests of the tier switch (positions kept), drill-down helpers, Stop registry
   tests/graph-toolbar.test.mjs Node tests of the Graph toolbar's fit (what collapses into the Display menu), Filter badge
@@ -499,16 +500,24 @@ renderers and a fake engine, `tests/tiers.test.mjs` the tier choice).
   1.6x of its size for the vertex count (`nodeSizeFor`). Switching it on reads the drawing again
   with the degrees and keeps the vertices where they are (`graph-canvas.js` `keepPositions`).
 
-- **Filter** (model `js/graph/filter-model.js`, `tests/graph-filter.test.mjs`; drawer
-  `components/graph-filter.js`, an overlay over the drawing, Esc closes, never docked). The drawer
-  edits a filter STATE `{enabled, hideIsolated, vertices/edges: {off: [hidden labels], conds:
-  {label: [{key, op, value, value2, type}]}}}`, kept per graph in localStorage
+- **Filter** (model `js/graph/filter-model.js`, `tests/graph-filter.test.mjs`; popover
+  `components/graph-filter.js`, an overlay over the drawing anchored under the Filter button at the
+  panel's left edge below the toolbar, also when Filter sits in the Display menu; it narrows from
+  340 px to 280 px to keep clear of the inspector on the right and covers it only in a panel
+  narrower than about 600 px; Esc closes, never docked). Each vertex label has a fixed-size colour
+  swatch (`.fd-swatch`, aria-hidden) from `labelSwatch` in `js/graph/palette.js`
+  (`tests/filter-swatch.test.mjs`): the slot the drawings use (the current drawing's labels are
+  assigned first through the shared `paletteLabels` order); a label never drawn in this page has
+  no slot yet (slots follow the order labels are first drawn), so it shows a dashed neutral
+  outline instead of a guessed colour; a hidden label shows its colour as a ring. Edges are drawn
+  in one neutral colour: no swatch. The popover edits a filter STATE `{enabled, hideIsolated,
+  vertices/edges: {off: [hidden labels], conds: {label: [{key, op, value, value2, type}]}}}`, kept per graph in localStorage
   (`graph.filter.<kind>:<name>`, `filterStorageKey`); `buildFilter` turns it into the engine's
   `GraphFilter` in its "others visible" form (`othersVisible: true`: `hiddenVertices`/`hiddenEdges`
   by name, `otherVertices`/`otherEdges: "visible"`, only the conditioned labels in the maps), so a
   label beyond the largest ones `statistics()` lists stays visible (a side with no hidden label and
   no condition is left out, so no filter costs nothing). Key types come from the stored schema, else the inferred
-  one (inferred only when the drawer opens; each condition keeps its key's type so a stored filter
+  one (inferred only when the popover opens; each condition keeps its key's type so a stored filter
   applies after a reload without inferring); a number key sends a JSON number, every other value
   a string (never sniffed). Applying: 300 ms after the last edit, on a graph above
   `FILTER_TUNING.manualApplyAbove` (100 000 elements) only on Apply; the on/off switch, Clear and

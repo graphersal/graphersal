@@ -45,7 +45,7 @@ import { legendLabels, inspectorRows, neighbourhood, idsOfIndices } from '../gra
 import { rendererFactory } from '../graph/renderer.js';
 import { GraphController } from '../graph/controller.js';
 import { TIER_TUNING } from '../graph/tiers.js';
-import { labelPalette, vertexLabelsInTableOrder, OTHER_SLOT, PALETTE_SIZE } from '../graph/palette.js';
+import { labelPalette, paletteLabels, OTHER_SLOT, PALETTE_SIZE } from '../graph/palette.js';
 import { ElementEditor } from './element-editor.js';
 import { ValueText } from './value-text.js';
 import { EDIT_TUNING, carryEditPositions, deleteConfirmText } from '../graph/edit-mode.js';
@@ -73,11 +73,6 @@ function schemaRows(d) {
 }
 
 /** The labels a drawing colours, in the order they get palette slots. */
-function paletteLabels(els, kind) {
-  if (!els) return [];
-  return kind === 'schema' ? els.nodes.map((n) => n.label) : vertexLabelsInTableOrder(els);
-}
-
 const message = (err) => (err && err.message ? err.message : String(err));
 
 export const GraphCanvas = {

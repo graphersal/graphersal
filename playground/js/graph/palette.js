@@ -106,6 +106,41 @@ export class LabelPalette {
   color(label, dark = false) {
     return slotColor(this.slot(label), dark);
   }
+
+  /** The slot of `label`, or `undefined` while it has none (never assigns). */
+  peek(label) {
+    return this.slots.get(String(label ?? ''));
+  }
+}
+
+/**
+ * The swatch of a vertex label outside a drawing (the filter popover): its drawing colour when it
+ * already has a slot, else no colour. It never assigns: a slot depends on the order labels are
+ * first drawn, so a label not drawn yet in this page cannot know its colour; it gets one when it
+ * is first drawn (the popover then shows it). `other`: a label past the palette (the neutral
+ * "other" colour).
+ * @param {LabelPalette} palette
+ * @param {string} label
+ * @param {boolean} [dark]
+ * @returns {{color: string|null, assigned: boolean, other: boolean}}
+ */
+export function labelSwatch(palette, label, dark = false) {
+  const slot = palette.peek(label);
+  if (slot === undefined) return { color: null, assigned: false, other: false };
+  return { color: slotColor(slot, dark), assigned: true, other: slot === OTHER_SLOT };
+}
+
+/**
+ * The labels a drawing assigns slots to, in its order: a data view's vertex labels in label-table
+ * order, the schema drawing's labels in node order. Every caller assigning for a drawing goes
+ * through it, so the order (and thus each colour) is the same whoever assigns first.
+ * @param {object|null} els  the drawing's elements (graph-canvas.js `elements`)
+ * @param {'data'|'schema'} kind
+ * @returns {string[]}
+ */
+export function paletteLabels(els, kind) {
+  if (!els) return [];
+  return kind === 'schema' ? els.nodes.map((n) => n.label) : vertexLabelsInTableOrder(els);
 }
 
 /** The page's palette: every drawing (graph, result, schema, every tier) colours through it. */
