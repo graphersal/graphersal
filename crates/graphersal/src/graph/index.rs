@@ -121,6 +121,9 @@ pub(crate) const fn id_entry_bytes<H>() -> u64 {
 /// read) right after its element left the graph. Cloning the index together with the graph keeps
 /// it valid: a `StableGraph` clone keeps every slot. Nothing iterates the id index; it serves
 /// point lookups only, so it keeps no insertion order.
+///
+/// Design and invariants: the book page "In-Memory Storage Internals"
+/// (`book/src/for_developers/storage_internals.md`).
 #[derive(Default, Debug, Clone)]
 pub(crate) struct GraphIndex {
     nodes: IdTable<VertexHandle>,

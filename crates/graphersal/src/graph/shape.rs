@@ -25,6 +25,9 @@
 //!   shape is interned), on `shrink_to_fit` and after a load. A shape referenced from anywhere (a
 //!   stored map, an element image in the undo log, a clone in a result) is never removed, so a
 //!   shape with this table's id is always in the table. Reads never touch the table.
+//!
+//! Design and invariants: the book page "In-Memory Storage Internals"
+//! (`book/src/for_developers/storage_internals.md`).
 
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;

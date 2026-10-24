@@ -8,7 +8,7 @@
 //! - `Indexed`: an `IndexMap`, for every free-standing map (nested objects, catalog payloads,
 //!   change sets, results, schema values) and every map a caller builds.
 //! - `Shaped`: a shared, interned key list ([`Shape`], held through an `Arc`) plus the values in
-//!   key order (`Box<[ElementProperty]>`), for the maps a `TraversalGraph` stores per element:
+//!   key order (a `Vec<ElementProperty>`), for the maps a `TraversalGraph` stores per element:
 //!   elements with the same key sequence share one key list, so a property slot costs the value
 //!   alone. The graph's shape table (`graph/shape.rs`) interns the shapes and moves a stored map
 //!   from shape to shape on key-adding and key-removing writes.
@@ -17,6 +17,9 @@
 //! equality, `Debug` text, serde). A key-changing mutation of a `Shaped` map through the public API
 //! (outside the graph's shape table) turns it into an `Indexed` map first; a value-only mutation
 //! (an existing key, `get_mut`, `iter_mut`, `values_mut`) keeps it `Shaped`.
+//!
+//! Design and invariants: the book page "In-Memory Storage Internals"
+//! (`book/src/for_developers/storage_internals.md`).
 
 use std::fmt;
 use std::hash::BuildHasherDefault;

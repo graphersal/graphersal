@@ -26,14 +26,56 @@ directly. All four are `0` without rules.
 With [property indexes](property_indexes.md) it reports `property_index_bytes`, an estimate of
 their entries (part of `total_bytes`; `0` without indexes).
 
-Element properties share their key names: every distinct sequence of keys (a "shape", say
-`name, age` in that order) is stored once per graph, and each vertex or edge keeps only its values
-in that order. `shape_bytes` reports the shared key lists (part of `property_bytes`); a property
-slot itself costs one value (32 bytes on a 64-bit target) plus whatever heap the value owns (a
-string longer than 24 bytes, an array, a nested object). Insertion order stays what every step
-reports (`valueMap()`, `elementMap()`, `properties()`). A key list no element uses any more is
-released by `shrink_to_fit()`, after a load, or when the table has doubled since the last
-release; until then `shape_bytes` still counts it.
+### How property memory works
+
+Element properties share their key names. Every distinct sequence of keys (a "shape", say
+`name, age` in that order) is stored once per graph, and each vertex or edge keeps only its values,
+in that order. A property slot therefore costs one value (32 bytes on a 64-bit target) plus
+whatever heap the value owns (a string longer than 24 bytes, an array, a nested object, a vector),
+no matter how long the key name is or how many elements carry it. `shape_bytes` reports the shared
+key lists: the key names, a lookup index for shapes of more than 16 keys, and the graph's table of
+shapes. It is part of `property_bytes`, never added to `total_bytes` a second time.
+Insertion order stays what every step reports (`valueMap()`, `elementMap()`, `properties()`). The
+playground's Statistics tab shows the figure under Properties as "of which key lists (shapes)".
+
+Two elements share a shape only when they have the same keys **in the same order**. Adding the
+properties of a label in one consistent order (always `name` then `age`, never sometimes `age`
+then `name`) keeps the number of shapes small. Elements that differ (optional properties, a key
+added later to some elements) are fine; they just make a few more shapes:
+
+```rhai,graph=empty,script
+g.add_v("person").property("name", "ann").property("age", 31).iterate();
+let one = g.memory_usage().shape_bytes;
+g.add_v("person").property("name", "bob").property("age", 42).iterate();
+let same_order = g.memory_usage().shape_bytes;      // unchanged: the second vertex shares the shape
+g.add_v("person").property("age", 27).property("name", "cid").iterate();
+let other_order = g.memory_usage().shape_bytes;     // grows: age, name is another shape
+[one, same_order, other_order]
+```
+
+Dropping a property moves the element to the shape without that key; its value slot stays
+allocated until the element gains a key again (so a drop followed by an add, or a rollback of
+either, allocates nothing). A key list no element uses any more is not released right away: it
+goes when the graph has twice as many shapes as after the last release, after a load (opening a
+Store, reading a snapshot, a GraphSON or GraphML file read into a new graph), or on
+`shrink_to_fit()` (Rust: `TraversalGraph::shrink_to_fit`, also `GraphStorage::shrink_to_fit`). Until then `shape_bytes` still counts it. A shape is never
+released while anything still refers to it, such as a rollback image of an open transaction or a
+copied property map.
+
+On a test graph of 1 million vertices and 3 million edges with UUID ids, six properties per vertex
+and two per edge, shared key lists took the live heap from about 2.2 GB to 1.4 GB.
+
+### IDs and the ID index
+
+Each element's id is stored once, with the element. The ID index (part of `index_bytes`) keeps
+only a handle and a 32-bit hash of the id per element (12 bytes plus one control byte per bucket),
+and confirms a lookup by comparing the id stored with the element. Long ids such as UUID strings
+therefore cost their length once, not twice: choose ids for your data, not for memory. On a
+1M/3M test graph with UUID ids and one property per vertex, dropping the index's second copy of
+every id saved about 20 % of the live heap. How both structures work inside is described in
+[In-Memory Storage Internals](../for_developers/storage_internals.md).
+
+### Accuracy
 
 All figures are **estimates**: they sum `std::mem::size_of`/capacity-based arithmetic over the
 structures that back the graph, not a true allocator-level accounting. Every hash map (a nested

@@ -363,6 +363,7 @@
   - [Count Pushdown Rule](optimizer/count_pushdown.md)
   - [Lazy Barrier Rule](optimizer/lazy_barrier.md)
   - [Path Requirement Analysis](optimizer/path_analysis.md)
+- [In-Memory Storage Internals](for_developers/storage_internals.md)
 - [Storage Format Specification](persistence/format.md)
 - [TinkerPop Compliance](for_developers/tinkerpop_compliance.md)
 - [Test Coverage](for_developers/test_coverage.md)
