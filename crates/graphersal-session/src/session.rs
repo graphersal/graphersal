@@ -30,7 +30,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 use crate::display::{
-    Bounds, CompactGraph, Display, Table, bounded_display, json_safe, values_json,
+    Bounds, CompactGraph, Display, Table, bounded_display_at, json_safe, values_json,
 };
 use crate::storage::{GraphFactory, IntoSessionGraph, SessionGraph, StorageKind};
 
@@ -59,6 +59,11 @@ pub struct RunOptions {
     pub max_items: Option<usize>,
     /// Display everything.
     pub no_limit: bool,
+    /// Display paging: the top-level results skipped before the shown ones (default 0); the
+    /// display then shows the `max_rows` results after them. The query itself is unchanged
+    /// (every result is still computed). Ignored for a single value. It pages the JSON and
+    /// Table views; the Raw view stays the engine visualizer's output of the first results.
+    pub offset: Option<usize>,
     /// Spelling of step names in the profile and error messages: `"snake"` (default) or
     /// `"camel"` (the session option `render.spelling`).
     pub spelling: Spelling,
@@ -1018,7 +1023,8 @@ impl Session {
                 }
             };
             let results = vec![listing];
-            let mut display = bounded_display(&results, true, &Bounds::of(render));
+            let mut display =
+                bounded_display_at(&results, true, &Bounds::of(render), offset_of(options));
             match try_render_value(value, VisualizeFormat::Auto, render) {
                 Ok(rendered) => display.raw = rendered.text,
                 Err(diagnostic) => display.raw = diagnostic,
@@ -1049,7 +1055,7 @@ impl Session {
                     opts.insert("profile_types".into(), Dynamic::from_array(types));
                 }
                 let exec = traversal.execute_dynamic(Dynamic::from_map(opts));
-                let mut out = execution_outcome(exec, render);
+                let mut out = execution_outcome(exec, render, offset_of(options));
                 out.implicit = true;
                 return out;
             }
@@ -1058,7 +1064,7 @@ impl Session {
 
         let value = match value.try_cast_result::<ScriptExecution>() {
             Ok(exec) => {
-                return execution_outcome(exec, render);
+                return execution_outcome(exec, render, offset_of(options));
             }
             Err(value) => value,
         };
@@ -1074,6 +1080,9 @@ impl Session {
                     raw: metrics.to_string(),
                     notice: None,
                     total_rows: None,
+                    offset: 0,
+                    shown_rows: None,
+                    items_cut: false,
                 };
                 return Outcome {
                     ok: true,
@@ -1096,6 +1105,9 @@ impl Session {
                 raw: schema.visualize(VisualizeFormat::Table),
                 notice: None,
                 total_rows: None,
+                offset: 0,
+                shown_rows: None,
+                items_cut: false,
             };
             return Outcome {
                 ok: true,
@@ -1137,6 +1149,9 @@ impl Session {
                 raw: text.clone(),
                 notice,
                 total_rows: None,
+                offset: 0,
+                shown_rows: None,
+                items_cut: false,
             };
             let results = format!("[{}]", serde_json::to_string(&text).unwrap_or_default());
             return Outcome {
@@ -1169,10 +1184,12 @@ impl Session {
             }
         };
         let terminal = hint.unwrap_or(if is_list { "to_list" } else { "value" });
-        let mut display = bounded_display(&results, is_list, &Bounds::of(render));
+        let offset = offset_of(options);
+        let mut display = bounded_display_at(&results, is_list, &Bounds::of(render), offset);
         match raw {
             Ok(rendered) => {
-                if let Some(notice) = rendered.notice() {
+                // The visualizer's notice speaks of the first rows: not of a later page.
+                if let Some(notice) = rendered.notice().filter(|_| offset == 0 || !is_list) {
                     display.notice = Some(notice);
                 }
                 display.raw = rendered.text;
@@ -1351,7 +1368,12 @@ fn execution_json(results: &str, error: &str, profile: &str) -> String {
 
 /// The response parts of an `Execution`: its own JSON (`{results, error, profile}`, the Rust
 /// map shape, keys in the engine's order), and the results rendered within the display limits.
-fn execution_outcome(mut exec: ScriptExecution, render: &RenderOptions) -> Outcome {
+/// The display offset of a run (`RunOptions::offset`, default 0).
+fn offset_of(options: &RunOptions) -> usize {
+    options.offset.unwrap_or(0)
+}
+
+fn execution_outcome(mut exec: ScriptExecution, render: &RenderOptions, offset: usize) -> Outcome {
     let ok = exec.is_ok();
     let execution = match exec.to_json() {
         Ok(text) => text,
@@ -1380,13 +1402,16 @@ fn execution_outcome(mut exec: ScriptExecution, render: &RenderOptions) -> Outco
                     },
                     None => Bounds::unlimited(),
                 };
-                let mut display = bounded_display(&results, true, &bounds);
-                display.notice = rendered.notice();
+                let mut display = bounded_display_at(&results, true, &bounds, offset);
+                // The visualizer's notice speaks of the first rows: not of a later page.
+                if offset == 0 {
+                    display.notice = rendered.notice();
+                }
                 display.raw = rendered.text;
                 display
             }
             Err(diagnostic) => {
-                let mut display = bounded_display(&results, true, &Bounds::of(render));
+                let mut display = bounded_display_at(&results, true, &Bounds::of(render), offset);
                 display.raw = diagnostic;
                 display
             }
@@ -3194,5 +3219,59 @@ mod tests {
         );
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["execution"]["results"].as_array().unwrap().len(), 4);
+    }
+
+    /// `offset` pages the display of a list result (traversal, `to_list()`) after the first
+    /// `offset` results; the response reports `offset`, `shown_rows` and `items_cut`, and a
+    /// single value ignores it.
+    #[test]
+    fn offset_pages_the_display() {
+        let page = |script: &str, offset: usize, max_rows: usize| {
+            run_with(
+                &mut modern(),
+                script,
+                &RunOptions {
+                    offset: Some(offset),
+                    max_rows: Some(max_rows),
+                    ..RunOptions::default()
+                },
+            )
+        };
+        let names = r#"g.v().order().by("name").values("name")"#;
+        for script in [names.to_string(), format!("{names}.to_list()")] {
+            let r = page(&script, 2, 3);
+            let shown: Value =
+                serde_json::from_str(r["display"]["json"].as_str().unwrap()).unwrap();
+            assert_eq!(shown, json!(["marko", "peter", "ripple"]), "{r}");
+            assert_eq!(r["display"]["offset"], 2, "{r}");
+            assert_eq!(r["display"]["shown_rows"], 3, "{r}");
+            assert_eq!(r["display"]["total_rows"], 6, "{r}");
+            assert!(r["display"].get("items_cut").is_none(), "{r}");
+            let notice = r["display"]["notice"].as_str().unwrap();
+            assert!(notice.contains("showing rows 3 to 5 of 6"), "{notice}");
+            // Past the end: nothing shown, the offset as asked.
+            let r = page(&script, 9, 3);
+            assert_eq!(r["display"]["json"], "[]", "{r}");
+            assert_eq!(r["display"]["offset"], 9, "{r}");
+            assert_eq!(r["display"]["shown_rows"], 0, "{r}");
+        }
+        // No offset: the fields stay out of the response (the playground's shape).
+        let r = page(names, 0, 100);
+        assert!(r["display"].get("offset").is_none(), "{r}");
+        assert_eq!(r["display"]["shown_rows"], 6, "{r}");
+        // A single value ignores the offset.
+        let r = page(r#"g.v().count().next()"#, 3, 100);
+        assert_eq!(r["display"]["json"], "6", "{r}");
+        assert!(r["display"].get("offset").is_none(), "{r}");
+        // A nested list cut to max_items is reported.
+        let r = run_with(
+            &mut modern(),
+            "[[1, 2, 3]]",
+            &RunOptions {
+                max_items: Some(2),
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(r["display"]["items_cut"], true, "{r}");
     }
 }

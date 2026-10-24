@@ -219,19 +219,54 @@ pub struct Display {
     pub notice: Option<String>,
     /// How many results there are (a list result), `None` for a single value.
     pub total_rows: Option<usize>,
+    /// The results skipped before the shown ones (`RunOptions::offset`; a list result only).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
+    /// How many results are shown (a list result), `None` for a single value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_rows: Option<usize>,
+    /// Whether a nested collection was cut to `max_items` (it then ends with a `… N more`
+    /// item, a map with a `…` key).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub items_cut: bool,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// The display of `results` (one row per item when `as_rows`, else the single value). `raw` is
 /// filled in by the caller from the engine's visualizer.
 pub fn bounded_display(results: &[ElementProperty], as_rows: bool, bounds: &Bounds) -> Display {
+    bounded_display_at(results, as_rows, bounds, 0)
+}
+
+/// [`bounded_display`] of the rows after the first `offset` ones (a page: rows `offset + 1` to
+/// `offset + max_rows`); `offset` is ignored for a single value (`!as_rows`).
+pub fn bounded_display_at(
+    results: &[ElementProperty],
+    as_rows: bool,
+    bounds: &Bounds,
+    offset: usize,
+) -> Display {
     let total = results.len();
-    let shown_rows = bounds.max_rows.map_or(total, |n| n.min(total));
+    // The offset as asked (reported, also past the end); the rows start at most at the end.
+    let offset = if as_rows { offset } else { 0 };
+    let start = offset.min(total);
+    let rest = total - start;
+    let shown_rows = bounds.max_rows.map_or(rest, |n| n.min(rest));
     let mut nested_cut = false;
-    let rows: Vec<ElementProperty> = results[..shown_rows]
+    let rows: Vec<ElementProperty> = results[start..start + shown_rows]
         .iter()
         .map(|row| cut_nested(row, bounds.max_items, &mut nested_cut))
         .collect();
-    let notice = if shown_rows < total {
+    let notice = if shown_rows < rest && offset > 0 {
+        Some(format!(
+            "{CUT} showing rows {} to {} of {total}; more exist.",
+            offset + 1,
+            offset + shown_rows
+        ))
+    } else if shown_rows < rest {
         Some(format!(
             "{CUT} showing the first {shown_rows} rows; more exist. Raise \"Max rows\" in the \
              settings, or override one call with to_table(#{{max_rows: n}}) / #{{no_limit: true}}."
@@ -257,6 +292,9 @@ pub fn bounded_display(results: &[ElementProperty], as_rows: bool, bounds: &Boun
         raw: String::new(),
         notice,
         total_rows: as_rows.then_some(total),
+        offset,
+        shown_rows: as_rows.then_some(shown_rows),
+        items_cut: nested_cut,
     }
 }
 

@@ -375,6 +375,13 @@ without `--mcp`, is a usage error. The [AI Chat](#ai-chat) does not use it (its 
 has the built-in MCP instructions, but not these notes): give the chat its own text with
 `system_prompt` or `system_prompt_file`, so nothing is added twice.
 
+The largest tool answer is 60000 characters by default; `--mcp-max-chars N` (at least 1000)
+sets another limit (see [Answer size and paging](#answer-size-and-paging)):
+
+```bash
+graphersal --graph data/ --server --mcp --mcp-max-chars 30000
+```
+
 The options combine (`--mcp --mcp-read-only --mcp-token ... --mcp-query-tools`), and the
 [limit options](#limits) apply to the agent's queries as to the browser's.
 
@@ -428,7 +435,7 @@ The list is the same on every `--graph` source; there are no persistence tools:
 
 | Tool | What it does |
 |---|---|
-| `query` `{script, profile?, max_rows?}` | Runs a script (Gremlin in Rhai syntax) as one transaction: the results as JSON within the display limits (100 rows and 100 nested items by default, with a note when something was cut), whether it changed the graph and the new commit number, the per-step profile with `profile: true`; a failing script is a tool error carrying the diagnostic and its `Help:` line, and changes nothing |
+| `query` `{script, profile?, offset?, max_rows?, max_items?}` | Runs a script (Gremlin in Rhai syntax) as one transaction: the results as compact JSON, [paged](#answer-size-and-paging) (100 results after the first `offset`, 100 items of every nested list by default, with a note when something was cut and the next page's offset), whether it changed the graph and the new commit number, the per-step profile with `profile: true`; a failing script is a tool error carrying the diagnostic and its `Help:` line, and changes nothing |
 | `get_schema`, `infer_schema` | The stored schema (or null), the schema the data satisfies |
 | `validate_schema` `{schema, mode?}`, `validate_schema_patch` `{patch}`, `diff_schema` `{schema}` | Check a proposed schema or a JSON Merge Patch against the data, without applying |
 | `set_schema` `{schema, mode?}`, `patch_schema` `{patch}` | Store a schema, patch the stored one (validated against the data) |
@@ -438,8 +445,40 @@ The list is the same on every `--graph` source; there are no persistence tools:
 | `list_indexes` | The [property indexes](../users_guide/property_indexes.md) with their `type` and stats (`entries`, `distinctValues`, `bytes`; `served: false` with a `reason` when the storage serves none or the index type is unknown to this version) (also in read-only mode) |
 | `create_index` `{label, key, element?, name?, type?}`, `drop_index` `{name}` | Create (built from the data in the same commit) or drop a property index; `type` is an enum of the known [index types](../users_guide/property_indexes.md#index-types) (`memory-ordered`, the default); refused in read-only mode, where `query` also refuses `g.create_index`/`g.drop_index`; a refused index answers its field errors (an unknown type, a key the schema declares as a vector, a list or a map) |
 | `list_saved_queries` `{folder?, search?}` | The [saved queries](../users_guide/saved_queries.md) stored in the graph: name, folder, description, parameters (JSON Schema, default, required, description), status (`error` with the reason when it cannot run), `writes` and `effects` (`true` and what it changes, for a query that writes); `folder` keeps a folder and those below it, `search` a text in the name or description (case-insensitive). With `--mcp-read-only` the queries that write are left out |
-| `run_saved_query` `{name, params?, max_rows?}` | Runs `g.query(name, #{..})` like `query` (bounded answer, the call text on its first line): the arguments are checked against the parameter schemas, omitted ones take their default, a wrong one is a tool error with its `Help:` line. A query that writes changes only its effects, as one transaction; with `--mcp-read-only` it is refused |
-| `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`) |
+| `run_saved_query` `{name, params?, offset?, max_rows?, max_items?}` | Runs `g.query(name, #{..})` like `query` (paged answer, the call text on its first line): the arguments are checked against the parameter schemas, omitted ones take their default, a wrong one is a tool error with its `Help:` line. A query that writes changes only its effects, as one transaction; with `--mcp-read-only` it is refused |
+| `statistics`, `graph_info` | Counts per label, memory and limits; what the server serves (name, counts, schema mode, source file or Store directory, `view` and a `note` while a read-only view is open, `damageFound`, `mcpReadOnly`, `answerLimitChars`) |
+
+### Answer size and paging
+
+Tool answers are compact JSON (no indentation), on one line after the status lines (`call: ...`
+of a saved query, `ok: 443 results (2.1 ms)`), followed by notes. `query`, `gql`,
+`run_saved_query` and the tools of `--mcp-query-tools` take three paging arguments:
+
+- `offset` (default 0): the first `offset` top-level results are skipped. The query itself is
+  not changed and computes every result again; only the answer shows a later page.
+- `max_rows` (default 100): the most top-level results of one page.
+- `max_items` (default 100): the most items of every nested list or map; a cut list ends with the
+  item `"… N more"`, a cut map with the key `"…"`, and a note says so.
+
+On top of that the whole answer stays within the server's answer limit (`--mcp-max-chars`, default
+60000 characters; `graph_info` shows it as `answerLimitChars`). The limit never cuts inside a
+result, so the JSON stays valid:
+
+- A list of results keeps its leading **whole** results that fit, and the note names what is
+  shown and where to go on: `note: shown results 101-160 of 443, cut at a whole result to fit the
+  answer limit of 60000 characters (...); more results follow: next page offset 160`. A page cut
+  by `max_rows` alone says `... (max_rows sets the page size); more results follow: next page
+  offset 200`; the last page says `no more results`, an offset past the end says so too.
+- A result that alone is longer than the limit is left out with a note that names the offset that
+  skips it.
+- A single value (such as a map from `.next()`) that is too long keeps its leading whole
+  entries with a note; `offset` pages only a list of results (GQL rows are one).
+- Every other tool keeps the leading whole items of its JSON (a note says how many of how many),
+  or the leading whole lines of a text answer.
+
+Clients limit tool output as well: Claude Code caps one MCP tool answer at about 25000 tokens
+by default (the environment variable `MAX_MCP_OUTPUT_TOKENS` changes it). Raising `--mcp-max-chars`
+alone may not help; bound large answers in the query (LIMIT, `values(..)`) or page them.
 
 **A read-only view opened in the browser** is server-wide: the agent's queries read that past
 state too. `graph_info` then carries a `note` ("the served state is a read-only view at commit N

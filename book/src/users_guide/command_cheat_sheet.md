@@ -170,6 +170,7 @@ graphersal --graph modern --server --port 9000 --mcp --mcp-read-only    # the ag
 graphersal --graph modern --server --port 9000 --mcp --mcp-token my-secret-token   # the agent must send the token
 graphersal --graph data/ --server --port 9000 --mcp --mcp-query-tools  # also every saved query as a tool of its own
 graphersal --graph data/ --server --mcp --mcp-instructions notes.md      # operator notes in the MCP instructions
+graphersal --graph data/ --server --mcp --mcp-max-chars 30000           # the largest MCP tool answer (default 60000)
 graphersal --args-file args.json                                         # the flags from a JSON file (also @args.json)
 ```
 

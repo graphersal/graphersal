@@ -94,7 +94,8 @@ USAGE:
     graphersal [OPTIONS] <SCRIPT>        # evaluate SCRIPT, print the result, exit
     graphersal [OPTIONS] --in            # evaluate the script read from stdin, print the result, exit
     graphersal --graph <SOURCE> --server [--port N] [--ui-dir DIR] [--mcp [--mcp-read-only]
-               [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]]
+               [--mcp-token SECRET] [--mcp-query-tools] [--mcp-instructions FILE]
+               [--mcp-max-chars N]]
                [--ai FILE]
                                          # DEV server: the playground UI over HTTP (unstable),
                                          # optionally an MCP endpoint for AI agents
@@ -211,6 +212,12 @@ OPTIONS:
                            "Notes from the operator of this server about this graph:" (what
                            the graph holds, which queries to prefer). Operator-trusted text.
                            The AI Chat does not use it: its own "system_prompt" does that.
+        --mcp-max-chars <N>
+                           With --mcp: the largest tool answer in characters (default 60000,
+                           at least 1000). A longer answer keeps whole results only (valid
+                           compact JSON) and ends with a note naming the next page's offset.
+                           The client may limit tool output too (Claude Code: about 25000
+                           tokens, MAX_MCP_OUTPUT_TOKENS), so raising this alone may not help.
         --ai <FILE>        With --server: EXPERIMENTAL AI Chat, an LLM agent working on the
                            served graph. FILE is JSON: {"provider": "openai"|"anthropic",
                            "model": "<id>", "api_key_env": "<VARIABLE>", "base_url": null,
@@ -733,6 +740,8 @@ pub struct Cli {
     pub mcp_token: Option<String>,
     /// `--mcp-query-tools`: the MCP endpoint also lists every saved query as a tool.
     pub mcp_query_tools: bool,
+    /// `--mcp-max-chars`: the largest MCP tool answer in characters (`None`: the default).
+    pub mcp_max_chars: Option<usize>,
     /// `--ai`: the AI Chat configuration file of the dev server.
     pub ai: Option<String>,
     /// `--mcp-instructions`: the TEXT of the operator's file, appended to the MCP server
@@ -818,6 +827,7 @@ impl Default for Cli {
             mcp_read_only: false,
             mcp_token: None,
             mcp_query_tools: false,
+            mcp_max_chars: None,
             ai: None,
             mcp_instructions: None,
             embedders: Vec::new(),
@@ -927,6 +937,21 @@ impl Cli {
                 "--mcp" => cli.mcp = true,
                 "--mcp-read-only" => cli.mcp_read_only = true,
                 "--mcp-query-tools" => cli.mcp_query_tools = true,
+                "--mcp-max-chars" => {
+                    let raw = value(&mut args)?;
+                    let n = raw
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n >= MCP_MIN_CHARS)
+                        .ok_or_else(|| {
+                            format!(
+                                "Invalid --mcp-max-chars value: {raw}. Expected a number of \
+                                 characters, at least {MCP_MIN_CHARS} (default 60000)"
+                            )
+                        })?;
+                    cli.mcp_max_chars = Some(n);
+                }
                 "--ai" => cli.ai = Some(value(&mut args)?),
                 "--mcp-instructions" => {
                     cli.mcp_instructions = Some(read_mcp_instructions(&value(&mut args)?)?)
@@ -1129,6 +1154,10 @@ impl Cli {
             );
         }
 
+        if cli.mcp_max_chars.is_some() && !cli.mcp {
+            return Err("--mcp-max-chars needs --mcp".to_string());
+        }
+
         if cli.no_limit && (cli.max_rows.is_some() || cli.max_items.is_some()) {
             return Err(
                 "--no-limit removes every display limit and cannot be combined with \
@@ -1155,6 +1184,9 @@ impl Cli {
 
 /// The longest `--mcp-instructions` text, in characters.
 pub const MAX_MCP_INSTRUCTIONS_CHARS: usize = 20_000;
+
+/// The smallest `--mcp-max-chars`: room for a status line, some results and the notes.
+pub const MCP_MIN_CHARS: usize = 1000;
 
 /// Reads the `--mcp-instructions` file: UTF-8, not empty, at most
 /// [`MAX_MCP_INSTRUCTIONS_CHARS`] characters; returns the trimmed text.

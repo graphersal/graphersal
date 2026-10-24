@@ -5470,3 +5470,269 @@ fn a_broken_args_file_is_a_usage_error() {
     assert!(err.contains("graphersal --help"), "{err}");
     assert!(out.stdout.is_empty());
 }
+
+/// Starts a server with `--mcp` and `extra` flags on an empty graph and fills it with 500
+/// `item` vertices (`n` 0..499, a 100-character `pad`).
+fn items_server(name: &str, extra: &[&str]) -> (DevServer, McpClient) {
+    let ui = ui_dir(name);
+    let mut args = vec![
+        "--graph",
+        "empty",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ];
+    args.extend_from_slice(extra);
+    let server = start(&args);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let script = format!(
+        r#"for i in 0..500 {{ g.add_v("item").property("n", i).property("pad", "{}").iterate(); }}"#,
+        "p".repeat(100)
+    );
+    let (error, text) = mcp.call("query", serde_json::json!({ "script": script }));
+    assert!(!error, "{text}");
+    (server, mcp)
+}
+
+/// The JSON line of a query answer (the line after the status), parsed.
+fn answer_json(text: &str) -> Value {
+    let line = text
+        .lines()
+        .find(|l| l.starts_with('[') || l.starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON line: {text}"));
+    serde_json::from_str(line).unwrap_or_else(|err| panic!("invalid JSON ({err}): {text}"))
+}
+
+/// The `next page offset N` of a query answer's note.
+fn next_offset(text: &str) -> Option<usize> {
+    let (_, rest) = text.split_once("next page offset ")?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// MCP answers are compact JSON (no indentation), a result list larger than the answer limit
+/// (`--mcp-max-chars`) keeps whole results only, so the JSON stays valid, and a note names the
+/// results shown and the next page's offset; paging with `offset` returns every result once.
+#[test]
+fn mcp_answers_are_compact_and_cut_at_whole_results() {
+    let (server, mut mcp) = items_server("mcp_compact", &["--mcp-max-chars", "5000"]);
+    let (error, info) = mcp.call("graph_info", serde_json::json!({}));
+    assert!(!error, "{info}");
+    assert!(!info.contains('\n'), "compact: {info}");
+    assert_eq!(answer_json(&info)["answerLimitChars"], 5000, "{info}");
+
+    let script = r#"g.v().has_label("item").order().by("n").project("n", "pad").by("n").by("pad")"#;
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": script, "max_rows": 500}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.chars().count() <= 5000, "{}", text.chars().count());
+    assert!(text.starts_with("ok: 500 results"), "{text}");
+    assert!(!text.contains("\n "), "no indentation: {text}");
+    let rows = answer_json(&text);
+    let kept = rows.as_array().unwrap().len();
+    assert!(kept > 10 && kept < 500, "{kept}");
+    assert_eq!(rows[0], serde_json::json!({"n": 0, "pad": "p".repeat(100)}));
+    assert!(
+        text.contains(&format!(
+            "note: shown results 1-{kept} of 500, cut at a whole result"
+        )),
+        "{text}"
+    );
+    assert_eq!(next_offset(&text), Some(kept), "{text}");
+
+    // Paging: every result exactly once, in order.
+    let mut seen = Vec::new();
+    let mut offset = Some(0);
+    let mut pages = 0;
+    while let Some(at) = offset {
+        let (error, text) = mcp.call(
+            "query",
+            serde_json::json!({"script": script, "max_rows": 500, "offset": at}),
+        );
+        assert!(!error, "{text}");
+        assert!(text.chars().count() <= 5000, "{text}");
+        for row in answer_json(&text).as_array().unwrap() {
+            seen.push(row["n"].as_u64().unwrap());
+        }
+        offset = next_offset(&text);
+        pages += 1;
+        assert!(pages < 100, "paging does not end");
+    }
+    assert_eq!(seen, (0..500).collect::<Vec<u64>>());
+
+    // max_rows pages too, and past the end a note says so.
+    let names = r#"g.v().has_label("item").order().by("n").values("n")"#;
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": names, "max_rows": 30, "offset": 450}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(
+        answer_json(&text),
+        serde_json::json!((450..480).collect::<Vec<_>>())
+    );
+    assert!(
+        text.contains("shown results 451-480 of 500 (max_rows sets the page size)"),
+        "{text}"
+    );
+    assert_eq!(next_offset(&text), Some(480));
+    let (_, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": names, "max_rows": 30, "offset": 480}),
+    );
+    assert!(
+        text.contains("shown results 481-500 of 500; no more results"),
+        "{text}"
+    );
+    assert_eq!(next_offset(&text), None, "{text}");
+    let (_, text) = mcp.call("query", serde_json::json!({"script": names, "offset": 900}));
+    assert_eq!(answer_json(&text), serde_json::json!([]), "{text}");
+    assert!(
+        text.contains("offset 900 is past the last result (500 in all)"),
+        "{text}"
+    );
+    let (error, text) = mcp.call("query", serde_json::json!({"script": names, "offset": -1}));
+    assert!(error && text.contains("\"offset\""), "{text}");
+
+    // GQL rows page the same way, keeping the column order.
+    let (error, text) = mcp.call(
+        "gql",
+        serde_json::json!({"query": "MATCH (i:item) RETURN i.n AS n, i.pad AS a ORDER BY n", "max_rows": 500, "offset": 100}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains(r#"[{"n":100,"a":"ppp"#), "{text}");
+    let kept = answer_json(&text).as_array().unwrap().len();
+    assert_eq!(next_offset(&text), Some(100 + kept), "{text}");
+
+    // One result longer than the limit is left out with a note; a single value keeps whole
+    // items.
+    let (_, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": r#"g.v().has_label("item").group().by("n").by("pad")"#, "max_items": 500}),
+    );
+    assert!(text.starts_with("ok: 1 result"), "{text}");
+    assert!(
+        text.contains("the result at offset 0 alone is longer than the answer limit of 5000"),
+        "{text}"
+    );
+    let (_, text) = mcp.call(
+        "query",
+        serde_json::json!({"script": r#"g.v().has_label("item").group().by("n").by("pad").next()"#, "max_items": 500}),
+    );
+    let entries = answer_json(&text);
+    assert!(entries.as_object().unwrap().len() < 500, "{text}");
+    assert!(text.contains("entries of the result"), "{text}");
+    assert!(text.chars().count() <= 5000);
+    drop(server);
+}
+
+/// `max_items` is in the tool schemas and bounds nested lists, with a note when it cut one.
+#[test]
+fn mcp_max_items_is_offered_and_its_cut_is_noted() {
+    let ui = ui_dir("mcp_items");
+    let server = start(&[
+        "--graph",
+        "modern",
+        "--ui-dir",
+        ui.to_str().unwrap(),
+        "--mcp",
+    ]);
+    let mut mcp = McpClient::connect(server.port, &[]);
+    let tools = mcp.rpc("tools/list", serde_json::json!({}));
+    for name in ["query", "gql", "run_saved_query"] {
+        let tool = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap();
+        for key in ["offset", "max_rows", "max_items"] {
+            assert!(
+                tool["inputSchema"]["properties"][key].is_object(),
+                "{name} {key}"
+            );
+        }
+    }
+    let script = "let xs = []; for i in 0..250 { xs.push(i); } [xs]";
+    let (error, text) = mcp.call("query", serde_json::json!({ "script": script }));
+    assert!(!error, "{text}");
+    let row = &answer_json(&text)[0];
+    assert_eq!(row.as_array().unwrap().len(), 101, "{text}");
+    assert_eq!(row[100], "… 150 more", "{text}");
+    assert!(
+        text.contains("note: nested lists and maps longer than max_items (100) were cut"),
+        "{text}"
+    );
+    let (error, text) = mcp.call(
+        "query",
+        serde_json::json!({ "script": script, "max_items": 300 }),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(answer_json(&text)[0].as_array().unwrap().len(), 250);
+    assert!(!text.contains("note:"), "{text}");
+    drop(server);
+}
+
+/// A saved query's own tool (`--mcp-query-tools`) and run_saved_query page like `query`.
+#[test]
+fn mcp_saved_query_tools_page() {
+    let (server, mut mcp) = items_server("mcp_query_paging", &["--mcp-query-tools"]);
+    let spec = r#"{"name": "items", "body": "fn items() { g.v().has_label(\"item\").order().by(\"n\").values(\"n\") }"}"#;
+    assert_eq!(
+        post(server.port, "/api/queries/define", spec).json()["ok"],
+        true
+    );
+    let tools = mcp.rpc("tools/list", serde_json::json!({}));
+    let own = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "items")
+        .unwrap()
+        .clone();
+    assert!(
+        own["inputSchema"]["properties"]["offset"].is_object(),
+        "{own}"
+    );
+    let (error, text) = mcp.call("items", serde_json::json!({"offset": 490, "max_rows": 5}));
+    assert!(!error, "{text}");
+    assert!(text.starts_with("call: g.query(\"items\""), "{text}");
+    assert_eq!(
+        answer_json(&text),
+        serde_json::json!([490, 491, 492, 493, 494])
+    );
+    assert_eq!(next_offset(&text), Some(495), "{text}");
+    let (error, text) = mcp.call(
+        "run_saved_query",
+        serde_json::json!({"name": "items", "offset": 495}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(
+        answer_json(&text),
+        serde_json::json!([495, 496, 497, 498, 499])
+    );
+    assert!(text.contains("no more results"), "{text}");
+    drop(server);
+}
+
+/// `--mcp-max-chars` needs `--mcp` and at least 1000 characters.
+#[test]
+fn mcp_max_chars_is_checked() {
+    for args in [
+        &["--server", "--mcp", "--mcp-max-chars", "999"][..],
+        &["--server", "--mcp", "--mcp-max-chars", "x"][..],
+        &["--server", "--mcp-max-chars", "5000"][..],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("--mcp-max-chars"), "{err}");
+    }
+}

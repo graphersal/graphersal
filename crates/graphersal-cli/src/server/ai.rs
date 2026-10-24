@@ -535,6 +535,7 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
         query_tools: false,
         client: Client::with_detail("ai", Some(&conversation.id)),
         cancel: Some(cancel),
+        max_chars: mcp::MAX_TEXT_CHARS,
     };
     // Ends the turn with an error event, unless it was stopped meanwhile.
     let fail = |message: String, help: String, calls: u32| {

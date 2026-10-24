@@ -72,9 +72,16 @@ use super::{
 /// The protocol revisions this endpoint speaks, newest first (all initialize-based).
 pub(super) const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
 
-/// Largest tool answer text in characters; longer text is cut with a note (an agent's context
-/// is small; the display limits already bound the results).
-const MAX_TEXT_CHARS: usize = 60_000;
+/// Largest tool answer text in characters by default (`--mcp-max-chars` sets another; an
+/// agent's context is small; the display limits already bound the results). A longer answer
+/// keeps whole results only ([`fit`]), so its JSON stays valid.
+pub(super) const MAX_TEXT_CHARS: usize = 60_000;
+
+/// Characters kept free for the notes when the results of an answer are cut to the limit.
+const NOTE_RESERVE: usize = 400;
+
+/// The paging arguments of `query`, `gql`, `run_saved_query` and a saved query's own tool.
+const PAGING_ARGS: [&str; 3] = ["offset", "max_rows", "max_items"];
 
 /// Default display limits of the `query` tool (the UI's defaults).
 const DEFAULT_MAX_ROWS: usize = 100;
@@ -97,6 +104,8 @@ pub(super) struct Mcp {
     token: Option<String>,
     /// `--mcp-instructions`: the operator's text, appended to the instructions.
     operator_notes: Option<String>,
+    /// `--mcp-max-chars`: the largest tool answer in characters.
+    max_chars: usize,
     /// Session id -> `clientInfo` of its `initialize`, in the order they were created.
     sessions: Mutex<Vec<(String, Value)>>,
     /// The `clientInfo` of the last `initialize` (the top bar's badge names it).
@@ -110,6 +119,7 @@ impl Mcp {
             query_tools,
             token,
             operator_notes: None,
+            max_chars: MAX_TEXT_CHARS,
             sessions: Mutex::new(Vec::new()),
             client: Mutex::new(None),
         }
@@ -119,6 +129,12 @@ impl Mcp {
     /// AI Chat prompt does not carry them: it has its own `system_prompt` key.
     pub(super) fn with_operator_notes(mut self, notes: Option<String>) -> Self {
         self.operator_notes = notes;
+        self
+    }
+
+    /// Sets the largest tool answer (`--mcp-max-chars`; `None` keeps [`MAX_TEXT_CHARS`]).
+    pub(super) fn with_max_chars(mut self, max_chars: Option<usize>) -> Self {
+        self.max_chars = max_chars.unwrap_or(MAX_TEXT_CHARS);
         self
     }
 
@@ -365,6 +381,7 @@ fn dispatch(context: &Context, mcp: &Mcp, method: &str, params: &Value) -> RpcRe
                 query_tools: mcp.query_tools,
                 client: Client::with_detail("mcp", None),
                 cancel: None,
+                max_chars: mcp.max_chars,
             };
             match call_tool(context, &caller, name, &args) {
                 Ok(outcome) => plain(tool_result(outcome.text, outcome.is_error)),
@@ -487,7 +504,13 @@ graphersal://statistics. To create test data, use \
 `Fake(seed)` inside a query (reproducible English names, e-mails, addresses, companies and \
 random numbers; section \"Test data generator\" of graphersal://dsl-reference, group \
 \"Generated test data (Fake)\" of graphersal://examples). Every query is one transaction: a \
-failing query changes nothing. Errors carry a `Help:` line that names the fix. Persistence \
+failing query changes nothing. Errors carry a `Help:` line that names the fix. Answers are \
+compact JSON. `query`, `gql` and `run_saved_query` page their results: at most `max_rows` \
+results (default 100) after the first `offset` ones (default 0), `max_items` items of every \
+nested list (default 100), and only whole results within the server's answer limit \
+(`graph_info`: `answerLimitChars`); a trailing note says what was shown and names the next \
+page's `offset`. Bound large answers in the query itself (LIMIT, `values(..)`) or page them. \
+Persistence \
 (checkpoints, history, views of past states) is the user's, in the browser: when the user opens \
 a read-only view of a past state, `graph_info` says so and writes are refused until they go \
 back to the live graph.";
@@ -547,8 +570,10 @@ impl Tool {
 }
 
 const QUERY_DESCRIPTION: &str = "Run a Graphersal script against the shared graph and return \
-its results as JSON (bounded: at most max_rows top-level results, default 100, and 100 items of \
-every nested list; a note says when something was cut).
+its results as compact JSON, paged: at most max_rows top-level results (default 100) after the \
+first offset ones (default 0), max_items items of every nested list or map (default 100), and \
+only whole results within the server's answer limit (graph_info: answerLimitChars); a note says \
+what was cut and names the next page's offset (pass offset to read on).
 
 GQL (the ISO graph query language, which also accepts Cypher spellings) is supported and is the \
 preferred language for reading and writing data. To run a GQL query directly, with no script \
@@ -623,8 +648,8 @@ fn no_args() -> Value {
 
 const GQL_DESCRIPTION: &str = "Run a GQL (ISO graph query language, Cypher-like) query against \
 the shared graph and return its rows as JSON: one JSON object per row, its keys the RETURN \
-columns in the order written (bounded like query's: at most max_rows rows, default 100; a note \
-says when something was cut). It runs the script g.gql(query, params). A query may write \
+columns in the order written (compact JSON, paged like query's: at most max_rows rows, default \
+100, after the first offset ones; a note says what was cut and names the next page's offset). It runs the script g.gql(query, params). A query may write \
 (INSERT, Cypher CREATE; SET; REMOVE; DELETE; MERGE): it is ONE transaction, a failing query changes nothing, and the answer \
 says whether it changed the graph (with the net vertex and edge count changes) and the new \
 commit number; run writes only when the user asked for that change (a read-only server refuses \
@@ -772,31 +797,35 @@ fn all_tools() -> Vec<Tool> {
             "Run a query",
             Kind::Destructive,
             QUERY_DESCRIPTION,
-            json!({
-                "type": "object",
-                "properties": {
-                    "script": {"type": "string", "description": "The Graphersal script (Gremlin in Rhai syntax)."},
-                    "profile": {"type": "boolean", "description": "Also return the per-step metrics of the optimized plan (default false)."},
-                    "max_rows": {"type": "integer", "minimum": 1, "description": "Most top-level results returned (default 100)."},
-                },
-                "required": ["script"],
-            }),
+            with_paging(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "script": {"type": "string", "description": "The Graphersal script (Gremlin in Rhai syntax)."},
+                        "profile": {"type": "boolean", "description": "Also return the per-step metrics of the optimized plan (default false)."},
+                    },
+                    "required": ["script"],
+                }),
+                "top-level results",
+            ),
         ),
         tool(
             "gql",
             "Run a GQL query",
             Kind::Destructive,
             GQL_DESCRIPTION,
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ..., SET ... or MERGE ...), as plain text."},
-                    "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
-                    "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
-                    "max_rows": {"type": "integer", "minimum": 1, "description": "Most rows returned (default 100)."},
-                },
-                "required": ["query"],
-            }),
+            with_paging(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The GQL query (MATCH ... RETURN ..., or a write such as INSERT ..., SET ... or MERGE ...), as plain text."},
+                        "params": {"type": "object", "description": "Parameter name -> value; $name in the query reads the entry name."},
+                        "profile": {"type": "boolean", "description": "Also return the per-step metrics of the Gremlin plan the query runs as (default false)."},
+                    },
+                    "required": ["query"],
+                }),
+                "rows",
+            ),
         ),
         tool(
             "list_saved_queries",
@@ -824,22 +853,25 @@ fn all_tools() -> Vec<Tool> {
             "Runs a saved query by name with named parameters, exactly like the script \
              g.query(name, #{..}): the parameters are checked against their declared schemas \
              (missing required, wrong type, violated constraint: an error with a Help line), \
-             defaults fill the omitted ones, and the answer is bounded like query's. A query \
+             defaults fill the omitted ones, and the answer is paged like query's (offset, \
+             max_rows, max_items). A query \
              listed with language: \"gql\" runs the same way (its parameters become the $name \
              values of its GQL text) and answers rows like the gql tool; inside a GQL query \
              the gql tool calls it as CALL folder.name(args) YIELD col (the arguments in the \
              order its text first reads them). A query \
              listed with writes: true changes data (only what its effects name, as one \
              transaction): run it only when the user asked for that change.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "The saved query's name (list_saved_queries)."},
-                    "params": {"type": "object", "description": "Parameter name -> value; omit a parameter to use its default."},
-                    "max_rows": {"type": "integer", "minimum": 1, "description": "Most top-level results returned (default 100)."},
-                },
-                "required": ["name"],
-            }),
+            with_paging(
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The saved query's name (list_saved_queries)."},
+                        "params": {"type": "object", "description": "Parameter name -> value; omit a parameter to use its default."},
+                    },
+                    "required": ["name"],
+                }),
+                "top-level results",
+            ),
         ),
         tool(
             "list_compressions",
@@ -1087,7 +1119,8 @@ fn all_tools() -> Vec<Tool> {
              source file or Store directory, the read-only view of a past state if the user \
              opened one in the browser (view, and a note: writes are refused while it is \
              open), damage found on the store's disk while it is open (damageFound: writes are \
-             refused when it says frozen), and whether MCP is read-only.",
+             refused when it says frozen), whether MCP is read-only, and answerLimitChars \
+             (the largest tool answer in characters; longer results are paged with offset).",
             no_args(),
         ),
     ]
@@ -1118,9 +1151,11 @@ pub(super) struct ToolCaller {
     /// The caller's own cancellation token of the queries it runs (an AI Chat turn's Stop),
     /// instead of the session's (the UI's Stop, `POST /api/cancel`).
     pub(super) cancel: Option<CancelToken>,
+    /// The largest answer text in characters (`--mcp-max-chars`, [`MAX_TEXT_CHARS`]).
+    pub(super) max_chars: usize,
 }
 
-/// The answer of a tool: its text (data for the model, cut to [`MAX_TEXT_CHARS`]) and whether
+/// The answer of a tool: its text (data for the model, fitted to the caller's `max_chars`) and whether
 /// it is a tool error.
 pub(super) struct ToolOutcome {
     pub(super) text: String,
@@ -1186,25 +1221,42 @@ fn call_tool_as_client(
 ) -> Result<ToolOutcome, CallRefused> {
     let outcome = |result: Result<String, String>| match result {
         Ok(text) => ToolOutcome {
-            text: cut(text),
+            text: fit(text, caller.max_chars),
             is_error: false,
         },
         Err(text) => ToolOutcome {
-            text: cut(with_view_note(context, text)),
+            text: fit(with_view_note(context, text), caller.max_chars),
             is_error: true,
         },
     };
     let Some(tool) = tools(caller.read_only).into_iter().find(|t| t.name == name) else {
         if caller.query_tools && !all_tools().iter().any(|t| t.name == name) {
             let wanted = name.to_string();
-            let known = context
-                .call(move |s| !s.get_query(&wanted).is_null())
+            let entry = context
+                .call(move |s| s.get_query(&wanted))
                 .map_err(|err| CallRefused::Internal(err.1))?;
-            if known {
-                if !args.is_object() {
+            if !entry.is_null() {
+                let Some(given) = args.as_object() else {
                     return Err(CallRefused::Params("arguments must be an object".into()));
+                };
+                // The paging arguments, unless the query declares a parameter of the name.
+                let declared = |key: &str| {
+                    entry["params"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|param| param["name"] == key)
+                };
+                let mut params = serde_json::Map::new();
+                let mut call = json!({"name": name});
+                for (key, value) in given {
+                    if PAGING_ARGS.contains(&key.as_str()) && !declared(key) {
+                        call[key] = value.clone();
+                    } else {
+                        params.insert(key.clone(), value.clone());
+                    }
                 }
-                let call = json!({"name": name, "params": args});
+                call["params"] = Value::Object(params);
                 return Ok(outcome(run_saved_query(context, caller, &call)));
             }
         }
@@ -1258,20 +1310,172 @@ fn tool_result(text: String, is_error: bool) -> Value {
     })
 }
 
-/// Cuts `text` to [`MAX_TEXT_CHARS`] with a note.
+/// [`fit`] to [`MAX_TEXT_CHARS`].
+#[cfg(test)]
 fn cut(text: String) -> String {
-    if text.chars().count() <= MAX_TEXT_CHARS {
-        return text;
-    }
-    let kept: String = text.chars().take(MAX_TEXT_CHARS).collect();
-    format!(
-        "{kept}\n… (cut at {MAX_TEXT_CHARS} characters; narrow the query, e.g. with limit(), \
-         values(..) or a smaller max_rows)"
-    )
+    fit(text, MAX_TEXT_CHARS)
 }
 
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
+/// Fits a tool answer into `max_chars` characters without breaking its JSON. The query tools
+/// fit their results themselves ([`query_text`], with the page's counts and the next offset);
+/// this is the rule for every other answer and the safety net: the longest line that is a JSON
+/// list or object (answers are compact JSON, one line) keeps the leading whole items (list
+/// items, object entries) that fit, followed by a note `shown K of N items`; an answer without
+/// such a line keeps its leading whole lines (a longer first line is cut by characters), with
+/// a note `cut at N characters`.
+fn fit(text: String, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let json_line = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with(['[', '{']))
+        .max_by_key(|(_, line)| line.len())
+        .filter(|(_, line)| serde_json::from_str::<Value>(line).is_ok())
+        .map(|(at, _)| at);
+    if let Some(at) = json_line
+        && let Some((open, items)) = json_items(lines[at])
+    {
+        let others = total - lines[at].chars().count();
+        if let Some(budget) = max_chars.checked_sub(others + NOTE_RESERVE) {
+            let (kept_text, kept) = json_prefix(open, &items, budget);
+            let what = if open == '[' { "items" } else { "entries" };
+            let mut out: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+            out[at] = kept_text;
+            out.insert(
+                at + 1,
+                format!(
+                    "note: shown {kept} of {} {what} of the JSON above (the answer is limited to \
+                     {max_chars} characters); narrow the request to see the rest",
+                    items.len()
+                ),
+            );
+            let fitted = out.join("\n");
+            if fitted.chars().count() <= max_chars {
+                return fitted;
+            }
+        }
+    }
+    let note = format!(
+        "… (cut at {max_chars} characters; narrow the query, e.g. with limit(), values(..), a \
+         smaller max_rows or max_items, or page with offset)"
+    );
+    let budget = max_chars.saturating_sub(note.chars().count() + 1);
+    let mut kept = String::new();
+    let mut used = 0;
+    for line in &lines {
+        let len = line.chars().count() + usize::from(used > 0);
+        if used + len > budget {
+            if used == 0 {
+                kept = line.chars().take(budget).collect();
+            }
+            break;
+        }
+        if used > 0 {
+            kept.push('\n');
+        }
+        kept.push_str(line);
+        used += len;
+    }
+    format!("{kept}\n{note}")
+}
+
+/// `text` as compact JSON (whitespace between tokens removed, strings and the key order kept
+/// as written), or `None` when it is no JSON.
+fn compact_json(text: &str) -> Option<String> {
+    let text = text.trim();
+    serde_json::from_str::<Value>(text).ok()?;
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if !matches!(c, ' ' | '\n' | '\r' | '\t') {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// The top-level items of a compact JSON list (`[a,b]`: `a`, `b`) or object (`{"k":v}`:
+/// `"k":v`) with its opening bracket; `None` for a scalar.
+fn json_items(text: &str) -> Option<(char, Vec<&str>)> {
+    let open = text.chars().next()?;
+    let close = match open {
+        '[' => ']',
+        '{' => '}',
+        _ => return None,
+    };
+    let inner = text.strip_prefix(open)?.strip_suffix(close)?;
+    let mut items = Vec::new();
+    if inner.is_empty() {
+        return Some((open, items));
+    }
+    let (mut depth, mut in_string, mut escaped, mut start) = (0usize, false, false, 0);
+    for (at, c) in inner.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(&inner[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&inner[start..]);
+    Some((open, items))
+}
+
+/// The JSON of the leading `items` (of a list `[` or an object `{`) that fit into `budget`
+/// characters, and how many they are.
+fn json_prefix(open: char, items: &[&str], budget: usize) -> (String, usize) {
+    let close = if open == '[' { ']' } else { '}' };
+    let mut out = String::from(open);
+    let (mut used, mut kept) = (2, 0);
+    for item in items {
+        let len = item.chars().count() + usize::from(kept > 0);
+        if used + len > budget {
+            break;
+        }
+        if kept > 0 {
+            out.push(',');
+        }
+        out.push_str(item);
+        used += len;
+        kept += 1;
+    }
+    out.push(close);
+    (out, kept)
+}
+
+/// A tool answer's JSON: compact (no indentation), on one line.
+fn compact(value: &Value) -> String {
+    value.to_string()
 }
 
 /// A schema or patch argument as JSON text: an object, or a string holding JSON. `mode` set on
@@ -1339,7 +1543,7 @@ fn run_tool(
             let info = context
                 .call(move |s| s.set_schema(&schema, mode.as_deref()))
                 .map_err(http_failed)??;
-            Ok(format!("Schema stored.\n{}", pretty(&info)))
+            Ok(format!("Schema stored.\n{}", compact(&info)))
         }
         "patch_schema" => {
             let patch = json_arg(args, "patch", None)?;
@@ -1351,7 +1555,7 @@ fn run_tool(
                 text
             ))
         }
-        "statistics" => Ok(pretty(&super::with_process_memory(
+        "statistics" => Ok(compact(&super::with_process_memory(
             context,
             context.call(|s| s.statistics()).map_err(http_failed)?,
         ))),
@@ -1364,7 +1568,7 @@ fn run_tool(
             Ok(if list.as_array().is_some_and(Vec::is_empty) {
                 "The graph has no compression rules (define_compression adds one).".to_string()
             } else {
-                pretty(&list)
+                compact(&list)
             })
         }
         "estimate_compression" => {
@@ -1383,12 +1587,12 @@ fn run_tool(
                     "Estimate (the graph was not changed; best is the index of the candidate \
                      that saves the most, savedBytes = plainBytes - storedBytes - \
                      dictionaryBytes):\n{}",
-                    pretty(&answer["estimate"])
+                    compact(&answer["estimate"])
                 ))
             } else {
                 Err(format!(
                     "The estimate was refused:\n{}",
-                    pretty(&answer["errors"])
+                    compact(&answer["errors"])
                 ))
             }
         }
@@ -1404,11 +1608,11 @@ fn run_tool(
                 .call(move |s| s.define_compression(&spec))
                 .map_err(http_failed)?;
             if answer["ok"] == json!(true) {
-                Ok(format!("Rule stored.\n{}", pretty(&answer["rule"])))
+                Ok(format!("Rule stored.\n{}", compact(&answer["rule"])))
             } else {
                 Err(format!(
                     "The rule was refused:\n{}",
-                    pretty(&answer["errors"])
+                    compact(&answer["errors"])
                 ))
             }
         }
@@ -1436,7 +1640,7 @@ fn run_tool(
             Ok(if list.as_array().is_some_and(Vec::is_empty) {
                 "The graph has no property indexes (create_index adds one).".to_string()
             } else {
-                pretty(&list)
+                compact(&list)
             })
         }
         "create_index" => {
@@ -1445,11 +1649,11 @@ fn run_tool(
                 .call(move |s| s.create_index(&spec))
                 .map_err(http_failed)?;
             if answer["ok"] == json!(true) {
-                Ok(format!("Index created.\n{}", pretty(&answer["index"])))
+                Ok(format!("Index created.\n{}", compact(&answer["index"])))
             } else {
                 Err(format!(
                     "The index was refused:\n{}",
-                    pretty(&answer["errors"])
+                    compact(&answer["errors"])
                 ))
             }
         }
@@ -1480,10 +1684,11 @@ fn run_tool(
                 graphersal_session::store::found_damage_value(&**s)
             });
             info["readOnly"] = json!(caller.read_only);
+            info["answerLimitChars"] = json!(caller.max_chars);
             if let Some(mcp) = &context.mcp {
                 info["mcpReadOnly"] = json!(mcp.read_only);
             }
-            Ok(pretty(&info))
+            Ok(compact(&info))
         }
         other => Err(format!("unknown tool {other:?}")),
     }
@@ -1493,7 +1698,7 @@ fn fallible(
     context: &Context,
     job: impl FnOnce(&mut Session) -> Result<Value, String> + Send + 'static,
 ) -> Result<String, String> {
-    Ok(pretty(&context.call(job).map_err(http_failed)??))
+    Ok(compact(&context.call(job).map_err(http_failed)??))
 }
 
 /// The saved queries as the agent sees them: the session's entries (`folder` prefix, `search`
@@ -1569,7 +1774,7 @@ fn list_saved_queries(context: &Context, read_only: bool, args: &Value) -> Resul
          it only when the user asked for that change):\n{}",
         list.len(),
         if list.len() == 1 { "y" } else { "ies" },
-        pretty(&Value::Array(list))
+        compact(&Value::Array(list))
     ))
 }
 
@@ -1595,12 +1800,90 @@ fn run_saved_query(context: &Context, caller: &ToolCaller, args: &Value) -> Resu
             ));
         }
     }
-    let max_rows = args
-        .get("max_rows")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_MAX_ROWS, |n| n.max(1) as usize);
-    let (ok, text) = run_script(context, caller, script.clone(), false, max_rows)?;
-    run_result((ok, format!("call: {script}\n{text}")))
+    let page = page_of(args, caller)?;
+    let head = format!("call: {script}");
+    run_result(run_script(
+        context,
+        caller,
+        script,
+        false,
+        page,
+        Some(head),
+    )?)
+}
+
+/// The display window of a query answer: which results it shows (`offset`, `max_rows`), how
+/// many items of every nested collection (`max_items`), and the answer limit in characters.
+#[derive(Clone, Copy)]
+struct Page {
+    offset: usize,
+    max_rows: usize,
+    max_items: usize,
+    max_chars: usize,
+}
+
+/// A count argument: an integer >= 0 (a JSON number, or a string holding one), `None` when
+/// it is absent or null.
+fn count_arg(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    let value = match args.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(value) => value,
+    };
+    let number = match value {
+        Value::String(text) => text.trim().parse::<u64>().ok(),
+        Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| *f >= 0.0 && f.fract() == 0.0 && *f <= u32::MAX as f64)
+                .map(|f| f as u64)
+        }),
+        _ => None,
+    };
+    number
+        .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
+        .ok_or_else(|| format!("argument \"{key}\" must be an integer >= 0, not {value}"))
+}
+
+/// The [`Page`] of a query tool's arguments (`offset` default 0, `max_rows` and `max_items`
+/// default 100, at least 1) for `caller`.
+fn page_of(args: &Value, caller: &ToolCaller) -> Result<Page, String> {
+    Ok(Page {
+        offset: count_arg(args, "offset")?.unwrap_or(0),
+        max_rows: count_arg(args, "max_rows")?
+            .unwrap_or(DEFAULT_MAX_ROWS)
+            .max(1),
+        max_items: count_arg(args, "max_items")?
+            .unwrap_or(DEFAULT_MAX_ITEMS)
+            .max(1),
+        max_chars: caller.max_chars,
+    })
+}
+
+/// The input schema entries of the paging arguments (`offset`, `max_rows`, `max_items`).
+fn paging_properties(what: &str) -> [(&'static str, Value); 3] {
+    [
+        (
+            "offset",
+            json!({"type": "integer", "minimum": 0, "description": format!("Paging: skip the first offset {what} (default 0); a cut answer's note names the next page's offset.")}),
+        ),
+        (
+            "max_rows",
+            json!({"type": "integer", "minimum": 1, "description": format!("Most {what} returned per page (default {DEFAULT_MAX_ROWS}).")}),
+        ),
+        (
+            "max_items",
+            json!({"type": "integer", "minimum": 1, "description": format!("Most items shown of every nested list or map (default {DEFAULT_MAX_ITEMS}); a cut list ends with \"… N more\".")}),
+        ),
+    ]
+}
+
+/// An input schema of `required` and `properties` plus the paging arguments.
+fn with_paging(mut schema: Value, what: &str) -> Value {
+    if let Some(properties) = schema["properties"].as_object_mut() {
+        for (key, value) in paging_properties(what) {
+            properties.entry(key).or_insert(value);
+        }
+    }
+    schema
 }
 
 /// With `--mcp-query-tools`: every saved query as a tool listing (`inputSchema` from its
@@ -1628,6 +1911,10 @@ fn query_tool_listings(context: &Context, read_only: bool) -> Result<Vec<Value>,
                 if param["required"].as_bool().unwrap_or(false) {
                     required.push(json!(param_name));
                 }
+            }
+            // Paging like run_saved_query's, unless a parameter has the name.
+            for (key, value) in paging_properties("results") {
+                properties.entry(key).or_insert(value);
             }
             let mut description = entry["description"]
                 .as_str()
@@ -1698,11 +1985,8 @@ fn gql(context: &Context, caller: &ToolCaller, args: &Value) -> Result<String, S
         .get("profile")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let max_rows = args
-        .get("max_rows")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_MAX_ROWS, |n| n.max(1) as usize);
-    run_result(run_script(context, caller, script, profile, max_rows)?)
+    let page = page_of(args, caller)?;
+    run_result(run_script(context, caller, script, profile, page, None)?)
 }
 
 /// The `query` tool: one run of the session (like the browser's Run), the answer as text.
@@ -1714,11 +1998,8 @@ fn query(context: &Context, caller: &ToolCaller, args: &Value) -> Result<String,
         .get("profile")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let max_rows = args
-        .get("max_rows")
-        .and_then(Value::as_u64)
-        .map_or(DEFAULT_MAX_ROWS, |n| n.max(1) as usize);
-    run_result(run_script(context, caller, script, profile, max_rows)?)
+    let page = page_of(args, caller)?;
+    run_result(run_script(context, caller, script, profile, page, None)?)
 }
 
 /// Runs `script` on the session (under the read-only authorizer for a read-only caller; with
@@ -1729,12 +2010,14 @@ fn run_script(
     caller: &ToolCaller,
     script: String,
     profile: bool,
-    max_rows: usize,
+    page: Page,
+    head: Option<String>,
 ) -> Result<(bool, String), String> {
     let options = RunOptions {
         profile,
-        max_rows: Some(max_rows),
-        max_items: Some(DEFAULT_MAX_ITEMS),
+        max_rows: Some(page.max_rows),
+        max_items: Some(page.max_items),
+        offset: Some(page.offset),
         ..RunOptions::default()
     };
     let authorizer = if caller.read_only {
@@ -1761,7 +2044,7 @@ fn run_script(
     let (text, commit_seq) = answer.map_err(http_failed)?;
     let response: Value =
         serde_json::from_str(&text).map_err(|err| format!("malformed engine answer: {err}"))?;
-    Ok(query_text(&response, commit_seq, profile))
+    Ok(query_text(&response, commit_seq, profile, &page, head))
 }
 
 /// `Ok` for a successful run, `Err` (a tool error) for a failed one.
@@ -1769,13 +2052,28 @@ fn run_result((ok, text): (bool, String)) -> Result<String, String> {
     if ok { Ok(text) } else { Err(text) }
 }
 
-/// The text of a `query` answer: a status line, the results (JSON within the display limits) or
-/// the error's diagnostic, and the profile table when asked.
-fn query_text(response: &Value, commit_seq: u64, profile: bool) -> (bool, String) {
+/// The text of a `query` answer: the `head` line (the call of a saved query), a status line,
+/// the results (compact JSON within the display limits, on one line) or the error's
+/// diagnostic, the notes, and the profile table when asked.
+///
+/// The answer fits into `page.max_chars` without breaking the JSON: a list of results keeps
+/// the leading WHOLE results that fit (never part of one), and a note names the results shown
+/// (`shown results 101-160 of 443`) and the next page's `offset`; a single value that is a list
+/// or an object keeps its leading whole items or entries (offset pages only a list of results);
+/// a result that alone exceeds the limit is left out with a note.
+fn query_text(
+    response: &Value,
+    commit_seq: u64,
+    profile: bool,
+    page: &Page,
+    head: Option<String>,
+) -> (bool, String) {
     let ok = response["ok"].as_bool().unwrap_or(false);
     let execution = &response["execution"];
     let elapsed = response["elapsed_ms"].as_f64().unwrap_or(0.0);
-    let mut out = Vec::new();
+    let mut out: Vec<String> = head.into_iter().collect();
+    let profile_table =
+        (profile && execution["profile"].is_object()).then(|| profile_text(&execution["profile"]));
     if ok {
         let changes = &response["changes"];
         let changed = match (
@@ -1809,19 +2107,56 @@ fn query_text(response: &Value, commit_seq: u64, profile: bool) -> (bool, String
             }
         }
         out.push(status);
-        let shown = if response["preferred_view"] == "raw" || response["terminal"] == "profile" {
-            display["raw"].as_str().unwrap_or_default().to_string()
+        let raw_view = response["preferred_view"] == "raw" || response["terminal"] == "profile";
+        let shown = if raw_view {
+            display["raw"].as_str().unwrap_or_default()
         } else {
-            display["json"].as_str().unwrap_or_default().to_string()
+            display["json"].as_str().unwrap_or_default()
         };
-        if !shown.is_empty() {
-            out.push(shown);
+        let json = if raw_view { None } else { compact_json(shown) };
+        let mut notes = Vec::new();
+        match json {
+            Some(json) => {
+                // Everything but the results: the lines so far, the profile, the line breaks.
+                let fixed = out
+                    .iter()
+                    .map(|line| line.chars().count() + 1)
+                    .sum::<usize>()
+                    + profile_table
+                        .as_ref()
+                        .map_or(0, |table| table.chars().count() + 1);
+                let (body, page_notes) = fit_results(&json, display, page, fixed);
+                if let Some(body) = body {
+                    out.push(body);
+                }
+                notes.extend(page_notes);
+                if display["items_cut"].as_bool().unwrap_or(false) {
+                    notes.push(format!(
+                        "note: nested lists and maps longer than max_items ({}) were cut: a cut \
+                         list ends with the item \"… N more\", a cut map with the key \"…\"; pass \
+                         a larger max_items to see more",
+                        page.max_items
+                    ));
+                } else if display["total_rows"].is_null()
+                    && let Some(notice) = display["notice"].as_str()
+                {
+                    notes.push(format!(
+                        "note: {notice} (pass max_rows or max_items, or narrow the query)"
+                    ));
+                }
+            }
+            None => {
+                if !shown.is_empty() {
+                    out.push(shown.to_string());
+                }
+                if let Some(notice) = display["notice"].as_str() {
+                    notes.push(format!(
+                        "note: {notice} (pass max_rows or max_items, or narrow the query)"
+                    ));
+                }
+            }
         }
-        if let Some(notice) = display["notice"].as_str() {
-            out.push(format!(
-                "note: {notice} (pass max_rows, or narrow the query)"
-            ));
-        }
+        out.extend(notes);
     } else {
         out.push(format!(
             "error ({elapsed:.1} ms): the script failed and was rolled back; the graph is \
@@ -1835,10 +2170,89 @@ fn query_text(response: &Value, commit_seq: u64, profile: bool) -> (bool, String
             .unwrap_or_else(|| error.to_string());
         out.push(text);
     }
-    if profile && execution["profile"].is_object() {
-        out.push(profile_text(&execution["profile"]));
-    }
+    out.extend(profile_table);
     (ok, out.join("\n"))
+}
+
+/// The results of a query answer (compact JSON `json` of the session's `display`) fitted into
+/// `page.max_chars` minus the `fixed` characters of the rest of the answer, and the notes on
+/// what is shown: see [`query_text`]. `None`: no result fits.
+fn fit_results(
+    json: &str,
+    display: &Value,
+    page: &Page,
+    fixed: usize,
+) -> (Option<String>, Vec<String>) {
+    let max_chars = page.max_chars;
+    let length = json.chars().count();
+    let fits = fixed + length + NOTE_RESERVE <= max_chars;
+    let budget = max_chars.saturating_sub(fixed + NOTE_RESERVE);
+    let mut notes = Vec::new();
+    let Some(total) = display["total_rows"].as_u64().map(|n| n as usize) else {
+        // A single value: its leading whole items or entries.
+        if fits {
+            return (Some(json.to_string()), notes);
+        }
+        return match json_items(json) {
+            Some((open, items)) => {
+                let (body, kept) = json_prefix(open, &items, budget);
+                notes.push(format!(
+                    "note: shown {kept} of {} {} of the result (cut at a whole item to fit the \
+                     answer limit of {max_chars} characters); offset pages only a list of \
+                     results: return the items as results (e.g. without fold(), or with \
+                     unfold()), or narrow the query",
+                    items.len(),
+                    if open == '[' { "items" } else { "entries" },
+                ));
+                (Some(body), notes)
+            }
+            None => {
+                notes.push(format!(
+                    "note: the result is one value of {length} characters, longer than the \
+                     answer limit of {max_chars} characters: narrow the query"
+                ));
+                (None, notes)
+            }
+        };
+    };
+    let offset = display["offset"].as_u64().map_or(0, |n| n as usize);
+    let shown = display["shown_rows"].as_u64().map_or(0, |n| n as usize);
+    let (body, kept) = match json_items(json) {
+        Some(('[', items)) if !fits => json_prefix('[', &items, budget),
+        _ => (json.to_string(), shown),
+    };
+    let end = offset + kept;
+    if total > 0 && offset >= total {
+        notes.push(format!(
+            "note: offset {offset} is past the last result ({total} in all)"
+        ));
+    } else if kept == 0 && shown > 0 {
+        notes.push(format!(
+            "note: the result at offset {offset} alone is longer than the answer limit of \
+             {max_chars} characters and is left out: narrow it (values(..), select(..), a smaller \
+             max_items), or skip it with offset {}",
+            offset + 1
+        ));
+    } else if kept < shown {
+        notes.push(format!(
+            "note: shown results {}-{end} of {total}, cut at a whole result to fit the answer \
+             limit of {max_chars} characters (a smaller max_items or a narrower query fits more \
+             per page); more results follow: next page offset {end}",
+            offset + 1
+        ));
+    } else if end < total {
+        notes.push(format!(
+            "note: shown results {}-{end} of {total} (max_rows sets the page size); more results \
+             follow: next page offset {end}",
+            offset + 1
+        ));
+    } else if offset > 0 && kept > 0 {
+        notes.push(format!(
+            "note: shown results {}-{end} of {total}; no more results",
+            offset + 1
+        ));
+    }
+    (Some(body), notes)
 }
 
 /// The per-step metrics as a compact text table (the layout of the CLI's "Traversal Metrics").
@@ -1934,10 +2348,10 @@ const RESOURCES: [Resource; 5] = [
 fn read_resource(context: &Context, uri: &str, read_only: bool) -> Result<String, String> {
     match uri {
         "graphersal://schema" => context.call(|s| s.get_schema_text()).map_err(http_failed),
-        "graphersal://saved-queries" => Ok(pretty(&Value::Array(saved_queries(
+        "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,
         )?))),
-        "graphersal://statistics" => Ok(pretty(&super::with_process_memory(
+        "graphersal://statistics" => Ok(compact(&super::with_process_memory(
             context,
             context.call(|s| s.statistics()).map_err(http_failed)?,
         ))),
@@ -2569,6 +2983,49 @@ mod tests {
             compact_signatures(&["(pattern: string)"]),
             "(pattern: string)"
         );
+    }
+
+    /// Compact JSON keeps strings and the key order; the item split ignores commas and
+    /// brackets inside strings; `fit` keeps whole items and valid JSON.
+    #[test]
+    fn json_is_compacted_split_and_fitted_at_whole_items() {
+        let pretty = "[\n  {\n    \"z\": \"a, b ] \\\" {\",\n    \"a\": [1, 2]\n  },\n  3\n]";
+        let compact = compact_json(pretty).unwrap();
+        assert_eq!(compact, r#"[{"z":"a, b ] \" {","a":[1,2]},3]"#);
+        assert_eq!(compact_json("not json"), None);
+        let (open, items) = json_items(&compact).unwrap();
+        assert_eq!(open, '[');
+        assert_eq!(items, vec![r#"{"z":"a, b ] \" {","a":[1,2]}"#, "3"]);
+        assert_eq!(
+            json_items(r#"{"a":1,"b":"x,y"}"#).unwrap().1,
+            vec![r#""a":1"#, r#""b":"x,y""#]
+        );
+        assert_eq!(json_items("[]").unwrap().1, Vec::<&str>::new());
+        assert_eq!(json_items("12"), None);
+        assert_eq!(
+            json_prefix('[', &["10", "20", "30"], 7),
+            ("[10,20]".to_string(), 2)
+        );
+        assert_eq!(json_prefix('{', &[r#""a":1"#], 3), ("{}".to_string(), 0));
+
+        // A long JSON line keeps its leading whole items, with a note.
+        let list: Vec<String> = (0..2000).map(|i| format!("item number {i}")).collect();
+        let text = format!("Header line.\n{}", json!(list));
+        let fitted = fit(text, 2000);
+        assert!(fitted.chars().count() <= 2000, "{fitted}");
+        let lines: Vec<&str> = fitted.lines().collect();
+        assert_eq!(lines[0], "Header line.");
+        let kept: Vec<String> = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(kept[..], list[..kept.len()]);
+        assert!(lines[2].starts_with(&format!("note: shown {} of 2000 items", kept.len())));
+        // Plain text keeps whole lines.
+        let text = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fitted = fit(text, 1000);
+        assert!(fitted.chars().count() <= 1000, "{fitted}");
+        assert!(fitted.contains("\nline 9\n") && fitted.ends_with("or page with offset)"));
     }
 
     #[test]
