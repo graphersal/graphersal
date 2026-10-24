@@ -57,7 +57,7 @@ export function formatLimit(key, value) {
 
 /**
  * The rows of the "Process memory" section (`statistics().process`: the loaded embedding models
- * with their sizes and, on the dev server with --ai, the AI Chat history), or null when there is
+ * with their sizes, the whole process (`memory`: RSS, live heap, WebAssembly memory) and, on the dev server with --ai, the AI Chat history), or null when there is
  * nothing to show.
  * @param {Object|undefined} process
  * @returns {null|Array<{name:string, text:string}>}
@@ -65,6 +65,15 @@ export function formatLimit(key, value) {
 export function processMemoryRows(process) {
   if (!process) return null;
   const rows = [];
+  const mem = process.memory;
+  if (mem) {
+    if (typeof mem.rssBytes === 'number') {
+      const peak = typeof mem.peakRssBytes === 'number' ? ` (peak ${formatBytes(mem.peakRssBytes)})` : '';
+      rows.push({ name: 'Process memory (RSS)', text: `${formatBytes(mem.rssBytes)}${peak}` });
+    }
+    if (typeof mem.liveHeapBytes === 'number') rows.push({ name: 'Live heap', text: formatBytes(mem.liveHeapBytes) });
+    if (typeof mem.wasmMemoryBytes === 'number') rows.push({ name: 'WebAssembly memory', text: formatBytes(mem.wasmMemoryBytes) });
+  }
   for (const m of process.models || []) {
     rows.push({ name: `Model ${m.name}`, text: `${formatBytes(m.bytes)} (${m.dimension} dimensions${m.default ? ', default' : ''})` });
   }

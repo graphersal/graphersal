@@ -14,7 +14,7 @@ categories = ["database"]
 include = ["/src/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
 
 [dependencies]
-graphersal = { workspace = true, features = ["io", "script", "gql", "serde", "display", "persist"] }
+graphersal = { workspace = true, features = ["io", "script", "gql", "serde", "display", "persist", "alloc-tracking"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 web-time = { workspace = true }

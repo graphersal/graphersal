@@ -50,6 +50,7 @@ pub mod display;
 pub mod edit;
 pub mod indexes;
 pub mod layout;
+pub mod process;
 pub mod queries;
 pub mod selection;
 pub mod session;

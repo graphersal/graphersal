@@ -35,6 +35,18 @@ fn creates_a_graph_and_runs_a_query() {
 }
 
 #[wasm_bindgen_test]
+fn the_statistics_report_the_wasm_memory() {
+    let stats = json(&modern().statistics());
+    let memory = &stats["process"]["memory"];
+    assert!(
+        memory["wasmMemoryBytes"].as_u64().unwrap() >= 65536,
+        "{stats}"
+    );
+    assert_eq!(memory["source"], "wasm");
+    assert!(memory.get("rssBytes").is_none(), "{stats}");
+}
+
+#[wasm_bindgen_test]
 fn the_large_generator_builds() {
     let mut p = Playground::new();
     let info = json(&p.load_sample("large").unwrap());

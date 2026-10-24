@@ -4940,6 +4940,22 @@ fn an_embedder_of_the_command_line_serves_the_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `GET /api/statistics` carries `process.memory`: the whole process (RSS where the OS gives
+/// one, the live heap of the installed tracking allocator).
+#[test]
+fn the_statistics_report_the_memory_of_the_whole_process() {
+    let server = start(&["--graph", "modern"]);
+    let stats = get(server.port, "/api/statistics").json();
+    let memory = &stats["process"]["memory"];
+    assert!(memory["source"].is_string(), "{stats}");
+    assert!(memory["liveHeapBytes"].as_u64().unwrap() > 0, "{stats}");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        assert!(memory["rssBytes"].as_u64().unwrap() > 0, "{stats}");
+        assert!(memory["peakRssBytes"].as_u64().unwrap() >= memory["rssBytes"].as_u64().unwrap());
+    }
+}
+
 /// `--embedder` with `--server`: the process memory block of `GET /api/statistics` lists the
 /// loaded model with its estimated size, and has no AI Chat member without `--ai`.
 #[cfg(feature = "model2vec")]

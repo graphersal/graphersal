@@ -438,10 +438,12 @@ impl Playground {
         to_text(&self.session.graph().memory_view())
     }
 
-    /// The statistics panel: `{statistics, memory, limits: {presets, defaults}}` (see
+    /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` (see
     /// [`Session::statistics`]).
     pub fn statistics(&self) -> String {
-        to_text(&self.session.statistics())
+        let mut statistics = self.session.statistics();
+        graphersal_session::process::add_to_statistics(&mut statistics);
+        to_text(&statistics)
     }
 
     /// Every DSL function, from the Rhai engine's metadata (completion catalogue).

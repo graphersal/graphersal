@@ -155,3 +155,18 @@ test('the process memory section lists models and the AI Chat history, and is hi
     { name: 'AI Chat history', text: `${formatBytes(5120)} (2 conversations)` },
   ]);
 });
+
+test('the process memory section shows the RSS with its peak, the live heap and the wasm memory', () => {
+  const rows = (memory) => statisticsModel({ ...WASM, process: { models: [], memory } }).process;
+  assert.deepEqual(rows({ rssBytes: 2097152, peakRssBytes: 4194304, liveHeapBytes: 1048576, source: 'proc' }), [
+    { name: 'Process memory (RSS)', text: `${formatBytes(2097152)} (peak ${formatBytes(4194304)})` },
+    { name: 'Live heap', text: formatBytes(1048576) },
+  ]);
+  assert.deepEqual(rows({ rssBytes: 2097152, source: 'ps' }), [
+    { name: 'Process memory (RSS)', text: formatBytes(2097152) },
+  ]);
+  assert.deepEqual(rows({ wasmMemoryBytes: 100663296, source: 'wasm' }), [
+    { name: 'WebAssembly memory', text: formatBytes(100663296) },
+  ]);
+  assert.equal(rows({ source: 'none' }), null);
+});

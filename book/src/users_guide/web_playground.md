@@ -79,10 +79,11 @@ answers questions by querying the served graph. In the WebAssembly playground th
   (none in the playground; the dev server's `--timeout`, `--max-*`, ...) and the engine's defaults
   for the rest (see [Resource Limits](resource_limits.md); `g.with(..)` changes them per query).
   While open it reloads after every run that changed the data. A **Process memory** section
-  (hidden when empty) lists what the process holds beside the graph: every loaded embedding model
+  (hidden when empty) lists what the process holds: the resident set size (RSS, with its peak)
+  and the live heap on the dev server (RSS on Linux and macOS only), every loaded embedding model
   with its estimated size and, on the dev server with `--ai`, the AI Chat history (conversations
-  and an estimate of their bytes). The WebAssembly playground has no loaded models and no chat,
-  so it shows nothing there.
+  and an estimate of their bytes). The WebAssembly playground has no loaded models, no chat and no RSS; it shows the live heap
+  and the size of its WebAssembly memory.
 - **Errors** show the message, the step path of a runtime error (the same step ids as the profile),
   the `help()` advice, a "Go to line" for script errors, and the full diagnostic.
 - **Graph, Schema, Profile** panels draw the graph (capped), show and edit the schema (see

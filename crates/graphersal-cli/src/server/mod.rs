@@ -1150,9 +1150,10 @@ fn ai_status(context: &Context) -> Value {
 }
 
 /// The session's statistics (`Session::statistics`) with the dev server's own part of the
-/// process memory added: `process.aiChat {conversations, historyBytes}` when the AI Chat is on
+/// process memory added: `process.memory` (the whole process, [`graphersal_session::process`]) and `process.aiChat {conversations, historyBytes}` when the AI Chat is on
 /// ([`ai::process_memory`]). Served by `GET /api/statistics` and the MCP `statistics` tool.
 fn with_process_memory(context: &Context, mut statistics: Value) -> Value {
+    graphersal_session::process::add_to_statistics(&mut statistics);
     #[cfg(feature = "ai")]
     if let Some(chat) = ai::process_memory(context)
         && let Some(process) = statistics.get_mut("process").and_then(Value::as_object_mut)

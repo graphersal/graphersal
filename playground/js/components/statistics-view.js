@@ -77,7 +77,7 @@ export const StatisticsView = {
         <p><span v-for="m in model.memory" :key="m.name" class="stats-pair">{{ m.name }} <b>{{ m.text }}</b></span></p>
       </section>
       <section v-if="model.process" class="stats-section">
-        <h4>Process memory <span class="muted">(loaded models and the AI Chat history, an estimate; not part of the graph)</span></h4>
+        <h4>Process memory <span class="muted">(what the whole process holds: the operating system's resident set size, the live heap, loaded models and the AI Chat history; not part of the graph)</span></h4>
         <p><span v-for="m in model.process" :key="m.name" class="stats-pair">{{ m.name }} <b>{{ m.text }}</b></span></p>
       </section>
       <section v-if="model.limits.length" class="stats-section">

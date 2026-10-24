@@ -1071,7 +1071,9 @@ fn all_tools() -> Vec<Tool> {
             "Statistics",
             Kind::Read,
             "Counts of the graph (vertices and edges in total and per label), its memory \
-             footprint, and the limits every query runs under.",
+             footprint, the limits every query runs under, and the memory the process holds beside the \
+             graph (`process`: loaded models, the AI Chat history, and `process.memory` with the \
+             resident set size where the OS reports one and the live heap).",
             no_args(),
         ),
         tool(
@@ -1932,9 +1934,10 @@ fn read_resource(context: &Context, uri: &str, read_only: bool) -> Result<String
         "graphersal://saved-queries" => Ok(pretty(&Value::Array(saved_queries(
             context, None, None, read_only,
         )?))),
-        "graphersal://statistics" => Ok(pretty(
-            &context.call(|s| s.statistics()).map_err(http_failed)?,
-        )),
+        "graphersal://statistics" => Ok(pretty(&super::with_process_memory(
+            context,
+            context.call(|s| s.statistics()).map_err(http_failed)?,
+        ))),
         "graphersal://dsl-reference" => {
             static REFERENCE: OnceLock<String> = OnceLock::new();
             if let Some(text) = REFERENCE.get() {

@@ -631,10 +631,11 @@ impl Session {
     }
 
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
-    /// bytes, default}]}`, one entry per registered embedder that reports its size
+    /// bytes, default}] }`, one entry per registered embedder that reports its size
     /// ([`graphersal::vector::Embedder::memory_bytes`]: a loaded model; the built-in
     /// `hash-ngram/1` and remote providers report none and are left out). A host adds its own
-    /// members (the dev server adds `aiChat`). Separate from `GraphStatistics`, which holds data
+    /// members: `memory`, the whole process ([`crate::process::add_to_statistics`]; volatile,
+    /// so `Session::statistics` itself stays deterministic), and the dev server's `aiChat`. Separate from `GraphStatistics`, which holds data
     /// counts only.
     pub fn process_memory(&self) -> Value {
         let embedders = &self.presets.embedders;
@@ -2897,6 +2898,21 @@ mod tests {
         assert_eq!(stats["statistics"]["vertex_count"], 6);
         // The default session has only the built-in embedder, which reports no size.
         assert_eq!(modern().statistics()["process"]["models"], json!([]));
+    }
+
+    /// `process.memory` is always present with a `source`; its figures are optional.
+    #[test]
+    fn statistics_carry_the_memory_of_the_whole_process() {
+        let mut stats = modern().statistics();
+        assert!(
+            stats["process"].get("memory").is_none(),
+            "volatile: hosts add it"
+        );
+        crate::process::add_to_statistics(&mut stats);
+        let memory = &stats["process"]["memory"];
+        assert!(memory["source"].is_string(), "{stats}");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(memory["rssBytes"].as_u64().unwrap() > 0, "{stats}");
     }
 
     /// The host's embedders reach every run: the `embed` step (also inside the MCP read-only
