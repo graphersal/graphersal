@@ -305,12 +305,27 @@ input[type="number"] { width: 80px; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* A path keeps its file or directory name: two grid columns, the directory part (may shrink to
+   nothing, shortened from the LEFT: direction: rtl puts the ellipsis there, <bdi> keeps the
+   path's own order) and the name (never shrinks below itself, so the header cannot squeeze it
+   away; no overflow on the grid, or its minimum size would drop to 0). */
 .topbar .graph-name {
+  display: inline-grid;
+  grid-template-columns: minmax(0, max-content) max-content;
+  max-width: 260px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.topbar .graph-name-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+}
+.topbar .graph-name-base {
+  grid-column: 2;
   max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
 }
 
 /* dropdown menus (details/summary based) */

@@ -126,6 +126,21 @@ export function formatDuration(ns) {
   return `${(ns / 1e9).toFixed(3)}s`;
 }
 
+/**
+ * A graph name split for display: `{dir, base}`, where `dir` is everything up to and including
+ * the last `/` or `\` (empty for a name that is not a path) and `base` the rest. The header
+ * shortens `dir` from the left so the file or directory name itself stays visible.
+ * @param {string} name
+ * @returns {{dir: string, base: string}}
+ */
+export function splitGraphName(name) {
+  const text = String(name ?? '');
+  const trimmed = text.replace(/[\\/]+$/, '');
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (cut < 0) return { dir: '', base: text };
+  return { dir: text.slice(0, cut + 1), base: text.slice(cut + 1) };
+}
+
 export function formatBytes(b) {
   if (b === undefined || b === null) return '';
   const abs = Math.abs(b);

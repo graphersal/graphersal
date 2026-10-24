@@ -10,7 +10,7 @@ import { state, reveal, cycleTheme, saveGraph, saveSchema, saveToSource, isServe
 import { viewBanner, backupBanner } from '../store-model.js';
 import { mcpBadgeTitle } from '../change-feed.js';
 import { navigate } from '../router.js';
-import { storage, debounce } from '../util.js';
+import { storage, debounce, splitGraphName } from '../util.js';
 import { formatCount } from '../statistics.js';
 import { QueryEditor } from './query-editor.js';
 import { ResultsPanel } from './results-panel.js';
@@ -291,6 +291,7 @@ export const Workspace = {
 
     return {
       formatCount, shareDialog, openShareDialog,
+      graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
       state, layout, main, left, right, narrow, leftCount, rightCount, PANELS,
       editorRef: panelRefs.editor, resultsRef: panelRefs.results, graphRef: panelRefs.graph,
       schemaRef: panelRefs.schema, profileRef: panelRefs.profile,
@@ -324,7 +325,7 @@ export const Workspace = {
       <span v-if="serverMode && state.engineInfo.mcp" class="badge accent mcp-badge"
             :title="mcpBadgeTitle(state.engineInfo.mcp, location.host)">MCP<template v-if="state.engineInfo.mcp.readOnly"> · read-only</template></span>
       <template v-if="state.graph">
-        <span class="graph-name" :title="state.graph.name">{{ state.graph.name }}</span>
+        <span class="graph-name" :title="state.graph.name"><span v-if="graphName.dir" class="graph-name-dir"><bdi>{{ graphName.dir }}</bdi></span><span class="graph-name-base">{{ graphName.base }}</span></span>
         <span class="badge" :title="state.graph.vertexCount + ' vertices, ' + state.graph.edgeCount + ' edges'">
           {{ formatCount(state.graph.vertexCount) }} V · {{ formatCount(state.graph.edgeCount) }} E
         </span>
