@@ -846,6 +846,10 @@ pub trait SessionStore: Send + Sync {
     fn last_auto_checkpoint_error(&self) -> Option<String>;
     /// [`Store::run_due_checkpoint`].
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError>;
+    /// [`Store::system_jobs`].
+    fn system_jobs(&self) -> Vec<graphersal::jobs::Job>;
+    /// [`Store::workload_stats`].
+    fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats>;
     /// [`Store::checkpoint`].
     fn checkpoint(&self, name: Option<&str>) -> Result<SnapshotInfo, PersistError>;
     /// [`Store::mark`].
@@ -946,6 +950,12 @@ where
     }
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError> {
         Store::<S>::run_due_checkpoint(self)
+    }
+    fn system_jobs(&self) -> Vec<graphersal::jobs::Job> {
+        Store::<S>::system_jobs(self)
+    }
+    fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats> {
+        Store::<S>::workload_stats(self)
     }
     fn checkpoint(&self, name: Option<&str>) -> Result<SnapshotInfo, PersistError> {
         Store::<S>::checkpoint(self, name)

@@ -30,6 +30,8 @@ pub mod handle;
 /// Commit hooks ([`CommitHook`]): veto and observe what each unit of work changed.
 pub mod hooks;
 pub(crate) mod index;
+/// Scheduled jobs: the scheduler a host ticks, cron schedules.
+pub mod jobs;
 pub(crate) mod labels;
 /// A graph's own memory footprint (`memory_usage()`).
 pub mod memory;
@@ -53,6 +55,8 @@ pub(crate) mod subgraph;
 pub(crate) mod topology;
 mod transaction;
 pub(crate) mod undo;
+/// Workload statistics: time-bucketed series of what an instance did.
+pub mod workload;
 pub mod write_checks;
 pub use any_graph::{AnyGraph, IntoAnyGraph};
 pub use authorization::{

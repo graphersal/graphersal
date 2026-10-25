@@ -81,5 +81,6 @@ it, so any storage type opens any store.
 | Checkpoint on close | off | `with_checkpoint_on_close` |
 | Read options (memory limit, value depth) | defaults | `with_read_options` |
 | Compaction policy and automatic compaction after prune | defaults, off | `with_compaction_policy`, `with_auto_compact` |
+| Workload statistics level (`off`, `memory`, `persisted`: the sidecar `WORKLOAD`) | `persisted` | `with_workload_level` |
 
 A new creation parameter is added to the first table (and to `store info`); see `CLAUDE.md`.

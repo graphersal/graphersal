@@ -50,6 +50,7 @@ pub mod display;
 pub mod edit;
 pub mod filter;
 pub mod indexes;
+pub mod jobs;
 pub mod layout;
 pub mod process;
 pub mod queries;

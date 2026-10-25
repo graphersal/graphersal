@@ -457,8 +457,38 @@ pub fn run(cli: &Cli) -> i32 {
             errln!("warning: cannot start the IPv6 accept thread: {err}");
         }
     }
+    start_job_ticker(&context);
     accept(&server, &context);
     EXIT_OK
+}
+
+/// How often the dev server ticks the scheduled jobs of the active store.
+const JOB_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ticks the session's scheduled jobs (book page "Scheduled Jobs") from a thread of its own,
+/// in the instance's local time zone; each tick is a session job like a browser call.
+fn start_job_ticker(context: &Arc<Context>) {
+    if let Some(zone) = crate::cli::local_time_zone() {
+        let _ = context.call(move |session| session.set_time_zone(&zone));
+    }
+    let context = context.clone();
+    let spawned = std::thread::Builder::new()
+        .name("graphersal-jobs".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(JOB_TICK);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_micros() as i64);
+                if context.call(move |session| session.tick_jobs(now)).is_err() {
+                    // The session thread is gone: the server is stopping.
+                    break;
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        errln!("warning: cannot start the scheduled-jobs thread: {err}");
+    }
 }
 
 /// Accepts the requests of `server`, each on a thread of its own; every listener (IPv4 and
@@ -910,6 +940,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "completions") => value(context.call(|s| views::completions(s.engine()))?),
         (Method::Get, "token-values") => value(context.call(|s| s.token_values())?),
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
+        // The scheduled jobs of the active store (`graphersal_session::jobs`).
+        (Method::Get, "jobs") => value(context.call(|s| s.jobs_view())?),
         // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
         (Method::Post, "memory/report") => {
             let body = json_body(request)?;
@@ -1070,6 +1102,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "token-values"
             | "memory"
             | "memory/report"
+            | "jobs"
             | "statistics"
             | "export"
             | "save"

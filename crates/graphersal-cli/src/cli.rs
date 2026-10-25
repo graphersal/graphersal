@@ -74,6 +74,29 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
     Ok(())
 }
 
+/// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
+/// variable when it names one (optionally with a leading `:`), else the target of the
+/// `/etc/localtime` link (`.../zoneinfo/Europe/Berlin`); `None` when neither tells (the jobs
+/// then run in UTC).
+pub fn local_time_zone() -> Option<String> {
+    if let Ok(tz) = std::env::var("TZ") {
+        let name = tz.trim_start_matches(':');
+        if graphersal::jobs::Scheduler::new()
+            .with_time_zone(name)
+            .is_ok()
+        {
+            return Some(name.to_string());
+        }
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let text = target.to_string_lossy();
+    let name = text.split("zoneinfo/").nth(1)?;
+    graphersal::jobs::Scheduler::new()
+        .with_time_zone(name)
+        .is_ok()
+        .then(|| name.to_string())
+}
+
 /// Exit code returned when every script evaluated successfully.
 pub const EXIT_OK: i32 = 0;
 /// Exit code returned when a script failed to evaluate.

@@ -55,6 +55,8 @@
     - [Single-File Store](persistence/single_file_store.md)
     - [Your Own Storage](persistence/store_own_storage.md)
     - [Creation Parameters](persistence/creation_parameters.md)
+    - [Workload Statistics](persistence/workload_statistics.md)
+    - [Scheduled Jobs](persistence/scheduled_jobs.md)
   - [The graphersal store Command](persistence/store_cli.md)
   - [The Store in the Playground](persistence/playground_store.md)
   - [Python](persistence/python.md)

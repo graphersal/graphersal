@@ -17,6 +17,7 @@ Agent guidance for the REPL, the one-shot runner, the dev server, MCP, the AI Ch
 - `src/server/`: `mod.rs` HTTP API + change feed `GET /api/changes`, `store.rs` `/api/store*`, `layout.rs` engine force layout `/api/layout*` (slices; Stop ends a running one), `mcp.rs`, `ai.rs`, `start_stats.rs` (load time + statistics on stderr at start, from `Session::statistics`; stdout keeps only the address line). Book `persistence/dev_server.md`.
 - CLI limit flags become `graphersal_session::SessionPresets` (`server::session_presets`); display flags are refused with `--server`.
 - "Save to file" (`POST /api/save`) writes the graph back to its `--graph` file and, with `--schema FILE`, the schema to that file (both atomic); without it a GraphML/GraphSON save of a graph with a schema answers a `warning`.
+- Scheduled jobs: `start_job_ticker` ticks `Session::tick_jobs` every 5 s from a thread (`graphersal-jobs`) in the machine's zone (`cli::local_time_zone`: `TZ`, else the `/etc/localtime` link); `GET /api/jobs` = `Session::jobs_view`.
 - `/api/queries*` saved queries, `/api/compression*` compression rules, `/api/indexes*` property indexes, `/api/catalog/export|load` the ONE catalog file (every kind).
 - Every session job that moves the commit position is recorded in the change feed with its client (`X-Graphersal-Client` of a page, `mcp`, or `ai` + conversation id as `detail`); the playground polls it (`js/change-feed.js`) and reloads on changes it did not make.
 

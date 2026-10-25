@@ -191,6 +191,7 @@ LOCK                          an empty file; the writer's operating-system lock 
 BACKUP                        an empty file; the backup pin (12.10)
 INTENT                        present only while a multi-file operation runs (11.1)
 marks                         the marks, derived from the WAL (10)
+WORKLOAD                      the workload statistics sidecar (4.4); optional, instance data
 snapshots/
     00000000000000052817/     one snapshot; the name is its commit_seq, 20 decimal digits
         manifest              6
@@ -240,6 +241,30 @@ On a file system, a move between two parts of the tree that live on different fi
 done as: copy into `tmp-xdev-<name>` in the target directory, sync, rename there, sync the
 directory, remove the source, sync its directory. Leftover `tmp-xdev-*` names MUST be ignored by
 every listing.
+
+### 4.4 The workload statistics sidecar
+
+`WORKLOAD` holds the instance's workload statistics (book page "Workload Statistics"): data of
+the running instance, not of the graph. It is never in the WAL, never in a snapshot, and never
+copied by a backup, a ZIP backup, a fork, a repair or a conversion; a restored or copied store
+starts without it. A writable store replaces it whole (`write_atomic`) periodically and at close.
+
+```text
+magic "GRWLSTAT" | version u32 = 1 | series count u32
+per series: byte length u32 | kind u8 (1 job, 2 write lock) | name (u32 length + UTF-8)
+            | channel u8 (0 host, 1 playground, 2 mcp, 3 cli, 4 python, 5 job)
+            | bucket count u16 | per bucket: day i64 (days since the Unix epoch, UTC)
+            | count u64 | failed u64 | items u64 | total microseconds u64 | max microseconds u64
+job count u32 | per job: name | started_at i64 (microseconds) | microseconds u64
+            | error flag u8 [+ error text]
+CRC-32C u32 of everything before it
+```
+
+All integers little-endian. A reader MUST treat the file as optional: a missing file, a wrong
+magic, length or checksum, or a version it does not know means "no statistics" (it starts anew
+and replaces the file at its next write), never damage, never a reason to refuse the store. A
+series of a kind or channel it does not know is skipped by its byte length. The magic is none of
+a segment's or a WAL segment's, so the version guard (15) ignores the file.
 
 ## 5. The `GRAPH` file
 
