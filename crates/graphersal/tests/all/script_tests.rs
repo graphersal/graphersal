@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(eval_value(graph, check).unwrap().as_int().ok(), Some(1));
     }
 
-    /// Rule 3: `remove_property(jpath(..))` / `removeProperty(..)` mutate through the DSL, with a
+    /// Rule 3: `remove_property(jpath(..))` / `remove_property(..)` mutate through the DSL, with a
     /// terminal and as a bare (rendered) traversal; a missing path is a no-op, not an error.
     #[test]
     fn test_script_eval_remove_property_jpath_mutations() {
@@ -204,7 +204,7 @@ mod tests {
         let setup = r#"
             g.addV("person").property(T.id, "p1").property_json(#{meta: #{k: 1, tags: ["a", "b", "c"]}}).toList();
             g.V("p1").remove_property(jpath("meta.k")).toList();
-            g.V("p1").removeProperty(jpath("meta.tags[0]")).toList();
+            g.V("p1").remove_property(jpath("meta.tags[0]")).toList();
             g.V("p1").remove_property(jpath("meta.absent[3]")).toList();
             g.V("p1").has(jpath("meta.tags[0]"), "b").hasNot(jpath("meta.k")).count().next()
         "#;
@@ -221,19 +221,19 @@ mod tests {
         assert_eq!(eval_value(graph, check).unwrap().as_int().ok(), Some(1));
     }
 
-    /// Rule 3: the label steps `add_label`/`addLabel`, `drop_label`/`dropLabel` (vertices) and
-    /// `set_label`/`setLabel` (edges) mutate through the DSL in both spellings, with a terminal
+    /// Rule 3: the label steps `add_label`, `drop_label` (vertices) and `set_label` (edges)
+    /// mutate through the DSL, with a terminal
     /// and as a bare (rendered) traversal, and inside `__`.
     #[test]
     fn test_script_eval_label_steps_in_both_spellings() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         let script = r#"
             g.V("1").add_label("employee").toList();
-            g.V("2").addLabel("employee").addLabel("employee").toList();
+            g.V("2").add_label("employee").add_label("employee").toList();
             g.V("4").add_label("a").add_label("b").drop_label("person").toList();
-            g.V("6").dropLabel("person").toList();
+            g.V("6").drop_label("person").toList();
             g.E("0").set_label("met").toList();
-            g.E("1").setLabel("met").setLabel("met").toList();
+            g.E("1").set_label("met").set_label("met").toList();
             [
                 g.V().has_label("employee").count().next(),
                 g.V("1").labels().next(),
@@ -254,7 +254,7 @@ mod tests {
         // A bare mutating traversal as the last statement is executed by the visualizer; a
         // child traversal relabels too.
         eval(graph.clone(), r#"g.V("3").add_label("tool")"#).expect("bare add_label");
-        eval(graph.clone(), r#"g.V("5").local(__.addLabel("tool"))"#).expect("anonymous");
+        eval(graph.clone(), r#"g.V("5").local(__.add_label("tool"))"#).expect("anonymous");
         eval(graph.clone(), r#"g.V("5").out_e().set_label("x")"#).expect("bare set_label");
         let check = r#"g.V().has_label("tool").count().next()"#;
         assert_eq!(
@@ -408,7 +408,7 @@ mod tests {
     }
 
     /// Tests bulk-assigning properties from a JSON object via `property_json()`, including its
-    /// `propertyJson()` camelCase alias, via script DSL.
+    /// `property_json()` via the script DSL.
     #[test]
     #[cfg(feature = "serde")]
     fn test_script_eval_property_json_mutation() {
@@ -439,7 +439,7 @@ mod tests {
 
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         let camel_script = r#"
-            g.V("2").propertyJson(#{score: 42}).toList();
+            g.V("2").property_json(#{score: 42}).toList();
             g.V("2").values("score").toList()
         "#;
 
@@ -461,13 +461,13 @@ mod tests {
     /// (`crates/graphersal/src/traversal/step/map_steps/step_select.rs`): a `By::JsonPath(...)`
     /// modulator built from Rhai must resolve a nested `property_json()` value through
     /// `select().by(...)` exactly like the Rust API does, in both spellings of `By`/`by`/`as`
-    /// (`By::JsonPath`/`propertyJson`/`as`/`select` and `By::JsonPath`/`property_json`/`as_`).
+    /// (`By::JsonPath`/`property_json`/`as`/`select` and `By::JsonPath`/`property_json`/`as_`).
     #[test]
     #[cfg(feature = "serde")]
     fn test_script_eval_select_by_json_path() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         let script = r#"
-            g.V("1").propertyJson(#{meta: #{k: 1}}).as("A").select("A").by(By::JsonPath("meta.k")).toList()
+            g.V("1").property_json(#{meta: #{k: 1}}).as("A").select("A").by(By::JsonPath("meta.k")).toList()
         "#;
 
         let result = eval(graph, script);
@@ -511,7 +511,7 @@ mod tests {
     fn test_script_eval_select_by_json_path_invalid_syntax() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         let script = r#"
-            g.V("1").propertyJson(#{meta: #{k: 1}}).as("A").select("A").by(By::JsonPath("$..bad")).toList()
+            g.V("1").property_json(#{meta: #{k: 1}}).as("A").select("A").by(By::JsonPath("$..bad")).toList()
         "#;
 
         let result = eval(graph, script);
@@ -527,10 +527,10 @@ mod tests {
         );
     }
 
-    /// DSL parity for the direct-access `.json_path()`/`.jsonPath()` step (step 6's Rust-API-only
+    /// DSL parity for the direct-access `.json_path()` step (step 6's Rust-API-only
     /// `StepJsonPath`, added in `crates/graphersal/src/traversal/step/flatmap_steps/step_json_path.rs`).
     /// Mirrors `test_script_eval_property_json_mutation`'s shape: seed a nested value via
-    /// `property_json()`, then resolve it with `json_path()`/`jsonPath()`, checking both
+    /// `property_json()`, then resolve it with `json_path()`, checking both
     /// spellings. Not `#[cfg(feature = "serde")]` on the `json_path()` calls themselves - only
     /// the `property_json()` setup needs that feature; `json_path()` operates on
     /// `ElementProperty::Object`/`Array`, which exist unconditionally.
@@ -558,8 +558,8 @@ mod tests {
 
         let graph = Arc::new(GraphSource::tinkerpop_modern());
         let camel_script = r#"
-            g.V("2").propertyJson(#{meta: #{k: 42}}).toList();
-            g.V("2").jsonPath("meta.k").toList()
+            g.V("2").property_json(#{meta: #{k: 42}}).toList();
+            g.V("2").json_path("meta.k").toList()
         "#;
 
         let result = eval(graph, camel_script);
@@ -576,14 +576,14 @@ mod tests {
         );
     }
 
-    /// A malformed JSONPath string passed directly to `.jsonPath()` (not via `By::JsonPath`) must
+    /// A malformed JSONPath string passed directly to `.json_path()` (not via `By::JsonPath`) must
     /// surface as a normal script evaluation error tracing back to `ValueError::InvalidJsonPath`,
     /// matching the Rust-API-side `rejected_syntax_is_invalid_json_path_error_not_panic` test in
     /// `step_json_path.rs`.
     #[test]
     fn test_script_eval_json_path_invalid_syntax() {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
-        let script = r#"g.V("1").jsonPath("$..bad").toList()"#;
+        let script = r#"g.V("1").json_path("$..bad").toList()"#;
 
         let result = eval(graph, script);
         assert!(
@@ -690,14 +690,14 @@ mod tests {
     }
 
     /// Rule 3: a saved query written in GQL mutates through the DSL in both spellings: defined
-    /// with `defineQuery` / `define_query`, called with `query` (bare as the last statement too,
+    /// with `define_query`, called with `query` (bare as the last statement too,
     /// rendered by the visualizer), returning what it wrote, persisting across evaluations.
     #[cfg(feature = "gql")]
     #[test]
     fn test_script_eval_gql_saved_query_mutations() {
         let graph = Arc::new(GraphSource::empty());
         let script = r#"
-            g.defineQuery(#{name: "add", language: "gql", params: #{n: "string"},
+            g.define_query(#{name: "add", language: "gql", params: #{n: "string"},
                 body: "INSERT (p:person {name: $n}) RETURN p.name AS name"});
             g.define_query(#{name: "link", language: "gql", params: #{a: "string", b: "string"},
                 body: "MATCH (x:person {name: $a}), (y:person {name: $b}) INSERT (x)-[:knows]->(y)"});
@@ -769,7 +769,7 @@ mod tests {
         // A saved GQL query with SET writes when called.
         eval(
             graph.clone(),
-            r#"g.defineQuery(#{name: "tag", language: "gql", params: #{n: "string"},
+            r#"g.define_query(#{name: "tag", language: "gql", params: #{n: "string"},
                    body: "MATCH (p {name: $n}) SET p.tag = 'x'"});
                g.query("tag", #{n: "lop"}).iterate()"#,
         )
@@ -831,7 +831,7 @@ mod tests {
         // A saved GQL query with DELETE writes when called.
         eval(
             graph.clone(),
-            r#"g.defineQuery(#{name: "forget", language: "gql", params: #{n: "string"},
+            r#"g.define_query(#{name: "forget", language: "gql", params: #{n: "string"},
                    body: "MATCH (p {name: $n}) DETACH DELETE p"});
                g.query("forget", #{n: "lop"}).iterate()"#,
         )
@@ -882,7 +882,7 @@ mod tests {
         // A saved GQL query with MERGE writes when called, once per new name.
         eval(
             graph.clone(),
-            r#"g.defineQuery(#{name: "tag", language: "gql", params: #{n: "string"},
+            r#"g.define_query(#{name: "tag", language: "gql", params: #{n: "string"},
                    body: "MERGE (t:tag {name: $n}) ON MATCH SET t.hits = coalesce(t.hits, 0) + 1"});
                g.query("tag", #{n: "x"}).iterate();
                g.query("tag", #{n: "x"}).iterate();
@@ -1031,17 +1031,15 @@ mod tests {
         assert!(err.contains("GraphSON"), "diagnostic: {err}");
     }
 
-    /// `export_graphson`/`exportGraphson` and `import_graphson`/`importGraphson`, and
+    /// `export_graphson` and `import_graphson`, and
     /// `GraphSource::file` on a `.json` file.
     #[cfg(feature = "io")]
     #[test]
     fn test_script_export_and_import_graphson_in_both_spellings() {
         let dir = std::env::temp_dir().join(format!("script-graphson-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for (export, import) in [
-            ("export_graphson", "import_graphson"),
-            ("exportGraphson", "importGraphson"),
-        ] {
+        {
+            let (export, import) = ("export_graphson", "import_graphson");
             let path = dir.join(format!("{export}.json"));
             let path = path.to_str().unwrap().replace('\\', "/");
             let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -1081,7 +1079,7 @@ mod tests {
         .unwrap();
         let path = skipped.to_str().unwrap().replace('\\', "/");
         let target = Arc::new(GraphSource::empty());
-        let msg = eval_value(target.clone(), &format!(r#"g.importGraphson("{path}")"#))
+        let msg = eval_value(target.clone(), &format!(r#"g.import_graphson("{path}")"#))
             .unwrap()
             .into_string()
             .unwrap();
@@ -1976,7 +1974,7 @@ mod tests {
         };
         for script in [
             "g.infer_schema()",
-            "g.inferSchema()",
+            "g.infer_schema()",
             "let s = g.infer_schema(); s",
         ] {
             let mermaid = render(script, VisualizeFormat::Mermaid);
@@ -2007,7 +2005,7 @@ mod tests {
         assert!(out.contains("person"), "Expected person label_name: {out}");
         let out = eval(
             graph.clone(),
-            r#"g.infer_schema().toGraph().v().count().next()"#,
+            r#"g.infer_schema().to_graph().v().count().next()"#,
         )
         .unwrap();
         assert_eq!(out.trim(), "2");
@@ -2145,12 +2143,12 @@ mod tests {
         assert!(res_map.contains("name"));
         assert!(res_map.contains("marko"));
 
-        // camelCase alias toTable / toMarkdown
+        // to_table / to_markdown in a chain of TinkerPop camelCase steps
         let res_alias = eval(
             graph.clone(),
-            r#"g.V().hasLabel("person").toTable(["name"])"#,
+            r#"g.V().hasLabel("person").to_table(["name"])"#,
         )
-        .expect("toTable alias failed");
+        .expect("to_table failed");
         assert!(res_alias.contains("name"));
     }
 
@@ -2169,8 +2167,8 @@ mod tests {
 
         // Generic, non-tree()-shaped input degrades to a flat list of root lines rather than
         // erroring — the same VisualizeFormat::Tree path handles both.
-        let res_flat = eval(graph.clone(), r#"g.V().hasLabel("person").toTree()"#)
-            .expect("toTree alias failed");
+        let res_flat =
+            eval(graph.clone(), r#"g.V().hasLabel("person").to_tree()"#).expect("to_tree failed");
         assert_eq!(res_flat.lines().count(), 4);
     }
 
@@ -2747,7 +2745,7 @@ mod tests {
         let before = eval(
             graph.clone(),
             r#"g.V("4").property("age", "999").toList();
-               g.V().hasLabel("person").inferSchema().toMarkdown()"#,
+               g.V().hasLabel("person").infer_schema().to_markdown()"#,
         )
         .expect("setup script failed");
         assert!(
@@ -2758,7 +2756,7 @@ mod tests {
         let after = eval(
             graph,
             r#"g.V().hasLabel("person").property("age", __.values("age").as_number(GType::LONG)).toList();
-               g.V().hasLabel("person").inferSchema().toMarkdown()"#,
+               g.V().hasLabel("person").infer_schema().to_markdown()"#,
         )
         .expect("normalization script failed");
         assert!(
@@ -4427,11 +4425,11 @@ mod bounded_rendering {
     fn a_per_call_map_overrides_the_session_default() {
         let table = text(eval_in_session(Some(2), "g.v().to_table(#{max_rows: 3})").unwrap());
         assert_eq!(table_rows(&table), 3, "{table}");
-        let table = text(eval_in_session(Some(2), "g.v().toTable(#{no_limit: true})").unwrap());
+        let table = text(eval_in_session(Some(2), "g.v().to_table(#{no_limit: true})").unwrap());
         assert_eq!(table_rows(&table), 6, "{table}");
         let table = text(eval_in_session(Some(2), "g.v().to_table(#{no_limit: false})").unwrap());
         assert_eq!(table_rows(&table), 2, "{table}");
-        let json = text(eval_in_session(Some(2), "g.v().toJson(#{noLimit: true})").unwrap());
+        let json = text(eval_in_session(Some(2), "g.v().to_json(#{noLimit: true})").unwrap());
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 6);
         let tree =

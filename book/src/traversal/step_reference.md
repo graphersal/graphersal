@@ -14,8 +14,9 @@ such as `where`, `repeat`, `union` or `by`, which runs once for every element th
 g.v().has_label("person").where(__.out("created")).values("name")   // marko, josh, peter
 ```
 
-Every step has a snake_case name and its Gremlin camelCase twin (`has_label` and `hasLabel`,
-`out_e` and `outE`); they are the same function. Strings are written in double quotes, maps as
+Every TinkerPop step has a snake_case name and its Gremlin camelCase twin (`has_label` and
+`hasLabel`, `out_e` and `outE`); they are the same function. Graphersal's own extensions are
+snake_case only. Strings are written in double quotes, maps as
 `#{key: value}`, lists as `[1, 2]`. Tokens are written with their class: `P.gt(30)`,
 `Order.desc`, `T.label`, `Scope.local`, `Column.keys` (see [Predicates](functions/predicates.md) and
 [Functions, Tokens and Values](functions/tokens_and_values.md)).

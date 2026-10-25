@@ -63,7 +63,7 @@ fn non_removable_values_are_cast_errors_and_nothing_is_removed() {
             "pathProperty",
         ),
         (r#"g.V("1").valueMap().unfold().drop().toList()"#, "entry"),
-        (r#"g.V().inferSchema().drop().toList()"#, "schema"),
+        (r#"g.V().infer_schema().drop().toList()"#, "schema"),
         (r#"g.E().subgraph("sg").cap("sg").drop().toList()"#, "graph"),
         // a vertex dropped before the failing value is restored with the failure
         (

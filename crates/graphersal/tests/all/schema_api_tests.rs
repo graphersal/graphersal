@@ -382,20 +382,20 @@ fn a_compatible_diff_can_still_conflict_with_existing_data() {
 fn the_dsl_methods_in_both_spellings_take_maps_and_json_text() {
     let graph = modern();
     assert!(run(&graph, "g.get_schema()").unwrap().is_unit());
-    assert!(run(&graph, "g.getSchema()").unwrap().is_unit());
+    assert!(run(&graph, "g.get_schema()").unwrap().is_unit());
     let _ = run(&graph, &format!("g.set_schema(`{PERSON}`)")).unwrap();
     assert_eq!(
-        schema_of(run(&graph, "g.getSchema()").unwrap()),
+        schema_of(run(&graph, "g.get_schema()").unwrap()),
         schema(PERSON)
     );
     // A map works too, and the result of get_schema feeds set_schema unchanged.
     let _ = run(
         &graph,
-        "let s = g.get_schema(); s.mode = \"none\"; g.setSchema(s)",
+        "let s = g.get_schema(); s.mode = \"none\"; g.set_schema(s)",
     )
     .unwrap();
     assert_eq!(graph.read().get_schema().unwrap().mode, SchemaMode::None);
-    let _ = run(&graph, r#"g.patchSchema(#{mode: "open"})"#).unwrap();
+    let _ = run(&graph, r#"g.patch_schema(#{mode: "open"})"#).unwrap();
     let patched = run(&graph, r#"g.patch_schema(`{"meta": {"status": "draft"}}`)"#).unwrap();
     assert!(schema_of(patched).to_json().contains(r#""status":"draft""#));
 
@@ -418,7 +418,7 @@ fn the_dsl_methods_in_both_spellings_take_maps_and_json_text() {
 
     let patch_check = run(
         &graph,
-        r#"g.validateSchemaPatch(#{vertices: #{person: #{schema: #{properties: #{nick: #{type: "string"}}}}}})"#,
+        r#"g.validate_schema_patch(#{vertices: #{person: #{schema: #{properties: #{nick: #{type: "string"}}}}}})"#,
     )
     .unwrap()
     .cast::<rhai::Map>();
@@ -427,7 +427,7 @@ fn the_dsl_methods_in_both_spellings_take_maps_and_json_text() {
         Ok(0)
     );
 
-    let diff = run(&graph, r#"g.diffSchema(#{mode: "none"})"#)
+    let diff = run(&graph, r#"g.diff_schema(#{mode: "none"})"#)
         .unwrap()
         .cast::<rhai::Map>();
     assert_eq!(diff["compatible"].as_bool(), Ok(true));

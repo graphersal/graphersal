@@ -18,8 +18,11 @@ names.len()                                        // 2
 - **Terminals run a traversal.** `to_list()`, `next()` and `iterate()` run it and return native
   values; a traversal that is the *last* value of a script is displayed instead. A traversal in
   the middle of a script without a terminal is only built, not run.
-- **Both spellings.** Every step is available in snake_case (`has_label`, `out_e`) and in
-  Gremlin camelCase (`hasLabel`, `outE`), with the same overloads.
+- **Two spellings for TinkerPop's steps.** Every TinkerPop step and function is available in
+  snake_case (`has_label`, `out_e`) and in Gremlin camelCase (`hasLabel`, `outE`), with the
+  same overloads. Graphersal's own extensions (`create_index`, `memory_report`,
+  `remove_property`, `glob_path`, `define_query`, the `Fake` methods, ...) are snake_case only
+  (since 0.3.0); a camelCase call of one fails with a help that names the snake_case name.
 - **Strings in double quotes.** Single quotes are Rhai character literals; maps are written
   `#{key: value}`.
 - **Anonymous traversals start with `__.`**: `where(__.out("knows"))`, `repeat(__.both())`.

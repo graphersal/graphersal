@@ -33,7 +33,7 @@ Fake(1).company()   // Vargas & Ryan
 Fake(1).country()   // South Africa
 ```
 
-**`Fake.domain_name` · `Fake.domainName`**: A random domain name.
+**`Fake.domain_name`**: A random domain name.
 
 ```rhai,graph=modern
 Fake(1).domain_name()   // vasquezsalt.info
@@ -45,7 +45,7 @@ Fake(1).domain_name()   // vasquezsalt.info
 Fake(1).email("Ada Lovelace")   // ada.lovelace57@example.net
 ```
 
-**`Fake.first_name` · `Fake.firstName`**: A random English given name.
+**`Fake.first_name`**: A random English given name.
 
 ```rhai,graph=modern
 Fake(1).first_name()   // Victoria
@@ -63,7 +63,7 @@ Fake(1).float(0, 100)   // 56.65615751722809
 Fake(1).fork("people").first_name()   // Mason
 ```
 
-**`Fake.full_name` · `Fake.fullName`**: A random given name and surname.
+**`Fake.full_name`**: A random given name and surname.
 
 ```rhai,graph=modern
 Fake(1).full_name()   // Victoria Vargas
@@ -75,13 +75,13 @@ Fake(1).full_name()   // Victoria Vargas
 Fake(1).int(1, 6)   // 4
 ```
 
-**`Fake.job_title` · `Fake.jobTitle`**: A random job title such as Senior Data Analyst.
+**`Fake.job_title`**: A random job title such as Senior Data Analyst.
 
 ```rhai,graph=modern
 Fake(1).job_title()   // Principal Infrastructure Officer
 ```
 
-**`Fake.last_name` · `Fake.lastName`**: A random English surname.
+**`Fake.last_name`**: A random English surname.
 
 ```rhai,graph=modern
 Fake(1).last_name()   // Vasquez
@@ -93,13 +93,13 @@ Fake(1).last_name()   // Vasquez
 Fake(1).lorem(100, 200).len()   // 157
 ```
 
-**`Fake.lorem_paragraph` · `Fake.loremParagraph`**: A random Lorem ipsum paragraph of 3 to 7 sentences.
+**`Fake.lorem_paragraph`**: A random Lorem ipsum paragraph of 3 to 7 sentences.
 
 ```rhai,graph=modern
 Fake(1).lorem_paragraph().len()   // 300
 ```
 
-**`Fake.lorem_sentence` · `Fake.loremSentence`**: A random Lorem ipsum sentence of 6 to 14 words.
+**`Fake.lorem_sentence`**: A random Lorem ipsum sentence of 6 to 14 words.
 
 ```rhai,graph=modern
 Fake(1).lorem_sentence()   // Vel non non accumsan libero est consequat ac excepteur montes sunt.
@@ -147,19 +147,19 @@ Fake(1).shuffle([1, 2, 3, 4])   // [1, 2, 4, 3]
 Fake(1).state()   // New Hampshire
 ```
 
-**`Fake.state_abbr` · `Fake.stateAbbr`**: A random US state postal abbreviation.
+**`Fake.state_abbr`**: A random US state postal abbreviation.
 
 ```rhai,graph=modern
 Fake(1).state_abbr()   // NH
 ```
 
-**`Fake.street_address` · `Fake.streetAddress`**: A random house number and street name.
+**`Fake.street_address`**: A random house number and street name.
 
 ```rhai,graph=modern
 Fake(1).street_address()   // 5666 Broad Trail
 ```
 
-**`Fake.street_name` · `Fake.streetName`**: A random street name.
+**`Fake.street_name`**: A random street name.
 
 ```rhai,graph=modern
 Fake(1).street_name()   // Lakeview Circle
@@ -183,7 +183,7 @@ Fake(1).uuid().as_string()   // 910a2dec-8902-4cc1-beeb-8da1658eec67
 Fake(1).word()   // onyx
 ```
 
-**`Fake.zip_code` · `Fake.zipCode`**: A random five-digit US ZIP code.
+**`Fake.zip_code`**: A random five-digit US ZIP code.
 
 ```rhai,graph=modern
 Fake(1).zip_code()   // 57062

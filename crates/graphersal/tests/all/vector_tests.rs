@@ -274,7 +274,7 @@ mod dsl {
             "vector([0.5, 1.0])"
         );
         assert_eq!(
-            run("g.inject([0.5, 1]).asVector().next()"),
+            run("g.inject([0.5, 1]).as_vector().next()"),
             "vector([0.5, 1.0])"
         );
         assert_eq!(

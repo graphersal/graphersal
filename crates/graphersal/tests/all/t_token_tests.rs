@@ -114,7 +114,8 @@ fn project_select_path_and_tree_by_t_tokens() {
 
 #[test]
 fn glob_path_by_t_tokens_in_both_spellings() {
-    for step in ["glob_path", "globPath"] {
+    {
+        let step = "glob_path";
         assert_t_equals_by(
             tree,
             &format!(

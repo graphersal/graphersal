@@ -88,7 +88,7 @@ fn test_infer_schema_step_rhai_script() {
     use std::sync::Arc;
     let graph = Arc::new(GraphSource::tinkerpop_modern());
     for script in [
-        r#"g.V().hasLabel("person").inferSchema().toList()"#,
+        r#"g.V().hasLabel("person").infer_schema().toList()"#,
         r#"g.v().has_label("person").infer_schema().to_list()"#,
     ] {
         let res = crate::script_host::eval(graph.clone(), script).expect(script);
@@ -98,12 +98,12 @@ fn test_infer_schema_step_rhai_script() {
     {
         let table = crate::script_host::eval(
             graph.clone(),
-            r#"g.V().hasLabel("person").inferSchema().to_table()"#,
+            r#"g.V().hasLabel("person").infer_schema().to_table()"#,
         )
         .unwrap();
         let vis = crate::script_host::eval(
             graph.clone(),
-            r#"g.V().hasLabel("person").inferSchema().visualize(V.Table)"#,
+            r#"g.V().hasLabel("person").infer_schema().visualize(V.Table)"#,
         )
         .unwrap();
         assert_eq!(table, vis);

@@ -85,7 +85,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.create_index(#{label, key, element?, name?, type?, transform?})` /
-    /// `g.createIndex(..)`: declares (or replaces) a property index: the `element`s
+    /// `g.create_index(..)`: declares (or replaces) a property index: the `element`s
     /// (`"vertex"`, the default, or `"edge"`) labelled `label`, ordered by their top-level
     /// property `key` (a plain name). `name` defaults to
     /// [`PropertyIndexDefinition::default_name`] (`<label>_<key>`, `_edge` for edges,
@@ -203,7 +203,7 @@ impl ScriptGraphTraversalSource {
             .collect())
     }
 
-    /// `g.drop_index(name)` / `g.dropIndex(name)`: drops the property index; `false` when there
+    /// `g.drop_index(name)`: drops the property index; `false` when there
     /// is none. Asks for `Delete` on it.
     pub fn drop_index(&mut self, name: &str) -> Result<bool, Box<EvalAltResult>> {
         self.require_index("drop_index", Action::Delete, Some(name))?;

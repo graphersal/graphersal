@@ -147,7 +147,7 @@ impl ScriptGraphSource {
         Self::file_tree().with_access(access::ScriptAccess::of_context(ctx), true)
     }
 
-    /// A graph the script built (`schema.toGraph()`), private, with the authorizer from `ctx`.
+    /// A graph the script built (`schema.to_graph()`), private, with the authorizer from `ctx`.
     pub(crate) fn private_graph_in(
         ctx: &NativeCallContext,
         graph: TraversalGraph,
@@ -179,7 +179,7 @@ impl std::fmt::Debug for ScriptGraphTarget {
 ///
 /// It holds its graph as `Arc<dyn AnyGraph>`, so one DSL serves every storage: the host's `g`
 /// may be any [`Graph<S>`](Graph), while the graphs a script builds itself (`GraphSource::*`,
-/// `__`, `_g`, `subgraph()`/`cap()`/`to_graph()` results, `schema.toGraph()`) are always
+/// `__`, `_g`, `subgraph()`/`cap()`/`to_graph()` results, `schema.to_graph()`) are always
 /// `TraversalGraph`s. A terminal is one [`AnyGraph`] call, which runs the engine for the
 /// concrete storage.
 #[derive(Clone)]
@@ -252,7 +252,7 @@ impl ScriptGraphTraversalSource {
         }
     }
 
-    /// `g.import_graphson(path)` / `g.importGraphson(path)`: imports GraphSON (line or wrapped
+    /// `g.import_graphson(path)`: imports GraphSON (line or wrapped
     /// form) into this source's graph as one unit and returns the import report as text (counts,
     /// then one line per kind of skipped or converted data). Asks for `Read` on the `File`
     /// (resolved under the host's file root, if any) and `Create` on `Data`.
@@ -470,7 +470,7 @@ impl ScriptGraphTraversalSource {
         Ok(Dynamic::from_map(map))
     }
 
-    /// `g.export_snapshot(path)` / `g.exportSnapshot(path)`: writes this source's graph as a
+    /// `g.export_snapshot(path)`: writes this source's graph as a
     /// packed snapshot (`.gsnap`: data, schema, lineage id, commit position; read it back
     /// with `GraphSource::file(path)`). Asks for `Read` on `Data` and `Create` on the `File`
     /// (resolved under the host's file root, if any).
@@ -553,7 +553,7 @@ impl ScriptGraphTraversalSource {
         })
     }
 
-    /// `g.get_schema()` / `g.getSchema()`: the stored schema as a map (its canonical format),
+    /// `g.get_schema()`: the stored schema as a map (its canonical format),
     /// `()` without one; never inferred. Asks for `Read` on `Schema`.
     pub fn get_schema(&mut self) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
         self.require_schema("get_schema", crate::graph::Action::Read)?;
@@ -563,7 +563,7 @@ impl ScriptGraphTraversalSource {
         })
     }
 
-    /// `g.set_schema(schema)` / `g.setSchema(schema)`: replaces the stored schema with a map or
+    /// `g.set_schema(schema)`: replaces the stored schema with a map or
     /// JSON text in the schema format. Existing data is validated immediately; on violations
     /// nothing changes. Runs in the current unit (a whole-script unit, a transaction) or as one
     /// of its own. Asks for `Update` on `Schema`.
@@ -580,7 +580,7 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `g.set_schema(schema, mode)` / `g.setSchema(schema, mode)`: [`Self::set_schema`] with the
+    /// `g.set_schema(schema, mode)`: [`Self::set_schema`] with the
     /// schema's mode replaced by `mode` (a `SchemaMode` token or `"none"`/`"open"`/`"closed"`).
     /// The one-liner that freezes the structure a graph has:
     /// `g.set_schema(g.infer_schema(), SchemaMode.closed)`; it always succeeds on the data the
@@ -601,7 +601,7 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `g.patch_schema(patch)` / `g.patchSchema(patch)`: applies a JSON Merge Patch (a map or
+    /// `g.patch_schema(patch)`: applies a JSON Merge Patch (a map or
     /// JSON text) to the stored schema and stores the result like `set_schema`; returns the new
     /// schema. Asks for `Update` on `Schema`.
     pub fn patch_schema(
@@ -618,7 +618,7 @@ impl ScriptGraphTraversalSource {
         Ok(element_property_to_dynamic(schema.to_value()))
     }
 
-    /// `g.validate_schema(schema)` / `g.validateSchema(schema)`: a dry run of `set_schema`:
+    /// `g.validate_schema(schema)`: a dry run of `set_schema`:
     /// `#{violations, diff, compatible}`. Nothing is applied. Asks for `Read` on `Schema`.
     pub fn validate_schema(
         ctx: NativeCallContext,
@@ -634,7 +634,7 @@ impl ScriptGraphTraversalSource {
         Ok(element_property_to_dynamic(validation.to_value()))
     }
 
-    /// `g.validate_schema(schema, mode)` / `g.validateSchema(schema, mode)`: the dry run of
+    /// `g.validate_schema(schema, mode)`: the dry run of
     /// `set_schema(schema, mode)`.
     pub fn validate_schema_with_mode(
         ctx: NativeCallContext,
@@ -652,7 +652,7 @@ impl ScriptGraphTraversalSource {
         Ok(element_property_to_dynamic(validation.to_value()))
     }
 
-    /// `g.validate_schema_patch(patch)` / `g.validateSchemaPatch(patch)`: `validate_schema` of
+    /// `g.validate_schema_patch(patch)`: `validate_schema` of
     /// the stored schema patched with `patch`. Asks for `Read` on `Schema`.
     pub fn validate_schema_patch(
         ctx: NativeCallContext,
@@ -668,7 +668,7 @@ impl ScriptGraphTraversalSource {
         Ok(element_property_to_dynamic(validation.to_value()))
     }
 
-    /// `g.diff_schema(schema)` / `g.diffSchema(schema)`: `#{changes, compatible}` from the
+    /// `g.diff_schema(schema)`: `#{changes, compatible}` from the
     /// stored schema to `schema`. Asks for `Read` on `Schema`.
     pub fn diff_schema(
         ctx: NativeCallContext,
@@ -684,7 +684,7 @@ impl ScriptGraphTraversalSource {
         Ok(element_property_to_dynamic(diff.to_value()))
     }
 
-    /// `g.infer_schema()` / `g.inferSchema()`: on an empty pipeline, the schema the whole graph's
+    /// `g.infer_schema()`: on an empty pipeline, the schema the whole graph's
     /// data satisfies, as a map (asks for `Read` on `Schema`); after steps
     /// (`g.v().has_label("person").infer_schema()`), the `infer_schema()` step over the stream.
     pub fn infer_schema(&mut self) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
@@ -772,7 +772,7 @@ impl ScriptGraphTraversalSource {
         }
     }
 
-    /// `g.export_graphson(path)` / `g.exportGraphson(path)`: exports this source's graph as
+    /// `g.export_graphson(path)`: exports this source's graph as
     /// GraphSON 3.0 (line form). Asks for `Read` on `Data` and `Create` on the `File` (resolved
     /// under the host's file root, if any).
     #[cfg(feature = "io")]

@@ -209,7 +209,7 @@ mod script {
                 r#"offsettime("10:00:00.5+02:00")"#,
                 r#"offsettime("10:00:00.500+02:00")"#,
             ),
-            (r#"offsetTime("10:00Z")"#, r#"offsettime("10:00:00Z")"#),
+            (r#"offsettime("10:00Z")"#, r#"offsettime("10:00:00Z")"#),
             (
                 r#"offsettime("10:00+02:00") == offsettime("08:00Z")"#,
                 "true",

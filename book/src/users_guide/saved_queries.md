@@ -42,7 +42,7 @@ g.query("older_than").values("name").toList()
 // ["josh", "peter"]
 ```
 
-`g.define_query(#{..})` (`g.defineQuery(..)`) stores a new query or replaces the one of that
+`g.define_query(#{..})` stores a new query or replaces the one of that
 name. The keys:
 
 | Key | Required | Meaning |
@@ -69,7 +69,7 @@ called.
 
 ### Several queries at once
 
-`g.define_queries(folder, source[, params])` (`g.defineQueries(..)`) stores every function of a
+`g.define_queries(folder, source[, params])` stores every function of a
 source as a query of its own, named like the function, described by its doc comment (`///`
 lines or a `/** .. */` block). `params` maps each function name to its parameter map. All of
 them are stored in one unit: either every query is stored or none. It returns the names.

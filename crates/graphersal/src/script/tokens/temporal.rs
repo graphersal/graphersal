@@ -278,13 +278,9 @@ pub(crate) fn register_temporal(registry: &mut crate::script::register::Registry
             script_datetime(text)
         })
         .register_fn("date", |text: &str| script_date(text))
-        .register_fn_as(&["localdatetime", "localDateTime"], |text: &str| {
-            script_local(text)
-        })
+        .register_fn_as(&["localdatetime"], |text: &str| script_local(text))
         .register_fn("time", |text: &str| script_time(text))
-        .register_fn_as(&["offsettime", "offsetTime"], |text: &str| {
-            script_offset_time(text)
-        })
+        .register_fn_as(&["offsettime"], |text: &str| script_offset_time(text))
         .register_fn("duration", |text: &str| script_duration(text))
         .register_fn("now", |ctx: NativeCallContext| access::now_of(&ctx))
         .register_fn("today", |ctx: NativeCallContext| script_today(&ctx, None))

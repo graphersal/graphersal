@@ -633,7 +633,7 @@ fn rhai_execute_with_memory_and_to_map_and_to_json() {
         let r = g.V().group().by("name").execute(#{profile_types: [ProfileType.Memory]});
         let m = r.to_map();
         [m.results.len(), m.error == (), m.profile.metrics[1].contains("memory"),
-         r.to_json().starts_with("{\"results\":"), r.toJson() == r.to_json()]
+         r.to_json().starts_with("{\"results\":"), r.to_json() == r.to_json()]
     "#;
     let values = eval_value(modern(), script).unwrap().cast::<rhai::Array>();
     assert_eq!(values[0].as_int().unwrap(), 1);

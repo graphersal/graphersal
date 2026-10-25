@@ -77,7 +77,8 @@ let social = f.fork("social");   // unchanged when the people part draws more va
 | `lorem(lo, hi)` | Lorem ipsum text of a random length from `lo` to `hi` bytes (both included, at most 16 MiB): paragraphs separated by an empty line, starting with "Lorem ipsum dolor sit amet", ending with a period; for large text fields, e.g. to try [compressed properties](compressed_properties.md) |
 | `lorem_sentence()`, `lorem_paragraph()` | a Lorem ipsum sentence of 6 to 14 words; a paragraph of 3 to 7 sentences |
 
-Methods of two words have both spellings (`full_name`/`fullName`, `zip_code`/`zipCode`, ...).
+Methods of two words are snake_case only (`full_name`, `zip_code`, ...), like every Graphersal
+extension.
 A wrong argument (`int(5, 1)`, `chance(1.5)`, `pick([])`, `sample([1], 2)`) is a script error that
 names the method.
 

@@ -55,7 +55,7 @@ mode)` is the dry run. `SchemaMode` is a reserved name in the script scope.
 
 | Binding | Freeze |
 |---|---|
-| DSL | `g.set_schema(g.infer_schema(), SchemaMode.closed)` (also `setSchema(.., "closed")`) |
+| DSL | `g.set_schema(g.infer_schema(), SchemaMode.closed)` (the mode also as a string: `"closed"`) |
 | Rust | `let s = g.infer_schema()?.with_mode(SchemaMode::Closed); g_mut.set_schema(s)?` |
 | Python | `graph.set_schema(graph.infer_schema(), mode="closed")` |
 | Playground | Schema panel: **Freeze as open** / **Freeze as closed** (shown while the graph stores no enforcing schema) |
@@ -429,7 +429,7 @@ unit of its own.
 | | Input | Output |
 |---|---|---|
 | Rust (`GraphTraversalSource`) | `GraphSchema` (`GraphSchema::from_json(text)`, `from_value`, or the builders), `SchemaPatch` (`graphersal::schema`) | `GraphSchema`, `SchemaValidation`, `SchemaDiff` (`to_value()` gives the data shape) |
-| DSL (both spellings: `get_schema`/`getSchema`, ...) | a map or JSON text | a map |
+| DSL (`get_schema`, `set_schema`, ...) | a map or JSON text | a map |
 | Python (`Graph.get_schema()`, ...) | a `dict` or JSON `str` (keyword `policy=`) | a `dict` |
 | Playground engine (wasm `getSchema`, ...) | JSON text | JSON |
 

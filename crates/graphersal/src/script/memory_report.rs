@@ -1,4 +1,4 @@
-//! `g.memory_report([#{..}])` / `g.memoryReport(..)`: the memory report (book page "Memory
+//! `g.memory_report([#{..}])` / `g.memory_report(..)`: the memory report (book page "Memory
 //! Usage"), a plain call on the source answering [`MemoryReport::to_property`]'s map.
 //!
 //! [`MemoryReport::to_property`]: crate::graph::MemoryReport::to_property
@@ -24,7 +24,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.memory_report(#{sample_every?, max_elements?, max_rows?, max_labels?, path_depth?})` /
-    /// `g.memoryReport(..)`: where the graph's memory goes, per label and per top-level
+    /// `g.memory_report(..)`: where the graph's memory goes, per label and per top-level
     /// property (a map, see [`crate::graph::MemoryReport::to_property`]), or `()` when the source
     /// has no graph. `sample_every`/`max_elements` sample (figures extrapolated), `max_rows`/`max_labels`
     /// keep the rows with the most bytes, `path_depth` is `1`. Read-only; asks for `Read` on

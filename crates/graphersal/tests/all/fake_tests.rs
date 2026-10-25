@@ -63,7 +63,7 @@ fn both_spellings_draw_the_same_values() {
         "let f = Fake(3); [f.first_name(), f.last_name(), f.full_name(), f.job_title(), f.street_name(), f.street_address(), f.state_abbr(), f.zip_code(), f.domain_name()]",
     );
     let camel = text(
-        "let f = Fake(3); [f.firstName(), f.lastName(), f.fullName(), f.jobTitle(), f.streetName(), f.streetAddress(), f.stateAbbr(), f.zipCode(), f.domainName()]",
+        "let f = Fake(3); [f.first_name(), f.last_name(), f.full_name(), f.job_title(), f.street_name(), f.street_address(), f.state_abbr(), f.zip_code(), f.domain_name()]",
     );
     assert_eq!(snake, camel);
 }

@@ -382,7 +382,7 @@ mod request_mapping {
         let _ = run(
             &graph,
             r#"g.with("repeat.max_loops", 5).mergeV(#{name: "zed"}).toList();
-               g.V().inferSchema().next(); g.infer_schema(); g.statistics(); g.V().removeProperty("age").toList();"#,
+               g.V().infer_schema().next(); g.infer_schema(); g.statistics(); g.V().remove_property("age").toList();"#,
             recorder.clone(),
         )
         .unwrap();
@@ -597,12 +597,12 @@ mod access_policy {
             "Create Data(vertex)",
         );
         assert_denied(
-            run(&graph, r#"g.V().removeProperty("age").toList()"#, read()),
+            run(&graph, r#"g.V().remove_property("age").toList()"#, read()),
             "remove_property",
             "Update Data",
         );
         assert_denied(
-            run(&graph, r#"g.V().addLabel("x").toList()"#, read()),
+            run(&graph, r#"g.V().add_label("x").toList()"#, read()),
             "add_label",
             "Update Data(vertex)",
         );
@@ -639,7 +639,7 @@ mod access_policy {
         assert_denied(
             run(
                 &graph,
-                "g.memoryReport(#{max_rows: 1})",
+                "g.memory_report(#{max_rows: 1})",
                 AccessPolicy::deny_all(),
             ),
             "memory_report",
@@ -671,14 +671,14 @@ mod access_policy {
         );
         for (script, operation) in [
             ("g.get_schema()", "get_schema"),
-            ("g.inferSchema()", "infer_schema"),
+            ("g.infer_schema()", "infer_schema"),
             ("g.diff_schema(`{}`)", "diff_schema"),
             ("g.validate_schema(`{}`)", "validate_schema"),
             (
                 "g.validate_schema(`{}`, SchemaMode.closed)",
                 "validate_schema",
             ),
-            ("g.validateSchemaPatch(`{}`)", "validate_schema_patch"),
+            ("g.validate_schema_patch(`{}`)", "validate_schema_patch"),
         ] {
             assert_denied(run(&graph, script, none()), operation, "Read Schema");
         }
@@ -928,7 +928,7 @@ mod private_graphs {
             r#"let sg = g.E().hasLabel("knows").subgraph("sg").cap("sg").next();
                sg.addV("extra").next();
                sg.V().drop().toList();
-               let tg = g.E().hasLabel("created").toGraph();
+               let tg = g.E().hasLabel("created").to_graph();
                tg.addV("more").next();
                tg.V().count().next()"#,
             AccessPolicy::read_only(),
@@ -1041,7 +1041,8 @@ mod file_io {
         let graph = modern();
         let dir = fresh_dir("snapshot-needs-file-io");
         let path = forward(&dir.join("g.gsnap"));
-        for spelling in ["export_snapshot", "exportSnapshot"] {
+        {
+            let spelling = "export_snapshot";
             assert_denied(
                 run(
                     &graph,
@@ -1053,7 +1054,7 @@ mod file_io {
             );
         }
         assert!(!dir.join("g.gsnap").exists());
-        let _ = run(&graph, &format!(r#"g.exportSnapshot("{path}")"#), files()).unwrap();
+        let _ = run(&graph, &format!(r#"g.export_snapshot("{path}")"#), files()).unwrap();
         assert!(dir.join("g.gsnap").exists());
         assert_denied(
             run(
@@ -1084,7 +1085,8 @@ mod file_io {
         let graph = modern();
         let dir = fresh_dir("graphson-needs-file-io");
         let path = forward(&dir.join("out.json"));
-        for spelling in ["export_graphson", "exportGraphson"] {
+        {
+            let spelling = "export_graphson";
             assert_denied(
                 run(
                     &graph,
@@ -1096,10 +1098,11 @@ mod file_io {
             );
         }
         assert!(!dir.join("out.json").exists());
-        let _ = run(&graph, &format!(r#"g.exportGraphson("{path}")"#), files()).unwrap();
+        let _ = run(&graph, &format!(r#"g.export_graphson("{path}")"#), files()).unwrap();
         assert!(dir.join("out.json").exists());
         let target = Arc::new(GraphSource::empty());
-        for spelling in ["import_graphson", "importGraphson"] {
+        {
+            let spelling = "import_graphson";
             assert_denied(
                 run(&target, &format!(r#"g.{spelling}("{path}")"#), files()),
                 "import_graphson",
@@ -1116,7 +1119,7 @@ mod file_io {
             );
         }
         let all = files().allow(ActionKind::Create, ResourceKind::Data);
-        let _ = run(&target, &format!(r#"g.importGraphson("{path}")"#), all).unwrap();
+        let _ = run(&target, &format!(r#"g.import_graphson("{path}")"#), all).unwrap();
         assert_eq!(count(&target), 6);
         // GraphSource::file reads a `.json` file as GraphSON.
         let n = run(
@@ -1227,8 +1230,8 @@ mod file_io {
         let graph = modern();
         for (script, operation) in [
             (r#"g.set_schema(`{"mode": "open"}`)"#, "set_schema"),
-            (r#"g.setSchema(`{}`, SchemaMode.open)"#, "set_schema"),
-            (r#"g.patchSchema(#{mode: "open"})"#, "patch_schema"),
+            (r#"g.set_schema(`{}`, SchemaMode.open)"#, "set_schema"),
+            (r#"g.patch_schema(#{mode: "open"})"#, "patch_schema"),
         ] {
             assert_denied(run(&graph, script, files()), operation, "Update Schema");
             let _ = run(

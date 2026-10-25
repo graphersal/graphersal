@@ -813,12 +813,12 @@ mod tests {
         };
         // All spellings merge into one entry, named by the shortest snake_case spelling.
         assert_eq!(find("traversal", "in")["aliases"], json!(["in_"]));
-        let plantuml = find("traversal", "to_plantuml");
         assert_eq!(
-            plantuml["aliases"].as_array().unwrap().len(),
-            2,
-            "{plantuml}"
+            find("traversal", "has_label")["aliases"],
+            json!(["hasLabel"])
         );
+        // A Graphersal extension has one spelling (snake_case only since 0.3.0).
+        assert_eq!(find("traversal", "to_plantuml")["aliases"], json!([]));
         // Free functions are listed too, with all their parameters.
         assert_eq!(
             find("global", "jpath")["signatures"],

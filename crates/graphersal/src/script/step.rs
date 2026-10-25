@@ -238,7 +238,7 @@ pub(super) enum Step {
     Skip(usize),
     Tail(usize),
     /// `range(low, high)`: `[low, high)` stream slicing. `high == -1` means "no upper bound",
-    /// per TinkerPop's own sentinel. Kept as `i64`/`i64` (not `usize`) so a negative `low` or a
+    /// per TinkerPop's own sentinel. Kept as `i64` (not `usize`) so a negative `low` or a
     /// `high` below `-1` reaches `StepRange::process` for a clear `TraverserError::InvalidRange`
     /// instead of silently wrapping via `as usize`.
     Range(i64, i64),
@@ -391,7 +391,7 @@ pub(super) enum Step {
     #[cfg(feature = "gql")]
     Gql(CompactString, Vec<(CompactString, ElementProperty)>),
     JsonPath(CompactString),
-    /// `glob_path(pattern[, #{...}])` / `globPath(pattern[, #{...}])`; the pattern is compiled
+    /// `glob_path(pattern[, #{...}])`; the pattern is compiled
     /// and `max_depth` validated by the Rust step.
     GlobPath(CompactString, ScriptGlobPathOptions),
     /// A step of the traversal source `g` (`withSack`, `withSideEffect`); see [`SourceStep`].

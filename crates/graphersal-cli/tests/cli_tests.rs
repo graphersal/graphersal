@@ -455,12 +455,12 @@ fn loads_a_graph_from_disk() {
     assert_eq!(res.stdout.trim(), "6");
 }
 
-/// `--graph x.json` reads GraphSON; `export_graphson` and `exportGraphson` write it.
+/// `--graph x.json` reads GraphSON; `export_graphson` writes it (`.json` and the line form).
 #[test]
 fn graphson_export_reads_back_through_graph() {
     for (name, call) in [
         ("modern_snake.json", "export_graphson"),
-        ("modern_camel.jsonl", "exportGraphson"),
+        ("modern_lines.jsonl", "export_graphson"),
     ] {
         let path = temp_path(name);
         let path = script_path(&path);

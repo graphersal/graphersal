@@ -652,7 +652,7 @@ mod dsl {
             assert!(all.contains(key), "{key}: {all}");
         }
         assert_eq!(
-            run(r#"g.estimateCompression(#{label: "customer", path: "bio"}).candidates.len()"#)
+            run(r#"g.estimate_compression(#{label: "customer", path: "bio"}).candidates.len()"#)
                 .as_int()
                 .unwrap(),
             10

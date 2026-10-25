@@ -91,8 +91,8 @@ compiled and run by `cargo test -p graphersal-session`. The `Forwarding` storage
 ## What stays `TraversalGraph`-only
 
 - **Scratch graphs.** Graphs a script creates itself are always `TraversalGraph`s, whatever the
-  host's storage: `GraphSource::*`, `__`, `_g`, the results of `subgraph()`/`cap()`/`toGraph()`
-  and `schema.toGraph()`. A host-chosen scratch storage is not planned.
+  host's storage: `GraphSource::*`, `__`, `_g`, the results of `subgraph()`/`cap()`/`to_graph()`
+  and `schema.to_graph()`. A host-chosen scratch storage is not planned.
 - **`withSideEffect(name, graph)` into a host graph.** A `subgraph()` writes only into a
   `TraversalGraph`; a foreign target fails with `GraphError::Unsupported`. Let the subgraph land
   in a scratch graph and copy what is needed.

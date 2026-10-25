@@ -274,15 +274,9 @@ pub(super) fn register(registry: &mut Registry) {
             &["as_date", "asDate"],
             ScriptGraphTraversalSource::as_date_t,
         )
-        .register_fn_as(
-            &["as_duration", "asDuration"],
-            ScriptGraphTraversalSource::as_duration,
-        )
+        .register_fn_as(&["as_duration"], ScriptGraphTraversalSource::as_duration)
         // The vector steps (book page "Vectors").
-        .register_fn_as(
-            &["as_vector", "asVector"],
-            ScriptGraphTraversalSource::as_vector,
-        )
+        .register_fn_as(&["as_vector"], ScriptGraphTraversalSource::as_vector)
         .register_fn("quantize", ScriptGraphTraversalSource::quantize)
         .register_fn("similarity", ScriptGraphTraversalSource::similarity)
         .register_fn("similarity", ScriptGraphTraversalSource::similarity_2)
@@ -292,10 +286,7 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn("embed", ScriptGraphTraversalSource::embed)
         .register_fn("embed", ScriptGraphTraversalSource::embed_1)
         .register_fn("embed", ScriptGraphTraversalSource::embed_2)
-        .register_fn_as(
-            &["vector_mean", "vectorMean"],
-            ScriptGraphTraversalSource::vector_mean,
-        )
+        .register_fn_as(&["vector_mean"], ScriptGraphTraversalSource::vector_mean)
         .register_fn_as(
             &["date_add", "dateAdd"],
             ScriptGraphTraversalSource::date_add,
@@ -326,31 +317,13 @@ pub(super) fn register(registry: &mut Registry) {
         )
         .register_fn("age", ScriptGraphTraversalSource::age)
         .register_fn("age", ScriptGraphTraversalSource::age_in)
-        .register_fn_as(
-            &["date_trunc", "dateTrunc"],
-            ScriptGraphTraversalSource::date_trunc,
-        )
-        .register_fn_as(
-            &["date_trunc", "dateTrunc"],
-            ScriptGraphTraversalSource::date_trunc_in,
-        )
-        .register_fn_as(
-            &["date_part", "datePart"],
-            ScriptGraphTraversalSource::date_part,
-        )
-        .register_fn_as(
-            &["date_part", "datePart"],
-            ScriptGraphTraversalSource::date_part_in,
-        )
-        .register_fn_as(&["at_zone", "atZone"], ScriptGraphTraversalSource::at_zone)
-        .register_fn_as(
-            &["as_local", "asLocal"],
-            ScriptGraphTraversalSource::as_local,
-        )
-        .register_fn_as(
-            &["as_local", "asLocal"],
-            ScriptGraphTraversalSource::as_local_in,
-        )
+        .register_fn_as(&["date_trunc"], ScriptGraphTraversalSource::date_trunc)
+        .register_fn_as(&["date_trunc"], ScriptGraphTraversalSource::date_trunc_in)
+        .register_fn_as(&["date_part"], ScriptGraphTraversalSource::date_part)
+        .register_fn_as(&["date_part"], ScriptGraphTraversalSource::date_part_in)
+        .register_fn_as(&["at_zone"], ScriptGraphTraversalSource::at_zone)
+        .register_fn_as(&["as_local"], ScriptGraphTraversalSource::as_local)
+        .register_fn_as(&["as_local"], ScriptGraphTraversalSource::as_local_in)
         .register_fn("cast", ScriptGraphTraversalSource::cast_with)
         .register_fn("substring", ScriptGraphTraversalSource::substring)
         .register_fn("substring", ScriptGraphTraversalSource::substring_from)
@@ -487,18 +460,9 @@ pub(super) fn register(registry: &mut Registry) {
             ScriptGraphTraversalSource::property_cardinality_unit,
         )
         .register_fn("property", ScriptGraphTraversalSource::property_token)
-        .register_fn_as(
-            &["json_path", "jsonPath"],
-            ScriptGraphTraversalSource::json_path,
-        )
-        .register_fn_as(
-            &["glob_path", "globPath"],
-            ScriptGraphTraversalSource::glob_path,
-        )
-        .register_fn_as(
-            &["glob_path", "globPath"],
-            ScriptGraphTraversalSource::glob_path_with,
-        );
+        .register_fn_as(&["json_path"], ScriptGraphTraversalSource::json_path)
+        .register_fn_as(&["glob_path"], ScriptGraphTraversalSource::glob_path)
+        .register_fn_as(&["glob_path"], ScriptGraphTraversalSource::glob_path_with);
 
     // Looping: the snake_case and camelCase spellings coincide.
     registry
@@ -513,7 +477,7 @@ pub(super) fn register(registry: &mut Registry) {
 
     #[cfg(feature = "serde")]
     registry.register_fn_as(
-        &["property_json", "propertyJson"],
+        &["property_json"],
         ScriptGraphTraversalSource::property_json,
     );
 
@@ -539,25 +503,16 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn_as(&["toV", "to_v"], ScriptGraphTraversalSource::to_v)
         .register_fn("drop", ScriptGraphTraversalSource::drop)
         .register_fn_as(
-            &["removeProperty", "remove_property"],
+            &["remove_property"],
             ScriptGraphTraversalSource::remove_property_empty,
         )
         .register_fn_as(
-            &["removeProperty", "remove_property"],
+            &["remove_property"],
             ScriptGraphTraversalSource::remove_property,
         )
-        .register_fn_as(
-            &["addLabel", "add_label"],
-            ScriptGraphTraversalSource::add_label,
-        )
-        .register_fn_as(
-            &["dropLabel", "drop_label"],
-            ScriptGraphTraversalSource::drop_label,
-        )
-        .register_fn_as(
-            &["setLabel", "set_label"],
-            ScriptGraphTraversalSource::set_label,
-        )
+        .register_fn_as(&["add_label"], ScriptGraphTraversalSource::add_label)
+        .register_fn_as(&["drop_label"], ScriptGraphTraversalSource::drop_label)
+        .register_fn_as(&["set_label"], ScriptGraphTraversalSource::set_label)
         .register_fn("subgraph", ScriptGraphTraversalSource::subgraph)
         .register_fn("subgraph", ScriptGraphTraversalSource::subgraph_no_label);
 

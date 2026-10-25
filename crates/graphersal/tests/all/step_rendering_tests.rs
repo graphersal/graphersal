@@ -296,9 +296,9 @@ const FAMILIES: &[(&str, &str, &str)] = &[
         r#"addE("knows").from("a")"#,
     ),
     (
-        r#"g.V().removeProperty("age")"#,
+        r#"g.V().remove_property("age")"#,
         r#"remove_property("age")"#,
-        r#"removeProperty("age")"#,
+        r#"remove_property("age")"#,
     ),
     (
         r#"g.mergeV(#{"T.label": "person"})"#,

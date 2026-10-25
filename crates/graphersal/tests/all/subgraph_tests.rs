@@ -862,7 +862,7 @@ mod dsl {
 
     #[test]
     fn to_graph_on_a_vertex_stream_is_an_error() {
-        for script in [r#"g.v(1).to_graph()"#, r#"g.V().toGraph()"#] {
+        for script in [r#"g.v(1).to_graph()"#, r#"g.V().to_graph()"#] {
             let err = run(script).expect_err("vertices are not edges");
             assert!(err.contains("to_graph() needs edges"), "{err}");
             assert!(err.contains("g.e(0).to_graph()"), "{err}");

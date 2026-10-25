@@ -6,7 +6,7 @@ property instead, see [Path Keys (jpath)](jpath_keys.md#removing-remove_property
 
 ```groovy
 g.V().hasLabel("person").remove_property("age")             // one key
-g.V().removeProperty(["age", "name"])                       // several keys, as an array
+g.V().remove_property(["age", "name"])                       // several keys, as an array
 g.E().remove_property()                                     // every property of each edge
 g.V("1").remove_property("age").values("name")              // the vertex flows on
 ```

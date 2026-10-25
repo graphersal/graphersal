@@ -6,9 +6,11 @@
 //! camelCase spelling is derived from that text by a crate-internal respelling: every identifier
 //! directly followed by `(` outside a string literal is renamed to its camelCase name. The pairs
 //! come from the registered DSL surface (`registered_step_names()`, where rule 2 registers each
-//! step once under both spellings) when the `script` feature is on, so no second list of names
-//! exists; a name the DSL does not register (an optimizer-inserted `lazy_barrier()`) is converted
-//! by the same snake -> camel rule the registry follows.
+//! TinkerPop step once under both spellings) when the `script` feature is on, so no second list
+//! of names exists. A name the DSL registers in snake_case only (Graphersal's own extensions such
+//! as `remove_property`, rule 2) keeps it, so the camelCase text still runs; a name the DSL does
+//! not register at all (an optimizer-inserted `lazy_barrier()`) is converted by the same
+//! snake -> camel rule the registry follows.
 //!
 //! The spelling is chosen per execution with `g.with("render.spelling", "camel")` (values
 //! `"snake"`, `"camel"`); front ends set it as a session option (`--spelling camel`,
@@ -77,12 +79,12 @@ fn camel_case(name: &str) -> String {
     out
 }
 
-/// The snake -> camel pairs of the registered DSL surface: every registered name with an
-/// underscore whose camelCase form is registered too. Built once, on the first camelCase
-/// rendering.
+/// The snake_case step names of the registered DSL surface, each with its camelCase twin when
+/// that is registered too (`None`: registered in snake_case only). Built once, on the first
+/// camelCase rendering.
 #[cfg(feature = "script")]
-fn registered_pairs() -> &'static std::collections::HashMap<String, String> {
-    static PAIRS: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+fn registered_pairs() -> &'static std::collections::HashMap<String, Option<String>> {
+    static PAIRS: std::sync::OnceLock<std::collections::HashMap<String, Option<String>>> =
         std::sync::OnceLock::new();
     PAIRS.get_or_init(|| {
         let names: std::collections::HashSet<String> =
@@ -90,9 +92,9 @@ fn registered_pairs() -> &'static std::collections::HashMap<String, String> {
         names
             .iter()
             .filter(|name| is_snake_step_name(name))
-            .filter_map(|name| {
+            .map(|name| {
                 let camel = camel_case(name);
-                names.contains(&camel).then(|| (name.clone(), camel))
+                (name.clone(), names.contains(&camel).then_some(camel))
             })
             .collect()
     })
@@ -107,14 +109,18 @@ fn is_snake_step_name(name: &str) -> bool {
 }
 
 /// The camelCase spelling of the snake_case step name `snake`: the registered pair when the DSL
-/// registers one, otherwise the same snake -> camel rule.
+/// registers one, the name itself when the DSL registers it in snake_case only, otherwise the
+/// same snake -> camel rule.
 pub(crate) fn camel_name(snake: &str) -> Cow<'_, str> {
     if !is_snake_step_name(snake) {
         return Cow::Borrowed(snake);
     }
     #[cfg(feature = "script")]
-    if let Some(camel) = registered_pairs().get(snake) {
-        return Cow::Owned(camel.clone());
+    if let Some(pair) = registered_pairs().get(snake) {
+        return match pair {
+            Some(camel) => Cow::Owned(camel.clone()),
+            None => Cow::Borrowed(snake),
+        };
     }
     Cow::Owned(camel_case(snake))
 }
@@ -206,13 +212,14 @@ mod tests {
             respell(r#"values("a\"b_c(").to_list()"#, Spelling::Camel),
             r#"values("a\"b_c(").toList()"#
         );
-        // keys of an object map literal and the math variable are no calls
+        // keys of an object map literal and the math variable are no calls; a Graphersal
+        // extension (snake_case only) keeps its name
         assert_eq!(
             respell(
-                r#"glob_path("a", #{max_depth: 2}).math("_ + 1")"#,
+                r#"glob_path("a", #{max_depth: 2}).math("_ + 1").to_list()"#,
                 Spelling::Camel
             ),
-            r#"globPath("a", #{max_depth: 2}).math("_ + 1")"#
+            r#"glob_path("a", #{max_depth: 2}).math("_ + 1").toList()"#
         );
     }
 
@@ -254,11 +261,13 @@ mod tests {
     #[test]
     fn camel_names_come_from_the_registry() {
         let pairs = registered_pairs();
-        assert_eq!(pairs.get("has_label").map(String::as_str), Some("hasLabel"));
-        assert_eq!(
-            pairs.get("from_string").map(String::as_str),
-            Some("fromString")
-        );
+        let camel = |snake: &str| pairs.get(snake).cloned().flatten();
+        assert_eq!(camel("has_label").as_deref(), Some("hasLabel"));
+        assert_eq!(camel("from_string").as_deref(), Some("fromString"));
         assert!(!pairs.contains_key("in_"));
+        // A Graphersal extension is registered in snake_case only and keeps it.
+        assert_eq!(pairs.get("remove_property"), Some(&None));
+        assert_eq!(camel_name("remove_property"), "remove_property");
+        assert_eq!(camel_name("lazy_barrier"), "lazyBarrier");
     }
 }

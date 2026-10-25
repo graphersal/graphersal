@@ -68,7 +68,7 @@ const SHAPES: &[(&str, &str)] = &[
     (r#"g.V("1").fold()"#, "array"),
     (r#"g.inject(1)"#, "computed"),
     (r#"g.V("1").constant(5)"#, "computed"),
-    (r#"g.V().inferSchema()"#, "schema"),
+    (r#"g.V().infer_schema()"#, "schema"),
     (r#"g.E().subgraph("sg").cap("sg")"#, "graph"),
 ];
 

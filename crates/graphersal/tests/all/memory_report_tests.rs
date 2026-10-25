@@ -657,7 +657,7 @@ fn the_dsl_answers_the_report_map() {
     let shared = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
     let rows = eval_value(
         shared.clone(),
-        r#"let r = g.memoryReport(#{max_rows: 2}); [r.properties.len(), r.rows_omitted, r.labels.len()]"#,
+        r#"let r = g.memory_report(#{max_rows: 2}); [r.properties.len(), r.rows_omitted, r.labels.len()]"#,
     )
     .unwrap();
     assert_eq!(rows.to_string(), "[2, 4, 4]");

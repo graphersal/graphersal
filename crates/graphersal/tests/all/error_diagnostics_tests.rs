@@ -6537,7 +6537,7 @@ fn label_steps_on_the_wrong_element_kind_name_the_right_step() {
              changed with set_label(), for example g.e().has_label(\"knows\").set_label(\"met\")",
         ),
         (
-            r#"g.e(0).dropLabel("x").toList()"#,
+            r#"g.e(0).drop_label("x").toList()"#,
             "The drop_label() step takes a vertex, but got a value of type 'edge'",
             "drop_label() changes the label set of a vertex; an edge has exactly one label",
         ),
@@ -6760,7 +6760,7 @@ fn property_index_type_errors_carry_their_help() {
     ] {
         assert!(vector.contains(part), "{part}\n{vector}");
     }
-    let array = fail(r#"g.createIndex(#{label: "doc", key: "tags"})"#);
+    let array = fail(r#"g.create_index(#{label: "doc", key: "tags"})"#);
     for part in [
         "declares 'tags' as array<string>",
         "Help: An index of type 'memory-ordered' holds scalar values only",
@@ -6816,7 +6816,7 @@ fn property_index_transform_errors_carry_their_help() {
         r#"g.create_index(#{label: "person", key: "name", transform: "to_lower"})"#,
     )
     .unwrap();
-    let unknown = fail(r#"g.createIndex(#{label: "person", key: "name", transform: "upper"})"#);
+    let unknown = fail(r#"g.create_index(#{label: "person", key: "name", transform: "upper"})"#);
     for part in [
         "Invalid transform of 'person_name_upper': 'upper' is not an index transform this \
          version knows (known: to_lower)",
@@ -10697,7 +10697,7 @@ mod gql {
         .0
         .help()
         .expect("help");
-        assert!(help.contains(".select(\"p\").addLabel(\"x\")"), "{help}");
+        assert!(help.contains(".select(\"p\").add_label(\"x\")"), "{help}");
         assert!(help.contains("g.gql(\"MATCH (p) RETURN p\")"), "{help}");
     }
 

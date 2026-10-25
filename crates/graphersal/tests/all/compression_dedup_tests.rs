@@ -1118,7 +1118,7 @@ fn the_dsl_defines_lists_and_estimates_dedup_in_both_spellings() {
     let graph = shared(graph_of(60));
     let listed = eval_value(
         graph.clone(),
-        r#"g.defineCompression(#{name: "path", label: "symbol", path: "path", codec: "dedup"});
+        r#"g.define_compression(#{name: "path", label: "symbol", path: "path", codec: "dedup"});
            let r = g.compressions()[0];
            [r.codec, r.min_bytes, r.dictionary, r.distinct_values]"#,
     )
@@ -1137,7 +1137,7 @@ fn the_dsl_defines_lists_and_estimates_dedup_in_both_spellings() {
     assert_eq!(estimate, r#"[14, "dedup", 3]"#);
     let only = eval_value(
         graph.clone(),
-        r#"g.estimateCompression(#{label: "symbol", path: "doc", codec: "dedup"}).warnings.map(|w| w.code)"#,
+        r#"g.estimate_compression(#{label: "symbol", path: "doc", codec: "dedup"}).warnings.map(|w| w.code)"#,
     )
     .unwrap()
     .to_string();

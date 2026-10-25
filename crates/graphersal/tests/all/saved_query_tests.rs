@@ -102,15 +102,15 @@ fn the_camel_case_spellings_work_alike() {
     let graph = modern();
     let _ = ok(
         &graph,
-        r#"g.defineQuery(#{name: "names", body: "fn names() { g.v().values(\"name\") }"});
-           g.defineQueries("x", "fn one() { 1 }");
-           g.moveQuery("names", "y");
-           g.describeQuery("names", "All names.");"#,
+        r#"g.define_query(#{name: "names", body: "fn names() { g.v().values(\"name\") }"});
+           g.define_queries("x", "fn one() { 1 }");
+           g.move_query("names", "y");
+           g.describe_query("names", "All names.");"#,
     );
-    let entry = ok(&graph, r#"g.getQuery("names")"#).cast::<rhai::Map>();
+    let entry = ok(&graph, r#"g.get_query("names")"#).cast::<rhai::Map>();
     assert_eq!(entry["folder"].to_string(), "y");
     assert_eq!(entry["description"].to_string(), "All names.");
-    assert_eq!(text(ok(&graph, r#"g.dropQuery("one")"#)), "true");
+    assert_eq!(text(ok(&graph, r#"g.drop_query("one")"#)), "true");
     assert_eq!(query_count(&graph), 1);
 }
 

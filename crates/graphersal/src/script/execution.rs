@@ -428,11 +428,9 @@ pub(crate) fn register(registry: &mut super::register::Registry) {
                 .collect::<rhai::Array>()
         })
         .register_fn_as(&["to_map", "toMap"], metrics_to_map)
-        .register_fn_as(&["to_json", "toJson"], |m: &mut TraversalMetrics| {
-            m.to_json()
-        })
+        .register_fn_as(&["to_json"], |m: &mut TraversalMetrics| m.to_json())
         .register_fn_as(
-            &["to_table", "toTable", "to_string", "to_debug"],
+            &["to_table", "to_string", "to_debug"],
             |m: &mut TraversalMetrics| m.to_string(),
         );
 
@@ -446,7 +444,7 @@ pub(crate) fn register(registry: &mut super::register::Registry) {
         .register_get("is_ok", ScriptExecution::is_ok)
         .register_get("isOk", ScriptExecution::is_ok)
         .register_fn_as(&["to_map", "toMap"], ScriptExecution::to_map)
-        .register_fn_as(&["to_json", "toJson"], ScriptExecution::to_json)
+        .register_fn_as(&["to_json"], ScriptExecution::to_json)
         .register_fn("to_string", |e: &mut ScriptExecution| {
             e.render(VisualizeFormat::Auto, &RenderOptions::default())
                 .map(|rendered| rendered.text)

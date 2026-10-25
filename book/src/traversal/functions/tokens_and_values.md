@@ -75,7 +75,7 @@ GraphSource::file_tree().v().count().next()   // 37
 g.inject(#{a: #{b: [5, 6]}}).values(jpath("a.b[1]")).to_list()   // [6]
 ```
 
-**`localdatetime` · `localDateTime`**: A date and time without a zone.
+**`localdatetime`**: A date and time without a zone.
 
 ```rhai,graph=modern
 localdatetime("2023-08-02T09:30").hour   // 9
@@ -103,7 +103,7 @@ localdatetime("2023-08-02T09:30").hour   // 9
 now() == now()   // true
 ```
 
-**`offsettime` · `offsetTime`**: A time of day with its UTC offset.
+**`offsettime`**: A time of day with its UTC offset.
 
 ```rhai,graph=modern
 offsettime("09:30+02:00").offset   // 7200
@@ -361,13 +361,13 @@ g.infer_schema().subgraph("person").v().count().next()   // 1
 g.infer_schema().subgraph_labels(["person", "software"]).v().count().next()   // 2
 ```
 
-**`map.to_graph` · `map.toGraph`**: Builds the meta-graph of a schema map: one vertex per label, one edge per declared connection (private to the script).
+**`map.to_graph`**: Builds the meta-graph of a schema map: one vertex per label, one edge per declared connection (private to the script).
 
 ```rhai,graph=modern
 g.infer_schema().to_graph().v().count().next()   // 2
 ```
 
-**`TraversalMetrics.to_json` · `TraversalMetrics.toJson`**: The profile as JSON text.
+**`TraversalMetrics.to_json`**: The profile as JSON text.
 
 ```rhai,graph=modern
 g.v().count().profile().to_json().contains("count_pushdown")   // true
@@ -379,13 +379,13 @@ g.v().count().profile().to_json().contains("count_pushdown")   // true
 g.v().count().profile().to_map()["optimizer_rules_applied"]   // ["count_pushdown"]
 ```
 
-**`TraversalMetrics.to_table` · `TraversalMetrics.toTable`**: The profile as the text table that profile() shows.
+**`TraversalMetrics.to_table`**: The profile as the text table that profile() shows.
 
 ```rhai,graph=modern
 g.v().count().profile().to_table().contains("v().count()")   // true
 ```
 
-**`Execution.to_json` · `Execution.toJson`**: The execution (results, error, profile) as JSON text.
+**`Execution.to_json`**: The execution (results, error, profile) as JSON text.
 
 ```rhai,graph=modern
 g.v().count().execute().to_json()   // {"results":[6],"error":null,"profile":null}

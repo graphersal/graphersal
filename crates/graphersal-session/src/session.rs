@@ -1857,7 +1857,7 @@ mod tests {
                 r#"Read File(\"g.graphml\")"#,
             ),
             (
-                r#"g.exportGraphson("out.json")"#,
+                r#"g.export_graphson("out.json")"#,
                 r#"Create File(\"out.json\")"#,
             ),
             (r#"GraphSource::file("g.json")"#, r#"Read File(\"g.json\")"#),

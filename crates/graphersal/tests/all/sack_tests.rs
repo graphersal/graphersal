@@ -459,7 +459,7 @@ mod dsl {
         let tree = Arc::new(GraphSource::file_tree());
         let count = |sack: i64| {
             let script = format!(
-                r#"g.withSack(7).V("root").globPath("**/*.rs", #{{prune: __.sack().is(P.eq({sack}))}}).by("name").count()"#
+                r#"g.withSack(7).V("root").glob_path("**/*.rs", #{{prune: __.sack().is(P.eq({sack}))}}).by("name").count()"#
             );
             match eval_on(tree.clone(), &script).as_slice() {
                 [ElementProperty::Number(n)] => n.as_i64().unwrap(),

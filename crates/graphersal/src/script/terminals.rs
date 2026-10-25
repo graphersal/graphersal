@@ -363,7 +363,7 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `to_graph()` / `toGraph()`: the graph built from the traversal's edges, usable as a new
+    /// `to_graph()`: the graph built from the traversal's edges, usable as a new
     /// traversal source (`let sub = g.e(0).to_graph(); sub.v().to_json()`). Our extension: the
     /// short form of `subgraph("sg").cap("sg")`. A stream of anything but edges is an error; a
     /// `cap("sg")` of a `subgraph("sg")` is returned as is. See [`GraphTraversalSource::to_graph`].

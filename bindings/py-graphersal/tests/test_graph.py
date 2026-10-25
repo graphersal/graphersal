@@ -93,7 +93,7 @@ def test_from_graphson_export_round_trip(tmp_path):
     assert names == ["josh", "marko", "peter", "vadas"]
     # The script methods in both spellings, into a live graph.
     target = graphersal.Graph()
-    message = target.query(f'g.importGraphson("{tmp_path.as_posix()}/roundtrip.json")')
+    message = target.query(f'g.import_graphson("{tmp_path.as_posix()}/roundtrip.json")')
     assert "imported 6 vertices and 6 edges" in message
     assert target.query("g.E().count().next()") == 6
 

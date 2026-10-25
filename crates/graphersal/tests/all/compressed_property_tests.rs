@@ -1259,7 +1259,7 @@ fn the_dsl_works_in_both_spellings() {
         r#"g.define_compression(#{name: "bio", label: "customer", path: "bio", min_bytes: 128})"#,
     );
     let _ = run(
-        r#"g.defineCompression(#{name: "notes", element: "edge", label: "bought", path: jpath("$.notes"), codec: "lz4", dictionary: false})"#,
+        r#"g.define_compression(#{name: "notes", element: "edge", label: "bought", path: jpath("$.notes"), codec: "lz4", dictionary: false})"#,
     );
     let listed = run("g.compressions()").to_string();
     assert!(listed.contains("\"$.notes\""), "{listed}");
@@ -1267,7 +1267,7 @@ fn the_dsl_works_in_both_spellings() {
     let values = run(r#"g.compressions().map(|r| r.compressed_values)"#).to_string();
     assert!(!values.contains("[0, 0]"), "{values}");
     let _ = run(r#"g.recompress("bio")"#);
-    assert!(run(r#"g.dropCompression("notes")"#).as_bool().unwrap());
+    assert!(run(r#"g.drop_compression("notes")"#).as_bool().unwrap());
     assert!(!run(r#"g.drop_compression("notes")"#).as_bool().unwrap());
     assert_eq!(run("g.compressions().len()").as_int().unwrap(), 1);
     let memory = run("g.memory_usage()").to_string();

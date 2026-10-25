@@ -225,7 +225,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.define_compression(#{name, label, path, element?, codec?, min_bytes?, dictionary?})`
-    /// / `g.defineCompression(..)`: stores (or replaces) a compression rule. `path` is a string
+    /// / `g.define_compression(..)`: stores (or replaces) a compression rule. `path` is a string
     /// read as a jpath (`"details.career.cv"`, because it IS a path) or a `jpath(..)`;
     /// `element` is `"vertex"` (default) or `"edge"`, `codec` `"lz4"` (default: `min_bytes`
     /// 256, `dictionary` true) or `"dedup"` (each distinct value stored once: `min_bytes` 25,
@@ -339,7 +339,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.estimate_compression(#{label, path, element?, codec?, min_bytes?, dictionary?})` /
-    /// `g.estimateCompression(..)`: what compression rules for `(element, label, path)` would
+    /// `g.estimate_compression(..)`: what compression rules for `(element, label, path)` would
     /// hold over the current values, without changing anything (read-only, commits nothing).
     /// Without `codec`/`min_bytes`/`dictionary` every default candidate is measured (`lz4`
     /// with and without a dictionary at 64, 128, 256, 512 and 1024 bytes, plus the current
@@ -503,7 +503,7 @@ impl ScriptGraphTraversalSource {
             .collect())
     }
 
-    /// `g.drop_compression(name)` / `g.dropCompression(name)`: removes the rule and decompresses
+    /// `g.drop_compression(name)`: removes the rule and decompresses
     /// its values (in the same unit); `false` when there is none. Asks for `Delete` on it.
     pub fn drop_compression(&mut self, name: &str) -> Result<bool, Box<EvalAltResult>> {
         self.require_compression("drop_compression", Action::Delete, Some(name))?;
