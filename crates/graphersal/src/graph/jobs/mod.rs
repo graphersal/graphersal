@@ -14,11 +14,15 @@
 //!
 
 mod cron;
+mod definition;
 pub(crate) mod limits;
 
 use std::sync::Arc;
 
 pub use cron::{CronError, CronSchedule};
+pub use definition::{
+    JobDefinition, JobTask, MAX_JOB_EFFECTS, MAX_JOB_PATH_BYTES, MAX_SCHEDULE_BYTES, RunOn,
+};
 pub use limits::JobLimits;
 
 use crate::traversal::cancel::CancelToken;

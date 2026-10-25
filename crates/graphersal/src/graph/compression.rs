@@ -1647,6 +1647,7 @@ impl Definition {
             DefinitionBody::Compression(rule) => Some(rule),
             DefinitionBody::Query(_)
             | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Job(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }

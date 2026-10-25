@@ -833,6 +833,7 @@ impl Definition {
             DefinitionBody::PropertyIndex(index) => Some(index),
             DefinitionBody::Query(_)
             | DefinitionBody::Compression(_)
+            | DefinitionBody::Job(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }
