@@ -4,8 +4,8 @@
 //!
 //! A series is a key ([`SeriesKey`]: what is counted and through which [`Channel`]) with three
 //! tiers of buckets, like a round-robin database: one bucket per minute for the last 60
-//! minutes and one per hour for the last 48 hours (in memory), one per day for the last 90
-//! days (the tier a Store persists). Every sample adds to the current bucket of each tier, so a
+//! minutes, one per hour for the last 48 hours, one per day for the last 90 days (a Store
+//! persists all three). Every sample adds to the current bucket of each tier, so a
 //! tier needs no roll-up; old buckets are dropped when a sample or a flush passes them. Series
 //! are sparse: a bucket exists only once something was counted in it.
 //!
@@ -28,7 +28,7 @@ pub enum WorkloadLevel {
     /// Recorded in memory only: gone with the process.
     Memory,
     /// Recorded in memory and, by a Store, written to its sidecar file (periodically and at
-    /// close) and read back at open. The default.
+    /// close, every tier) and read back at open. The default.
     #[default]
     Persisted,
 }

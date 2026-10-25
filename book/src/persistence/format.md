@@ -253,8 +253,10 @@ starts without it. A writable store replaces it whole (`write_atomic`) periodica
 magic "GRWLSTAT" | version u32 = 1 | series count u32
 per series: byte length u32 | kind u8 (1 job, 2 write lock) | name (u32 length + UTF-8)
             | channel u8 (0 host, 1 playground, 2 mcp, 3 cli, 4 python, 5 job)
-            | bucket count u16 | per bucket: day i64 (days since the Unix epoch, UTC)
-            | count u64 | failed u64 | items u64 | total microseconds u64 | max microseconds u64
+            | tier count u8 | per tier: tier u8 (0 minutes, 1 hours, 2 days) | bucket count u16
+            | per bucket: index i64 (the bucket's start in minutes/hours/days since the Unix
+              epoch, UTC) | count u64 | failed u64 | items u64 | total microseconds u64
+              | max microseconds u64
 job count u32 | per job: name | started_at i64 (microseconds) | microseconds u64
             | error flag u8 [+ error text]
 CRC-32C u32 of everything before it
@@ -263,7 +265,8 @@ CRC-32C u32 of everything before it
 All integers little-endian. A reader MUST treat the file as optional: a missing file, a wrong
 magic, length or checksum, or a version it does not know means "no statistics" (it starts anew
 and replaces the file at its next write), never damage, never a reason to refuse the store. A
-series of a kind or channel it does not know is skipped by its byte length. The magic is none of
+series of a kind or channel it does not know is skipped by its byte length, a tier it does not
+know by its bucket count; a reader keeps at most 60 minute, 48 hour and 90 day buckets. The magic is none of
 a segment's or a WAL segment's, so the version guard (15) ignores the file.
 
 ## 5. The `GRAPH` file

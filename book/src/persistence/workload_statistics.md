@@ -26,9 +26,9 @@ Every series keeps three tiers of buckets, like a round-robin database:
 - one per day for the last 90 days.
 
 Each bucket counts the occurrences, the failed ones, the items they touched, their total and
-their longest duration. The minute and hour tiers live in memory; the day tier is what the
-sidecar keeps, so after a restart the long history is back and the fine-grained one starts
-anew. Old buckets fall out on their own.
+their longest duration. The sidecar keeps all three tiers, so a restart loses none of them;
+buckets that aged past their window while the process was stopped fall out at the next
+sample.
 
 ## The sidecar
 

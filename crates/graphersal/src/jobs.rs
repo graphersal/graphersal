@@ -6,5 +6,6 @@
 //! seconds) with the current time.
 
 pub use crate::graph::jobs::{
-    CronError, CronSchedule, Job, JobAction, JobError, JobInfo, JobKind, Scheduler,
+    CronError, CronSchedule, Job, JobAction, JobContext, JobError, JobInfo, JobKind, JobLimits,
+    Scheduler,
 };

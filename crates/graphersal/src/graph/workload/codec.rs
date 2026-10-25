@@ -1,11 +1,13 @@
-//! The sidecar form of the workload statistics (format spec "Workload statistics sidecar"): the
-//! day tier of every series and the job block, written whole by a Store through
-//! `StoreDir::write_atomic`.
+//! The sidecar form of the workload statistics (format spec 4.4): every tier of every series
+//! (minutes, hours, days) and the job block, written whole by a Store through
+//! `StoreDir::write_atomic`, so a restart loses none of them (buckets that aged meanwhile drop
+//! out at the next sample).
 //!
 //! ```text
 //! magic "GRWLSTAT" | version u32 = 1 | series count u32
 //! per series: byte length u32 | kind u8 | name (u32 length + UTF-8) | channel u8
-//!             | bucket count u16 | per bucket: day i64 | count, failed, items, total, max u64
+//!             | tier count u8 | per tier: tier u8 (0 minute, 1 hour, 2 day) | bucket count u16
+//!             | per bucket: index i64 (bucket start / width) | count, failed, items, total, max u64
 //! job count u32 | per job: name | started_at i64 | micros u64 | error flag u8 [+ text]
 //! CRC-32C u32 of everything before it
 //! ```
@@ -25,8 +27,6 @@ const MAGIC: &[u8; 8] = b"GRWLSTAT";
 const VERSION: u32 = 1;
 const KIND_JOB: u8 = 1;
 const KIND_WRITE_LOCK: u8 = 2;
-/// The tier the sidecar holds (days).
-const DAY_TIER: usize = 2;
 
 fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
@@ -94,13 +94,16 @@ impl WorkloadStats {
             body.push(kind);
             put_str(&mut body, name);
             body.push(key.channel.code());
-            let buckets = &series.tiers[DAY_TIER].buckets;
-            let count = buckets.len().min(u16::MAX as usize);
-            body.extend_from_slice(&(count as u16).to_le_bytes());
-            for (day, c) in buckets.iter().take(count) {
-                body.extend_from_slice(&day.to_le_bytes());
-                for value in [c.count, c.failed, c.items, c.total_micros, c.max_micros] {
-                    body.extend_from_slice(&value.to_le_bytes());
+            body.push(TIERS.len() as u8);
+            for (tier_index, tier) in series.tiers.iter().enumerate() {
+                body.push(tier_index as u8);
+                let count = tier.buckets.len().min(u16::MAX as usize);
+                body.extend_from_slice(&(count as u16).to_le_bytes());
+                for (index, c) in tier.buckets.iter().take(count) {
+                    body.extend_from_slice(&index.to_le_bytes());
+                    for value in [c.count, c.failed, c.items, c.total_micros, c.max_micros] {
+                        body.extend_from_slice(&value.to_le_bytes());
+                    }
                 }
             }
             out.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -138,7 +141,6 @@ impl WorkloadStats {
             return None;
         }
         let mut inner = Inner::default();
-        let (_, keep) = TIERS[DAY_TIER];
         for _ in 0..r.u32()? {
             let len = r.u32()? as usize;
             let mut s = Reader {
@@ -160,20 +162,31 @@ impl WorkloadStats {
                 continue;
             };
             let mut series = Series::default();
-            for _ in 0..s.u16()? {
-                let day = s.i64()?;
-                let counters = Counters {
-                    count: s.u64()?,
-                    failed: s.u64()?,
-                    items: s.u64()?,
-                    total_micros: s.u64()?,
-                    max_micros: s.u64()?,
+            for _ in 0..s.u8()? {
+                let tier_index = s.u8()? as usize;
+                let mut buckets = std::collections::VecDeque::new();
+                for _ in 0..s.u16()? {
+                    let index = s.i64()?;
+                    let counters = Counters {
+                        count: s.u64()?,
+                        failed: s.u64()?,
+                        items: s.u64()?,
+                        total_micros: s.u64()?,
+                        max_micros: s.u64()?,
+                    };
+                    buckets.push_back((index, counters));
+                }
+                // A tier a newer version adds is skipped (its buckets are consumed).
+                let (Some(tier), Some((_, keep))) =
+                    (series.tiers.get_mut(tier_index), TIERS.get(tier_index))
+                else {
+                    continue;
                 };
-                series.tiers[DAY_TIER].buckets.push_back((day, counters));
-            }
-            if series.tiers[DAY_TIER].buckets.len() > keep {
-                let drop = series.tiers[DAY_TIER].buckets.len() - keep;
-                series.tiers[DAY_TIER].buckets.drain(..drop);
+                if buckets.len() > *keep {
+                    let drop = buckets.len() - keep;
+                    buckets.drain(..drop);
+                }
+                tier.buckets = buckets;
             }
             inner.series.insert(SeriesKey::new(kind, channel), series);
         }
@@ -210,7 +223,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_day_tier_and_the_jobs_round_trip() {
+    fn every_tier_and_the_jobs_round_trip() {
         let stats = WorkloadStats::new(WorkloadLevel::Persisted);
         let t0 = 1_800_000_000_000_000i64;
         let lock = SeriesKey::new(SeriesKind::WriteLock("query".into()), Channel::Mcp);
@@ -233,8 +246,13 @@ mod tests {
             assert_eq!(x.key, y.key);
             assert_eq!(x.last_ninety_days, y.last_ninety_days);
         }
-        // Only the day tier is kept: the minute and hour tiers start empty.
-        assert_eq!(b.series[0].last_hour.count, 0);
+        // Every tier survives.
+        for (x, y) in a.series.iter().zip(&b.series) {
+            assert_eq!(x.last_hour, y.last_hour);
+            assert_eq!(x.last_two_days, y.last_two_days);
+        }
+        let lock_back = b.series.iter().find(|s| s.key == lock).unwrap();
+        assert_eq!(lock_back.last_hour.count, 1);
     }
 
     #[test]
@@ -270,7 +288,7 @@ mod tests {
         let mut body = vec![99u8];
         put_str(&mut body, "future");
         body.push(0);
-        body.extend_from_slice(&0u16.to_le_bytes());
+        body.push(0);
         body.extend_from_slice(b"extra bytes of a newer layout");
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&body);

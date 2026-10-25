@@ -14,10 +14,14 @@
 //!
 
 mod cron;
+pub(crate) mod limits;
 
 use std::sync::Arc;
 
 pub use cron::{CronError, CronSchedule};
+pub use limits::JobLimits;
+
+use crate::traversal::cancel::CancelToken;
 
 use crate::graph::workload::{JobRunRecord, WorkloadStats};
 
@@ -41,15 +45,31 @@ impl JobKind {
     }
 }
 
-/// The action of a job: called with the time the run starts (microseconds since the Unix
-/// epoch); an `Err` is the run's error text.
-pub type JobAction = Box<dyn FnMut(i64) -> Result<(), String> + Send>;
+/// What a run of a job is given: when it started, its cancellation token (every traversal of the
+/// run checks it) and its limits (which every traversal of the run gets as its
+/// `evaluationTimeout` / `memory.limit` caps; an action doing long work of its own checks
+/// `limits.timeout` against `started_at` itself).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct JobContext {
+    /// When the run started (microseconds since the Unix epoch).
+    pub started_at: i64,
+    /// The run's cancellation token: traversals of the run check it, and an action doing long
+    /// work of its own should too.
+    pub cancel: CancelToken,
+    /// The job's limits.
+    pub limits: JobLimits,
+}
 
-/// A job: its name, kind, schedule, switch and action.
+/// The action of a job: called with the run's [`JobContext`]; an `Err` is the run's error text.
+pub type JobAction = Box<dyn FnMut(&JobContext) -> Result<(), String> + Send>;
+
+/// A job: its name, kind, schedule, limits, switch and action.
 pub struct Job {
     name: String,
     kind: JobKind,
     schedule: CronSchedule,
+    limits: JobLimits,
     enabled: bool,
     action: JobAction,
 }
@@ -71,15 +91,22 @@ impl Job {
         name: impl Into<String>,
         kind: JobKind,
         schedule: CronSchedule,
-        action: impl FnMut(i64) -> Result<(), String> + Send + 'static,
+        action: impl FnMut(&JobContext) -> Result<(), String> + Send + 'static,
     ) -> Self {
         Job {
             name: name.into(),
             kind,
             schedule,
+            limits: JobLimits::default(),
             enabled: true,
             action: Box::new(action),
         }
+    }
+
+    /// The same job with `limits` per run (a timeout, a memory limit).
+    pub fn with_limits(mut self, limits: JobLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The same job, switched off (it never runs until [`Scheduler::set_enabled`]).
@@ -104,6 +131,8 @@ pub struct JobInfo {
     pub kind: JobKind,
     /// The schedule (cron text).
     pub schedule: String,
+    /// The limits per run.
+    pub limits: JobLimits,
     /// Whether it runs.
     pub enabled: bool,
     /// When it runs next (microseconds since the Unix epoch), `None` when off or never.
@@ -251,6 +280,12 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Gives job `name` new limits per run (from its next run).
+    pub fn set_limits(&mut self, name: &str, limits: JobLimits) -> Result<(), JobError> {
+        self.entry(name)?.job.limits = limits;
+        Ok(())
+    }
+
     /// Gives job `name` a new schedule (planned from the next tick).
     pub fn set_schedule(&mut self, name: &str, schedule: CronSchedule) -> Result<(), JobError> {
         let entry = self.entry(name)?;
@@ -318,15 +353,42 @@ impl Scheduler {
             return;
         };
         let started = web_time::Instant::now();
-        // A panicking action is a failed run, never a failed host.
+        let limits = entry.job.limits;
+        let context = JobContext {
+            started_at: now,
+            cancel: CancelToken::new(),
+            limits,
+        };
+        let run_limits = limits::RunLimits {
+            deadline: limits.timeout.and_then(|t| started.checked_add(t)),
+            memory_limit: limits.memory_limit,
+        };
+        // Every traversal of the run checks the run's token and gets the job's limits; a
+        // panicking action is a failed run, never a failed host.
         let action = &mut entry.job.action;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(now)))
-            .unwrap_or_else(|_| Err("the job panicked".to_string()));
-        let micros = started.elapsed().as_micros() as u64;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            context
+                .cancel
+                .scope(|| limits::scope(run_limits, || action(&context)))
+        }))
+        .unwrap_or_else(|_| Err("the job panicked".to_string()));
+        let elapsed = started.elapsed();
+        let micros = elapsed.as_micros() as u64;
+        // An action that does not check its limits and runs past its timeout still finishes;
+        // the run is recorded as over time.
+        let error = match (result, limits.timeout) {
+            (Err(error), _) => Some(error),
+            (Ok(()), Some(timeout)) if elapsed > timeout => Some(format!(
+                "finished after {} ms, over its timeout of {} ms",
+                elapsed.as_millis(),
+                timeout.as_millis()
+            )),
+            (Ok(()), _) => None,
+        };
         let run = JobRunRecord {
             started_at: now,
             micros,
-            error: result.err(),
+            error,
         };
         if let Some(error) = &run.error {
             tracing::warn!(job = %entry.job.name, %error, "scheduled job failed");
@@ -347,6 +409,7 @@ impl Scheduler {
                 name: e.job.name.clone(),
                 kind: e.job.kind,
                 schedule: e.job.schedule.to_string(),
+                limits: e.job.limits,
                 enabled: e.job.enabled,
                 next_at: e.next_at.filter(|_| e.job.enabled),
                 last: e.last.clone(),
@@ -373,8 +436,8 @@ mod tests {
             name,
             JobKind::User,
             "*/5 * * * *".parse().unwrap(),
-            move |at| {
-                log.lock().unwrap().push((label.clone(), at));
+            move |run: &JobContext| {
+                log.lock().unwrap().push((label.clone(), run.started_at));
                 Ok(())
             },
         )
@@ -470,5 +533,98 @@ mod tests {
         assert!(Scheduler::new().with_time_zone("Mars/Base").is_err());
         let berlin = Scheduler::new().with_time_zone("Europe/Berlin").unwrap();
         assert_eq!(berlin.time_zone(), "Europe/Berlin");
+    }
+
+    /// The job's limits reach the traversals it runs: its timeout caps their
+    /// `evaluationTimeout`, its memory limit their `memory.limit`.
+    #[test]
+    fn limits_reach_the_traversals_of_a_run() {
+        use crate::graph::TraversalGraph;
+        use std::time::Duration;
+        let graph = Arc::new(parking_lot::Mutex::new(TraversalGraph::tinkerpop_modern()));
+        let mut s = Scheduler::new();
+        let work = |graph: Arc<parking_lot::Mutex<TraversalGraph>>| {
+            move |_run: &JobContext| {
+                let graph = graph.lock();
+                crate::GraphTraversalSource::new(&*graph)
+                    .v(None)
+                    .repeat(crate::traversal::__::both(None))
+                    .times(14)
+                    .count()
+                    .next()
+                    .map(|_| ())
+                    .map_err(|err| crate::error::format_diagnostic(&*err))
+            }
+        };
+        s.add(
+            Job::new(
+                "slow",
+                JobKind::User,
+                "* * * * *".parse().unwrap(),
+                work(graph.clone()),
+            )
+            .with_limits(JobLimits::new().with_timeout(Duration::ZERO)),
+        )
+        .unwrap();
+        s.add(
+            Job::new(
+                "greedy",
+                JobKind::User,
+                "* * * * *".parse().unwrap(),
+                work(graph.clone()),
+            )
+            .with_limits(JobLimits::new().with_memory_limit(1)),
+        )
+        .unwrap();
+        s.add(Job::new(
+            "free",
+            JobKind::User,
+            "* * * * *".parse().unwrap(),
+            work(graph),
+        ))
+        .unwrap();
+        s.run_now("slow", T0).unwrap();
+        s.run_now("greedy", T0).unwrap();
+        s.run_now("free", T0).unwrap();
+        let jobs = s.jobs();
+        let error = |i: usize| jobs[i].last.as_ref().unwrap().error.clone();
+        assert!(
+            error(0).is_some_and(|e| e.contains("evaluationTimeout")),
+            "{:?}",
+            error(0)
+        );
+        assert!(
+            error(1).is_some_and(|e| e.contains("memory.limit")),
+            "{:?}",
+            error(1)
+        );
+        assert_eq!(error(2), None);
+        assert_eq!(jobs[0].limits.timeout, Some(Duration::ZERO));
+        // Outside a run nothing is capped.
+        assert!(limits::current().is_none());
+    }
+
+    /// An action that does not check its limits still finishes; the run is recorded as over
+    /// its timeout.
+    #[test]
+    fn an_action_past_its_timeout_is_recorded_over_time() {
+        use std::time::Duration;
+        let mut s = Scheduler::new();
+        s.add(
+            Job::new(
+                "sleepy",
+                JobKind::User,
+                "* * * * *".parse().unwrap(),
+                |_| {
+                    std::thread::sleep(Duration::from_millis(20));
+                    Ok(())
+                },
+            )
+            .with_limits(JobLimits::new().with_timeout(Duration::from_millis(1))),
+        )
+        .unwrap();
+        s.run_now("sleepy", T0).unwrap();
+        let error = s.jobs()[0].last.as_ref().unwrap().error.clone().unwrap();
+        assert!(error.contains("over its timeout of 1 ms"), "{error}");
     }
 }

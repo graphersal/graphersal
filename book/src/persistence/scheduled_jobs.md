@@ -20,6 +20,17 @@ A job never overlaps itself: due jobs run one after another. A time missed while
 (the process was stopped) is skipped: the job runs at its next scheduled time. A failing job
 (an error, a panic) is recorded and runs again at its next time.
 
+## Limits per run
+
+A job may limit each of its runs: a **timeout** and a **memory limit** (`JobLimits`, both
+optional). The engine cannot interrupt arbitrary code, so the limits reach the checks every
+traversal already makes: while the job runs, its remaining time caps each traversal's
+`evaluationTimeout` and its memory limit caps `memory.limit` (a query's own stricter value
+stays). A breach fails the traversal as any timeout or memory limit does, its work is rolled
+back, and the run is recorded as failed with the reason. An action doing long work of its own
+checks `limits.timeout` itself; if it finishes past its timeout anyway, the run is recorded as
+over time.
+
 ## System jobs
 
 A Store brings its system jobs (`Store::system_jobs()`):
@@ -39,7 +50,7 @@ whether it is on, the next time and the last run.
 ## In your own program
 
 ```rust
-use graphersal::jobs::{Job, JobKind, Scheduler};
+use graphersal::jobs::{Job, JobKind, JobLimits, Scheduler};
 use graphersal::persist::{MemDir, Store, StoreOptions};
 
 let dir = MemDir::named("memory:jobs");
@@ -52,9 +63,13 @@ for job in store.system_jobs() {
     scheduler.add(job).unwrap();
 }
 scheduler
-    .add(Job::new("hello", JobKind::User, "0 * * * *".parse().unwrap(), |_now| {
-        Ok(()) // your work
-    }))
+    .add(
+        Job::new("hello", JobKind::User, "0 * * * *".parse().unwrap(), |run| {
+            let _started = run.started_at; // your work; traversals here get the limits below
+            Ok(())
+        })
+        .with_limits(JobLimits::new().with_timeout(std::time::Duration::from_secs(30))),
+    )
     .unwrap();
 let now = 1_800_000_000_000_000; // microseconds since the Unix epoch
 scheduler.tick(now); // plans the first runs; call it again every few seconds

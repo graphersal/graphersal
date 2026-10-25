@@ -55,8 +55,8 @@ fn statistics_survive_a_restart_through_the_sidecar() {
     assert_eq!(report.series.len(), 1);
     let days = report.series[0].last_ninety_days;
     assert_eq!((days.count, days.items, days.total_micros), (2, 4, 200));
-    // The minute tier is not persisted.
-    assert_eq!(report.series[0].last_hour.count, 0);
+    // Every tier survives the restart (the minute tier too).
+    assert_eq!(report.series[0].last_hour.count, 2);
 }
 
 #[test]

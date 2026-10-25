@@ -844,6 +844,20 @@ impl ExecutionOptions {
             parsed.max_string_bytes = parse_positive_count(MAX_STRING_BYTES, value, "bytes")?;
         }
         parsed.memory = resolve_memory_limit(options, policy)?.map(MemoryBudget::new);
+        // A scheduled job's limits cap the run's own (the stricter value stays).
+        if let Some(job) = crate::graph::jobs::limits::current() {
+            if let Some(remaining) = job.remaining() {
+                parsed.evaluation_timeout = Some(
+                    parsed
+                        .evaluation_timeout
+                        .map_or(remaining, |own| own.min(remaining)),
+                );
+            }
+            if let Some(limit) = job.memory_limit {
+                let limit = parsed.memory.map_or(limit, |own| own.limit.min(limit));
+                parsed.memory = Some(MemoryBudget::new(limit));
+            }
+        }
         if let Some(name) = parsed
             .optimizer_disabled
             .intersection(&parsed.optimizer_enabled)
