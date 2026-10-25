@@ -4,13 +4,19 @@
 //! out at the next sample).
 //!
 //! ```text
-//! magic "GRWLSTAT" | version u32 = 1 | series count u32
+//! magic "GRWLSTAT" | version u32 = 2 | series count u32
 //! per series: byte length u32 | kind u8 | name (u32 length + UTF-8) | channel u8
 //!             | tier count u8 | per tier: tier u8 (0 minute, 1 hour, 2 day) | bucket count u16
 //!             | per bucket: index i64 (bucket start / width) | count, failed, items, total, max u64
 //! job count u32 | per job: name | started_at i64 | micros u64 | error flag u8 [+ text]
+//! section count u32 | per section: tag u8 | byte length u32 | bytes          (version 2)
+//!     tag 1, the system jobs' settings: count u32 | per job: name | schedule flag u8 [+ text]
+//!            | enabled u8 (0 unset, 1 off, 2 on)
 //! CRC-32C u32 of everything before it
 //! ```
+//!
+//! Version 1 (no sections) is still read; a version 2 file may leave the sections out. A section of a tag this version does not know is
+//! skipped by its byte length.
 //!
 //! All integers little-endian. Reading is best effort and never fails a Store: a wrong magic,
 //! checksum or length, or a newer version, yields `None` (the statistics start anew); a series
@@ -24,7 +30,8 @@ use super::{
 };
 
 const MAGIC: &[u8; 8] = b"GRWLSTAT";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+const SECTION_JOB_OVERRIDES: u8 = 1;
 const KIND_JOB: u8 = 1;
 const KIND_LOCK: u8 = 2;
 const KIND_QUERY: u8 = 3;
@@ -144,6 +151,29 @@ impl WorkloadStats {
                 None => out.push(0),
             }
         }
+        let mut overrides: Vec<_> = inner.overrides.iter().collect();
+        overrides.sort_by(|a, b| a.0.cmp(b.0));
+        let mut section = Vec::new();
+        section.extend_from_slice(&(overrides.len() as u32).to_le_bytes());
+        for (name, setting) in overrides {
+            put_str(&mut section, name);
+            match &setting.schedule {
+                Some(schedule) => {
+                    section.push(1);
+                    put_str(&mut section, schedule);
+                }
+                None => section.push(0),
+            }
+            section.push(match setting.enabled {
+                None => 0,
+                Some(false) => 1,
+                Some(true) => 2,
+            });
+        }
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(SECTION_JOB_OVERRIDES);
+        out.extend_from_slice(&(section.len() as u32).to_le_bytes());
+        out.extend_from_slice(&section);
         let crc = crc32c::crc32c(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out
@@ -157,7 +187,11 @@ impl WorkloadStats {
             return None;
         }
         let mut r = Reader { bytes: body, at: 0 };
-        if r.take(8)? != MAGIC || r.u32()? != VERSION {
+        if r.take(8)? != MAGIC {
+            return None;
+        }
+        let version = r.u32()?;
+        if !(1..=VERSION).contains(&version) {
             return None;
         }
         let mut inner = Inner::default();
@@ -252,6 +286,39 @@ impl WorkloadStats {
                 },
             );
         }
+        // The sections (version 2) may be left out altogether: none.
+        if version >= 2 && r.at < body.len() {
+            for _ in 0..r.u32()? {
+                let tag = r.u8()?;
+                let len = r.u32()? as usize;
+                let mut s = Reader {
+                    bytes: r.take(len)?,
+                    at: 0,
+                };
+                if tag != SECTION_JOB_OVERRIDES {
+                    // A section of a newer version: skipped.
+                    continue;
+                }
+                for _ in 0..s.u32()? {
+                    let name = CompactString::from(s.str()?);
+                    let schedule = match s.u8()? {
+                        0 => None,
+                        _ => Some(s.str()?.to_string()),
+                    };
+                    let enabled = match s.u8()? {
+                        0 => None,
+                        1 => Some(false),
+                        _ => Some(true),
+                    };
+                    inner
+                        .overrides
+                        .insert(name, super::JobOverride { schedule, enabled });
+                }
+                if s.at != len {
+                    return None;
+                }
+            }
+        }
         if r.at != body.len() {
             return None;
         }
@@ -264,7 +331,7 @@ impl WorkloadStats {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DAY, Sample};
+    use super::super::{DAY, JobOverride, Sample};
     use super::*;
 
     #[test]
@@ -342,5 +409,79 @@ mod tests {
         out.extend_from_slice(&crc.to_le_bytes());
         let back = WorkloadStats::from_sidecar(&out, WorkloadLevel::Memory).unwrap();
         assert!(back.report(0).series.is_empty());
+    }
+
+    fn job_overrides_hand_built(version: u32, sections: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        if version >= 2 {
+            out.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+            for (tag, bytes) in sections {
+                out.push(*tag);
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+        let crc = crc32c::crc32c(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn the_system_jobs_settings_round_trip_and_survive_clear() {
+        let stats = WorkloadStats::new(WorkloadLevel::Persisted);
+        stats.set_job_override("compact", JobOverride::new().with_enabled(true));
+        stats.set_job_override(
+            "stats_flush",
+            JobOverride::new()
+                .with_schedule("*/5 * * * *")
+                .with_enabled(false),
+        );
+        stats.clear(None);
+        let back =
+            WorkloadStats::from_sidecar(&stats.to_sidecar(), WorkloadLevel::Persisted).unwrap();
+        assert_eq!(back.job_overrides(), stats.job_overrides());
+        assert_eq!(
+            back.job_override("stats_flush"),
+            Some(JobOverride {
+                schedule: Some("*/5 * * * *".into()),
+                enabled: Some(false)
+            })
+        );
+        // An empty setting removes it.
+        back.set_job_override("compact", JobOverride::new());
+        assert_eq!(back.job_override("compact"), None);
+    }
+
+    #[test]
+    fn version_one_is_read_and_an_unknown_section_is_skipped() {
+        let v1 = job_overrides_hand_built(1, &[]);
+        let back = WorkloadStats::from_sidecar(&v1, WorkloadLevel::Memory).unwrap();
+        assert!(back.job_overrides().is_empty());
+        let mut known = Vec::new();
+        known.extend_from_slice(&1u32.to_le_bytes());
+        put_str(&mut known, "compact");
+        known.push(0);
+        known.push(2);
+        let v2 = job_overrides_hand_built(
+            2,
+            &[
+                (77, b"a newer section".to_vec()),
+                (SECTION_JOB_OVERRIDES, known),
+            ],
+        );
+        let back = WorkloadStats::from_sidecar(&v2, WorkloadLevel::Memory).unwrap();
+        assert_eq!(
+            back.job_override("compact"),
+            Some(JobOverride::new().with_enabled(true))
+        );
+        // A newer version is not read.
+        assert!(
+            WorkloadStats::from_sidecar(&job_overrides_hand_built(3, &[]), WorkloadLevel::Memory)
+                .is_none()
+        );
     }
 }

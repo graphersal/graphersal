@@ -3110,6 +3110,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "patch_schema",
             "statistics",
             "workload_statistics",
+            "list_jobs",
             "memory_report",
             "graph_info",
         ]
@@ -5830,4 +5831,86 @@ fn workload_history_over_http_and_mcp() {
         serde_json::json!({"history": "weeks"}),
     );
     assert!(error, "{text}");
+}
+
+/// The scheduled jobs over HTTP (`/api/jobs*`, `graphersal_session::jobs`): define with field
+/// errors, a backup job (the dev server's user may write files), switch, run now, history, a
+/// system job's schedule, drop.
+#[test]
+fn scheduled_jobs_over_http() {
+    let ui = ui_dir("jobs");
+    let data = ui.parent().unwrap().join("jobs-data");
+    let backups = ui.parent().unwrap().join("jobs-backups");
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&backups);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+        "--mcp-read-only",
+    ]);
+    let port = server.port;
+    let spec = serde_json::json!({
+        "name": "nightly_backup", "schedule": "0 2 * * *", "action": "backup",
+        "path": backups.to_str().unwrap(),
+    });
+    let defined = post(port, "/api/jobs/define", &spec.to_string()).json();
+    assert_eq!(defined["ok"], true, "{defined}");
+    assert_eq!(
+        defined["job"]["effects"][0]["action"], "Create",
+        "{defined}"
+    );
+    // Defining a job is a commit: the change feed records it.
+    assert_eq!(changes(port)["commitSeq"], 1);
+    let refused = post(
+        port,
+        "/api/jobs/define",
+        r#"{"name": "x", "schedule": "every day", "action": "checkpoint"}"#,
+    );
+    assert_eq!(refused.status, 200);
+    assert_eq!(refused.json()["errors"][0]["field"], "schedule");
+    let ran = post(port, "/api/jobs/run", r#"{"name": "nightly_backup"}"#).json();
+    assert!(ran["last"]["error"].is_null(), "{ran}");
+    assert!(backups.join("GRAPH").exists() || backups.read_dir().unwrap().next().is_some());
+    let history = get(port, "/api/jobs/history?name=nightly_backup&tier=hours").json();
+    assert_eq!(history["buckets"][0]["count"], 1, "{history}");
+    let off = post(
+        port,
+        "/api/jobs/enable",
+        r#"{"name": "nightly_backup", "enabled": false}"#,
+    )
+    .json();
+    assert_eq!(off["enabled"], false, "{off}");
+    let compact = post(
+        port,
+        "/api/jobs/schedule",
+        r#"{"name": "compact", "schedule": "15 4 * * *"}"#,
+    )
+    .json();
+    assert_eq!(compact["schedule"], "15 4 * * *", "{compact}");
+    let listed = get(port, "/api/jobs").json();
+    let names: Vec<&str> = listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["stats_flush", "compact", "nightly_backup"],
+        "{listed}"
+    );
+    let unknown = post(port, "/api/jobs/run", r#"{"name": "nowhere"}"#);
+    assert_eq!(unknown.status, 422, "{}", unknown.body);
+    assert_eq!(
+        post(port, "/api/jobs/drop", r#"{"name": "nightly_backup"}"#).json()["dropped"],
+        true
+    );
+    assert_eq!(get(port, "/api/jobs/define").status, 405);
+    let _ = std::fs::remove_dir_all(&backups);
 }

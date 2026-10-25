@@ -40,8 +40,12 @@ A Store brings its system jobs (`Store::system_jobs()`):
 | `stats_flush` | every minute | on | writes the [workload statistics](workload_statistics.md) to the sidecar |
 | `compact` | 03:00 daily | off | releases spare capacity of the in-memory structure |
 
-System jobs cannot be removed; their schedule and switch can be changed. Every run (start,
-duration, error) is recorded in the workload statistics.
+System jobs cannot be removed; their schedule and switch can be changed (the playground's and
+the dev server's job list, `POST /api/jobs/schedule` and `/api/jobs/enable`, or
+`WorkloadStats::set_job_override` in your own program). The change is a setting of the
+instance, not of the graph: it is kept in the store's workload sidecar (at the level
+`persisted`, the default), so it survives a restart but is not carried by a backup or a fork.
+Every run (start, duration, error) is recorded in the workload statistics.
 
 ## Jobs of users
 
@@ -94,8 +98,20 @@ and sync them whenever the catalog's jobs changed:
 scheduler.sync_user_jobs(store.user_jobs());
 ```
 
-The dev server answers `GET /api/jobs` with the jobs of the active store: name, kind, schedule,
-whether it is on, the next time and the last run.
+**Front ends.** The dev server and the playground share one job API (`graphersal-session`):
+
+| Dev server | What it does |
+|---|---|
+| `GET /api/jobs` | every job: the system jobs, then the jobs of users: schedule, on or off, next time, last run, the run counts of the last hour, two days and 90 days, whether it runs (and why not), a user job's action, arguments and effects |
+| `POST /api/jobs/define` | defines or replaces a job from the keys of `g.define_job`; a refused job answers the wrong fields |
+| `POST /api/jobs/drop` | `{name}`: removes a job of a user |
+| `POST /api/jobs/enable` | `{name, enabled}`: switches a job on or off (a user job's definition keeps its effects) |
+| `POST /api/jobs/schedule` | `{name, schedule}`: a system job's schedule (`null`: the built-in one); a user job is defined again instead |
+| `POST /api/jobs/run` | `{name}`: runs a job now, whatever its schedule |
+| `GET /api/jobs/history?name=..&tier=minutes\|hours\|days` | the job's runs per minute, hour or day: count, failures, total and longest time |
+
+The dev server's user owns the machine's files, so a backup job defined there may name any
+directory; the browser playground has no files and refuses backup jobs.
 
 ## In your own program
 

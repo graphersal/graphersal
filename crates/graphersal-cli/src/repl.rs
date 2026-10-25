@@ -1177,7 +1177,7 @@ mod tests {
             WorkloadLevel::Memory,
         )));
         let graph = std::sync::Arc::new(graph);
-        scope(Channel::Cli, false, || {
+        let _ = scope(Channel::Cli, false, || {
             graphersal::script::eval_value(graph.clone(), r#"g.v().values("name").to_list()"#)
         })
         .unwrap();

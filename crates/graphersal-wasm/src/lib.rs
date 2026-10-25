@@ -520,6 +520,64 @@ impl Playground {
         to_text(&self.session.jobs_view())
     }
 
+    /// Defines (or replaces) a job of a user from the form's spec (JSON text, see
+    /// `graphersal_session::jobs`): `{ok, job}` or `{ok: false, errors: [{field, message,
+    /// help?}]}`; never throws for a refused job. The playground has no files, so no backup jobs.
+    #[wasm_bindgen(js_name = defineJob)]
+    pub fn define_job(&mut self, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.define_job(&spec)))
+    }
+
+    /// Drops the job of a user `name`: `{dropped}`.
+    #[wasm_bindgen(js_name = dropJob)]
+    pub fn drop_job(&mut self, name: &str) -> Result<String, JsError> {
+        self.session
+            .drop_job(name)
+            .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Switches job `name` on or off: its entry.
+    #[wasm_bindgen(js_name = setJobEnabled)]
+    pub fn set_job_enabled(&mut self, name: &str, enabled: bool) -> Result<String, JsError> {
+        self.session
+            .set_job_enabled(name, enabled)
+            .map(|entry| to_text(&entry))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Gives the system job `name` a schedule (`null`: its built-in one again): its entry.
+    #[wasm_bindgen(js_name = setJobSchedule)]
+    pub fn set_job_schedule(
+        &mut self,
+        name: &str,
+        schedule: Option<String>,
+    ) -> Result<String, JsError> {
+        self.session
+            .set_job_schedule(name, schedule.as_deref())
+            .map(|entry| to_text(&entry))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Runs job `name` now: its entry, `last` being this run.
+    #[wasm_bindgen(js_name = runJobNow)]
+    pub fn run_job_now(&mut self, name: &str) -> Result<String, JsError> {
+        self.session
+            .run_job_now(name)
+            .map(|entry| to_text(&entry))
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// The run buckets of job `name` in `tier` (`minutes`, `hours`, `days`): `{tier, buckets}`.
+    #[wasm_bindgen(js_name = jobHistory)]
+    pub fn job_history(&self, name: &str, tier: &str) -> Result<String, JsError> {
+        self.session
+            .job_history(name, tier)
+            .map(|history| to_text(&history))
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// Every DSL function, from the Rhai engine's metadata (completion catalogue).
     pub fn completions(&self) -> String {
         to_text(&views::completions(self.session.engine()))
@@ -929,6 +987,60 @@ mod tests {
         assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
         assert_eq!(json(p.info())["compressionRules"], 1);
         assert_eq!(json(p.info())["catalog"]["compression"], 1);
+    }
+
+    #[test]
+    fn jobs_through_the_playground_api() {
+        let json = |text: String| -> Value { serde_json::from_str(&text).expect("JSON") };
+        let mut p = Playground::new();
+        p.load_sample("modern").unwrap();
+        let defined = json(
+            p.define_job(r#"{"name": "cp", "schedule": "0 * * * *", "action": "checkpoint"}"#)
+                .unwrap(),
+        );
+        assert_eq!(defined["ok"], true, "{defined}");
+        // The playground's graph is in a store in memory: the job is scheduled.
+        let jobs = json(p.jobs());
+        assert_eq!(jobs["store"], true);
+        let cp = jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "cp")
+            .cloned()
+            .unwrap();
+        assert_eq!(cp["scheduled"], true, "{cp}");
+        assert_eq!(
+            json(p.set_job_enabled("cp", false).unwrap())["enabled"],
+            false
+        );
+        let ran = json(p.run_job_now("cp").unwrap());
+        assert!(ran["last"]["error"].is_null(), "{ran}");
+        // No files in the playground: no backup jobs.
+        let refused = json(
+            p.define_job(
+                r#"{"name": "b", "schedule": "0 * * * *", "action": "backup", "path": "/b"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(refused["errors"][0]["field"], "path", "{refused}");
+        // The catalog file carries the job.
+        let file = p.save_catalog();
+        assert!(file.contains("\"job\""), "{file}");
+        assert_eq!(json(p.drop_job("cp").unwrap())["dropped"], true);
+        assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
+        assert_eq!(
+            json(p.job_history("cp", "minutes").unwrap())["tier"],
+            "minutes"
+        );
+        let back = json(p.jobs());
+        let cp = back["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "cp")
+            .cloned();
+        assert_eq!(cp.unwrap()["enabled"], false);
     }
 
     #[test]

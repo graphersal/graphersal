@@ -224,3 +224,34 @@ fn the_scheduler_follows_the_catalog() {
     assert_eq!(names(&scheduler).len(), 3);
     assert!(!names(&scheduler).iter().any(|(n, _)| n == "a"));
 }
+
+#[test]
+fn a_system_jobs_settings_survive_a_reopen() {
+    use graphersal::workload::JobOverride;
+    let dir = MemDir::named("memory:job-run-settings");
+    let store = Store::create_with(
+        &dir,
+        TraversalGraph::tinkerpop_modern(),
+        StoreOptions::new(),
+    )
+    .unwrap();
+    store.workload_stats().set_job_override(
+        "compact",
+        JobOverride::new()
+            .with_schedule("30 1 * * 0")
+            .with_enabled(true),
+    );
+    // A schedule that does not parse is ignored: the built-in one stays.
+    store
+        .workload_stats()
+        .set_job_override("stats_flush", JobOverride::new().with_schedule("never"));
+    store.close().unwrap();
+    let store = Store::open(&dir, StoreOptions::new()).unwrap();
+    let jobs = store.system_jobs();
+    let compact = jobs.iter().find(|j| j.name() == "compact").unwrap();
+    assert!(compact.enabled());
+    assert_eq!(compact.schedule().to_string(), "30 1 * * 0");
+    let flush = jobs.iter().find(|j| j.name() == "stats_flush").unwrap();
+    assert_eq!(flush.schedule().to_string(), "* * * * *");
+    store.close().unwrap();
+}

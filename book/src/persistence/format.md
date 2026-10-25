@@ -250,7 +250,7 @@ copied by a backup, a ZIP backup, a fork, a repair or a conversion; a restored o
 starts without it. A writable store replaces it whole (`write_atomic`) periodically and at close.
 
 ```text
-magic "GRWLSTAT" | version u32 = 1 | series count u32
+magic "GRWLSTAT" | version u32 = 2 | series count u32
 per series: byte length u32 | kind u8 (1 job, 2 lock, 3 query, 4 property)
             | name (u32 length + UTF-8; a property series: the key, "*" for all)
             | channel u8 (0 host, 1 playground, 2 mcp, 3 cli, 4 python, 5 job)
@@ -263,10 +263,16 @@ per series: byte length u32 | kind u8 (1 job, 2 lock, 3 query, 4 property)
               | max microseconds u64
 job count u32 | per job: name | started_at i64 (microseconds) | microseconds u64
             | error flag u8 [+ error text]
+section count u32 | per section: tag u8 | byte length u32 | bytes        (version 2; may be absent)
+    tag 1, the system jobs' settings: count u32 | per job: name | schedule flag u8
+            [+ cron text] | enabled u8 (0 unset, 1 off, 2 on)
 CRC-32C u32 of everything before it
 ```
 
-All integers little-endian. A reader MUST treat the file as optional: a missing file, a wrong
+All integers little-endian. Version 1 has no sections and is still read; in version 2 the
+sections may be left out (no settings). A section of a tag the reader does not know is skipped
+by its byte length. The settings of the system jobs (book page "Scheduled Jobs") are data of the
+instance like the statistics: they are lost with the file. A reader MUST treat the file as optional: a missing file, a wrong
 magic, length or checksum, or a version it does not know means "no statistics" (it starts anew
 and replaces the file at its next write), never damage, never a reason to refuse the store. A
 series of a kind or channel it does not know is skipped by its byte length, a tier it does not
