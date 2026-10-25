@@ -266,7 +266,7 @@ impl ShapeTable {
                 });
                 // Exactly sized: a plain `collect` would reuse the entry allocation in place (twice the
                 // size of the values).
-                let indexed = std::mem::take(indexed).into_inner();
+                let indexed = std::mem::take(indexed);
                 let mut values = Vec::with_capacity(indexed.len());
                 values.extend(indexed.into_values());
                 map.0 = Repr::Shaped(Shaped { shape, values });

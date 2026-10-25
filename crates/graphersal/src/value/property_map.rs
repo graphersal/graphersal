@@ -207,80 +207,10 @@ pub(crate) struct Shaped {
     pub(crate) values: Vec<ElementProperty>,
 }
 
-/// The empty map every unallocated [`IndexedMap`] reads as.
-static EMPTY: PropertyMapInner = IndexMap::with_hasher(BuildHasherDefault::new());
-
-/// The `IndexMap` of an `Indexed` [`PropertyMap`], boxed so that a `PropertyMap` is the size of
-/// its `Shaped` form (32 bytes instead of 56: every element slot of a graph holds one), and
-/// allocated on the first write, so an empty map allocates nothing. Reads of an unallocated map
-/// see [`EMPTY`]; `DerefMut` allocates.
-#[derive(Default)]
-pub(crate) struct IndexedMap(Option<Box<PropertyMapInner>>);
-
-impl IndexedMap {
-    /// The boxed form of `map` (nothing allocated for an empty map without capacity).
-    #[inline]
-    pub(crate) fn from_map(map: PropertyMapInner) -> Self {
-        if map.capacity() == 0 {
-            IndexedMap(None)
-        } else {
-            IndexedMap(Some(Box::new(map)))
-        }
-    }
-
-    /// The map, unboxed.
-    #[inline]
-    pub(crate) fn into_inner(self) -> PropertyMapInner {
-        self.0.map(|map| *map).unwrap_or_default()
-    }
-
-    /// The bytes of the box itself (`0` while unallocated).
-    #[inline]
-    fn box_bytes(&self) -> u64 {
-        self.0
-            .as_ref()
-            .map_or(0, |_| std::mem::size_of::<PropertyMapInner>() as u64)
-    }
-}
-
-impl std::ops::Deref for IndexedMap {
-    type Target = PropertyMapInner;
-
-    #[inline]
-    fn deref(&self) -> &PropertyMapInner {
-        match &self.0 {
-            Some(map) => map,
-            None => &EMPTY,
-        }
-    }
-}
-
-impl std::ops::DerefMut for IndexedMap {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut PropertyMapInner {
-        self.0.get_or_insert_with(Box::default)
-    }
-}
-
-impl Clone for IndexedMap {
-    #[inline(always)]
-    fn clone(&self) -> Self {
-        IndexedMap(self.0.clone())
-    }
-
-    #[inline(always)]
-    fn clone_from(&mut self, source: &Self) {
-        match (&mut self.0, &source.0) {
-            (Some(target), Some(source)) => target.clone_from(source),
-            (target, source) => *target = source.clone(),
-        }
-    }
-}
-
 /// The representation of a [`PropertyMap`] (crate-internal; see the module docs).
 pub(crate) enum Repr {
     /// A free-standing map.
-    Indexed(IndexedMap),
+    Indexed(PropertyMapInner),
     /// A map stored in a `TraversalGraph`: shared keys, own values.
     Shaped(Shaped),
 }
@@ -288,7 +218,7 @@ pub(crate) enum Repr {
 impl Default for Repr {
     #[inline]
     fn default() -> Self {
-        Repr::Indexed(IndexedMap::default())
+        Repr::Indexed(PropertyMapInner::default())
     }
 }
 
@@ -344,7 +274,7 @@ impl PartialEq for PropertyMap {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
-            (Repr::Indexed(a), Repr::Indexed(b)) => **a == **b,
+            (Repr::Indexed(a), Repr::Indexed(b)) => a == b,
             _ => self.eq_mixed(other),
         }
     }
@@ -354,14 +284,15 @@ impl PropertyMap {
     /// An empty map.
     #[inline]
     pub fn new() -> Self {
-        Self(Repr::Indexed(IndexedMap::default()))
+        Self(Repr::Indexed(PropertyMapInner::default()))
     }
 
     /// An empty map with room for `capacity` entries.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(Repr::Indexed(IndexedMap::from_map(
-            PropertyMapInner::with_capacity_and_hasher(capacity, BuildHasherDefault::default()),
+        Self(Repr::Indexed(PropertyMapInner::with_capacity_and_hasher(
+            capacity,
+            BuildHasherDefault::default(),
         )))
     }
 
@@ -515,7 +446,7 @@ impl PropertyMap {
             self.unshape();
         }
         match self.0 {
-            Repr::Indexed(ref mut map) => &mut **map,
+            Repr::Indexed(ref mut map) => map,
             // Not reached: converted above. Starting over from an empty map keeps this total.
             Repr::Shaped(_) => {
                 self.0 = Repr::default();
@@ -532,7 +463,7 @@ impl PropertyMap {
         if let Repr::Shaped(shaped) = &mut self.0 {
             let values = std::mem::take(&mut shaped.values);
             let map: PropertyMapInner = shaped.shape.keys.iter().cloned().zip(values).collect();
-            self.0 = Repr::Indexed(IndexedMap::from_map(map));
+            self.0 = Repr::Indexed(map);
         }
     }
 
@@ -544,7 +475,7 @@ impl PropertyMap {
             values.truncate(shape.len());
             if values.len() < shape.len() {
                 let keys = shape.keys.iter().cloned().zip(values).collect();
-                return Self(Repr::Indexed(IndexedMap::from_map(keys)));
+                return Self(Repr::Indexed(keys));
             }
         }
         Self(Repr::Shaped(Shaped { shape, values }))
@@ -554,7 +485,7 @@ impl PropertyMap {
     #[cfg(test)]
     pub(crate) fn as_indexed(&self) -> Option<&PropertyMapInner> {
         match &self.0 {
-            Repr::Indexed(map) => Some(&**map),
+            Repr::Indexed(map) => Some(map),
             Repr::Shaped(_) => None,
         }
     }
@@ -666,8 +597,7 @@ impl PropertyMap {
     pub(crate) fn own_heap_bytes(&self) -> u64 {
         match &self.0 {
             Repr::Indexed(map) => {
-                map.box_bytes()
-                    + index_map_heap_bytes::<CompactString, ElementProperty>(map.capacity())
+                index_map_heap_bytes::<CompactString, ElementProperty>(map.capacity())
                     + map
                         .keys()
                         .map(super::compact_string_heap_bytes)
@@ -707,9 +637,9 @@ impl std::ops::Index<&str> for PropertyMap {
 impl<K: Into<CompactString>> FromIterator<(K, ElementProperty)> for PropertyMap {
     #[inline]
     fn from_iter<I: IntoIterator<Item = (K, ElementProperty)>>(iter: I) -> Self {
-        Self(Repr::Indexed(IndexedMap::from_map(
+        Self(Repr::Indexed(
             iter.into_iter().map(|(k, v)| (k.into(), v)).collect(),
-        )))
+        ))
     }
 }
 
@@ -735,7 +665,7 @@ impl IntoIterator for PropertyMap {
     #[inline]
     fn into_iter(self) -> IntoIter {
         IntoIter(match self.0 {
-            Repr::Indexed(map) => Either::Indexed(map.into_inner().into_iter()),
+            Repr::Indexed(map) => Either::Indexed(map.into_iter()),
             Repr::Shaped(Shaped { shape, values }) => Either::Shaped(ShapedIntoIter {
                 keys: 0..shape.len(),
                 shape,
@@ -1037,7 +967,7 @@ pub(crate) fn hash_table_heap_bytes(capacity: usize, entry: usize) -> u64 {
 mod serde_impl {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{IndexedMap, PropertyMap, PropertyMapInner, Repr};
+    use super::{PropertyMap, PropertyMapInner, Repr};
 
     /// Serializes as a JSON object, entries in order.
     impl Serialize for PropertyMap {
@@ -1049,8 +979,7 @@ mod serde_impl {
     /// Deserializes a JSON object, entries in order.
     impl<'de> Deserialize<'de> for PropertyMap {
         fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            PropertyMapInner::deserialize(deserializer)
-                .map(|map| PropertyMap(Repr::Indexed(IndexedMap::from_map(map))))
+            PropertyMapInner::deserialize(deserializer).map(|map| PropertyMap(Repr::Indexed(map)))
         }
     }
 }
@@ -1060,30 +989,11 @@ mod tests {
     use super::{PropertyMap, PropertyMapInner};
     use crate::value::ElementProperty;
 
-    /// A map is the size of its `Shaped` form (the `Indexed` map is boxed): every element slot
-    /// of a graph holds one, and an edge's `Option<PropertyMap>` costs nothing more.
     #[test]
-    fn a_map_is_32_bytes() {
-        assert_eq!(size_of::<PropertyMap>(), 32);
-        assert_eq!(size_of::<Option<PropertyMap>>(), 32);
+    fn the_newtype_costs_nothing() {
+        assert_eq!(size_of::<PropertyMap>(), size_of::<PropertyMapInner>());
         assert_eq!(align_of::<PropertyMap>(), align_of::<PropertyMapInner>());
         assert_eq!(size_of::<ElementProperty>(), 32);
-    }
-
-    /// An empty map allocates nothing until its first write, and reads as empty.
-    #[test]
-    fn an_empty_map_allocates_nothing() {
-        let mut map = PropertyMap::new();
-        assert!(map.is_empty());
-        assert_eq!(map.get("x"), None);
-        assert_eq!(map.iter().count(), 0);
-        assert_eq!(crate::value::estimated_element_heap_bytes(&map), 0);
-        assert_eq!(PropertyMap::with_capacity(0), map);
-        map.insert("x", ElementProperty::from(1));
-        assert_eq!(map.get("x"), Some(&ElementProperty::from(1)));
-        assert!(crate::value::estimated_element_heap_bytes(&map) > 0);
-        let empty: PropertyMap = std::iter::empty::<(&str, ElementProperty)>().collect();
-        assert_eq!(crate::value::estimated_element_heap_bytes(&empty), 0);
     }
 
     #[test]
@@ -1202,11 +1112,9 @@ mod tests {
                 Some(capacity),
                 "len {len}"
             );
-            // The box of the `Indexed` map counts too.
-            let boxed = size_of::<PropertyMapInner>() as u64;
             assert_eq!(
                 crate::value::estimated_element_heap_bytes(&map),
-                boxed + capacity as u64 * bucket + table(buckets),
+                capacity as u64 * bucket + table(buckets),
                 "len {len}"
             );
         }
