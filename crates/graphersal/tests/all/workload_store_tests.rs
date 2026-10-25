@@ -622,3 +622,38 @@ fn every_key_taking_step_declares_its_property_access() {
         );
     }
 }
+
+/// A job's queries count under the `job` channel, whatever the host's channel is.
+#[test]
+fn a_jobs_queries_count_under_the_job_channel() {
+    use graphersal::jobs::{Job, JobKind};
+    let dir = MemDir::named("memory:job-channel");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let graph = store.graph().clone();
+    let mut scheduler = Scheduler::new().with_stats(store.workload_stats());
+    scheduler
+        .add(Job::new(
+            "count_people",
+            JobKind::User,
+            "* * * * *".parse().unwrap(),
+            move |_| {
+                graph
+                    .read()
+                    .traversal()
+                    .v(None)
+                    .has_label("person")
+                    .count()
+                    .to_list()
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())
+            },
+        ))
+        .unwrap();
+    graphersal::workload::scope(Channel::Mcp, false, || {
+        scheduler.tick(T0);
+        assert_eq!(scheduler.tick(T0 + MINUTE), ["count_people"]);
+    });
+    let runs = queries(&store);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].1, Channel::Job);
+}

@@ -912,7 +912,12 @@ impl Session {
             .lock()
             .map(|mut slot| std::mem::replace(&mut *slot, cancel.clone()))
             .ok();
-        let answer = cancel.scope(|| self.execute_in_scope(script, options, authorizer));
+        // The user's query counts in the workload statistics under the host's channel, even
+        // where the host marks the session's other work (drawing, panels) as technical.
+        let answer =
+            graphersal::workload::scope(graphersal::workload::current_channel(), false, || {
+                cancel.scope(|| self.execute_in_scope(script, options, authorizer))
+            });
         if let (Some(previous), Ok(mut slot)) = (previous, self.run_cancel.lock()) {
             *slot = previous;
         }

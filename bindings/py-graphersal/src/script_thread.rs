@@ -50,6 +50,9 @@ thread_local! {
 /// continues on the calling thread. Runs `job` directly when no worker thread can be started.
 pub(crate) fn on_script_thread<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
     let (done, result) = mpsc::channel();
+    // Everything Python runs counts under the `python` channel of the workload statistics.
+    let job =
+        move || graphersal::workload::scope(graphersal::workload::Channel::Python, false, job);
     let mut job = Some(job);
     let sent = WORKER.with(|worker| {
         let mut worker = worker.borrow_mut();

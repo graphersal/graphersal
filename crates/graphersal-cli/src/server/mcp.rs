@@ -47,6 +47,9 @@
 //!
 //! `memory_report` (reading, also in read-only mode) answers the session's memory report
 //! (`Session::memory_report`), at most 50 property rows unless `max_rows` says otherwise.
+//! `workload_statistics` (reading) answers the workload statistics of a store's graph
+//! (`Session::workload_report`): the queries, properties, lock times and jobs counted, at most
+//! 50 rows per list (most total time first) unless `max_rows` says otherwise.
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
@@ -495,7 +498,8 @@ the user asked for that change. Large text that queries rarely read (CVs, descri
 compressed in memory with a compression rule: `list_compressions`, `estimate_compression` \
 (measures the candidate rules on the current data first, changes nothing), \
 `define_compression`, `drop_compression`, `recompress` (reads stay plain); `memory_report` \
-shows where the memory goes per label and property. A query that filters a label on a \
+shows where the memory goes per label and property, `workload_statistics` which queries ran \
+and how the properties were used. A query that filters a label on a \
 property (`g.v().has_label(\"person\").has(\"age\", P.gt(30))`) and is slow on a large \
 graph can be served by a property index: `list_indexes`, `create_index` {label, key, \
 element?, type?, transform?}, `drop_index`; results never change, `.profile()` names the index \
@@ -1116,6 +1120,25 @@ fn all_tools() -> Vec<Tool> {
             no_args(),
         ),
         tool(
+            "workload_statistics",
+            "Workload statistics",
+            Kind::Read,
+            "What the workload of this graph did, counted by the engine (only for a graph in a \
+             store; level `off` otherwise): `queries` by normalized plan (literals as `?`), \
+             `properties` (element, label, key, access: filter_scan, filter_index, read, \
+             order_group, similarity, write, remove), `locks` (write.wait, write.hold, \
+             read.wait) and scheduled `jobs`, each per channel (playground, mcp, cli, python, \
+             job, host) with the windows last_hour, last_two_days and last_ninety_days (count, \
+             failed, items, total_micros, max_micros). The page's own drawing and panels are not \
+             counted. Rows sorted by total time over 90 days; max_rows per list (default 50).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "max_rows": {"type": "integer", "minimum": 1, "description": "Keep this many rows per list (default 50); <list>_omitted counts the rest."},
+                },
+            }),
+        ),
+        tool(
             "memory_report",
             "Memory report",
             Kind::Read,
@@ -1588,6 +1611,31 @@ fn run_tool(
             context,
             context.call(|s| s.statistics()).map_err(http_failed)?,
         ))),
+        "workload_statistics" => {
+            let max_rows = args
+                .get("max_rows")
+                .and_then(Value::as_u64)
+                .unwrap_or(50)
+                .max(1) as usize;
+            let mut report = context.call(|s| s.workload_report()).map_err(http_failed)?;
+            if let Some(map) = report.as_object_mut() {
+                for list in ["queries", "properties", "locks", "jobs"] {
+                    let omitted = match map.get_mut(list).and_then(Value::as_array_mut) {
+                        Some(rows) if rows.len() > max_rows => {
+                            let omitted = rows.len() - max_rows;
+                            rows.truncate(max_rows);
+                            omitted
+                        }
+                        _ => continue,
+                    };
+                    map.insert(format!("{list}_omitted"), json!(omitted));
+                }
+            }
+            Ok(format!(
+                "Workload statistics (times in microseconds, rows sorted by total time):\n{}",
+                compact(&report)
+            ))
+        }
         "memory_report" => {
             let mut spec = match args {
                 Value::Object(map) => Value::Object(map.clone()),

@@ -18,6 +18,8 @@ pub(crate) struct Origin {
 
 thread_local! {
     static CURRENT: Cell<Option<Origin>> = const { Cell::new(None) };
+    /// The origin outside every scope ([`set_thread_default`]).
+    static DEFAULT: Cell<Option<Origin>> = const { Cell::new(None) };
     /// The statistics of the graph whose lock guard this thread holds (the innermost one).
     static ATTACHED: RefCell<Option<Arc<WorkloadStats>>> = const { RefCell::new(None) };
 }
@@ -86,13 +88,28 @@ pub fn scope<R>(channel: Channel, technical: bool, run: impl FnOnce() -> R) -> R
     run()
 }
 
-/// The origin of the current thread's work ([`Channel::Host`], not technical, outside a scope).
+/// The origin of the current thread's work: the innermost scope's, else the thread's default
+/// ([`set_thread_default`]), else [`Channel::Host`], not technical.
 pub(crate) fn current() -> Origin {
     CURRENT
         .try_with(Cell::get)
         .ok()
         .flatten()
+        .or_else(|| DEFAULT.try_with(Cell::get).ok().flatten())
         .unwrap_or_default()
+}
+
+/// Sets what the current thread's work counts as outside every [`scope`]: a thread that only
+/// serves one front end (the playground's worker, the CLI's script thread, a Python script
+/// worker) declares it once instead of around every call.
+pub fn set_thread_default(channel: Channel, technical: bool) {
+    let _ = DEFAULT.try_with(|default| default.set(Some(Origin { channel, technical })));
+}
+
+/// The channel the current thread's work counts under. A front end that marks its own work as
+/// technical runs a user's query in `scope(current_channel(), false, ..)`: same channel, counted.
+pub fn current_channel() -> Channel {
+    current().channel
 }
 
 #[cfg(test)]
@@ -116,5 +133,25 @@ mod tests {
             assert_eq!(current().channel, Channel::Mcp);
         });
         assert_eq!(current(), Origin::default());
+    }
+
+    #[test]
+    fn a_thread_default_applies_outside_scopes() {
+        let thread = std::thread::spawn(|| {
+            set_thread_default(Channel::Python, true);
+            assert_eq!(current_channel(), Channel::Python);
+            assert!(current().technical);
+            scope(current_channel(), false, || {
+                assert_eq!(
+                    current(),
+                    Origin {
+                        channel: Channel::Python,
+                        technical: false
+                    }
+                );
+            });
+            assert!(current().technical);
+        });
+        assert!(thread.join().is_ok());
     }
 }

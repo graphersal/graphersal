@@ -7,5 +7,6 @@
 
 pub use crate::graph::workload::{
     AccessKind, Channel, Counters, JobRunRecord, MAX_QUERY_SERIES, PropertyUse, Sample, SeriesKey,
-    SeriesKind, SeriesTotals, WorkloadLevel, WorkloadReport, WorkloadStats, scope,
+    SeriesKind, SeriesTotals, WorkloadLevel, WorkloadReport, WorkloadStats, current_channel, scope,
+    set_thread_default,
 };

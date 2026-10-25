@@ -3109,6 +3109,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "set_schema",
             "patch_schema",
             "statistics",
+            "workload_statistics",
             "memory_report",
             "graph_info",
         ]
@@ -5733,4 +5734,59 @@ fn mcp_max_chars_is_checked() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("--mcp-max-chars"), "{err}");
     }
+}
+
+/// The workload statistics of a store's graph count the page's and the agent's queries under
+/// their channels (`playground`, `mcp`), never the page's own drawing; `GET /api/workload` and
+/// the MCP tool `workload_statistics` show them.
+#[test]
+fn workload_statistics_count_queries_per_channel() {
+    let ui = ui_dir("workload");
+    let data = ui.parent().unwrap().join("workload-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let r = execute(
+        port,
+        r#"g.add_v("person").property("name", "ann").iterate()"#,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let view = get(port, "/api/graph-view");
+    assert_eq!(view.status, 200, "{}", view.body);
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, _) = mcp.call(
+        "query",
+        serde_json::json!({"script": "g.v().has_label(\"person\").values(\"name\").to_list()"}),
+    );
+    assert!(!error);
+    let report = get(port, "/api/workload").json();
+    assert_eq!(report["level"], "persisted", "{report}");
+    let queries = report["queries"].as_array().unwrap();
+    let channel_of = |prefix: &str| {
+        queries
+            .iter()
+            .find(|q| q["query"].as_str().unwrap_or("").starts_with(prefix))
+            .map(|q| q["channel"].as_str().unwrap_or("").to_string())
+    };
+    assert_eq!(
+        channel_of("add_v").as_deref(),
+        Some("playground"),
+        "{report}"
+    );
+    assert_eq!(channel_of("v(").as_deref(), Some("mcp"), "{report}");
+    // Only the two queries: the graph view and the MCP tool's own reads are not counted.
+    assert_eq!(queries.len(), 2, "{report}");
+    let (error, text) = mcp.call("workload_statistics", serde_json::json!({"max_rows": 1}));
+    assert!(!error, "{text}");
+    assert!(text.contains("\"queries_omitted\":1"), "{text}");
+    assert!(text.contains("\"channel\":\"mcp\"") || text.contains("\"channel\":\"playground\""));
 }

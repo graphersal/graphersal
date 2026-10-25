@@ -373,6 +373,18 @@ impl Store {
         Ok(dict.into_any().unbind())
     }
 
+    /// ``store.workload_report()``: the workload statistics of the store's graph (book page
+    /// "Workload Statistics"): ``{"level", "queries", "properties", "locks", "jobs"}``, every
+    /// row with its ``channel`` (Python's own queries count under ``"python"``) and the
+    /// windows ``last_hour`` / ``last_two_days`` / ``last_ninety_days``.
+    fn workload_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64);
+        let report = self.with(py, move |store| Ok(store.workload_stats().report(now)))?;
+        crate::convert::property_to_pyobject(py, &report.to_property())
+    }
+
     /// ``store.checkpoint(name=None)``: writes a snapshot of the current state; returns its
     /// listing ``{"commit_seq", "name", ...}``.
     #[pyo3(signature = (name=None))]

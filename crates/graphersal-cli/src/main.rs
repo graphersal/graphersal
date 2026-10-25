@@ -60,6 +60,9 @@ fn main() -> Result<()> {
 
 /// The whole command line session (one-shot or REPL), on the large-stack thread of [`main`].
 fn run() -> Result<()> {
+    // Scripts of the command line count under `cli` in a store's workload statistics (the dev
+    // server sets its own channels per request).
+    graphersal::workload::set_thread_default(graphersal::workload::Channel::Cli, false);
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("store") {
         log::install();

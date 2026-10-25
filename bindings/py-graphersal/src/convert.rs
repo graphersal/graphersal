@@ -106,7 +106,7 @@ pub(crate) fn dynamic_to_pyobject(py: Python<'_>, value: Dynamic) -> PyResult<Py
 /// Converts a property value of a vertex or an edge into the closest native Python value, the
 /// same mapping [`dynamic_to_pyobject`] applies to script values (a map with a non-string key
 /// becomes a dict with those keys).
-fn property_to_pyobject(py: Python<'_>, value: &ElementProperty) -> PyResult<Py<PyAny>> {
+pub(crate) fn property_to_pyobject(py: Python<'_>, value: &ElementProperty) -> PyResult<Py<PyAny>> {
     Ok(match value.to_logical() {
         ElementProperty::Null => py.None(),
         ElementProperty::Boolean(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
