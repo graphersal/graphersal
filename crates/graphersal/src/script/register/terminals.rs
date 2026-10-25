@@ -215,7 +215,11 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn_as(
             &["drop_index", "dropIndex"],
             ScriptGraphTraversalSource::drop_index,
-        );
+        )
+        // Scheduled jobs (`script/jobs.rs`): Graphersal extensions, snake_case only.
+        .register_fn("define_job", ScriptGraphTraversalSource::define_job)
+        .register_fn("jobs", ScriptGraphTraversalSource::jobs)
+        .register_fn("drop_job", ScriptGraphTraversalSource::drop_job);
 
     #[cfg(feature = "io")]
     registry

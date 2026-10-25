@@ -98,6 +98,9 @@ pub use crate::graph::definition::{
 };
 #[cfg(feature = "persist")]
 pub use crate::graph::definition::{decode_payload, encode_payload};
+pub use crate::graph::jobs::{
+    JobDefinition, JobTask, MAX_JOB_EFFECTS, MAX_JOB_PATH_BYTES, MAX_SCHEDULE_BYTES, RunOn,
+};
 pub use crate::graph::property_index::{
     MAX_INDEX_KEY_BYTES, MAX_INDEX_LABEL_BYTES, PropertyIndexDefinition, PropertyIndexTransform,
     PropertyIndexType,

@@ -412,9 +412,8 @@ impl ScriptGraphTraversalSource {
     }
 
     /// The file `operation` may `action` for `path` (asks for `action` on the `File`, then
-    /// resolves it, e.g. under the host's file root). Only the GraphML methods (`io`) take a
-    /// path: a schema is never read from a file.
-    #[cfg(feature = "io")]
+    /// resolves it, e.g. under the host's file root): the import/export methods and a backup
+    /// job's directory take a path; a schema is never read from a file.
     pub(crate) fn require_file(
         &self,
         operation: &str,

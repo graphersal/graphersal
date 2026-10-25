@@ -60,6 +60,7 @@ mod engine;
 mod eval;
 mod execution;
 mod fake;
+mod jobs;
 mod limits;
 mod memory_report;
 mod mutating;

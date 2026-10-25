@@ -217,6 +217,8 @@ pub(crate) const CLASSES: &[(&[&str], StepClass)] = {
                 "drop_compression",
                 "dropCompression",
                 "recompress",
+                "define_job",
+                "drop_job",
             ],
             Refused(CATALOG),
         ),

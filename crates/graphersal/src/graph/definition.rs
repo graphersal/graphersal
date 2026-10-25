@@ -234,6 +234,9 @@ impl DefinitionKind {
     /// Kind `3`: a compression rule
     /// ([`CompressionDefinition`](crate::graph::compression::CompressionDefinition)).
     pub const COMPRESSION: DefinitionKind = DefinitionKind(3);
+    /// Kind `4`: a scheduled job of a user
+    /// ([`JobDefinition`](crate::graph::jobs::JobDefinition)).
+    pub const JOB: DefinitionKind = DefinitionKind(4);
     /// The first kind reserved for hosts (`128`): kinds `128..=255` are never assigned by this
     /// library (see the [module docs](crate::catalog#kind-ranges)).
     pub const HOST_FIRST: DefinitionKind = DefinitionKind(128);
@@ -276,9 +279,13 @@ impl DefinitionKind {
     }
 
     /// Whether this version decodes the payload of this kind ([`Self::QUERY`],
-    /// [`Self::PROPERTY_INDEX`] and [`Self::COMPRESSION`]); every other kind is kept opaque.
+    /// [`Self::PROPERTY_INDEX`], [`Self::COMPRESSION`] and [`Self::JOB`]); every other kind is
+    /// kept opaque.
     pub const fn is_known(self) -> bool {
-        self.0 == Self::QUERY.0 || self.0 == Self::PROPERTY_INDEX.0 || self.0 == Self::COMPRESSION.0
+        self.0 == Self::QUERY.0
+            || self.0 == Self::PROPERTY_INDEX.0
+            || self.0 == Self::COMPRESSION.0
+            || self.0 == Self::JOB.0
     }
 
     /// The name of an assigned kind (`"query"`, `"property_index"`), `None` for an unassigned
@@ -288,6 +295,7 @@ impl DefinitionKind {
             1 => Some("query"),
             2 => Some("property_index"),
             3 => Some("compression"),
+            4 => Some("job"),
             _ => None,
         }
     }
@@ -298,6 +306,7 @@ impl DefinitionKind {
             "query" => Some(Self::QUERY),
             "property_index" => Some(Self::PROPERTY_INDEX),
             "compression" => Some(Self::COMPRESSION),
+            "job" => Some(Self::JOB),
             _ => None,
         }
     }
@@ -395,6 +404,8 @@ pub enum DefinitionBody {
     Compression(crate::graph::compression::CompressionDefinition),
     /// A property index (kind [`DefinitionKind::PROPERTY_INDEX`]).
     PropertyIndex(crate::graph::property_index::PropertyIndexDefinition),
+    /// A scheduled job of a user (kind [`DefinitionKind::JOB`]).
+    Job(crate::graph::jobs::JobDefinition),
     /// A payload this version does not decode (an unknown kind, or a known kind whose payload
     /// could not be decoded): its bytes exactly as read, written back unchanged.
     Opaque(Vec<u8>),
@@ -474,6 +485,7 @@ impl Definition {
             DefinitionBody::Query(query) => Some(query),
             DefinitionBody::Compression(_)
             | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Job(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }
@@ -484,6 +496,7 @@ impl Definition {
             DefinitionBody::Query(query) => Some(query),
             DefinitionBody::Compression(_)
             | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Job(_)
             | DefinitionBody::Opaque(_) => None,
         }
     }
@@ -494,7 +507,8 @@ impl Definition {
             DefinitionBody::Opaque(bytes) => Some(bytes),
             DefinitionBody::Query(_)
             | DefinitionBody::Compression(_)
-            | DefinitionBody::PropertyIndex(_) => None,
+            | DefinitionBody::PropertyIndex(_)
+            | DefinitionBody::Job(_) => None,
         }
     }
 
@@ -542,6 +556,16 @@ impl Definition {
                     });
                 }
                 index.validate(&self.name)
+            }
+            DefinitionBody::Job(job) => {
+                if let Some(reason) = identifier_problem(&self.name, MAX_QUERY_NAME_BYTES) {
+                    return Err(DefinitionError::InvalidName {
+                        kind: self.kind.to_string(),
+                        name: self.name.clone(),
+                        reason,
+                    });
+                }
+                job.validate(&self.name)
             }
             DefinitionBody::Opaque(payload) => {
                 let reason = if self.name.is_empty() {
@@ -606,6 +630,14 @@ impl Definition {
                     map.insert("flags", ElementProperty::from(self.flags.0 as i64));
                 }
                 index.write_fields(&mut map);
+            }
+            DefinitionBody::Job(job) => {
+                map.insert("kind", kind_value(self.kind));
+                map.insert("name", ElementProperty::from(self.name.as_str()));
+                if self.flags != DefinitionFlags::NONE {
+                    map.insert("flags", ElementProperty::from(self.flags.0 as i64));
+                }
+                job.write_fields(&mut map);
             }
             DefinitionBody::Opaque(payload) => {
                 map.insert("kind", ElementProperty::from(self.kind.0 as i64));
@@ -687,11 +719,21 @@ impl Definition {
                 body: DefinitionBody::PropertyIndex(index),
             });
         }
+        if kind == DefinitionKind::JOB {
+            let job =
+                crate::graph::jobs::JobDefinition::read_fields(map, &["kind", "name", "flags"])?;
+            return Ok(Definition {
+                kind,
+                flags,
+                name,
+                body: DefinitionBody::Job(job),
+            });
+        }
         if kind != DefinitionKind::QUERY {
             return Err(malformed(
                 "/kind",
                 format!(
-                    "a definition of {kind} needs its 'payload' (this version decodes queries, property indexes and compression rules)"
+                    "a definition of {kind} needs its 'payload' (this version decodes queries, property indexes, compression rules and jobs)"
                 ),
             ));
         }
