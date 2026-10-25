@@ -36,7 +36,7 @@ pub fn engine() -> Engine {
 /// The authorizer governs what the engine itself provides: Rhai's `import "module"` (`Execute`
 /// on the module's `File`, resolved by [`Authorizer::resolve_file`](crate::graph::Authorizer::resolve_file),
 /// e.g. under a file root) and the traversal sources a script creates (`GraphSource::empty()`,
-/// `GraphSource::file(path)`, `schema.toGraph()`). The session's own `g` gets its authorizer
+/// `GraphSource::file(path)`, `schema.to_graph()`). The session's own `g` gets its authorizer
 /// from [`graph_scope_with_options`]: pass the same one to both.
 pub fn engine_with_limits(
     limits: &ScriptLimits,
@@ -47,7 +47,7 @@ pub fn engine_with_limits(
 
 /// [`engine_with_limits`] with the host's preset traversal `options` for the traversal sources
 /// the engine itself provides: `GraphSource::empty()`, `GraphSource::tinkerpop_modern()`,
-/// `GraphSource::file(path)`, `schema.toGraph()`, `subgraph(..)` results. Pass the same options
+/// `GraphSource::file(path)`, `schema.to_graph()`, `subgraph(..)` results. Pass the same options
 /// as to [`graph_scope_with_options`] (which covers `g`, `_g` and `__`), so a script cannot escape
 /// a preset such as `evaluationTimeout` by creating a source of its own:
 ///

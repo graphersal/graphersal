@@ -131,7 +131,7 @@ never too deep to read back (see [Resource Limits](resource_limits.md#value-dept
 
 ## Removing: `remove_property(jpath(..))`
 
-`remove_property(key)` / `removeProperty(key)` (and the array form `remove_property([k1, k2])`,
+`remove_property(key)` (and the array form `remove_property([k1, k2])`,
 which may mix names and paths) removes the value at a path and lets the element continue, so
 `values(..)` can follow. The first segment is the property name, the rest descends into its value.
 

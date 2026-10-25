@@ -6,9 +6,9 @@ changes the element it receives and passes the same element on, so the traversal
 
 | Step | Element | What it does |
 |---|---|---|
-| `add_label("L")` / `addLabel("L")` | vertex | adds `L` to the vertex's label set (appended; the first label stays the primary one `label()` returns) |
-| `drop_label("L")` / `dropLabel("L")` | vertex | removes `L` from the label set; dropping the last one leaves the vertex unlabeled |
-| `set_label("L")` / `setLabel("L")` | edge | replaces the edge's one label (an unlabeled edge gets `L`) |
+| `add_label("L")` | vertex | adds `L` to the vertex's label set (appended; the first label stays the primary one `label()` returns) |
+| `drop_label("L")` | vertex | removes `L` from the label set; dropping the last one leaves the vertex unlabeled |
+| `set_label("L")` | edge | replaces the edge's one label (an unlabeled edge gets `L`) |
 
 ```rhai
 g.v(1).add_label("employee").labels().next()        // ["person", "employee"]

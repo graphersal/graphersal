@@ -199,7 +199,18 @@ pub fn map_eval_error(
     }
     Box::new(match *err {
         EvalAltResult::ErrorFunctionNotFound(signature, position) => {
-            EvalAltResult::ErrorFunctionNotFound(names(&signature), position)
+            let signature = names(&signature);
+            match snake_case_twin(&signature) {
+                Some(snake) => EvalAltResult::ErrorRuntime(
+                    Dynamic::from(format!(
+                        "Function not found: {signature}\nHelp: Graphersal's own functions are \
+                         spelled in snake_case only since 0.3.0 (both spellings are kept for \
+                         TinkerPop's steps alone): write `{snake}(..)`."
+                    )),
+                    position,
+                ),
+                None => EvalAltResult::ErrorFunctionNotFound(signature, position),
+            }
         }
         EvalAltResult::ErrorMismatchDataType(expected, actual, position) => {
             EvalAltResult::ErrorMismatchDataType(names(&expected), names(&actual), position)
@@ -220,6 +231,31 @@ pub fn map_eval_error(
         }
         other => other,
     })
+}
+
+/// The registered snake_case name of a camelCase call the engine did not find (`createIndex`
+/// -> `create_index`): the camelCase twins of Graphersal's extensions were removed in 0.3.0
+/// (rule 2), so a script written before gets the name to use instead.
+fn snake_case_twin(signature: &str) -> Option<String> {
+    let name = signature.split([' ', '(']).next()?.trim();
+    if !name.starts_with(|c: char| c.is_ascii_lowercase())
+        || !name.chars().any(|c| c.is_ascii_uppercase())
+        || !name.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let mut snake = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            snake.push('_');
+            snake.push(c.to_ascii_lowercase());
+        } else {
+            snake.push(c);
+        }
+    }
+    super::registered_step_names()
+        .contains(&snake)
+        .then_some(snake)
 }
 
 /// [`eval_value_with_params`] under explicit [`ScriptLimits`] instead of the SAFE defaults and

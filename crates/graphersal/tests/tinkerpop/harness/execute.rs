@@ -84,7 +84,6 @@ pub const MUTATING_STEPS: &[&str] = &[
     "add_e",
     "property",
     "property_json",
-    "propertyJson",
     "drop",
     "mergeV",
     "merge_v",

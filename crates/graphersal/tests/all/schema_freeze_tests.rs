@@ -379,9 +379,9 @@ fn dsl_one_liner_in_every_spelling() {
             "g.set_schema(g.infer_schema(), SchemaMode::closed)",
             "closed",
         ),
-        ("g.setSchema(g.inferSchema(), SchemaMode.open)", "open"),
+        ("g.set_schema(g.infer_schema(), SchemaMode.open)", "open"),
         ("g.set_schema(g.infer_schema(), \"closed\")", "closed"),
-        ("g.setSchema(g.inferSchema(), \"open\")", "open"),
+        ("g.set_schema(g.infer_schema(), \"open\")", "open"),
         ("g.set_schema(g.infer_schema(), SchemaMode.none)", "none"),
     ] {
         let graph = Arc::new(GraphSource::tinkerpop_modern());
@@ -422,7 +422,7 @@ fn dsl_validate_schema_with_mode_is_the_dry_run() {
         r#"g.add_v().next(); g.add_v("a").next();
            let r = g.validate_schema(g.infer_schema(), SchemaMode.closed);
            [r.violations.mode, r.violations.total_violations, r.violations.groups[0].label,
-            g.validateSchema(g.inferSchema(), "open").violations.total_violations]"#,
+            g.validate_schema(g.infer_schema(), "open").violations.total_violations]"#,
     )
     .unwrap();
     assert_eq!(out, r#"["closed", 1, "<unlabeled>", 0]"#);

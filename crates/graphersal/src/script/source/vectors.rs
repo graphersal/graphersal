@@ -259,7 +259,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.embed_property(#{label, from, to, element?, embedder?, only_missing?, batch?})` /
-    /// `g.embedProperty(..)`: the job that embeds the property `from` of every element with
+    /// `g.embed_property(..)`: the job that embeds the property `from` of every element with
     /// `label` into its vector property `to`, page by page (book page "Vectors"). Returns the
     /// report map. Asks `Read` and `Update` on the label's data, `Execute` on the embedder and,
     /// when the job declares the property in the schema, `Update` on `Schema`.

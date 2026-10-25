@@ -1,4 +1,4 @@
-//! `remove_property(keys...)` / `removeProperty(keys...)`: explicit property removal that keeps
+//! `remove_property(keys...)`: explicit property removal that keeps
 //! the element in the stream (a Graphersal extension; `property(k, null)` still stores a null).
 #![cfg(feature = "script")]
 
@@ -33,7 +33,7 @@ fn fail(graph: &Arc<Graph>, script: &str) -> String {
         .to_string()
 }
 
-const SPELLINGS: [&str; 2] = ["remove_property", "removeProperty"];
+const SPELLINGS: [&str; 1] = ["remove_property"];
 
 #[test]
 fn one_key_both_spellings() {
@@ -156,7 +156,7 @@ fn bad_arguments_are_mismatches_with_help() {
     let g = modern();
     for script in [
         "g.V().remove_property(1).toList()",
-        r#"g.V().removeProperty(["a", 2]).toList()"#,
+        r#"g.V().remove_property(["a", 2]).toList()"#,
         "g.V().remove_property([]).toList()",
     ] {
         let msg = fail(&g, script);

@@ -100,11 +100,8 @@ const EXCLUDED_STEPS: &[&str] = &[
     "export_graphml",
     "import_graphml",
     "export_graphson",
-    "exportGraphson",
     "import_graphson",
-    "importGraphson",
     "export_snapshot",
-    "exportSnapshot",
     "loadSchema",
     "load_schema",
     "file",
@@ -114,7 +111,6 @@ const EXCLUDED_STEPS: &[&str] = &[
     // A report of the whole graph, not a step (like `memory_usage`); excluded rather than a
     // terminal so that the pinned seeds keep generating the same scripts.
     "memory_report",
-    "memoryReport",
     // Catalog calls of scheduled jobs, not steps; excluded so that the pinned seeds keep
     // generating the same scripts.
     "define_job",
@@ -135,29 +131,18 @@ const TERMINAL_STEPS: &[&str] = &[
     "visualize",
     "statistics",
     "mark",
-    "memoryUsage",
     "memory_usage",
-    "toGraph",
     "to_graph",
-    "toJson",
     "to_json",
-    "toJsonSchema",
     "to_json_schema",
-    "toMarkdown",
     "to_markdown",
-    "toMermaid",
     "to_mermaid",
-    "toPlantUML",
-    "toPlantuml",
     "to_plantuml",
-    "toTable",
     "to_table",
-    "toTree",
     "to_tree",
     "toMap",
     "to_map",
     "schema",
-    "setVisualizer",
     "set_visualizer",
 ];
 
@@ -597,7 +582,6 @@ const TYPED: &[&str] = &[
     "property:KS",
     "property:CKS",
     "property:KT",
-    "removeProperty:K",
     "drop:",
     "addV:L",
     "addV:",
@@ -669,9 +653,7 @@ const TYPED: &[&str] = &[
     "substring:N",
     "substring:NN",
     "replace:SS",
-    "globPath:R",
     "json_path:J",
-    "propertyJson:K",
     "subgraph:A",
     "element:",
     "toE:D",
@@ -1979,17 +1961,23 @@ fn fuzz_fast() {
     );
 }
 
-/// Seeds of the long campaign whose unbounded `repeat()` grew to gigabytes within the 1 s
+/// The unbounded `repeat()` loops the long campaign found growing to gigabytes within the 1 s
 /// `evaluationTimeout` (`repeat(__.constant([..]).unfold())`, `repeat(__.group().barrier())`,
-/// `repeat(__.path())`): under the host's `memory.limit` each stops with the memory limit error.
+/// `repeat(__.path())`; written out, so they do not depend on the generator's step table):
+/// under the host's `memory.limit` each stops with the memory limit error.
 /// The `evaluationTimeout` is raised so a debug build reaches the limit before the deadline, and
 /// the limit is lowered to 64 MiB to keep the test small: the engine's estimate (no tracking
 /// allocator here) undercounts these loops several times over, so a 512 MiB host limit let one
 /// case reach about 3 GB of resident memory.
 #[test]
 fn unbounded_repeat_stops_at_the_memory_limit() {
-    for seed in [23_102_892, 23_189_523, 23_159_444] {
-        let script = generate(seed).render();
+    for script in [
+        r#"g.with("bulk.merge", false).inject(1).repeat(__.constant([1, 2, 3, 4]).unfold()).to_list()"#,
+        r#"g.inject(1).repeat(__.group().barrier()).to_list()"#,
+        r#"g.inject(1).repeat(__.path()).to_list()"#,
+    ] {
+        let seed = script;
+        let script = script.to_string();
         for kind in [GraphKind::Modern, GraphKind::Empty] {
             let start = Instant::now();
             let owned = script.clone();

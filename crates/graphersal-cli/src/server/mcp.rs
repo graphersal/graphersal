@@ -599,8 +599,9 @@ task is run with run_saved_query (or inside a script as g.query(\"name\", #{para
 
 The language is Gremlin (Apache TinkerPop) in Rhai syntax: `g` is the traversal source, steps \
 chain with `.`, strings use double quotes, lists are `[..]`, maps `#{k: v}`. Both spellings of \
-every step work: snake_case (has_label, value_map, out_e, in_) and Gremlin camelCase (hasLabel, \
-valueMap, outE, in). Anonymous child traversals need an explicit `__.` (`__.out(\"knows\")`, never \
+every TinkerPop step work: snake_case (has_label, value_map, out_e, in_) and Gremlin camelCase \
+(hasLabel, valueMap, outE, in); Graphersal's own functions (create_index, memory_report, \
+define_query, ...) are snake_case only. Anonymous child traversals need an explicit `__.` (`__.out(\"knows\")`, never \
 a bare `out()`), tokens are explicit too: `Order.desc`, `T.id`, `T.label`, `P.gt(30)`, \
 `P.within([\"a\", \"b\"])`, `Column.keys`, `Scope.local`. A traversal without a terminal is \
 executed and all its results returned; terminals such as `.to_list()`, `.next()`, `.count()` \
@@ -2548,9 +2549,10 @@ fn dsl_reference(completions: &Value) -> String {
     let mut out = String::from(
         "# Graphersal DSL reference\n\n\
          Gremlin (Apache TinkerPop) in Rhai syntax. `g` is the traversal source; `__.` starts an \
-         anonymous child traversal, always explicit (`__.out(\"knows\")`). Names have a \
-         snake_case and a camelCase spelling (`has_label`, `hasLabel`): the steps list their \
-         aliases in brackets, other sections only irregular ones. Tokens: `T.id`, \
+         anonymous child traversal, always explicit (`__.out(\"knows\")`). TinkerPop's \
+         names have a snake_case and a camelCase spelling (`has_label`, `hasLabel`), \
+         Graphersal's own functions snake_case only: the steps list their aliases in brackets, \
+         other sections only irregular ones. Tokens: `T.id`, \
          `T.label`, `P.eq/neq/lt/lte/gt/gte/inside/outside/between/within/without(..)`, \
          `TextP.containing/startingWith/endingWith(..)`, `Order.asc/desc/shuffle`, \
          `Column.keys/values`, `Scope.local/global`, `Pop.first/last/all/mixed`, \

@@ -161,7 +161,7 @@ fn as_duration_reads_iso_8601_durations() {
     assert_eq!(
         both(
             r#"g.inject("P1Y2M3DT4H", "-PT1.5S", duration("P2W")).as_duration().to_list()"#,
-            r#"g.inject("P1Y2M3DT4H", "-PT1.5S", duration("P2W")).asDuration().toList()"#,
+            r#"g.inject("P1Y2M3DT4H", "-PT1.5S", duration("P2W")).as_duration().toList()"#,
         ),
         r#"[duration("P1Y2M3DT4H"), duration("-PT1.500S"), duration("P14D")]"#
     );
@@ -433,7 +433,7 @@ fn date_trunc_and_date_part() {
     assert_eq!(
         both(
             r#"g.inject(datetime("2023-08-17T09:30:15.5+02:00")).date_trunc(DT.week).next()"#,
-            r#"g.inject(datetime("2023-08-17T09:30:15.5+02:00")).dateTrunc(DT.week).next()"#,
+            r#"g.inject(datetime("2023-08-17T09:30:15.5+02:00")).date_trunc(DT.week).next()"#,
         ),
         r#"datetime("2023-08-14T00:00:00+02:00")"#
     );
@@ -452,7 +452,7 @@ fn date_trunc_and_date_part() {
     );
     assert_eq!(parts, "[2023, 8, 17, 9, 15, 250, 4, 4, 229, 33, 3, 7200]");
     assert_eq!(
-        run(r#"g.inject(datetime("1970-01-01T00:00:01.5Z")).datePart(DT.epoch).next()"#),
+        run(r#"g.inject(datetime("1970-01-01T00:00:01.5Z")).date_part(DT.epoch).next()"#),
         "1.5"
     );
     assert_eq!(
@@ -468,7 +468,7 @@ fn at_zone_and_as_local() {
     assert_eq!(
         both(
             r#"g.inject(datetime("2023-08-02T12:00:00Z")).at_zone("Europe/Berlin").next()"#,
-            r#"g.inject(datetime("2023-08-02T12:00:00Z")).atZone("Europe/Berlin").next()"#,
+            r#"g.inject(datetime("2023-08-02T12:00:00Z")).at_zone("Europe/Berlin").next()"#,
         ),
         r#"datetime("2023-08-02T14:00:00+02:00[Europe/Berlin]")"#
     );
@@ -487,7 +487,7 @@ fn at_zone_and_as_local() {
     assert_eq!(
         both(
             r#"g.inject(datetime("2023-08-02T12:00:00+02:00")).as_local().next()"#,
-            r#"g.inject(datetime("2023-08-02T12:00:00+02:00")).asLocal().next()"#,
+            r#"g.inject(datetime("2023-08-02T12:00:00+02:00")).as_local().next()"#,
         ),
         r#"localdatetime("2023-08-02T12:00:00")"#
     );
@@ -849,7 +849,7 @@ fn profile_shows_the_canonical_step_names_in_both_spellings() {
     let camel = run(
         r#"g.with("render.spelling", "camel").inject("2023-08-02").as_date(GType.DATE).date_trunc(DT.month).profile().to_table()"#,
     );
-    for name in ["asDate(GType.DATE)", "dateTrunc(DT.month)"] {
+    for name in ["asDate(GType.DATE)", "date_trunc(DT.month)"] {
         assert!(camel.contains(name), "{name} missing in {camel}");
     }
 }

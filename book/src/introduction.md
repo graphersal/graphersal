@@ -38,8 +38,8 @@ g.v().has("name", "marko").as("me")
 ## What you get
 
 - **Gremlin, two ways.** Build traversals in Rust (`g.v(None).has_label("person").out("knows")`)
-  or write them as text in the Gremlin DSL, in snake_case or in Gremlin's own camelCase
-  (`hasLabel`, `outE`). The text runs the same everywhere: in the browser, in the command line,
+  or write them as text in the Gremlin DSL, TinkerPop's steps in snake_case or in Gremlin's own
+  camelCase (`hasLabel`, `outE`). The text runs the same everywhere: in the browser, in the command line,
   from Python and through an AI agent.
 - **GQL patterns (experimental).** [`g.gql(..)`](gql/index.md) runs ISO GQL queries
   (`MATCH (p:person)-[:knows]->(f) RETURN f.name`, `INSERT`, `SET`, `DELETE`, Cypher spellings as aliases) on the

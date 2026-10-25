@@ -911,9 +911,12 @@ fn rhai_set_schema_fails_with_the_report_and_changes_nothing() {
         "{err}"
     );
     // the camelCase spelling and a map go through the same check
-    let err = eval_value(graph.clone(), &format!("g.setSchema(parse_json(`{json}`))"))
-        .unwrap_err()
-        .to_string();
+    let err = eval_value(
+        graph.clone(),
+        &format!("g.set_schema(parse_json(`{json}`))"),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(err.contains("Cannot apply the Closed schema"), "{err}");
     // nothing was applied: the creation that Closed would reject still works
     assert!(graph.read().get_schema().is_none());

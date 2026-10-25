@@ -12,7 +12,7 @@ the second format. Both need the `io` feature, and neither carries the schema (s
 |---|---|---|
 | Rust, new graph | `GraphSource::from_graphson(path)`, `from_graphson_reader(reader)`, `GraphSource::from_file(path)` for `.json`/`.jsonl`/`.graphson`; `GraphSONImport::new().load(reader)` / `load_file(path)` also return the [report](#the-import-report) | `graph.export_graphson(path)`, `export_graphson_writer(writer)` (`GraphExport`), `GraphSONExport::new().export_writer(&storage, writer)` |
 | Rust, live graph | `graph.import_graphson(path)` / `import_graphson_reader(reader)` (`GraphImport`): one [unit](transactions.md), returns the report | |
-| Rhai | `g.import_graphson(path)` / `g.importGraphson(path)`: returns the report as text; `GraphSource::file("graph.json")` | `g.export_graphson(path)` / `g.exportGraphson(path)` |
+| Rhai | `g.import_graphson(path)`: returns the report as text; `GraphSource::file("graph.json")` | `g.export_graphson(path)` |
 | CLI | `graphersal --graph graph.json` (also `.jsonl`, `.graphson`); skipped data is listed in a `note:` on stderr | `-e 'g.export_graphson("out.json")'` |
 | Python | `Graph.from_graphson(path, schema=None, mode=None)` (a `schema` is set on the new graph first, then the file is imported as one unit); `graph.import_graphson(path)` into a live graph, one unit; skipped data is one `UserWarning` | `graph.export_graphson(path)` |
 | Playground | **Load from file** with a `.json`/`.jsonl`/`.graphson` file; skipped data is a notice | **Save ▾ › Data as GraphSON** (also Data as GraphML, Schema) |

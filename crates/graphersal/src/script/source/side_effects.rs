@@ -116,7 +116,7 @@ impl ScriptGraphTraversalSource {
         self.add_step(Step::Drop)
     }
 
-    /// `remove_property()` / `removeProperty()`: no argument removes every property.
+    /// `remove_property()`: no argument removes every property.
     pub fn remove_property_empty(&mut self) -> Self {
         self.add_step(Step::RemoveProperty(vec![]))
     }
@@ -172,17 +172,17 @@ impl ScriptGraphTraversalSource {
         Ok(self.add_step(Step::RemoveProperty(keys)))
     }
 
-    /// `add_label(label)` / `addLabel(label)`: adds a label to each incoming vertex.
+    /// `add_label(label)`: adds a label to each incoming vertex.
     pub fn add_label(&mut self, label: String) -> Self {
         self.add_step(Step::AddLabel(CompactString::new(label)))
     }
 
-    /// `drop_label(label)` / `dropLabel(label)`: removes a label from each incoming vertex.
+    /// `drop_label(label)`: removes a label from each incoming vertex.
     pub fn drop_label(&mut self, label: String) -> Self {
         self.add_step(Step::DropLabel(CompactString::new(label)))
     }
 
-    /// `set_label(label)` / `setLabel(label)`: changes the label of each incoming edge.
+    /// `set_label(label)`: changes the label of each incoming edge.
     pub fn set_label(&mut self, label: String) -> Self {
         self.add_step(Step::SetLabel(CompactString::new(label)))
     }
@@ -429,7 +429,7 @@ impl ScriptGraphTraversalSource {
         Ok(this.add_step(Step::PropertyJson(json)))
     }
 
-    /// Direct-access JSONPath navigation (`.json_path(path)`/`.jsonPath(path)`). Parses `path`
+    /// Direct-access JSONPath navigation (`.json_path(path)`). Parses `path`
     /// eagerly, mirroring `ArgByModule::JsonPath`, so a syntactically invalid path (recursive
     /// descent, wildcards, filter expressions - unsupported by this engine's JSONPath subset)
     /// surfaces as a script error at the call site instead of silently propagating to a later
@@ -444,7 +444,7 @@ impl ScriptGraphTraversalSource {
         Ok(self.add_step(Step::JsonPath(CompactString::new(path))))
     }
 
-    /// `.glob_path(pattern)`/`.globPath(pattern)`: a Gremlin extension that walks the tree below
+    /// `.glob_path(pattern)`: a Gremlin extension that walks the tree below
     /// each incoming vertex along a glob pattern (see `GraphTraversalSource::glob_path`). Like
     /// every by()-modulated step, an invalid pattern or `by()` surfaces when the traversal
     /// executes, as `InvalidGlobPattern` / `InvalidModulator`.
@@ -455,7 +455,7 @@ impl ScriptGraphTraversalSource {
         ))
     }
 
-    /// `.glob_path(pattern, #{max_depth: n, prune: __...})` (and `globPath`): `glob_path` with
+    /// `.glob_path(pattern, #{max_depth: n, prune: __...})` `glob_path` with
     /// options (see `GraphTraversalSource::glob_path_with`). An unknown or reserved key, or a
     /// value of the wrong type, fails here with `ScriptError::ArgumentMismatch`; an out-of-range
     /// `max_depth` fails when the traversal executes, as `InvalidOption`.
@@ -557,7 +557,7 @@ impl ScriptGraphTraversalSource {
 
     /// `local(traversal)`: runs `traversal` once per incoming traverser, in isolation from every
     /// other traverser in the batch. Vanilla TinkerPop has no camelCase variant for `local` (it's
-    /// already a single word), so `local`/`local` is the whole dual-spelling story here.
+    /// already a single word), so `local` is the whole dual-spelling story here.
     pub fn local(&mut self, arg: Dynamic) -> Result<Self, Box<rhai::EvalAltResult>> {
         let gts = try_dynamic_to_gts(arg)?;
         Ok(self.add_step(Step::Local(gts)))

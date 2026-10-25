@@ -47,8 +47,9 @@ usually pastes as it is; the differences are small:
 | `def x = ...` | `let x = ...;` |
 
 The full copy-paste table is in [Repeated Labels: select with Pop](../users_guide/select_pop.md#copy-paste-cheat-sheet).
-Every step also has a snake_case name (`has_label`, `out_e`) next to its camelCase one
-(`hasLabel`, `outE`), and the Rust API uses the snake_case names.
+Every TinkerPop step also has a snake_case name (`has_label`, `out_e`) next to its camelCase one
+(`hasLabel`, `outE`), and the Rust API uses the snake_case names. Graphersal's own additions
+below are snake_case only.
 
 ## Additions
 

@@ -1,12 +1,12 @@
 use std::fmt;
 
-/// The `DT` token: a unit of time (`dateAdd`, `dateDiff`, `dateTrunc`) or a part of a temporal
-/// value (`datePart`).
+/// The `DT` token: a unit of time (`dateAdd`, `dateDiff`, `date_trunc`) or a part of a temporal
+/// value (`date_part`).
 ///
 /// TinkerPop 3.8 defines `DT.second`, `DT.minute`, `DT.hour` and `DT.day`; Graphersal adds the
 /// smaller units, the calendar units from `week` to `millennium` (PostgreSQL `date_trunc` /
 /// `extract` field names) and the parts that are not units (`day_of_week`, `iso_day_of_week`,
-/// `day_of_year`, `iso_year`, `epoch`, `offset`), which only `datePart` accepts.
+/// `day_of_year`, `iso_year`, `epoch`, `offset`), which only `date_part` accepts.
 ///
 /// - Units below a day ([`Nanosecond`](DT::Nanosecond) to [`Hour`](DT::Hour)) are fixed
 ///   lengths: adding them moves the instant.
@@ -146,7 +146,7 @@ impl DT {
             .find(|dt| dt.name() == name || dt.camel_name() == name)
     }
 
-    /// Whether the token is a unit of time (usable by `dateAdd`, `dateDiff` and `dateTrunc`),
+    /// Whether the token is a unit of time (usable by `dateAdd`, `dateDiff` and `date_trunc`),
     /// not only a part.
     pub fn is_unit(self) -> bool {
         !matches!(

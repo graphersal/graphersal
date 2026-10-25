@@ -47,12 +47,12 @@ What each step requests is decided in one place in the engine (`GraphStep::for_e
 | `addV("person")`, `addV(["a", "b"])` | `Create` on `Data(vertex "person")`, one request per label (`Data(vertex)` without a static label) |
 | `addE("knows")` | `Create` on `Data(edge "knows")` |
 | `g.gql("INSERT (:person {name: 'ann'})-[:knows]->(:person)")` | `Create` on `Data(vertex "person")` per new node and label, `Create` on `Data(edge "knows")` per new edge, and nothing for the properties (`addV("person").property(..)` also asks `Update`, see [Writing with GQL](../gql/writes.md#permissions)); the `MATCH` before an `INSERT` asks its reads like its Gremlin twin |
-| `g.gql("MATCH (a)-[e:knows]->(b) SET e.seen = true, b:known")`, `REMOVE ..` | `Update` on `Data(vertex)` for a node target (any label, as for `addLabel()`), on `Data(edge "knows")` for an edge whose pattern names its labels, on `Data` when the kind is known only at run time (a `FOR` item); the same as the Gremlin twins `property()`, `removeProperty()`, `addLabel()`, `dropLabel()` |
+| `g.gql("MATCH (a)-[e:knows]->(b) SET e.seen = true, b:known")`, `REMOVE ..` | `Update` on `Data(vertex)` for a node target (any label, as for `add_label()`), on `Data(edge "knows")` for an edge whose pattern names its labels, on `Data` when the kind is known only at run time (a `FOR` item); the same as the Gremlin twins `property()`, `remove_property()`, `add_label()`, `drop_label()` |
 | `g.gql("MATCH ()-[e:knows]->() DELETE e")`, `DETACH DELETE n` | `Delete` on `Data(vertex)` for a node, on `Data(edge "knows")` for an edge whose pattern names its labels, on `Data` for a path, a list or a value known only at run time; `DETACH` asks nothing more; the same as `drop()` |
 | `g.gql("MERGE (p:person {name: 'ann'}) ON MATCH SET p.seen = true")` | `Create` per label of every element the pattern can create (as its `INSERT`), `Update` only for `ON CREATE SET` / `ON MATCH SET` items (as `SET`), checked first, then the `Read`s of the search (as a `MATCH` of the pattern), whether a row finds or creates ([Writing with GQL](../gql/writes.md#permissions)) |
 | `mergeV(..)` / `mergeE(..)` | `Read` on what the merge searches (`Data(vertex)` for `mergeV()`; `Data(edge)` and `Data(vertex)`, the endpoints its ids name, for `mergeE()`), then `Create` and `Update` on `Data(vertex)` / `Data(edge)`: a policy denying reads cannot probe existence through a merge |
-| `property(..)`, `removeProperty(..)` | `Update` on the `Data` the steps before it state (see below), `Data` when they state nothing |
-| `addLabel(..)`, `dropLabel(..)` / `setLabel(..)` | `Update` on `Data(vertex)` / `Data(edge)`, with the edge label the steps before it state |
+| `property(..)`, `remove_property(..)` | `Update` on the `Data` the steps before it state (see below), `Data` when they state nothing |
+| `add_label(..)`, `drop_label(..)` / `set_label(..)` | `Update` on `Data(vertex)` / `Data(edge)`, with the edge label the steps before it state |
 | `drop()` | `Delete` on the `Data` the steps before it state, `Data` when they state nothing |
 | `infer_schema()`, `g.get_schema()`, `g.infer_schema()`, `g.diff_schema(..)`, `g.validate_schema(..)`, `g.validate_schema_patch(..)` | `Read` on `Schema` |
 | `g.statistics()`, `g.memory_usage()` | `Read` on `Data` |
@@ -342,8 +342,8 @@ The root does not allow file access by itself: the policy must also allow the ac
 ## Graphs the script builds itself
 
 A graph the script built itself is **private** to it: `GraphSource::empty()`,
-`GraphSource::tinkerpop_modern()`, `GraphSource::file(path)`, `schema.toGraph()`, the scratch
-sources `__` and `_g`, and the results of `subgraph()`/`cap()` and `toGraph()`. Changing it is not
+`GraphSource::tinkerpop_modern()`, `GraphSource::file(path)`, `schema.to_graph()`, the scratch
+sources `__` and `_g`, and the results of `subgraph()`/`cap()` and `to_graph()`. Changing it is not
 a change of the host graph, so a request that writes data or the schema of it
 (`Create`/`Update`/`Delete` on `Data`, `Schema` or `Definition`, `AccessRequest::writes_graph`) is allowed
 without asking the authorizer:
@@ -378,4 +378,4 @@ authorizer: a GQL query is lowered into ordinary steps before the check, so it i
 denied like its Gremlin equivalent. Its writes (`INSERT`) ask `Create` like `addV()` /
 `addE()`, but nothing for the new element's properties, where `addV(..).property(..)` also asks
 `Update` ([Writing with GQL](../gql/writes.md#permissions)); `SET` and `REMOVE` ask `Update`
-like `property()` and `addLabel()`, `DELETE` asks `Delete` like `drop()`; a read-only policy refuses them before anything runs.
+like `property()` and `add_label()`, `DELETE` asks `Delete` like `drop()`; a read-only policy refuses them before anything runs.

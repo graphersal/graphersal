@@ -390,7 +390,7 @@ fn scratch_graphs_of_a_script_on_a_foreign_graph_stay_traversal_graphs() {
     // `to_graph()` and `subgraph().cap()` build TraversalGraphs from the foreign graph's edges.
     assert_eq!(
         int(run(
-            r#"g.E().hasLabel("knows").toGraph().V().count().next()"#
+            r#"g.E().hasLabel("knows").to_graph().V().count().next()"#
         )),
         3
     );

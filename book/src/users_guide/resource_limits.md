@@ -93,7 +93,7 @@ or policy default asks nothing. The presets of `graph_scope_with_options` reach 
 session: `g`, `_g` and `__` (also a traversal *started* from `__`, such as
 `__.inject(1).repeat(..)`). Build the engine with `engine_with_options(&limits, authorizer,
 &options)` and the same options, so the sources a script creates itself
-(`GraphSource::empty()`, `GraphSource::tinkerpop_modern()`, `schema.toGraph()`, ...) get them
+(`GraphSource::empty()`, `GraphSource::tinkerpop_modern()`, `schema.to_graph()`, ...) get them
 too; otherwise a script could escape a preset `evaluationTimeout` by building its own source.
 
 A `gql()` query is bounded by the same options. An unbounded quantified edge (`-[:knows]->{1,}`,

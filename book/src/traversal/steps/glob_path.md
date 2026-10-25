@@ -107,7 +107,6 @@ g.v("root").glob_path("*").by("name").by(["directory"]).where(__.glob_path("*.md
 "root/docs"
 ```
 
-The camelCase spelling `globPath(...)` is the same step.
 
 ## Pattern syntax
 

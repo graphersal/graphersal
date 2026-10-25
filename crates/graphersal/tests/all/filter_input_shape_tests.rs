@@ -33,7 +33,7 @@ const RECORD: &str = r#"g.V("1").valueMap()"#;
 const OBJECT: &str = r#"g.V("1").project("name").by("name")"#;
 const ARRAY: &str = r#"g.V("1").fold()"#;
 const SCALAR: &str = r#"g.inject(1)"#;
-const SCHEMA: &str = r#"g.V().inferSchema()"#;
+const SCHEMA: &str = r#"g.V().infer_schema()"#;
 const GRAPH: &str = r#"g.E().subgraph("sg").cap("sg")"#;
 
 /// `Ok(n)`: the filter keeps `n` of the producer's traversers; `Err(t)`: a cast error naming `t`.

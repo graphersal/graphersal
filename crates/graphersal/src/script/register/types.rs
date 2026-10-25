@@ -144,7 +144,7 @@ pub(super) fn register_schema(registry: &mut Registry) {
     registry
         // The meta-graphs are private to the script (`script/access.rs`).
         .register_fn_as(
-            &["to_graph", "toGraph"],
+            &["to_graph"],
             |ctx: NativeCallContext, s: &mut rhai::Map| {
                 let schema = loaded(&ctx, s)?;
                 Ok::<_, Box<rhai::EvalAltResult>>(ScriptGraphSource::private_graph_in(

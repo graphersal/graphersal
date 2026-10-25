@@ -23,9 +23,9 @@ costs memory and a little time on every write of its key (below).
 
 | DSL | Rust (`GraphTraversalSource`) | Python (`Graph`) |
 |---|---|---|
-| `g.create_index(#{label, key, element?, name?, type?, transform?})` / `g.createIndex(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))`, `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` |
+| `g.create_index(#{label, key, element?, name?, type?, transform?})` / `g.create_index(..)` | `create_index(name, PropertyIndexDefinition::new(kind, label, key))`, `.with_type(PropertyIndexType::MemoryOrdered)`, `.with_transform(Some(PropertyIndexTransform::ToLower))` | `graph.create_index(label, key, element="vertex", name=None, type="memory-ordered", transform=None)` |
 | `g.indexes()` | `list_indexes()` | `graph.indexes()` |
-| `g.drop_index(name)` / `g.dropIndex(name)` | `drop_index(name)` | `graph.drop_index(name)` |
+| `g.drop_index(name)` | `drop_index(name)` | `graph.drop_index(name)` |
 
 - `element` is `"vertex"` (the default) or `"edge"`; `label` is one vertex or edge label (it need
   not exist yet); `key` is one **top-level** property name (a plain name, not a jpath: nested

@@ -180,13 +180,13 @@ fn order_local_over_mixed_key_kinds_does_not_panic() {
 #[test]
 fn display_renders_keys_through_display_text() {
     let table =
-        run(r#"let out = g.V().groupCount().by("age").toTable(); out.to_string()"#).to_string();
+        run(r#"let out = g.V().groupCount().by("age").to_table(); out.to_string()"#).to_string();
     assert!(table.contains("29") && table.contains("35"), "{table}");
     let profile =
         run(r#"let out = g.V().groupCount().by("age").profile(); out.to_string()"#).to_string();
     assert!(profile.contains("group_count"), "{profile}");
     let tree =
-        run(r#"let out = g.V("1").out("knows").tree().toTable(); out.to_string()"#).to_string();
+        run(r#"let out = g.V("1").out("knows").tree().to_table(); out.to_string()"#).to_string();
     assert!(tree.contains("v[1]"), "{tree}");
 }
 

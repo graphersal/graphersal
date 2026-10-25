@@ -1061,7 +1061,7 @@ impl ScriptGraphTraversalSource {
     }
 
     /// `g.define_query(#{name, body, language?, folder?, description?, params?, meta?})` /
-    /// `g.defineQuery(..)`: stores (or replaces) a saved query. With `language` `"rhai"` (the
+    /// `g.define_query(..)`: stores (or replaces) a saved query. With `language` `"rhai"` (the
     /// default) `body` is the text of one Rhai function named `name` whose parameters are
     /// declared in `params` (parameter name -> a type name such as `"integer"`, or
     /// `#{schema: <schema node>, default: <value>}`); `description` defaults to the function's
@@ -1213,7 +1213,7 @@ impl ScriptGraphTraversalSource {
         this.store_queries(operation, vec![(name, query)])
     }
 
-    /// `g.define_queries(folder, source)` / `g.defineQueries(..)`: [`Self::define_queries_with`]
+    /// `g.define_queries(folder, source)` / `g.define_queries(..)`: [`Self::define_queries_with`]
     /// for functions without parameters.
     pub fn define_queries(
         ctx: NativeCallContext,
@@ -1224,7 +1224,7 @@ impl ScriptGraphTraversalSource {
         Self::define_queries_with(ctx, this, folder, source, Dynamic::UNIT)
     }
 
-    /// `g.define_queries(folder, source, params)` / `g.defineQueries(..)`: stores every function
+    /// `g.define_queries(folder, source, params)` / `g.define_queries(..)`: stores every function
     /// of `source` as a saved query of its own, named like the function, in `folder` (`""` or
     /// `()`: the root), described by its doc comment (`///` lines or a `/** */` block), with
     /// the parameters declared in `params` (function name -> its parameter map, as in
@@ -1748,7 +1748,7 @@ impl ScriptGraphTraversalSource {
             .collect())
     }
 
-    /// `g.get_query(name)` / `g.getQuery(name)`: the saved query as a map (the entry of
+    /// `g.get_query(name)`: the saved query as a map (the entry of
     /// [`Self::queries`] plus `body`, `dialect` and `meta`), `()` when there is none. Asks for
     /// `Read` on it.
     pub fn get_query(
@@ -1773,7 +1773,7 @@ impl ScriptGraphTraversalSource {
             }))
     }
 
-    /// `g.drop_query(name)` / `g.dropQuery(name)`: removes the saved query; `false` when there
+    /// `g.drop_query(name)`: removes the saved query; `false` when there
     /// is none. A unit of its own; asks for `Delete` on it. Callers of a dropped query fail
     /// when they call it (dependencies are not tracked).
     pub fn drop_query(&mut self, name: &str) -> Result<bool, Box<EvalAltResult>> {
@@ -1783,7 +1783,7 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `g.move_query(name, folder)` / `g.moveQuery(..)`: moves the saved query into `folder`
+    /// `g.move_query(name, folder)` / `g.move_query(..)`: moves the saved query into `folder`
     /// (`""` or `()`: the root). Callers name a query without its folder, so moving breaks
     /// none. Asks for `Update` on it.
     pub fn move_query(&mut self, name: &str, folder: Dynamic) -> Result<(), Box<EvalAltResult>> {
@@ -1794,7 +1794,7 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 
-    /// `g.describe_query(name, text)` / `g.describeQuery(..)`: sets the description of the
+    /// `g.describe_query(name, text)` / `g.describe_query(..)`: sets the description of the
     /// saved query (`""` or `()` removes it). Asks for `Update` on it.
     pub fn describe_query(
         &mut self,

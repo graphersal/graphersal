@@ -1,7 +1,7 @@
 //! Time zones: a fixed UTC offset or an IANA zone of the bundled database (`jiff-tzdb`, the same
 //! rules on every machine and in wasm32; they change only with a Graphersal release).
 //!
-//! An operation that takes a zone argument (`atZone("Europe/Berlin")`,
+//! An operation that takes a zone argument (`at_zone("Europe/Berlin")`,
 //! `dateAdd(DT.day, 1, "Europe/Berlin")`) gives a [`DateTime`] carrying the zone's offset at its
 //! instant and, for an IANA zone, the zone's name (a fixed offset such as `+02:00` gives no
 //! name). A `datetime` written with a zone name (`[Europe/Berlin]`, the GQL `timezone` field)

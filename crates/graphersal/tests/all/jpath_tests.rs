@@ -2624,7 +2624,7 @@ fn remove_in_an_anonymous_traversal_and_profile_text() {
     );
     let profile = run_on(
         &g,
-        r#"g.V("a").removeProperty([jpath("meta.k"), "scalar"]).profile().to_string()"#,
+        r#"g.V("a").remove_property([jpath("meta.k"), "scalar"]).profile().to_string()"#,
     )
     .unwrap()
     .to_string();
@@ -3538,7 +3538,7 @@ fn dsl_parity_every_name_taking_step_in_both_spellings() {
     }
     for script in [
         r#"g.V("1").remove_property(jpath("meta.k")).values(jpath("meta.k")).toList()"#,
-        r#"g.V("1").removeProperty(jpath("meta.k")).values(jpath("meta.k")).toList()"#,
+        r#"g.V("1").remove_property(jpath("meta.k")).values(jpath("meta.k")).toList()"#,
     ] {
         assert!(list(&g, script).is_empty(), "{script}");
     }

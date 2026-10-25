@@ -788,9 +788,9 @@ fn edge_indexes_serve_e_with_ranges() {
     assert_eq!(with.as_ref().map(Vec::len), Ok(1));
     assert_eq!(with, without);
     // camelCase spellings.
-    ok(&graph, r#"g.createIndex(#{label: "person", key: "age"})"#);
+    ok(&graph, r#"g.create_index(#{label: "person", key: "age"})"#);
     assert_eq!(
-        run(&graph, r#"g.dropIndex("person_age")"#)
+        run(&graph, r#"g.drop_index("person_age")"#)
             .unwrap()
             .as_bool(),
         Ok(true)
@@ -1475,7 +1475,7 @@ mod index_types {
         ok(&graph, r#"g.create_index(#{label: "person", key: "age"})"#);
         ok(
             &graph,
-            r#"g.createIndex(#{label: "software", key: "lang", type: "memory-ordered"})"#,
+            r#"g.create_index(#{label: "software", key: "lang", type: "memory-ordered"})"#,
         );
         let listed = run(&graph, "g.indexes()").unwrap().to_string();
         assert_eq!(
@@ -1532,7 +1532,8 @@ mod index_types {
         );
         // The DSL, both spellings.
         let graph = Arc::new(GraphSource::tinkerpop_modern());
-        for call in ["create_index", "createIndex"] {
+        {
+            let call = "create_index";
             let err = run(
                 &graph,
                 &format!(r#"g.{call}(#{{label: "person", key: "age", type: "hash"}})"#),

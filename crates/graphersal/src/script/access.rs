@@ -111,7 +111,7 @@ pub(crate) fn value_depth_of(context: &NativeCallContext) -> usize {
 
 /// The engine tag value carrying a session's access (`Engine::set_default_tag`): read by the
 /// functions that create a traversal source without one (`GraphSource::empty()`,
-/// `GraphSource::file(path)`, `schema.toGraph()`, ...), and the clock of `now()`
+/// `GraphSource::file(path)`, `schema.to_graph()`, ...), and the clock of `now()`
 /// ([`ScriptClock`]). A script cannot read or change the tag.
 #[derive(Clone)]
 pub(crate) struct EngineAccess(pub(crate) Arc<ScriptAccess>, pub(crate) ScriptClock);

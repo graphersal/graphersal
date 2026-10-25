@@ -260,7 +260,7 @@ const CURATED: &[(Mode, &str)] = &[
     // Vector search: nearest(), similarity(), vector_mean(), the schema's metric annotation.
     (
         Mode::Plain,
-        r#"g.V("1").property("emb", vector([1.0, 0.0])).iterate(); g.V("2").property("emb", vector([0.6, 0.8], "i8")).iterate(); g.V("4").property("emb", vector([0.0, 1.0])).iterate(); [g.V().nearest("emb", vector([1.0, 0.1]), 2).values("name").toList(), g.V().nearest("emb", [0.0, 1.0], 3, #{metric: "l2"}).id().toList(), g.V().similarity("emb", vector([1.0, 0.0])).toList(), g.V().values("emb").vectorMean().next()]"#,
+        r#"g.V("1").property("emb", vector([1.0, 0.0])).iterate(); g.V("2").property("emb", vector([0.6, 0.8], "i8")).iterate(); g.V("4").property("emb", vector([0.0, 1.0])).iterate(); [g.V().nearest("emb", vector([1.0, 0.1]), 2).values("name").toList(), g.V().nearest("emb", [0.0, 1.0], 3, #{metric: "l2"}).id().toList(), g.V().similarity("emb", vector([1.0, 0.0])).toList(), g.V().values("emb").vector_mean().next()]"#,
     ),
     (
         Mode::Plain,
@@ -504,7 +504,7 @@ const GQL_CURATED_2C: &[&str] = &[
     r#"g.gql("MATCH (p:person) OPTIONAL MATCH (p)-[:created]->(s:software {lang: 'none'}) RETURN p.name AS n, s {.name} AS m ORDER BY n").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name AS n, [x IN [p.age, 30, NULL] WHERE x >= 30 | x * 2] AS l ORDER BY n").toList()"#,
     r#"g.gql("MATCH (p:person)-[:created]->(s) WITH p, collect_list(s.name) AS ns RETURN p.name AS n, [y IN ns WHERE y <> 'lop' | upper(y)] AS l ORDER BY n").toList()"#,
-    r#"g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.name, friends: [(p)-->(f) | f {.name}]} AS answer").toJson()"#,
+    r#"g.gql("MATCH (p:person {name: 'marko'}) RETURN p {.name, friends: [(p)-->(f) | f {.name}]} AS answer").to_json()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name AS n, [(p)-[:knows]->(f) | f] AS fs ORDER BY n").toList()"#,
     r#"g.gql("MATCH (p:person) WHERE size([(p)-[:created]->(s) WHERE s.lang = 'java' | s]) > 1 RETURN p.name AS n").toList()"#,
     r#"g.gql("MATCH (p:person) RETURN p.name AS n ORDER BY size([(p)<--(x) | x]) DESC, n").toList()"#,

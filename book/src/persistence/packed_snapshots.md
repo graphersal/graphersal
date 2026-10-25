@@ -95,7 +95,7 @@ graphersal store export data/ data.gsnap              # a Store's latest snapsho
 graphersal store create data2/ --from data.gsnap      # a new Store from a .gsnap
 ```
 
-- DSL: `g.export_snapshot(path)` (or `g.exportSnapshot(..)`) writes one; `GraphSource::file("m.gsnap")`
+- DSL: `g.export_snapshot(path)` (or `g.export_snapshot(..)`) writes one; `GraphSource::file("m.gsnap")`
   loads one. Both need file access ([Permissions](../users_guide/permissions.md)).
 - Python: `graph.save(path)` and `graphersal.Graph.load(path)` ([Python](python.md)).
 - Playground: **Save as snapshot** on the start page, and a `.gsnap` file loads like any graph

@@ -2,7 +2,7 @@
 //! `file_tree` sample graph. Results are asserted by vertex id; ids are paths from `root`.
 //!
 //! Every query runs through the Rust API and, with the `script` feature, through Rhai in both
-//! spellings (`glob_path` and `globPath`), which must return the same ids.
+//! DSL (`glob_path`; a Graphersal extension, snake_case only), which must return the same ids.
 
 use graphersal::prelude::*;
 
@@ -38,7 +38,7 @@ fn rhai_ids(script: &str) -> Vec<String> {
 }
 
 /// Asserts that the Rust query and the Rhai `script` (written with `glob_path`, and run again
-/// with every `glob_path` spelled `globPath`) all return exactly `expected` (as a set of ids,
+/// all return exactly `expected` (as a set of ids,
 /// with multiplicity).
 fn dual<F>(rust: F, script: &str, expected: &[&str])
 where
@@ -57,8 +57,6 @@ where
     #[cfg(feature = "script")]
     {
         assert_eq!(rhai_ids(script), expected, "Rhai result of `{script}`");
-        let camel = script.replace("glob_path(", "globPath(");
-        assert_eq!(rhai_ids(&camel), expected, "Rhai result of `{camel}`");
     }
     #[cfg(not(feature = "script"))]
     let _ = script;
@@ -714,9 +712,9 @@ fn rhai_errors_surface_as_the_same_variants() {
     };
     let cases = [
         (r#"g.v("root").glob_path("*")"#, 1),
-        (r#"g.v("root").globPath("*").by(["file"])"#, 1),
+        (r#"g.v("root").glob_path("*").by(["file"])"#, 1),
         (r#"g.v("root").glob_path("*").by(__.values("name"))"#, 1),
-        (r#"g.v("root").globPath("*").by("name").by("name")"#, 2),
+        (r#"g.v("root").glob_path("*").by("name").by("name")"#, 2),
         (r#"g.v("root").glob_path("*").by("name").by([])"#, 2),
         (
             r#"g.v("root").glob_path("*").by("name").by(["file"]).by(By.Id)"#,
@@ -1070,7 +1068,7 @@ fn rhai_count_matches_in_both_spellings() {
     let engine = crate::script_host::engine();
     for script in [
         r#"g.v("root").glob_path("**/*.rs").by("name").by(["directory","file"]).count().next()"#,
-        r#"g.V("root").globPath("**/*.rs").by("name").by(["directory","file"]).count().next()"#,
+        r#"g.V("root").glob_path("**/*.rs").by("name").by(["directory","file"]).count().next()"#,
     ] {
         let mut scope = crate::script_host::graph_scope(graph.clone());
         let count = engine
@@ -1117,8 +1115,7 @@ fn options_case(build: &Build<'_>, script: &str, expected: &[&str]) {
     #[cfg(feature = "script")]
     {
         use std::sync::Arc;
-        let camel = script.replace("glob_path(", "globPath(");
-        for script in [script, camel.as_str()] {
+        {
             assert_eq!(
                 rhai_ids(&format!("{script}.id()")),
                 expected_ids,
@@ -1764,8 +1761,9 @@ fn rhai_option_errors() {
         ("-1", "must be at least 1, got -1"),
         ("4294967296", "must be at most 4294967295, got 4294967296"),
     ] {
-        for step in ["glob_path", "globPath"] {
-            let script = format!(r#"g.v("root").{step}("**", #{{max_depth: {depth}}}).by("name")"#);
+        {
+            let script =
+                format!(r#"g.v("root").glob_path("**", #{{max_depth: {depth}}}).by("name")"#);
             let graph = Arc::new(GraphSource::file_tree());
             let mut scope = crate::script_host::graph_scope(graph.clone());
             let gts = crate::script_host::engine()
@@ -1803,8 +1801,8 @@ fn rhai_option_errors() {
         ),
     ];
     for (options, message) in &cases {
-        for step in ["glob_path", "globPath"] {
-            let script = format!(r#"g.v("root").{step}("**", {options}).by("name").to_list()"#);
+        {
+            let script = format!(r#"g.v("root").glob_path("**", {options}).by("name").to_list()"#);
             let err = eval(&script).expect_err(&script);
             let EvalAltResult::ErrorRuntime(diagnostic, ..) = *err else {
                 panic!("`{script}`: not a runtime error: {err}");

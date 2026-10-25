@@ -308,7 +308,7 @@ fn graphson_script_functions_round_trip_exactly() {
     );
     let target = Arc::new(GraphSource::empty());
     let message =
-        graphersal::script::eval_value(target.clone(), &format!(r#"g.importGraphson("{path}")"#))
+        graphersal::script::eval_value(target.clone(), &format!(r#"g.import_graphson("{path}")"#))
             .unwrap()
             .into_string()
             .unwrap();

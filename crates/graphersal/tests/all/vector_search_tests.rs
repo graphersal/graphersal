@@ -372,7 +372,7 @@ fn similarity_overloads() {
     );
     // camelCase twin of vector_mean, project with a score.
     check(
-        r#"g.v().has_label("doc").values("emb").vectorMean().next()"#,
+        r#"g.v().has_label("doc").values("emb").vector_mean().next()"#,
         "vector([0.53333336, 0.6])",
     );
     check(

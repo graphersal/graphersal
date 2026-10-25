@@ -547,52 +547,31 @@ pub(super) fn register(registry: &mut Registry) {
             f.sample(items, n)
         })
         .register_fn("uuid", |f: &mut ScriptFake| f.uuid())
-        .register_fn_as(&["first_name", "firstName"], |f: &mut ScriptFake| {
-            f.first_name()
-        })
-        .register_fn_as(&["last_name", "lastName"], |f: &mut ScriptFake| {
-            f.last_name()
-        })
-        .register_fn_as(&["full_name", "fullName"], |f: &mut ScriptFake| {
-            f.full_name()
-        })
+        .register_fn_as(&["first_name"], |f: &mut ScriptFake| f.first_name())
+        .register_fn_as(&["last_name"], |f: &mut ScriptFake| f.last_name())
+        .register_fn_as(&["full_name"], |f: &mut ScriptFake| f.full_name())
         .register_fn("username", |f: &mut ScriptFake| f.username())
         .register_fn("email", |f: &mut ScriptFake| f.email())
         .register_fn("email", |f: &mut ScriptFake, name: &str| f.email_for(name))
         .register_fn("phone", |f: &mut ScriptFake| f.phone())
-        .register_fn_as(&["job_title", "jobTitle"], |f: &mut ScriptFake| {
-            f.job_title()
-        })
-        .register_fn_as(&["street_name", "streetName"], |f: &mut ScriptFake| {
-            f.street_name()
-        })
-        .register_fn_as(
-            &["street_address", "streetAddress"],
-            |f: &mut ScriptFake| f.street_address(),
-        )
+        .register_fn_as(&["job_title"], |f: &mut ScriptFake| f.job_title())
+        .register_fn_as(&["street_name"], |f: &mut ScriptFake| f.street_name())
+        .register_fn_as(&["street_address"], |f: &mut ScriptFake| f.street_address())
         .register_fn("city", |f: &mut ScriptFake| f.city())
         .register_fn("state", |f: &mut ScriptFake| f.state())
-        .register_fn_as(&["state_abbr", "stateAbbr"], |f: &mut ScriptFake| {
-            f.state_abbr()
-        })
-        .register_fn_as(&["zip_code", "zipCode"], |f: &mut ScriptFake| f.zip_code())
+        .register_fn_as(&["state_abbr"], |f: &mut ScriptFake| f.state_abbr())
+        .register_fn_as(&["zip_code"], |f: &mut ScriptFake| f.zip_code())
         .register_fn("country", |f: &mut ScriptFake| f.country())
         .register_fn("address", |f: &mut ScriptFake| f.address())
         .register_fn("company", |f: &mut ScriptFake| f.company())
-        .register_fn_as(&["domain_name", "domainName"], |f: &mut ScriptFake| {
-            f.domain_name()
-        })
+        .register_fn_as(&["domain_name"], |f: &mut ScriptFake| f.domain_name())
         .register_fn("word", |f: &mut ScriptFake| f.word())
         .register_fn("sentence", |f: &mut ScriptFake| f.sentence())
         .register_fn("lorem", |f: &mut ScriptFake, lo: INT, hi: INT| {
             f.lorem(lo, hi)
         })
-        .register_fn_as(
-            &["lorem_sentence", "loremSentence"],
-            |f: &mut ScriptFake| f.lorem_sentence(),
-        )
-        .register_fn_as(
-            &["lorem_paragraph", "loremParagraph"],
-            |f: &mut ScriptFake| f.lorem_paragraph(),
-        );
+        .register_fn_as(&["lorem_sentence"], |f: &mut ScriptFake| f.lorem_sentence())
+        .register_fn_as(&["lorem_paragraph"], |f: &mut ScriptFake| {
+            f.lorem_paragraph()
+        });
 }

@@ -739,7 +739,7 @@ fn the_dsl_job_returns_the_report_map() {
         &graph,
         &embedders,
         r#"g.set_schema(g.infer_schema(), SchemaMode.open);
-           g.embedProperty(#{label: "person", from: "name", to: "emb", batch: 3})"#,
+           g.embed_property(#{label: "person", from: "name", to: "emb", batch: 3})"#,
     )
     .unwrap()
     .cast::<graphersal::script::rhai::Map>();

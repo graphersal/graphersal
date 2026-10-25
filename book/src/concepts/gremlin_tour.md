@@ -111,8 +111,9 @@ g.v().has("name", "marko").out("knows").values("name")   // ann, josh, vadas
 
 ## Two spellings
 
-Every step has a snake_case name and its Gremlin camelCase twin, so a query copied from
-TinkerPop documentation runs as it is (with double quotes for strings):
+Every TinkerPop step has a snake_case name and its Gremlin camelCase twin, so a query copied
+from TinkerPop documentation runs as it is (with double quotes for strings); Graphersal's own
+extensions are snake_case only:
 
 ```rhai,graph=modern
 g.V().hasLabel("person").outE("created").has("weight", P.gte(0.5)).inV().values("name")

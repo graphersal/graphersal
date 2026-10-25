@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 /// Functions registered only with the `persist` feature (on when the snapshot is taken).
-const PERSIST_ONLY: &[&str] = &["export_snapshot", "exportSnapshot"];
+const PERSIST_ONLY: &[&str] = &["export_snapshot"];
 
 /// The lines of functions registered only with the `gql` feature (on when the snapshot is
 /// taken): the metadata entries, the signatures and the step name.
@@ -208,41 +208,27 @@ fn standard_library_is_the_one_of_engine_new() {
     assert_eq!(standard, expected);
 }
 
-/// Names registered in one spelling only, on purpose (rule 2 asks for both spellings of a step).
-const SINGLE_SPELLING: [(&str, &str); 17] = [
-    ("define_job", "Graphersal extension: snake_case only"),
-    ("drop_job", "Graphersal extension: snake_case only"),
-    ("file_tree", "GraphSource factory, not a step"),
-    ("tinkerpop_modern", "GraphSource factory, not a step"),
-    ("subgraph_labels", "schema map function, not a step"),
-    ("has_p", "explicit Graphersal form of the overloaded has()"),
-    (
-        "has_value_p",
-        "explicit Graphersal form of the overloaded hasValue()",
-    ),
-    ("has_value_any", "alias of hasValue(a, b, ...)"),
-    (
-        "where_p",
-        "explicit Graphersal form of the overloaded where()",
-    ),
-    (
-        "where_t",
-        "explicit Graphersal form of the overloaded where()",
-    ),
-    ("profile_with", "Rust API name of profile(flags), an alias"),
+/// Names registered in one spelling only although the rule below asks for both, on purpose.
+const SINGLE_SPELLING: [(&str, &str); 3] = [
     ("to_string", "Rhai's own conversion hook"),
     ("to_debug", "Rhai's own conversion hook"),
     ("typeOf", "type_of is a Rhai keyword"),
-    ("toPlantUML", "third spelling of to_plantuml/toPlantuml"),
-    (
-        "localDateTime",
-        "camelCase twin of the type name localdatetime (Java LocalDateTime)",
-    ),
-    (
-        "offsetTime",
-        "camelCase twin of the type name offsettime (Java OffsetTime)",
-    ),
 ];
+
+/// camelCase names of the standard Java API that Gremlin-Java users type, kept beside their
+/// snake_case twins although TinkerPop's traversal API does not list them.
+const JAVA_API: [&str; 5] = ["containsKey", "isEmpty", "toMap", "ofList", "fromString"];
+
+/// The names of the vendored TinkerPop 3.8.2 traversal API inventory (steps, source and
+/// terminal methods, the members of its tokens).
+fn tinkerpop_names() -> BTreeSet<&'static str> {
+    include_str!("../../tests/tinkerpop/api-3.8.2.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('['))
+        .map(|line| line.rsplit('.').next().unwrap_or(line))
+        .collect()
+}
 
 /// `has_label` -> `hasLabel`.
 fn camel_case(name: &str) -> String {
@@ -302,23 +288,34 @@ fn both_spellings_have_the_same_overloads() {
             .or_default()
             .insert(params);
     }
+    // Rule 2 (user decision 2026-10-25): both spellings only for TinkerPop's names (and the
+    // Java API ones), Graphersal's own extensions in snake_case only.
+    let tinkerpop = tinkerpop_names();
+    let gremlin = |camel: &str| tinkerpop.contains(camel) || JAVA_API.contains(&camel);
+    let single = |name: &str| SINGLE_SPELLING.iter().any(|(single, _)| *single == name);
     let mut problems = Vec::new();
     for (name, signatures) in &overloads {
         let starts_lower = name.chars().next().is_some_and(|c| c.is_ascii_lowercase());
-        if name.ends_with('_') || !starts_lower {
+        if name.ends_with('_') || !starts_lower || single(name) {
             continue;
         }
-        let other = if name.contains('_') {
-            camel_case(name)
+        let (snake, camel) = if name.contains('_') {
+            (name.clone(), camel_case(name))
         } else if name.chars().any(|c| c.is_ascii_uppercase()) {
-            snake_case(name)
+            (snake_case(name), name.clone())
         } else {
             continue;
         };
-        if SINGLE_SPELLING.iter().any(|(single, _)| single == name) {
+        if !gremlin(&camel) {
+            if overloads.contains_key(&camel) {
+                problems.push(format!(
+                    "{camel}: a camelCase twin of the Graphersal extension {snake} (snake_case only)"
+                ));
+            }
             continue;
         }
-        match overloads.get(&other) {
+        let other = if *name == snake { &camel } else { &snake };
+        match overloads.get(other) {
             None => problems.push(format!("{name}: no `{other}`")),
             Some(others) if others != signatures => {
                 problems.push(format!("{name}/{other}: different overloads"));
