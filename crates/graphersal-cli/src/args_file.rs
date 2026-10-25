@@ -374,12 +374,17 @@ mod tests {
                           "embedder": "a=./m"}"#,
         )
         .unwrap();
-        assert!(args.contains(&"--graph=/etc/g/data/g.json".to_string()));
+        // Joined with the platform's separator (`\` on Windows).
+        let under = |rel: &str| Path::new("/etc/g").join(rel).display().to_string();
+        assert!(
+            args.contains(&format!("--graph={}", under("data/g.json"))),
+            "{args:?}"
+        );
         assert!(args.contains(&"--schema=/abs/s.json".to_string()));
-        assert!(args.contains(&"--ai=/etc/g/ai.json".to_string()));
-        assert!(args.contains(&"--ui-dir=/etc/g/ui".to_string()));
-        assert!(args.contains(&"--mcp-instructions=/etc/g/n.md".to_string()));
-        assert!(args.contains(&"--embedder=a=/etc/g/./m".to_string()));
+        assert!(args.contains(&format!("--ai={}", under("ai.json"))));
+        assert!(args.contains(&format!("--ui-dir={}", under("ui"))));
+        assert!(args.contains(&format!("--mcp-instructions={}", under("n.md"))));
+        assert!(args.contains(&format!("--embedder=a={}", under("./m"))));
         // a repository name stays one
         let args = tr(r#"{"embedder": "p=minishlab/potion-base-8M"}"#).unwrap();
         assert_eq!(args, ["--embedder=p=minishlab/potion-base-8M"]);

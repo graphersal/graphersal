@@ -228,10 +228,15 @@ fn the_due_checkpoint_runs_synchronously_without_a_thread() {
     // Off (threshold 0): never due.
     assert!(store.run_due_checkpoint().unwrap().is_none());
     drop(store);
-    let store = Store::open(&dir, StoreOptions::new().with_checkpoint_after_bytes(1)).unwrap();
-    // A thread runs it natively; take the thread away to act as wasm32 does.
-    store.core.stop_thread();
-    store.core.shared.shutdown.store(false, Ordering::Release);
+    // Natively a thread would run it at once; open without one (threshold 0 starts none, as on
+    // wasm32) and lower the threshold afterwards, so no thread can take the checkpoint first.
+    let store = Store::open(&dir, StoreOptions::new().with_checkpoint_after_bytes(0)).unwrap();
+    store
+        .core
+        .shared
+        .wal
+        .checkpoint_after
+        .store(1, Ordering::Release);
     assert!(store.wal_bytes_since_checkpoint() > 0);
     let snapshot = store.run_due_checkpoint().unwrap().expect("due");
     assert_eq!(snapshot.commit_seq, 1);

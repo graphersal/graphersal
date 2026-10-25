@@ -125,11 +125,11 @@ impl std::str::FromStr for CronSchedule {
         let [minute, hour, day, month, weekday] = fields.as_slice() else {
             return Err(fail(format!("{} fields instead of 5", fields.len())));
         };
-        let minutes = field(minute, "minute", 0, 59, &[], 0).map_err(&fail)?;
-        let hours = field(hour, "hour", 0, 23, &[], 0).map_err(&fail)? as u32;
-        let days = field(day, "day of month", 1, 31, &[], 0).map_err(&fail)? as u32;
-        let months = field(month, "month", 1, 12, &MONTHS, 1).map_err(&fail)? as u16;
-        let mut weekdays = field(weekday, "day of week", 0, 7, &WEEKDAYS, 0).map_err(&fail)?;
+        let minutes = field(minute, "minute", 0, 59, &[], 0).map_err(fail)?;
+        let hours = field(hour, "hour", 0, 23, &[], 0).map_err(fail)? as u32;
+        let days = field(day, "day of month", 1, 31, &[], 0).map_err(fail)? as u32;
+        let months = field(month, "month", 1, 12, &MONTHS, 1).map_err(fail)? as u16;
+        let mut weekdays = field(weekday, "day of week", 0, 7, &WEEKDAYS, 0).map_err(fail)?;
         // 7 is Sunday too.
         if weekdays & (1 << 7) != 0 {
             weekdays = (weekdays & 0x7f) | 1;
