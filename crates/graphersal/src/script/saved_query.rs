@@ -1382,7 +1382,38 @@ impl ScriptGraphTraversalSource {
         this.call_query(&ctx, name, args)
     }
 
+    /// [`Self::call_query_inner`], counted in the query statistics as `saved:<name>` (the call
+    /// itself: a returned traversal runs later and counts under its plan's fingerprint).
     fn call_query(
+        &self,
+        ctx: &NativeCallContext,
+        name: &str,
+        args: rhai::Map,
+    ) -> Result<Dynamic, Box<EvalAltResult>> {
+        let started = web_time::Instant::now();
+        let result = self.call_query_inner(ctx, name, args);
+        if let Some(stats) = self.g.as_ref().and_then(|g| g.workload_stats()) {
+            use crate::graph::workload::{Sample, SeriesKey, SeriesKind, WorkloadLevel};
+            let origin = crate::graph::workload::scope::current();
+            if !origin.technical && stats.level() != WorkloadLevel::Off {
+                let mut sample = Sample::new(0, started.elapsed().as_micros() as u64);
+                if result.is_err() {
+                    sample = sample.failed();
+                }
+                let now = web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_micros() as i64);
+                let key = SeriesKey::new(
+                    SeriesKind::Query(format!("saved:{name}").into()),
+                    origin.channel,
+                );
+                stats.record(key, now, sample);
+            }
+        }
+        result
+    }
+
+    fn call_query_inner(
         &self,
         ctx: &NativeCallContext,
         name: &str,

@@ -46,6 +46,18 @@ at hand. A Store attaches its statistics to its graph; a graph of your own count
 `Graph::attach_workload_stats(stats)`. Work a front end marks as technical (its own drawing and
 panel queries) is not counted.
 
+## Queries
+
+Every run of a traversal on a graph with statistics (GQL included: it runs the same pipeline)
+counts in the series of its **fingerprint**: the optimized plan, as `.profile()` names its
+steps, with every literal replaced by `?`. `g.v().has("name", "ann").values("age")` and the same
+query for `"bob"` are one series, `v().has(?, ?).values(?)`; a list of literals is one `?`. Each
+run adds its result count (with bulk), its duration and whether it failed. A saved query call
+counts once more as `saved:<name>` (the call itself; the traversal it returns counts under its
+plan when it runs). At most 500 query series are kept: a new one beyond that replaces the one
+run least in the last 90 days. Like `pg_stat_statements` in PostgreSQL, this answers "which
+queries run, how often, how long", by channel (which ones the AI agents run).
+
 ## The sidecar
 
 A writable store writes `WORKLOAD` once a minute (the system job `stats_flush`, see

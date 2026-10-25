@@ -27,6 +27,7 @@ const MAGIC: &[u8; 8] = b"GRWLSTAT";
 const VERSION: u32 = 1;
 const KIND_JOB: u8 = 1;
 const KIND_LOCK: u8 = 2;
+const KIND_QUERY: u8 = 3;
 
 fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
@@ -90,6 +91,7 @@ impl WorkloadStats {
             let (kind, name) = match &key.kind {
                 SeriesKind::Job(name) => (KIND_JOB, name),
                 SeriesKind::Lock(name) => (KIND_LOCK, name),
+                SeriesKind::Query(name) => (KIND_QUERY, name),
             };
             body.push(kind);
             put_str(&mut body, name);
@@ -154,6 +156,7 @@ impl WorkloadStats {
                 match kind {
                     KIND_JOB => Some(SeriesKind::Job(name)),
                     KIND_LOCK => Some(SeriesKind::Lock(name)),
+                    KIND_QUERY => Some(SeriesKind::Query(name)),
                     _ => None,
                 },
                 Channel::from_code(channel),

@@ -13,6 +13,7 @@
 
 #[cfg(feature = "persist")]
 pub(crate) mod codec;
+pub(crate) mod fingerprint;
 pub(crate) mod scope;
 
 pub use scope::scope;
@@ -135,6 +136,9 @@ pub enum SeriesKind {
     /// The graph's lock: `write.wait` (asking for the write lock until holding it),
     /// `write.hold` (holding it), `read.wait` (a reader waiting for a writer).
     Lock(CompactString),
+    /// One query (the query statistics): its normalized fingerprint (the optimized plan with
+    /// literals replaced by `?`), or `saved:<name>` for a saved query call as a whole.
+    Query(CompactString),
 }
 
 /// The key of a series: what is counted and the channel it came through.
@@ -288,6 +292,10 @@ pub struct JobRunRecord {
     pub error: Option<String>,
 }
 
+/// The most query series kept; a new query beyond it evicts the one run least in the last 90
+/// days (the query statistics stay bounded whatever the workload).
+pub const MAX_QUERY_SERIES: usize = 500;
+
 #[derive(Debug, Default)]
 struct Inner {
     series: HashMap<SeriesKey, Series>,
@@ -331,6 +339,29 @@ pub struct WorkloadReport {
     pub jobs: Vec<(String, JobRunRecord)>,
 }
 
+impl Inner {
+    /// Evicts the least used query series when [`MAX_QUERY_SERIES`] are kept.
+    fn make_room_for_query(&mut self) {
+        let queries = self
+            .series
+            .keys()
+            .filter(|key| matches!(key.kind, SeriesKind::Query(_)))
+            .count();
+        if queries < MAX_QUERY_SERIES {
+            return;
+        }
+        let least = self
+            .series
+            .iter()
+            .filter(|(key, _)| matches!(key.kind, SeriesKind::Query(_)))
+            .min_by_key(|(_, series)| series.tiers[2].sum_since(i64::MIN).count)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = least {
+            self.series.remove(&key);
+        }
+    }
+}
+
 impl WorkloadStats {
     /// Empty statistics at `level`.
     pub fn new(level: WorkloadLevel) -> Self {
@@ -357,6 +388,9 @@ impl WorkloadStats {
             return;
         }
         let mut inner = self.inner.lock();
+        if matches!(key.kind, SeriesKind::Query(_)) && !inner.series.contains_key(&key) {
+            inner.make_room_for_query();
+        }
         let series = inner.series.entry(key).or_default();
         for (tier, (width, keep)) in series.tiers.iter_mut().zip(TIERS) {
             tier.add(now.div_euclid(width), keep, &sample);
@@ -515,5 +549,28 @@ mod tests {
         assert_eq!(stats.report(0).jobs.len(), 1);
         stats.clear(None);
         assert!(stats.report(0).jobs.is_empty());
+    }
+
+    #[test]
+    fn query_series_stay_bounded() {
+        let stats = WorkloadStats::new(WorkloadLevel::Memory);
+        let query =
+            |i: usize| SeriesKey::new(SeriesKind::Query(format!("q{i}").into()), Channel::Cli);
+        // q0 runs often, the others once.
+        for _ in 0..5 {
+            stats.record(query(0), 0, Sample::new(1, 1));
+        }
+        for i in 1..=MAX_QUERY_SERIES + 10 {
+            stats.record(query(i), 0, Sample::new(1, 1));
+        }
+        let report = stats.report(0);
+        assert_eq!(report.series.len(), MAX_QUERY_SERIES);
+        assert!(
+            report.series.iter().any(|s| s.key == query(0)),
+            "the frequent one stays"
+        );
+        // Other kinds are never evicted for queries.
+        stats.record(job("j"), 0, Sample::new(1, 1));
+        assert_eq!(stats.report(0).series.len(), MAX_QUERY_SERIES + 1);
     }
 }
