@@ -657,3 +657,39 @@ fn a_jobs_queries_count_under_the_job_channel() {
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert_eq!(runs[0].1, Channel::Job);
 }
+
+/// A report with history gives every series' buckets of one tier within its window, oldest
+/// first, each starting on its minute, hour or day; a plain report has none.
+#[test]
+fn a_report_with_history_gives_the_buckets_of_the_tier() {
+    use graphersal::workload::HistoryTier;
+    let dir = MemDir::named("memory:history");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let stats = store.workload_stats();
+    const HOUR: i64 = 60 * MINUTE;
+    // In time order: two hours ago, ten minutes ago (twice), now.
+    stats.record(key(), T0 - 2 * HOUR, Sample::new(4, 700));
+    stats.record(key(), T0 - 10 * MINUTE, Sample::new(2, 300));
+    stats.record(key(), T0 - 10 * MINUTE + 1, Sample::new(3, 500));
+    stats.record(key(), T0, Sample::new(1, 100));
+    let minutes = stats.report_with_history(T0, HistoryTier::Minutes);
+    assert_eq!(minutes.history, Some(HistoryTier::Minutes));
+    let history = &minutes.series[0].history;
+    // The bucket two hours ago is outside the 60-minute window.
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert!(history[0].start < history[1].start);
+    assert_eq!(history[0].start % MINUTE, 0);
+    assert_eq!(history[0].counters.count, 2);
+    assert_eq!(history[0].counters.max_micros, 500);
+    assert_eq!(history[1].counters.count, 1);
+    let hours = stats.report_with_history(T0, HistoryTier::Hours);
+    let total: u64 = hours.series[0]
+        .history
+        .iter()
+        .map(|b| b.counters.count)
+        .sum();
+    assert_eq!(total, 4);
+    assert!(hours.series[0].history.iter().all(|b| b.start % HOUR == 0));
+    assert!(stats.report(T0).series[0].history.is_empty());
+    assert_eq!(stats.report(T0).history, None);
+}

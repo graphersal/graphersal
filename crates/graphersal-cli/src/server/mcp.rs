@@ -1130,11 +1130,14 @@ fn all_tools() -> Vec<Tool> {
              read.wait) and scheduled `jobs`, each per channel (playground, mcp, cli, python, \
              job, host) with the windows last_hour, last_two_days and last_ninety_days (count, \
              failed, items, total_micros, max_micros). The page's own drawing and panels are not \
-             counted. Rows sorted by total time over 90 days; max_rows per list (default 50).",
+             counted. Rows sorted by total time over 90 days; max_rows per list (default 50). \
+             history adds every row's buckets of that tier (its course over time: start in \
+             microseconds since the Unix epoch, count, failed, items, total_micros, max_micros).",
             json!({
                 "type": "object",
                 "properties": {
                     "max_rows": {"type": "integer", "minimum": 1, "description": "Keep this many rows per list (default 50); <list>_omitted counts the rest."},
+                    "history": {"type": "string", "enum": ["minutes", "hours", "days"], "description": "Add every row's buckets of this tier: the last 60 minutes, 48 hours or 90 days."},
                 },
             }),
         ),
@@ -1617,7 +1620,15 @@ fn run_tool(
                 .and_then(Value::as_u64)
                 .unwrap_or(50)
                 .max(1) as usize;
-            let mut report = context.call(|s| s.workload_report()).map_err(http_failed)?;
+            let mut report = match args.get("history").and_then(Value::as_str) {
+                None => context.call(|s| s.workload_report()).map_err(http_failed)?,
+                Some(tier) => {
+                    let tier = tier.to_string();
+                    context
+                        .call(move |s| s.workload_report_with_history(&tier))
+                        .map_err(http_failed)??
+                }
+            };
             if let Some(map) = report.as_object_mut() {
                 for list in ["queries", "properties", "locks", "jobs"] {
                     let omitted = match map.get_mut(list).and_then(Value::as_array_mut) {

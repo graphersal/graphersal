@@ -376,12 +376,32 @@ impl Store {
     /// ``store.workload_report()``: the workload statistics of the store's graph (book page
     /// "Workload Statistics"): ``{"level", "queries", "properties", "locks", "jobs"}``, every
     /// row with its ``channel`` (Python's own queries count under ``"python"``) and the
-    /// windows ``last_hour`` / ``last_two_days`` / ``last_ninety_days``.
-    fn workload_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// windows ``last_hour`` / ``last_two_days`` / ``last_ninety_days``. ``history`` (``"minutes"``,
+    /// ``"hours"``, ``"days"``) adds every row's buckets of that tier (``"history"``: ``{"start",
+    /// "count", "failed", "items", "total_micros", "max_micros"}``, ``start`` in microseconds since
+    /// the Unix epoch) and ``"history_tier"``.
+    #[pyo3(signature = (history=None))]
+    fn workload_report(&self, py: Python<'_>, history: Option<&str>) -> PyResult<Py<PyAny>> {
+        let tier = match history {
+            None => None,
+            Some(name) => Some(
+                graphersal::workload::HistoryTier::from_name(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown history tier '{name}': use minutes, hours or days"
+                    ))
+                })?,
+            ),
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_micros() as i64);
-        let report = self.with(py, move |store| Ok(store.workload_stats().report(now)))?;
+        let report = self.with(py, move |store| {
+            let stats = store.workload_stats();
+            Ok(match tier {
+                Some(tier) => stats.report_with_history(now, tier),
+                None => stats.report(now),
+            })
+        })?;
         crate::convert::property_to_pyobject(py, &report.to_property())
     }
 
