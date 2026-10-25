@@ -5,6 +5,9 @@ use std::fmt;
 
 use super::{SeriesKind, SeriesTotals, WorkloadReport};
 
+/// A block of the text: its title and what a series of it shows (`None`: not in the block).
+type Block = (&'static str, fn(&SeriesKind) -> Option<String>);
+
 /// The figures of one series: `count failed items mean max channel what`.
 fn line(f: &mut fmt::Formatter<'_>, row: &SeriesTotals, what: &str) -> fmt::Result {
     let c = &row.last_ninety_days;
@@ -35,7 +38,7 @@ impl fmt::Display for WorkloadReport {
                 .cmp(&a.last_ninety_days.total_micros)
                 .then_with(|| a.key.cmp(&b.key))
         });
-        let blocks: [(&str, fn(&SeriesKind) -> Option<String>); 4] = [
+        let blocks: [Block; 4] = [
             ("Queries", |kind| match kind {
                 SeriesKind::Query(query) => Some(query.to_string()),
                 _ => None,
