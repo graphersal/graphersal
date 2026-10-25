@@ -121,3 +121,14 @@ test('workload rows: only the slow ones, sorted by a column', () => {
   const byMax = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'max' });
   assert.equal(byMax[0].max, 2000);
 });
+
+test('workload rows sort by channel, failed and either direction', () => {
+  const byChannel = workloadRows(REPORT, 'queries', 'two_days', 'all', NOW, { sort: 'channel' });
+  assert.deepEqual(byChannel.map((r) => r.channel), ['cli', 'mcp', 'playground']);
+  const reversed = workloadRows(REPORT, 'queries', 'two_days', 'all', NOW, { sort: 'channel', desc: true });
+  assert.deepEqual(reversed.map((r) => r.channel), ['playground', 'mcp', 'cli']);
+  const byFailed = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'failed' });
+  assert.equal(byFailed[0].failed, 1);
+  const fewestRuns = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'count', desc: false });
+  assert.deepEqual(fewestRuns.map((r) => r.count), [2, 5]);
+});

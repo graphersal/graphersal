@@ -137,18 +137,25 @@ export const MIN_TIMES = Object.freeze([
   { micros: 1e6, label: 'Max ≥ 1 s' },
 ]);
 
-/** The columns a workload table sorts by (descending). */
-export const SORTS = Object.freeze(['total', 'count', 'mean', 'max']);
+/** The columns a workload table sorts by; numbers start descending, the channel ascending. */
+export const SORTS = Object.freeze(['channel', 'count', 'failed', 'mean', 'max', 'total']);
+
+/** The first direction of a column: `true` for descending (numbers), `false` for text. */
+export function sortsDescending(column) {
+  return column !== 'channel';
+}
 
 /**
  * The rows of one workload list in a window, for a channel (`all`: every channel):
  * `{key, name, channel, count, failed, items, total, mean, max, series}`. `options.minMicros`
- * keeps only rows whose longest run took at least that long; `options.sort` (`total`, the
- * default, `count`, `mean`, `max`) orders them, the largest first.
+ * keeps only rows whose longest run took at least that long; `options.sort` (one of
+ * [`SORTS`], default `total`) orders them in direction `options.desc` (default: the column's
+ * first direction, [`sortsDescending`]); ties by total time, then by name.
  */
 export function workloadRows(report, listId, windowId, channel = 'all', now = Date.now() * 1000, options = {}) {
   const minMicros = options.minMicros || 0;
   const sort = SORTS.includes(options.sort) ? options.sort : 'total';
+  const desc = options.desc === undefined ? sortsDescending(sort) : !!options.desc;
   const window = WINDOWS.find((w) => w.id === windowId) || WINDOWS[0];
   const rows = [];
   for (const row of (report && report[listId]) || []) {
@@ -171,7 +178,10 @@ export function workloadRows(report, listId, windowId, channel = 'all', now = Da
       lastRun: row.last_run || null,
     });
   }
-  rows.sort((a, b) => b[sort] - a[sort] || b.total - a.total || a.name.localeCompare(b.name));
+  const compare = sort === 'channel'
+    ? (a, b) => String(a.channel).localeCompare(String(b.channel))
+    : (a, b) => a[sort] - b[sort];
+  rows.sort((a, b) => (desc ? compare(b, a) : compare(a, b)) || b.total - a.total || a.name.localeCompare(b.name));
   return rows;
 }
 
