@@ -2,7 +2,11 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, OnceLock};
 
+use web_time::Instant;
+
+use crate::graph::workload::{SeriesKey, SeriesKind, WorkloadLevel, WorkloadStats};
 use crate::graph::{GraphStorage, TraversalGraph};
 
 /// A shareable, lock-protected graph: a [`GraphStorage`] `S` behind a read-write lock.
@@ -34,6 +38,9 @@ pub struct Graph<S: GraphStorage = TraversalGraph> {
     /// `S: PersistentStorage` itself (`book/src/for_developers/custom_storage.md`).
     #[cfg(feature = "persist")]
     snapshot_writer: Option<SnapshotWriter<S>>,
+    /// The workload statistics the lock's wait and hold times go to
+    /// ([`Graph::attach_workload_stats`]; a Store attaches its own).
+    workload: OnceLock<Arc<WorkloadStats>>,
 }
 
 /// Writes a storage as a packed snapshot with the default options.
@@ -50,8 +57,39 @@ pub struct GraphRead<'a, S: GraphStorage = TraversalGraph>(parking_lot::RwLockRe
 
 /// Exclusive write access to the storage of a [`Graph`] ([`Graph::write`],
 /// [`Graph::try_write`]); dereferences (mutably) to `S`. The lock is released when the guard is
-/// dropped.
-pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph>(parking_lot::RwLockWriteGuard<'a, S>);
+/// dropped; with workload statistics attached, the time it was held is counted then.
+pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph> {
+    guard: parking_lot::RwLockWriteGuard<'a, S>,
+    /// When the lock was acquired and where the hold time goes (statistics attached only).
+    held: Option<(Instant, &'a Arc<WorkloadStats>)>,
+}
+
+/// The statistics a lock event is counted in (attached), with the series key of `name` under
+/// the current thread's channel; `None` when not attached, off, or the work is technical.
+fn lock_series<'a>(
+    workload: &'a OnceLock<Arc<WorkloadStats>>,
+    name: &str,
+) -> Option<(&'a Arc<WorkloadStats>, SeriesKey)> {
+    let stats = workload.get()?;
+    lock_key(stats, name).map(|key| (stats, key))
+}
+
+/// The series key of lock event `name` under the current thread's channel, `None` when the
+/// statistics are off or the work is technical.
+fn lock_key(stats: &WorkloadStats, name: &str) -> Option<SeriesKey> {
+    if stats.level() == WorkloadLevel::Off {
+        return None;
+    }
+    let origin = crate::graph::workload::scope::current();
+    (!origin.technical).then(|| SeriesKey::new(SeriesKind::Lock(name.into()), origin.channel))
+}
+
+/// The current time in microseconds since the Unix epoch.
+fn now_micros() -> i64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as i64)
+}
 
 impl<S: GraphStorage> Graph<S> {
     /// Wraps `storage` for sharing.
@@ -67,7 +105,22 @@ impl<S: GraphStorage> Graph<S> {
             lock: parking_lot::RwLock::new(storage),
             #[cfg(feature = "persist")]
             snapshot_writer: None,
+            workload: OnceLock::new(),
         }
+    }
+
+    /// Counts the lock's wait and hold times in `stats` from now on (book page "Workload
+    /// Statistics"): `write.wait` (asking for the write lock until holding it), `write.hold`
+    /// (holding it) and `read.wait` (a reader waiting), each under the channel of the work
+    /// that took the lock, nothing for technical work. Set once (a second call is ignored and
+    /// returns `false`); a Store attaches its own statistics.
+    pub fn attach_workload_stats(&self, stats: Arc<WorkloadStats>) -> bool {
+        self.workload.set(stats).is_ok()
+    }
+
+    /// The workload statistics attached by [`Self::attach_workload_stats`].
+    pub fn workload_stats(&self) -> Option<&Arc<WorkloadStats>> {
+        self.workload.get()
     }
 
     /// A new graph around `storage` with the same capabilities at the dyn boundary as `self`
@@ -79,6 +132,7 @@ impl<S: GraphStorage> Graph<S> {
             lock: parking_lot::RwLock::new(storage),
             #[cfg(feature = "persist")]
             snapshot_writer: self.snapshot_writer,
+            workload: OnceLock::new(),
         }
     }
 
@@ -91,18 +145,54 @@ impl<S: GraphStorage> Graph<S> {
     /// Locks the graph for reading, blocking while a writer holds it. Several readers may hold
     /// it at once.
     pub fn read(&self) -> GraphRead<'_, S> {
-        GraphRead(self.lock.read())
+        let Some((stats, key)) = lock_series(&self.workload, "read.wait") else {
+            return GraphRead(self.lock.read());
+        };
+        // Uncontended: no clock read, nothing counted.
+        if let Some(guard) = self.lock.try_read() {
+            return GraphRead(guard);
+        }
+        let asked = Instant::now();
+        let guard = self.lock.read();
+        let wait = asked.elapsed().as_micros() as u64;
+        stats.record(
+            key,
+            now_micros(),
+            crate::graph::workload::Sample::new(0, wait),
+        );
+        GraphRead(guard)
     }
 
     /// Locks the graph for writing, blocking until no reader or writer holds it.
     pub fn write(&self) -> GraphWrite<'_, S> {
-        GraphWrite(self.lock.write())
+        let Some((stats, key)) = lock_series(&self.workload, "write.wait") else {
+            return GraphWrite {
+                guard: self.lock.write(),
+                held: None,
+            };
+        };
+        let asked = Instant::now();
+        let guard = self.lock.write();
+        let acquired = Instant::now();
+        let wait = acquired.duration_since(asked).as_micros() as u64;
+        stats.record(
+            key,
+            now_micros(),
+            crate::graph::workload::Sample::new(0, wait),
+        );
+        GraphWrite {
+            guard,
+            held: Some((acquired, stats)),
+        }
     }
 
     /// Locks the graph for writing if nobody holds it right now, else returns `None` without
     /// blocking (a thread that already holds the lock gets `None` instead of a deadlock).
     pub fn try_write(&self) -> Option<GraphWrite<'_, S>> {
-        self.lock.try_write().map(GraphWrite)
+        let guard = self.lock.try_write()?;
+        let held =
+            lock_series(&self.workload, "write.hold").map(|(stats, _)| (Instant::now(), stats));
+        Some(GraphWrite { guard, held })
     }
 
     /// The storage itself, without locking: the exclusive borrow proves nobody else holds it.
@@ -144,6 +234,7 @@ impl<S: crate::graph::PersistentStorage> Graph<S> {
         Graph {
             lock: parking_lot::RwLock::new(storage),
             snapshot_writer: Some(write::<S>),
+            workload: OnceLock::new(),
         }
     }
 }
@@ -176,19 +267,35 @@ impl<S: GraphStorage> Deref for GraphRead<'_, S> {
     }
 }
 
+impl<S: GraphStorage> Drop for GraphWrite<'_, S> {
+    /// Counts the hold time (`write.hold`) when statistics are attached.
+    fn drop(&mut self) {
+        if let Some((acquired, stats)) = self.held.take()
+            && let Some(key) = lock_key(stats, "write.hold")
+        {
+            let hold = acquired.elapsed().as_micros() as u64;
+            stats.record(
+                key,
+                now_micros(),
+                crate::graph::workload::Sample::new(0, hold),
+            );
+        }
+    }
+}
+
 impl<S: GraphStorage> Deref for GraphWrite<'_, S> {
     type Target = S;
 
     #[inline]
     fn deref(&self) -> &S {
-        &self.0
+        &self.guard
     }
 }
 
 impl<S: GraphStorage> DerefMut for GraphWrite<'_, S> {
     #[inline]
     fn deref_mut(&mut self) -> &mut S {
-        &mut self.0
+        &mut self.guard
     }
 }
 
