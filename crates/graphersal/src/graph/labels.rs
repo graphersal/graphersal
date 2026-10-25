@@ -45,6 +45,9 @@ pub(crate) struct Labels {
     last_set: LabelSetId,
     /// The edge label interned last.
     last_name: LabelId,
+    /// The bytes of the label set contents (a slot and the heap of each label), kept as sets are
+    /// added, so [`Self::heap_bytes`] needs no walk.
+    set_content_bytes: u64,
 }
 
 impl Default for Labels {
@@ -56,6 +59,7 @@ impl Default for Labels {
             set_ids: HashTable::new(),
             last_set: LabelSetId::EMPTY,
             last_name: LabelId::NONE,
+            set_content_bytes: 0,
         }
     }
 }
@@ -63,6 +67,15 @@ impl Default for Labels {
 /// The hash of an ordered label set.
 fn set_hash(labels: &[CompactString]) -> u64 {
     keys_hash(labels.iter().map(CompactString::as_str))
+}
+
+/// The bytes of one label set's contents: a slot per label plus each label's heap.
+fn set_bytes(labels: &[CompactString]) -> u64 {
+    labels.len() as u64 * std::mem::size_of::<CompactString>() as u64
+        + labels
+            .iter()
+            .map(crate::value::compact_string_heap_bytes)
+            .sum::<u64>()
 }
 
 /// The hash of one label.
@@ -88,6 +101,7 @@ impl Labels {
             Some(&id) => LabelSetId(id),
             None => {
                 let id = self.sets.len() as u32;
+                self.set_content_bytes += set_bytes(labels);
                 self.sets.push(labels.into());
                 let sets = &self.sets;
                 self.set_ids.insert_unique(hash, id, |&id| {
@@ -162,11 +176,7 @@ impl Labels {
             + self.name_ids.capacity() as u64 * (4 + 1);
         let set_slot = size_of::<Box<[CompactString]>>() as u64;
         let sets = self.sets.capacity() as u64 * set_slot
-            + self
-                .sets
-                .iter()
-                .map(|set| set.len() as u64 * string + set.iter().map(heap).sum::<u64>())
-                .sum::<u64>()
+            + self.set_content_bytes
             + self.set_ids.capacity() as u64 * (4 + 1);
         names + sets
     }
@@ -221,5 +231,17 @@ mod tests {
             assert_eq!(labels.intern_set(&set(&[text.as_str(), "shared"])), *set_id);
             assert_eq!(labels.set(*set_id)[0], text.as_str());
         }
+    }
+
+    #[test]
+    fn the_kept_set_bytes_equal_a_walk() {
+        let mut labels = Labels::default();
+        for i in 0..50 {
+            let long = format!("a label longer than the inline limit {i}");
+            labels.intern_set(&set(&[long.as_str(), "short"]));
+            labels.intern_set(&set(&["short"]));
+        }
+        let walked: u64 = labels.sets.iter().map(|s| set_bytes(s)).sum();
+        assert_eq!(labels.set_content_bytes, walked);
     }
 }
