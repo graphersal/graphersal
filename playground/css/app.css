@@ -1801,7 +1801,8 @@ input.ve-null { color: var(--text-muted); }
 .op-full { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 6px 8px; margin-bottom: 6px; background: var(--accent-soft); border-radius: 4px; }
 .op-sort { cursor: pointer; user-select: none; }
 .op-sort.active { color: var(--accent); }
-.op-sort.active::after { content: ' ▾'; }
+.op-sort.active.desc::after { content: ' ▾'; }
+.op-sort.active.asc::after { content: ' ▴'; }
 .op-spark { display: block; }
 .op-spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .op-chart { width: 100%; height: 160px; display: block; }

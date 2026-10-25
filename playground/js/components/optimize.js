@@ -13,7 +13,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
-  WINDOWS, TIERS, LISTS, MIN_TIMES, recommendationRows, adviceSummary, channels, workloadRows, sparkPath,
+  WINDOWS, TIERS, LISTS, MIN_TIMES, sortsDescending, recommendationRows, adviceSummary, channels, workloadRows, sparkPath,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
@@ -31,7 +31,7 @@ export const OptimizePanel = {
     const tab = ref('advice');
     const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null });
     const work = reactive({
-      report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total',
+      report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total', desc: true,
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
     });
     const memory = reactive({ report: null, loading: false, error: null });
@@ -146,12 +146,17 @@ export const OptimizePanel = {
 
     // Workload.
     const channelList = computed(() => channels(work.report));
-    const options = () => ({ minMicros: work.minMicros, sort: work.sort });
+    const options = () => ({ minMicros: work.minMicros, sort: work.sort, desc: work.desc });
     const rows = computed(() => workloadRows(work.report, work.list, work.window, work.channel, Date.now() * 1000, options()));
     const listCounts = computed(() => Object.fromEntries(
       LISTS.map((l) => [l.id, workloadRows(work.report, l.id, work.window, work.channel, Date.now() * 1000, options()).length]),
     ));
-    const sortBy = (column) => { work.sort = column; };
+    // A click sorts by the column; a second click on it turns the direction around.
+    const sortBy = (column) => {
+      if (work.sort === column) work.desc = !work.desc;
+      else Object.assign(work, { sort: column, desc: sortsDescending(column) });
+    };
+    const sortClass = (column) => (work.sort === column ? ['active', work.desc ? 'desc' : 'asc'] : []);
     const spark = (row, field) => (row.series ? sparkPath(row.series.map((b) => b[field]), SPARK_W, SPARK_H) : '');
     async function select(row) {
       if (work.selected && work.selected.key === row.key) {
@@ -187,7 +192,7 @@ export const OptimizePanel = {
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, copy,
-      WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
+      WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
       memRows, memLabels, memTotals,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
     };
@@ -263,11 +268,15 @@ export const OptimizePanel = {
               <col class="op-col-t"><col class="op-col-t"><col class="op-col-t"><col class="op-col-spark">
             </colgroup>
             <thead><tr>
-              <th>{{ LISTS.find((l) => l.id === work.list).what }}</th><th>Channel</th>
-              <th class="num op-sort" :class="{ active: work.sort === 'count' }" @click="sortBy('count')" title="Sort by runs">Runs</th><th class="num">Failed</th><th class="num">Items</th>
-              <th class="num op-sort" :class="{ active: work.sort === 'mean' }" @click="sortBy('mean')" title="Sort by mean time">Mean</th>
-              <th class="num op-sort" :class="{ active: work.sort === 'max' }" @click="sortBy('max')" title="Sort by the longest run">Max</th>
-              <th class="num op-sort" :class="{ active: work.sort === 'total' }" @click="sortBy('total')" title="Sort by total time">Total</th><th>Runs over time</th>
+              <th>{{ LISTS.find((l) => l.id === work.list).what }}</th>
+              <th class="op-sort" :class="sortClass('channel')" @click="sortBy('channel')" title="Sort by channel">Channel</th>
+              <th class="num op-sort" :class="sortClass('count')" @click="sortBy('count')" title="Sort by runs">Runs</th>
+              <th class="num op-sort" :class="sortClass('failed')" @click="sortBy('failed')" title="Sort by failed runs">Failed</th>
+              <th class="num">Items</th>
+              <th class="num op-sort" :class="sortClass('mean')" @click="sortBy('mean')" title="Sort by mean time">Mean</th>
+              <th class="num op-sort" :class="sortClass('max')" @click="sortBy('max')" title="Sort by the longest run">Max</th>
+              <th class="num op-sort" :class="sortClass('total')" @click="sortBy('total')" title="Sort by total time">Total</th>
+              <th>Runs over time</th>
             </tr></thead>
             <tbody>
               <template v-for="row in rows" :key="row.key">
