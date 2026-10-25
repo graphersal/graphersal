@@ -16,6 +16,14 @@ current time, and the scheduler runs the jobs that are due.
 | Browser playground | a timer in the engine's worker, every 5 seconds, in the browser's time zone |
 | Your own program | call `Scheduler::tick(now)` yourself |
 
+The CLI (a script or the REPL on a store) and the Python binding do not tick: a store opened
+there runs no jobs (its workload statistics are still written when it closes). Open the store
+with the dev server, or tick a `Scheduler` in your own program, to run them.
+
+**Daylight saving time.** A schedule is read in the local wall clock. A time that does not exist
+on the day the clocks go forward (02:30 in most of Europe) runs right after the gap (03:00); a
+time that happens twice when they go back runs once, at its first occurrence.
+
 A job never overlaps itself: due jobs run one after another. A time missed while nothing ticked
 (the process was stopped) is skipped: the job runs at its next scheduled time. A failing job
 (an error, a panic) is recorded and runs again at its next time.
@@ -105,6 +113,11 @@ switch; a job of yours has **Run now**, **Edit** and **Drop**, a system job **Ru
 does (a saved query with its arguments as JSON, a checkpoint, a backup directory), the schedule
 (5-field cron, with presets), on or off, a timeout and a description; a refused job shows the
 engine's message next to the field.
+
+**History.** Every run (start, duration, error) is counted in the
+[workload statistics](workload_statistics.md) as series `job` per minute, hour and day: the job
+list shows the runs of the last two days, **Optimize ▸ Workload ▸ Jobs** draws them over time,
+`GET /api/jobs/history?name=..&tier=..` answers the buckets.
 
 **Front ends.** The dev server and the playground share one job API (`graphersal-session`):
 
