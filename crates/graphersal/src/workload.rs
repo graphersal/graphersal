@@ -6,7 +6,7 @@
 //! the [`WorkloadLevel`] set when it was opened.
 
 pub use crate::graph::workload::{
-    AccessKind, Channel, Counters, JobRunRecord, MAX_QUERY_SERIES, PropertyUse, Sample, SeriesKey,
-    SeriesKind, SeriesTotals, WorkloadLevel, WorkloadReport, WorkloadStats, current_channel, scope,
-    set_thread_default,
+    AccessKind, Bucket, Channel, Counters, HistoryTier, JobRunRecord, MAX_QUERY_SERIES,
+    PropertyUse, Sample, SeriesKey, SeriesKind, SeriesTotals, WorkloadLevel, WorkloadReport,
+    WorkloadStats, current_channel, scope, set_thread_default,
 };

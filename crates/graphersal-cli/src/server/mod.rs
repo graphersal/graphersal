@@ -955,7 +955,13 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         // The scheduled jobs of the active store (`graphersal_session::jobs`).
         (Method::Get, "jobs") => value(context.call(|s| s.jobs_view())?),
         // The workload statistics (`Session::workload_report`).
-        (Method::Get, "workload") => value(context.call(|s| s.workload_report())?),
+        // `?history=minutes|hours|days` adds every row's buckets of that tier (chart data).
+        (Method::Get, "workload") => match query_value(query, "history") {
+            None => value(context.call(|s| s.workload_report())?),
+            Some(tier) => {
+                value(context.call_fallible(move |s| s.workload_report_with_history(&tier))?)
+            }
+        },
         // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
         (Method::Post, "memory/report") => {
             let body = json_body(request)?;

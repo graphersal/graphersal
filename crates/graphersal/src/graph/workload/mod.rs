@@ -410,6 +410,61 @@ pub struct SeriesTotals {
     pub last_two_days: Counters,
     /// The last 90 days.
     pub last_ninety_days: Counters,
+    /// The buckets of the tier the report was asked for ([`WorkloadStats::report_with_history`]),
+    /// oldest first, only those with something counted; empty in a plain [`WorkloadStats::report`].
+    pub history: Vec<Bucket>,
+}
+
+/// One bucket of a series' history: the figures of one minute, hour or day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Bucket {
+    /// Its start, in microseconds since the Unix epoch (UTC).
+    pub start: i64,
+    /// What was counted in it.
+    pub counters: Counters,
+}
+
+/// A tier of the history: one bucket per minute (the last 60), hour (the last 48) or day (the
+/// last 90).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HistoryTier {
+    /// One bucket per minute, the last 60 minutes.
+    Minutes,
+    /// One bucket per hour, the last 48 hours.
+    Hours,
+    /// One bucket per day, the last 90 days.
+    Days,
+}
+
+impl HistoryTier {
+    /// `minutes`, `hours` or `days`.
+    pub fn name(self) -> &'static str {
+        match self {
+            HistoryTier::Minutes => "minutes",
+            HistoryTier::Hours => "hours",
+            HistoryTier::Days => "days",
+        }
+    }
+
+    /// The tier with this [name](Self::name).
+    pub fn from_name(name: &str) -> Option<HistoryTier> {
+        match name {
+            "minutes" => Some(HistoryTier::Minutes),
+            "hours" => Some(HistoryTier::Hours),
+            "days" => Some(HistoryTier::Days),
+            _ => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            HistoryTier::Minutes => 0,
+            HistoryTier::Hours => 1,
+            HistoryTier::Days => 2,
+        }
+    }
 }
 
 /// A snapshot of the statistics ([`WorkloadStats::report`]).
@@ -422,6 +477,8 @@ pub struct WorkloadReport {
     pub series: Vec<SeriesTotals>,
     /// The last run of every job that ran, by name.
     pub jobs: Vec<(String, JobRunRecord)>,
+    /// The tier of every series' [`SeriesTotals::history`], `None` without history.
+    pub history: Option<HistoryTier>,
 }
 
 impl Inner {
@@ -504,6 +561,16 @@ impl WorkloadStats {
 
     /// The totals of every series at `now` and the last job runs.
     pub fn report(&self, now: i64) -> WorkloadReport {
+        self.report_in(now, None)
+    }
+
+    /// [`Self::report`] with every series' buckets of `tier` within its window (the data of a
+    /// chart: runs, failures, mean and max time per minute, hour or day).
+    pub fn report_with_history(&self, now: i64, tier: HistoryTier) -> WorkloadReport {
+        self.report_in(now, Some(tier))
+    }
+
+    fn report_in(&self, now: i64, history: Option<HistoryTier>) -> WorkloadReport {
         let inner = self.inner.lock();
         let mut series: Vec<SeriesTotals> = inner
             .series
@@ -513,11 +580,25 @@ impl WorkloadStats {
                     let (width, _) = TIERS[tier];
                     series.tiers[tier].sum_since(now.div_euclid(width) - windows + 1)
                 };
+                let history = history.map_or_else(Vec::new, |tier| {
+                    let (width, keep) = TIERS[tier.index()];
+                    let first = now.div_euclid(width) - keep as i64 + 1;
+                    series.tiers[tier.index()]
+                        .buckets
+                        .iter()
+                        .filter(|(index, _)| *index >= first)
+                        .map(|(index, counters)| Bucket {
+                            start: index.saturating_mul(width),
+                            counters: *counters,
+                        })
+                        .collect()
+                });
                 SeriesTotals {
                     key: key.clone(),
                     last_hour: since(0, 60),
                     last_two_days: since(1, 48),
                     last_ninety_days: since(2, 90),
+                    history,
                 }
             })
             .collect();
@@ -532,6 +613,7 @@ impl WorkloadStats {
             level: self.level(),
             series,
             jobs,
+            history,
         }
     }
 

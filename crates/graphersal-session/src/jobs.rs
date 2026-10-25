@@ -109,18 +109,31 @@ impl Session {
     /// properties, locks, jobs}`); a graph without statistics (not in a store) answers level
     /// `off` with empty lists. Reading it is not counted.
     pub fn workload_report(&self) -> Value {
+        self.workload_report_in(None)
+    }
+
+    /// [`Self::workload_report`] with every row's `history` of the tier `tier` (`minutes`,
+    /// `hours` or `days`: its buckets, oldest first, the data of a chart) and `history_tier`;
+    /// `Err` names the tiers for another `tier`.
+    pub fn workload_report_with_history(&self, tier: &str) -> Result<Value, String> {
+        let tier = graphersal::workload::HistoryTier::from_name(tier)
+            .ok_or_else(|| format!("unknown history tier '{tier}': use minutes, hours or days"))?;
+        Ok(self.workload_report_in(Some(tier)))
+    }
+
+    fn workload_report_in(&self, history: Option<graphersal::workload::HistoryTier>) -> Value {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.as_micros() as i64);
-        let report = self
-            .graph()
-            .workload_stats()
-            .unwrap_or_else(|| {
-                Arc::new(graphersal::workload::WorkloadStats::new(
-                    graphersal::workload::WorkloadLevel::Off,
-                ))
-            })
-            .report(now);
+        let stats = self.graph().workload_stats().unwrap_or_else(|| {
+            Arc::new(graphersal::workload::WorkloadStats::new(
+                graphersal::workload::WorkloadLevel::Off,
+            ))
+        });
+        let report = match history {
+            Some(tier) => stats.report_with_history(now, tier),
+            None => stats.report(now),
+        };
         serde_json::from_str(&report.to_json()).unwrap_or(Value::Null)
     }
 }
@@ -187,5 +200,27 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(names["label"], "person", "{report}");
         assert_eq!(names["access"], "read");
+    }
+
+    #[test]
+    fn the_report_with_history_has_every_rows_buckets() {
+        let mut s = Session::new();
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        let answer = s.execute("g.v().count().to_list()", &crate::RunOptions::default());
+        assert!(answer.contains('6'), "{answer}");
+        // The minute bucket of the run: the data of a chart.
+        let report = s.workload_report_with_history("minutes").unwrap();
+        assert_eq!(report["history_tier"], "minutes");
+        let history = report["queries"][0]["history"].as_array().unwrap();
+        assert_eq!(history.len(), 1, "{report}");
+        assert_eq!(history[0]["count"], 1);
+        assert!(history[0]["start"].as_i64().unwrap() > 0);
+        assert!(s.workload_report()["queries"][0].get("history").is_none());
+        assert!(
+            s.workload_report_with_history("weeks")
+                .unwrap_err()
+                .contains("minutes")
+        );
     }
 }

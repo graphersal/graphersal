@@ -284,3 +284,15 @@ def test_the_workload_report_counts_python_queries(tmp_path):
         assert channels == {"python"}
         assert any(row["key"] == "name" and row["access"] == "write" for row in report["properties"])
         assert all(row["last_hour"]["count"] >= 1 for row in report["queries"])
+
+
+def test_the_workload_report_with_history_has_the_buckets(tmp_path):
+    with graphersal.Store.create(str(tmp_path / "data")) as store:
+        store.graph.execute('g.addV("person").next()')
+        report = store.workload_report(history="minutes")
+        assert report["history_tier"] == "minutes"
+        bucket = report["queries"][0]["history"][0]
+        assert bucket["count"] == 1 and bucket["start"] > 0
+        assert "history" not in store.workload_report()["queries"][0]
+        with pytest.raises(ValueError):
+            store.workload_report(history="weeks")
