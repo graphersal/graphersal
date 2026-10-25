@@ -371,6 +371,7 @@ impl ScriptGraphTraversalSource {
             Dynamic::from_int(stats.total_bytes() as i64),
         );
         let int = |n: u64| Dynamic::from_int(i64::try_from(n).unwrap_or(i64::MAX));
+        map.insert("workload_bytes".into(), int(stats.workload_bytes));
         map.insert("compressed_values".into(), int(stats.compressed_values));
         map.insert(
             "compressed_plain_bytes".into(),

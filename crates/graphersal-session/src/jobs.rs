@@ -273,4 +273,14 @@ mod tests {
             "{view}"
         );
     }
+
+    #[test]
+    fn the_statistics_memory_is_in_the_sessions_statistics() {
+        let mut s = Session::new();
+        assert_eq!(s.statistics()["memory"]["workload_bytes"], 0);
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        let bytes = s.statistics()["memory"]["workload_bytes"].as_u64().unwrap();
+        assert!(bytes > 0, "{bytes}");
+    }
 }

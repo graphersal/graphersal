@@ -28,6 +28,11 @@ shared text once, part of `property_bytes`); all three are `0` without `dedup` r
 With [property indexes](property_indexes.md) it reports `property_index_bytes`, an estimate of
 their entries (part of `total_bytes`; `0` without indexes).
 
+A graph in a store also reports `workload_bytes`: the memory of its
+[workload statistics](../persistence/workload_statistics.md), held beside the graph and NOT part
+of `total_bytes` (which is the graph's own data); `0` for a graph without statistics. The
+playground's Profile ▸ Statistics tab shows it as **Workload statistics** below the total.
+
 ### How property memory works
 
 Element properties share their key names. Every distinct sequence of keys (a "shape", say

@@ -151,6 +151,16 @@ export function statisticsModel(raw) {
         // Property indexes (Catalog ▸ Property indexes): only when the graph has some.
         ...(m.property_index_bytes ? [{ name: 'Property indexes', text: formatBytes(m.property_index_bytes) }] : []),
         { name: 'Total', text: formatBytes(m.total_bytes) },
+        // The workload statistics of a graph in a store: held beside the graph, not in Total.
+        ...(m.workload_bytes
+          ? [
+              {
+                name: 'Workload statistics',
+                text: formatBytes(m.workload_bytes),
+                hint: 'The counts of the queries, property uses, lock times and jobs of this store (minutes, hours, days), kept in memory beside the graph and written to the store\'s WORKLOAD file. Not part of Total.',
+              },
+            ]
+          : []),
       ]
     : null;
   const processRows = processMemoryRows(r.process);

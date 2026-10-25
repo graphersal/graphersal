@@ -93,6 +93,12 @@ pub struct MemoryStats {
     /// sweep (`shrink_to_fit`, a load, or the table doubling).
     #[cfg_attr(feature = "serde", serde(default))]
     pub shape_bytes: u64,
+    /// The graph's [workload statistics](crate::workload) (book page "Workload Statistics"),
+    /// held beside the storage: filled in by the graph that holds them (`g.memory_usage()`, the
+    /// front ends' statistics), `0` from a storage alone and for a graph without statistics.
+    /// NOT part of [`Self::total_bytes`], which is the graph's own data.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub workload_bytes: u64,
 }
 
 impl MemoryStats {
@@ -199,6 +205,7 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
         deduped_plain_bytes: compressed.deduped_plain,
         dedup_table_bytes,
         shape_bytes,
+        workload_bytes: 0,
     }
 }
 

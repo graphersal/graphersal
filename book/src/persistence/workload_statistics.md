@@ -103,6 +103,13 @@ counts under its top-level property. These counts answer "which properties are f
 without an index, which are only written, which are read at all": the input of the planned
 storage advisor.
 
+## Memory
+
+The statistics stay bounded (at most 500 query series, at most 60 + 48 + 90 buckets per series,
+only buckets in which something was counted). Their memory is shown as `workload_bytes` in
+`g.memory_usage()`, in the dev server's and the playground's statistics (Profile ▸ Statistics,
+**Workload statistics**), never added to the graph's `total_bytes`.
+
 ## The sidecar
 
 A writable store writes `WORKLOAD` once a minute (the system job `stats_flush`, see

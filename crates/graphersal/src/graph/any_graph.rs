@@ -94,7 +94,8 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`GraphStorage::statistics`] of the storage, cloned out of the lock.
     fn statistics(&self) -> Option<GraphStatistics>;
 
-    /// [`GraphStorage::memory_usage`] of the storage.
+    /// [`GraphStorage::memory_usage`] of the storage, with the graph's
+    /// [`MemoryStats::workload_bytes`].
     fn memory_usage(&self) -> Option<MemoryStats>;
 
     /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
@@ -314,7 +315,9 @@ where
     }
 
     fn memory_usage(&self) -> Option<MemoryStats> {
-        self.read().memory_usage()
+        let mut stats = self.read().memory_usage()?;
+        stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
+        Some(stats)
     }
 
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {
