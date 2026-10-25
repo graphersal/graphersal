@@ -18,6 +18,12 @@
 //     current data (the graph is not changed): a table with a saving bar per candidate, the
 //     best one highlighted, and "Use" copying a candidate's codec, threshold and dictionary
 //     into the form.
+//   * Scheduled jobs: the system jobs and the jobs of users (catalog kind `job`) with their
+//     schedule, next and last run (its error), runs in two days and a switch; Run now, Edit
+//     and Drop for a job of a user, a schedule of its own (or the built-in one again) for a
+//     system job; the form (name, action: a saved query with JSON arguments, a checkpoint or a
+//     backup directory, a schedule with presets, enabled, timeout, description) with the
+//     engine's field errors next to their inputs. Model js/jobs.js.
 //   * Property indexes: the indexes with their stats (entries, distinct values, elements per
 //     value, memory; "not served" on a storage without indexes) with Drop (confirmed), and the
 //     create form (element, label with suggestions, key, optional name with the default name
@@ -29,7 +35,12 @@ import {
   state, toast, openCatalog, saveCatalogFile, loadCatalogFile, refreshSavedQueries, refreshCompressions,
   defineCompressionRule, dropCompressionRule, recompressRule, estimateCompressionRule, dropSavedQuery,
   refreshIndexes, createPropertyIndex, dropPropertyIndex,
+  refreshJobs, defineUserJob, dropUserJob, switchJob, scheduleSystemJob, runJobNow, isServerMode,
 } from '../store.js';
+import {
+  jobsMenuItem, jobRows, newJobDraft, draftFromJob, jobDraftToSpec, queryChoices, argsSkeleton,
+  JOB_ACTIONS, SCHEDULE_PRESETS, scheduleText, formErrors,
+} from '../jobs.js';
 import {
   ruleRow, totals, newDraft, draftFromRule, draftToSpec, labelSuggestions,
   canEstimate, draftToEstimateSpec, estimateView, estimateSummary, histogramRows, applyCandidate,
@@ -54,7 +65,9 @@ export const CatalogMenu = {
   components: { DropMenu },
   setup() {
     const fileInput = ref(null);
-    const items = computed(() => catalogMenuItems(state.graph));
+    const items = computed(() => [...catalogMenuItems(state.graph), jobsMenuItem(state.graph, state.jobs)]);
+    // The jobs' count (active/all) follows the graph: a commit may define, drop or switch one.
+    watch(() => state.graph, () => refreshJobs(), { immediate: true });
     function pickFile(close) {
       close();
       if (fileInput.value) fileInput.value.click();
@@ -618,13 +631,256 @@ export const IndexesManager = {
   `,
 };
 
+/** The Scheduled jobs manager: every job with its runs and switch, and the define form. */
+export const JobsManager = {
+  setup(props, { expose }) {
+    const dlg = ref(null);
+    const d = reactive({ draft: null, errors: {}, busy: false, now: Date.now() * 1000 });
+    const rows = computed(() => {
+      const view = state.jobs;
+      return ((view && view.jobs) || []).map((job, i) => ({ job, row: jobRows({ jobs: [job] }, d.now)[0], i }));
+    });
+    const view = computed(() => state.jobs || { jobs: [] });
+    const queries = computed(() => queryChoices(state.savedQueries));
+    const serverMode = computed(isServerMode);
+    let timer = null;
+
+    async function open() {
+      Object.assign(d, { draft: null, errors: {}, busy: false, now: Date.now() * 1000 });
+      await refreshJobs();
+      if (dlg.value && !dlg.value.open) dlg.value.showModal();
+      if (!timer) {
+        timer = setInterval(async () => {
+          if (!dlg.value || !dlg.value.open) {
+            clearInterval(timer);
+            timer = null;
+            return;
+          }
+          d.now = Date.now() * 1000;
+          if (!d.draft && !d.busy) await refreshJobs();
+        }, 5000);
+      }
+    }
+    function close() {
+      if (dlg.value && dlg.value.open) dlg.value.close();
+    }
+    async function startNew() {
+      await refreshSavedQueries();
+      Object.assign(d, { draft: newJobDraft(), errors: {} });
+      await nextTick();
+    }
+    async function startEdit(job) {
+      await refreshSavedQueries();
+      Object.assign(d, { draft: draftFromJob(job), errors: {} });
+    }
+    function cancelForm() {
+      Object.assign(d, { draft: null, errors: {} });
+    }
+    function pickQuery() {
+      const q = queries.value.find((x) => x.name === d.draft.query);
+      const text = d.draft.argsText.trim();
+      if (q && (!text || text === '{}')) d.draft.argsText = q.params.length ? argsSkeleton(q.params) : '{}';
+    }
+    async function save() {
+      if (d.busy || !d.draft) return;
+      const local = jobDraftToSpec(d.draft);
+      if (local.errors) {
+        d.errors = errorsByField(local.errors);
+        return;
+      }
+      d.busy = true;
+      try {
+        const replaces = d.draft.replaces;
+        const res = await defineUserJob(local.spec);
+        if (res && res.ok) {
+          // A rename stores the new job and drops the old one.
+          if (replaces && replaces !== local.spec.name) await dropUserJob(replaces);
+          toast(`Job "${local.spec.name}" saved: ${scheduleText(local.spec.schedule)}.`, 'info', 5000);
+          cancelForm();
+        } else {
+          d.errors = errorsByField(formErrors((res && res.errors) || [{ field: 'general', message: 'The engine refused it.' }]));
+        }
+      } catch (err) {
+        d.errors = { general: [message(err)] };
+      } finally {
+        d.busy = false;
+      }
+    }
+    async function toggle(job) {
+      if (d.busy) return;
+      d.busy = true;
+      try {
+        await switchJob(job.name, !job.enabled);
+      } catch (err) {
+        toast(`Switch failed: ${message(err)}`, 'error', 9000);
+      } finally {
+        d.busy = false;
+      }
+    }
+    async function run(job) {
+      if (d.busy) return;
+      d.busy = true;
+      try {
+        const entry = await runJobNow(job.name);
+        const error = entry && entry.last && entry.last.error;
+        if (error) toast(`Job "${job.name}" failed: ${error}`, 'error', 9000);
+        else toast(`Job "${job.name}" ran.`, 'info', 4000);
+      } catch (err) {
+        toast(`Run failed: ${message(err)}`, 'error', 9000);
+      } finally {
+        d.busy = false;
+        d.now = Date.now() * 1000;
+      }
+    }
+    async function drop(job) {
+      if (d.busy) return;
+      if (!window.confirm(`Drop the job "${job.name}"? It stops running; no data changes.`)) return;
+      d.busy = true;
+      try {
+        await dropUserJob(job.name);
+        toast(`Job "${job.name}" dropped.`, 'info', 4000);
+      } catch (err) {
+        toast(`Drop failed: ${message(err)}`, 'error', 9000);
+      } finally {
+        d.busy = false;
+      }
+    }
+    async function reschedule(job) {
+      if (d.busy) return;
+      const text = window.prompt(`Schedule of the system job "${job.name}" (5-field cron, e.g. 0 3 * * *). Empty: its built-in schedule.`, job.schedule);
+      if (text === null) return;
+      d.busy = true;
+      try {
+        await scheduleSystemJob(job.name, text.trim() || null);
+      } catch (err) {
+        toast(`Schedule refused: ${message(err)}`, 'error', 9000);
+      } finally {
+        d.busy = false;
+      }
+    }
+    expose({ open, close });
+    return {
+      state, dlg, d, rows, view, queries, serverMode, close, startNew, startEdit, cancelForm, save,
+      toggle, run, drop, reschedule, pickQuery, actions: JOB_ACTIONS, presets: SCHEDULE_PRESETS, scheduleText,
+    };
+  },
+  template: `
+  <dialog ref="dlg" class="catalog-dialog wide" aria-labelledby="cj-title">
+    <div class="dialog-head">
+      <h2 id="cj-title">Scheduled jobs</h2><span class="spacer"></span>
+      <button type="button" class="icon-btn" @click="close" aria-label="Close">×</button>
+    </div>
+    <div class="dialog-body">
+      <template v-if="!d.draft">
+        <p class="muted sq-note">Jobs run on a cron schedule ({{ view.timeZone || 'UTC' }}) in the store: the system jobs, and jobs you define (a saved query with fixed arguments, a checkpoint, a backup). A job runs with the rights it was defined with; a job of yours is part of the catalog and travels with the catalog file and backups.</p>
+        <p v-if="state.jobs && !view.store" class="field-error">The graph is not in a store: jobs are kept but do not run.</p>
+        <div v-if="state.jobsError" class="field-error">{{ state.jobsError }}</div>
+        <div v-else-if="rows.length" class="catalog-table-wrap">
+          <table class="data-table catalog-table">
+            <thead><tr>
+              <th>Name</th><th>Does</th><th>Schedule</th><th>On</th><th>Next</th><th>Last run</th>
+              <th class="num" title="Runs in the last two days (failed)">Runs (2 days)</th><th></th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="{ job, row } in rows" :key="row.name">
+                <td class="code">{{ row.name }} <span v-if="row.system" class="badge" title="Comes with the store; can be switched and rescheduled, not dropped">system</span>
+                  <span v-if="!row.scheduled" class="badge" :title="row.reason">not running</span>
+                  <div v-if="row.description" class="muted cc-sub">{{ row.description }}</div></td>
+                <td>{{ row.action }}<div v-if="row.effects.length" class="muted cc-sub" title="What each run may write: the rights stored when the job was defined">may: {{ row.effects.join('; ') }}</div></td>
+                <td :title="row.schedule"><span class="code">{{ row.schedule }}</span><div class="muted cc-sub">{{ row.scheduleText !== row.schedule ? row.scheduleText : '' }}{{ row.changed ? ' (changed)' : '' }}</div></td>
+                <td><input type="checkbox" :checked="row.enabled" :disabled="d.busy || state.running" :aria-label="(row.enabled ? 'Switch off ' : 'Switch on ') + row.name" @change="toggle(job)"></td>
+                <td>{{ row.next }}</td>
+                <td>{{ row.last }}<span v-if="row.lastMs != null" class="muted"> · {{ row.lastMs }} ms</span>
+                  <div v-if="row.lastError" class="field-error cc-sub">{{ row.lastError }}</div></td>
+                <td class="num">{{ row.runs }}<span v-if="row.failed" class="field-error"> ({{ row.failed }})</span></td>
+                <td class="catalog-actions">
+                  <button type="button" class="btn small" :disabled="d.busy || state.running || !row.scheduled" @click="run(job)" title="Run it now, whatever its schedule">Run now</button>
+                  <button v-if="row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="reschedule(job)">Schedule…</button>
+                  <button v-if="!row.system" type="button" class="btn small" :disabled="d.busy || state.running" @click="startEdit(job)">Edit…</button>
+                  <button v-if="!row.system" type="button" class="btn small danger" :disabled="d.busy || state.running" @click="drop(job)">Drop</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="muted">No jobs.</p>
+        <div class="sq-buttons">
+          <button type="button" class="btn primary" :disabled="state.running" @click="startNew">New job…</button>
+          <span class="spacer"></span>
+          <button type="button" class="btn" @click="close">Close</button>
+        </div>
+      </template>
+
+      <form v-else @submit.prevent="save">
+        <h3>{{ d.draft.replaces ? 'Edit job "' + d.draft.replaces + '"' : 'New job' }}</h3>
+        <div class="form-grid">
+          <label for="cj-name">Name</label>
+          <input id="cj-name" type="text" v-model="d.draft.name" :class="{ invalid: d.errors.name }" placeholder="nightly_cleanup" autocomplete="off" spellcheck="false">
+          <div v-for="m in d.errors.name || []" class="field-error sq-span">{{ m }}</div>
+          <label for="cj-action">Does</label>
+          <select id="cj-action" v-model="d.draft.action" :class="{ invalid: d.errors.action }" style="justify-self:start">
+            <option v-for="a in actions" :key="a.name" :value="a.name" :title="a.hint">{{ a.label }}</option>
+          </select>
+          <div v-for="m in d.errors.action || []" class="field-error sq-span">{{ m }}</div>
+          <template v-if="d.draft.action === 'query'">
+            <label for="cj-query">Saved query</label>
+            <select id="cj-query" v-model="d.draft.query" :class="{ invalid: d.errors.query }" style="justify-self:start" @change="pickQuery">
+              <option value="" disabled>Choose a saved query</option>
+              <option v-for="q in queries" :key="q.name" :value="q.name">{{ q.name }}{{ q.params.length ? '(' + q.params.join(', ') + ')' : '()' }}</option>
+            </select>
+            <div v-for="m in d.errors.query || []" class="field-error sq-span">{{ m }}</div>
+            <span v-if="!queries.length" class="hint">No saved queries yet: save one in Catalog ▸ Saved queries first.</span>
+            <label for="cj-args">Arguments</label>
+            <textarea id="cj-args" v-model="d.draft.argsText" rows="3" :class="{ invalid: d.errors.args }" spellcheck="false" class="code"></textarea>
+            <div v-for="m in d.errors.args || []" class="field-error sq-span">{{ m }}</div>
+            <span class="hint">A JSON object, parameter name -> value; checked against the query's parameters.</span>
+          </template>
+          <template v-if="d.draft.action === 'backup'">
+            <label for="cj-path">Directory</label>
+            <input id="cj-path" type="text" v-model="d.draft.path" :class="{ invalid: d.errors.path }" placeholder="/backups/graph" autocomplete="off" spellcheck="false">
+            <div v-for="m in d.errors.path || []" class="field-error sq-span">{{ m }}</div>
+            <span class="hint">{{ serverMode ? 'A directory on the machine of the dev server; the first run is a full backup, the next ones increments.' : 'The browser playground has no files: backup jobs work with the dev server (graphersal --server).' }}</span>
+          </template>
+          <label for="cj-schedule">Schedule</label>
+          <span class="cj-schedule">
+            <input id="cj-schedule" type="text" v-model="d.draft.schedule" :class="{ invalid: d.errors.schedule }" placeholder="0 3 * * *" autocomplete="off" spellcheck="false" style="width:16ch">
+            <select aria-label="Schedule presets" @change="d.draft.schedule = $event.target.value; $event.target.value = ''">
+              <option value="">Presets…</option>
+              <option v-for="p in presets" :key="p.cron" :value="p.cron">{{ p.label }} ({{ p.cron }})</option>
+            </select>
+          </span>
+          <div v-for="m in d.errors.schedule || []" class="field-error sq-span">{{ m }}</div>
+          <span class="hint">5-field cron: minute hour day-of-month month day-of-week, in {{ view.timeZone || 'UTC' }}. {{ scheduleText(d.draft.schedule.trim()) !== d.draft.schedule.trim() ? scheduleText(d.draft.schedule.trim()) + '.' : '' }}</span>
+          <label for="cj-enabled">On</label>
+          <span><input id="cj-enabled" type="checkbox" v-model="d.draft.enabled"> <label for="cj-enabled" class="muted">runs on its schedule (off: kept, not run)</label></span>
+          <label for="cj-timeout">Timeout</label>
+          <input id="cj-timeout" type="text" inputmode="numeric" v-model="d.draft.timeoutText" :class="{ invalid: d.errors.timeout_ms }" placeholder="no limit" style="width:14ch;justify-self:start">
+          <div v-for="m in d.errors.timeout_ms || []" class="field-error sq-span">{{ m }}</div>
+          <span class="hint">Milliseconds a run may take; a longer run is stopped and recorded as failed.</span>
+          <label for="cj-desc">Description</label>
+          <input id="cj-desc" type="text" v-model="d.draft.description" :class="{ invalid: d.errors.description }" autocomplete="off">
+        </div>
+        <div v-for="m in d.errors.general || []" class="field-error">{{ m }}</div>
+        <p class="muted sq-note">Saving checks your rights for everything the job will do and stores them with it (one commit); nothing runs until its time or Run now.</p>
+        <div class="sq-buttons">
+          <span class="spacer"></span>
+          <button type="button" class="btn" @click="cancelForm">Back</button>
+          <button type="submit" class="btn primary" :disabled="d.busy || state.running">{{ d.busy ? 'Saving…' : 'Save' }}</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+  `,
+};
+
 /** The managers of the Catalog dropdown, opened through `openCatalog(id)`. */
 export const CatalogDialogs = {
-  components: { SavedQueriesManager, CompressionManager, IndexesManager },
+  components: { SavedQueriesManager, CompressionManager, IndexesManager, JobsManager },
   setup() {
     const queries = ref(null);
     const compression = ref(null);
     const indexes = ref(null);
+    const jobs = ref(null);
     watch(() => state.catalogDialogN, async () => {
       const id = state.catalogDialog;
       state.catalogDialog = null;
@@ -637,12 +893,14 @@ export const CatalogDialogs = {
       }
       if (id === 'compression' && compression.value) await compression.value.open();
       if (id === 'indexes' && indexes.value) await indexes.value.open();
+      if (id === 'jobs' && jobs.value) await jobs.value.open();
     });
-    return { queries, compression, indexes };
+    return { queries, compression, indexes, jobs };
   },
   template: `
   <saved-queries-manager ref="queries"></saved-queries-manager>
   <compression-manager ref="compression"></compression-manager>
   <indexes-manager ref="indexes"></indexes-manager>
+  <jobs-manager ref="jobs"></jobs-manager>
   `,
 };

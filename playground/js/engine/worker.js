@@ -82,6 +82,14 @@ const JSON_METHODS = {
   listIndexes: () => playground.listIndexes(),
   createIndex: (spec) => playground.createIndex(JSON.stringify(spec)),
   dropIndex: (name) => playground.dropIndex(name),
+  // Scheduled jobs (graphersal_session::jobs).
+  jobs: () => playground.jobs(),
+  defineJob: (spec) => playground.defineJob(JSON.stringify(spec || {})),
+  dropJob: (name) => playground.dropJob(name),
+  setJobEnabled: (name, enabled) => playground.setJobEnabled(name, !!enabled),
+  setJobSchedule: (name, schedule) => playground.setJobSchedule(name, schedule || undefined),
+  runJobNow: (name) => playground.runJobNow(name),
+  jobHistory: (name, tier) => playground.jobHistory(name, tier || 'minutes'),
   // The Optimize panel: the memory report, the workload statistics, the storage advisor.
   memoryReport: (spec) => playground.memoryReport(JSON.stringify(spec || {})),
   workloadReport: (history) => playground.workloadReport(history || undefined),

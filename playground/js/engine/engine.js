@@ -718,6 +718,36 @@ export class Engine {
   async dropIndex(name) { throw notImplemented('dropIndex'); }
 
   /**
+   * The scheduled jobs (graphersal_session::jobs `jobs_view`): `{timeZone, store, jobs: [{name,
+   * kind: "system"|"user", schedule, enabled, nextAt, last: {startedAt, micros, error} | null,
+   * timeoutMs, memoryLimit, scheduled, reason, runs, setting? (system), action?, query?, args?,
+   * path?, runOn?, description?, effects?, served? (user)}]}` (times in microseconds).
+   */
+  async jobs() { throw notImplemented('jobs'); }
+
+  /**
+   * Defines or replaces a job of a user from the form's spec `{name, schedule, action, query?,
+   * args?, path?, enabled?, timeout_ms?, description?}`: `{ok: true, job}` or `{ok: false,
+   * errors: [{field, message, help?}]}`.
+   */
+  async defineJob(spec) { throw notImplemented('defineJob'); }
+
+  /** Drops the job of a user `name`: `{dropped}`. */
+  async dropJob(name) { throw notImplemented('dropJob'); }
+
+  /** Switches job `name` on or off: its entry. */
+  async setJobEnabled(name, enabled) { throw notImplemented('setJobEnabled'); }
+
+  /** A system job's schedule (`null`: its built-in one): its entry. */
+  async setJobSchedule(name, schedule) { throw notImplemented('setJobSchedule'); }
+
+  /** Runs job `name` now: its entry (`last` = this run). */
+  async runJobNow(name) { throw notImplemented('runJobNow'); }
+
+  /** The runs of job `name` per bucket of `tier`: `{tier, buckets}`. */
+  async jobHistory(name, tier) { throw notImplemented('jobHistory'); }
+
+  /**
    * The memory report of the graph for a spec `{max_rows?, max_labels?, sample_every?, ...}`
    * (`{}`: a full report): `{ok: true, report}` or `{ok: false, error}` (graphersal_session's
    * `memory_report`; snake_case keys). Read-only.

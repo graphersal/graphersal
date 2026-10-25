@@ -112,3 +112,12 @@ test('memory rows: the most bytes first, with their badges', () => {
   assert.deepEqual(labelRows(report).map((r) => [r.label, r.maxDegree]), [['person', 3], ['knows', null]]);
   assert.deepEqual(memoryTotals(report), [{ label: 'Properties', bytes: 300 }]);
 });
+
+test('workload rows: only the slow ones, sorted by a column', () => {
+  const slow = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { minMicros: 1000 });
+  assert.deepEqual(slow.map((r) => r.name), ['v(labels: [?]).values(?)']);
+  const byRuns = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'count' });
+  assert.deepEqual(byRuns.map((r) => r.count), [5, 2]);
+  const byMax = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'max' });
+  assert.equal(byMax[0].max, 2000);
+});

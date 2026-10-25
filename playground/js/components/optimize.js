@@ -13,7 +13,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
-  WINDOWS, TIERS, LISTS, recommendationRows, adviceSummary, channels, workloadRows, sparkPath,
+  WINDOWS, TIERS, LISTS, MIN_TIMES, recommendationRows, adviceSummary, channels, workloadRows, sparkPath,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
@@ -31,7 +31,7 @@ export const OptimizePanel = {
     const tab = ref('advice');
     const advice = reactive({ data: null, loading: false, error: null, everything: false, applying: null });
     const work = reactive({
-      report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries',
+      report: null, loading: false, error: null, window: 'hour', channel: 'all', list: 'queries', minMicros: 0, sort: 'total',
       selected: null, detailTier: 'minutes', detail: null, detailLoading: false,
     });
     const memory = reactive({ report: null, loading: false, error: null });
@@ -146,10 +146,12 @@ export const OptimizePanel = {
 
     // Workload.
     const channelList = computed(() => channels(work.report));
-    const rows = computed(() => workloadRows(work.report, work.list, work.window, work.channel));
+    const options = () => ({ minMicros: work.minMicros, sort: work.sort });
+    const rows = computed(() => workloadRows(work.report, work.list, work.window, work.channel, Date.now() * 1000, options()));
     const listCounts = computed(() => Object.fromEntries(
-      LISTS.map((l) => [l.id, workloadRows(work.report, l.id, work.window, work.channel).length]),
+      LISTS.map((l) => [l.id, workloadRows(work.report, l.id, work.window, work.channel, Date.now() * 1000, options()).length]),
     ));
+    const sortBy = (column) => { work.sort = column; };
     const spark = (row, field) => (row.series ? sparkPath(row.series.map((b) => b[field]), SPARK_W, SPARK_H) : '');
     async function select(row) {
       if (work.selected && work.selected.key === row.key) {
@@ -185,7 +187,7 @@ export const OptimizePanel = {
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
       recRows, summary, apply, copy,
-      WINDOWS, TIERS, LISTS, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
+      WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
       memRows, memLabels, memTotals,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
     };
@@ -242,6 +244,9 @@ export const OptimizePanel = {
             <option value="all">All channels</option>
             <option v-for="c in channelList" :key="c" :value="c">{{ c }}</option>
           </select>
+          <select v-model.number="work.minMicros" aria-label="Slowest run at least" title="Show only the rows whose longest run took at least this long">
+            <option v-for="t in MIN_TIMES" :key="t.micros" :value="t.micros">{{ t.label }}</option>
+          </select>
           <span class="spacer"></span>
           <span class="muted" v-if="work.report">level {{ work.report.level }}</span>
         </div>
@@ -253,23 +258,29 @@ export const OptimizePanel = {
         <p v-else-if="work.report && !rows.length" class="muted">Nothing counted in this window. Queries you run (here, through MCP, the CLI or Python) are counted; the page's own drawing is not.</p>
         <div v-else-if="rows.length" class="catalog-table-wrap">
           <table class="data-table catalog-table op-table">
+            <colgroup>
+              <col><col class="op-col-channel"><col class="op-col-n"><col class="op-col-n"><col class="op-col-n">
+              <col class="op-col-t"><col class="op-col-t"><col class="op-col-t"><col class="op-col-spark">
+            </colgroup>
             <thead><tr>
               <th>{{ LISTS.find((l) => l.id === work.list).what }}</th><th>Channel</th>
-              <th class="num">Runs</th><th class="num">Failed</th><th class="num">Items</th>
-              <th class="num">Mean</th><th class="num">Max</th><th class="num">Total</th><th>Runs over time</th>
+              <th class="num op-sort" :class="{ active: work.sort === 'count' }" @click="sortBy('count')" title="Sort by runs">Runs</th><th class="num">Failed</th><th class="num">Items</th>
+              <th class="num op-sort" :class="{ active: work.sort === 'mean' }" @click="sortBy('mean')" title="Sort by mean time">Mean</th>
+              <th class="num op-sort" :class="{ active: work.sort === 'max' }" @click="sortBy('max')" title="Sort by the longest run">Max</th>
+              <th class="num op-sort" :class="{ active: work.sort === 'total' }" @click="sortBy('total')" title="Sort by total time">Total</th><th>Runs over time</th>
             </tr></thead>
             <tbody>
               <template v-for="row in rows" :key="row.key">
                 <tr :class="['op-row', { selected: work.selected && work.selected.key === row.key }]" @click="select(row)" title="Show the chart">
-                  <td class="code op-name">{{ row.name }}</td><td>{{ row.channel }}</td>
+                  <td class="code op-name" :title="row.name">{{ row.name }}</td><td>{{ row.channel }}</td>
                   <td class="num">{{ row.count }}</td><td class="num">{{ row.failed || '' }}</td><td class="num">{{ row.items }}</td>
                   <td class="num">{{ formatMicros(row.mean) }}</td><td class="num">{{ formatMicros(row.max) }}</td><td class="num">{{ formatMicros(row.total) }}</td>
                   <td><svg v-if="row.series" class="op-spark" :width="SPARK_W" :height="SPARK_H" :viewBox="'0 0 ' + SPARK_W + ' ' + SPARK_H" aria-hidden="true"><path :d="spark(row, 'count')"></path></svg></td>
                 </tr>
                 <tr v-if="work.selected && work.selected.key === row.key" class="op-detail-row">
                   <td colspan="9">
+                    <div v-if="row.name.length > 80" class="op-full code">{{ row.name }}</div>
                     <div class="op-bar">
-                      <strong class="code">{{ row.name }}</strong>
                       <span class="spacer"></span>
                       <select v-model="work.detailTier" aria-label="Buckets">
                         <option v-for="(t, id) in TIERS" :key="id" :value="id">{{ t.label }}</option>
