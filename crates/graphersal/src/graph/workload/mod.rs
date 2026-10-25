@@ -496,6 +496,12 @@ pub struct WorkloadStats {
     inner: parking_lot::Mutex<Inner>,
 }
 
+// The statistics are counters and settings behind one non-poisoning mutex: a panic in the middle
+// of a record leaves them consistent (at worst one sample short), so sharing them across an
+// unwind is sound, and `Graph` stays `UnwindSafe` as it was before it held them.
+impl std::panic::UnwindSafe for WorkloadStats {}
+impl std::panic::RefUnwindSafe for WorkloadStats {}
+
 /// The totals of one series over the three windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

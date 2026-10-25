@@ -18,15 +18,15 @@ Python package and the web playground are released with the same number:
 | `graphersal` (Python) | wheels (abi3, Python 3.10+) | the PyO3 binding from `bindings/py-graphersal` |
 | web playground | static files | runs `graphersal-wasm` (not published; its JS API is internal to the playground) |
 
-## Stability in 0.2.x
+## Stability in 0.3.x
 
-The same rules hold for every minor line before 1.0 (they held for 0.1.x as well); a minor release
-(0.1 to 0.2) may break them, and its release notes list every break with the upgrade step
-([Release Notes 0.2.0](../release_notes/release_notes_0.2.0.md)).
+The same rules hold for every minor line before 1.0 (they held for 0.1.x and 0.2.x as well); a minor
+release (0.2 to 0.3) may break them, and its release notes list every break with the upgrade step
+([Release Notes 0.3.0](../release_notes/release_notes_0.3.0.md)).
 
-- Stable within 0.2.x (additive changes only): the public API of `graphersal` outside the items marked
+- Stable within 0.3.x (additive changes only): the public API of `graphersal` outside the items marked
   EXPERIMENTAL, the DSL and the schema format.
-- EXPERIMENTAL (may change in any 0.2.x release): the `GraphStorage` trait and its associated types,
+- EXPERIMENTAL (may change in any 0.3.x release): the `GraphStorage` trait and its associated types,
   `PersistentStorage`, `AnyGraph`, `StoreDir`, and `graphersal-storage-tests`; pin the exact version.
 - Internal: `graphersal-session`, the wasm crate's JS API, the dev server's HTTP API and its MCP tools
   (`--server` is a development tool, bound to the loopback interface), the experimental AI Chat.

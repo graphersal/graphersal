@@ -6000,3 +6000,94 @@ fn storage_advice_over_http_and_mcp() {
     assert_eq!(restored["ok"], true);
     assert_eq!(post(port, "/api/advise/dismiss", "{}").status, 400);
 }
+
+/// The OpenAPI description (`openapi.json`, EXPERIMENTAL) is answered at `/openapi.json` and
+/// `/api/openapi.json` with the binary's version, carries the same version in the file, describes
+/// every route of the router (read from its source), and every operation it describes is routed.
+#[test]
+fn the_openapi_description_matches_the_router() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest.join("openapi.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["info"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        file["info"]["title"]
+            .as_str()
+            .unwrap()
+            .contains("EXPERIMENTAL")
+    );
+    assert_eq!(file["info"]["x-experimental"], true);
+    let described = |method: &str, path: &str| file["paths"][path].get(method).is_some();
+
+    // Every route of the router's source is described.
+    let mut routes: Vec<(String, String)> = Vec::new();
+    for source in ["src/server/mod.rs", "src/server/store.rs"] {
+        let text = std::fs::read_to_string(manifest.join(source)).unwrap();
+        for line in text.lines() {
+            let line = line.trim();
+            for method in ["Get", "Post", "Delete"] {
+                let start = format!("(Method::{method}, \"");
+                if let Some(rest) = line.strip_prefix(start.as_str())
+                    && let Some(endpoint) = rest.split('"').next()
+                {
+                    routes.push((method.to_lowercase(), format!("/api/{endpoint}")));
+                }
+            }
+        }
+    }
+    for endpoint in ["layout", "layout/step", "layout/cancel"] {
+        routes.push(("post".into(), format!("/api/{endpoint}")));
+    }
+    assert!(routes.len() > 80, "{routes:?}");
+    let missing: Vec<_> = routes
+        .iter()
+        .filter(|(method, path)| !described(method, path))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "routes the description lacks: {missing:?}"
+    );
+
+    // Every described operation is routed (never "unknown endpoint" nor a wrong method).
+    let ui = ui_dir("openapi");
+    let data = ui.parent().unwrap().join("openapi-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let served = get(port, "/openapi.json");
+    assert_eq!(served.status, 200);
+    assert_eq!(served.json()["info"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(get(port, "/api/openapi.json").json(), served.json());
+    for (path, item) in file["paths"].as_object().unwrap() {
+        for method in item.as_object().unwrap().keys() {
+            let url = path.replace("{id}", "nowhere");
+            let answer = request(
+                port,
+                &method.to_uppercase(),
+                &url,
+                (method != "get").then_some("{}"),
+                &[
+                    "Content-Type: application/json",
+                    "X-Graphersal-Client: openapi-test",
+                ],
+            );
+            assert!(
+                !answer.body.contains("unknown endpoint") && answer.status != 405,
+                "{method} {path}: {} {}",
+                answer.status,
+                answer.body
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&data);
+}

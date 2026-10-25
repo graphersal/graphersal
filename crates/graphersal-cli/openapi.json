@@ -1,0 +1,3864 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Graphersal dev server HTTP API (EXPERIMENTAL)",
+    "version": "0.3.0",
+    "summary": "The HTTP API of `graphersal --server`: EXPERIMENTAL, may change in any release.",
+    "description": "**EXPERIMENTAL.** The HTTP API of the Graphersal development server (`graphersal --server`), the playground's engine boundary over HTTP. It may change in any release, minor or patch; pin the exact Graphersal version and read this file from the same version (the server answers it at `GET /openapi.json`, with its own version in `info.version`). The server binds the loopback interface only and has no authentication besides the optional MCP token: it is a local development tool, not a production server.\n\nConventions: answers are JSON; an error is `{\"error\": \"...\"}` with a 4xx status (422 when the engine refuses). Form-like operations (`*/define`, `*/create`, `element/*`) answer 200 with `{ok: false, errors: [{field, message, help?}]}` for refused input. A page sends `X-Graphersal-Client: <id>` with every request so the change feed can name who committed. Request bodies are JSON (`Content-Type: application/json`). The schemas below are deliberately loose (objects with the documented keys); the authoritative descriptions of every answer are the Graphersal book's pages linked from `externalDocs`.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "x-experimental": true
+  },
+  "externalDocs": {
+    "description": "The dev server in the Graphersal book",
+    "url": "https://graphersal.dev/persistence/dev_server.html"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "graphersal --server --port 8080 (the default port)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Server"
+    },
+    {
+      "name": "Graph"
+    },
+    {
+      "name": "Queries"
+    },
+    {
+      "name": "Optimize"
+    },
+    {
+      "name": "Schema"
+    },
+    {
+      "name": "Graph panel"
+    },
+    {
+      "name": "Elements"
+    },
+    {
+      "name": "Catalog"
+    },
+    {
+      "name": "Jobs"
+    },
+    {
+      "name": "Files"
+    },
+    {
+      "name": "Store"
+    },
+    {
+      "name": "AI Chat"
+    },
+    {
+      "name": "MCP"
+    }
+  ],
+  "paths": {
+    "/api/info": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Server info",
+        "description": "What the page needs to switch to this server: `server` (`graphersal-dev`), `version`, `saveable`, `source`, `presets` (the limits in force), `mcp` (`{endpoint, readOnly, client}` or null), `ai` (`{provider, model, readOnly, sendsDataTo, maxToolCallsPerTurn}` or null; never the key), `damageFound`, `embedders`. Answered without the session.",
+        "operationId": "getApiInfo",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/changes": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Change feed",
+        "description": "`{version, commitSeq, recent: [{version, by, commitSeq, detail?}], view, mcp, damageFound}`; `by` is the client of the commit (`X-Graphersal-Client` of a page, `mcp`, or `ai` with the conversation id in `detail`). Polled by the page to reload on changes it did not make.",
+        "operationId": "getApiChanges",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cancel": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Stop the running query",
+        "description": "Cancels the session's running query (it is rolled back): `{cancelled}`. Does not stop an AI Chat turn.",
+        "operationId": "postApiCancel",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graph": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Graph info",
+        "description": "The served graph's info (name, counts, schema mode, catalog counts, store).",
+        "operationId": "getApiGraph",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/execute": {
+      "post": {
+        "tags": [
+          "Queries"
+        ],
+        "summary": "Run a script",
+        "description": "Runs a script (Gremlin in Rhai, `g.gql(..)` for GQL) as ONE unit (it commits when the answer is `ok`, and is rolled back otherwise). The answer is the playground's ExecuteResponse: `{ok, terminal, results | table | subgraph | text, execution: {error?, profile?}, mutated, changes, change_summary, ...}`; a failing script is reported in `execution.error` with status 200.",
+        "operationId": "postApiExecute",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "script": {
+                    "type": "string"
+                  },
+                  "options": {
+                    "type": "object",
+                    "description": "RunOptions: display limits (`maxRows`, `maxItems`, `noLimit`, `offset`), `profile`, `profileTypes`, subgraph limits, ..."
+                  }
+                },
+                "required": [
+                  "script"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/statistics": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Statistics",
+        "description": "`{statistics, memory, process, limits: {presets, defaults}}`: the graph's data counts, its memory footprint (incl. `workload_bytes`), the memory of the process beside it (`process.memory`: RSS, live heap; models; the AI Chat history with `--ai`) and the limits every query runs under.",
+        "operationId": "getApiStatistics",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory": {
+      "get": {
+        "tags": [
+          "Graph"
+        ],
+        "summary": "Memory footprint",
+        "description": "The graph's memory usage (`memoryUsage()`): structure, index and property bytes.",
+        "operationId": "getApiMemory",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/report": {
+      "post": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Memory report",
+        "description": "The memory report: one row per (element, label, property) with bytes, value types, size histogram, distinct strings, compression and index use; labels; the structure's totals. Read-only. `{ok: true, report}` or `{ok: false, error}`.",
+        "operationId": "postApiMemoryReport",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sample_every": {
+                    "type": "integer"
+                  },
+                  "max_elements": {
+                    "type": "integer"
+                  },
+                  "max_rows": {
+                    "type": "integer"
+                  },
+                  "max_labels": {
+                    "type": "integer"
+                  },
+                  "path_depth": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          },
+          "description": "A spec; `{}` for a full report."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/workload": {
+      "get": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Workload statistics",
+        "description": "The workload statistics of the served graph: `{level, queries, properties, locks, jobs}` (level `off` outside a store), each row per channel with the windows `last_hour`, `last_two_days`, `last_ninety_days`. With `history` every row carries `history: [{start, count, failed, items, total_micros, max_micros}]` of that tier (an unknown tier is a 422).",
+        "operationId": "getApiWorkload",
+        "parameters": [
+          {
+            "name": "history",
+            "in": "query",
+            "required": false,
+            "description": "A tier of buckets to add: minutes, hours or days.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "minutes",
+                "hours",
+                "days"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/schema": {
+      "get": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Schema views",
+        "description": "The schema views of the graph (stored or inferred, per label).",
+        "operationId": "getApiSchema",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schema/stored": {
+      "get": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Stored schema",
+        "description": "The stored schema (`null` without one).",
+        "operationId": "getApiSchemaStored",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schema/infer": {
+      "get": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Infer a schema",
+        "description": "A schema inferred from the data (nothing stored).",
+        "operationId": "getApiSchemaInfer",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schema/view": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Views of a draft schema",
+        "description": "The schema views of the given schema with the graph's label counts, `source: \"given\"`; nothing stored.",
+        "operationId": "postApiSchemaView",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "description": "A schema (the schema format)."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/schema/set": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Store a schema",
+        "description": "Stores the schema, validated against the data (422 with the violations).",
+        "operationId": "postApiSchemaSet",
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "description": "Replaces the schema's mode.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "closed",
+                "none"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "description": "A schema."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/schema/patch": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Patch the schema",
+        "description": "Applies a JSON Merge Patch (RFC 7396) to the stored schema.",
+        "operationId": "postApiSchemaPatch",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "description": "A JSON Merge Patch."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/schema/validate": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Validate a schema",
+        "description": "Validates a schema against the data; changes nothing.",
+        "operationId": "postApiSchemaValidate",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/schema/validate-patch": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Validate a schema patch",
+        "description": "Validates the stored schema with a patch applied; changes nothing.",
+        "operationId": "postApiSchemaValidatePatch",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/schema/diff": {
+      "post": {
+        "tags": [
+          "Schema"
+        ],
+        "summary": "Diff a schema",
+        "description": "The differences between the stored schema and the given one.",
+        "operationId": "postApiSchemaDiff",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/graph-view": {
+      "get": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Draw the graph",
+        "description": "The drawing as columns (ids, label indices, captions, edge endpoints as indices), no properties.",
+        "operationId": "getApiGraphView",
+        "parameters": [
+          {
+            "name": "maxNodes",
+            "in": "query",
+            "required": false,
+            "description": "Vertex limit.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "maxEdges",
+            "in": "query",
+            "required": false,
+            "description": "Edge limit.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Draw the graph with a filter",
+        "description": "The same columns with the Graph panel's filter applied before the limits, plus `matchedNodes`/`matchedEdges`; `degrees: true` adds in/out degrees. An invalid filter is a 422.",
+        "operationId": "postApiGraphView",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "maxNodes": {
+                    "type": "integer"
+                  },
+                  "maxEdges": {
+                    "type": "integer"
+                  },
+                  "degrees": {
+                    "type": "boolean"
+                  },
+                  "filter": {
+                    "$ref": "#/components/schemas/GraphFilter"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/graph-filter-query": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Filter as a query",
+        "description": "`{query}`: the Rhai query selecting the vertices and edges the filter shows.",
+        "operationId": "postApiGraphFilterQuery",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GraphFilter"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/neighbourhood": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Neighbourhood",
+        "description": "The vertices within `hops` (1-5) along `direction` of the centre `ids`, plus `keep`, and the edges between them, bounded by `maxNodes`/`maxEdges`; `seeds`, `missing`, `hiddenEdges`, `leftOut`. 422 for an unknown id or a depth above 5.",
+        "operationId": "postApiNeighbourhood",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "hops": {
+                    "type": "integer"
+                  },
+                  "direction": {
+                    "type": "string",
+                    "enum": [
+                      "both",
+                      "out",
+                      "in"
+                    ]
+                  },
+                  "keep": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "maxNodes": {
+                    "type": "integer"
+                  },
+                  "maxEdges": {
+                    "type": "integer"
+                  },
+                  "degrees": {
+                    "type": "boolean"
+                  },
+                  "filter": {
+                    "$ref": "#/components/schemas/GraphFilter"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/sample": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Label sample",
+        "description": "The first vertices of some primary labels or the first edges of one label pair, with `sample: {kind, shown, total, complete}`.",
+        "operationId": "postApiSample",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vertices": {
+                    "type": "object",
+                    "properties": {
+                      "labels": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "exclude": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "edge": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "from": {
+                        "type": "string"
+                      },
+                      "to": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "degrees": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/meta-graph": {
+      "get": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Meta graph",
+        "description": "Vertex labels with counts (the 40 largest) and label pairs with edge counts (the 200 largest).",
+        "operationId": "getApiMetaGraph",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/layout": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Start a force layout",
+        "description": "Starts the engine's force layout of a drawing and runs its first slice: `{job, state, iterations, totalIterations, progress, elapsedMs, vertexCount, cached}`, with `positions` once done or cancelled.",
+        "operationId": "postApiLayout",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vertexCount": {
+                    "type": "integer"
+                  },
+                  "edgeSource": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "edgeTarget": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "seed": {
+                    "type": "integer"
+                  },
+                  "iterations": {
+                    "type": "integer"
+                  },
+                  "budgetMs": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "vertexCount",
+                  "edgeSource",
+                  "edgeTarget"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/layout/step": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Next layout slice",
+        "description": "Runs the next slice (`budgetMs` default 100, at most 500).",
+        "operationId": "postApiLayoutStep",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "job": {
+                    "type": "integer"
+                  },
+                  "budgetMs": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "job"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/layout/cancel": {
+      "post": {
+        "tags": [
+          "Graph panel"
+        ],
+        "summary": "Cancel a layout",
+        "description": "Ends the job, keeping the positions reached so far.",
+        "operationId": "postApiLayoutCancel",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "job": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "job"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/element": {
+      "get": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "One element",
+        "description": "One element with its properties (the inspector); `null` when it no longer exists.",
+        "operationId": "getApiElement",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "description": "vertex or edge",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "vertex",
+                "edge"
+              ]
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "The element id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/element/edit": {
+      "get": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "An element for editing",
+        "description": "The element in the typed form (`{type, value}` per property): `{kind, id, label, labels, source?, target?, properties, readOnly}`.",
+        "operationId": "getApiElementEdit",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "description": "vertex or edge",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "vertex",
+                "edge"
+              ]
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "The element id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/element/update": {
+      "post": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "Update an element",
+        "description": "Writes the changed and removed top-level properties as ONE commit: `{ok: true, changed, element}` or `{ok: false, errors}` (always 200).",
+        "operationId": "postApiElementUpdate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "set": {
+                    "type": "array"
+                  },
+                  "remove": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "validateOnly": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/element/labels": {
+      "post": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "Label choices",
+        "description": "The labels the edit mode offers for a new vertex, or an edge between `from` and `to`.",
+        "operationId": "postApiElementLabels",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/element/create": {
+      "post": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "Create an element",
+        "description": "Creates a vertex or an edge as ONE commit: `{ok: true, created, element, drawn}` or `{ok: false, errors}` (always 200).",
+        "operationId": "postApiElementCreate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "properties": {
+                    "type": "array"
+                  },
+                  "validateOnly": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/element/delete": {
+      "post": {
+        "tags": [
+          "Elements"
+        ],
+        "summary": "Delete an element",
+        "description": "Deletes a vertex with its edges, or an edge, as ONE commit: `{ok: true, deleted, edges}` or `{ok: false, errors}`.",
+        "operationId": "postApiElementDelete",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "validateOnly": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/completions": {
+      "get": {
+        "tags": [
+          "Queries"
+        ],
+        "summary": "Function catalogue",
+        "description": "Every DSL function with its signatures, aliases and doc (completion).",
+        "operationId": "getApiCompletions",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/token-values": {
+      "get": {
+        "tags": [
+          "Queries"
+        ],
+        "summary": "Token values",
+        "description": "The values of the DSL's token classes (`Order` -> asc, desc, shuffle).",
+        "operationId": "getApiTokenValues",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/queries": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Saved queries",
+        "description": "The saved queries with their params, status, writes and effects.",
+        "operationId": "getApiQueries",
+        "parameters": [
+          {
+            "name": "folder",
+            "in": "query",
+            "required": false,
+            "description": "Only this folder and below.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/queries/get": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "One saved query",
+        "description": "One saved query with its body, dialect and meta; `null` when there is none.",
+        "operationId": "getApiQueriesGet",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "The query's name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/queries/define": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Define a saved query",
+        "description": "`{ok: true, query}` or `{ok: false, errors}` (always 200); `replaces` renames in the same commit.",
+        "operationId": "postApiQueriesDefine",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "folder": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string",
+                    "enum": [
+                      "rhai",
+                      "gql"
+                    ]
+                  },
+                  "params": {
+                    "type": "array"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "replaces": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "body"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/queries/drop": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Drop a saved query",
+        "description": "`{dropped}`.",
+        "operationId": "postApiQueriesDrop",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/queries/move": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Move a saved query",
+        "description": "The moved entry.",
+        "operationId": "postApiQueriesMove",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "folder": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/queries/preview": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Preview a call",
+        "description": "The call run as a dry run and rolled back: `{ok: true, changes}` or `{ok: false, error}`.",
+        "operationId": "postApiQueriesPreview",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/queries/call-text": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Call text",
+        "description": "`{text}`: the call `g.query(\"name\", #{..})` with the arguments as Rhai literals.",
+        "operationId": "postApiQueriesCallText",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/catalog/export": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Export the catalog",
+        "description": "The catalog file `{\"definitions\": [..]}` (every kind).",
+        "operationId": "getApiCatalogExport",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/load": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Load a catalog file",
+        "description": "Stores a catalog file in one commit: `{loaded, graph}`.",
+        "operationId": "postApiCatalogLoad",
+        "parameters": [
+          {
+            "name": "replace",
+            "in": "query",
+            "required": false,
+            "description": "true: drop the definitions the file does not have.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "description": "A catalog file."
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/compression": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Compression rules",
+        "description": "The compression rules with their stats.",
+        "operationId": "getApiCompression",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compression/define": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Define a compression rule",
+        "description": "`{ok: true, rule}` or `{ok: false, errors}` (always 200).",
+        "operationId": "postApiCompressionDefine",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  },
+                  "codec": {
+                    "type": "string"
+                  },
+                  "minBytes": {
+                    "type": "integer"
+                  },
+                  "dictionary": {
+                    "type": "boolean"
+                  },
+                  "replaces": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "label",
+                  "path"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/compression/estimate": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Estimate compression",
+        "description": "What candidate rules would save on the current data; changes nothing. `{ok: true, estimate}` or `{ok: false, errors}`.",
+        "operationId": "postApiCompressionEstimate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  },
+                  "codec": {},
+                  "minBytes": {
+                    "type": "integer"
+                  },
+                  "dictionary": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "label",
+                  "path"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/compression/drop": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Drop a compression rule",
+        "description": "`{dropped}`.",
+        "operationId": "postApiCompressionDrop",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/compression/recompress": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Recompress",
+        "description": "The rule's entry after a new dictionary and re-encode (422 when there is none).",
+        "operationId": "postApiCompressionRecompress",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/indexes": {
+      "get": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Property indexes",
+        "description": "The property indexes with their stats.",
+        "operationId": "getApiIndexes",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/indexes/create": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Create a property index",
+        "description": "`{ok: true, index}` or `{ok: false, errors}` (always 200).",
+        "operationId": "postApiIndexesCreate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "element": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "transform": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label",
+                  "key"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/indexes/drop": {
+      "post": {
+        "tags": [
+          "Catalog"
+        ],
+        "summary": "Drop a property index",
+        "description": "`{dropped}`.",
+        "operationId": "postApiIndexesDrop",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Scheduled jobs",
+        "description": "`{timeZone, store, jobs}`: the system jobs, then the jobs of users, each with schedule, enabled, nextAt, last run, run counts, `scheduled`/`reason`; a user job with action, args, path and effects.",
+        "operationId": "getApiJobs",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs/define": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Define a job",
+        "description": "Defines or replaces a job of a user: `{ok: true, job}` or `{ok: false, errors}` (always 200).",
+        "operationId": "postApiJobsDefine",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "schedule": {
+                    "type": "string"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "query",
+                      "checkpoint",
+                      "backup"
+                    ]
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "object"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "timeout_ms": {
+                    "type": "integer"
+                  },
+                  "memory_limit": {
+                    "type": "integer"
+                  },
+                  "run_on": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "schedule",
+                  "action"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/jobs/drop": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Drop a job",
+        "description": "`{dropped}`.",
+        "operationId": "postApiJobsDrop",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/jobs/enable": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Switch a job",
+        "description": "Switches a job on or off: its entry.",
+        "operationId": "postApiJobsEnable",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "enabled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/jobs/schedule": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Schedule a system job",
+        "description": "A system job's schedule (`null`: its built-in one): its entry.",
+        "operationId": "postApiJobsSchedule",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "schedule": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/jobs/run": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Run a job now",
+        "description": "Runs a job now: its entry (`last` = this run).",
+        "operationId": "postApiJobsRun",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/jobs/history": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "summary": "Job run history",
+        "description": "`{tier, buckets}`: the job's runs per minute, hour or day.",
+        "operationId": "getApiJobsHistory",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "The job's name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tier",
+            "in": "query",
+            "required": false,
+            "description": "minutes (default), hours or days.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "minutes",
+                "hours",
+                "days"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/advise": {
+      "post": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Storage advice",
+        "description": "The storage advisor's recommendations (create or drop an index, add or drop a compression rule), each with evidence, cost, memory effect, confidence and its command; `dismissed` and `applied` outcomes. Read-only. `{ok: true, advice}` or `{ok: false, error}`.",
+        "operationId": "postApiAdvise",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "everything": {
+                    "type": "boolean"
+                  },
+                  "min_filter_runs": {
+                    "type": "integer"
+                  },
+                  "min_index_elements": {
+                    "type": "integer"
+                  },
+                  "min_observed_days": {
+                    "type": "integer"
+                  },
+                  "min_compression_bytes": {
+                    "type": "integer"
+                  },
+                  "min_saving_bytes": {
+                    "type": "integer"
+                  },
+                  "min_saving_percent": {
+                    "type": "integer"
+                  },
+                  "hot_reads": {
+                    "type": "integer"
+                  },
+                  "max_estimates": {
+                    "type": "integer"
+                  }
+                },
+                "description": "The advisor's thresholds; `{}`: the defaults, `everything: true`: every candidate."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/advise/apply": {
+      "post": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Apply a recommendation",
+        "description": "Recomputes the advice for `spec`, finds `id` and runs its catalog command (one commit): `{ok: true, id, kind, result}` or `{ok: false, error}`.",
+        "operationId": "postApiAdviseApply",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "spec": {
+                    "type": "object",
+                    "properties": {
+                      "everything": {
+                        "type": "boolean"
+                      },
+                      "min_filter_runs": {
+                        "type": "integer"
+                      },
+                      "min_index_elements": {
+                        "type": "integer"
+                      },
+                      "min_observed_days": {
+                        "type": "integer"
+                      },
+                      "min_compression_bytes": {
+                        "type": "integer"
+                      },
+                      "min_saving_bytes": {
+                        "type": "integer"
+                      },
+                      "min_saving_percent": {
+                        "type": "integer"
+                      },
+                      "hot_reads": {
+                        "type": "integer"
+                      },
+                      "max_estimates": {
+                        "type": "integer"
+                      }
+                    },
+                    "description": "The advisor's thresholds; `{}`: the defaults, `everything: true`: every candidate."
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/advise/dismiss": {
+      "post": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Dismiss a recommendation",
+        "description": "Hides it for `days` (without: for good); kept in the store's workload sidecar. `{ok}`.",
+        "operationId": "postApiAdviseDismiss",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "days": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/advise/restore": {
+      "post": {
+        "tags": [
+          "Optimize"
+        ],
+        "summary": "Restore a recommendation",
+        "description": "Lists a dismissed recommendation again. `{ok}`.",
+        "operationId": "postApiAdviseRestore",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/export": {
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Download the graph",
+        "description": "The graph as GraphSON (`.json`), GraphML or a packed snapshot (`gsnap`, binary).",
+        "operationId": "getApiExport",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": true,
+            "description": "graphson, graphml or gsnap.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "graphson",
+                "graphml",
+                "gsnap"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file (binary for gsnap).",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          }
+        }
+      }
+    },
+    "/api/save": {
+      "post": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Save to the source file",
+        "description": "Writes the graph back to its `--graph` file (and the schema to `--schema`): `{path, format, bytes, warnings, schemaPath?, warning?}`.",
+        "operationId": "postApiSave",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Store info",
+        "description": "`{store: null}` without a store, else position, snapshots, marks, WAL, creation parameters, damage, compaction.",
+        "operationId": "getApiStore",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/store/checkpoint": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Checkpoint",
+        "description": "Writes a checkpoint (422 with the diagnostic on failure; 409 without a store).",
+        "operationId": "postApiStoreCheckpoint",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/mark": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Mark",
+        "description": "Names the current position.",
+        "operationId": "postApiStoreMark",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/snapshot": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Download a snapshot",
+        "description": "A stored snapshot as `.gsnap` (no `commit`: the latest).",
+        "operationId": "getApiStoreSnapshot",
+        "parameters": [
+          {
+            "name": "commit",
+            "in": "query",
+            "required": false,
+            "description": "The snapshot's commit.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file (binary for gsnap).",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
+    "/api/store/view": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Open a read-only view",
+        "description": "Serves the state at `target` read-only: `{view, graph}`.",
+        "operationId": "postApiStoreView",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {}
+                },
+                "required": [
+                  "target"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/live": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Back to the live graph",
+        "description": "Closes the view.",
+        "operationId": "postApiStoreLive",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
+    "/api/store/fork": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Fork",
+        "description": "Copies the state at `target` into a new store `dir`: `{fork}` (409: the directory exists).",
+        "operationId": "postApiStoreFork",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {},
+                  "dir": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "dir"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/rollback": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Roll back",
+        "description": "Rolls the store back to `target` (the undone commits go to the attic unless `delete`).",
+        "operationId": "postApiStoreRollback",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "target": {},
+                  "delete": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "target"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/attic/changes": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Attic changes",
+        "description": "One page of the commits of an attic entry with totals.",
+        "operationId": "getApiStoreAtticChanges",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "The attic entry.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "First commit.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "At most 500 (default 100).",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/attic/restore": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Restore from the attic",
+        "description": "Replays an attic entry onto the live graph.",
+        "operationId": "postApiStoreAtticRestore",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/attic/fork": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Fork an attic entry",
+        "description": "Copies an attic entry into a new store `dir`.",
+        "operationId": "postApiStoreAtticFork",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "dir": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "dir"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/attic/remove": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Remove an attic entry",
+        "description": "Deletes an attic entry.",
+        "operationId": "postApiStoreAtticRemove",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/verify": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Verify",
+        "description": "Reads and checks every file: `{verify: {ok, problems, notes, ...}}`.",
+        "operationId": "postApiStoreVerify",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
+    "/api/store/backup": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Back up",
+        "description": "A verified backup into `dir` (default `<store>-backup`; an existing backup takes an increment).",
+        "operationId": "postApiStoreBackup",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dir": {
+                    "type": "string"
+                  },
+                  "full": {
+                    "type": "boolean"
+                  },
+                  "from_memory": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/store/compaction": {
+      "get": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Compaction advice",
+        "description": "`{compaction: {recommended, reason, reclaimableBytes, ...}}`.",
+        "operationId": "getApiStoreCompaction",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
+    "/api/store/compact": {
+      "post": {
+        "tags": [
+          "Store"
+        ],
+        "summary": "Compact",
+        "description": "Prunes and compacts the store; 409 with `marksUnreachable` when a prune would lose marks and `dropMarks` is not true.",
+        "operationId": "postApiStoreCompact",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dropMarks": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
+          }
+        }
+      }
+    },
+    "/api/ai/conversations": {
+      "post": {
+        "tags": [
+          "AI Chat"
+        ],
+        "summary": "New conversation",
+        "description": "With `--ai` (EXPERIMENTAL): a new conversation `{id}` owned by the page's `X-Graphersal-Client` (required). Without `--ai` every `/api/ai/*` is 404.",
+        "operationId": "postApiAiConversations",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/ai/conversations/{id}/messages": {
+      "post": {
+        "tags": [
+          "AI Chat"
+        ],
+        "summary": "Send a message",
+        "description": "Starts a turn on the server: `{turn}` (409 while one runs; 403 for another client's conversation).",
+        "operationId": "postApiAiConversationsByIdMessages",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The conversation id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          },
+          "409": {
+            "$ref": "#/components/responses/E409"
+          }
+        }
+      }
+    },
+    "/api/ai/conversations/{id}/events": {
+      "get": {
+        "tags": [
+          "AI Chat"
+        ],
+        "summary": "Conversation events",
+        "description": "`{events, running, last}`: the events after `after` (user, assistant, tool_call, tool_result, error, done).",
+        "operationId": "getApiAiConversationsByIdEvents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The conversation id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "The last event seen.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/ai/conversations/{id}/stop": {
+      "post": {
+        "tags": [
+          "AI Chat"
+        ],
+        "summary": "Stop the turn",
+        "description": "`{stopped}`: ends this conversation's turn only.",
+        "operationId": "postApiAiConversationsByIdStop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The conversation id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/api/ai/conversations/{id}": {
+      "delete": {
+        "tags": [
+          "AI Chat"
+        ],
+        "summary": "Drop a conversation",
+        "description": "Drops the conversation (history, pending call, running query).",
+        "operationId": "deleteApiAiConversationsById",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The conversation id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "MCP"
+        ],
+        "summary": "MCP endpoint",
+        "description": "With `--mcp`: the Model Context Protocol endpoint (Streamable HTTP, JSON answers, JSON-RPC 2.0 messages: initialize, tools/list, tools/call, resources/*). Its tools are described by `tools/list`, not here.",
+        "operationId": "postMcp",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "A JSON-RPC 2.0 request."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "404": {
+            "$ref": "#/components/responses/E404"
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "This description",
+        "description": "The OpenAPI description of this API (also at `/api/openapi.json`), with this server's version.",
+        "operationId": "getOpenapiJson",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "This description (under /api)",
+        "description": "The same as `/openapi.json`.",
+        "operationId": "openapiUnderApi",
+        "responses": {
+          "200": {
+            "description": "JSON answer.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "FieldErrors": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": false
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "help": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ]
+            }
+          }
+        },
+        "required": [
+          "ok",
+          "errors"
+        ]
+      },
+      "GraphFilter": {
+        "type": "object",
+        "properties": {
+          "vertices": {
+            "type": "object",
+            "description": "label -> [{key, op, value?}]"
+          },
+          "edges": {
+            "type": "object",
+            "description": "label -> [{key, op, value?}]"
+          },
+          "hiddenVertices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hiddenEdges": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "otherVertices": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "hidden"
+            ]
+          },
+          "otherEdges": {
+            "type": "string",
+            "enum": [
+              "visible",
+              "hidden"
+            ]
+          },
+          "hideIsolated": {
+            "type": "boolean"
+          }
+        },
+        "description": "The Graph panel's filter."
+      }
+    },
+    "responses": {
+      "E400": {
+        "description": "A malformed request (missing body field, not JSON).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E401": {
+        "description": "A missing or wrong MCP token.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E403": {
+        "description": "Another client's resource.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E404": {
+        "description": "Unknown endpoint, id or a disabled feature.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E405": {
+        "description": "Wrong method.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E409": {
+        "description": "Not possible in the server's state (no store, a read-only view, a conflict).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E422": {
+        "description": "Refused by the engine (the diagnostic in `error`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

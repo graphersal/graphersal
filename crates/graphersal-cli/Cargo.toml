@@ -13,7 +13,7 @@ keywords = ["graph", "gremlin", "tinkerpop", "repl", "cli"]
 categories = ["command-line-utilities", "database"]
 # `ui` is a symbolic link to `../../playground`; `cargo package` follows it, so the packaged crate
 # holds a real copy of the UI files `build.rs` embeds (the same entries as its `ENTRIES`).
-include = ["/src/**", "/build.rs", "/ui/index.html", "/ui/css/**", "/ui/js/**", "/ui/assets/**", "/ui/reset/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
+include = ["/src/**", "/build.rs", "/openapi.json", "/ui/index.html", "/ui/css/**", "/ui/js/**", "/ui/assets/**", "/ui/reset/**", "/README.md", "/LICENSE-APACHE", "/NOTICE"]
 
 # `cargo binstall graphersal-cli`: the prebuilt archives of the GitHub Release
 # (.github/workflows/binaries.yml names them `graphersal-v<version>-<platform>`, each holding a

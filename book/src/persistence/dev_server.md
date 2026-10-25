@@ -732,11 +732,19 @@ change or delete data, the schema or a catalog definition is refused. The tab sh
 - The provider's own limits (rate, context length, cost) are yours: a long conversation sends the
   whole history with every call.
 
-## The HTTP API (internal)
+## The HTTP API (EXPERIMENTAL)
 
-For reference while it exists; it follows the playground's engine boundary
-(`playground/js/engine/engine.js`) and may change in any release. Answers are JSON; errors are
+The API follows the playground's engine boundary (`playground/js/engine/engine.js`) and is
+**EXPERIMENTAL**: it may change in any release, minor or patch. Answers are JSON; errors are
 `{"error": "..."}` with a 4xx status (422 for a failing schema operation).
+
+An **OpenAPI 3.1 description** of every endpoint below is part of each release:
+[`crates/graphersal-cli/openapi.json`](https://github.com/graphersal/graphersal/blob/main/crates/graphersal-cli/openapi.json)
+in the repository, and a running server answers it at `GET /openapi.json` (also
+`GET /api/openapi.json`; `GET /api/info` names it as `openapi`), with the server's own version in
+`info.version`. Generate a client from it, or open it in any OpenAPI viewer; pin the Graphersal
+version you read it from. The schemas in it are deliberately loose (objects with the documented
+keys); the table below and the linked pages describe every answer.
 
 | Endpoint | Engine method |
 |---|---|
@@ -804,6 +812,9 @@ For reference while it exists; it follows the playground's engine boundary
 | `GET /api/indexes` | `listIndexes()`: the [property indexes](../users_guide/property_indexes.md) `[{name, element, label, key, type, transform, served, reason, stats: {entries, distinctValues, skipped, bytes} \| null}]` (`transform` is `null` or `"to_lower"`; `stats` is `null`, `served` false and `reason` a text when the storage keeps the definition but serves no index, or the index type or transform is unknown to this version; `reason` is `null` otherwise) |
 | `POST /api/indexes/create` `{label, key, element?, name?, type?, transform?}` | `createIndex(spec)`: `{ok: true, index}` or `{ok: false, errors: [{field, message, help?}]}` (always 200; `field` is `name`, `element`, `label`, `key`, `type`, `transform` or `general`; an unknown `type` is an error of `type`, an unknown `transform` of `transform`, a key the schema declares as values the index cannot hold one of `key`); `name` defaults to `<label>_<key>` (`<label>_<key>_edge` for an edge index, then `_to_lower` with that transform), `type` to `memory-ordered`, `transform` to none (`"to_lower"`: case-insensitive search with `has(key, __.to_lower().is(..))`); an existing name is refused (drop it first) |
 | `POST /api/indexes/drop` `{name}` | `dropIndex(name)`: `{dropped}` |
+| `POST /api/memory/report` (a spec, `{}`: a full report) | `memoryReport(spec)`: the [memory report](../users_guide/memory_and_profiling.md), `{ok, report}` or `{ok: false, error}` |
+| `POST /api/advise` (thresholds, `{}`: the defaults), `POST /api/advise/apply` `{id, spec}`, `POST /api/advise/dismiss` `{id, days?}`, `POST /api/advise/restore` `{id}` | `advise(spec)`, `applyRecommendation(id, spec)`, `dismissRecommendation(id, days)`, `restoreRecommendation(id)`: the [storage advisor](optimize.md) |
+| `GET /openapi.json`, `GET /api/openapi.json` | the OpenAPI description of this API, with this server's version |
 
 A `target` is `{"commit": N}`, `{"mark": "name"}` or `{"time": T}` with `T` an RFC 3339 date-time
 (as the CLI's `--at-time`) or microseconds. `GET /api/store` lists every attic entry with

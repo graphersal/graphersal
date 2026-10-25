@@ -810,6 +810,15 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
     if path == "/mcp" {
         return mcp::route(context, request, &method);
     }
+    if path == "/openapi.json" || path == "/api/openapi.json" {
+        return match method {
+            Method::Get | Method::Head => Ok(json_response(200, &openapi())),
+            _ => Err(HttpError(
+                405,
+                format!("method {method} is not allowed on {path}"),
+            )),
+        };
+    }
     if !path.starts_with("/api/") {
         return match method {
             Method::Get | Method::Head => serve_static(&context.ui, path),
@@ -1233,6 +1242,19 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
     }
 }
 
+/// The OpenAPI description of this HTTP API (`openapi.json` beside the crate's manifest,
+/// EXPERIMENTAL), answered at `GET /openapi.json` and `GET /api/openapi.json` with this binary's
+/// version in `info.version` (the file carries the same; `server_tests.rs` checks it and that
+/// every route is described).
+fn openapi() -> Value {
+    let mut spec: Value =
+        serde_json::from_str(include_str!("../../openapi.json")).unwrap_or(Value::Null);
+    if let Some(info) = spec.get_mut("info").and_then(Value::as_object_mut) {
+        info.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
+    }
+    spec
+}
+
 /// `GET /api/info`: what the UI needs to switch to this server; answered without the session.
 fn info(context: &Context) -> Value {
     json!({
@@ -1240,6 +1262,8 @@ fn info(context: &Context) -> Value {
         "name": "server",
         "dev": true,
         "unstable": true,
+        // The OpenAPI description of this API (EXPERIMENTAL).
+        "openapi": "/openapi.json",
         "version": env!("CARGO_PKG_VERSION"),
         // The binary installs the counting allocator (main.rs) and queries run on one thread.
         "memoryTracked": true,

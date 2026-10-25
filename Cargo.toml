@@ -20,7 +20,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.3.0"
 authors = ["Aleksandr Dederer <aleks@graphersal.dev>"]
 repository = "https://github.com/graphersal/graphersal"
 homepage = "https://graphersal.dev"
@@ -55,9 +55,9 @@ panic = "abort"
 
 [workspace.dependencies]
 # Internal workspace crates
-graphersal = { path = "crates/graphersal", version = "0.2.3" }
-graphersal-session = { path = "crates/graphersal-session", version = "0.2.3" }
-graphersal-storage-tests = { path = "crates/graphersal-storage-tests", version = "0.2.3" }
+graphersal = { path = "crates/graphersal", version = "0.3.0" }
+graphersal-session = { path = "crates/graphersal-session", version = "0.3.0" }
+graphersal-storage-tests = { path = "crates/graphersal-storage-tests", version = "0.3.0" }
 
 # Core Graph & Algorithms
 compact_str = { version = "0.10", features = ["serde"] }
