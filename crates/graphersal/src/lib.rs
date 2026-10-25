@@ -31,6 +31,7 @@ pub mod exec;
 pub(crate) mod gql;
 // Graph storage, schema and indexes: internal; the public items are re-exported by the topic
 // modules (`storage`, `schema`, `changes`, `auth`, `catalog`, `exec`).
+pub mod advisor;
 pub(crate) mod graph;
 #[cfg(feature = "io")]
 pub mod io;

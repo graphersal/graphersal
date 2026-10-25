@@ -130,6 +130,47 @@ impl<S: GraphStorage> Graph<S> {
         self.workload.get()
     }
 
+    /// The storage advisor's recommendations (book page "Optimize",
+    /// [`crate::advisor`]): the memory report and the measured compression candidates under one
+    /// read lock, the workload statistics attached to the graph (none: only the data is looked
+    /// at, so no index advice). Fails for a cancelled memory report or estimate (the running
+    /// thread's [`CancelToken`](crate::CancelToken)). Unauthorized: a front end asks its
+    /// authorizer for `Read` on the data first.
+    pub fn advise(
+        &self,
+        request: &crate::graph::advisor::AdviceRequest,
+    ) -> crate::error::TraverserResult<crate::graph::advisor::Advice> {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64);
+        let workload = self
+            .workload_stats()
+            .map(|stats| stats.report_with_history(now, crate::graph::workload::HistoryTier::Days));
+        let guard = self.read();
+        let source = crate::GraphTraversalSource::new(&*guard);
+        let memory =
+            source.memory_report(&crate::graph::memory_report::MemoryReportRequest::new())?;
+        let mut failure = None;
+        let mut estimate =
+            |request: &crate::graph::compression_estimate::CompressionEstimateRequest| {
+                match source.estimate_compression(request) {
+                    Ok(estimate) => Some(estimate),
+                    Err(err) if matches!(*err, crate::TraverserError::Cancelled { .. }) => {
+                        failure = Some(err);
+                        None
+                    }
+                    // A storage without compressed properties: no compression advice.
+                    Err(_) => None,
+                }
+            };
+        let advice =
+            crate::graph::advisor::compute(&memory, workload.as_ref(), &mut estimate, request, now);
+        match failure {
+            Some(err) => Err(err),
+            None => Ok(advice),
+        }
+    }
+
     /// A new graph around `storage` with the same capabilities at the dyn boundary as `self`
     /// (the snapshot writer of [`Graph::new_persistent`]): a whole-script unit moves the
     /// storage into such a private graph.

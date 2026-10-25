@@ -126,6 +126,7 @@ export const state = reactive({
   // The manager the Catalog dropdown opened: 'queries' | 'compression' | null (the Workspace
   // hosts the dialogs; openCatalog sets it, the dialog clears it when it closes).
   catalogDialog: null,
+  optimizeN: 0, // bumped by every openOptimize: the Optimize panel opens
   catalogDialogN: 0, // bumped by every openCatalog, so opening the same manager again reopens it
   catalogDialogScript: null, // the tab text "Save as query…" hands to the saved-query editor
   focusPanel: null, // {panel, tab, n}: a request to reveal a panel/tab
@@ -1296,6 +1297,24 @@ export async function loadCatalogFile(file) {
 }
 
 /** Opens a manager of the Catalog dropdown: 'queries', 'compression' or 'indexes'. */
+/** Opens the Optimize panel (js/components/optimize.js). */
+export function openOptimize() {
+  state.optimizeN++;
+}
+
+/**
+ * A recommendation of the Optimize panel was applied (an index or a compression rule created
+ * or dropped): the catalog lists and the graph info (its counts) reload.
+ */
+export async function optimizeApplied() {
+  await Promise.all([refreshIndexes(), refreshCompressions()]);
+  try {
+    state.graph = await state.engine.graphInfo();
+  } catch (err) {
+    /* the counts in the info are cosmetic */
+  }
+}
+
 export function openCatalog(id) {
   state.catalogDialog = id;
   state.catalogDialogN++;

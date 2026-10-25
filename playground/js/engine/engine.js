@@ -718,6 +718,35 @@ export class Engine {
   async dropIndex(name) { throw notImplemented('dropIndex'); }
 
   /**
+   * The memory report of the graph for a spec `{max_rows?, max_labels?, sample_every?, ...}`
+   * (`{}`: a full report): `{ok: true, report}` or `{ok: false, error}` (graphersal_session's
+   * `memory_report`; snake_case keys). Read-only.
+   */
+  async memoryReport(spec) { throw notImplemented('memoryReport'); }
+
+  /**
+   * The workload statistics of the graph: `{level, queries, properties, locks, jobs}`; with
+   * `history` (`minutes`, `hours`, `days`) every row has `history: [{start, count, failed,
+   * items, total_micros, max_micros}]` of that tier (chart data). Read-only.
+   */
+  async workloadReport(history) { throw notImplemented('workloadReport'); }
+
+  /**
+   * The storage advisor's recommendations for a spec of thresholds (`{}`: the defaults,
+   * `{everything: true}`: every candidate): `{ok: true, advice: {workload_level, observed_since,
+   * commit_seq, property_bytes, estimates, recommendations: [{id, kind, element, label, key,
+   * title, evidence, cost, memory_bytes, measured, confidence, reversible, command, action}]}}`
+   * or `{ok: false, error}`. Read-only.
+   */
+  async advise(spec) { throw notImplemented('advise'); }
+
+  /**
+   * Applies the recommendation `id` of the advice for `spec` (one commit through the catalog's
+   * own operation): `{ok: true, id, kind, result}` or `{ok: false, error}`.
+   */
+  async applyRecommendation(id, spec) { throw notImplemented('applyRecommendation'); }
+
+  /**
    * AI Chat (dev server with `--ai` only; js/ai-chat.js): `aiCreateConversation() -> {id}`,
    * `aiSend(id, text) -> {turn}`, `aiEvents(id, after) -> {events, running, last}`,
    * `aiStop(id) -> {stopped}`, `aiDelete(id)`. Errors carry the HTTP status as `status`. The

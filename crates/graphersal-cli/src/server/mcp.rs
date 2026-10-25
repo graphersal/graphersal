@@ -51,7 +51,9 @@
 //! (`Session::workload_report`): the queries, properties, lock times and jobs counted, at most
 //! 50 rows per list (most total time first) unless `max_rows` says otherwise. `list_jobs`
 //! (reading) answers the scheduled jobs (`Session::jobs_view`); defining, switching or running
-//! a job stays the user's (the playground's job list, `/api/jobs*`).
+//! a job stays the user's (the playground's job list, `/api/jobs*`). `advise` (reading)
+//! answers the storage advisor's recommendations (`Session::advise`), each with the command
+//! applying it through the catalog tools.
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
@@ -1144,6 +1146,24 @@ fn all_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "advise",
+            "Storage advice",
+            Kind::Read,
+            "Recommendations of the storage advisor, WITHOUT changing anything: create a \
+             property index for a key filtered often by a full scan, drop an index no query \
+             used, compress or deduplicate large strings (savings measured on the data), stop \
+             compressing a key read often. Each has evidence, cost, memory_bytes (freed; \
+             negative = taken), confidence and the exact command applying it (create_index, \
+             drop_index, define_compression, drop_compression: apply one only when the user \
+             asked for it). everything: true lists every candidate (small graphs).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "everything": {"type": "boolean", "description": "Report every candidate, ignoring the default thresholds (for small graphs)."},
+                },
+            }),
+        ),
+        tool(
             "list_jobs",
             "List scheduled jobs",
             Kind::Read,
@@ -1660,6 +1680,16 @@ fn run_tool(
             Ok(format!(
                 "Workload statistics (times in microseconds, rows sorted by total time):\n{}",
                 compact(&report)
+            ))
+        }
+        "advise" => {
+            let spec = json!({"everything": args.get("everything").and_then(Value::as_bool).unwrap_or(false)});
+            let answer = context
+                .call(move |s| s.advise(&spec))
+                .map_err(http_failed)?;
+            Ok(format!(
+                "Storage advice (memory_bytes: freed, negative = taken):\n{}",
+                compact(&answer)
             ))
         }
         "list_jobs" => Ok(format!(

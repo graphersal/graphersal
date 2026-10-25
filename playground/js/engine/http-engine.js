@@ -409,6 +409,25 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'indexes/drop', JSON.stringify({ name }));
   }
 
+  // The Optimize panel (`/api/memory/report`, `/api/workload`, `/api/advise*`): reading, but
+  // applying a recommendation is a commit and shows in the change feed.
+
+  async memoryReport(spec) {
+    return this.request('POST', 'memory/report', JSON.stringify(spec || {}));
+  }
+
+  async workloadReport(history) {
+    return this.request('GET', history ? `workload?history=${encodeURIComponent(history)}` : 'workload');
+  }
+
+  async advise(spec) {
+    return this.request('POST', 'advise', JSON.stringify(spec || {}));
+  }
+
+  async applyRecommendation(id, spec) {
+    return this.request('POST', 'advise/apply', JSON.stringify({ id, spec: spec || {} }));
+  }
+
   async listSampleGraphs() {
     return [];
   }

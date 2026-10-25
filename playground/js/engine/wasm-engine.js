@@ -472,6 +472,26 @@ export class WasmEngine extends Engine {
     return res;
   }
 
+  // The Optimize panel.
+
+  async memoryReport(spec) {
+    return this.call('memoryReport', plain(spec || {}));
+  }
+
+  async workloadReport(history) {
+    return this.call('workloadReport', history || null);
+  }
+
+  async advise(spec) {
+    return this.call('advise', plain(spec || {}));
+  }
+
+  async applyRecommendation(id, spec) {
+    const res = await this.call('applyRecommendation', id, plain(spec || {}));
+    if (res && res.ok) await this.catalogChanged();
+    return res;
+  }
+
   /** The page changed the catalog: the restore point of a Stop keeps the new catalog. */
   async catalogChanged() {
     this.catalogJson = await this.call('saveCatalog');
