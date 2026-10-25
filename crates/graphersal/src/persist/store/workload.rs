@@ -149,3 +149,117 @@ impl<S: PersistentStorage> Store<S> {
         jobs
     }
 }
+
+impl<S: PersistentStorage + Default> Store<S> {
+    /// The scheduled jobs of users in this store's catalog (kind `job`, book page "Scheduled
+    /// Jobs"), for the host's [`Scheduler`](crate::jobs::Scheduler)
+    /// ([`sync_user_jobs`](crate::jobs::Scheduler::sync_user_jobs) whenever the catalog's jobs
+    /// changed): a `query` job calls its saved query as one unit carrying `{job: <name>}` in its
+    /// commit metadata, under an authorizer limited to the job's stored effects (feature
+    /// `script`); `checkpoint` writes a checkpoint, `backup` backs the store up into its directory
+    /// (not on wasm32). A disabled job is listed switched off; a job this version does not run
+    /// (an unknown action, `run_on` `replica` on a single instance) is left out.
+    pub fn user_jobs(&self) -> Vec<Job> {
+        let definitions: Vec<crate::graph::definition::Definition> = self
+            .graph
+            .read()
+            .definitions()
+            .filter(|d| d.kind() == crate::graph::definition::DefinitionKind::JOB)
+            .cloned()
+            .collect();
+        definitions
+            .iter()
+            .filter_map(|definition| self.user_job(definition.name(), definition.as_job()?))
+            .collect()
+    }
+
+    fn user_job(&self, name: &str, job: &crate::graph::jobs::JobDefinition) -> Option<Job> {
+        use crate::graph::jobs::{JobTask, RunOn};
+        if let Some(reason) = job.unserved_reason() {
+            tracing::info!("the job '{name}' is not scheduled: {reason}");
+            return None;
+        }
+        if matches!(job.run_on(), RunOn::Replica | RunOn::Unknown(_)) {
+            return None;
+        }
+        let schedule = job.schedule().parse().ok()?;
+        let job_name = name.to_string();
+        let action: crate::graph::jobs::JobAction = match job.action() {
+            JobTask::Query { name: query, args } => {
+                self.query_action(&job_name, query, args, job.effects())
+            }
+            JobTask::Checkpoint => {
+                let core = Arc::clone(&self.core);
+                Box::new(move |_| {
+                    core.checkpoint(None)
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())
+                })
+            }
+            JobTask::Backup { path } => {
+                // The directory the definer was allowed (resolved under the host's file
+                // root when the job was defined), else the path as written.
+                let target = job
+                    .effects()
+                    .iter()
+                    .find_map(|effect| match effect.as_request().resource {
+                        crate::graph::Resource::File { path } => Some(path.to_path_buf()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| std::path::PathBuf::from(path));
+                let core = Arc::clone(&self.core);
+                Box::new(move |_| backup_to(&core, &target))
+            }
+            JobTask::Unknown(_) => return None,
+        };
+        let mut built = Job::new(name, JobKind::User, schedule, action).with_limits(job.limits());
+        if !job.enabled() {
+            built = built.disabled();
+        }
+        Some(built)
+    }
+
+    #[cfg(feature = "script")]
+    fn query_action(
+        &self,
+        job: &str,
+        query: &str,
+        args: &crate::value::PropertyMap,
+        effects: &[crate::graph::AccessRequestBuf],
+    ) -> crate::graph::jobs::JobAction {
+        let graph = crate::graph::IntoAnyGraph::into_any_graph(Arc::clone(&self.graph));
+        let (job, query, args, effects) = (
+            job.to_string(),
+            query.to_string(),
+            args.clone(),
+            effects.to_vec(),
+        );
+        Box::new(move |_| {
+            crate::script::run_query_job(graph.clone(), &job, &query, &args, effects.clone())
+        })
+    }
+
+    #[cfg(not(feature = "script"))]
+    fn query_action(
+        &self,
+        _job: &str,
+        _query: &str,
+        _args: &crate::value::PropertyMap,
+        _effects: &[crate::graph::AccessRequestBuf],
+    ) -> crate::graph::jobs::JobAction {
+        Box::new(|_| Err("this build cannot call saved queries (feature `script`)".to_string()))
+    }
+}
+
+/// A backup job's run: the store into the directory `target`.
+#[cfg(not(target_arch = "wasm32"))]
+fn backup_to(core: &StoreCore, target: &std::path::Path) -> Result<(), String> {
+    core.backup(target)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn backup_to(_core: &StoreCore, _target: &std::path::Path) -> Result<(), String> {
+    Err("a backup job writes a directory, and this build has no file system".to_string())
+}

@@ -848,6 +848,8 @@ pub trait SessionStore: Send + Sync {
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError>;
     /// [`Store::system_jobs`].
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job>;
+    /// [`Store::user_jobs`].
+    fn user_jobs(&self) -> Vec<graphersal::jobs::Job>;
     /// [`Store::workload_stats`].
     fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats>;
     /// [`Store::checkpoint`].
@@ -953,6 +955,9 @@ where
     }
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job> {
         Store::<S>::system_jobs(self)
+    }
+    fn user_jobs(&self) -> Vec<graphersal::jobs::Job> {
+        Store::<S>::user_jobs(self)
     }
     fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats> {
         Store::<S>::workload_stats(self)

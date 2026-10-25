@@ -693,3 +693,28 @@ fn a_report_with_history_gives_the_buckets_of_the_tier() {
     assert!(stats.report(T0).series[0].history.is_empty());
     assert_eq!(stats.report(T0).history, None);
 }
+
+/// A saved query called inside a whole-script unit (the playground runs every script as one)
+/// counts as `saved:<name>` too: the unit's private graph has no statistics of its own.
+#[test]
+fn a_saved_query_call_inside_a_whole_script_unit_counts() {
+    let dir = MemDir::named("memory:saved-in-unit");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let graph = store.graph().clone();
+    let _ = crate::script_host::eval_value(
+        graph.clone(),
+        r#"g.define_query(#{name: "people", body: "fn people() { g.v().has_label(\"person\") }"})"#,
+    )
+    .unwrap();
+    store.workload_stats().clear(None);
+    let _ = graphersal::script::eval_value_atomic(
+        graph,
+        r#"g.query("people").values("name").to_list()"#,
+        Default::default(),
+        &graphersal::script::ScriptLimits::default(),
+        std::sync::Arc::new(graphersal::auth::AllowAll),
+    )
+    .unwrap();
+    let runs = queries(&store);
+    assert!(runs.iter().any(|(q, _, _)| q == "saved:people"), "{runs:?}");
+}

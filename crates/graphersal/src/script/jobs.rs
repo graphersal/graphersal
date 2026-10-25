@@ -401,3 +401,32 @@ impl ScriptGraphTraversalSource {
             .map_err(script_error)
     }
 }
+
+/// One run of a `query` job (`Store::user_jobs`): calls the saved query `query` with `args` as
+/// one unit carrying `{job: <job>}` in its commit metadata, under an authorizer limited to the
+/// job's stored `effects`; a traversal the query returns runs inside the unit.
+pub(crate) fn run_query_job(
+    graph: Arc<dyn AnyGraph>,
+    job: &str,
+    query: &str,
+    args: &crate::value::PropertyMap,
+    effects: Vec<AccessRequestBuf>,
+) -> Result<(), String> {
+    let mut params = std::collections::HashMap::new();
+    params.insert("job_query".to_string(), ElementProperty::from(query));
+    params.insert(
+        "job_args".to_string(),
+        ElementProperty::Object(Box::new(args.clone())),
+    );
+    let authorizer = Arc::new(crate::graph::jobs::JobAuthorizer::new(job, effects));
+    let metadata = crate::graph::CommitMetadata::new().with_attribute("job", job);
+    super::eval::eval_job_unit(
+        graph,
+        "g.query(job_query, job_args)",
+        params,
+        &ScriptLimits::default(),
+        authorizer,
+        metadata,
+    )
+    .map_err(|err| err.to_string())
+}
