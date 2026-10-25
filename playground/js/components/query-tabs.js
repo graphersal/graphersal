@@ -4,14 +4,15 @@
 // stale (another tab changed the graph after it ran). "+" opens a menu: a Query tab, a GQL query
 // tab (a Query tab in GQL, marked "GQL"; js/gql-tab.js) or an AI Chat tab (its own accent
 // colour; js/ai-chat.js). "Share as link…" opens the share dialog, like the
-// top bar's Share button (components/share-dialog.js). "Save as query…" opens the saved-query
+// top bar's Share button (components/share-dialog.js); both are hidden over the dev server (a link
+// to the public playground cannot carry a server's graph). "Save as query…" opens the saved-query
 // editor on the tab's text (a `g.gql(..)` tab: a query written in GQL). The state and the
 // actions are in store.js.
 
 import { ref, nextTick, watch } from 'vue';
 import {
   state, switchTab, newTab, newGqlTab, newChatTab, closeTab, closeOtherTabs, duplicateTab, renameTab, moveTab, runAllTabs,
-  openShareDialog, saveTabAsQuery,
+  openShareDialog, saveTabAsQuery, isServerMode,
 } from '../store.js';
 import { modKey } from '../util.js';
 import { DropMenu } from './drop-menu.js';
@@ -84,6 +85,7 @@ export const QueryTabs = {
 
     return {
       state, editing, draftName, strip, modKey, tabTitle, openShare: openShareDialog, saveTabAsQuery,
+      serverMode: isServerMode,
       switchTab, closeTab, closeOtherTabs, duplicateTab, runAllTabs,
       newTab: () => newTab(), newGqlTab: () => newGqlTab(), newChatTab: () => newChatTab(), startRename, commitRename, cancelRename, onAux, onDragStart, onDrop,
     };
@@ -122,7 +124,7 @@ export const QueryTabs = {
       <button class="menu-item" @click="duplicateTab()">Duplicate tab</button>
       <button class="menu-item" @click="startRename(state.tab)">Rename tab</button>
       <div class="menu-sep"></div>
-      <button class="menu-item" @click="openShare()" :disabled="state.running || !state.graph" title="A link that opens this tab's query with the graph (small graphs only)">Share as link…</button>
+      <button v-if="!serverMode()" class="menu-item" @click="openShare()" :disabled="state.running || !state.graph" title="A link that opens this tab's query with the graph (small graphs only)">Share as link…</button>
       <button class="menu-item" @click="saveTabAsQuery()" :disabled="!state.graph || state.tab.kind === 'ai' || !state.tab.script.trim()"
               title="Store this tab's query in the graph as a saved query: a GQL tab (or a tab holding one g.gql(…) call) is saved as a GQL query with its $parameters">Save as query…</button>
       <div class="menu-sep"></div>
