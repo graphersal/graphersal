@@ -19,7 +19,7 @@ import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
 import { taskStartText, taskEndText } from './store-model.js';
 import { VALUE_MAX_CHARS } from './value-view.js';
-import { PUBLIC_PLAYGROUND, MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
+import { MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
 import {
   GQL_TAB_TEMPLATE, gqlCallText, gqlErrorSpan, switchTabLanguage, withQueryParams, tabLanguage,
 } from './gql-tab.js';
@@ -673,6 +673,9 @@ export function registerShareDialog(open) {
 
 /** Opens the share dialog: the top bar's Share button and the tab menu's "Share as link…". */
 export function openShareDialog() {
+  // Over the dev server there is nothing to share: a link opens the public playground, which
+  // has neither the server's graph nor its store.
+  if (isServerMode()) return;
   if (shareDialogOpener) shareDialogOpener();
 }
 
@@ -680,7 +683,7 @@ export function openShareDialog() {
  * The link of the share dialog (components/share-dialog.js) for the active tab: its query and the
  * graph, as a sample name when the graph is a sample that has not changed, otherwise the graph's
  * GraphSON and schema compressed into the link (js/link.js). Saved queries and compression rules
- * are not included. On the dev server the link points to the public playground.
+ * are not included. Not offered over the dev server (openShareDialog).
  * Resolves to `{url, chars, fits, sample, vertexCount, edgeCount, schema, tooMany}`.
  * @param {{run?: boolean}} [options]
  */
@@ -689,11 +692,11 @@ export async function makeShareLink({ run = true } = {}) {
   const graph = state.graph;
   if (!state.engine || !graph || !tab) throw new Error('No graph is open.');
   const script = tab.kind === 'ai' ? '' : tab.script.trim();
-  const base = isServerMode() ? PUBLIC_PLAYGROUND : window.location.href;
+  const base = window.location.href;
   const title = tab.name;
   const counts = { vertexCount: graph.vertexCount, edgeCount: graph.edgeCount };
   let store = null;
-  if (!isServerMode() && typeof state.engine.storeInfo === 'function') {
+  if (typeof state.engine.storeInfo === 'function') {
     try {
       store = await state.engine.storeInfo();
     } catch (err) {

@@ -5790,3 +5790,44 @@ fn workload_statistics_count_queries_per_channel() {
     assert!(text.contains("\"queries_omitted\":1"), "{text}");
     assert!(text.contains("\"channel\":\"mcp\"") || text.contains("\"channel\":\"playground\""));
 }
+
+/// `GET /api/workload?history=minutes` and the MCP tool's `history` add every row's buckets
+/// (chart data); an unknown tier is a 422 / a tool error naming the tiers.
+#[test]
+fn workload_history_over_http_and_mcp() {
+    let ui = ui_dir("workload-history");
+    let data = ui.parent().unwrap().join("workload-history-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+    ]);
+    let port = server.port;
+    let r = execute(port, r#"g.add_v("person").iterate()"#);
+    assert_eq!(r["ok"], true, "{r}");
+    let report = get(port, "/api/workload?history=minutes").json();
+    assert_eq!(report["history_tier"], "minutes", "{report}");
+    let history = report["queries"][0]["history"].as_array().unwrap();
+    assert_eq!(history[0]["count"], 1, "{report}");
+    let bad = get(port, "/api/workload?history=weeks");
+    assert_eq!(bad.status, 422, "{}", bad.body);
+    assert!(bad.body.contains("minutes"), "{}", bad.body);
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call(
+        "workload_statistics",
+        serde_json::json!({"history": "hours"}),
+    );
+    assert!(!error, "{text}");
+    assert!(text.contains("\"history_tier\":\"hours\""), "{text}");
+    let (error, text) = mcp.call(
+        "workload_statistics",
+        serde_json::json!({"history": "weeks"}),
+    );
+    assert!(error, "{text}");
+}

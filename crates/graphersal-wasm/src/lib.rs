@@ -482,10 +482,18 @@ impl Playground {
     }
 
     /// The workload statistics of the served graph (JSON text, see
-    /// [`Session::workload_report`]).
+    /// [`Session::workload_report`]); with `history` (`minutes`, `hours`, `days`) every row's
+    /// buckets of that tier ([`Session::workload_report_with_history`]).
     #[wasm_bindgen(js_name = workloadReport)]
-    pub fn workload_report(&self) -> String {
-        to_text(&self.session.workload_report())
+    pub fn workload_report(&self, history: Option<String>) -> Result<String, JsError> {
+        match history {
+            None => Ok(to_text(&self.session.workload_report())),
+            Some(tier) => self
+                .session
+                .workload_report_with_history(&tier)
+                .map(|report| to_text(&report))
+                .map_err(|err| JsError::new(&err)),
+        }
     }
 
     /// Sets the time zone the scheduled jobs run in (the browser's zone, from

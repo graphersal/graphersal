@@ -131,6 +131,14 @@ The JSON form (`WorkloadReport::to_json`) has the keys `level`, `queries` (`quer
 are sorted by total time over 90 days. A graph outside a store answers level `off` with empty
 lists.
 
+**History.** Asked with a tier (`?history=minutes|hours|days` on the dev server, the MCP tool's
+`history`, Python's `workload_report(history="hours")`, Rust's
+`report_with_history(now, HistoryTier::Hours)`), the report adds `history_tier` and gives every
+row its `history`: the buckets of that tier within its window (the last 60 minutes, 48 hours or
+90 days), oldest first, only those in which something was counted, each `{start, count, failed,
+items, total_micros, max_micros}` with `start` in microseconds since the Unix epoch. That is the
+data of a chart: how often a query ran and how long it took, minute by minute or day by day.
+
 
 ```rust
 use graphersal::persist::{MemDir, Store, StoreOptions};

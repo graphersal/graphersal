@@ -28,11 +28,29 @@ fn counters(c: &Counters) -> ElementProperty {
     object(map)
 }
 
-fn windows(map: &mut PropertyMap, series: &SeriesTotals) {
+fn windows(map: &mut PropertyMap, series: &SeriesTotals, history: bool) {
     map.insert("channel", text(series.key.channel.name()));
     map.insert("last_hour", counters(&series.last_hour));
     map.insert("last_two_days", counters(&series.last_two_days));
     map.insert("last_ninety_days", counters(&series.last_ninety_days));
+    if history {
+        let buckets = series
+            .history
+            .iter()
+            .map(|bucket| {
+                let mut map = PropertyMap::default();
+                map.insert("start", ElementProperty::from(bucket.start));
+                let c = &bucket.counters;
+                map.insert("count", int(c.count));
+                map.insert("failed", int(c.failed));
+                map.insert("items", int(c.items));
+                map.insert("total_micros", int(c.total_micros));
+                map.insert("max_micros", int(c.max_micros));
+                object(map)
+            })
+            .collect();
+        map.insert("history", ElementProperty::Array(buckets));
+    }
 }
 
 fn last_run(run: Option<&JobRunRecord>) -> ElementProperty {
@@ -54,8 +72,13 @@ impl WorkloadReport {
     /// the last 90 days first; `properties` (`element`, `label`, `key`, `access`; `null` element
     /// or label = not stated by the plan); `locks` (`lock`); `jobs` (`name`, `last_run`); every
     /// series row with its `channel` and the windows `last_hour` / `last_two_days` /
-    /// `last_ninety_days` (`count`, `failed`, `items`, `total_micros`, `max_micros`).
+    /// `last_ninety_days` (`count`, `failed`, `items`, `total_micros`, `max_micros`). A report
+    /// with history ([`WorkloadStats::report_with_history`](super::WorkloadStats::report_with_history))
+    /// adds `history_tier` (`minutes`, `hours`, `days`) and to every row `history`: its buckets,
+    /// oldest first, only those with something counted, each `{start, count, failed, items,
+    /// total_micros, max_micros}` (`start` in microseconds since the Unix epoch).
     pub fn to_property(&self) -> ElementProperty {
+        let history = self.history.is_some();
         let mut series: Vec<&SeriesTotals> = self.series.iter().collect();
         series.sort_by(|a, b| {
             b.last_ninety_days
@@ -70,7 +93,7 @@ impl WorkloadReport {
             match &row.key.kind {
                 SeriesKind::Query(query) => {
                     map.insert("query", text(query));
-                    windows(&mut map, row);
+                    windows(&mut map, row, history);
                     queries.push(object(map));
                 }
                 SeriesKind::Property(property) => {
@@ -89,17 +112,17 @@ impl WorkloadReport {
                     );
                     map.insert("key", text(&property.key));
                     map.insert("access", text(property.access.name()));
-                    windows(&mut map, row);
+                    windows(&mut map, row, history);
                     properties.push(object(map));
                 }
                 SeriesKind::Lock(lock) => {
                     map.insert("lock", text(lock));
-                    windows(&mut map, row);
+                    windows(&mut map, row, history);
                     locks.push(object(map));
                 }
                 SeriesKind::Job(name) => {
                     map.insert("name", text(name));
-                    windows(&mut map, row);
+                    windows(&mut map, row, history);
                     let run = self
                         .jobs
                         .iter()
@@ -112,6 +135,9 @@ impl WorkloadReport {
         }
         let mut map = PropertyMap::default();
         map.insert("level", text(self.level.name()));
+        if let Some(tier) = self.history {
+            map.insert("history_tier", text(tier.name()));
+        }
         map.insert("queries", ElementProperty::Array(queries));
         map.insert("properties", ElementProperty::Array(properties));
         map.insert("locks", ElementProperty::Array(locks));

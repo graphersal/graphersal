@@ -331,7 +331,7 @@ export const Workspace = {
         </span>
       </template>
       <span class="spacer"></span>
-      <button v-if="state.graph" type="button" class="btn share-btn" @click="openShareDialog" :disabled="state.running"
+      <button v-if="state.graph && !serverMode" type="button" class="btn share-btn" @click="openShareDialog" :disabled="state.running"
               title="Share as link: a link that opens this tab's query with the graph (small graphs only)">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2L8 3.8" /><path d="M9.5 6.5a3 3 0 0 0-4.2 0L2.7 9.1a3 3 0 0 0 4.2 4.2L8 12.2" /></svg>
         <span>Share<span class="hide-narrow"> link</span></span>

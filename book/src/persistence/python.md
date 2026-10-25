@@ -49,7 +49,7 @@ with graphersal.Store.create("data") as store:            # or Store.open("data"
 | `store.graph` | the store's `Graph`; every commit is durable before it returns | [Commits](store_commits.md) |
 | `store.close()`, `with ...:` | a clean close; the graph refuses commits afterwards | |
 | `store.open_report()` | what the open did | |
-| `store.workload_report()` | the [workload statistics](workload_statistics.md): queries, property uses, lock times, jobs (Python's queries under the channel `python`) | |
+| `store.workload_report(history=None)` | the [workload statistics](workload_statistics.md): queries, property uses, lock times, jobs (Python's queries under the channel `python`); `history="minutes"\|"hours"\|"days"` adds every row's buckets | |
 | `store.checkpoint(name=None)` | write a snapshot | [Checkpoints](store_checkpoints.md) |
 | `store.mark(name)`, `store.marks()` | name the position; list the marks | [Marks](store_marks.md) |
 | `store.snapshots()` | the snapshots, oldest first | |

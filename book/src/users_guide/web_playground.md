@@ -186,6 +186,9 @@ graph goes into the link itself, with its schema. Saved queries and compression 
 included. Copy the link into a bug report or a message; whoever opens it gets the same graph and
 query in their own browser.
 
+The playground over the [dev server](../getting_started/server_mcp_ai.md) has no Share button:
+its graph lives on the server, and a link to the public playground could not carry it.
+
 **Only small graphs fit into a link.** A link is at most 60,000 characters, so that it fits into
 the text of an issue: roughly a graph of a thousand elements, fewer with long property values. For
 a bug report, reduce the graph to the few vertices and edges that reproduce the problem and leave
