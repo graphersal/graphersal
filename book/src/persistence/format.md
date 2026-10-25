@@ -266,12 +266,15 @@ job count u32 | per job: name | started_at i64 (microseconds) | microseconds u64
 section count u32 | per section: tag u8 | byte length u32 | bytes        (version 2; may be absent)
     tag 1, the system jobs' settings: count u32 | per job: name | schedule flag u8
             [+ cron text] | enabled u8 (0 unset, 1 off, 2 on)
+    tag 2, the storage advisor's marks (book page "Optimize"): count u32 | per mark: id
+            | dismissed flag u8 [+ until i64, microseconds; i64::MAX = for good]
+            | applied flag u8 [+ at i64 | kind | title | promised bytes i64 | bytes before u64]
 CRC-32C u32 of everything before it
 ```
 
 All integers little-endian. Version 1 has no sections and is still read; in version 2 the
 sections may be left out (no settings). A section of a tag the reader does not know is skipped
-by its byte length. The settings of the system jobs (book page "Scheduled Jobs") are data of the
+by its byte length. The settings of the system jobs (book page "Scheduled Jobs") and the advisor's marks are data of the
 instance like the statistics: they are lost with the file. A reader MUST treat the file as optional: a missing file, a wrong
 magic, length or checksum, or a version it does not know means "no statistics" (it starts anew
 and replaces the file at its next write), never damage, never a reason to refuse the store. A

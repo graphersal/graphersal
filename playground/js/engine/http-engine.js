@@ -454,6 +454,14 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'advise', JSON.stringify(spec || {}));
   }
 
+  async dismissRecommendation(id, days) {
+    return this.request('POST', 'advise/dismiss', JSON.stringify(days == null ? { id } : { id, days }));
+  }
+
+  async restoreRecommendation(id) {
+    return this.request('POST', 'advise/restore', JSON.stringify({ id }));
+  }
+
   async applyRecommendation(id, spec) {
     return this.request('POST', 'advise/apply', JSON.stringify({ id, spec: spec || {} }));
   }

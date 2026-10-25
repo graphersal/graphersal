@@ -23,13 +23,24 @@ candidate* in the playground, `everything: true` in the API, or each threshold o
 workload statistics (a graph outside a store) only the data is looked at, so there is no index
 advice.
 
+## Dismissing, and what an applied one did
+
+A recommendation can be **snoozed** for 7 days or **dismissed** for good; it is then listed under
+*Dismissed* (with **Restore**) until its time. Applying one records the memory before and what it
+promised: for 30 days the advice lists it under *Applied* with the memory freed (or taken) since,
+measured on the graph's property and property index memory (other changes of the data in the
+meantime count too), and for a new index the indexed lookups of its key. Dismissals and these
+records are settings of the instance, not data: they are kept in the store's
+[workload statistics](workload_statistics.md) sidecar and need a store.
+
 ## In the playground
 
 The top bar's **Optimize** opens one panel with three tabs:
 
 - **Recommendations**: each with its evidence, cost, memory effect, confidence and the exact
   command; **Apply** runs it (one commit, recorded in the change feed like any catalog change),
-  **Copy** copies the command.
+  **Copy** copies the command, **Snooze 7 days** and **Dismiss** hide it; below the list,
+  *Applied* (the outcomes) and *Dismissed* (with **Restore**).
 - **Workload**: the workload statistics as tables (queries, properties, locks, jobs) for a window
   (the last hour, 2 days or 90 days) and a channel, with a sparkline of the runs per row; a row
   opens its chart: runs per minute, hour or day with the failed part, and the mean and the
@@ -41,7 +52,7 @@ The top bar's **Optimize** opens one panel with three tabs:
 
 | Front end | How |
 |---|---|
-| dev server | `POST /api/advise` with the thresholds (`{}`: the defaults); `POST /api/advise/apply` `{id, spec}` applies one by its id |
+| dev server | `POST /api/advise` with the thresholds (`{}`: the defaults); `POST /api/advise/apply` `{id, spec}` applies one by its id; `POST /api/advise/dismiss` `{id, days?}` and `POST /api/advise/restore` `{id}` |
 | MCP | tool `advise` {everything} (reading, also in read-only mode); the agent applies a recommendation with `create_index`, `drop_index`, `define_compression` or `drop_compression` when the user asks |
 | Rust | `Graph::advise(&AdviceRequest)`, module `graphersal::advisor` |
 
@@ -71,4 +82,7 @@ The JSON form (`Advice::to_json`, the answer of every front end) has `workload_l
 `observed_since`, `commit_seq`, `property_bytes`, `estimates` and `recommendations`, each with
 `id` (stable: the kind and the target), `kind`, `element`, `label`, `key`, `title`, `evidence`,
 `cost`, `memory_bytes` (freed; negative when it takes memory), `measured`, `confidence` (`low`,
-`medium`, `high`), `reversible`, `command` and `action` (the catalog change as fields).
+`medium`, `high`), `reversible`, `command` and `action` (the catalog change as fields); then
+`dismissed` (`id`, `title`, `until`: `null` for good) and `applied` (`id`, `kind`, `title`, `at`,
+`promised_bytes`, `measured_bytes`, `index_lookups`), and `memory_bytes`, the figure the outcomes
+are measured on.

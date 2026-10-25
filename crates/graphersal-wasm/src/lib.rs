@@ -535,6 +535,23 @@ impl Playground {
         Ok(to_text(&self.session.apply_recommendation(id, &spec)))
     }
 
+    /// Dismisses the recommendation `id` for `days` (`null`: for good): `{ok}` or `{ok: false,
+    /// error}`.
+    #[wasm_bindgen(js_name = dismissRecommendation)]
+    pub fn dismiss_recommendation(&mut self, id: &str, days: Option<f64>) -> String {
+        to_text(
+            &self
+                .session
+                .dismiss_recommendation(id, days.map(|d| d.max(0.0) as u64)),
+        )
+    }
+
+    /// Lists the dismissed recommendation `id` again: `{ok}`.
+    #[wasm_bindgen(js_name = restoreRecommendation)]
+    pub fn restore_recommendation(&mut self, id: &str) -> String {
+        to_text(&self.session.restore_recommendation(id))
+    }
+
     /// Defines (or replaces) a job of a user from the form's spec (JSON text, see
     /// `graphersal_session::jobs`): `{ok, job}` or `{ok: false, errors: [{field, message,
     /// help?}]}`; never throws for a refused job. The playground has no files, so no backup jobs.

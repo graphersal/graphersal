@@ -17,7 +17,12 @@
 //!   recommendation `id` and runs its catalog command through the session's own operation
 //!   (`create_index`, `drop_index`, `define_compression`, `drop_compression`: one commit, the
 //!   change feed records it); answers `{ok: true, id, kind, result}` (the operation's answer)
-//!   or `{ok: false, error}` (gone meanwhile, refused).
+//!   or `{ok: false, error}` (gone meanwhile, refused). In a store the application is recorded
+//!   (the memory before and what was promised), so the advice lists its outcome for 30 days;
+//! - **dismiss / restore** (`dismiss_recommendation(id, days)`, `restore_recommendation(id)`): a
+//!   dismissed recommendation leaves the list for `days` (`None`: for good) and is listed under
+//!   `dismissed`; kept in the store's workload sidecar (an instance preference, not data). Both
+//!   answer `{ok: true}` or `{ok: false, error}` (no store: no statistics to keep it in).
 
 use graphersal::advisor::{AdviceRequest, RecommendedAction};
 use graphersal::storage::ElementKind;
@@ -130,6 +135,7 @@ impl Session {
             });
         };
         let kind = recommendation.action.kind();
+        let before = advice.memory_bytes;
         let element = |element: &ElementKind| element.as_str().to_string();
         let result = match &recommendation.action {
             RecommendedAction::CreateIndex {
@@ -181,8 +187,57 @@ impl Session {
                 });
             }
         };
+        if let Some(stats) = self.graph.workload_stats() {
+            let applied = graphersal::workload::AppliedAdvice::new(
+                now_micros(),
+                kind,
+                recommendation.title.clone(),
+                recommendation.memory_bytes,
+                before,
+            );
+            stats.mark_advice(id, |mark| {
+                mark.applied = Some(applied);
+                mark.dismissed_until = None;
+            });
+        }
         json!({"ok": true, "id": id, "kind": kind, "result": result})
     }
+
+    /// Dismisses the recommendation `id` for `days` (`None`: for good) (module docs).
+    pub fn dismiss_recommendation(&mut self, id: &str, days: Option<u64>) -> Value {
+        let Some(stats) = self.graph.workload_stats() else {
+            return json!({"ok": false, "error": NO_STATISTICS});
+        };
+        let until = match days {
+            None => i64::MAX,
+            Some(days) => now_micros().saturating_add(
+                i64::try_from(days)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(86_400_000_000),
+            ),
+        };
+        stats.mark_advice(id, |mark| mark.dismissed_until = Some(until));
+        json!({"ok": true})
+    }
+
+    /// Lists the dismissed recommendation `id` again (module docs).
+    pub fn restore_recommendation(&mut self, id: &str) -> Value {
+        let Some(stats) = self.graph.workload_stats() else {
+            return json!({"ok": false, "error": NO_STATISTICS});
+        };
+        stats.mark_advice(id, |mark| mark.dismissed_until = None);
+        json!({"ok": true})
+    }
+}
+
+/// Why a dismissal cannot be kept.
+const NO_STATISTICS: &str =
+    "the graph is not in a store: a dismissal is kept in the store's workload statistics";
+
+fn now_micros() -> i64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as i64)
 }
 
 /// A refused catalog operation's field errors as one error text.
@@ -259,5 +314,37 @@ mod tests {
         assert_eq!(s.advise(&json!([]))["ok"], false);
         // Without a store: no workload statistics, the data alone.
         assert_eq!(s.advise(&Value::Null)["advice"]["workload_level"], "off");
+    }
+
+    #[test]
+    fn an_applied_recommendation_is_recorded_and_one_can_be_dismissed() {
+        let mut s = Session::new();
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        for _ in 0..2 {
+            s.execute(
+                r#"g.v().has_label("person").has("age", P.gt(30)).values("name").to_list()"#,
+                &crate::RunOptions::default(),
+            );
+        }
+        let spec = json!({"everything": true});
+        let id = "create_index:vertex:person:age";
+        // Dismissed for 7 days: under `dismissed`; restored: recommended again.
+        assert_eq!(s.dismiss_recommendation(id, Some(7))["ok"], true);
+        let advice = s.advise(&spec)["advice"].clone();
+        assert_eq!(advice["dismissed"][0]["id"], id, "{advice}");
+        assert!(advice["dismissed"][0]["until"].as_i64().is_some());
+        assert_eq!(s.restore_recommendation(id)["ok"], true);
+        assert_eq!(s.apply_recommendation(id, &spec)["ok"], true);
+        let advice = s.advise(&spec)["advice"].clone();
+        let applied = &advice["applied"][0];
+        assert_eq!(applied["id"], id, "{advice}");
+        assert_eq!(applied["kind"], "create_index");
+        assert!(applied["promised_bytes"].as_i64().unwrap() < 0);
+        assert!(applied["measured_bytes"].as_i64().unwrap() < 0, "{applied}");
+        assert_eq!(applied["index_lookups"], 0);
+        // Without a store there is nowhere to keep a dismissal.
+        let mut plain = Session::new();
+        assert_eq!(plain.dismiss_recommendation(id, None)["ok"], false);
     }
 }

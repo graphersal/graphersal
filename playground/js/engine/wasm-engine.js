@@ -522,6 +522,14 @@ export class WasmEngine extends Engine {
     return this.call('advise', plain(spec || {}));
   }
 
+  async dismissRecommendation(id, days) {
+    return this.call('dismissRecommendation', id, days == null ? null : days);
+  }
+
+  async restoreRecommendation(id) {
+    return this.call('restoreRecommendation', id);
+  }
+
   async applyRecommendation(id, spec) {
     const res = await this.call('applyRecommendation', id, plain(spec || {}));
     if (res && res.ok) await this.catalogChanged();

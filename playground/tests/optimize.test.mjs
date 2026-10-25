@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   recommendationRows, adviceSummary, effectText, channels, workloadRows, bucketSeries, sparkPath,
-  chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, TIERS,
+  chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals, TIERS, dismissedRows, appliedRows,
 } from '../js/optimize.js';
 
 const MIN = 60e6;
@@ -131,4 +131,18 @@ test('workload rows sort by channel, failed and either direction', () => {
   assert.equal(byFailed[0].failed, 1);
   const fewestRuns = workloadRows(REPORT, 'queries', 'hour', 'all', NOW, { sort: 'count', desc: false });
   assert.deepEqual(fewestRuns.map((r) => r.count), [2, 5]);
+});
+
+test('dismissed and applied recommendations become rows', () => {
+  const advice = {
+    dismissed: [{ id: 'a', title: 'Drop the unused index x', until: null }, { id: 'b', title: 'Compress c', until: NOW + 3 * TIERS.days.width }],
+    applied: [{ id: 'c', kind: 'create_index', title: 'Create an index on person.age', at: NOW - 2 * TIERS.days.width, promised_bytes: -2048, measured_bytes: -1024, index_lookups: 12 }],
+  };
+  assert.deepEqual(dismissedRows(advice, NOW).map((d) => d.until), ['for good', 'for 3 more days']);
+  const [row] = appliedRows(advice, NOW);
+  assert.equal(row.when, '2 days ago');
+  assert.equal(row.promised, 'takes 2 KiB');
+  assert.equal(row.measured, 'takes 1 KiB');
+  assert.equal(row.lookups, '12 indexed lookups since');
+  assert.deepEqual(dismissedRows(null), []);
 });

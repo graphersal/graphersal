@@ -414,6 +414,63 @@ impl JobOverride {
     }
 }
 
+/// What the instance keeps about one storage-advisor recommendation (book page "Optimize"), by
+/// its id: a dismissal (until a time, `i64::MAX` = for good) and the record of applying it (the
+/// baseline its outcome is measured against). Settings of the instance like [`JobOverride`]:
+/// kept at every level, written to the sidecar at level `persisted`, never deleted by
+/// [`WorkloadStats::clear`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdviceMark {
+    /// Not recommended before this time (microseconds since the Unix epoch).
+    pub dismissed_until: Option<i64>,
+    /// When it was applied, and the figures before.
+    pub applied: Option<AppliedAdvice>,
+}
+
+impl AdviceMark {
+    /// Whether it says nothing.
+    pub fn is_empty(&self) -> bool {
+        self.dismissed_until.is_none() && self.applied.is_none()
+    }
+}
+
+/// The record of an applied recommendation: when, what it was and the memory figures before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppliedAdvice {
+    /// When it was applied (microseconds since the Unix epoch).
+    pub at: i64,
+    /// Its kind (`create_index`, ...).
+    pub kind: String,
+    /// Its title.
+    pub title: String,
+    /// The memory it promised to free (negative: to take), in bytes.
+    pub promised_bytes: i64,
+    /// The graph's property bytes plus property index bytes before it was applied.
+    pub bytes_before: u64,
+}
+
+impl AppliedAdvice {
+    /// The record of `kind` / `title` applied at `at`, which promised `promised_bytes` when the
+    /// graph held `bytes_before`.
+    pub fn new(
+        at: i64,
+        kind: impl Into<String>,
+        title: impl Into<String>,
+        promised_bytes: i64,
+        bytes_before: u64,
+    ) -> Self {
+        Self {
+            at,
+            kind: kind.into(),
+            title: title.into(),
+            promised_bytes,
+            bytes_before,
+        }
+    }
+}
+
 /// The most query series kept; a new query beyond it evicts the one run least in the last 90
 /// days (the query statistics stay bounded whatever the workload).
 pub const MAX_QUERY_SERIES: usize = 500;
@@ -424,6 +481,8 @@ struct Inner {
     jobs: HashMap<CompactString, JobRunRecord>,
     /// The system jobs' settings ([`JobOverride`]), by job name.
     overrides: HashMap<CompactString, JobOverride>,
+    /// The storage advisor's marks ([`AdviceMark`]), by recommendation id.
+    advice: HashMap<String, AdviceMark>,
     /// Something changed since the last flush.
     dirty: bool,
 }
@@ -592,6 +651,14 @@ impl WorkloadStats {
         for (name, setting) in &inner.overrides {
             bytes += heap(name) + setting.schedule.as_ref().map_or(0, |s| s.capacity() as u64);
         }
+        bytes += inner.advice.capacity() as u64
+            * (size_of::<String>() + size_of::<AdviceMark>() + 1) as u64;
+        for (id, mark) in &inner.advice {
+            bytes += id.capacity() as u64
+                + mark.applied.as_ref().map_or(0, |a| {
+                    (size_of::<AppliedAdvice>() + a.kind.capacity() + a.title.capacity()) as u64
+                });
+        }
         bytes
     }
 
@@ -668,6 +735,30 @@ impl WorkloadStats {
             inner.overrides.remove(name);
         } else {
             inner.overrides.insert(name.into(), setting);
+        }
+        inner.dirty = true;
+    }
+
+    /// Every storage-advisor mark, by recommendation id.
+    pub fn advice_marks(&self) -> Vec<(String, AdviceMark)> {
+        let mut all: Vec<(String, AdviceMark)> = self
+            .inner
+            .lock()
+            .advice
+            .iter()
+            .map(|(id, mark)| (id.clone(), mark.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
+    /// Changes the mark of recommendation `id` with `change` (an empty result removes it).
+    pub fn mark_advice(&self, id: &str, change: impl FnOnce(&mut AdviceMark)) {
+        let mut inner = self.inner.lock();
+        let mut mark = inner.advice.remove(id).unwrap_or_default();
+        change(&mut mark);
+        if !mark.is_empty() {
+            inner.advice.insert(id.to_string(), mark);
         }
         inner.dirty = true;
     }

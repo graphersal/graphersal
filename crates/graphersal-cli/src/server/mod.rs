@@ -1017,6 +1017,24 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             let spec = body.get("spec").cloned().unwrap_or(Value::Null);
             value(context.call(move |s| s.apply_recommendation(&id, &spec))?)
         }
+        // `{id, days?}`: not recommended for `days` (without: for good); `{id}`: listed again.
+        (Method::Post, "advise/dismiss") => {
+            let body = json_body(request)?;
+            let id = body["id"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| HttpError(400, "the body needs \"id\"".to_string()))?;
+            let days = body["days"].as_u64();
+            value(context.call(move |s| s.dismiss_recommendation(&id, days))?)
+        }
+        (Method::Post, "advise/restore") => {
+            let body = json_body(request)?;
+            let id = body["id"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| HttpError(400, "the body needs \"id\"".to_string()))?;
+            value(context.call(move |s| s.restore_recommendation(&id))?)
+        }
         // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
         (Method::Post, "memory/report") => {
             let body = json_body(request)?;
@@ -1179,6 +1197,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "memory/report"
             | "advise"
             | "advise/apply"
+            | "advise/dismiss"
+            | "advise/restore"
             | "jobs"
             | "jobs/define"
             | "jobs/drop"
