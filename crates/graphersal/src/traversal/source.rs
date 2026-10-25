@@ -2412,6 +2412,52 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// succeeded (empty unless profiling was enabled), so a failed run still has its partial
     /// profile.
     fn run(&mut self) -> RunOutcome<S> {
+        let started = Instant::now();
+        let outcome = self.run_once();
+        // The query statistics (book page "Workload Statistics"): one sample per run of the
+        // optimized plan, when the graph's lock guard put statistics on this thread.
+        if let Some((stats, origin)) = crate::graph::workload::scope::attached() {
+            self.record_query(&stats, origin.channel, started, &outcome);
+        }
+        outcome
+    }
+
+    /// Counts one run in the query statistics: its fingerprint (the optimized plan with its
+    /// literals replaced), result count (with bulk), duration and failure. Out of line: only a
+    /// graph with statistics pays the rendering.
+    #[inline(never)]
+    fn record_query(
+        &self,
+        stats: &crate::graph::workload::WorkloadStats,
+        channel: crate::graph::workload::Channel,
+        started: Instant,
+        outcome: &RunOutcome<S>,
+    ) {
+        use crate::graph::workload::{SeriesKey, SeriesKind, fingerprint};
+        let plan: Vec<String> = self.steps.iter().map(GraphStep::get_name).collect();
+        let key = SeriesKey::new(
+            SeriesKind::Query(fingerprint::normalize(&plan.join(".")).into()),
+            channel,
+        );
+        let items = match &outcome.result {
+            Ok(traversers) => traversers
+                .iter()
+                .fold(0u64, |sum, traverser| sum.saturating_add(traverser.bulk)),
+            Err(_) => 0,
+        };
+        let mut sample =
+            crate::graph::workload::Sample::new(items, started.elapsed().as_micros() as u64);
+        if outcome.result.is_err() {
+            sample = sample.failed();
+        }
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64);
+        stats.record(key, now, sample);
+    }
+
+    /// [`Self::run`] without the query statistics.
+    fn run_once(&mut self) -> RunOutcome<S> {
         // The permission check runs on the plan as written, before the optimizer can fuse or
         // move a step, and before anything executes.
         // An error before the run is respelled like one inside it (`render.spelling`).

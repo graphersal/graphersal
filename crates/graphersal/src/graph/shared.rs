@@ -53,7 +53,12 @@ pub(crate) type SnapshotWriter<S> =
 
 /// Shared read access to the storage of a [`Graph`] ([`Graph::read`]); dereferences to `S`.
 /// The lock is released when the guard is dropped.
-pub struct GraphRead<'a, S: GraphStorage = TraversalGraph>(parking_lot::RwLockReadGuard<'a, S>);
+pub struct GraphRead<'a, S: GraphStorage = TraversalGraph> {
+    guard: parking_lot::RwLockReadGuard<'a, S>,
+    /// Makes the graph's statistics the thread's while the guard lives (executions record into
+    /// them).
+    _attached: Option<crate::graph::workload::scope::Attached>,
+}
 
 /// Exclusive write access to the storage of a [`Graph`] ([`Graph::write`],
 /// [`Graph::try_write`]); dereferences (mutably) to `S`. The lock is released when the guard is
@@ -62,6 +67,8 @@ pub struct GraphWrite<'a, S: GraphStorage = TraversalGraph> {
     guard: parking_lot::RwLockWriteGuard<'a, S>,
     /// When the lock was acquired and where the hold time goes (statistics attached only).
     held: Option<(Instant, &'a Arc<WorkloadStats>)>,
+    /// Makes the graph's statistics the thread's while the guard lives.
+    _attached: Option<crate::graph::workload::scope::Attached>,
 }
 
 /// The statistics a lock event is counted in (attached), with the series key of `name` under
@@ -145,12 +152,19 @@ impl<S: GraphStorage> Graph<S> {
     /// Locks the graph for reading, blocking while a writer holds it. Several readers may hold
     /// it at once.
     pub fn read(&self) -> GraphRead<'_, S> {
+        let attached = self.attached();
         let Some((stats, key)) = lock_series(&self.workload, "read.wait") else {
-            return GraphRead(self.lock.read());
+            return GraphRead {
+                guard: self.lock.read(),
+                _attached: attached,
+            };
         };
         // Uncontended: no clock read, nothing counted.
         if let Some(guard) = self.lock.try_read() {
-            return GraphRead(guard);
+            return GraphRead {
+                guard,
+                _attached: attached,
+            };
         }
         let asked = Instant::now();
         let guard = self.lock.read();
@@ -160,7 +174,17 @@ impl<S: GraphStorage> Graph<S> {
             now_micros(),
             crate::graph::workload::Sample::new(0, wait),
         );
-        GraphRead(guard)
+        GraphRead {
+            guard,
+            _attached: attached,
+        }
+    }
+
+    /// The guard that makes this graph's statistics the thread's (none attached: `None`).
+    fn attached(&self) -> Option<crate::graph::workload::scope::Attached> {
+        self.workload
+            .get()
+            .map(crate::graph::workload::scope::Attached::new)
     }
 
     /// Locks the graph for writing, blocking until no reader or writer holds it.
@@ -169,6 +193,7 @@ impl<S: GraphStorage> Graph<S> {
             return GraphWrite {
                 guard: self.lock.write(),
                 held: None,
+                _attached: self.attached(),
             };
         };
         let asked = Instant::now();
@@ -183,6 +208,7 @@ impl<S: GraphStorage> Graph<S> {
         GraphWrite {
             guard,
             held: Some((acquired, stats)),
+            _attached: self.attached(),
         }
     }
 
@@ -192,7 +218,11 @@ impl<S: GraphStorage> Graph<S> {
         let guard = self.lock.try_write()?;
         let held =
             lock_series(&self.workload, "write.hold").map(|(stats, _)| (Instant::now(), stats));
-        Some(GraphWrite { guard, held })
+        Some(GraphWrite {
+            guard,
+            held,
+            _attached: self.attached(),
+        })
     }
 
     /// The storage itself, without locking: the exclusive borrow proves nobody else holds it.
@@ -263,7 +293,7 @@ impl<S: GraphStorage> Deref for GraphRead<'_, S> {
 
     #[inline]
     fn deref(&self) -> &S {
-        &self.0
+        &self.guard
     }
 }
 

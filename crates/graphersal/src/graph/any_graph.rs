@@ -97,6 +97,9 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// [`GraphStorage::memory_usage`] of the storage.
     fn memory_usage(&self) -> Option<MemoryStats>;
 
+    /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
+    fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>>;
+
     /// The memory report of the storage
     /// ([`GraphTraversalSource::memory_report`](crate::GraphTraversalSource::memory_report)),
     /// computed under one read lock. Fails for an invalid request and when cancelled (the
@@ -312,6 +315,10 @@ where
 
     fn memory_usage(&self) -> Option<MemoryStats> {
         self.read().memory_usage()
+    }
+
+    fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {
+        Graph::workload_stats(self).cloned()
     }
 
     fn memory_report(

@@ -4,9 +4,10 @@
 //! all for technical work (queries the front end made up itself: schema inference, drawing,
 //! panels, the advisor's reads).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
-use super::Channel;
+use super::{Channel, WorkloadStats};
 
 /// What the current thread runs: its channel and whether it is technical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,6 +18,53 @@ pub(crate) struct Origin {
 
 thread_local! {
     static CURRENT: Cell<Option<Origin>> = const { Cell::new(None) };
+    /// The statistics of the graph whose lock guard this thread holds (the innermost one).
+    static ATTACHED: RefCell<Option<Arc<WorkloadStats>>> = const { RefCell::new(None) };
+}
+
+/// While alive, makes `stats` the statistics executions on this thread record into (a lock
+/// guard of a graph with statistics holds one); dropping restores the previous ones.
+pub(crate) struct Attached(Option<Arc<WorkloadStats>>);
+
+impl Attached {
+    /// Attaches `stats` to the current thread.
+    pub(crate) fn new(stats: &Arc<WorkloadStats>) -> Self {
+        let previous = ATTACHED
+            .try_with(|current| {
+                current
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut current| current.replace(Arc::clone(stats)))
+            })
+            .ok()
+            .flatten();
+        Attached(previous)
+    }
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        let _ = ATTACHED.try_with(|current| {
+            if let Ok(mut current) = current.try_borrow_mut() {
+                *current = previous;
+            }
+        });
+    }
+}
+
+/// The statistics executions on this thread record into: those of the graph whose lock guard
+/// the thread holds, when they are on and the work is not technical.
+pub(crate) fn attached() -> Option<(Arc<WorkloadStats>, Origin)> {
+    let origin = current();
+    if origin.technical {
+        return None;
+    }
+    let stats = ATTACHED
+        .try_with(|current| current.try_borrow().ok().and_then(|c| c.clone()))
+        .ok()
+        .flatten()?;
+    (stats.level() != super::WorkloadLevel::Off).then_some((stats, origin))
 }
 
 /// Runs `run` counting its samples under `channel` (`technical`: not counted at all). Scopes

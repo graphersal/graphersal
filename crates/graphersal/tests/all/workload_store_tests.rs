@@ -302,5 +302,98 @@ fn a_graph_without_statistics_counts_nothing() {
     assert!(graph.attach_workload_stats(stats.clone()));
     assert!(!graph.attach_workload_stats(stats.clone()), "attached once");
     graph.write().traversal_mut().add_v("y").to_list().unwrap();
-    assert_eq!(stats.report(0).series.len(), 2);
+    // write.wait, write.hold and the query itself (stage C).
+    let kinds: Vec<SeriesKind> = stats
+        .report(0)
+        .series
+        .into_iter()
+        .map(|s| s.key.kind)
+        .collect();
+    assert_eq!(kinds.len(), 3, "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, SeriesKind::Query(_))));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Query statistics (0b stage C)
+// ---------------------------------------------------------------------------------------------
+
+fn queries(store: &Store) -> Vec<(String, Channel, graphersal::workload::Counters)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    store
+        .workload_stats()
+        .report(now)
+        .series
+        .into_iter()
+        .filter_map(|s| match &s.key.kind {
+            SeriesKind::Query(text) => Some((text.to_string(), s.key.channel, s.last_hour)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn runs_count_under_their_normalized_plan() {
+    let dir = MemDir::named("memory:queries");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    for name in ["marko", "vadas", "nobody"] {
+        let graph = store.graph().read();
+        graph
+            .traversal()
+            .v(None)
+            .has("name", name)
+            .values("age")
+            .to_list()
+            .unwrap();
+    }
+    let found = queries(&store);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let (text, channel, counters) = &found[0];
+    assert_eq!(text, r#"v().has(?, ?).values(?)"#);
+    assert_eq!(*channel, Channel::Host);
+    assert_eq!(counters.count, 3);
+    assert_eq!(
+        counters.items, 2,
+        "29 and 27: two results over the three runs"
+    );
+
+    // A failing run counts as failed; technical work not at all; another channel apart.
+    graphersal::workload::scope(Channel::Mcp, false, || {
+        let graph = store.graph().read();
+        let _ = graph.traversal().v(None).values("name").as_bool().to_list();
+    });
+    graphersal::workload::scope(Channel::Playground, true, || {
+        let graph = store.graph().read();
+        graph.traversal().v(None).count().next().unwrap();
+    });
+    let found = queries(&store);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let mcp = found.iter().find(|(_, c, _)| *c == Channel::Mcp).unwrap();
+    assert_eq!((mcp.2.count, mcp.2.failed), (1, 1));
+}
+
+#[test]
+fn a_saved_query_call_counts_under_its_name() {
+    use std::sync::Arc;
+    let dir = MemDir::named("memory:saved");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let graph: Arc<graphersal::storage::Graph> = store.graph().clone();
+    crate::script_host::eval_value(
+        graph.clone(),
+        r#"g.define_query(#{name: "people", body: "fn people() { g.v().has_label(\"person\") }"})"#,
+    )
+    .unwrap();
+    store.workload_stats().clear(None);
+    crate::script_host::eval_value(graph, r#"g.query("people").values("name").to_list()"#).unwrap();
+    let found = queries(&store);
+    let names: Vec<&str> = found.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert!(names.contains(&"saved:people"), "{names:?}");
+    assert!(
+        names
+            .iter()
+            .any(|t| t.starts_with("v(") && t.contains("values(?)")),
+        "the plan it returned runs and counts too: {names:?}"
+    );
 }
