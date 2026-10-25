@@ -1820,3 +1820,6 @@ input.ve-null { color: var(--text-muted); }
 .op-totals { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
 .op-total { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 120px; font-size: 13px; }
 .cj-schedule { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.op-applied { background: var(--ok-soft); }
+.op-dismissed { margin-top: 10px; }
+.op-dismissed summary { cursor: pointer; color: var(--text-muted); }

@@ -12,6 +12,9 @@
 //! section count u32 | per section: tag u8 | byte length u32 | bytes          (version 2)
 //!     tag 1, the system jobs' settings: count u32 | per job: name | schedule flag u8 [+ text]
 //!            | enabled u8 (0 unset, 1 off, 2 on)
+//!     tag 2, the storage advisor's marks: count u32 | per mark: id | dismissed flag u8
+//!            [+ until i64] | applied flag u8 [+ at i64 | kind | title | promised i64
+//!            | bytes before u64]
 //! CRC-32C u32 of everything before it
 //! ```
 //!
@@ -32,6 +35,7 @@ use super::{
 const MAGIC: &[u8; 8] = b"GRWLSTAT";
 const VERSION: u32 = 2;
 const SECTION_JOB_OVERRIDES: u8 = 1;
+const SECTION_ADVICE_MARKS: u8 = 2;
 const KIND_JOB: u8 = 1;
 const KIND_LOCK: u8 = 2;
 const KIND_QUERY: u8 = 3;
@@ -170,10 +174,40 @@ impl WorkloadStats {
                 Some(true) => 2,
             });
         }
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.push(SECTION_JOB_OVERRIDES);
-        out.extend_from_slice(&(section.len() as u32).to_le_bytes());
-        out.extend_from_slice(&section);
+        let mut marks: Vec<_> = inner.advice.iter().collect();
+        marks.sort_by(|a, b| a.0.cmp(b.0));
+        let mut advice = Vec::new();
+        advice.extend_from_slice(&(marks.len() as u32).to_le_bytes());
+        for (id, mark) in marks {
+            put_str(&mut advice, id);
+            match mark.dismissed_until {
+                Some(until) => {
+                    advice.push(1);
+                    advice.extend_from_slice(&until.to_le_bytes());
+                }
+                None => advice.push(0),
+            }
+            match &mark.applied {
+                Some(applied) => {
+                    advice.push(1);
+                    advice.extend_from_slice(&applied.at.to_le_bytes());
+                    put_str(&mut advice, &applied.kind);
+                    put_str(&mut advice, &applied.title);
+                    advice.extend_from_slice(&applied.promised_bytes.to_le_bytes());
+                    advice.extend_from_slice(&applied.bytes_before.to_le_bytes());
+                }
+                None => advice.push(0),
+            }
+        }
+        out.extend_from_slice(&2u32.to_le_bytes());
+        for (tag, bytes) in [
+            (SECTION_JOB_OVERRIDES, &section),
+            (SECTION_ADVICE_MARKS, &advice),
+        ] {
+            out.push(tag);
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
         let crc = crc32c::crc32c(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         out
@@ -295,6 +329,36 @@ impl WorkloadStats {
                     bytes: r.take(len)?,
                     at: 0,
                 };
+                if tag == SECTION_ADVICE_MARKS {
+                    for _ in 0..s.u32()? {
+                        let id = s.str()?.to_string();
+                        let dismissed_until = match s.u8()? {
+                            0 => None,
+                            _ => Some(s.i64()?),
+                        };
+                        let applied = match s.u8()? {
+                            0 => None,
+                            _ => Some(super::AppliedAdvice {
+                                at: s.i64()?,
+                                kind: s.str()?.to_string(),
+                                title: s.str()?.to_string(),
+                                promised_bytes: s.i64()?,
+                                bytes_before: s.u64()?,
+                            }),
+                        };
+                        inner.advice.insert(
+                            id,
+                            super::AdviceMark {
+                                dismissed_until,
+                                applied,
+                            },
+                        );
+                    }
+                    if s.at != len {
+                        return None;
+                    }
+                    continue;
+                }
                 if tag != SECTION_JOB_OVERRIDES {
                     // A section of a newer version: skipped.
                     continue;
@@ -483,5 +547,31 @@ mod tests {
             WorkloadStats::from_sidecar(&job_overrides_hand_built(3, &[]), WorkloadLevel::Memory)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_advice_marks_round_trip_and_survive_clear() {
+        use super::super::{AdviceMark, AppliedAdvice};
+        let stats = WorkloadStats::new(WorkloadLevel::Persisted);
+        stats.mark_advice("drop_index:person_name", |m| {
+            m.dismissed_until = Some(i64::MAX)
+        });
+        stats.mark_advice("create_index:vertex:person:age", |m| {
+            m.applied = Some(AppliedAdvice::new(
+                7,
+                "create_index",
+                "Create an index",
+                -4096,
+                9000,
+            ));
+        });
+        stats.clear(None);
+        let back =
+            WorkloadStats::from_sidecar(&stats.to_sidecar(), WorkloadLevel::Persisted).unwrap();
+        assert_eq!(back.advice_marks(), stats.advice_marks());
+        assert_eq!(back.advice_marks().len(), 2);
+        // Emptied: gone.
+        back.mark_advice("drop_index:person_name", |m| *m = AdviceMark::default());
+        assert_eq!(back.advice_marks().len(), 1);
     }
 }

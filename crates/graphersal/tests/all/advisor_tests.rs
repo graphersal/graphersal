@@ -194,3 +194,53 @@ fn without_workload_statistics_only_the_data_is_advised() {
         assert!(json.contains(key), "{key}: {json}");
     }
 }
+
+#[test]
+fn a_dismissed_recommendation_waits_and_an_applied_one_reports_its_outcome() {
+    use graphersal::workload::AppliedAdvice;
+    let graph = with_stats(customers());
+    let stats = graph.workload_stats().unwrap().clone();
+    let id = "add_compression:vertex:customer:cv";
+    // Dismissed for good: listed under `dismissed`, not recommended.
+    stats.mark_advice(id, |mark| mark.dismissed_until = Some(i64::MAX));
+    let advice = graph.advise(&AdviceRequest::everything()).unwrap();
+    assert!(!ids(&advice).contains(&id));
+    assert_eq!(advice.dismissed.len(), 1);
+    assert_eq!(advice.dismissed[0].id, id);
+    // A dismissal that ended: recommended again.
+    stats.mark_advice(id, |mark| mark.dismissed_until = Some(0));
+    let advice = graph.advise(&AdviceRequest::everything()).unwrap();
+    let rule = advice
+        .recommendations
+        .iter()
+        .find(|r| r.id == id)
+        .cloned()
+        .unwrap();
+    // Applied: the outcome compares the memory then and now with what was promised.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    stats.mark_advice(id, |mark| {
+        mark.applied = Some(AppliedAdvice::new(
+            now,
+            "add_compression",
+            rule.title.clone(),
+            rule.memory_bytes,
+            advice.memory_bytes,
+        ));
+    });
+    run(&graph, &rule.action.command());
+    let after = graph.advise(&AdviceRequest::everything()).unwrap();
+    let outcome = &after.applied[0];
+    assert_eq!(outcome.id, id);
+    assert_eq!(outcome.promised_bytes, rule.memory_bytes);
+    let promised = rule.memory_bytes as f64;
+    assert!(
+        (outcome.measured_bytes as f64 - promised).abs() <= promised / 100.0,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.index_lookups, None);
+    let json = after.to_json();
+    assert!(json.contains("\"applied\":[{"), "{json}");
+}

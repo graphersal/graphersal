@@ -5972,7 +5972,31 @@ fn storage_advice_over_http_and_mcp() {
     assert_eq!(applied["ok"], true, "{applied}");
     assert_eq!(get(port, "/api/graph").json()["propertyIndexes"], 1);
     let again = post(port, "/api/advise", spec).json();
-    assert!(!again.to_string().contains(id), "{again}");
+    assert!(
+        !again["advice"]["recommendations"].to_string().contains(id),
+        "{again}"
+    );
     assert_eq!(post(port, "/api/advise/apply", "{}").status, 400);
     assert_eq!(get(port, "/api/advise").status, 405);
+    // The applied recommendation reports its outcome; a dismissal hides one and Restore lists
+    // it again.
+    assert_eq!(again["advice"]["applied"][0]["id"], id, "{again}");
+    let drop_id = "drop_index:person_name";
+    let dismissed = post(
+        port,
+        "/api/advise/dismiss",
+        &serde_json::json!({"id": drop_id, "days": 7}).to_string(),
+    )
+    .json();
+    assert_eq!(dismissed["ok"], true, "{dismissed}");
+    let hidden = post(port, "/api/advise", spec).json();
+    assert_eq!(hidden["advice"]["dismissed"][0]["id"], drop_id, "{hidden}");
+    let restored = post(
+        port,
+        "/api/advise/restore",
+        &serde_json::json!({"id": drop_id}).to_string(),
+    )
+    .json();
+    assert_eq!(restored["ok"], true);
+    assert_eq!(post(port, "/api/advise/dismiss", "{}").status, 400);
 }

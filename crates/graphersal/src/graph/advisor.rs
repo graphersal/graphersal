@@ -15,6 +15,11 @@
 //!
 //! Order: `create_index` by the elements its scans read, then `add_compression` by bytes saved,
 //! `drop_index` by bytes freed, `drop_compression` by reads.
+//!
+//! The instance's marks ([`AdviceMark`], kept in the workload statistics) leave a dismissed
+//! recommendation out until its time ([`Advice::dismissed`]) and turn an applied one into an
+//! outcome for 30 days ([`Advice::applied`]: the memory promised against the memory measured
+//! since, and for a new index the lookups it served).
 
 use compact_str::CompactString;
 
@@ -24,7 +29,7 @@ use crate::graph::compression_estimate::{
     CompressionCandidate, CompressionEstimate, CompressionEstimateRequest,
 };
 use crate::graph::memory_report::{MemoryReport, PropertyMemory};
-use crate::graph::workload::{AccessKind, SeriesKind, WorkloadLevel, WorkloadReport};
+use crate::graph::workload::{AccessKind, AdviceMark, SeriesKind, WorkloadLevel, WorkloadReport};
 use crate::value::{ElementProperty, PropertyMap};
 
 /// The thresholds of the advisor's rules (module docs); [`AdviceRequest::new`] has the
@@ -243,12 +248,52 @@ pub struct Recommendation {
     pub reversible: bool,
 }
 
+/// A recommendation the instance dismissed, still advised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DismissedRecommendation {
+    /// Its id.
+    pub id: String,
+    /// Its title.
+    pub title: String,
+    /// Dismissed until (microseconds since the Unix epoch; `i64::MAX` = for good).
+    pub until: i64,
+}
+
+/// The outcome of a recommendation applied in the last 30 days.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppliedOutcome {
+    /// Its id.
+    pub id: String,
+    /// Its kind.
+    pub kind: String,
+    /// Its title.
+    pub title: String,
+    /// When it was applied (microseconds since the Unix epoch).
+    pub at: i64,
+    /// The memory it promised to free (negative: to take).
+    pub promised_bytes: i64,
+    /// The memory freed since (negative: taken): the graph's property and property index bytes
+    /// then minus now. Other changes of the data since count too.
+    pub measured_bytes: i64,
+    /// For a new index: the indexed lookups of its key in the last 90 days.
+    pub index_lookups: Option<u64>,
+}
+
+/// How long an applied recommendation's outcome is shown.
+const OUTCOME_DAYS: i64 = 30;
+
 /// The advisor's answer.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Advice {
-    /// The recommendations, in the advisor's order (module docs).
+    /// The recommendations, in the advisor's order (module docs), without the dismissed ones.
     pub recommendations: Vec<Recommendation>,
+    /// The recommendations dismissed for now.
+    pub dismissed: Vec<DismissedRecommendation>,
+    /// The outcomes of the recommendations applied in the last 30 days, the latest first.
+    pub applied: Vec<AppliedOutcome>,
     /// The level of the workload statistics it read (`off`: only the data was looked at, so no
     /// index advice).
     pub workload_level: WorkloadLevel,
@@ -259,6 +304,9 @@ pub struct Advice {
     pub commit_seq: u64,
     /// The property bytes of the graph (the memory report's sum).
     pub property_bytes: u64,
+    /// The property bytes plus the property index bytes ([`measured_bytes`]): the figure an
+    /// applied recommendation's outcome is measured on.
+    pub memory_bytes: u64,
     /// How many properties `estimate_compression` measured.
     pub estimates: usize,
 }
@@ -379,12 +427,23 @@ fn top_level(row: &PropertyMemory) -> Option<(ElementKind, &str, String)> {
     Some((row.target.element, label, key_of(&row.target.path)?))
 }
 
+/// The memory the advisor's outcomes measure: property bytes plus property index bytes.
+pub fn measured_bytes(memory: &MemoryReport) -> u64 {
+    memory.property_bytes()
+        + memory
+            .indexes
+            .iter()
+            .map(|index| index.stats.bytes)
+            .sum::<u64>()
+}
+
 /// The recommendations for the data in `memory`, the uses in `workload` (read with the day
-/// tier's history for the time observed) and the measurements of `estimate` (module docs).
-/// `now` is microseconds since the Unix epoch.
+/// tier's history for the time observed), the instance's `marks` and the measurements of
+/// `estimate` (module docs). `now` is microseconds since the Unix epoch.
 pub fn compute(
     memory: &MemoryReport,
     workload: Option<&WorkloadReport>,
+    marks: &[(String, AdviceMark)],
     estimate: &mut dyn FnMut(&CompressionEstimateRequest) -> Option<CompressionEstimate>,
     request: &AdviceRequest,
     now: i64,
@@ -679,7 +738,7 @@ pub fn compute(
         ));
     }
 
-    let mut recommendations = Vec::new();
+    let mut all = Vec::new();
     for mut group in [
         index_advice,
         compression_advice,
@@ -687,14 +746,63 @@ pub fn compute(
         drop_compression_advice,
     ] {
         group.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
-        recommendations.extend(group.into_iter().map(|(_, r)| r));
+        all.extend(group.into_iter().map(|(_, r)| r));
     }
+    let mark_of = |id: &str| marks.iter().find(|(m, _)| m == id).map(|(_, mark)| mark);
+    let mut recommendations = Vec::new();
+    let mut dismissed = Vec::new();
+    for r in all {
+        match mark_of(&r.id).and_then(|m| m.dismissed_until) {
+            Some(until) if until > now => dismissed.push(DismissedRecommendation {
+                id: r.id.clone(),
+                title: r.title.clone(),
+                until,
+            }),
+            _ => recommendations.push(r),
+        }
+    }
+    let bytes_now = measured_bytes(memory);
+    let mut applied: Vec<AppliedOutcome> = marks
+        .iter()
+        .filter_map(|(id, mark)| {
+            let record = mark.applied.as_ref()?;
+            if now.saturating_sub(record.at) > OUTCOME_DAYS * DAY {
+                return None;
+            }
+            let index_lookups = (record.kind == "create_index")
+                .then(|| {
+                    // create_index:<element>:<label>:<key>
+                    let mut parts = id.splitn(4, ':').skip(1);
+                    let element = match parts.next()? {
+                        "edge" => ElementKind::Edge,
+                        _ => ElementKind::Vertex,
+                    };
+                    let (label, key) = (parts.next()?, parts.next()?);
+                    Some(Uses::of(workload, element, label, key).index_runs_90)
+                })
+                .flatten();
+            Some(AppliedOutcome {
+                id: id.clone(),
+                kind: record.kind.clone(),
+                title: record.title.clone(),
+                at: record.at,
+                promised_bytes: record.promised_bytes,
+                measured_bytes: i64::try_from(record.bytes_before).unwrap_or(i64::MAX)
+                    - i64::try_from(bytes_now).unwrap_or(i64::MAX),
+                index_lookups,
+            })
+        })
+        .collect();
+    applied.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.id.cmp(&b.id)));
     Advice {
         recommendations,
+        dismissed,
+        applied,
         workload_level: level,
         observed_since,
         commit_seq: memory.commit_seq,
         property_bytes: memory.property_bytes(),
+        memory_bytes: bytes_now,
         estimates,
     }
 }
@@ -702,8 +810,10 @@ pub fn compute(
 impl Advice {
     /// The advice as a value: `{workload_level, observed_since, commit_seq, property_bytes,
     /// estimates, recommendations: [{id, kind, element, label, key, title, evidence, cost,
-    /// memory_bytes, measured, confidence, reversible, command, action: {..}}]}` (the one form
-    /// every front end shows; snake_case keys like the workload report).
+    /// memory_bytes, measured, confidence, reversible, command, action: {..}}], dismissed: [{id,
+    /// title, until (null: for good)}], applied: [{id, kind, title, at, promised_bytes,
+    /// measured_bytes, index_lookups}]}` (the one form every front end shows; snake_case keys
+    /// like the workload report).
     pub fn to_property(&self) -> ElementProperty {
         let text = |value: &str| ElementProperty::from(value);
         let int = |value: i64| ElementProperty::from(value);
@@ -762,6 +872,44 @@ impl Advice {
                 object(map)
             })
             .collect();
+        let dismissed = self
+            .dismissed
+            .iter()
+            .map(|d| {
+                let mut map = PropertyMap::default();
+                map.insert("id", text(&d.id));
+                map.insert("title", text(&d.title));
+                map.insert(
+                    "until",
+                    if d.until == i64::MAX {
+                        ElementProperty::Null
+                    } else {
+                        int(d.until)
+                    },
+                );
+                object(map)
+            })
+            .collect();
+        let applied = self
+            .applied
+            .iter()
+            .map(|a| {
+                let mut map = PropertyMap::default();
+                map.insert("id", text(&a.id));
+                map.insert("kind", text(&a.kind));
+                map.insert("title", text(&a.title));
+                map.insert("at", int(a.at));
+                map.insert("promised_bytes", int(a.promised_bytes));
+                map.insert("measured_bytes", int(a.measured_bytes));
+                map.insert(
+                    "index_lookups",
+                    a.index_lookups.map_or(ElementProperty::Null, |n| {
+                        int(i64::try_from(n).unwrap_or(i64::MAX))
+                    }),
+                );
+                object(map)
+            })
+            .collect();
         let mut map = PropertyMap::default();
         map.insert("workload_level", text(self.workload_level.name()));
         map.insert(
@@ -776,8 +924,14 @@ impl Advice {
             "property_bytes",
             int(i64::try_from(self.property_bytes).unwrap_or(i64::MAX)),
         );
+        map.insert(
+            "memory_bytes",
+            int(i64::try_from(self.memory_bytes).unwrap_or(i64::MAX)),
+        );
         map.insert("estimates", int(self.estimates as i64));
         map.insert("recommendations", ElementProperty::Array(recommendations));
+        map.insert("dismissed", ElementProperty::Array(dismissed));
+        map.insert("applied", ElementProperty::Array(applied));
         object(map)
     }
 

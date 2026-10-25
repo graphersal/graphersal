@@ -13,7 +13,7 @@
 import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { state, toast, optimizeApplied } from '../store.js';
 import {
-  WINDOWS, TIERS, LISTS, MIN_TIMES, sortsDescending, recommendationRows, adviceSummary, channels, workloadRows, sparkPath,
+  WINDOWS, TIERS, LISTS, MIN_TIMES, SNOOZE_DAYS, sortsDescending, recommendationRows, dismissedRows, appliedRows, adviceSummary, channels, workloadRows, sparkPath,
   chartGeometry, formatMicros, memoryRows, labelRows, memoryTotals,
 } from '../optimize.js';
 import { formatBytes } from '../statistics.js';
@@ -135,6 +135,25 @@ export const OptimizePanel = {
         advice.applying = null;
       }
     }
+    async function dismiss(row, days) {
+      try {
+        const res = await engine().dismissRecommendation(row.id, days);
+        if (res && res.ok) await loadAdvice();
+        else toast(`Not dismissed: ${(res && res.error) || 'refused'}`, 'error', 9000);
+      } catch (err) {
+        toast(`Not dismissed: ${message(err)}`, 'error', 9000);
+      }
+    }
+    async function restore(row) {
+      try {
+        await engine().restoreRecommendation(row.id);
+        await loadAdvice();
+      } catch (err) {
+        toast(`Not restored: ${message(err)}`, 'error', 9000);
+      }
+    }
+    const dismissed = computed(() => dismissedRows(advice.data));
+    const applied = computed(() => appliedRows(advice.data));
     async function copy(row) {
       try {
         await navigator.clipboard.writeText(row.command);
@@ -191,7 +210,7 @@ export const OptimizePanel = {
 
     return {
       state, dlg, tab, advice, work, memory, open, close, refresh,
-      recRows, summary, apply, copy,
+      recRows, summary, apply, copy, dismiss, restore, dismissed, applied, SNOOZE_DAYS,
       WINDOWS, TIERS, LISTS, MIN_TIMES, sortBy, sortClass, channelList, rows, listCounts, spark, select, formatMicros, formatBytes,
       memRows, memLabels, memTotals,
       SPARK_W, SPARK_H, CHART_W, CHART_H,
@@ -234,10 +253,27 @@ export const OptimizePanel = {
           <div class="op-rec-foot">
             <code class="op-command">{{ r.command }}</code>
             <span class="spacer"></span>
+            <button type="button" class="btn small" :disabled="!!advice.applying" @click="dismiss(r, SNOOZE_DAYS)" :title="'Hide it for ' + SNOOZE_DAYS + ' days'">Snooze {{ SNOOZE_DAYS }} days</button>
+            <button type="button" class="btn small" :disabled="!!advice.applying" @click="dismiss(r, null)" title="Hide it for good (Restore lists it again)">Dismiss</button>
             <button type="button" class="btn small" @click="copy(r)">Copy</button>
             <button type="button" class="btn small primary" :disabled="!!advice.applying || state.running" @click="apply(r)">{{ advice.applying === r.id ? 'Applying…' : 'Apply' }}</button>
           </div>
         </div>
+        <template v-if="applied.length">
+          <h3>Applied</h3>
+          <div v-for="a in applied" :key="a.id" class="op-rec op-applied">
+            <div class="op-rec-head"><strong>{{ a.title }}</strong><span class="spacer"></span><span class="muted">{{ a.when }}</span></div>
+            <div class="op-rec-line"><span class="muted">Promised:</span> {{ a.promised }} · <span class="muted">measured since:</span> {{ a.measured }}<span v-if="a.lookups"> · {{ a.lookups }}</span></div>
+          </div>
+          <p class="muted sq-note">Measured on the graph's property and property index memory then and now: other data changes since count too. Shown for 30 days.</p>
+        </template>
+        <details v-if="dismissed.length" class="op-dismissed">
+          <summary>Dismissed ({{ dismissed.length }})</summary>
+          <div v-for="d in dismissed" :key="d.id" class="op-bar">
+            <span>{{ d.title }}</span><span class="muted">{{ d.until }}</span><span class="spacer"></span>
+            <button type="button" class="btn small" @click="restore(d)">Restore</button>
+          </div>
+        </details>
       </template>
 
       <template v-else-if="tab === 'workload'">

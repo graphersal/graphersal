@@ -776,6 +776,12 @@ export class Engine {
    */
   async applyRecommendation(id, spec) { throw notImplemented('applyRecommendation'); }
 
+  /** Dismisses the recommendation `id` for `days` (null: for good): `{ok}` or `{ok: false, error}`. */
+  async dismissRecommendation(id, days) { throw notImplemented('dismissRecommendation'); }
+
+  /** Lists the dismissed recommendation `id` again: `{ok}` or `{ok: false, error}`. */
+  async restoreRecommendation(id) { throw notImplemented('restoreRecommendation'); }
+
   /**
    * AI Chat (dev server with `--ai` only; js/ai-chat.js): `aiCreateConversation() -> {id}`,
    * `aiSend(id, text) -> {turn}`, `aiEvents(id, after) -> {events, running, last}`,

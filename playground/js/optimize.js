@@ -68,6 +68,37 @@ export function recommendationRows(advice) {
   }));
 }
 
+/** The days a "Snooze" dismisses a recommendation for. */
+export const SNOOZE_DAYS = 7;
+
+/** A day count or a date for "dismissed until": `for good`, `for 3 more days`, `until tomorrow`. */
+function untilText(until, now) {
+  if (until == null) return 'for good';
+  const days = Math.ceil((until - now) / TIERS.days.width);
+  if (days <= 1) return 'until tomorrow';
+  return `for ${days} more days`;
+}
+
+/** The dismissed recommendations: `[{id, title, until}]`. */
+export function dismissedRows(advice, now = Date.now() * 1000) {
+  return ((advice && advice.dismissed) || []).map((d) => ({ id: d.id, title: d.title, until: untilText(d.until, now) }));
+}
+
+/** The outcomes of applied recommendations: `[{id, title, when, promised, measured, lookups}]`. */
+export function appliedRows(advice, now = Date.now() * 1000) {
+  return ((advice && advice.applied) || []).map((a) => {
+    const days = Math.floor((now - a.at) / TIERS.days.width);
+    return {
+      id: a.id,
+      title: a.title,
+      when: days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`,
+      promised: effectText(a.promised_bytes, true),
+      measured: effectText(a.measured_bytes, true),
+      lookups: a.index_lookups == null ? null : `${a.index_lookups} indexed lookup${a.index_lookups === 1 ? '' : 's'} since`,
+    };
+  });
+}
+
 /** One line about the advice: how many, how much memory in all, what it rests on. */
 export function adviceSummary(advice, now = Date.now() * 1000) {
   if (!advice) return '';

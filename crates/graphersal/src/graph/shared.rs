@@ -163,8 +163,18 @@ impl<S: GraphStorage> Graph<S> {
                     Err(_) => None,
                 }
             };
-        let advice =
-            crate::graph::advisor::compute(&memory, workload.as_ref(), &mut estimate, request, now);
+        let marks = self
+            .workload_stats()
+            .map(|stats| stats.advice_marks())
+            .unwrap_or_default();
+        let advice = crate::graph::advisor::compute(
+            &memory,
+            workload.as_ref(),
+            &marks,
+            &mut estimate,
+            request,
+            now,
+        );
         match failure {
             Some(err) => Err(err),
             None => Ok(advice),
