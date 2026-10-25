@@ -115,6 +115,11 @@ const EXCLUDED_STEPS: &[&str] = &[
     // terminal so that the pinned seeds keep generating the same scripts.
     "memory_report",
     "memoryReport",
+    // Catalog calls of scheduled jobs, not steps; excluded so that the pinned seeds keep
+    // generating the same scripts.
+    "define_job",
+    "jobs",
+    "drop_job",
 ];
 
 /// Steps that end a traversal (they return data, a rendering or a report, not a traversal): the

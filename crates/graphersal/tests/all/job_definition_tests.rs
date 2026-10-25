@@ -23,7 +23,7 @@ const QUERIES: &str = r#"
 
 fn modern_with_queries() -> Arc<Graph> {
     let graph = Arc::new(GraphSource::tinkerpop_modern());
-    eval_value(graph.clone(), QUERIES).unwrap();
+    let _ = eval_value(graph.clone(), QUERIES).unwrap();
     graph
 }
 
@@ -44,7 +44,7 @@ fn field(job: &Dynamic, key: &str) -> Dynamic {
 #[test]
 fn a_query_job_stores_the_effects_its_definer_was_allowed() {
     let graph = modern_with_queries();
-    eval_value(
+    let _ = eval_value(
         graph.clone(),
         r#"g.define_job(#{name: "nightly_purge", schedule: "0 3 * * *", action: "query",
             query: "purge", args: #{label: "software"}, timeout_ms: 30000,
@@ -75,7 +75,7 @@ fn a_query_job_stores_the_effects_its_definer_was_allowed() {
         "{effects:?}"
     );
     // A reading query stores only the `Execute`.
-    eval_value(
+    let _ = eval_value(
         graph.clone(),
         r#"g.define_job(#{name: "list", schedule: "*/5 * * * *", action: "query", query: "names"})"#,
     )
@@ -88,20 +88,14 @@ fn a_query_job_stores_the_effects_its_definer_was_allowed() {
     assert_eq!(field(list, "effects").into_array().unwrap().len(), 1);
     // Defining a job changes no data and runs nothing.
     assert_eq!(graph.read().vertex_count(), 6);
-    assert_eq!(
+    let drop = || {
         eval_value(graph.clone(), r#"g.drop_job("list")"#)
             .unwrap()
             .as_bool()
-            .unwrap(),
-        true
-    );
-    assert_eq!(
-        eval_value(graph.clone(), r#"g.drop_job("list")"#)
             .unwrap()
-            .as_bool()
-            .unwrap(),
-        false
-    );
+    };
+    assert!(drop());
+    assert!(!drop());
 }
 
 #[test]
@@ -185,8 +179,8 @@ fn a_job_survives_every_store_path() {
         StoreOptions::new(),
     )
     .unwrap();
-    eval_value(store.graph().clone(), QUERIES).unwrap();
-    eval_value(
+    let _ = eval_value(store.graph().clone(), QUERIES).unwrap();
+    let _ = eval_value(
         store.graph().clone(),
         r#"g.define_job(#{name: "nightly", schedule: "0 3 * * *", action: "query",
             query: "purge", args: #{label: "software"}, enabled: false})"#,
