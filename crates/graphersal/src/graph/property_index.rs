@@ -1489,8 +1489,13 @@ impl TraversalGraph {
         else {
             return;
         };
-        self.property_indexes
-            .vertex_entries(insert, node, &vertex.1, &vertex.2, key);
+        self.property_indexes.vertex_entries(
+            insert,
+            node,
+            self.labels.set(vertex.1),
+            &vertex.2,
+            key,
+        );
     }
 
     /// The edge counterpart of [`Self::pindex_vertex`].
@@ -1514,7 +1519,7 @@ impl TraversalGraph {
         self.property_indexes.edge_entries(
             insert,
             edge,
-            weight.1.as_deref(),
+            self.labels.name_str(weight.1),
             weight.2.as_ref(),
             key,
         );

@@ -30,6 +30,7 @@ pub mod handle;
 /// Commit hooks ([`CommitHook`]): veto and observe what each unit of work changed.
 pub mod hooks;
 pub(crate) mod index;
+pub(crate) mod labels;
 /// A graph's own memory footprint (`memory_usage()`).
 pub mod memory;
 /// The memory report: where a graph's memory goes, per label and per property path.
@@ -89,19 +90,20 @@ pub use statistics::GraphStatistics;
 pub use storage::{GraphStorage, UnitChanges, UnitMark};
 pub use transaction::Transactional;
 
-/// Vertex weight stored in the topology: `(id, labels, properties,
-/// generation)`.
+/// Vertex weight stored in the topology: `(id, label set, properties, generation)`.
 ///
-/// `labels` is an ordered, deduplicated set: empty means no labels, and the first entry is the
-/// *primary* label — the one `vertex_label()`, `label()`, and `elementMap()`'s `"label"` key keep
-/// returning. See [`storage::GraphStorage::vertex_labels`]. `generation` is the slot generation
-/// the vertex was created with; a [`VertexHandle`] is valid iff it carries the same one.
-pub(crate) type VertexData = (CompactString, Vec<CompactString>, PropertyMap, NonZeroU32);
-/// Edge weight stored in the topology: `(id, label, properties,
-/// generations)`; see [`handle::EdgeGenerations`].
+/// The label set is a number in the graph's label table ([`labels::Labels::set`]): an ordered,
+/// deduplicated set, empty meaning no labels, the first entry the *primary* label — the one
+/// `vertex_label()`, `label()`, and `elementMap()`'s `"label"` key keep returning. See
+/// [`storage::GraphStorage::vertex_labels`]. `generation` is the slot generation the vertex was
+/// created with; a [`VertexHandle`] is valid iff it carries the same one.
+pub(crate) type VertexData = (CompactString, labels::LabelSetId, PropertyMap, NonZeroU32);
+/// Edge weight stored in the topology: `(id, label, properties, generations)`; the label is a
+/// number in the graph's label table ([`labels::Labels::name`]); see
+/// [`handle::EdgeGenerations`].
 pub(crate) type EdgeData = (
     CompactString,
-    Option<CompactString>,
+    labels::LabelId,
     Option<PropertyMap>,
     handle::EdgeGenerations,
 );
@@ -161,6 +163,8 @@ pub struct TraversalGraph {
     /// The interned key lists of the stored property maps (see [`shape`]): every stored map is
     /// `Shaped` over one of them.
     pub(crate) shapes: shape::ShapeTable,
+    /// The interned edge labels and vertex label sets the element slots refer to.
+    pub(crate) labels: labels::Labels,
 }
 
 /// Whether an element is a vertex or an edge.
@@ -201,6 +205,7 @@ impl TraversalGraph {
             property_indexes: property_index::PropertyIndexes::default(),
             footprint: memory::FootprintCache::default(),
             shapes: shape::ShapeTable::new(),
+            labels: labels::Labels::default(),
         }
     }
 
@@ -478,7 +483,7 @@ impl TraversalGraph {
             } else {
                 self.graph
                     .node_weight(idx)
-                    .map(|v| v.1.as_slice())
+                    .map(|v| self.labels.set(v.1))
                     .unwrap_or(&[])
             }
         };
@@ -486,7 +491,7 @@ impl TraversalGraph {
             for edge in self.graph.edges_directed(node, direction) {
                 SchemaValidator::check_topology(
                     &schema,
-                    edge.weight().1.as_deref(),
+                    self.labels.name(edge.weight().1).map(CompactString::as_str),
                     labels_of(edge.source()),
                     labels_of(edge.target()),
                 )?;
@@ -909,7 +914,7 @@ mod tests {
         // Fast O(1) lookup check
         let (_idx, v) = tg.get_vertex_by_id("v_500").expect("should find v_500");
         assert_eq!(v.0, "v_500");
-        assert_eq!(v.1.first().map(|l| l.as_str()), Some("node"));
+        assert_eq!(tg.labels.set(v.1).first().map(|l| l.as_str()), Some("node"));
 
         // Uniqueness constraint
         let duplicate_res = tg.insert_vertex(Some("v_500".into()), vec![], PropertyMap::default());
@@ -970,7 +975,7 @@ mod tests {
         let (found_e_idx, e_weight) = tg.get_edge_by_id(&e_id).expect("should find edge");
         assert_eq!(found_e_idx, e_idx);
         assert_eq!(e_weight.0, e_id);
-        assert_eq!(e_weight.1.as_deref(), Some("knows"));
+        assert_eq!(tg.labels.name_str(e_weight.1), Some("knows"));
 
         tg.drop_edge(e_idx).expect("should drop edge");
         assert!(tg.get_edge_by_id(&e_id).is_none());

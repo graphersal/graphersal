@@ -830,8 +830,9 @@ fn put_delta(
             .get_node(&delta.graph, id)
             .and_then(|handle| delta.vertex_weight(handle))
         {
-            totals.out_memory += loaded_vertex_bytes(&vertex.0, &vertex.1, &vertex.2);
-            sink.vertex(&vertex.0, &vertex.1, &vertex.2)?;
+            let labels = delta.labels.set(vertex.1);
+            totals.out_memory += loaded_vertex_bytes(&vertex.0, labels, &vertex.2);
+            sink.vertex(&vertex.0, labels, &vertex.2)?;
         }
         return Ok(());
     }
@@ -851,14 +852,9 @@ fn put_delta(
             "an endpoint of the merged edge is missing",
         ));
     };
-    totals.out_memory += loaded_edge_bytes(&edge.0, edge.1.as_deref(), edge.2.as_ref());
-    sink.edge(
-        &edge.0,
-        edge.1.as_deref(),
-        &out_v.0,
-        &in_v.0,
-        edge.2.as_ref(),
-    )
+    let label = delta.labels.name_str(edge.1);
+    totals.out_memory += loaded_edge_bytes(&edge.0, label, edge.2.as_ref());
+    sink.edge(&edge.0, label, &out_v.0, &in_v.0, edge.2.as_ref())
 }
 
 /// The merge of a run's base records with its slice of the sorted delta ids.

@@ -520,7 +520,7 @@ pub(crate) fn compute<S: GraphStorage>(
         // The labels with the most bytes, of both kinds.
         report
             .labels
-            .sort_by(|a, b| label_bytes(b).cmp(&label_bytes(a)));
+            .sort_by_key(|label| std::cmp::Reverse(label_bytes(label)));
         report.labels_omitted = (report.labels.len() - cap) as u64;
         report.labels_omitted_property_bytes = report.labels[cap..]
             .iter()

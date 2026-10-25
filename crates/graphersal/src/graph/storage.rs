@@ -1359,19 +1359,20 @@ impl GraphStorage for TraversalGraph {
     #[inline]
     fn vertex_label(&self, node: VertexHandle) -> Option<&str> {
         self.vertex_weight(node)
-            .and_then(|v| v.1.first())
+            .and_then(|v| self.labels.set(v.1).first())
             .map(|l| l.as_str())
     }
 
     #[inline]
     fn edge_label(&self, edge: EdgeHandle) -> Option<&str> {
-        self.edge_weight(edge).and_then(|e| e.1.as_deref())
+        self.edge_weight(edge)
+            .and_then(|e| self.labels.name_str(e.1))
     }
 
     #[inline]
     fn vertex_labels(&self, node: VertexHandle) -> &[CompactString] {
         self.vertex_weight(node)
-            .map(|v| v.1.as_slice())
+            .map(|v| self.labels.set(v.1))
             .unwrap_or(&[])
     }
 
@@ -1526,14 +1527,14 @@ impl GraphStorage for TraversalGraph {
         check_label(&label)?;
         match self.vertex_weight(node) {
             Some(vertex) => {
-                if vertex.1.contains(&label) {
+                if self.labels.set(vertex.1).contains(&label) {
                     return Ok(false);
                 }
                 // Schema: the vertex must be valid under the new label set (a Closed schema
                 // rejects an undeclared label; a newly declaring label's required fields must be
                 // present and the existing properties must conform). Nothing is mutated on error.
                 // Closed: every incident edge must still match a declared connection.
-                let mut new_labels = vertex.1.clone();
+                let mut new_labels = self.labels.set(vertex.1).to_vec();
                 new_labels.push(label.clone());
                 crate::graph::schema::SchemaValidator::check_vertex(
                     &self.schema.read(),
@@ -1549,8 +1550,12 @@ impl GraphStorage for TraversalGraph {
                     .node_weight_mut(node.index())
                     .filter(|vertex| vertex.3 == node.generation())
                 {
-                    let old = std::mem::replace(&mut vertex.1, new_labels);
-                    self.statistics.vertex_relabeled(&old, &vertex.1);
+                    let new_set = self.labels.intern_set(&new_labels);
+                    let old = self
+                        .labels
+                        .set(std::mem::replace(&mut vertex.1, new_set))
+                        .to_vec();
+                    self.statistics.vertex_relabeled(&old, &new_labels);
                     if recording {
                         let id = vertex.0.clone();
                         self.undo.record(UndoEntry::VertexLabels { id, old });
@@ -1570,14 +1575,20 @@ impl GraphStorage for TraversalGraph {
     fn remove_vertex_label(&mut self, node: VertexHandle, label: &str) -> Result<bool, GraphError> {
         match self.vertex_weight(node) {
             Some(vertex) => {
-                if !vertex.1.iter().any(|l| l.as_str() == label) {
+                if !self
+                    .labels
+                    .set(vertex.1)
+                    .iter()
+                    .any(|l| l.as_str() == label)
+                {
                     return Ok(false);
                 }
                 // Schema: Closed rejects removing the last label or leaving properties that no
                 // remaining label declares; Open and Closed re-check the remaining labels.
                 // Closed: every incident edge must still match a declared connection.
-                let new_labels: Vec<CompactString> = vertex
-                    .1
+                let new_labels: Vec<CompactString> = self
+                    .labels
+                    .set(vertex.1)
                     .iter()
                     .filter(|l| l.as_str() != label)
                     .cloned()
@@ -1596,8 +1607,12 @@ impl GraphStorage for TraversalGraph {
                     .node_weight_mut(node.index())
                     .filter(|vertex| vertex.3 == node.generation())
                 {
-                    let old = std::mem::replace(&mut vertex.1, new_labels);
-                    self.statistics.vertex_relabeled(&old, &vertex.1);
+                    let new_set = self.labels.intern_set(&new_labels);
+                    let old = self
+                        .labels
+                        .set(std::mem::replace(&mut vertex.1, new_set))
+                        .to_vec();
+                    self.statistics.vertex_relabeled(&old, &new_labels);
                     if recording {
                         let id = vertex.0.clone();
                         self.undo.record(UndoEntry::VertexLabels { id, old });
@@ -1626,7 +1641,7 @@ impl GraphStorage for TraversalGraph {
         ) else {
             return Err(GraphError::edge_removed());
         };
-        if weight.1.as_deref() == Some(label.as_str()) {
+        if self.labels.name_str(weight.1) == Some(label.as_str()) {
             return Ok(false);
         }
         // Schema: the edge as stored must be valid under the new label (Closed: declared label
@@ -1644,8 +1659,8 @@ impl GraphStorage for TraversalGraph {
                 crate::graph::schema::SchemaValidator::check_edge(
                     &schema,
                     Some(label.as_str()),
-                    &source.1,
-                    &target.1,
+                    self.labels.set(source.1),
+                    self.labels.set(target.1),
                     weight.2.as_ref().unwrap_or(&empty),
                 )?;
             }
@@ -1655,7 +1670,11 @@ impl GraphStorage for TraversalGraph {
         let Some(weight) = self.graph.edge_weight_mut(index) else {
             return Err(GraphError::edge_removed());
         };
-        let old = weight.1.replace(label.clone());
+        let new_id = self.labels.intern_name(Some(label.as_str()));
+        let old = self
+            .labels
+            .name(std::mem::replace(&mut weight.1, new_id))
+            .cloned();
         self.statistics
             .edge_relabeled(old.as_deref(), Some(label.as_str()));
         if recording {
@@ -1692,8 +1711,8 @@ impl GraphStorage for TraversalGraph {
         };
         check_properties(&properties)?;
         // Topology: ANY label of an endpoint can satisfy a declared connection.
-        let source_labels: &[CompactString] = source.1.as_slice();
-        let target_labels: &[CompactString] = target.1.as_slice();
+        let source_labels: &[CompactString] = self.labels.set(source.1);
+        let target_labels: &[CompactString] = self.labels.set(target.1);
 
         // Coerce to, and validate against, the active schema.
         {
@@ -1750,14 +1769,17 @@ impl GraphStorage for TraversalGraph {
                     crate::graph::schema::SchemaValidator::validate_element_property(
                         &schema,
                         "vertex",
-                        &node_ref.1,
+                        self.labels.set(node_ref.1),
                         &key,
                         value,
                     )?
                 };
                 let mut value = value;
-                self.compression
-                    .prepare_vertex_value(&node_ref.1, &key, &mut value);
+                self.compression.prepare_vertex_value(
+                    self.labels.set(node_ref.1),
+                    &key,
+                    &mut value,
+                );
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 // The property indexes on `key`: the old entry out, the new one in.
                 let index_key = (!self.property_indexes.is_empty()).then(|| key.clone());
@@ -1765,7 +1787,7 @@ impl GraphStorage for TraversalGraph {
                     self.property_indexes.vertex_entries(
                         false,
                         node,
-                        &node_ref.1,
+                        self.labels.set(node_ref.1),
                         &node_ref.2,
                         Some(&key),
                     );
@@ -1775,7 +1797,7 @@ impl GraphStorage for TraversalGraph {
                     self.property_indexes.vertex_entries(
                         true,
                         node,
-                        &node_ref.1,
+                        self.labels.set(node_ref.1),
                         &node_ref.2,
                         Some(index_key),
                     );
@@ -1811,14 +1833,17 @@ impl GraphStorage for TraversalGraph {
                     crate::graph::schema::SchemaValidator::validate_element_property(
                         &schema,
                         "edge",
-                        edge_ref.1.as_slice(),
+                        self.labels.name_slice(edge_ref.1),
                         &key,
                         value,
                     )?
                 };
                 let mut value = value;
-                self.compression
-                    .prepare_edge_value(edge_ref.1.as_deref(), &key, &mut value);
+                self.compression.prepare_edge_value(
+                    self.labels.name_str(edge_ref.1),
+                    &key,
+                    &mut value,
+                );
                 let undo_key = self.undo.is_recording().then(|| key.clone());
                 let map_was_none = edge_ref.2.is_none();
                 // The property indexes on `key`: the old entry out, the new one in.
@@ -1827,7 +1852,7 @@ impl GraphStorage for TraversalGraph {
                     self.property_indexes.edge_entries(
                         false,
                         edge,
-                        edge_ref.1.as_deref(),
+                        self.labels.name_str(edge_ref.1),
                         edge_ref.2.as_ref(),
                         Some(&key),
                     );
@@ -1841,7 +1866,7 @@ impl GraphStorage for TraversalGraph {
                     self.property_indexes.edge_entries(
                         true,
                         edge,
-                        edge_ref.1.as_deref(),
+                        self.labels.name_str(edge_ref.1),
                         edge_ref.2.as_ref(),
                         Some(index_key),
                     );
@@ -1895,11 +1920,19 @@ impl GraphStorage for TraversalGraph {
             // Coerce the leaf at the type the schema declares at that nested location, write it,
             // then validate the complete resulting top-level property (no re-coercion of siblings).
             let value = crate::graph::schema::SchemaValidator::coerce_path_leaf(
-                &schema, "vertex", &vertex.1, path, value,
+                &schema,
+                "vertex",
+                self.labels.set(vertex.1),
+                path,
+                value,
             )?;
             let (key, resulting) = write_path(vertex.2.get(name.as_str()), path, value)?;
             crate::graph::schema::SchemaValidator::check_element_property(
-                &schema, "vertex", &vertex.1, &key, &resulting,
+                &schema,
+                "vertex",
+                self.labels.set(vertex.1),
+                &key,
+                &resulting,
             )?;
             (key, resulting)
         };
@@ -1948,7 +1981,7 @@ impl GraphStorage for TraversalGraph {
             let value = crate::graph::schema::SchemaValidator::coerce_path_leaf(
                 &schema,
                 "edge",
-                edge_ref.1.as_slice(),
+                self.labels.name_slice(edge_ref.1),
                 path,
                 value,
             )?;
@@ -1960,7 +1993,7 @@ impl GraphStorage for TraversalGraph {
             crate::graph::schema::SchemaValidator::check_element_property(
                 &schema,
                 "edge",
-                edge_ref.1.as_slice(),
+                self.labels.name_slice(edge_ref.1),
                 &key,
                 &resulting,
             )?;
@@ -2039,7 +2072,7 @@ impl GraphStorage for TraversalGraph {
                 crate::graph::schema::SchemaValidator::check_element_property(
                     &self.schema.read(),
                     "vertex",
-                    &vertex.1,
+                    self.labels.set(vertex.1),
                     &key,
                     &resulting,
                 )?;
@@ -2115,7 +2148,7 @@ impl GraphStorage for TraversalGraph {
                 crate::graph::schema::SchemaValidator::check_element_property(
                     &self.schema.read(),
                     "edge",
-                    edge_ref.1.as_slice(),
+                    self.labels.name_slice(edge_ref.1),
                     &key,
                     &resulting,
                 )?;
@@ -2155,7 +2188,7 @@ impl GraphStorage for TraversalGraph {
             crate::graph::schema::SchemaValidator::check_removal(
                 &self.schema.read(),
                 "vertex",
-                &vertex.1,
+                self.labels.set(vertex.1),
                 prop,
             )?;
         }
@@ -2202,7 +2235,7 @@ impl GraphStorage for TraversalGraph {
             crate::graph::schema::SchemaValidator::check_removal(
                 &self.schema.read(),
                 "edge",
-                edge_weight.1.as_slice(),
+                self.labels.name_slice(edge_weight.1),
                 prop,
             )?;
         }

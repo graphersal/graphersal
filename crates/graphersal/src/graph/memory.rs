@@ -155,20 +155,18 @@ pub(crate) fn compute(graph: &super::TraversalGraph) -> MemoryStats {
     let mut property_bytes = 0u64;
     let mut compressed = CompressedCount::default();
 
-    for (id, labels, properties, _) in graph.graph.node_weights() {
+    // The labels live once, in the label table; a slot holds a number.
+    structure_bytes += graph.labels.heap_bytes();
+    for (id, _, properties, _) in graph.graph.node_weights() {
         structure_bytes += string_heap(id);
-        structure_bytes +=
-            labels.capacity() as u64 * std::mem::size_of::<compact_str::CompactString>() as u64;
-        structure_bytes += labels.iter().map(string_heap).sum::<u64>();
         property_bytes += crate::value::estimated_element_heap_bytes(properties);
         if !graph.compression.is_empty() {
             properties.values().for_each(|value| compressed.add(value));
         }
     }
 
-    for (id, edge_label, properties, _) in graph.graph.edge_weights() {
+    for (id, _, properties, _) in graph.graph.edge_weights() {
         structure_bytes += string_heap(id);
-        structure_bytes += edge_label.as_ref().map_or(0, string_heap);
         if let Some(properties) = properties {
             property_bytes += crate::value::estimated_element_heap_bytes(properties);
             if !graph.compression.is_empty() {
@@ -280,16 +278,12 @@ pub(crate) fn loaded_vertex_bytes(
     properties: &crate::value::PropertyMap,
 ) -> u64 {
     use crate::value::compact_string_heap_bytes;
-    use compact_str::CompactString;
-    use std::mem::size_of;
     let slot = super::GraphType::node_slot_bytes() as u64;
     let mut bytes = slot
         + super::index::id_entry_bytes::<super::VertexHandle>()
         + compact_string_heap_bytes(id);
-    // The label `Vec` slot and the entry in the label's bucket set.
-    bytes += labels.len() as u64
-        * (size_of::<CompactString>() as u64 + index_entry_bytes::<super::VertexHandle, ()>());
-    bytes += labels.iter().map(compact_string_heap_bytes).sum::<u64>();
+    // The entry in each label's bucket set (the label itself lives once, in the label table).
+    bytes += labels.len() as u64 * index_entry_bytes::<super::VertexHandle, ()>();
     bytes + stored_properties_bytes(properties)
 }
 
@@ -323,8 +317,9 @@ pub(crate) fn loaded_edge_bytes(
         }
     };
     let mut bytes = slot + super::index::id_entry_bytes::<super::EdgeHandle>() + heap(id);
-    if let Some(label) = label {
-        bytes += heap(label) + index_entry_bytes::<super::EdgeHandle, ()>();
+    if label.is_some() {
+        // The label lives once, in the label table; the edge adds its bucket entry.
+        bytes += index_entry_bytes::<super::EdgeHandle, ()>();
     }
     bytes + properties.map_or(0, stored_properties_bytes)
 }

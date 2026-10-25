@@ -22,6 +22,15 @@ lists. A new edge goes to the front of both lists, so `out()`/`in()` see the new
 self-loop is in both lists of its vertex. Removing an edge unlinks it from both lists; removing a
 vertex removes its edges first.
 
+A vertex slot holds its id, a number for its label set, its property map and its slot
+generation (96 bytes on a 64-bit target); an edge slot its id, a number for its label, its
+property map, the generations of itself and its endpoints and the list links (112 bytes). The
+labels live once per graph in a label table (`graph/labels.rs`): every distinct edge label and
+every distinct ordered vertex label SET, so a vertex with labels `person, admin` costs 4 bytes in
+its slot, not a list of strings, and `vertex_labels()` still returns a slice. A materialized
+element (a vertex or edge value in a result) keeps its stored map's shape: the copy is the shared
+key list and the values, no key is hashed.
+
 The vectors grow by doubling, so a graph built element by element can carry up to half its slots
 as spare capacity. A snapshot load reserves the slots from the manifest's counts, and every load
 (snapshot, Store, GraphSON, GraphML) ends with `shrink_to_fit`, which releases the spare capacity
