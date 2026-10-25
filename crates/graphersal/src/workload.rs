@@ -7,5 +7,5 @@
 
 pub use crate::graph::workload::{
     Channel, Counters, JobRunRecord, Sample, SeriesKey, SeriesKind, SeriesTotals, WorkloadLevel,
-    WorkloadReport, WorkloadStats,
+    WorkloadReport, WorkloadStats, scope,
 };

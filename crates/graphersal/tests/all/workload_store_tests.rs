@@ -14,7 +14,7 @@ const T0: i64 = 1_800_000_000_000_000;
 const MINUTE: i64 = 60_000_000;
 
 fn key() -> SeriesKey {
-    SeriesKey::new(SeriesKind::WriteLock("query".into()), Channel::Mcp)
+    SeriesKey::new(SeriesKind::Lock("query".into()), Channel::Mcp)
 }
 
 fn new_store(dir: &MemDir, level: WorkloadLevel) -> Store {
@@ -178,4 +178,129 @@ fn a_single_file_store_keeps_the_statistics_inside() {
     let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
     assert_eq!(entries.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Write-lock time (0b stage B)
+// ---------------------------------------------------------------------------------------------
+
+fn lock_totals(store: &Store, name: &str, channel: Channel) -> graphersal::workload::Counters {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    store
+        .workload_stats()
+        .report(now)
+        .series
+        .into_iter()
+        .find(|s| s.key == SeriesKey::new(SeriesKind::Lock(name.into()), channel))
+        .map(|s| s.last_hour)
+        .unwrap_or_default()
+}
+
+#[test]
+fn writes_count_their_wait_and_hold_under_the_channel() {
+    let dir = MemDir::named("memory:lock");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    store.workload_stats().clear(None);
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .add_v("x")
+        .to_list()
+        .unwrap();
+    assert_eq!(lock_totals(&store, "write.wait", Channel::Host).count, 1);
+    assert_eq!(lock_totals(&store, "write.hold", Channel::Host).count, 1);
+    graphersal::workload::scope(Channel::Mcp, false, || {
+        store
+            .graph()
+            .write()
+            .traversal_mut()
+            .add_v("y")
+            .to_list()
+            .unwrap();
+    });
+    assert_eq!(lock_totals(&store, "write.hold", Channel::Mcp).count, 1);
+    // Technical work is not counted; an uncontended read neither.
+    graphersal::workload::scope(Channel::Playground, true, || {
+        store
+            .graph()
+            .write()
+            .traversal_mut()
+            .add_v("z")
+            .to_list()
+            .unwrap();
+    });
+    let _ = store.graph().read().vertex_count();
+    let report_len = |store: &Store| {
+        store
+            .workload_stats()
+            .report(T0)
+            .series
+            .iter()
+            .filter(|s| s.key.channel == Channel::Playground)
+            .count()
+    };
+    assert_eq!(report_len(&store), 0);
+    assert_eq!(lock_totals(&store, "read.wait", Channel::Host).count, 0);
+    // Off: nothing at all.
+    store.workload_stats().set_level(WorkloadLevel::Off);
+    store
+        .graph()
+        .write()
+        .traversal_mut()
+        .add_v("w")
+        .to_list()
+        .unwrap();
+    assert_eq!(lock_totals(&store, "write.hold", Channel::Host).count, 1);
+}
+
+#[test]
+fn contention_shows_as_wait_time() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = MemDir::named("memory:contention");
+    let store = Arc::new(new_store(&dir, WorkloadLevel::Memory));
+    store.workload_stats().clear(None);
+    let holder = {
+        let store = store.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let guard = store.graph().write();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+            drop(guard);
+        });
+        held_rx.recv().unwrap();
+        handle
+    };
+    let reader = {
+        let store = store.clone();
+        std::thread::spawn(move || store.graph().read().vertex_count())
+    };
+    let _ = store.graph().write();
+    holder.join().unwrap();
+    reader.join().unwrap();
+    let wait = lock_totals(&store, "write.wait", Channel::Host);
+    assert!(wait.max_micros >= 20_000, "{wait:?}");
+    let hold = lock_totals(&store, "write.hold", Channel::Host);
+    assert!(hold.max_micros >= 50_000, "{hold:?}");
+    let read = lock_totals(&store, "read.wait", Channel::Host);
+    assert_eq!(read.count, 1, "{read:?}");
+}
+
+#[test]
+fn a_graph_without_statistics_counts_nothing() {
+    let graph = graphersal::storage::Graph::new(TraversalGraph::tinkerpop_modern());
+    assert!(graph.workload_stats().is_none());
+    graph.write().traversal_mut().add_v("x").to_list().unwrap();
+    let stats = std::sync::Arc::new(graphersal::workload::WorkloadStats::new(
+        WorkloadLevel::Memory,
+    ));
+    assert!(graph.attach_workload_stats(stats.clone()));
+    assert!(!graph.attach_workload_stats(stats.clone()), "attached once");
+    graph.write().traversal_mut().add_v("y").to_list().unwrap();
+    assert_eq!(stats.report(0).series.len(), 2);
 }

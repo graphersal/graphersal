@@ -13,6 +13,9 @@
 
 #[cfg(feature = "persist")]
 pub(crate) mod codec;
+pub(crate) mod scope;
+
+pub use scope::scope;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -129,8 +132,9 @@ impl Channel {
 pub enum SeriesKind {
     /// The runs of one scheduled job (its name).
     Job(CompactString),
-    /// Write-lock acquisitions of one operation kind (`query`, `import`, `catalog`, ...).
-    WriteLock(CompactString),
+    /// The graph's lock: `write.wait` (asking for the write lock until holding it),
+    /// `write.hold` (holding it), `read.wait` (a reader waiting for a writer).
+    Lock(CompactString),
 }
 
 /// The key of a series: what is counted and the channel it came through.

@@ -30,6 +30,22 @@ their longest duration. The sidecar keeps all three tiers, so a restart loses no
 buckets that aged past their window while the process was stopped fall out at the next
 sample.
 
+## The graph's lock
+
+The graph has one writer lock: a writer excludes readers and other writers. To see whether it
+is a problem, three series measure it under the channel of the work that took the lock:
+
+| Series | What it measures |
+|---|---|
+| `write.wait` | a writer asking for the lock until it holds it (contention) |
+| `write.hold` | a writer holding the lock (what readers and other writers wait for) |
+| `read.wait` | a reader waiting because a writer holds the lock (an uncontended read is not counted) |
+
+Each bucket has the count, the total and the longest time, so the mean and the worst wait are
+at hand. A Store attaches its statistics to its graph; a graph of your own counts after
+`Graph::attach_workload_stats(stats)`. Work a front end marks as technical (its own drawing and
+panel queries) is not counted.
+
 ## The sidecar
 
 A writable store writes `WORKLOAD` once a minute (the system job `stats_flush`, see
@@ -52,7 +68,7 @@ let store = Store::create(&dir, StoreOptions::new()).unwrap();
 let stats = store.workload_stats();
 let now = 1_800_000_000_000_000; // microseconds since the Unix epoch
 stats.record(
-    SeriesKey::new(SeriesKind::WriteLock("query".into()), Channel::Cli),
+    SeriesKey::new(SeriesKind::Lock("write.hold".into()), Channel::Cli),
     now,
     Sample::new(10, 250),
 );

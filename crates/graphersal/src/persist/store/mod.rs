@@ -1010,6 +1010,8 @@ impl<S: PersistentStorage + Default> Store<S> {
                     "a store whose graph is not of the store's storage type",
                 ))
             })?;
+        // The lock's wait and hold times go to the store's workload statistics.
+        graph.attach_workload_stats(Arc::clone(&core.shared.workload));
         Ok(Store {
             core: Arc::new(core),
             graph,

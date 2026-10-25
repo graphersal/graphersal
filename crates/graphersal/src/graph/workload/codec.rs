@@ -26,7 +26,7 @@ use super::{
 const MAGIC: &[u8; 8] = b"GRWLSTAT";
 const VERSION: u32 = 1;
 const KIND_JOB: u8 = 1;
-const KIND_WRITE_LOCK: u8 = 2;
+const KIND_LOCK: u8 = 2;
 
 fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
@@ -89,7 +89,7 @@ impl WorkloadStats {
             let mut body = Vec::new();
             let (kind, name) = match &key.kind {
                 SeriesKind::Job(name) => (KIND_JOB, name),
-                SeriesKind::WriteLock(name) => (KIND_WRITE_LOCK, name),
+                SeriesKind::Lock(name) => (KIND_LOCK, name),
             };
             body.push(kind);
             put_str(&mut body, name);
@@ -153,7 +153,7 @@ impl WorkloadStats {
             let (Some(kind), Some(channel)) = (
                 match kind {
                     KIND_JOB => Some(SeriesKind::Job(name)),
-                    KIND_WRITE_LOCK => Some(SeriesKind::WriteLock(name)),
+                    KIND_LOCK => Some(SeriesKind::Lock(name)),
                     _ => None,
                 },
                 Channel::from_code(channel),
@@ -226,7 +226,7 @@ mod tests {
     fn every_tier_and_the_jobs_round_trip() {
         let stats = WorkloadStats::new(WorkloadLevel::Persisted);
         let t0 = 1_800_000_000_000_000i64;
-        let lock = SeriesKey::new(SeriesKind::WriteLock("query".into()), Channel::Mcp);
+        let lock = SeriesKey::new(SeriesKind::Lock("query".into()), Channel::Mcp);
         stats.record(lock.clone(), t0, Sample::new(4, 10));
         stats.record(lock.clone(), t0 + DAY, Sample::new(1, 30).failed());
         stats.record_job_run(
