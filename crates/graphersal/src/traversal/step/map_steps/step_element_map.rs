@@ -147,6 +147,26 @@ fn push_vertex_tokens<S: GraphStorage>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepElementMap {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        match (&self.args, &self.path_keys) {
+            (None, None) => visit(None, crate::graph::workload::AccessKind::Read),
+            (args, paths) => {
+                args.iter()
+                    .flatten()
+                    .for_each(|key| visit(Some(key), crate::graph::workload::AccessKind::Read));
+                for (path, _) in paths.iter().flat_map(|p| p.paths.iter()) {
+                    if let Some(crate::value::json_path::JsonPathSegment::Key(key)) =
+                        path.segments().first()
+                    {
+                        visit(Some(key), crate::graph::workload::AccessKind::Read);
+                    }
+                }
+            }
+        }
+    }
     /// Builds an aggregation/materialization buffer (D3 of the memory-inspection spec) — reported
     /// to `.profile()` as a non-zero `bytes_materialized`.
     fn materializes(&self) -> bool {

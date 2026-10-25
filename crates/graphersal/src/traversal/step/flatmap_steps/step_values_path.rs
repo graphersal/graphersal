@@ -101,6 +101,16 @@ pub(super) fn properties_keys_step<'g, S: GraphStorage + 'g>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValuesKeys {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for plan in &self.plans {
+            if let Some(key) = plan.key.top_level() {
+                visit(Some(key), crate::graph::workload::AccessKind::Read);
+            }
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,
@@ -239,6 +249,16 @@ fn read_path_properties<S: GraphStorage>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepPropertiesKeys {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for plan in &self.plans {
+            if let Some(key) = plan.key.top_level() {
+                visit(Some(key), crate::graph::workload::AccessKind::Read);
+            }
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

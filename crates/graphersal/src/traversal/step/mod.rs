@@ -95,6 +95,28 @@ impl<'g, S: GraphStorage + 'g> GraphStep<'g, S> {
         }
     }
 
+    /// The properties this step uses and how ([`GraphStepFilter::property_access`] and its
+    /// twins in the other categories): `visit(key, access)` per use, `None` for every key.
+    pub(crate) fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        match self {
+            GraphStep::Init(_, step) => step.property_access(visit),
+            GraphStep::Filter(_, step) => step.property_access(visit),
+            GraphStep::FlatMap(_, step) => step.property_access(visit),
+            GraphStep::Map(_, step) => step.property_access(visit),
+            GraphStep::FlatBarrier(_, step) => step.property_access(visit),
+            GraphStep::Barrier(_, step) => step.property_access(visit),
+            GraphStep::SideEffectMut(_, step) => step.property_access(visit),
+            GraphStep::Modulator(_, step) => step.property_access(visit),
+            GraphStep::Append(_, _)
+            | GraphStep::SideEffect(_, _)
+            | GraphStep::As(_, _)
+            | GraphStep::Count(_, _) => {}
+        }
+    }
+
     /// The child traversals this step holds, in their canonical order. This is the single
     /// definition of the child numbering behind step ids (`Metrics::id` of `.profile()` and the
     /// location of an execution error, `<step>.<child>.<step>...`): the step's own traversal
@@ -974,6 +996,16 @@ pub(crate) trait GraphStepModulator<'g, S: GraphStorage + 'g>:
     ) -> crate::traversal::optimizer::path_analysis::PathRequirement {
         crate::traversal::optimizer::path_analysis::PathRequirement::None
     }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
+    }
     fn clone_box(&self) -> Box<dyn GraphStepModulator<'g, S> + 'g>;
 }
 
@@ -1106,6 +1138,16 @@ pub(crate) trait GraphStepSideEffectMut<'g, S: GraphStorage + 'g>:
     /// the plan-time validation pass before execution, even when no traverser reaches the step.
     fn plan_check(&self) -> TraverserResult<()> {
         Ok(())
+    }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
     }
     fn clone_box(&self) -> Box<dyn GraphStepSideEffectMut<'g, S> + 'g>;
 }
@@ -1421,6 +1463,16 @@ pub(crate) trait GraphStepInit<'g, S: GraphStorage + 'g>:
     fn materializes(&self) -> bool {
         false
     }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
+    }
     fn clone_box(&self) -> Box<dyn GraphStepInit<'g, S> + 'g>;
 }
 
@@ -1631,6 +1683,16 @@ pub(crate) trait GraphStepMap<'g, S: GraphStorage + 'g>: Send + Sync + fmt::Disp
     fn plan_check(&self) -> TraverserResult<()> {
         Ok(())
     }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
+    }
     fn clone_box(&self) -> Box<dyn GraphStepMap<'g, S> + 'g>;
 }
 
@@ -1779,6 +1841,16 @@ pub(crate) trait GraphStepFlatMap<'g, S: GraphStorage + 'g>:
     fn materializes(&self) -> bool {
         false
     }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
+    }
     fn clone_box(&self) -> Box<dyn GraphStepFlatMap<'g, S> + 'g>;
 }
 
@@ -1859,6 +1931,16 @@ pub(crate) trait GraphStepBarrier<'g, S: GraphStorage + 'g>:
     /// somewhere in the query. `None` for every step that isn't a keyed side effect.
     fn declares_side_effect_key(&self) -> Option<&str> {
         None
+    }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
     }
     fn clone_box(&self) -> Box<dyn GraphStepBarrier<'g, S> + 'g>;
 }
@@ -1967,6 +2049,16 @@ pub(crate) trait GraphStepFlatBarrier<'g, S: GraphStorage + 'g>:
     /// [`GraphStepBarrier::declares_side_effect_key`].
     fn declares_side_effect_key(&self) -> Option<&str> {
         None
+    }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
     }
     fn clone_box(&self) -> Box<dyn GraphStepFlatBarrier<'g, S> + 'g>;
 }
@@ -2095,6 +2187,16 @@ pub(crate) trait GraphStepFilter<'g, S: GraphStorage + 'g>:
     /// computing at all.
     fn materializes(&self) -> bool {
         false
+    }
+    /// The properties this step uses and how (the property statistics, book page "Workload
+    /// Statistics"): `visit(key, access)` once per use, `None` for every key (a whole-map
+    /// read). Default: none. A step taking property keys overrides it
+    /// (`every_key_taking_step_declares_its_property_access` checks the known ones).
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        let _ = visit;
     }
     fn clone_box(&self) -> Box<dyn GraphStepFilter<'g, S> + 'g>;
 }

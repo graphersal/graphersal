@@ -111,6 +111,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepOrderLocal<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.clauses.property_keys() {
+            visit(Some(key), crate::graph::workload::AccessKind::OrderGroup);
+        }
+    }
     #[inline]
     fn process(
         &self,

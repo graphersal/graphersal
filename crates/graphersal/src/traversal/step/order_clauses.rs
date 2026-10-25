@@ -51,6 +51,13 @@ impl<'g, S: GraphStorage + 'g> Clone for OrderClauses<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> OrderClauses<'g, S> {
+    /// The properties the clauses sort by (`by(key)`).
+    pub(crate) fn property_keys(&self) -> impl Iterator<Item = &str> {
+        self.clauses
+            .iter()
+            .filter_map(|(by, _)| by.as_ref().and_then(By::property_key))
+    }
+
     /// Writes the clauses as `.by(key, direction)` suffixes, for the step's profile name.
     pub(crate) fn fmt_clauses(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (by, order) in &self.clauses {

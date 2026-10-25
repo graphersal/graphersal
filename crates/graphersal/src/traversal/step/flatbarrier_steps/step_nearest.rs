@@ -172,6 +172,14 @@ impl MetricCache {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepNearest<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let Some(key) = self.key.top_level() {
+            visit(Some(key), crate::graph::workload::AccessKind::Similarity);
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

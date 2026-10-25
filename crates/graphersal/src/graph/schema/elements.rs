@@ -161,7 +161,7 @@ impl std::fmt::Display for SchemaMode {
 ///
 /// Closed on purpose: a property graph has exactly two element kinds, so this enum is
 /// deliberately *not* `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ElementKind {
     /// A vertex.

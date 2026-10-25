@@ -89,6 +89,15 @@ pub(crate) fn edge_has<S: GraphStorage>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHas {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        visit(
+            Some(&self.key),
+            crate::graph::workload::AccessKind::FilterScan,
+        );
+    }
     fn property_equality(&self) -> Option<crate::traversal::step::PropertyFilter> {
         Some(crate::traversal::step::PropertyFilter {
             key: self.key.clone(),

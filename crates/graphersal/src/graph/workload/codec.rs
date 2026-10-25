@@ -28,6 +28,7 @@ const VERSION: u32 = 1;
 const KIND_JOB: u8 = 1;
 const KIND_LOCK: u8 = 2;
 const KIND_QUERY: u8 = 3;
+const KIND_PROPERTY: u8 = 4;
 
 fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(&(text.len() as u32).to_le_bytes());
@@ -92,10 +93,27 @@ impl WorkloadStats {
                 SeriesKind::Job(name) => (KIND_JOB, name),
                 SeriesKind::Lock(name) => (KIND_LOCK, name),
                 SeriesKind::Query(name) => (KIND_QUERY, name),
+                SeriesKind::Property(property) => (KIND_PROPERTY, &property.key),
             };
             body.push(kind);
             put_str(&mut body, name);
             body.push(key.channel.code());
+            // A property series names its element kind, label and access after the channel.
+            if let SeriesKind::Property(property) = &key.kind {
+                body.push(match property.element {
+                    None => 0,
+                    Some(crate::graph::ElementKind::Vertex) => 1,
+                    Some(crate::graph::ElementKind::Edge) => 2,
+                });
+                match &property.label {
+                    Some(label) => {
+                        body.push(1);
+                        put_str(&mut body, label);
+                    }
+                    None => body.push(0),
+                }
+                body.push(property.access.code());
+            }
             body.push(TIERS.len() as u8);
             for (tier_index, tier) in series.tiers.iter().enumerate() {
                 body.push(tier_index as u8);
@@ -152,11 +170,35 @@ impl WorkloadStats {
             let kind = s.u8()?;
             let name = CompactString::from(s.str()?);
             let channel = s.u8()?;
+            let property = if kind == KIND_PROPERTY {
+                let element = match s.u8()? {
+                    0 => None,
+                    1 => Some(crate::graph::ElementKind::Vertex),
+                    2 => Some(crate::graph::ElementKind::Edge),
+                    _ => continue,
+                };
+                let label = match s.u8()? {
+                    0 => None,
+                    _ => Some(CompactString::from(s.str()?)),
+                };
+                let Some(access) = super::AccessKind::from_code(s.u8()?) else {
+                    continue;
+                };
+                Some(super::PropertyUse {
+                    element,
+                    label,
+                    key: name.clone(),
+                    access,
+                })
+            } else {
+                None
+            };
             let (Some(kind), Some(channel)) = (
                 match kind {
                     KIND_JOB => Some(SeriesKind::Job(name)),
                     KIND_LOCK => Some(SeriesKind::Lock(name)),
                     KIND_QUERY => Some(SeriesKind::Query(name)),
+                    KIND_PROPERTY => property.map(SeriesKind::Property),
                     _ => None,
                 },
                 Channel::from_code(channel),

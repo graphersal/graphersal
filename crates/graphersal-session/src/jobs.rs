@@ -3,7 +3,7 @@
 //! from a timer in its worker); the session keeps one [`Scheduler`] for the active store and
 //! builds a new one when the active store changes. Without a store there are no jobs.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use graphersal::jobs::Scheduler;
 use serde_json::{Value, json};
@@ -16,13 +16,9 @@ use crate::storage::SessionStore;
 pub struct SessionJobs {
     /// The IANA time zone the schedules run in (`None`: UTC).
     time_zone: Option<String>,
-    /// The scheduler and the address of the store it belongs to.
-    current: Option<(usize, Scheduler)>,
-}
-
-/// The address of a store, to notice that the active store changed.
-fn address(store: &Arc<dyn SessionStore>) -> usize {
-    Arc::as_ptr(store) as *const () as usize
+    /// The scheduler and the store it belongs to (a `Weak` keeps the allocation, so a new
+    /// store never takes the old one's address and is mistaken for it).
+    current: Option<(Weak<dyn SessionStore>, Scheduler)>,
 }
 
 impl Session {
@@ -44,8 +40,12 @@ impl Session {
             self.jobs.current = None;
             return None;
         };
-        let key = address(&store);
-        if self.jobs.current.as_ref().map(|(k, _)| *k) != Some(key) {
+        let same = self
+            .jobs
+            .current
+            .as_ref()
+            .is_some_and(|(known, _)| std::ptr::addr_eq(known.as_ptr(), Arc::as_ptr(&store)));
+        if !same {
             // The zone was checked when it was set; an unknown one falls back to UTC.
             let zoned = match &self.jobs.time_zone {
                 Some(zone) => Scheduler::new().with_time_zone(zone).ok(),
@@ -55,7 +55,7 @@ impl Session {
             for job in store.system_jobs() {
                 let _ = scheduler.add(job);
             }
-            self.jobs.current = Some((key, scheduler));
+            self.jobs.current = Some((Arc::downgrade(&store), scheduler));
         }
         self.jobs.current.as_mut().map(|(_, scheduler)| scheduler)
     }

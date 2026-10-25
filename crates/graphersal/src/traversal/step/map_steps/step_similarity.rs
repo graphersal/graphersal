@@ -413,6 +413,11 @@ pub(crate) struct VectorKey {
 }
 
 impl VectorKey {
+    /// The top-level property the vector lives in.
+    pub(crate) fn top_level(&self) -> Option<&str> {
+        self.key.top_level()
+    }
+
     pub(crate) fn new(key: PropKey) -> Self {
         let segments = match &key {
             PropKey::Name(name) => vec![JsonPathSegment::Key(name.clone())],
@@ -554,6 +559,14 @@ fn similarity_step<'g, S: GraphStorage + 'g>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSimilarity<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let Some(key) = self.key.as_ref().and_then(VectorKey::top_level) {
+            visit(Some(key), crate::graph::workload::AccessKind::Similarity);
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

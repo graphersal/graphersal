@@ -336,6 +336,14 @@ pub(crate) fn dedup_labels_step<'g, S: GraphStorage + 'g>(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepDedup<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::OrderGroup);
+        }
+    }
     #[inline]
     fn process(
         &self,

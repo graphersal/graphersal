@@ -6,6 +6,6 @@
 //! the [`WorkloadLevel`] set when it was opened.
 
 pub use crate::graph::workload::{
-    Channel, Counters, JobRunRecord, MAX_QUERY_SERIES, Sample, SeriesKey, SeriesKind, SeriesTotals,
-    WorkloadLevel, WorkloadReport, WorkloadStats, scope,
+    AccessKind, Channel, Counters, JobRunRecord, MAX_QUERY_SERIES, PropertyUse, Sample, SeriesKey,
+    SeriesKind, SeriesTotals, WorkloadLevel, WorkloadReport, WorkloadStats, scope,
 };

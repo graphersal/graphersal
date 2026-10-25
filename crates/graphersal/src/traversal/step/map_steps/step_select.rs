@@ -411,6 +411,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepSelect<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().flatten().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::Read);
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

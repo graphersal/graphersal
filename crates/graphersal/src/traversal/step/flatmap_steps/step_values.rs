@@ -48,6 +48,17 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatMap<'g, S> for StepValues {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        match &self.args {
+            None => visit(None, crate::graph::workload::AccessKind::Read),
+            Some(keys) => keys
+                .iter()
+                .for_each(|key| visit(Some(key), crate::graph::workload::AccessKind::Read)),
+        }
+    }
     #[inline]
     fn process(
         &self,

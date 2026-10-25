@@ -324,6 +324,14 @@ pub(crate) fn takes_incoming_value<'g, S: GraphStorage + 'g>(value_by: &By<'g, S
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepBarrier<'g, S> for StepGroup<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().flatten().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::OrderGroup);
+        }
+    }
     /// Builds an aggregation/materialization buffer (D3 of the memory-inspection spec) — reported
     /// to `.profile()` as a non-zero `bytes_materialized`.
     fn materializes(&self) -> bool {

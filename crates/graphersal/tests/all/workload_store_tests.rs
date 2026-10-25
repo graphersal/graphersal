@@ -380,13 +380,14 @@ fn a_saved_query_call_counts_under_its_name() {
     let dir = MemDir::named("memory:saved");
     let store = new_store(&dir, WorkloadLevel::Memory);
     let graph: Arc<graphersal::storage::Graph> = store.graph().clone();
-    crate::script_host::eval_value(
+    let _ = crate::script_host::eval_value(
         graph.clone(),
         r#"g.define_query(#{name: "people", body: "fn people() { g.v().has_label(\"person\") }"})"#,
     )
     .unwrap();
     store.workload_stats().clear(None);
-    crate::script_host::eval_value(graph, r#"g.query("people").values("name").to_list()"#).unwrap();
+    let _ = crate::script_host::eval_value(graph, r#"g.query("people").values("name").to_list()"#)
+        .unwrap();
     let found = queries(&store);
     let names: Vec<&str> = found.iter().map(|(t, _, _)| t.as_str()).collect();
     assert!(names.contains(&"saved:people"), "{names:?}");
@@ -396,4 +397,228 @@ fn a_saved_query_call_counts_under_its_name() {
             .any(|t| t.starts_with("v(") && t.contains("values(?)")),
         "the plan it returned runs and counts too: {names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Property statistics (0b stage D)
+// ---------------------------------------------------------------------------------------------
+
+/// `(element, label, key, access, executions, items)` of every property series, sorted.
+fn property_uses(store: &Store) -> Vec<(String, String, String, String, u64, u64)> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    let mut out: Vec<_> = store
+        .workload_stats()
+        .report(now)
+        .series
+        .into_iter()
+        .filter_map(|s| match &s.key.kind {
+            SeriesKind::Property(p) => Some((
+                p.element.map_or("*", |e| e.as_str()).to_string(),
+                p.label.as_deref().unwrap_or("*").to_string(),
+                p.key.to_string(),
+                p.access.name().to_string(),
+                s.last_hour.count,
+                s.last_hour.items,
+            )),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn run_script(store: &Store, script: &str) {
+    let _ = crate::script_host::eval_value(store.graph().clone(), script)
+        .unwrap_or_else(|err| panic!("{script}: {err}"));
+}
+
+fn uses_of(store: &Store, script: &str) -> Vec<(String, String, String, String, u64, u64)> {
+    store.workload_stats().clear(None);
+    run_script(store, script);
+    property_uses(store)
+}
+
+fn row(
+    e: &str,
+    l: &str,
+    k: &str,
+    a: &str,
+    n: u64,
+    items: u64,
+) -> (String, String, String, String, u64, u64) {
+    (e.into(), l.into(), k.into(), a.into(), n, items)
+}
+
+#[test]
+fn filters_and_reads_count_per_label_and_key() {
+    let dir = MemDir::named("memory:props");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let uses = uses_of(
+        &store,
+        r#"g.v().has_label("person").has("age", P.gt(30)).values("name").to_list()"#,
+    );
+    assert_eq!(
+        uses,
+        [
+            // 4 persons reach the filter, 2 (josh 32, peter 35) reach values().
+            row("vertex", "person", "age", "filter_scan", 1, 4),
+            row("vertex", "person", "name", "read", 1, 2),
+        ]
+    );
+    // Order, project, element_map, a child traversal.
+    let uses = uses_of(
+        &store,
+        r#"g.v().has_label("person").order().by("age").project("n").by("name").to_list()"#,
+    );
+    assert!(
+        uses.contains(&row("vertex", "person", "age", "order_group", 1, 4)),
+        "{uses:?}"
+    );
+    assert!(
+        uses.contains(&row("vertex", "person", "name", "read", 1, 4)),
+        "{uses:?}"
+    );
+    let uses = uses_of(
+        &store,
+        r#"g.e().has_label("knows").element_map().to_list()"#,
+    );
+    assert_eq!(uses, [row("edge", "knows", "*", "read", 1, 2)]);
+    // A filter the optimizer unnests is a top-level step; one inside a child has no flow.
+    let uses = uses_of(&store, r#"g.v().where(__.has("lang")).to_list()"#);
+    assert_eq!(uses, [row("vertex", "*", "lang", "filter_scan", 1, 6)]);
+    let uses = uses_of(&store, r#"g.v().where(__.out().has("lang")).to_list()"#);
+    assert_eq!(uses, [row("*", "*", "lang", "filter_scan", 1, 0)]);
+}
+
+#[test]
+fn an_index_served_filter_and_writes_count_as_such() {
+    let dir = MemDir::named("memory:props-index");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    run_script(&store, r#"g.create_index(#{label: "person", key: "name"})"#);
+    let uses = uses_of(
+        &store,
+        r#"g.v().has_label("person").has("name", "marko").values("age").to_list()"#,
+    );
+    assert!(
+        uses.contains(&row("vertex", "person", "name", "filter_index", 1, 0)),
+        "{uses:?}"
+    );
+    assert!(!uses.iter().any(|u| u.3 == "filter_scan"), "{uses:?}");
+    let uses = uses_of(
+        &store,
+        r#"g.add_v("person").property("name", "ann").property("age", 1).iterate()"#,
+    );
+    assert!(
+        uses.iter().any(|u| u.2 == "name" && u.3 == "write"),
+        "{uses:?}"
+    );
+    assert!(
+        uses.iter().any(|u| u.2 == "age" && u.3 == "write"),
+        "{uses:?}"
+    );
+    let uses = uses_of(
+        &store,
+        r#"g.v().has_label("person").remove_property("age").iterate()"#,
+    );
+    assert!(
+        uses.contains(&row("vertex", "person", "age", "remove", 1, 5)),
+        "{uses:?}"
+    );
+}
+
+/// Every step that takes a property key declares how it uses it (a new key-taking step needs a
+/// `property_access` and a line here).
+#[test]
+fn every_key_taking_step_declares_its_property_access() {
+    let dir = MemDir::named("memory:props-coverage");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    run_script(
+        &store,
+        r#"g.add_v("doc").property("emb", vector([1.0, 0.0])).property("meta", #{a: 1}).iterate()"#,
+    );
+    let cases: &[(&str, &str, &str)] = &[
+        (r#"g.v().has("age", 29).to_list()"#, "age", "filter_scan"),
+        (
+            r#"g.v().has("age", P.gt(1)).to_list()"#,
+            "age",
+            "filter_scan",
+        ),
+        (r#"g.v().has("age").to_list()"#, "age", "filter_scan"),
+        (r#"g.v().has_not("age").to_list()"#, "age", "filter_scan"),
+        (
+            r#"g.v().has(jpath("meta.a"), 1).to_list()"#,
+            "meta",
+            "filter_scan",
+        ),
+        (
+            r#"g.v().has("name", __.to_lower().is("marko")).to_list()"#,
+            "name",
+            "filter_scan",
+        ),
+        (r#"g.v().values("name").to_list()"#, "name", "read"),
+        (r#"g.v().values(jpath("meta.a")).to_list()"#, "meta", "read"),
+        (r#"g.v().properties("name").to_list()"#, "name", "read"),
+        (r#"g.v().value_map("name").to_list()"#, "name", "read"),
+        (r#"g.v().value_map().to_list()"#, "*", "read"),
+        (r#"g.v().element_map("age").to_list()"#, "age", "read"),
+        (
+            r#"g.v().has_label("doc").similarity("emb", vector([1.0, 0.0])).to_list()"#,
+            "emb",
+            "similarity",
+        ),
+        (
+            r#"g.v().has_label("doc").nearest("emb", vector([1.0, 0.0]), 1).to_list()"#,
+            "emb",
+            "similarity",
+        ),
+        (r#"g.v().group().by("age").to_list()"#, "age", "order_group"),
+        (
+            r#"g.v().dedup().by("lang").to_list()"#,
+            "lang",
+            "order_group",
+        ),
+        (
+            r#"g.v().order().by("name").to_list()"#,
+            "name",
+            "order_group",
+        ),
+        (
+            r#"g.v().fold().order(Scope.local).by("name").to_list()"#,
+            "name",
+            "order_group",
+        ),
+        (r#"g.v().project("a").by("age").to_list()"#, "age", "read"),
+        (
+            r#"g.v().as_("a").select("a").by("name").to_list()"#,
+            "name",
+            "read",
+        ),
+        (r#"g.v().out().path().by("name").to_list()"#, "name", "read"),
+        (r#"g.v().out().tree().by("name").to_list()"#, "name", "read"),
+        (
+            r#"g.v().has_label("doc").property("x", 1).iterate()"#,
+            "x",
+            "write",
+        ),
+        (
+            r#"g.v().has_label("doc").property(#{y: 1}).iterate()"#,
+            "y",
+            "write",
+        ),
+        (
+            r#"g.v().has_label("doc").remove_property("x").iterate()"#,
+            "x",
+            "remove",
+        ),
+    ];
+    for (script, key, access) in cases {
+        let uses = uses_of(&store, script);
+        assert!(
+            uses.iter().any(|u| u.2 == *key && u.3 == *access),
+            "{script}: expected {key} {access} in {uses:?}"
+        );
+    }
 }

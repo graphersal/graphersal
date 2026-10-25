@@ -43,6 +43,20 @@ pub(crate) struct LevelAt {
     pub(crate) first: usize,
 }
 
+/// Adds the bulk of `source` to the input count of top-level step `index`.
+#[inline(never)]
+fn note_step_input<S: GraphStorage>(inputs: &mut Vec<u64>, index: usize, source: &[Traverser<S>]) {
+    if inputs.len() <= index {
+        inputs.resize(index + 1, 0);
+    }
+    let bulk = source
+        .iter()
+        .fold(0u64, |sum, traverser| sum.saturating_add(traverser.bulk));
+    if let Some(slot) = inputs.get_mut(index) {
+        *slot = slot.saturating_add(bulk);
+    }
+}
+
 impl LevelAt {
     /// The top-level traversal.
     pub(crate) const TOP: LevelAt = LevelAt {
@@ -75,6 +89,9 @@ struct RunOutcome<S: GraphStorage> {
     result: TraverserResult<Vec<Traverser<S>>>,
     profile: ProfileContext,
     expansion: Expansion,
+    /// The traversers that reached each top-level step (`TraverserContext::step_inputs`), when
+    /// the run records workload statistics.
+    step_inputs: Option<Vec<u64>>,
 }
 
 /// The bounds a terminal expands a run's traversers under: the run's limits and its deadline,
@@ -2427,7 +2444,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
     /// graph with statistics pays the rendering.
     #[inline(never)]
     fn record_query(
-        &self,
+        &mut self,
         stats: &crate::graph::workload::WorkloadStats,
         channel: crate::graph::workload::Channel,
         started: Instant,
@@ -2454,6 +2471,114 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.as_micros() as i64);
         stats.record(key, now, sample);
+        for (property, items) in self.property_uses(outcome.step_inputs.as_deref()) {
+            let key = SeriesKey::new(SeriesKind::Property(property), channel);
+            stats.record(key, now, crate::graph::workload::Sample::new(items, 0));
+        }
+    }
+
+    /// The properties the optimized plan used and how, each once with the traversers that
+    /// reached the steps using it (top-level steps; uses inside child traversals count with no
+    /// items). The element kind and label come from what the plan states before each step
+    /// (`access_flow_after`, labels of `v(labels)` / `e(labels)` / `has_label`); a `by(key)`
+    /// counts as a sort/group on or after `order`/`group`/`group_count`/`dedup`, else as a read; a
+    /// filter on the key a source's index serves counts as an index filter.
+    fn property_uses(
+        &mut self,
+        inputs: Option<&[u64]>,
+    ) -> Vec<(crate::graph::workload::PropertyUse, u64)> {
+        use crate::graph::workload::{AccessKind, PropertyUse};
+        let mut uses: Vec<(PropertyUse, u64)> = Vec::new();
+        let mut add = |flow: &crate::traversal::step::AccessFlow,
+                       key: Option<&str>,
+                       access: AccessKind,
+                       items: u64| {
+            let label = match flow.labels.as_slice() {
+                [one] => Some(CompactString::from(one.as_str())),
+                _ => None,
+            };
+            let property = PropertyUse {
+                element: flow.element,
+                label,
+                key: CompactString::from(key.unwrap_or("*")),
+                access,
+            };
+            match uses.iter_mut().find(|(known, _)| *known == property) {
+                Some((_, count)) => *count = count.saturating_add(items),
+                None => uses.push((property, items)),
+            }
+        };
+        let mut flow = crate::traversal::step::AccessFlow::default();
+        let mut indexed: Vec<String> = Vec::new();
+        let mut previous = "";
+        let mut logical = 0usize;
+        for step in &mut self.steps {
+            let items = match step {
+                GraphStep::Modulator(_, _) => 0,
+                _ => inputs
+                    .and_then(|inputs| inputs.get(logical))
+                    .copied()
+                    .unwrap_or(0),
+            };
+            // A source's own filters (folded `has`, an index) apply to what it yields; for the
+            // statistics its labels name the vertices too (they are counts, not a permission).
+            if let GraphStep::Init(_, init) = step {
+                flow = crate::traversal::step::AccessFlow {
+                    labels: init.labels().map(<[String]>::to_vec).unwrap_or_default(),
+                    ..step.access_flow_after(flow)
+                };
+            }
+            let sorts = |name: &str| matches!(name, "order" | "group" | "group_count" | "dedup");
+            let ordering = sorts(previous) || sorts(step.kind_name());
+            step.property_access(&mut |key, access| {
+                let access = match (access, key) {
+                    (AccessKind::FilterIndex, Some(key)) => {
+                        indexed.push(key.to_string());
+                        access
+                    }
+                    (AccessKind::FilterScan, Some(key)) if indexed.iter().any(|k| k == key) => {
+                        AccessKind::FilterIndex
+                    }
+                    (AccessKind::OrderGroup, _) if !ordering => AccessKind::Read,
+                    (access, _) => access,
+                };
+                add(&flow, key, access, items);
+            });
+            Self::child_property_uses(&mut *step, &mut add);
+            if let GraphStep::Modulator(_, _) = step {
+                continue;
+            }
+            previous = step.kind_name();
+            flow = match step {
+                GraphStep::Init(_, _) => flow,
+                GraphStep::Filter("has_label", filter) => crate::traversal::step::AccessFlow {
+                    element: flow.element,
+                    labels: filter.labels().map(<[String]>::to_vec).unwrap_or_default(),
+                },
+                _ => step.access_flow_after(flow),
+            };
+            logical += 1;
+        }
+        uses
+    }
+
+    /// The property uses inside the child traversals of `step`, with no flow and no items.
+    fn child_property_uses(
+        step: &mut GraphStep<'g, S>,
+        add: &mut impl FnMut(
+            &crate::traversal::step::AccessFlow,
+            Option<&str>,
+            crate::graph::workload::AccessKind,
+            u64,
+        ),
+    ) {
+        let flow = crate::traversal::step::AccessFlow::default();
+        for child in step.child_traversals_mut() {
+            for nested in child.steps.iter_mut() {
+                nested.property_access(&mut |key, access| add(&flow, key, access, 0));
+                Self::child_property_uses(nested, add);
+            }
+        }
     }
 
     /// [`Self::run`] without the query statistics.
@@ -2467,6 +2592,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 result: Err(err),
                 profile: ProfileContext::new(),
                 expansion: Expansion::UNBOUNDED,
+                step_inputs: None,
             }
         };
         // The `embed` steps resolve their embedder first, so the permission check asks for the
@@ -2498,7 +2624,8 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
         // Implicit auto-commit: the run is one unit of atomicity; any error inside it (a step,
         // the schema, a resource limit, `evaluationTimeout`) rolls back what it changed.
         let mark = self.storage.begin_unit();
-        let (result, mut profile, deadline) = crate::graph::storage::close_on_unwind(
+        let count_inputs = crate::graph::workload::scope::attached().is_some();
+        let (result, mut profile, deadline, step_inputs) = crate::graph::storage::close_on_unwind(
             self,
             |this| {
                 let mut context = TraverserContext::with_options(
@@ -2507,6 +2634,9 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     this.side_effect.clone(),
                     options,
                 );
+                if count_inputs {
+                    context.step_inputs = Some(Vec::new());
+                }
                 context.profile_type = this.profile_type;
                 context.create_context = this
                     .create_time
@@ -2525,6 +2655,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                     result,
                     std::mem::take(&mut context.profile),
                     context.deadline.take(),
+                    context.step_inputs.take(),
                 )
             },
             |this| {
@@ -2558,6 +2689,7 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
             result,
             profile,
             expansion: Expansion { limits, deadline },
+            step_inputs,
         }
     }
 
@@ -2789,6 +2921,14 @@ impl<'g, S: GraphStorage + 'g> crate::GraphTraversalSource<'g, S> {
                 GraphStep::Count(_, _) => counted_in.take().unwrap_or(source.len()),
                 _ => source.len(),
             };
+            // The property statistics' items: the traversers (with bulk) reaching each
+            // top-level step, counted only when the run records workload statistics.
+            if at.child.is_none()
+                && !matches!(current_step, GraphStep::Modulator(_, _))
+                && let Some(inputs) = context.step_inputs.as_mut()
+            {
+                note_step_input(inputs, step_at.index, &source);
+            }
             let mut count_out = 0;
             let alloc_before = AllocSnapshot::capture(profile_memory);
 

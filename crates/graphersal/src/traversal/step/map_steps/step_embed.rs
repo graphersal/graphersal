@@ -116,6 +116,14 @@ impl StepEmbed {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepEmbed {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let Some(key) = self.key.as_ref().and_then(|key| key.top_level()) {
+            visit(Some(key), crate::graph::workload::AccessKind::Read);
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

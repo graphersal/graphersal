@@ -32,6 +32,18 @@ impl PropKey {
         }
     }
 
+    /// The top-level property the key reads or writes: the name, or a path's first member
+    /// name (`None` for a path starting with an index).
+    pub(crate) fn top_level(&self) -> Option<&str> {
+        match self {
+            PropKey::Name(n) => Some(n.as_str()),
+            PropKey::Path(path) => match path.segments().first() {
+                Some(crate::value::json_path::JsonPathSegment::Key(key)) => Some(key.as_str()),
+                _ => None,
+            },
+        }
+    }
+
     /// The path, or `None` for a literal name.
     pub fn as_path(&self) -> Option<&JsonPath> {
         match self {

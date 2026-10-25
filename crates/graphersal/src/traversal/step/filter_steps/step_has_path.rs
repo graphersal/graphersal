@@ -37,6 +37,16 @@ impl fmt::Display for StepHasPath {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasPath {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let Some(crate::value::json_path::JsonPathSegment::Key(key)) =
+            self.path.segments().first()
+        {
+            visit(Some(key), crate::graph::workload::AccessKind::FilterScan);
+        }
+    }
     #[inline]
     fn process(
         &self,
