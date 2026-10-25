@@ -718,3 +718,35 @@ fn a_saved_query_call_inside_a_whole_script_unit_counts() {
     let runs = queries(&store);
     assert!(runs.iter().any(|(q, _, _)| q == "saved:people"), "{runs:?}");
 }
+
+/// The workload statistics' memory shows as `workload_bytes` in `g.memory_usage()` (beside the
+/// graph's own data: never part of `total_bytes`) and grows with the series; a graph without
+/// statistics reports 0.
+#[test]
+fn the_statistics_memory_is_shown_beside_the_graph() {
+    let dir = MemDir::named("memory:workload-memory");
+    let store = new_store(&dir, WorkloadLevel::Memory);
+    let usage = |graph: &std::sync::Arc<Graph>| {
+        let map = crate::script_host::eval_value(graph.clone(), "g.memory_usage()")
+            .unwrap()
+            .cast::<graphersal::script::rhai::Map>();
+        let int = |key: &str| map[key].as_int().unwrap();
+        (int("workload_bytes"), int("total_bytes"))
+    };
+    let (before, total) = usage(store.graph());
+    assert!(before > 0);
+    // The storage's own figure is the same total: the statistics are not in it.
+    let storage_total = store.graph().read().memory_usage().unwrap().total_bytes();
+    assert_eq!(total as u64, storage_total);
+    for i in 0..50 {
+        let _ = crate::script_host::eval_value(
+            store.graph().clone(),
+            &format!("g.v().has(\"name\", \"n{i}\").values(\"age{i}\").to_list()"),
+        )
+        .unwrap();
+    }
+    let (after, _) = usage(store.graph());
+    assert!(after > before, "{before} -> {after}");
+    let plain = std::sync::Arc::new(GraphSource::tinkerpop_modern());
+    assert_eq!(usage(&plain).0, 0);
+}

@@ -306,7 +306,11 @@ where
     }
 
     fn memory_view(&self) -> Value {
-        crate::views::memory_usage(&*self.read())
+        let mut view = crate::views::memory_usage(&*self.read());
+        if let (Some(stats), Some(map)) = (Graph::workload_stats(self), view.as_object_mut()) {
+            map.insert("workload_bytes".into(), stats.memory_bytes().into());
+        }
+        view
     }
 
     fn element(&self, kind: ElementKind, id: &str) -> Option<InspectedElement> {

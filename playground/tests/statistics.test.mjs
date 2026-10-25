@@ -198,3 +198,13 @@ test('dedup and shapes together keep their order', () => {
     'Structure', 'Indexes', 'Properties', 'of which key lists (shapes)', 'Shared strings (dedup)', 'Total',
   ]);
 });
+
+test('the workload statistics of a store are shown after the total, not in it', () => {
+  const m = statisticsModel({ ...WASM, memory: { ...WASM.memory, workload_bytes: 3072 } });
+  const names = m.memory.map((r) => r.name);
+  assert.deepEqual(names.slice(-2), ['Total', 'Workload statistics']);
+  assert.equal(m.memory.at(-1).text, '3 KiB');
+  assert.match(m.memory.at(-1).hint, /Not part of Total/);
+  // A graph without statistics: no row.
+  assert.ok(!statisticsModel(WASM).memory.some((r) => r.name === 'Workload statistics'));
+});

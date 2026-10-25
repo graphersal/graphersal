@@ -513,7 +513,45 @@ impl WorkloadStats {
         }
     }
 
-    /// The level.
+    /// The memory these statistics hold, in bytes (an estimate from the capacities of their
+    /// tables and buckets): shown as `workload_bytes` beside a graph's
+    /// [`MemoryStats`](crate::graph::MemoryStats), never part of its `total_bytes`.
+    pub fn memory_bytes(&self) -> u64 {
+        use std::mem::size_of;
+        let inner = self.inner.lock();
+        let heap = |text: &CompactString| {
+            if text.is_heap_allocated() {
+                text.capacity() as u64
+            } else {
+                0
+            }
+        };
+        let mut bytes = size_of::<WorkloadStats>() as u64;
+        // The series table: one slot per capacity (key, series, control byte).
+        bytes += inner.series.capacity() as u64
+            * (size_of::<SeriesKey>() + size_of::<Series>() + 1) as u64;
+        for (key, series) in &inner.series {
+            bytes += match &key.kind {
+                SeriesKind::Job(name) | SeriesKind::Lock(name) | SeriesKind::Query(name) => {
+                    heap(name)
+                }
+                SeriesKind::Property(property) => {
+                    heap(&property.key) + property.label.as_ref().map_or(0, heap)
+                }
+            };
+            for tier in &series.tiers {
+                bytes += (tier.buckets.capacity() * size_of::<(i64, Counters)>()) as u64;
+            }
+        }
+        bytes += inner.jobs.capacity() as u64
+            * (size_of::<CompactString>() + size_of::<JobRunRecord>() + 1) as u64;
+        for (name, run) in &inner.jobs {
+            bytes += heap(name) + run.error.as_ref().map_or(0, |e| e.capacity() as u64);
+        }
+        bytes
+    }
+
+    /// The level the statistics are kept at.
     pub fn level(&self) -> WorkloadLevel {
         *self.level.read()
     }

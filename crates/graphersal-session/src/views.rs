@@ -322,8 +322,10 @@ pub fn statistics_view<S: GraphStorage>(g: &S) -> Value {
 /// `g.memory_usage()` as data: `{structure_bytes, index_bytes, property_bytes, total_bytes,
 /// total_mb, compressed_values, compressed_plain_bytes, compressed_stored_bytes,
 /// compression_dictionary_bytes, property_index_bytes, deduped_values, deduped_plain_bytes,
-/// dedup_table_bytes, shape_bytes}`, or `null`. `shape_bytes` and `dedup_table_bytes` are parts
-/// of `property_bytes`, never to be added to the total again.
+/// dedup_table_bytes, shape_bytes, workload_bytes}`, or `null`. `shape_bytes` and
+/// `dedup_table_bytes` are parts of `property_bytes`, never to be added to the total again;
+/// `workload_bytes` (the graph's workload statistics, held beside the storage) is not part of the
+/// total either and is `0` from a storage alone ([`SessionGraph::memory_view`] fills it in).
 pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
     match g.memory_usage() {
         Some(stats) => json!({
@@ -341,6 +343,7 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
             "deduped_plain_bytes": stats.deduped_plain_bytes,
             "dedup_table_bytes": stats.dedup_table_bytes,
             "shape_bytes": stats.shape_bytes,
+            "workload_bytes": stats.workload_bytes,
         }),
         None => Value::Null,
     }
