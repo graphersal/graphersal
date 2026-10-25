@@ -113,6 +113,8 @@ export const state = reactive({
   changeBurstAnnounce: '',
   // The saved queries of the graph (engine.listQueries), reloaded with the graph
   // (refreshSavedQueries); null before the first load.
+  jobs: null, // the engine's jobs() answer: {timeZone, store, jobs}
+  jobsError: null,
   savedQueries: null,
   savedQueriesError: null,
   // The compression rules of the graph with their stats (engine.listCompressions), reloaded with
@@ -1446,6 +1448,77 @@ export async function createPropertyIndex(spec) {
 export async function dropPropertyIndex(name) {
   const res = await state.engine.dropIndex(name);
   await indexesChanged();
+  return res;
+}
+
+// Scheduled jobs (the Catalog's Scheduled jobs manager, js/jobs.js).
+
+let jobsLoad = 0;
+
+/** Reloads the scheduled jobs (`state.jobs`). */
+export async function refreshJobs() {
+  if (!state.engine || typeof state.engine.jobs !== 'function' || !state.graph) return;
+  const load = ++jobsLoad;
+  try {
+    const view = await state.engine.jobs();
+    if (load === jobsLoad) {
+      state.jobs = markRaw(view || null);
+      state.jobsError = null;
+    }
+  } catch (err) {
+    if (load === jobsLoad) state.jobsError = err && err.message ? err.message : String(err);
+  }
+}
+
+/** A job changed through the page: the list and the graph info (its counts) reload. */
+async function jobsChanged() {
+  await refreshJobs();
+  try {
+    state.graph = await state.engine.graphInfo();
+  } catch (err) {
+    /* the counts in the info are cosmetic */
+  }
+}
+
+/** Defines or replaces a job of a user: `{ok, job}` or `{ok: false, errors}`. */
+export async function defineUserJob(spec) {
+  if (!state.engine) return { ok: false, errors: [{ field: 'general', message: 'The engine is not available.' }] };
+  const res = await state.engine.defineJob(spec);
+  if (res && res.ok) await jobsChanged();
+  return res;
+}
+
+/** Drops a job of a user (the caller asked the user first). */
+export async function dropUserJob(name) {
+  const res = await state.engine.dropJob(name);
+  await jobsChanged();
+  return res;
+}
+
+/** Switches a job on or off. */
+export async function switchJob(name, enabled) {
+  const res = await state.engine.setJobEnabled(name, enabled);
+  await jobsChanged();
+  return res;
+}
+
+/** Gives a system job a schedule (`null`: its built-in one). */
+export async function scheduleSystemJob(name, schedule) {
+  const res = await state.engine.setJobSchedule(name, schedule);
+  await refreshJobs();
+  return res;
+}
+
+/**
+ * Runs a job now: its entry. The run may have changed the data (a query job) or the store (a
+ * checkpoint): the graph info reloads and the Graph, Schema and Statistics panels redraw, as
+ * after a query of the page (the change feed does not reload for the page's own commit).
+ */
+export async function runJobNow(name) {
+  const res = await state.engine.runJobNow(name);
+  await jobsChanged();
+  state.graphVersion++;
+  state.dataVersion++;
   return res;
 }
 

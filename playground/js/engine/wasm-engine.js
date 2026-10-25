@@ -472,6 +472,42 @@ export class WasmEngine extends Engine {
     return res;
   }
 
+  // Scheduled jobs: a define, drop or switch of a user job is a catalog change.
+
+  async jobs() {
+    return this.call('jobs');
+  }
+
+  async defineJob(spec) {
+    const res = await this.call('defineJob', plain(spec));
+    if (res && res.ok) await this.catalogChanged();
+    return res;
+  }
+
+  async dropJob(name) {
+    const res = await this.call('dropJob', name);
+    await this.catalogChanged();
+    return res;
+  }
+
+  async setJobEnabled(name, enabled) {
+    const res = await this.call('setJobEnabled', name, !!enabled);
+    await this.catalogChanged();
+    return res;
+  }
+
+  async setJobSchedule(name, schedule) {
+    return this.call('setJobSchedule', name, schedule || null);
+  }
+
+  async runJobNow(name) {
+    return this.call('runJobNow', name);
+  }
+
+  async jobHistory(name, tier) {
+    return this.call('jobHistory', name, tier || 'minutes');
+  }
+
   // The Optimize panel.
 
   async memoryReport(spec) {

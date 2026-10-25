@@ -128,17 +128,34 @@ export function bucketSeries(history, tier, now) {
   return out;
 }
 
+/** The "Max time ≥" choices of the workload tables, in microseconds (0: every row). */
+export const MIN_TIMES = Object.freeze([
+  { micros: 0, label: 'Any time' },
+  { micros: 1e3, label: 'Max ≥ 1 ms' },
+  { micros: 1e4, label: 'Max ≥ 10 ms' },
+  { micros: 1e5, label: 'Max ≥ 100 ms' },
+  { micros: 1e6, label: 'Max ≥ 1 s' },
+]);
+
+/** The columns a workload table sorts by (descending). */
+export const SORTS = Object.freeze(['total', 'count', 'mean', 'max']);
+
 /**
- * The rows of one workload list in a window, for a channel (`all`: every channel), the most
- * total time first: `{key, name, channel, count, failed, items, total, mean, max, series}`.
+ * The rows of one workload list in a window, for a channel (`all`: every channel):
+ * `{key, name, channel, count, failed, items, total, mean, max, series}`. `options.minMicros`
+ * keeps only rows whose longest run took at least that long; `options.sort` (`total`, the
+ * default, `count`, `mean`, `max`) orders them, the largest first.
  */
-export function workloadRows(report, listId, windowId, channel = 'all', now = Date.now() * 1000) {
+export function workloadRows(report, listId, windowId, channel = 'all', now = Date.now() * 1000, options = {}) {
+  const minMicros = options.minMicros || 0;
+  const sort = SORTS.includes(options.sort) ? options.sort : 'total';
   const window = WINDOWS.find((w) => w.id === windowId) || WINDOWS[0];
   const rows = [];
   for (const row of (report && report[listId]) || []) {
     if (channel !== 'all' && row.channel !== channel) continue;
     const c = row[window.field] || {};
     if (!c.count) continue;
+    if ((c.max_micros || 0) < minMicros) continue;
     const name = rowName(listId, row);
     rows.push({
       key: `${listId}|${name}|${row.channel}`,
@@ -154,7 +171,7 @@ export function workloadRows(report, listId, windowId, channel = 'all', now = Da
       lastRun: row.last_run || null,
     });
   }
-  rows.sort((a, b) => b.total - a.total || b.count - a.count || a.name.localeCompare(b.name));
+  rows.sort((a, b) => b[sort] - a[sort] || b.total - a.total || a.name.localeCompare(b.name));
   return rows;
 }
 

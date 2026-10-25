@@ -409,6 +409,36 @@ export class HttpEngine extends Engine {
     return this.request('POST', 'indexes/drop', JSON.stringify({ name }));
   }
 
+  // Scheduled jobs (`/api/jobs*`): a define, drop or switch of a user job is a commit.
+
+  async jobs() {
+    return this.request('GET', 'jobs');
+  }
+
+  async defineJob(spec) {
+    return this.request('POST', 'jobs/define', JSON.stringify(spec));
+  }
+
+  async dropJob(name) {
+    return this.request('POST', 'jobs/drop', JSON.stringify({ name }));
+  }
+
+  async setJobEnabled(name, enabled) {
+    return this.request('POST', 'jobs/enable', JSON.stringify({ name, enabled: !!enabled }));
+  }
+
+  async setJobSchedule(name, schedule) {
+    return this.request('POST', 'jobs/schedule', JSON.stringify({ name, schedule: schedule || null }));
+  }
+
+  async runJobNow(name) {
+    return this.request('POST', 'jobs/run', JSON.stringify({ name }));
+  }
+
+  async jobHistory(name, tier) {
+    return this.request('GET', `jobs/history?name=${encodeURIComponent(name)}&tier=${encodeURIComponent(tier || 'minutes')}`);
+  }
+
   // The Optimize panel (`/api/memory/report`, `/api/workload`, `/api/advise*`): reading, but
   // applying a recommendation is a commit and shows in the change feed.
 
