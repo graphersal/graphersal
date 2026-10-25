@@ -117,7 +117,9 @@ impl<S: PersistentStorage> Store<S> {
     /// The system jobs of this store, for the host's [`Scheduler`](crate::jobs::Scheduler):
     /// `stats_flush` (every minute: [`Self::flush_workload_stats`]) and `compact` (off by
     /// default, daily at 03:00: releases spare capacity, [`crate::storage::GraphStorage::shrink_to_fit`]
-    /// under the write lock). The jobs hold the store's core, not the store.
+    /// under the write lock), each with the instance's settings applied
+    /// ([`WorkloadStats::set_job_override`]: a schedule and a switch its user chose, kept in the
+    /// sidecar). The jobs hold the store's core, not the store.
     pub fn system_jobs(&self) -> Vec<Job> {
         let flush = Arc::clone(&self.core);
         let graph = Arc::clone(&self.graph);
@@ -146,7 +148,15 @@ impl<S: PersistentStorage> Store<S> {
                 .disabled(),
             );
         }
-        jobs
+        // The instance's settings (book page "Scheduled Jobs": a system job's schedule and
+        // switch changed by its user).
+        let stats = &self.core.shared.workload;
+        jobs.into_iter()
+            .map(|job| match stats.job_override(job.name()) {
+                Some(setting) => job.with_override(&setting),
+                None => job,
+            })
+            .collect()
     }
 }
 

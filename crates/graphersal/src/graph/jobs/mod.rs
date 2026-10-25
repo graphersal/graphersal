@@ -115,6 +115,38 @@ impl Job {
         self
     }
 
+    /// The same job on `schedule`.
+    pub fn with_schedule(mut self, schedule: CronSchedule) -> Self {
+        self.schedule = schedule;
+        self
+    }
+
+    /// The same job switched on or off.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// The same job with the instance's settings `setting` applied (a system job's schedule
+    /// and switch, [`JobOverride`](crate::graph::workload::JobOverride)); a schedule that does
+    /// not parse is ignored with a warning (the built-in one stays).
+    pub fn with_override(mut self, setting: &crate::graph::workload::JobOverride) -> Self {
+        if let Some(text) = &setting.schedule {
+            match text.parse::<CronSchedule>() {
+                Ok(schedule) => self.schedule = schedule,
+                Err(err) => tracing::warn!(
+                    job = %self.name,
+                    %err,
+                    "the stored schedule of the job is not valid; the built-in one is kept"
+                ),
+            }
+        }
+        if let Some(enabled) = setting.enabled {
+            self.enabled = enabled;
+        }
+        self
+    }
+
     /// The same job, switched off (it never runs until [`Scheduler::set_enabled`]).
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
@@ -124,6 +156,16 @@ impl Job {
     /// The job's name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The job's schedule.
+    pub fn schedule(&self) -> &CronSchedule {
+        &self.schedule
+    }
+
+    /// Whether the job runs.
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 }
 

@@ -107,7 +107,7 @@ impl FieldError {
 /// JSON of a value of the engine (plain JSON; a uuid as its canonical text).
 /// One effect of a saved query: `{action, element, label, text}` (`element` / `label` `null`
 /// when open: every kind, every label).
-fn effect_json(effect: &AccessRequestBuf) -> Value {
+pub(crate) fn effect_json(effect: &AccessRequestBuf) -> Value {
     let request = effect.as_request();
     let (element, label) = match request.resource {
         Resource::Data { element, label } => (element.map(|kind| kind.to_string()), label),
@@ -121,7 +121,7 @@ fn effect_json(effect: &AccessRequestBuf) -> Value {
     })
 }
 
-fn value_json(value: &ElementProperty) -> Value {
+pub(crate) fn value_json(value: &ElementProperty) -> Value {
     serde_json::to_value(crate::display::json_safe(value)).unwrap_or(Value::Null)
 }
 
@@ -171,7 +171,7 @@ fn rhai_key(key: &str) -> String {
 }
 
 /// The Rhai literal of a JSON value: `()`, `true`, `5`, `2.5`, `"x"`, `[..]`, `#{k: v}`.
-fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Result<(), String> {
+pub(crate) fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Result<(), String> {
     if depth > MAX_LITERAL_DEPTH {
         return Err(format!(
             "the arguments nest deeper than {MAX_LITERAL_DEPTH} levels"

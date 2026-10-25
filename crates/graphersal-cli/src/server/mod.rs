@@ -954,6 +954,46 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
         // The scheduled jobs of the active store (`graphersal_session::jobs`).
         (Method::Get, "jobs") => value(context.call(|s| s.jobs_view())?),
+        // The dev server's user owns the machine's files (the Store menu writes backups
+        // anywhere), so a backup job may name any directory.
+        (Method::Post, "jobs/define") => {
+            let body = json_body(request)?;
+            value(context.call(move |s| {
+                s.define_job_with_authorizer(
+                    &body,
+                    Arc::new(graphersal::auth::AccessPolicy::allow_all()),
+                )
+            })?)
+        }
+        (Method::Post, "jobs/drop") => {
+            let name = body_name(&json_body(request)?)?;
+            let dropped = context.call_fallible(move |s| s.drop_job(&name))?;
+            value(json!({ "dropped": dropped }))
+        }
+        (Method::Post, "jobs/enable") => {
+            let body = json_body(request)?;
+            let name = body_name(&body)?;
+            let enabled = body["enabled"].as_bool().ok_or_else(|| {
+                HttpError(400, "the body needs \"enabled\": true or false".to_string())
+            })?;
+            value(context.call_fallible(move |s| s.set_job_enabled(&name, enabled))?)
+        }
+        (Method::Post, "jobs/schedule") => {
+            let body = json_body(request)?;
+            let name = body_name(&body)?;
+            let schedule = body["schedule"].as_str().map(str::to_string);
+            value(context.call_fallible(move |s| s.set_job_schedule(&name, schedule.as_deref()))?)
+        }
+        (Method::Post, "jobs/run") => {
+            let name = body_name(&json_body(request)?)?;
+            value(context.call_fallible(move |s| s.run_job_now(&name))?)
+        }
+        // `?name=<job>&tier=minutes|hours|days` (default minutes): the job's run buckets.
+        (Method::Get, "jobs/history") => {
+            let name = query_text(query, "name").unwrap_or_default();
+            let tier = query_text(query, "tier").unwrap_or_else(|| "minutes".to_string());
+            value(context.call_fallible(move |s| s.job_history(&name, &tier))?)
+        }
         // The workload statistics (`Session::workload_report`).
         // `?history=minutes|hours|days` adds every row's buckets of that tier (chart data).
         (Method::Get, "workload") => match query_value(query, "history") {
@@ -1123,6 +1163,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "memory"
             | "memory/report"
             | "jobs"
+            | "jobs/define"
+            | "jobs/drop"
+            | "jobs/enable"
+            | "jobs/schedule"
+            | "jobs/run"
+            | "jobs/history"
             | "statistics"
             | "export"
             | "save"

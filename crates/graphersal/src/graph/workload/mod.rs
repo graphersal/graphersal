@@ -377,6 +377,43 @@ pub struct JobRunRecord {
     pub error: Option<String>,
 }
 
+/// The settings an instance keeps for one of its SYSTEM jobs (book page "Scheduled Jobs"): a
+/// schedule and a switch replacing the built-in ones (`None` keeps the built-in one). Settings,
+/// not statistics: kept at every level, written to the sidecar at level `persisted`, never
+/// deleted by [`WorkloadStats::clear`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JobOverride {
+    /// The schedule (cron text) replacing the built-in one.
+    pub schedule: Option<String>,
+    /// The switch replacing the built-in one.
+    pub enabled: Option<bool>,
+}
+
+impl JobOverride {
+    /// No override: the built-in schedule and switch.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The same override with `schedule` (cron text).
+    pub fn with_schedule(mut self, schedule: impl Into<String>) -> Self {
+        self.schedule = Some(schedule.into());
+        self
+    }
+
+    /// The same override with the switch `enabled`.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Whether it overrides nothing.
+    pub fn is_empty(&self) -> bool {
+        self.schedule.is_none() && self.enabled.is_none()
+    }
+}
+
 /// The most query series kept; a new query beyond it evicts the one run least in the last 90
 /// days (the query statistics stay bounded whatever the workload).
 pub const MAX_QUERY_SERIES: usize = 500;
@@ -385,6 +422,8 @@ pub const MAX_QUERY_SERIES: usize = 500;
 struct Inner {
     series: HashMap<SeriesKey, Series>,
     jobs: HashMap<CompactString, JobRunRecord>,
+    /// The system jobs' settings ([`JobOverride`]), by job name.
+    overrides: HashMap<CompactString, JobOverride>,
     /// Something changed since the last flush.
     dirty: bool,
 }
@@ -548,6 +587,11 @@ impl WorkloadStats {
         for (name, run) in &inner.jobs {
             bytes += heap(name) + run.error.as_ref().map_or(0, |e| e.capacity() as u64);
         }
+        bytes += inner.overrides.capacity() as u64
+            * (size_of::<CompactString>() + size_of::<JobOverride>() + 1) as u64;
+        for (name, setting) in &inner.overrides {
+            bytes += heap(name) + setting.schedule.as_ref().map_or(0, |s| s.capacity() as u64);
+        }
         bytes
     }
 
@@ -594,6 +638,37 @@ impl WorkloadStats {
         self.record(key, end, sample);
         let mut inner = self.inner.lock();
         inner.jobs.insert(name.into(), run);
+        inner.dirty = true;
+    }
+
+    /// The settings of the system job `name`, `None` when it has none.
+    pub fn job_override(&self, name: &str) -> Option<JobOverride> {
+        self.inner.lock().overrides.get(name).cloned()
+    }
+
+    /// Every system job's settings, by name.
+    pub fn job_overrides(&self) -> Vec<(String, JobOverride)> {
+        let mut all: Vec<(String, JobOverride)> = self
+            .inner
+            .lock()
+            .overrides
+            .iter()
+            .map(|(name, setting)| (name.to_string(), setting.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
+    /// Gives the system job `name` the settings `setting` (an empty one removes them: the
+    /// built-in schedule and switch again). The host applies them to its scheduler; a Store
+    /// applies them to the system jobs it hands out.
+    pub fn set_job_override(&self, name: &str, setting: JobOverride) {
+        let mut inner = self.inner.lock();
+        if setting.is_empty() {
+            inner.overrides.remove(name);
+        } else {
+            inner.overrides.insert(name.into(), setting);
+        }
         inner.dirty = true;
     }
 

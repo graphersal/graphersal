@@ -49,7 +49,9 @@
 //! (`Session::memory_report`), at most 50 property rows unless `max_rows` says otherwise.
 //! `workload_statistics` (reading) answers the workload statistics of a store's graph
 //! (`Session::workload_report`): the queries, properties, lock times and jobs counted, at most
-//! 50 rows per list (most total time first) unless `max_rows` says otherwise.
+//! 50 rows per list (most total time first) unless `max_rows` says otherwise. `list_jobs`
+//! (reading) answers the scheduled jobs (`Session::jobs_view`); defining, switching or running
+//! a job stays the user's (the playground's job list, `/api/jobs*`).
 //!
 //! Compression rules (`book/src/users_guide/compressed_properties.md`): `list_compressions` and
 //! `estimate_compression` (both reading, also in read-only mode: an estimate changes nothing),
@@ -1142,6 +1144,19 @@ fn all_tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            "list_jobs",
+            "List scheduled jobs",
+            Kind::Read,
+            "The scheduled jobs of this graph's store: the system jobs (stats_flush, compact), \
+             then the jobs of users from the catalog: name, kind, schedule (5-field cron in \
+             timeZone), enabled, nextAt and the last run (microseconds since the Unix epoch, \
+             error), the run counts of the last hour, two days and 90 days, scheduled (with a \
+             reason when it does not run); a user job also its action (query with args, \
+             checkpoint, backup with path) and effects (what each run may write). Jobs are \
+             defined and changed by the user in the playground.",
+            no_args(),
+        ),
+        tool(
             "memory_report",
             "Memory report",
             Kind::Read,
@@ -1647,6 +1662,10 @@ fn run_tool(
                 compact(&report)
             ))
         }
+        "list_jobs" => Ok(format!(
+            "Scheduled jobs (times in microseconds since the Unix epoch):\n{}",
+            compact(&context.call(|s| s.jobs_view()).map_err(http_failed)?)
+        )),
         "memory_report" => {
             let mut spec = match args {
                 Value::Object(map) => Value::Object(map.clone()),
