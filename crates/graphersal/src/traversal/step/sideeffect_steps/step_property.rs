@@ -522,6 +522,17 @@ pub(crate) fn check_cardinality(
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepProperty<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        // `property(traversal, value)`: the key is known only when it runs.
+        if self.key.is_none()
+            && let Some(key) = self.property.top_level()
+        {
+            visit(Some(key), crate::graph::workload::AccessKind::Write);
+        }
+    }
     #[inline]
     fn process(
         &self,

@@ -105,6 +105,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepPath<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::Read);
+        }
+    }
     /// Builds an aggregation/materialization buffer (D3 of the memory-inspection spec) — reported
     /// to `.profile()` as a non-zero `bytes_materialized`.
     fn materializes(&self) -> bool {

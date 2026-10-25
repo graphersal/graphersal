@@ -58,6 +58,29 @@ plan when it runs). At most 500 query series are kept: a new one beyond that rep
 run least in the last 90 days. Like `pg_stat_statements` in PostgreSQL, this answers "which
 queries run, how often, how long", by channel (which ones the AI agents run).
 
+## Properties
+
+The same run also counts, per property, how the plan used it: series `(element, label, key,
+access)`, each counted once per run with the number of traversers that reached the step using
+it. The access is one of
+
+| Access | Steps |
+|---|---|
+| `filter_scan` | `has(key, ..)`, `has(key)`, `has_not(key)`, `has(key, __.to_lower()...)`, a `has` folded into `v()`/`e()` |
+| `filter_index` | the same filters when a [property index](../users_guide/property_indexes.md) serves them |
+| `read` | `values`, `properties`, `value_map`, `element_map`, a `by(key)` of `project`/`select`/`path`/`tree` |
+| `order_group` | a `by(key)` of `order`, `group`, `group_count`, `dedup` |
+| `similarity` | `similarity`, `nearest`, `embed` |
+| `write` / `remove` | `property`, `add_v`/`add_e` properties / `remove_property` |
+
+The element kind and label are what the plan states before the step (`v(labels)`,
+`e(labels)`, `has_label`, `out_e(labels)`, `add_v(label)`); a step that reads every property
+(`value_map()`, `element_map()`) names the key `*`, and a use inside a child traversal
+(`where(__.out().has("lang"))`) has no element, no label and no traverser count. A jpath key
+counts under its top-level property. These counts answer "which properties are filtered
+without an index, which are only written, which are read at all": the input of the planned
+storage advisor.
+
 ## The sidecar
 
 A writable store writes `WORKLOAD` once a minute (the system job `stats_flush`, see

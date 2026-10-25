@@ -281,6 +281,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepBarrier<'g, S> for StepTree<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::Read);
+        }
+    }
     /// Builds a genuinely new nested aggregation structure, matching `group()`/`fold()`'s
     /// precedent — reported to `.profile()` as a non-zero `bytes_materialized`.
     fn materializes(&self) -> bool {

@@ -375,6 +375,14 @@ impl<'g, S: GraphStorage + 'g> StepAddE<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepAddE<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.properties.keys() {
+            visit(Some(key), crate::graph::workload::AccessKind::Write);
+        }
+    }
     fn set_create_time(&mut self, now: crate::value::temporal::DateTime) {
         self.create_time = Some(now);
     }

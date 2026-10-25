@@ -126,6 +126,86 @@ impl Channel {
     }
 }
 
+/// How a query used a property: the kind of access a step makes (the property statistics; the
+/// storage advisor weighs them: a key filtered by a scan is an index candidate, a key only
+/// written is cold).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum AccessKind {
+    /// A filter evaluated element by element (`has(key, ..)`, `has_not(key)`).
+    FilterScan,
+    /// A filter served by a property index (`v().has(key, ..)` reading an index).
+    FilterIndex,
+    /// The value read into a result (`values`, `value_map`, `element_map`, `project().by(key)`).
+    Read,
+    /// The value used to sort or group (`order().by(key)`, `group().by(key)`, `dedup().by(key)`).
+    OrderGroup,
+    /// A vector compared (`similarity`, `nearest`).
+    Similarity,
+    /// The value written (`property(key, ..)`, a created element's properties).
+    Write,
+    /// The value removed (`remove_property`).
+    Remove,
+}
+
+impl AccessKind {
+    /// Every kind, in order.
+    pub const ALL: [AccessKind; 7] = [
+        AccessKind::FilterScan,
+        AccessKind::FilterIndex,
+        AccessKind::Read,
+        AccessKind::OrderGroup,
+        AccessKind::Similarity,
+        AccessKind::Write,
+        AccessKind::Remove,
+    ];
+
+    /// `filter_scan`, `filter_index`, `read`, `order_group`, `similarity`, `write`, `remove`.
+    pub fn name(self) -> &'static str {
+        match self {
+            AccessKind::FilterScan => "filter_scan",
+            AccessKind::FilterIndex => "filter_index",
+            AccessKind::Read => "read",
+            AccessKind::OrderGroup => "order_group",
+            AccessKind::Similarity => "similarity",
+            AccessKind::Write => "write",
+            AccessKind::Remove => "remove",
+        }
+    }
+
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            AccessKind::FilterScan => 0,
+            AccessKind::FilterIndex => 1,
+            AccessKind::Read => 2,
+            AccessKind::OrderGroup => 3,
+            AccessKind::Similarity => 4,
+            AccessKind::Write => 5,
+            AccessKind::Remove => 6,
+        }
+    }
+
+    pub(crate) fn from_code(code: u8) -> Option<AccessKind> {
+        AccessKind::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+}
+
+/// Which property a property series counts: the element kind and label as the plan states them
+/// (`None`: unknown, every one) and the top-level key (`*`: every key, a step reading the whole
+/// map such as `element_map()`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub struct PropertyUse {
+    /// The element kind, when the plan knows it.
+    pub element: Option<crate::graph::ElementKind>,
+    /// The label, when the plan knows it.
+    pub label: Option<CompactString>,
+    /// The top-level key (`*`: every key).
+    pub key: CompactString,
+    /// How it was used.
+    pub access: AccessKind,
+}
+
 /// What a series counts. Later stages add the property accesses and the query statistics;
 /// a sidecar written by a newer version with kinds this one does not know is read without them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -139,6 +219,9 @@ pub enum SeriesKind {
     /// One query (the query statistics): its normalized fingerprint (the optimized plan with
     /// literals replaced by `?`), or `saved:<name>` for a saved query call as a whole.
     Query(CompactString),
+    /// One property used one way (the property statistics): executions that used it and the
+    /// traversers that reached the step using it.
+    Property(PropertyUse),
 }
 
 /// The key of a series: what is counted and the channel it came through.

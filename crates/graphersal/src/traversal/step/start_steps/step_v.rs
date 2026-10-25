@@ -79,6 +79,25 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepInit<'g, S> for StepV {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        // The index the source reads, then the folded `has()`s (scanned unless the index
+        // serves them).
+        let indexed = self.index.as_ref().map(|index| index.key.as_str());
+        if let Some(key) = indexed {
+            visit(Some(key), crate::graph::workload::AccessKind::FilterIndex);
+        }
+        for filter in &self.has {
+            if Some(filter.key.as_str()) != indexed {
+                visit(
+                    Some(&filter.key),
+                    crate::graph::workload::AccessKind::FilterScan,
+                );
+            }
+        }
+    }
     #[inline]
     fn process(
         &self,

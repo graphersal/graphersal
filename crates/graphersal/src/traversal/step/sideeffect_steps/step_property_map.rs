@@ -182,6 +182,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepPropertyMap {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for entry in &self.entries {
+            visit(Some(&entry.key), crate::graph::workload::AccessKind::Write);
+        }
+    }
     fn process(
         &self,
         context: &mut TraverserContext<'_, S>,

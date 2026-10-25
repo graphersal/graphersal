@@ -493,6 +493,16 @@ pub enum By<'g, S: GraphStorage + 'g> {
     Column(crate::value::Column),
 }
 
+impl<'g, S: GraphStorage + 'g> By<'g, S> {
+    /// The property a `by(key)` reads (`None` for every other form).
+    pub(crate) fn property_key(&self) -> Option<&str> {
+        match self {
+            By::Property(key) => Some(key.as_str()),
+            _ => None,
+        }
+    }
+}
+
 impl<'g, S: GraphStorage + 'g> std::fmt::Debug for By<'g, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

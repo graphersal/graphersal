@@ -61,6 +61,16 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepModulator<'g, S> for StepBy<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        // Sorting or grouping by default; the plan walk reads it as a read after a step that
+        // projects (`project`, `select`, `value_map`, ...).
+        if let Some(crate::traversal::step::By::Property(key)) = &self.args {
+            visit(Some(key), crate::graph::workload::AccessKind::OrderGroup);
+        }
+    }
     fn get_by(&mut self) -> Option<By<'g, S>> {
         self.args.take()
     }

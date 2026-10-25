@@ -165,6 +165,16 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasTraversal<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let HasTarget::Property(key) = &self.target
+            && let Some(key) = key.top_level()
+        {
+            visit(Some(key), crate::graph::workload::AccessKind::FilterScan);
+        }
+    }
     /// `has(key, __.to_lower().is(P))` on a literal name, `P` an equality, `P.within` or a
     /// range: the condition a `to_lower` index serves (the constants of `P` as given, compared
     /// with the lowered values). Any other child is not served.

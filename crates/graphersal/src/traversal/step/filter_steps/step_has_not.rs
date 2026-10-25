@@ -62,6 +62,15 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFilter<'g, S> for StepHasNot {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        visit(
+            Some(&self.key),
+            crate::graph::workload::AccessKind::FilterScan,
+        );
+    }
     fn keys(&self) -> Option<&[String]> {
         Some(std::slice::from_ref(&self.key))
     }

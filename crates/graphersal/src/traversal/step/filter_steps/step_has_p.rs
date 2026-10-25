@@ -149,6 +149,15 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 impl<'g, S: GraphStorage + 'g, B: Into<PValue> + Debug + Clone + Send + Sync + 'static>
     GraphStepFilter<'g, S> for StepHasP<B>
 {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        visit(
+            Some(&self.key),
+            crate::graph::workload::AccessKind::FilterScan,
+        );
+    }
     fn index_condition(&self) -> Option<crate::traversal::step::IndexCondition<'_>> {
         index_ranges(&self.predicate).map(|ranges| crate::traversal::step::IndexCondition {
             key: self.key.as_str(),

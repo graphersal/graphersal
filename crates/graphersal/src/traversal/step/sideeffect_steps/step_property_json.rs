@@ -41,6 +41,16 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepSideEffectMut<'g, S> for StepPropertyJson {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        if let Some(object) = self.json.as_object() {
+            object
+                .keys()
+                .for_each(|key| visit(Some(key), crate::graph::workload::AccessKind::Write));
+        }
+    }
     #[inline]
     fn process(
         &self,

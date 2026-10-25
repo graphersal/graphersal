@@ -251,8 +251,12 @@ starts without it. A writable store replaces it whole (`write_atomic`) periodica
 
 ```text
 magic "GRWLSTAT" | version u32 = 1 | series count u32
-per series: byte length u32 | kind u8 (1 job, 2 lock, 3 query) | name (u32 length + UTF-8)
+per series: byte length u32 | kind u8 (1 job, 2 lock, 3 query, 4 property)
+            | name (u32 length + UTF-8; a property series: the key, "*" for all)
             | channel u8 (0 host, 1 playground, 2 mcp, 3 cli, 4 python, 5 job)
+            | kind 4 only: element u8 (0 unstated, 1 vertex, 2 edge) | label flag u8
+              [+ label (u32 length + UTF-8)] | access u8 (0 filter_scan, 1 filter_index,
+              2 read, 3 order_group, 4 similarity, 5 write, 6 remove)
             | tier count u8 | per tier: tier u8 (0 minutes, 1 hours, 2 days) | bucket count u16
             | per bucket: index i64 (the bucket's start in minutes/hours/days since the Unix
               epoch, UTC) | count u64 | failed u64 | items u64 | total microseconds u64

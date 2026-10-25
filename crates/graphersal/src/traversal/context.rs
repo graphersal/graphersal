@@ -92,6 +92,10 @@ pub(crate) struct TraverserContext<'a, S: GraphStorage> {
     /// Wall-clock budget of this execution, shared by every nested traversal that runs on the
     /// context. `None` when no `evaluationTimeout` is set.
     pub(crate) deadline: Option<Deadline>,
+    /// The traversers (with bulk) that reached each top-level step, by its position in the
+    /// optimized plan; `Some` only when the run records workload statistics (the property
+    /// statistics' item counts).
+    pub(crate) step_inputs: Option<Vec<u64>>,
     /// One frame per `repeat()` being executed, innermost last. `loops()` reads the counters
     /// here, so traversers carry no loop state.
     pub(crate) loop_stack: Vec<LoopFrame<S>>,
@@ -206,6 +210,7 @@ impl<'a, S: GraphStorage> TraverserContext<'a, S> {
             glob_path: Default::default(),
             options: ExecutionOptions::default(),
             deadline: None,
+            step_inputs: None,
             loop_stack: Vec::new(),
             loop_persist: false,
             bulk_merge: false,

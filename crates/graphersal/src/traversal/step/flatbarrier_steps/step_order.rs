@@ -83,6 +83,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepFlatBarrier<'g, S> for StepOrder<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.clauses.property_keys() {
+            visit(Some(key), crate::graph::workload::AccessKind::OrderGroup);
+        }
+    }
     /// `order()` materializes the whole stream into a `Vec` to sort it (D3 of the
     /// memory-inspection spec) — reported to `.profile()` as a non-zero `bytes_materialized`.
     fn materializes(&self) -> bool {

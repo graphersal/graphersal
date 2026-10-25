@@ -88,6 +88,14 @@ impl<'g, S: GraphStorage + 'g> AnonymousTraversal<'g, S> {
 }
 
 impl<'g, S: GraphStorage + 'g> GraphStepMap<'g, S> for StepProject<'g, S> {
+    fn property_access(
+        &self,
+        visit: &mut dyn FnMut(Option<&str>, crate::graph::workload::AccessKind),
+    ) {
+        for key in self.by.iter().flatten().filter_map(By::property_key) {
+            visit(Some(key), crate::graph::workload::AccessKind::Read);
+        }
+    }
     /// `project()` applies its `by()` modulators as TinkerPop's traversal ring: round-robin over
     /// the keys, so one `by()` applies to every key, `project("a", "b", "c").by("name").by("age")`
     /// reads a: name, b: age, c: name, and without `by()` every key holds the incoming object
