@@ -480,7 +480,8 @@ payload     = property map (3) with inline keys (as in a WAL record)
 | 1 | saved query |
 | 2 | property index |
 | 3 | compression rule |
-| 4..127 | unassigned (assigned only by this format) |
+| 4 | scheduled job of a user (since 0.3.0) |
+| 5..127 | unassigned (assigned only by this format) |
 | 128..255 | host kinds: reserved for applications built on the library, never assigned by this format (16 rule 8) |
 
 A **saved query** (kind 1) is one Rhai function (or one GQL query) stored as text and called by
@@ -532,6 +533,30 @@ codec changes no stored data, which stays plain. Two rules with the same `elemen
 > **0.2.0** decodes an unknown `codec` as an invalid payload, that is as damage: it reads a store
 > holding a `dedup` rule (0.2.1) as damaged from that commit on and proposes a repair that would
 > drop commits. Open such a store with 0.2.1 or later only; 0.2.1 and later follow the rule above.
+
+A **scheduled job** (kind 4, not critical; since 0.3.0) runs an action on a cron schedule (book
+page "Scheduled Jobs"). Its name is an identifier as for a saved query. A reader that does not
+know the kind keeps it and never runs it. Its payload keys, in this order, followed by the
+unknown keys:
+
+| Key | Value |
+|---|---|
+| `schedule` | string: a 5-field cron schedule, at most 256 bytes |
+| `action` | string: `"query"`, `"checkpoint"` or `"backup"` |
+| `query` | string: the saved query a `query` job calls (`query` jobs only) |
+| `args` | object: its arguments by parameter name (`query` jobs only) |
+| `path` | string: the directory a `backup` job writes (`backup` jobs only) |
+| `enabled` | boolean |
+| `timeout_ms` | int64: the longest a run may take, in milliseconds; absent = no limit |
+| `memory_limit` | int64: the most memory a run may use, in bytes; absent = no limit |
+| `run_on` | string: `"any"`, `"primary"` or `"replica"` (for replication); absent = `"any"` |
+| `description` | string; absent = none |
+| `effects` | list of objects: what the definer was allowed when the job was defined, each `{"action", "resource", ..}` with `action` one of `"read"`, `"create"`, `"update"`, `"delete"`, `"execute"` and `resource` `"data"` (+ `element`, `label` when stated), `"file"` (+ `path`) or `"definition"` (+ `kind` as its number, `name`) |
+
+`schedule` and `action` are required; `enabled` defaults to `true`, `effects` to none. A run may
+do exactly the stored effects (and read). An `action`, a `run_on` value or an effect form the
+reader does not know is NOT damage (16 rules 1 and 9): the reader keeps the job, writes its
+payload back exactly as read, never runs it and lists it as not served with the reason.
 
 A **property index** (kind 2, not critical) orders the elements of one element kind and label by
 the value of one top-level property (book page "Property Indexes"). Its name is an identifier as

@@ -280,6 +280,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         "Property indexes",
         &["create_index", "drop_index", "indexes"],
     ),
+    ("Scheduled jobs", &["define_job", "jobs", "drop_job"]),
     (
         "Compressed properties",
         &[

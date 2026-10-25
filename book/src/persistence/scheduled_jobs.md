@@ -41,8 +41,44 @@ A Store brings its system jobs (`Store::system_jobs()`):
 | `compact` | 03:00 daily | off | releases spare capacity of the in-memory structure |
 
 System jobs cannot be removed; their schedule and switch can be changed. Every run (start,
-duration, error) is recorded in the workload statistics. Jobs defined by users (a saved query or
-a backup on a schedule) are planned as catalog definitions.
+duration, error) is recorded in the workload statistics.
+
+## Jobs of users
+
+A user's job is a catalog definition (kind `job`, beside saved queries, compression rules and
+property indexes): it is versioned with the graph, written to the journal, carried by
+checkpoints, backups and the catalog file. Its action is one of
+
+| Action | What a run does |
+|---|---|
+| `query` | calls a [saved query](../users_guide/saved_queries.md) with fixed arguments |
+| `checkpoint` | writes a checkpoint of the store |
+| `backup` | backs the store up into a directory (the first run a full backup, the next ones increments) |
+
+```rhai,graph=modern,script
+g.define_query(#{name: "purge", params: #{label: "string"},
+    body: "fn purge(label) { g.v().has_label(label).drop() }"});
+g.define_job(#{name: "nightly_purge", schedule: "0 3 * * *", action: "query",
+    query: "purge", args: #{label: "software"}, timeout_ms: 30000});
+g.jobs().map(|j| [j.name, j.schedule, j.action])
+```
+
+`g.define_job(#{name, schedule, action, query?, args?, path?, enabled?, timeout_ms?,
+memory_limit?, run_on?, description?})` defines or replaces a job, `g.jobs()` lists them,
+`g.drop_job(name)` removes one. The arguments are checked against the query's parameters when
+the job is defined.
+
+**Rights.** A job runs with the rights of whoever defined it. When it is defined, the definer's
+authorizer is asked for everything the job will do: `Execute` on the saved query and every data
+write the query may make, `Create` on the backup directory; the allowed requests are stored with
+the job as its **effects**, and every run may do exactly them (and read). If the query is
+changed later to write more, its runs are refused until the job is defined again. Revoking the
+definer's rights later does not stop a job until it is redefined (the engine has no identities;
+an embedding server that has them re-checks on every run). A browser playground cannot define a
+backup job: its pages have no files.
+
+A job of a newer version (an action this version does not know) is kept as it was written and
+never run; `g.jobs()` lists it with `served: false` and the reason.
 
 The dev server answers `GET /api/jobs` with the jobs of the active store: name, kind, schedule,
 whether it is on, the next time and the last run.

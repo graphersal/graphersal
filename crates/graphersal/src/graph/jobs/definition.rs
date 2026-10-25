@@ -338,9 +338,7 @@ impl JobDefinition {
                 JobTask::Backup { path }
             }
             other => {
-                unserved = Some(format!(
-                    "the action '{other}' is not known to this version"
-                ));
+                unserved = Some(format!("the action '{other}' is not known to this version"));
                 JobTask::Unknown(other.to_string())
             }
         };
@@ -762,8 +760,11 @@ mod tests {
             "timeout_ms"
         );
         assert!(matches!(
-            Definition::job("not a name", JobDefinition::new("* * * * *", JobTask::Checkpoint))
-                .validate(),
+            Definition::job(
+                "not a name",
+                JobDefinition::new("* * * * *", JobTask::Checkpoint)
+            )
+            .validate(),
             Err(DefinitionError::InvalidName { .. })
         ));
     }

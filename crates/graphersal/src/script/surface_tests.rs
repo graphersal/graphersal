@@ -209,7 +209,9 @@ fn standard_library_is_the_one_of_engine_new() {
 }
 
 /// Names registered in one spelling only, on purpose (rule 2 asks for both spellings of a step).
-const SINGLE_SPELLING: [(&str, &str); 15] = [
+const SINGLE_SPELLING: [(&str, &str); 17] = [
+    ("define_job", "Graphersal extension: snake_case only"),
+    ("drop_job", "Graphersal extension: snake_case only"),
     ("file_tree", "GraphSource factory, not a step"),
     ("tinkerpop_modern", "GraphSource factory, not a step"),
     ("subgraph_labels", "schema map function, not a step"),

@@ -179,6 +179,10 @@ unless a page says otherwise; the differences are collected in
 
 [`create_index`](steps/create_index.md) · [`drop_index`](steps/drop_index.md) · [`indexes`](steps/indexes.md)
 
+### Scheduled jobs
+
+[`define_job`](steps/define_job.md) · [`jobs`](steps/jobs.md) · [`drop_job`](steps/drop_job.md)
+
 ### Compressed properties
 
 [`define_compression`](steps/define_compression.md) · [`drop_compression`](steps/drop_compression.md) · [`compressions`](steps/compressions.md) · [`recompress`](steps/recompress.md) · [`estimate_compression`](steps/estimate_compression.md)

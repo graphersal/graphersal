@@ -218,6 +218,15 @@ pub(crate) const DOCS: &[FnDoc] = docs! {
     "traversal" "as_vector":
         "Converts a list of numbers to an f32 vector; a vector passes (see the book page Vectors).",
         "g.inject([0.5, 1]).as_vector().next()" => "vector([0.5, 1.0])";
+    "traversal" "define_job":
+        "Defines (or replaces) a scheduled job: on a 5-field cron schedule it calls a saved query, writes a checkpoint or takes a backup of the store, with the definer's rights checked now and stored (Graphersal extension).",
+        "{ g.define_job(#{name: \"nightly\", schedule: \"0 3 * * *\", action: \"checkpoint\"}); g.jobs().map(|j| j.name) }" => "[\"nightly\"]";
+    "traversal" "drop_job":
+        "Removes a scheduled job; false when there is none (Graphersal extension).",
+        "{ g.define_job(#{name: \"nightly\", schedule: \"0 3 * * *\", action: \"checkpoint\"}); g.drop_job(\"nightly\") }" => "true";
+    "traversal" "jobs":
+        "Lists the scheduled jobs as maps: name, schedule, action, query and args or path, enabled, timeout_ms, memory_limit, run_on, description, the stored effects and served (Graphersal extension).",
+        "{ g.define_job(#{name: \"nightly\", schedule: \"0 3 * * *\", action: \"checkpoint\"}); g.jobs().map(|j| j.schedule) }" => "[\"0 3 * * *\"]";
     "traversal" "quantize":
         "Converts a vector to the element kind f32, f16, i8 or bit; quantize(\"f32\") dequantizes.",
         "g.inject(vector([0.5, -1.0])).quantize(\"i8\").next().element" => "i8";
