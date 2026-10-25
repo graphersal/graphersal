@@ -1392,7 +1392,14 @@ impl ScriptGraphTraversalSource {
     ) -> Result<Dynamic, Box<EvalAltResult>> {
         let started = web_time::Instant::now();
         let result = self.call_query_inner(ctx, name, args);
-        if let Some(stats) = self.g.as_ref().and_then(|g| g.workload_stats()) {
+        // The graph's statistics; inside a whole-script unit the source holds the unit's private
+        // graph, and the statistics are those the shared graph's lock guard put on the thread.
+        let stats = self
+            .g
+            .as_ref()
+            .and_then(|g| g.workload_stats())
+            .or_else(|| crate::graph::workload::scope::attached().map(|(stats, _)| stats));
+        if let Some(stats) = stats {
             use crate::graph::workload::{Sample, SeriesKey, SeriesKind, WorkloadLevel};
             let origin = crate::graph::workload::scope::current();
             if !origin.technical && stats.level() != WorkloadLevel::Off {

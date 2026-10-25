@@ -80,6 +80,20 @@ backup job: its pages have no files.
 A job of a newer version (an action this version does not know) is kept as it was written and
 never run; `g.jobs()` lists it with `served: false` and the reason.
 
+**Running.** The jobs of a store's catalog run on the store's scheduler beside its system jobs:
+the dev server and the playground pick up a defined, changed or dropped job at their next tick.
+A `query` job's run is one transaction whose commit metadata carries `job: <name>` (the change
+feed and the history name the job), its queries count under the channel `job` of the
+[workload statistics](workload_statistics.md), and its limits per run apply. A run that fails
+(a write outside its effects, a timeout, an error of the query) changes nothing and is recorded
+with its error; the job runs again at its next time. A job on a graph outside a store is kept but
+not run (there is no scheduler). In your own program, give the scheduler the store's user jobs
+and sync them whenever the catalog's jobs changed:
+
+```rust,ignore
+scheduler.sync_user_jobs(store.user_jobs());
+```
+
 The dev server answers `GET /api/jobs` with the jobs of the active store: name, kind, schedule,
 whether it is on, the next time and the last run.
 

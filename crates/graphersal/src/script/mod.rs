@@ -90,6 +90,7 @@ pub use eval::{
     materialize_traversals,
 };
 pub use execution::{ScriptExecution, metrics_to_map};
+pub(crate) use jobs::run_query_job;
 pub use limits::{ScriptLimits, resource_limit_from_rhai};
 #[doc(hidden)]
 pub use register::doc_examples;

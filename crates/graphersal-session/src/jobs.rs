@@ -19,6 +19,8 @@ pub struct SessionJobs {
     /// The scheduler and the store it belongs to (a `Weak` keeps the allocation, so a new
     /// store never takes the old one's address and is mistaken for it).
     current: Option<(Weak<dyn SessionStore>, Scheduler)>,
+    /// The catalog's job definitions the scheduler's user jobs were built from.
+    user_jobs: Vec<graphersal::catalog::Definition>,
 }
 
 impl Session {
@@ -56,6 +58,17 @@ impl Session {
                 let _ = scheduler.add(job);
             }
             self.jobs.current = Some((Arc::downgrade(&store), scheduler));
+            self.jobs.user_jobs.clear();
+        }
+        // The user jobs follow the catalog: rebuilt when its job definitions changed (a define,
+        // a drop, a rollback or a catalog load).
+        let definitions = self
+            .graph()
+            .definitions(Some(graphersal::catalog::DefinitionKind::JOB));
+        let (_, scheduler) = self.jobs.current.as_mut()?;
+        if definitions != self.jobs.user_jobs {
+            scheduler.sync_user_jobs(store.user_jobs());
+            self.jobs.user_jobs = definitions;
         }
         self.jobs.current.as_mut().map(|(_, scheduler)| scheduler)
     }
@@ -221,6 +234,43 @@ mod tests {
             s.workload_report_with_history("weeks")
                 .unwrap_err()
                 .contains("minutes")
+        );
+    }
+
+    #[test]
+    fn a_job_of_the_catalog_is_listed_and_runs_on_its_schedule() {
+        let mut s = Session::new();
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        let answer = s.execute(
+            r#"g.define_job(#{name: "cp", schedule: "* * * * *", action: "checkpoint"})"#,
+            &crate::RunOptions::default(),
+        );
+        assert!(
+            answer.contains("\"ok\": true") || answer.contains("\"ok\":true"),
+            "{answer}"
+        );
+        let view = s.jobs_view();
+        let cp = view["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["name"] == "cp")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(cp["kind"], "user", "{view}");
+        s.tick_jobs(T0);
+        assert!(s.tick_jobs(T0 + MINUTE).contains(&"cp".to_string()));
+        // Dropped: gone from the scheduler at the next look.
+        s.execute(r#"g.drop_job("cp")"#, &crate::RunOptions::default());
+        let view = s.jobs_view();
+        assert!(
+            !view["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|j| j["name"] == "cp"),
+            "{view}"
         );
     }
 }

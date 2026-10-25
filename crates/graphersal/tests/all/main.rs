@@ -108,6 +108,7 @@ mod inject_tests;
 mod integration_tests;
 mod io_integration;
 mod job_definition_tests;
+mod job_run_tests;
 mod journal_panic_tests;
 mod jpath_tests;
 mod lazy_materialization_tests;

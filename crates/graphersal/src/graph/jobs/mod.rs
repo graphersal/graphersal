@@ -13,7 +13,9 @@
 //! catalog definitions.
 //!
 
+mod authorizer;
 mod cron;
+pub(crate) use authorizer::JobAuthorizer;
 mod definition;
 pub(crate) mod limits;
 
@@ -274,6 +276,52 @@ impl Scheduler {
             .ok_or_else(|| JobError::Unknown(name.to_string()))?;
         self.entries.remove(index);
         Ok(())
+    }
+
+    /// Makes `jobs` the scheduler's user jobs (the jobs of a store's catalog, rebuilt when the
+    /// catalog changed): a user job not in `jobs` is removed, a new one added; one of the same
+    /// name keeps its last run, and its planned time when its schedule and switch are unchanged.
+    /// A job named like a system job is skipped (the system job stays).
+    pub fn sync_user_jobs(&mut self, jobs: Vec<Job>) {
+        let mut kept: Vec<Entry> = Vec::with_capacity(self.entries.len() + jobs.len());
+        let mut old_users: Vec<Entry> = Vec::new();
+        for entry in self.entries.drain(..) {
+            if entry.job.kind == JobKind::User {
+                old_users.push(entry);
+            } else {
+                kept.push(entry);
+            }
+        }
+        for job in jobs {
+            if kept.iter().any(|e| e.job.name == job.name) {
+                tracing::warn!(
+                    "the user job '{}' is named like a system job and is not scheduled",
+                    job.name
+                );
+                continue;
+            }
+            let previous = old_users
+                .iter()
+                .position(|e| e.job.name == job.name)
+                .map(|index| old_users.swap_remove(index));
+            let (next_at, last) = match previous {
+                Some(old) => {
+                    let unchanged =
+                        old.job.schedule == job.schedule && old.job.enabled == job.enabled;
+                    (old.next_at.filter(|_| unchanged), old.last)
+                }
+                None => (None, None),
+            };
+            kept.push(Entry {
+                job: Job {
+                    kind: JobKind::User,
+                    ..job
+                },
+                next_at,
+                last,
+            });
+        }
+        self.entries = kept;
     }
 
     /// Switches job `name` on or off.

@@ -337,6 +337,35 @@ pub fn eval_value_atomic(
         .map(|(value, _)| value)
 }
 
+/// [`eval_value_atomic`] for a scheduled job: the script is one unit carrying `metadata` to its
+/// commit (the job's name), and a traversal it returns runs inside that unit (a job's result is
+/// not shown: what it does is its writes).
+pub(crate) fn eval_job_unit(
+    shared: Arc<dyn AnyGraph>,
+    script: &str,
+    params: std::collections::HashMap<String, ElementProperty>,
+    limits: &ScriptLimits,
+    authorizer: Arc<dyn crate::graph::Authorizer>,
+    metadata: crate::graph::CommitMetadata,
+) -> Result<(), Box<rhai::EvalAltResult>> {
+    let mut params = Some(params);
+    let mut authorizer = Some(authorizer);
+    let mut body = |private: &Arc<dyn AnyGraph>| {
+        let (Some(params), Some(authorizer)) = (params.take(), authorizer.take()) else {
+            return crate::script::plan::UnitBody(Err(body_ran_twice()));
+        };
+        crate::script::plan::UnitBody(
+            eval_in_unit(private, script, params, limits, authorizer).and_then(|value| {
+                materialize_traversals(value, limits.effective_max_value_depth())
+            }),
+        )
+    };
+    shared
+        .run_unit(crate::script::plan::UnitKind::Call(metadata), &mut body)
+        .0
+        .map(|_| ())
+}
+
 /// Runs a script like [`eval_value_atomic`] and then ALWAYS rolls everything back: a preview
 /// of what the script would change, the script-side counterpart of
 /// [`Transactional::dry_run`](crate::graph::Transactional::dry_run). Returns the script's result
