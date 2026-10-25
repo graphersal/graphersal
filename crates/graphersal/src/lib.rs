@@ -34,6 +34,7 @@ pub(crate) mod gql;
 pub(crate) mod graph;
 #[cfg(feature = "io")]
 pub mod io;
+pub mod jobs;
 #[cfg(feature = "persist")]
 pub mod persist;
 pub mod prelude;
@@ -49,6 +50,7 @@ pub mod temporal;
 pub(crate) mod traversal;
 pub(crate) mod value;
 pub mod vector;
+pub mod workload;
 
 // The domain types at the crate root (rule 8). No glob re-exports: query writers use
 // `prelude`, integrators the topic modules.

@@ -478,6 +478,30 @@ impl Playground {
         Ok(to_text(&self.session.memory_report(&spec)))
     }
 
+    /// Sets the time zone the scheduled jobs run in (the browser's zone, from
+    /// `Intl.DateTimeFormat().resolvedOptions().timeZone`).
+    #[wasm_bindgen(js_name = setTimeZone)]
+    pub fn set_time_zone(&mut self, name: &str) -> Result<(), JsError> {
+        self.session
+            .set_time_zone(name)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Runs the due scheduled jobs of the active store at `now_ms` (milliseconds since the Unix
+    /// epoch, `Date.now()`; the worker's timer calls it): the names of the jobs that ran.
+    #[wasm_bindgen(js_name = tickJobs)]
+    pub fn tick_jobs(&mut self, now_ms: f64) -> String {
+        to_text(&serde_json::json!(
+            self.session.tick_jobs((now_ms * 1000.0) as i64)
+        ))
+    }
+
+    /// The scheduled jobs of the active store (see `Session::jobs_view`).
+    #[wasm_bindgen(js_name = jobs)]
+    pub fn jobs(&mut self) -> String {
+        to_text(&self.session.jobs_view())
+    }
+
     /// Every DSL function, from the Rhai engine's metadata (completion catalogue).
     pub fn completions(&self) -> String {
         to_text(&views::completions(self.session.engine()))

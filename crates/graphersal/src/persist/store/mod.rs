@@ -38,6 +38,7 @@ mod rollback;
 mod snapshot_dir;
 mod upgrade;
 mod wal_files;
+mod workload;
 #[cfg(feature = "persist-zip")]
 mod zip;
 
@@ -127,6 +128,7 @@ pub struct StoreOptions {
     compaction: CompactionPolicy,
     auto_compact: bool,
     damage_policy: DamagePolicy,
+    workload_level: crate::graph::workload::WorkloadLevel,
     /// Injected WAL failures (crate tests only).
     faults: Option<Arc<Faults>>,
 }
@@ -146,6 +148,7 @@ impl Default for StoreOptions {
             compaction: CompactionPolicy::default(),
             auto_compact: false,
             damage_policy: DamagePolicy::Maintenance,
+            workload_level: crate::graph::workload::WorkloadLevel::Persisted,
             faults: None,
         }
     }
@@ -157,6 +160,15 @@ impl StoreOptions {
     /// chunks of 1 MiB, snapshot segments of 64 MiB, no checkpoint on close.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How much workload statistics the store keeps (book page "Workload Statistics"; default
+    /// [`WorkloadLevel::Persisted`](crate::workload::WorkloadLevel::Persisted): in memory and in
+    /// the sidecar file `WORKLOAD`, read back at the next open). Per open, never stored in
+    /// `GRAPH`; `off` keeps nothing, `memory` writes no file.
+    pub fn with_workload_level(mut self, level: crate::graph::workload::WorkloadLevel) -> Self {
+        self.workload_level = level;
+        self
     }
 
     /// When a commit is durable ([`Durability::EveryCommit`] by default).
@@ -404,6 +416,9 @@ struct Shared {
     stopped: Mutex<Option<String>>,
     /// Damage found on disk while the store is open, in the order it was found.
     found: Mutex<Vec<FoundDamage>>,
+    /// The workload statistics (`workload.rs`): read from the sidecar at open, written by the
+    /// system job `stats_flush` and at close.
+    workload: Arc<crate::graph::workload::WorkloadStats>,
 }
 
 /// One graph kept in one directory: snapshot + write-ahead log, recovery on open, checkpoints,
@@ -1531,6 +1546,7 @@ impl StoreCore {
         };
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
+        let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let shared = Arc::new(Shared {
             chunk_bytes: graph_file.chunk_bytes,
             dir,
@@ -1546,6 +1562,7 @@ impl StoreCore {
             read_only: Mutex::new(None),
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
+            workload: workload_stats,
         });
         Ok(StoreCore {
             shared,
@@ -1785,6 +1802,7 @@ impl StoreCore {
             file.clean = false;
             write_graph_file(&dir, &file)?;
         }
+        let workload_stats = workload::open_stats(&dir, options.workload_level, true);
         let shared = Arc::new(Shared {
             chunk_bytes,
             dir,
@@ -1800,6 +1818,7 @@ impl StoreCore {
             read_only: Mutex::new(None),
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
+            workload: workload_stats,
         });
         let thread = if shared.options.checkpoint_after_bytes > 0 {
             spawn_checkpoint_thread(&shared)
@@ -1842,6 +1861,7 @@ impl StoreCore {
         report.read_only = Some(reason.clone());
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
+        let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let shared = Arc::new(Shared {
             chunk_bytes: graph_file.chunk_bytes,
             dir,
@@ -1857,6 +1877,7 @@ impl StoreCore {
             read_only: Mutex::new(Some(reason)),
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
+            workload: workload_stats,
         });
         Ok(StoreCore {
             shared,
@@ -1918,6 +1939,7 @@ impl StoreCore {
         report.snapshot_commit_seq = damage.base_snapshot.unwrap_or(0);
         let wal = Arc::new(WalShared::default());
         wal.closed.store(true, Ordering::Release);
+        let workload_stats = workload::open_stats(&dir, options.workload_level, false);
         let shared = Arc::new(Shared {
             chunk_bytes: salvage.graph_file.chunk_bytes,
             dir,
@@ -1933,6 +1955,7 @@ impl StoreCore {
             read_only: Mutex::new(None),
             stopped: Mutex::new(None),
             found: Mutex::new(Vec::new()),
+            workload: workload_stats,
         });
         Ok(StoreCore {
             shared,
@@ -2784,6 +2807,23 @@ impl StoreCore {
             return Ok(());
         }
         self.stop_thread();
+        // The workload statistics first (best effort: a failure is logged, the close goes on).
+        let writable = self.backup.is_none()
+            && self.maintenance.is_none()
+            && self
+                .shared
+                .read_only
+                .lock()
+                .is_ok_and(|reason| reason.is_none())
+            && self
+                .shared
+                .stopped
+                .lock()
+                .is_ok_and(|reason| reason.is_none())
+            && self.shared.wal.frozen().is_none();
+        if let Err(err) = self.shared.flush_workload(writable) {
+            tracing::warn!(%err, "the workload statistics were not written at close");
+        }
         let mut result = Ok(());
         if self.shared.options.checkpoint_on_close
             && !self.writes_nothing()

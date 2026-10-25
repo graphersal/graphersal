@@ -110,9 +110,34 @@ const RAW_METHODS = {
   saveCatalog: () => playground.saveCatalog(),
 };
 
+// Every few seconds the worker ticks the scheduled jobs of the active store (book page
+// "Scheduled Jobs": the host drives the clock), in the browser's time zone. A tick runs between
+// two requests (the worker is single-threaded), never inside one.
+const JOB_TICK_MS = 5000;
+let jobTicker = null;
+
+function startJobTicker() {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (zone) playground.setTimeZone(zone);
+  } catch {
+    // An unknown zone: the jobs run in UTC.
+  }
+  if (jobTicker) clearInterval(jobTicker);
+  jobTicker = setInterval(() => {
+    if (!playground) return;
+    try {
+      playground.tickJobs(Date.now());
+    } catch {
+      // A failed tick is recorded by the job itself; a trap shows at the next request.
+    }
+  }, JOB_TICK_MS);
+}
+
 async function start() {
   await init({ module_or_path: new URL('../../pkg/graphersal_wasm_bg.wasm', import.meta.url) });
   playground = new Playground();
+  startJobTicker();
   return {
     version: Playground.version(),
     memoryTracked: Playground.memoryTracked(),

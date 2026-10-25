@@ -219,6 +219,8 @@ pub struct Session {
     pub(crate) memory_stores: bool,
     /// The force layouts of the Graph panel: running jobs and finished ones ([`crate::layout`]).
     layouts: crate::layout::LayoutJobs,
+    /// The scheduled jobs of the active store and the time zone they run in ([`crate::jobs`]).
+    pub(crate) jobs: crate::jobs::SessionJobs,
 }
 
 impl Default for Session {
@@ -370,6 +372,7 @@ impl Session {
             stores: None,
             memory_stores: false,
             layouts: crate::layout::LayoutJobs::default(),
+            jobs: crate::jobs::SessionJobs::default(),
         }
     }
 
