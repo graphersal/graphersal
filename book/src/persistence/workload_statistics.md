@@ -125,6 +125,7 @@ A backup opened read-only, a read-only or maintenance-mode store keeps statistic
 
 | Front end | How |
 |---|---|
+| playground | **Optimize** ▸ Workload: tables with a sparkline per row and a chart per series ([Optimize](optimize.md)) |
 | REPL (`--graph <store>`) | `/workload`: one line per series, last 90 days |
 | dev server | `GET /api/workload` (the JSON below) |
 | MCP | tool `workload_statistics` {max_rows} (at most 50 rows per list by default) |

@@ -6,7 +6,7 @@
 // sizes are saved in localStorage (best effort).
 
 import { reactive, ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import { state, reveal, cycleTheme, saveGraph, saveSchema, saveToSource, isServerMode, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog } from '../store.js';
+import { state, reveal, cycleTheme, saveGraph, saveSchema, saveToSource, isServerMode, backToLiveGraph, runStoreTask, toast, refreshSavedQueries, refreshCompressions, refreshIndexes, registerShareDialog, openShareDialog, openOptimize } from '../store.js';
 import { viewBanner, backupBanner } from '../store-model.js';
 import { mcpBadgeTitle } from '../change-feed.js';
 import { navigate } from '../router.js';
@@ -20,6 +20,7 @@ import { ProfilePanel } from './profile-panel.js';
 import { DropMenu, LAYOUT_EVENT } from './drop-menu.js';
 import { StoreMenu } from './store-menu.js';
 import { CatalogMenu, CatalogDialogs } from './catalog.js';
+import { OptimizePanel } from './optimize.js';
 import { ShareDialog } from './share-dialog.js';
 import { ChangeBurstBanner } from './change-burst-banner.js';
 
@@ -66,7 +67,7 @@ const elementStyle = (dimension, size, gutterSize) => ({ 'flex-basis': `calc(${s
 const gutterStyle = (dimension, gutterSize) => ({ 'flex-basis': `${gutterSize}px` });
 
 export const Workspace = {
-  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, ShareDialog, ChangeBurstBanner },
+  components: { QueryEditor, ResultsPanel, GraphPanel, SchemaPanel, ProfilePanel, DropMenu, StoreMenu, CatalogMenu, CatalogDialogs, OptimizePanel, ShareDialog, ChangeBurstBanner },
   emits: ['help', 'settings'],
   setup(props, { emit }) {
     const layout = reactive(loadLayout());
@@ -290,7 +291,7 @@ export const Workspace = {
     });
 
     return {
-      formatCount, shareDialog, openShareDialog,
+      formatCount, shareDialog, openShareDialog, openOptimize,
       graphName: computed(() => splitGraphName(state.graph ? state.graph.name : '')),
       state, layout, main, left, right, narrow, leftCount, rightCount, PANELS,
       editorRef: panelRefs.editor, resultsRef: panelRefs.results, graphRef: panelRefs.graph,
@@ -360,6 +361,8 @@ export const Workspace = {
           <button class="menu-item" @click="resetLayout">Reset layout</button>
       </drop-menu>
       <catalog-menu v-if="state.graph"></catalog-menu>
+      <button v-if="state.graph" type="button" class="btn hide-narrow" @click="openOptimize()"
+              title="Optimize: the storage advisor's recommendations (indexes, compression) with Apply, the workload statistics with charts, the memory report">Optimize</button>
       <store-menu v-if="(serverMode && state.engineInfo.store) || (state.engineInfo && state.engineInfo.storeMemory && state.graph)"></store-menu>
       <drop-menu v-if="state.graph" class="hide-narrow" button-class="btn" title="Download the graph data, its schema or a snapshot: one file per entry" menu-style="min-width: 300px">
         <template #trigger>{{ state.saving ? 'Saving…' : 'Save ▾' }}</template>
@@ -432,6 +435,7 @@ export const Workspace = {
       <button class="btn" @click="showAll">Show all panels</button>
     </div>
     <catalog-dialogs></catalog-dialogs>
+    <optimize-panel></optimize-panel>
     <share-dialog ref="shareDialog"></share-dialog>
   </div>
   `,

@@ -44,6 +44,7 @@
 
 #![deny(missing_docs)]
 
+pub mod advisor;
 pub mod compression;
 pub mod create;
 pub mod display;

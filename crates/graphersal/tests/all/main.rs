@@ -12,6 +12,7 @@ mod add_edge_endpoint_tests;
 mod add_element_parameters_tests;
 mod add_property_fold_tests;
 mod adjacency_input_shape_tests;
+mod advisor_tests;
 mod any_graph_script_tests;
 mod api_stability_tests;
 mod backup_fuzz_tests;

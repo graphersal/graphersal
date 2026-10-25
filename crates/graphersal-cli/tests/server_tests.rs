@@ -3110,6 +3110,7 @@ fn mcp_on_a_store_offers_the_graph_tools_only() {
             "patch_schema",
             "statistics",
             "workload_statistics",
+            "advise",
             "list_jobs",
             "memory_report",
             "graph_info",
@@ -5913,4 +5914,65 @@ fn scheduled_jobs_over_http() {
     );
     assert_eq!(get(port, "/api/jobs/define").status, 405);
     let _ = std::fs::remove_dir_all(&backups);
+}
+
+/// The storage advisor over HTTP (`/api/advise*`) and MCP (`advise`): a key filtered often is
+/// advised an index; applying the recommendation by its id creates it, and the advice is gone.
+#[test]
+fn storage_advice_over_http_and_mcp() {
+    let ui = ui_dir("advise");
+    let data = ui.parent().unwrap().join("advise-data");
+    let _ = std::fs::remove_dir_all(&data);
+    let data_arg = data.to_str().unwrap().to_string();
+    let ui_arg = ui.to_str().unwrap().to_string();
+    let server = start(&[
+        "--graph",
+        &data_arg,
+        "--ui-dir",
+        &ui_arg,
+        "--create-store",
+        "--mcp",
+        "--mcp-read-only",
+    ]);
+    let port = server.port;
+    for name in ["ann", "bob", "cid"] {
+        let r = execute(
+            port,
+            &format!(r#"g.add_v("person").property("name", "{name}").iterate()"#),
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        let r = execute(
+            port,
+            &format!(r#"g.v().has_label("person").has("name", "{name}").count().next()"#),
+        );
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    let spec = r#"{"everything": true}"#;
+    let advice = post(port, "/api/advise", spec).json();
+    assert_eq!(advice["ok"], true, "{advice}");
+    let id = "create_index:vertex:person:name";
+    assert!(
+        advice["advice"]["recommendations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == id),
+        "{advice}"
+    );
+    let mut mcp = McpClient::connect(port, &[]);
+    let (error, text) = mcp.call("advise", serde_json::json!({"everything": true}));
+    assert!(!error, "{text}");
+    assert!(text.contains(id), "{text}");
+    let applied = post(
+        port,
+        "/api/advise/apply",
+        &serde_json::json!({"id": id, "spec": {"everything": true}}).to_string(),
+    )
+    .json();
+    assert_eq!(applied["ok"], true, "{applied}");
+    assert_eq!(get(port, "/api/graph").json()["propertyIndexes"], 1);
+    let again = post(port, "/api/advise", spec).json();
+    assert!(!again.to_string().contains(id), "{again}");
+    assert_eq!(post(port, "/api/advise/apply", "{}").status, 400);
+    assert_eq!(get(port, "/api/advise").status, 405);
 }

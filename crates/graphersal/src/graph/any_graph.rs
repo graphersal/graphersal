@@ -111,6 +111,13 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport>;
 
+    /// [`Graph::advise`]: the storage advisor's recommendations. Unauthorized: the front end
+    /// asks its authorizer first.
+    fn advise(
+        &self,
+        request: &crate::graph::advisor::AdviceRequest,
+    ) -> TraverserResult<crate::graph::advisor::Advice>;
+
     /// The graph as one value, `{"vertices": [..], "edges": [..]}`, with at most `keep`
     /// vertices and `keep` edges (all with `None`): what a script host shows for a graph value
     /// as a script's final value. Internal to the script layer.
@@ -329,6 +336,13 @@ where
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport> {
         GraphTraversalSource::new(&*self.read()).memory_report(request)
+    }
+
+    fn advise(
+        &self,
+        request: &crate::graph::advisor::AdviceRequest,
+    ) -> TraverserResult<crate::graph::advisor::Advice> {
+        Graph::advise(self, request)
     }
 
     fn listing(&self, keep: Option<usize>) -> TraverserResult<crate::value::ElementProperty> {

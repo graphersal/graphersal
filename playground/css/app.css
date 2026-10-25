@@ -1770,3 +1770,40 @@ input.ve-null { color: var(--text-muted); }
 .fd-foot { flex: none; padding: 6px 10px; border-top: 1px solid var(--border); }
 .filtered-strip a { font-weight: 600; }
 .fd-partial { margin: 0 10px 4px; border: 0; border-radius: 5px; font-size: 11.5px; line-height: 1.4; }
+
+/* The Optimize panel (js/components/optimize.js). */
+.optimize-dialog .dialog-head { gap: 12px; flex-wrap: wrap; }
+.op-tabs { display: inline-flex; gap: 2px; border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+.op-tabs button { border: 0; background: transparent; color: var(--text-muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+.op-tabs button.active { background: var(--accent-soft); color: var(--accent); }
+.op-tabs.small { margin: 8px 0; }
+.op-tabs.small button { padding: 3px 8px; font-size: 12px; }
+.op-bar { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
+.op-check { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.op-rec { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.op-rec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.op-rec-line { margin-top: 4px; font-size: 13px; }
+.op-rec-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.op-command { font-size: 12px; background: var(--accent-soft); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.op-effect { font-size: 13px; font-weight: 600; }
+.op-effect.good { color: var(--ok); }
+.op-effect.cost { color: var(--warn); }
+.op-table .op-row { cursor: pointer; }
+.op-table .op-row.selected td { background: var(--accent-soft); }
+.op-name { max-width: 420px; overflow-wrap: anywhere; }
+.op-spark { display: block; }
+.op-spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.op-chart { width: 100%; height: 160px; display: block; }
+.op-bars rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 0.5; }
+.op-bars rect.failed { fill: var(--danger-soft); stroke: var(--danger); }
+.op-line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.op-line.mean { stroke: var(--ok); }
+.op-line.max { stroke: var(--warn); stroke-dasharray: 4 3; }
+.op-legend { display: flex; gap: 14px; font-size: 12px; flex-wrap: wrap; margin-top: 4px; }
+.op-legend .sw { display: inline-block; width: 12px; height: 8px; margin-right: 4px; vertical-align: middle; }
+.op-legend .sw.bars { background: var(--accent-soft); border: 1px solid var(--accent); }
+.op-legend .sw.failed { background: var(--danger-soft); border: 1px solid var(--danger); }
+.op-legend .sw.mean { border-top: 2px solid var(--ok); height: 0; }
+.op-legend .sw.max { border-top: 2px dashed var(--warn); height: 0; }
+.op-totals { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
+.op-total { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; min-width: 120px; font-size: 13px; }

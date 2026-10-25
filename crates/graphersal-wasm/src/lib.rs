@@ -520,6 +520,21 @@ impl Playground {
         to_text(&self.session.jobs_view())
     }
 
+    /// The storage advisor's recommendations for a spec of thresholds (JSON text, `{}` for the
+    /// defaults; see `graphersal_session::advisor`): `{ok, advice}` or `{ok: false, error}`.
+    pub fn advise(&self, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.advise(&spec)))
+    }
+
+    /// Applies the recommendation `id` of the advice for `spec`: `{ok, id, kind, result}` or
+    /// `{ok: false, error}`.
+    #[wasm_bindgen(js_name = applyRecommendation)]
+    pub fn apply_recommendation(&mut self, id: &str, spec: &str) -> Result<String, JsError> {
+        let spec = body_json(spec)?;
+        Ok(to_text(&self.session.apply_recommendation(id, &spec)))
+    }
+
     /// Defines (or replaces) a job of a user from the form's spec (JSON text, see
     /// `graphersal_session::jobs`): `{ok, job}` or `{ok: false, errors: [{field, message,
     /// help?}]}`; never throws for a refused job. The playground has no files, so no backup jobs.

@@ -1002,6 +1002,21 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
                 value(context.call_fallible(move |s| s.workload_report_with_history(&tier))?)
             }
         },
+        // The storage advisor (`graphersal_session::advisor`): POST a spec of thresholds (`{}`:
+        // the defaults); apply one recommendation by its id with the same spec.
+        (Method::Post, "advise") => {
+            let body = json_body(request)?;
+            value(context.call(move |s| s.advise(&body))?)
+        }
+        (Method::Post, "advise/apply") => {
+            let body = json_body(request)?;
+            let id = body["id"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| HttpError(400, "the body needs \"id\"".to_string()))?;
+            let spec = body.get("spec").cloned().unwrap_or(Value::Null);
+            value(context.call(move |s| s.apply_recommendation(&id, &spec))?)
+        }
         // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
         (Method::Post, "memory/report") => {
             let body = json_body(request)?;
@@ -1162,6 +1177,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             | "token-values"
             | "memory"
             | "memory/report"
+            | "advise"
+            | "advise/apply"
             | "jobs"
             | "jobs/define"
             | "jobs/drop"

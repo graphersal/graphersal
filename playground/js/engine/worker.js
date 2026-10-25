@@ -82,6 +82,11 @@ const JSON_METHODS = {
   listIndexes: () => playground.listIndexes(),
   createIndex: (spec) => playground.createIndex(JSON.stringify(spec)),
   dropIndex: (name) => playground.dropIndex(name),
+  // The Optimize panel: the memory report, the workload statistics, the storage advisor.
+  memoryReport: (spec) => playground.memoryReport(JSON.stringify(spec || {})),
+  workloadReport: (history) => playground.workloadReport(history || undefined),
+  advise: (spec) => playground.advise(JSON.stringify(spec || {})),
+  applyRecommendation: (id, spec) => playground.applyRecommendation(id, JSON.stringify(spec || {})),
 };
 
 // Methods that answer a drawing (compact columns).
