@@ -61,6 +61,9 @@ impl Playground {
     /// it is lost with the page.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Playground {
+        // The worker serves only the page: its drawing and panels are technical, the queries
+        // the user runs (`Session::execute*`) count under `playground`.
+        graphersal::workload::set_thread_default(graphersal::workload::Channel::Playground, true);
         let mut session = Session::new();
         session.set_memory_stores(true);
         Playground { session }
@@ -476,6 +479,13 @@ impl Playground {
     pub fn memory_report(&self, spec: &str) -> Result<String, JsError> {
         let spec = body_json(spec)?;
         Ok(to_text(&self.session.memory_report(&spec)))
+    }
+
+    /// The workload statistics of the served graph (JSON text, see
+    /// [`Session::workload_report`]).
+    #[wasm_bindgen(js_name = workloadReport)]
+    pub fn workload_report(&self) -> String {
+        to_text(&self.session.workload_report())
     }
 
     /// Sets the time zone the scheduled jobs run in (the browser's zone, from

@@ -363,13 +363,19 @@ impl Scheduler {
             deadline: limits.timeout.and_then(|t| started.checked_add(t)),
             memory_limit: limits.memory_limit,
         };
-        // Every traversal of the run checks the run's token and gets the job's limits; a
-        // panicking action is a failed run, never a failed host.
+        // Every traversal of the run checks the run's token, gets the job's limits and counts
+        // under the `job` channel; a panicking action is a failed run, never a failed host.
         let action = &mut entry.job.action;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            context
-                .cancel
-                .scope(|| limits::scope(run_limits, || action(&context)))
+            crate::graph::workload::scope::scope(
+                crate::graph::workload::Channel::Job,
+                false,
+                || {
+                    context
+                        .cancel
+                        .scope(|| limits::scope(run_limits, || action(&context)))
+                },
+            )
         }))
         .unwrap_or_else(|_| Err("the job panicked".to_string()));
         let elapsed = started.elapsed();

@@ -272,3 +272,15 @@ def test_temporal_values_survive_the_store_exactly(tmp_path):
     with graphersal.Store.open(path) as store:
         check(store.graph)  # from the snapshot
         assert store.verify()["ok"]
+
+
+def test_the_workload_report_counts_python_queries(tmp_path):
+    with graphersal.Store.create(str(tmp_path / "data")) as store:
+        store.graph.execute('g.addV("person").property("name", "ann").next()')
+        assert names(store.graph) == ["ann"]
+        report = store.workload_report()
+        assert report["level"] == "persisted"
+        channels = {row["channel"] for row in report["queries"]}
+        assert channels == {"python"}
+        assert any(row["key"] == "name" and row["access"] == "write" for row in report["properties"])
+        assert all(row["last_hour"]["count"] >= 1 for row in report["queries"])

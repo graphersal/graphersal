@@ -103,6 +103,28 @@ impl Session {
     }
 }
 
+impl Session {
+    /// The workload statistics of the served graph
+    /// ([`graphersal::workload::WorkloadReport::to_property`] as JSON: `{level, queries,
+    /// properties, locks, jobs}`); a graph without statistics (not in a store) answers level
+    /// `off` with empty lists. Reading it is not counted.
+    pub fn workload_report(&self) -> Value {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64);
+        let report = self
+            .graph()
+            .workload_stats()
+            .unwrap_or_else(|| {
+                Arc::new(graphersal::workload::WorkloadStats::new(
+                    graphersal::workload::WorkloadLevel::Off,
+                ))
+            })
+            .report(now);
+        serde_json::from_str(&report.to_json()).unwrap_or(Value::Null)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +154,38 @@ mod tests {
         // Another active store gets its own scheduler (planned anew).
         s.load_sample("modern").unwrap();
         assert!(s.jobs_view()["jobs"][0]["last"].is_null());
+    }
+
+    #[test]
+    fn only_the_users_queries_count_under_the_hosts_channel() {
+        use graphersal::workload::{Channel, scope};
+        let mut s = Session::new();
+        assert_eq!(s.workload_report()["level"], "off");
+        s.set_memory_stores(true);
+        s.load_sample("modern").unwrap();
+        scope(Channel::Mcp, true, || {
+            // The page's own work: technical, not counted.
+            s.graph_view(r#"{"maxNodes": 10, "maxEdges": 10}"#).unwrap();
+            let answer = s.execute(
+                r#"g.v().has_label("person").values("name").to_list()"#,
+                &crate::RunOptions::default(),
+            );
+            assert!(answer.contains("marko"), "{answer}");
+        });
+        let report = s.workload_report();
+        let queries = report["queries"].as_array().unwrap();
+        assert_eq!(queries.len(), 1, "{report}");
+        assert_eq!(queries[0]["channel"], "mcp");
+        assert_eq!(queries[0]["last_hour"]["count"], 1);
+        assert_eq!(queries[0]["last_hour"]["items"], 4);
+        let names = report["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["key"] == "name")
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(names["label"], "person", "{report}");
+        assert_eq!(names["access"], "read");
     }
 }

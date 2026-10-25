@@ -567,6 +567,12 @@ fn start_session(
         .name("graphersal-session".to_string())
         .stack_size(SESSION_STACK_BYTES)
         .spawn(move || {
+            // Work outside a request (loading at start) is technical; `Context::call` sets
+            // each request's channel.
+            graphersal::workload::set_thread_default(
+                graphersal::workload::Channel::Playground,
+                true,
+            );
             let mut session = Session::with_presets(presets);
             let loaded = match (shared, preloaded) {
                 (Some((store, name)), _) => {
@@ -685,9 +691,15 @@ impl Context {
         let (reply, answer) = channel();
         let feed = self.feed.clone();
         let client = CLIENT.with(|c| c.borrow().clone());
+        // The workload statistics count only the queries a client runs (`Session::execute*`)
+        // under its channel; the page's drawing and panels are technical.
+        let channel = match client.name.as_str() {
+            "mcp" | "ai" => graphersal::workload::Channel::Mcp,
+            _ => graphersal::workload::Channel::Playground,
+        };
         let job: Job = Box::new(move |session| {
             let before = position(session);
-            let out = job(session);
+            let out = graphersal::workload::scope(channel, true, || job(session));
             let after = position(session);
             if before != after
                 && let Ok(mut feed) = feed.lock()
@@ -942,6 +954,8 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
         // The scheduled jobs of the active store (`graphersal_session::jobs`).
         (Method::Get, "jobs") => value(context.call(|s| s.jobs_view())?),
+        // The workload statistics (`Session::workload_report`).
+        (Method::Get, "workload") => value(context.call(|s| s.workload_report())?),
         // The memory report (`Session::memory_report`): POST a spec, `{}` for a full report.
         (Method::Post, "memory/report") => {
             let body = json_body(request)?;

@@ -122,6 +122,11 @@ const COMMANDS: &[(&str, &str, &str)] = &[
         "where the graph's memory goes per label and property (g.memory_report()); \
          with a number: sampled",
     ),
+    (
+        "workload",
+        "",
+        "the workload statistics of a store's graph (queries, properties, locks, jobs)",
+    ),
     ("exit", "", "close the graph and leave the shell"),
 ];
 
@@ -140,6 +145,19 @@ fn memory_report(graph: &graphersal::storage::Graph, args: &str) -> String {
         Ok(report) => report.to_string(),
         Err(err) => graphersal::error::format_diagnostic(&*err),
     }
+}
+
+/// The text of `/workload`: the workload statistics of `graph` (only a store's graph has them).
+fn workload_report(graph: &graphersal::storage::Graph) -> String {
+    let Some(stats) = graph.workload_stats() else {
+        return "No workload statistics: only a graph opened from a store (--graph <store>) \
+                counts its workload."
+            .to_string();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as i64);
+    stats.report(now).to_string()
 }
 
 /// Rhai keywords offered at the start of an expression.
@@ -819,6 +837,7 @@ Use /exit or CTRL-D to exit; CTRL-C breaks the line input
                                 exit(0);
                             }
                             "memory" => outln!("{}", memory_report(&arc_graph, args)),
+                            "workload" => outln!("{}", workload_report(&arc_graph)),
                             "help" => {
                                 if let Some(helper) = rl.helper() {
                                     outln!("{}", helper.catalogue.help(args, spelling));
@@ -1150,11 +1169,30 @@ mod tests {
     }
 
     #[test]
+    fn workload_prints_the_statistics_of_a_graph_that_has_them() {
+        use graphersal::workload::{Channel, WorkloadLevel, WorkloadStats, scope};
+        let graph = graphersal::storage::Graph::new(graphersal::TraversalGraph::tinkerpop_modern());
+        assert!(workload_report(&graph).starts_with("No workload statistics"));
+        graph.attach_workload_stats(std::sync::Arc::new(WorkloadStats::new(
+            WorkloadLevel::Memory,
+        )));
+        let graph = std::sync::Arc::new(graph);
+        scope(Channel::Cli, false, || {
+            graphersal::script::eval_value(graph.clone(), r#"g.v().values("name").to_list()"#)
+        })
+        .unwrap();
+        let text = workload_report(&graph);
+        assert!(text.contains("v().values(?)"), "{text}");
+        assert!(text.contains("cli"), "{text}");
+        assert!(text.contains("vertex * name read"), "{text}");
+    }
+
+    #[test]
     fn slash_commands_and_their_arguments_complete() {
         let c = catalogue();
         assert_eq!(
             displays(&c, "/", Spelling::Snake),
-            ["/exit", "/help", "/memory", "/set"]
+            ["/exit", "/help", "/memory", "/set", "/workload"]
         );
         assert_eq!(displays(&c, "/s", Spelling::Snake), ["/set"]);
         let set = displays(&c, "/set ", Spelling::Snake);

@@ -796,6 +796,10 @@ class Store:
     def open_report(self) -> dict[str, Any]:
         """What the open did: ``{"clean_close", "commit_seq", "commits_replayed",
         "torn_tail_bytes"}``."""
+    def workload_report(self) -> dict[str, Any]:
+        """The workload statistics of the store's graph: ``{"level", "queries",
+        "properties", "locks", "jobs"}``, rows with their ``channel`` and the windows
+        ``last_hour`` / ``last_two_days`` / ``last_ninety_days``."""
     def checkpoint(self, name: Optional[str] = None) -> dict[str, Any]:
         """Writes a snapshot of the current state; returns its listing."""
     def mark(self, name: str) -> dict[str, Any]:

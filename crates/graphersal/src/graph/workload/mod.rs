@@ -14,9 +14,11 @@
 #[cfg(feature = "persist")]
 pub(crate) mod codec;
 pub(crate) mod fingerprint;
+mod property;
 pub(crate) mod scope;
+mod text;
 
-pub use scope::scope;
+pub use scope::{current_channel, scope, set_thread_default};
 
 use std::collections::HashMap;
 use std::collections::VecDeque;

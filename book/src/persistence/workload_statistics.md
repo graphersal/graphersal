@@ -1,8 +1,8 @@
 # Workload Statistics
 
 A graph instance keeps statistics of what was done with it: which scheduled jobs ran and how
-long they took, how long writers held the graph's lock, and, as later releases add them, which
-properties queries read and how. They describe the **instance**, not the data: they are not
+long they took, how long writers held the graph's lock, which queries ran, and which
+properties they used and how. They describe the **instance**, not the data: they are not
 versioned with the graph, never written to the journal, and never part of a commit, so they
 do not move with a rollback and are not replicated.
 
@@ -29,6 +29,28 @@ Each bucket counts the occurrences, the failed ones, the items they touched, the
 their longest duration. The sidecar keeps all three tiers, so a restart loses none of them;
 buckets that aged past their window while the process was stopped fall out at the next
 sample.
+
+## Channels
+
+Every sample is counted under the **channel** of the work that produced it, so the report says
+who runs what (which queries the AI agents run, which ones the page):
+
+| Channel | Work |
+|---|---|
+| `playground` | queries run from the browser playground (in the page, or over the dev server) |
+| `mcp` | the MCP endpoint's tools and the AI Chat's agent |
+| `cli` | the command line: one-shot scripts and the REPL |
+| `python` | the Python binding |
+| `job` | the actions of [scheduled jobs](scheduled_jobs.md) |
+| `host` | anything else (an application embedding the library) |
+
+Only a user's queries count. The work a front end makes up itself (drawing the Graph panel,
+the inspector, schema inference, the panels' lists) is **technical** and not counted. A host
+declares its channel around the work it does for a request with
+`graphersal::workload::scope(channel, technical, || ..)`, or once for a thread that serves one
+front end with `set_thread_default(channel, technical)`; a front end that marks its own work
+technical runs a user's query in `scope(current_channel(), false, ..)`. Scopes nest, and a
+job's run is always `job`.
 
 ## The graph's lock
 
@@ -93,6 +115,22 @@ is section 4.4 of the [format specification](format.md).
 A backup opened read-only, a read-only or maintenance-mode store keeps statistics in memory only.
 
 ## Reading them
+
+| Front end | How |
+|---|---|
+| REPL (`--graph <store>`) | `/workload`: one line per series, last 90 days |
+| dev server | `GET /api/workload` (the JSON below) |
+| MCP | tool `workload_statistics` {max_rows} (at most 50 rows per list by default) |
+| Python | `store.workload_report()` (a dict) |
+| Rust | `store.workload_stats().report(now)`, `WorkloadReport::to_property()` / `to_json()` / `Display` |
+
+The JSON form (`WorkloadReport::to_json`) has the keys `level`, `queries` (`query`),
+`properties` (`element`, `label`, `key`, `access`), `locks` (`lock`) and `jobs` (`name`,
+`last_run`); every row has its `channel` and the windows `last_hour`, `last_two_days` and
+`last_ninety_days`, each with `count`, `failed`, `items`, `total_micros` and `max_micros`. Rows
+are sorted by total time over 90 days. A graph outside a store answers level `off` with empty
+lists.
+
 
 ```rust
 use graphersal::persist::{MemDir, Store, StoreOptions};
