@@ -540,7 +540,9 @@ class Graph:
         """Stores (or replaces) a saved query: ``{"name", "body", "language"?, "folder"?,
         "description"?, "params"?, "meta"?}`` as for the DSL's ``g.define_query``; with
         ``"language": "gql"`` the body is one plain GQL query whose ``$name`` parameters are
-        exactly the declared ones (``"rhai"``, the default: one Rhai function)."""
+        exactly the declared ones (``"rhai"``, the default: one Rhai function). ``"params"``
+        may also be the list ``get_query`` returns, so a stored definition can be changed and
+        given back."""
     def drop_query(self, name: str, *, policy: Optional[AccessPolicy] = None) -> bool:
         """Removes the saved query; ``False`` when there is none."""
     def define_compression(

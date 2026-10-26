@@ -869,6 +869,67 @@ fn gql_definition(
     Ok(query)
 }
 
+/// The parameter declarations of one query (or `()` for none) as a map, parameter name -> a
+/// type name or `#{schema, default}`. Also takes the list `get_query` returns, one
+/// `#{name, schema, default?, required?}` per parameter, so a definition read with `get_query`
+/// can be given back to `define_query` (issue #17); `required` is what the default implies
+/// (a parameter without a default is required) and is refused when it says otherwise.
+fn declared_params(
+    operation: &str,
+    value: Dynamic,
+) -> Result<Option<rhai::Map>, Box<EvalAltResult>> {
+    const EXPECTED: &str = "params as a map (parameter name -> type name or #{schema, default}) \
+                            or a list of #{name, schema, default?} as get_query returns it";
+    if !value.is_array() {
+        return optional_map(operation, EXPECTED, value);
+    }
+    let mismatch = |actual: String| {
+        fail(ScriptError::ArgumentMismatch {
+            step_name: operation.to_string(),
+            expected: EXPECTED.to_string(),
+            actual,
+        })
+    };
+    let mut declared = rhai::Map::new();
+    for entry in value.cast::<rhai::Array>() {
+        let actual = type_name_of(&entry);
+        let Some(mut entry) = entry.try_cast::<rhai::Map>() else {
+            return Err(mismatch(format!("a list item of type {actual}")));
+        };
+        if let Some(unknown) = entry
+            .keys()
+            .find(|key| !["name", "schema", "default", "required"].contains(&key.as_str()))
+        {
+            return Err(mismatch(format!("a list item with the key '{unknown}'")));
+        }
+        let name = match entry.remove("name") {
+            Some(name) if name.is_string() => name.to_string(),
+            _ => {
+                return Err(mismatch(
+                    "a list item without a name (a string)".to_string(),
+                ));
+            }
+        };
+        if let Some(required) = entry.remove("required") {
+            let has_default = entry.contains_key("default");
+            if required.as_bool().ok() != Some(!has_default) {
+                return Err(mismatch(format!(
+                    "the parameter '{name}' with required: {required} {} a default \
+                     (a parameter is required exactly when it has no default)",
+                    if has_default { "and" } else { "but without" }
+                )));
+            }
+        }
+        if declared
+            .insert(name.as_str().into(), Dynamic::from_map(entry))
+            .is_some()
+        {
+            return Err(mismatch(format!("the parameter '{name}' twice")));
+        }
+    }
+    Ok(Some(declared))
+}
+
 /// A map argument (or `()` for none), for `operation`.
 pub(super) fn optional_map(
     operation: &str,
@@ -1140,11 +1201,7 @@ impl ScriptGraphTraversalSource {
         let folder = optional_text(operation, "folder", take("folder"))?;
         let description = optional_text(operation, "description", take("description"))?;
         let meta = optional_text(operation, "meta", take("meta"))?;
-        let declared = optional_map(
-            operation,
-            "params as a map (parameter name -> type name or #{schema, default})",
-            take("params"),
-        )?;
+        let declared = declared_params(operation, take("params"))?;
 
         // The name first (a keyword or a too long name would only confuse the compile check).
         Definition::query(name.as_str(), QueryDefinition::new("fn"))
@@ -1294,7 +1351,7 @@ impl ScriptGraphTraversalSource {
             .map_err(|reason| invalid(&name, reason))?;
             let own = match declared.remove(name.as_str()) {
                 None => None,
-                Some(value) => optional_map(operation, "the parameter map of a function", value)?,
+                Some(value) => declared_params(operation, value)?,
             };
             let params = params_of(&ctx, &name, &signature, own)?;
             let mut query = QueryDefinition::new(text);

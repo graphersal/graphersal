@@ -107,6 +107,18 @@ A parameter is declared as `#{schema: <schema node>, default: <value>}`, or as a
   in a parameter's schema is an error: it fills a property of a created element and means
   nothing for an argument.
 
+`params` may also be the list `g.get_query(name)["params"]` returns, one
+`#{name, schema, default?, required?}` per parameter (`required` must match the default: a
+parameter is required exactly when it has none), so a stored definition can be read, changed
+and given back:
+
+```rhai
+let q = g.get_query("older_than");
+let body = q["body"];
+body.replace("P.gt", "P.gte");
+g.define_query(#{name: "older_than", params: q["params"], body: body})
+```
+
 Arguments are **named**: `g.query("x", #{limit: 5})`, or `g.query("x")` when every parameter has
 a default. An argument is a data value (a string, a number, a boolean, a UUID, a date or time, a
 list, a map; never a traversal or a closure), bound to the function's parameter like a
