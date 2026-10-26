@@ -1,7 +1,7 @@
 # Graphersal
 
-**An in-memory graph database and traversal engine in Rust, queried with Gremlin, with vector
-search for GraphRAG.**
+**An in-memory graph database and traversal engine in Rust, queried with GQL, the ISO standard
+graph query language, and with Gremlin, with vector search for GraphRAG.**
 
 [![crates.io](https://img.shields.io/crates/v/graphersal.svg)](https://crates.io/crates/graphersal)
 [![docs.rs](https://img.shields.io/docsrs/graphersal)](https://docs.rs/graphersal)
@@ -58,10 +58,30 @@ your Rust application, from Python and through MCP. The guide:
 
 [![The web playground: a recursive traversal over a directory tree, its results and the graph](book/src/images/getting_started/playground-tree.png)](https://play.graphersal.dev/#/play?graph=tree&q=%2F%2F%20every%20path%20below%20the%20src%20directory%0Ag.v().has(%22name%22%2C%20%22src%22)%0A%20%20.repeat(__.out()).emit()%0A%20%20.path().by(%22name%22)&run=1)
 
-You ask Graphersal questions in **plain language** or in **Gremlin**. In the AI chat you simply
-write what you want to know, and the model of your choice turns it into queries, runs them and
-answers. Gremlin is the query language of [Apache TinkerPop&trade;](https://tinkerpop.apache.org):
-start somewhere in a graph, walk along its edges, filter, group and count.
+You ask Graphersal questions in **plain language**, in **GQL** or in **Gremlin**. In the AI chat you
+simply write what you want to know, and the model of your choice turns it into queries, runs them
+and answers.
+
+**GQL** is the ISO standard graph query language (ISO/IEC 39075): you draw the pattern you are
+looking for, and Graphersal returns one row per match.
+
+```sql
+-- who created software together with marko?
+MATCH (me:person {name: 'marko'})-[:created]->(s:software)<-[:created]-(other:person)
+WHERE other <> me
+RETURN other.name AS coworker, s.name AS software
+ORDER BY coworker
+```
+
+[Run it in the playground](https://play.graphersal.dev/#/play?graph=modern&lang=gql&q=%2F%2F%20who%20created%20software%20together%20with%20marko%3F%0AMATCH%20(me%3Aperson%20%7Bname%3A%20%27marko%27%7D)-%5B%3Acreated%5D-%3E(s%3Asoftware)%3C-%5B%3Acreated%5D-(other%3Aperson)%0AWHERE%20other%20%3C%3E%20me%0ARETURN%20other.name%20AS%20coworker%2C%20s.name%20AS%20software%0AORDER%20BY%20coworker&run=1).
+GQL reads and writes (`INSERT`, `SET`, `REMOVE`, `DELETE`), and familiar Cypher spellings such as
+`CREATE`, `MERGE`, `UNWIND` or `toUpper()` are accepted as aliases where they mean the same, so a
+query you already know usually runs as it is. GQL support is experimental and grows from release to
+release: [GQL Queries](https://graphersal.dev/gql/index.html),
+[the supported subset](https://graphersal.dev/gql/subset.html).
+
+**Gremlin** is the query language of [Apache TinkerPop&trade;](https://tinkerpop.apache.org): start
+somewhere in a graph, walk along its edges, filter, group and count.
 
 ```groovy
 // who created software together with marko?
@@ -73,10 +93,16 @@ g.v().has("name", "marko").as("me")
 
 [Run it in the playground](https://play.graphersal.dev/#/play?graph=modern&q=%2F%2F%20who%20created%20software%20together%20with%20marko%3F%0Ag.v().has(%22name%22%2C%20%22marko%22).as(%22me%22)%0A%20%20.out(%22created%22).in(%22created%22)%0A%20%20.where(P.neq(%22me%22))%0A%20%20.path().by(%22name%22)&run=1):
 the real engine, compiled to WebAssembly, runs in your browser. Nothing to install, and your data
-never leaves your browser.
+never leaves your browser. Both languages run on the same graph and the same engine: a GQL query is
+compiled into an ordinary traversal plan, with the same optimizer, indexes, `profile()`, limits and
+permissions as Gremlin.
 
 ## What you get
 
+- **GQL, the ISO standard.** Pattern queries with `MATCH`, `OPTIONAL MATCH`, aggregation,
+  subqueries, quantified paths and `UNION`, and writes with `INSERT`, `SET`, `REMOVE`, `DELETE` and
+  `MERGE`; Cypher spellings are accepted as aliases. Run a query with `g.gql("MATCH ...")`, in the
+  playground's GQL tab, through MCP, or save it as a named query (experimental).
 - **Gremlin, two ways.** Build traversals in Rust or write them as text in the Gremlin DSL, in
   snake_case or in Gremlin's own camelCase (`has_label` or `hasLabel`). The same text runs in the
   browser, on the command line, from Python and through an AI agent.
@@ -85,7 +111,7 @@ never leaves your browser.
 - **A command line tool.** One-shot queries for shell scripts, an interactive REPL with completion
   and help, and a local server that brings the playground UI to a graph on your disk.
 - **AI agents on your graph.** The server speaks the Model Context Protocol (MCP), so Claude Code or
-  another MCP client can query the graph you are looking at. In the playground's AI Chat tab you ask
+  another MCP client can query the graph you are looking at, in GQL or in Gremlin. In the playground's AI Chat tab you ask
   about your graph in plain language, and the model of your choice writes and runs the queries
   (experimental).
 - **Values with real types.** Besides numbers, strings, UUIDs and nested JSON: five date and time
@@ -129,6 +155,7 @@ Open **[play.graphersal.dev](https://play.graphersal.dev)**, pick a sample graph
 
 ```bash
 graphersal -e 'g.v().has("name", "marko").out("knows").values("name")'
+graphersal -e 'g.gql("MATCH (p:person)-[:knows]->(f) RETURN f.name AS friend")'   # GQL
 graphersal --graph people.json -e 'g.v().has_label("person").count()'    # GraphSON or GraphML
 graphersal                                                               # interactive REPL
 graphersal --graph people.json --server --mcp      # the playground UI + MCP on http://127.0.0.1:8080
@@ -142,7 +169,7 @@ and [Dev Server, MCP and AI Chat](https://graphersal.dev/getting_started/server_
 
 ```toml
 [dependencies]
-graphersal = { version = "0.2", features = ["script", "io", "display"] }
+graphersal = { version = "0.3", features = ["script", "io", "display", "gql"] }
 ```
 
 ```rust
@@ -158,15 +185,20 @@ let friends = graph
     .values("name")
     .to_list()?; // ["josh", "vadas"]
 
-// the same query as Gremlin text (feature `script`)
+// the same query as Gremlin text (feature `script`), and as GQL (features `script` and `gql`)
+let graph = std::sync::Arc::new(graph);
 let names = graphersal::script::eval_value(
-    std::sync::Arc::new(graph),
+    graph.clone(),
     r#"g.V().has("name", "marko").out("knows").values("name").toList()"#,
+)?;
+let rows = graphersal::script::eval_value(
+    graph,
+    r#"g.gql("MATCH (:person {name: 'marko'})-[:knows]->(f) RETURN f.name AS friend").toList()"#,
 )?;
 ```
 
-Every feature is off by default: `script` (the Gremlin DSL), `io` (GraphSON and GraphML),
-`display` (tables), `serde`, `persist` (snapshots, journal and the Store). See the
+Every feature is off by default: `script` (the Gremlin DSL), `gql` (GQL queries), `io` (GraphSON
+and GraphML), `display` (tables), `serde`, `persist` (snapshots, journal and the Store). See the
 [Rust Quick Start](https://graphersal.dev/library/rust.html).
 
 ### From Python
@@ -181,29 +213,36 @@ import graphersal
 graph = graphersal.Graph.tinkerpop_modern()
 graph.query('g.V().has("name", "marko").out("knows").values("name")')
 # ['josh', 'vadas']
+graph.query('''g.gql("MATCH (:person {name: 'marko'})-[:knows]->(f) RETURN f.name AS friend")''')
+# [{'friend': 'josh'}, {'friend': 'vadas'}]
 ```
 
 See the [Python Quick Start](https://graphersal.dev/library/python.html).
 
 ## How mature is it
 
-Graphersal 0.2 is an early release line, built with the care of a database:
+Graphersal 0.3 is an early release line, built with the care of a database:
 
 - **TinkerPop conformance.** Apache TinkerPop's own Gherkin test suite (3.8.2) runs on every test
   run. More than 97 % of the scenarios in scope pass, and no implemented step gives a wrong result.
   The rest are steps that are not implemented yet or differ on purpose; each difference is
   documented ([compliance](https://graphersal.dev/for_developers/tinkerpop_compliance.html),
   [deviations](https://graphersal.dev/for_developers/tinkerpop_deviations.html)).
+- **GQL conformance.** Which parts of ISO/IEC 39075 are supported is listed feature by feature
+  ([GQL conformance](https://graphersal.dev/gql/conformance.html)); how far the Cypher compatibility
+  forms agree with Neo4j's behaviour is measured against the openCypher TCK on every test run
+  ([TCK compliance](https://graphersal.dev/gql/tck_compliance.html)), and no supported construct
+  gives a wrong result there. GQL is experimental: its subset grows, and an answer may still change.
 - **Tested hard.** About 90 % line coverage; randomized differential tests and fuzzing of queries,
   file decoders, checkpoints and backups run in every `cargo test`, with long budgets before each
   release. A query that goes wrong ends in an error with a `help()` text, never in a crash.
 - **A public storage format.** Snapshots, the write-ahead log and the Store are described byte by
   byte in the [format specification](https://graphersal.dev/persistence/format.html); every
   decoder treats its input as hostile.
-- **Clear stability labels.** Within 0.2.x the public API of `graphersal` (outside the items
-  marked experimental), the DSL and the schema format change only additively. The storage traits
-  (`GraphStorage`, `PersistentStorage`, `StoreDir`) are experimental in 0.2.x, and the dev
-  server's HTTP API is internal.
+- **Clear stability labels.** Within 0.3.x the public API of `graphersal` (outside the items
+  marked experimental), the DSL and the schema format change only additively. GQL, the storage
+  traits (`GraphStorage`, `PersistentStorage`, `StoreDir`) and the AI Chat are experimental, and the
+  dev server's HTTP API is internal.
 
 Graphersal is **not a complete copy of TinkerPop.** Read
 [Graphersal and TinkerPop](https://graphersal.dev/concepts/graphersal_and_tinkerpop.html) for what
@@ -213,7 +252,7 @@ is the same, what is different and why.
 
 | Path | What |
 |---|---|
-| [`crates/graphersal`](crates/graphersal) | the library: storage, traversal engine, optimizer, Gremlin DSL, schema, persistence |
+| [`crates/graphersal`](crates/graphersal) | the library: storage, traversal engine, optimizer, Gremlin DSL, GQL, schema, persistence |
 | [`crates/graphersal-cli`](crates/graphersal-cli) | the `graphersal` binary: one-shot runner, REPL, dev server with MCP, `graphersal store` |
 | [`bindings/py-graphersal`](bindings/py-graphersal) | the Python package `graphersal` |
 | [`playground`](playground) | the browser playground (runs `crates/graphersal-wasm`) |
@@ -229,7 +268,8 @@ cargo build --release -p graphersal-cli      # target/release/graphersal
 ## Contributing
 
 Bug reports, questions and pull requests are welcome. Contributions are accepted under the
-Apache-2.0 licence with a DCO sign-off (`git commit -s`); see [CONTRIBUTING.md](CONTRIBUTING.md).
+[Contributor License Agreement](CLA.md), signed once with a comment on your first pull request; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 Please report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
@@ -240,3 +280,8 @@ the project name is described in [TRADEMARKS.md](TRADEMARKS.md).
 Graphersal is compatible with, and inspired by, Apache TinkerPop Gremlin. It is an independent
 project: it is not part of Apache TinkerPop and is not endorsed by the Apache Software Foundation.
 Apache TinkerPop, TinkerPop and Gremlin are trademarks of the Apache Software Foundation.
+
+Graphersal's GQL is measured against the openCypher TCK and accepts Cypher compatibility forms. It
+is not Cypher and not openCypher, and it is not affiliated with, endorsed by or sponsored by Neo4j
+or the openCypher Implementers Group. Cypher&reg; is a registered trademark of Neo4j Inc.; the names
+Cypher and openCypher are used here only to describe compatibility testing.
