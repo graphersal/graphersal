@@ -10,8 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use graphersal::persist::{
-    BackupMode, BackupReport, CompactionAdvice, CompactionPolicy, DamagePolicy, PersistError,
-    RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions, store_dir_at,
+    BackupMode, BackupReport, CompactionAdvice, CompactionPolicy, DamagePolicy, ModelCopy,
+    PersistError, RecoveryTarget, RollbackMode, SingleFileDir, Store, StoreDir, StoreOptions,
+    StoredModel, store_dir_at,
 };
 
 use crate::cli::{EXIT_OK, EXIT_QUERY_ERROR, EXIT_USAGE_ERROR, GraphSpec};
@@ -54,11 +55,17 @@ USAGE:
                                      a consistent copy (works while in use): full into an empty
                                      directory, INCREMENTAL into an existing backup of DIR;
                                      every checksum is read in DIR and again in the copy
-    graphersal store backup <DIR> <FILE.zip> --zip  a full backup as one ZIP archive
+    graphersal store backup <DIR> <FILE.zip> --zip [--without-models]
+                                     a full backup as one ZIP archive (--without-models: the
+                                     embedding models left out)
     graphersal store restore <BACKUP_DIR>           make a backup the live store, in place
     graphersal store restore <FILE.zip> <DIR>       unpack a ZIP backup into a new directory
-    graphersal store export <DIR> <FILE.gsnap> [--commit <N>]
-                                     the latest (or the given) stored snapshot as a packed file
+    graphersal store export <DIR> <FILE.gsnap> [--commit <N>] [--without-models]
+                                     the latest (or the given) stored snapshot as a packed file,
+                                     with the store's embedding models unless --without-models
+    graphersal store models <DIR>    the embedding models the store keeps, with their licences
+    graphersal store models remove <DIR> <IDENTITY>
+                                     remove a model (by identity or id) from the store
     graphersal store rollback <DIR> TARGET [--delete]
                                      roll the store back IN PLACE: everything after TARGET moves
                                      to the attic (--delete: deleted); a new lineage continues
@@ -81,6 +88,10 @@ DIR: a store directory, or a single-file store (an existing file, or a new path 
 A damaged store opens read-only in maintenance mode; `verify` lists the damage and its donors.
 A backup directory is read-only (info, list, marks, verify, export, fork, prune work on it;
 --graph opens it read-only) until `store restore <BACKUP_DIR>` makes it the live store.
+Embedding models (models/ in the store) enter it only by `graphersal embed-model download
+<REPO> --into <DIR>` or `embed-model import <MODEL_DIR> --into <DIR>`; every copy (backup,
+fork, convert, repair, export) carries them with their licences: a store handed on
+redistributes its models. The schema's models are loaded when the store is opened.
 
 Snapshots and marks: a snapshot is a full copy of the graph at a commit (a fast start, a
 `.gsnap` download); a mark is a name for a position in the history. Every commit can be a
@@ -171,8 +182,10 @@ pub fn command_help(command: &str) -> Option<String> {
         "info" => (
             "graphersal store info <DIR>",
             "Prints the store's identity (graph id, lineage), position (commit, time), snapshots,\n\
-             marks, WAL size and attic, and the parameters fixed when it was created (chunk size,\n\
-             damage policy, backend). Works while a server has the store open.",
+             marks, WAL size and attic, the embedding models it keeps (identity, size, licence,\n\
+             whether the schema uses them; models the schema names but the store lacks), and\n\
+             the parameters fixed when it was created (chunk size, damage policy, backend).\n\
+             Works while a server has the store open.",
             false,
         ),
         "list" => (
@@ -244,6 +257,10 @@ pub fn command_help(command: &str) -> Option<String> {
              a target (--at-commit, ...) of `fork` and of a read-only view. `store prune` works\n\
              on it. --zip writes one ZIP archive instead (always full; `store restore\n\
              FILE.zip DIR` unpacks it as the live store).\n\
+             The store's embedding models (with their cards and licences) are copied too and\n\
+             listed in the report: who hands a backup on redistributes them. --without-models\n\
+             (with --zip only) leaves them out: such an archive is also restored by Graphersal\n\
+             0.3.0, which refuses one with models as written by a newer version.\n\
              Every checksum of what is copied is read in DIR first (GRAPH, marks, the snapshot,\n\
              every WAL record) and again in the copy (an archive is read back). Damage stops the\n\
              backup: nothing of it is kept (an increment is rolled back) and the report names\n\
@@ -267,9 +284,28 @@ pub fn command_help(command: &str) -> Option<String> {
             false,
         ),
         "export" => (
-            "graphersal store export <DIR> <FILE.gsnap> [--commit <N>]",
+            "graphersal store export <DIR> <FILE.gsnap> [--commit <N>] [--without-models]",
             "Writes the latest stored snapshot (or the one at commit N) as one packed file;\n\
-             load it with --graph FILE.gsnap or the playground's start page.",
+             load it with --graph FILE.gsnap or the playground's start page. The store's\n\
+             embedding models travel with it (with their cards and licences; listed in the\n\
+             report): who hands the file on redistributes them. --without-models leaves them\n\
+             out; the receiver adds them again by the identities the schema records\n\
+             (`graphersal embed-model download <REPO> --into <DIR>`). `store create <DIR>\n\
+             --from FILE.gsnap` puts the models back into a store; Graphersal 0.3.0 loads such a\n\
+             file and ignores its models.",
+            false,
+        ),
+        "models" => (
+            "graphersal store models <DIR>\n    graphersal store models remove <DIR> <IDENTITY>",
+            "Lists the embedding models the store keeps (models/<id>/, format spec 4.5): the\n\
+             identity a schema's `embedder` records (model2vec/<repo>@<12 hex>), the size, the\n\
+             licence and where its text comes from (file: a licence file of the repository;\n\
+             template: the standard text of the licence the model card names, written by\n\
+             Graphersal; none), whether the repository is gated, and whether the schema uses\n\
+             it. `remove` deletes one (by identity or by its id model2vec-<12 hex>): the only\n\
+             way a model leaves a store; refused while a writer has the store open. A model\n\
+             enters a store by `graphersal embed-model download <REPO> --into <DIR>` or\n\
+             `embed-model import <MODEL_DIR> --into <DIR>`.",
             false,
         ),
         "rollback" => (
@@ -363,11 +399,67 @@ pub fn backup_summary(report: &BackupReport, target: &str) -> String {
             );
         }
     }
+    out.push_str(&models_carried(&report.models));
     out.push_str(&format!(
         "The backup is read-only (graphersal --graph {target} opens it so); `graphersal store \
          restore {target}` makes it the live store.\n"
     ));
     out
+}
+
+/// The lines naming the embedding models a copy carries, with their licences (empty without
+/// models): who hands the copy on redistributes them.
+pub fn models_carried(models: &[StoredModel]) -> String {
+    if models.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "It carries {} embedding model(s) with their licences (handing it on redistributes \
+         them):\n",
+        models.len()
+    );
+    for model in models {
+        out.push_str(&format!("  {}\n", model_line(model)));
+    }
+    out
+}
+
+/// Whether the schema's identity `named` (`model2vec/<repo>@<12 hex>`, possibly with a
+/// `?normalize=` suffix) names the stored model `model` (its id `model2vec-<12 hex>`: the same
+/// files, whatever repository name the schema recorded).
+pub fn same_model(named: &str, model: &StoredModel) -> bool {
+    let hex = named
+        .split('?')
+        .next()
+        .and_then(|base| base.rsplit_once('@'))
+        .map(|(_, hex)| hex);
+    hex.is_some_and(|hex| model.id.strip_prefix("model2vec-") == Some(hex))
+}
+
+/// One model as the store commands show it: identity, size, licence and its text's source.
+pub fn model_line(model: &StoredModel) -> String {
+    let name = if model.identity.is_empty() {
+        model.id.as_str()
+    } else {
+        model.identity.as_str()
+    };
+    let mut line = format!(
+        "{name}  {}  licence {} ({})",
+        bytes_text(model.bytes),
+        model.license,
+        match model.license_text.as_str() {
+            "file" => "text from the repository",
+            "template" => "standard text, written by Graphersal",
+            _ => "no licence text",
+        }
+    );
+    if model.gated {
+        line.push_str(", gated repository");
+    }
+    if let Some(problem) = &model.problem {
+        line.push_str(&format!(" [{problem}]"));
+    }
+    line
 }
 
 /// The backend for a path: a single file when asked (`--single-file`), else by the path
@@ -622,8 +714,8 @@ pub fn run(args: &[String]) -> i32 {
         "compact" => &["drop-marks"],
         "fork" | "rollback" => &["at-commit", "at-time", "at-mark", "delete"],
         "repair" => &["to"],
-        "backup" => &["zip", "full", "from-memory"],
-        "export" => &["commit"],
+        "backup" => &["zip", "full", "from-memory", "without-models"],
+        "export" => &["commit", "without-models"],
         _ => &[],
     };
     if let Some((unknown, _)) = flags.iter().find(|(n, _)| !known.contains(&n.as_str())) {
@@ -811,6 +903,26 @@ pub fn run(args: &[String]) -> i32 {
                         info.wal_segments,
                         info.wal_bytes
                     );
+                    if !info.models.is_empty() || !info.schema_models.is_empty() {
+                        outln!(
+                            "models      {} ({}; every copy carries them)",
+                            info.models.len(),
+                            bytes_text(info.models.iter().map(|m| m.bytes).sum())
+                        );
+                        for model in &info.models {
+                            let in_use = info.schema_models.iter().any(|u| same_model(u, model));
+                            outln!(
+                                "  {}{}",
+                                model_line(model),
+                                if in_use { ", used by the schema" } else { "" }
+                            );
+                        }
+                        for identity in &info.schema_models {
+                            if !info.models.iter().any(|m| same_model(identity, m)) {
+                                outln!("  missing {identity} (the schema names it)");
+                            }
+                        }
+                    }
                     match info.space {
                         Some(space) => outln!(
                             "file        single file, {} ({} live, {} free space inside: \
@@ -874,6 +986,61 @@ pub fn run(args: &[String]) -> i32 {
                             s.edge_count,
                             s.name
                         );
+                    }
+                    EXIT_OK
+                }
+                Err(err) => fail(err),
+            }
+        }
+        "models" => {
+            if positional.first().map(String::as_str) == Some("remove") {
+                if positional.len() != 3 {
+                    return usage("`store models remove` takes the store and the model's identity");
+                }
+                return match Store::remove_model_dir(positional[1].as_str(), &positional[2]) {
+                    Ok(model) => {
+                        outln!("Removed {} ({}).", model_line(&model), model.id);
+                        EXIT_OK
+                    }
+                    Err(err) => fail(err),
+                };
+            }
+            try_code!(need(1));
+            let used = Store::inspect(positional[0].as_str())
+                .map(|info| info.schema_models)
+                .unwrap_or_default();
+            match Store::models_dir(positional[0].as_str()) {
+                Ok(models) if models.is_empty() => {
+                    errln!(
+                        "{} keeps no embedding models (add one with `graphersal embed-model \
+                         download <REPO> --into {}`)",
+                        positional[0],
+                        positional[0]
+                    );
+                    for identity in &used {
+                        outln!("missing  {identity}  (the schema names it)");
+                    }
+                    EXIT_OK
+                }
+                Ok(models) => {
+                    for model in &models {
+                        let in_use = used.iter().any(|u| same_model(u, model));
+                        outln!(
+                            "{}  {}",
+                            model_line(model),
+                            if in_use {
+                                "used by the schema"
+                            } else {
+                                "not used by the schema"
+                            }
+                        );
+                    }
+                    for identity in &used {
+                        if !models.iter().any(|m| same_model(identity, m)) {
+                            outln!(
+                                "missing  {identity}  (the schema names it, the store holds no such model)"
+                            );
+                        }
                     }
                     EXIT_OK
                 }
@@ -1117,7 +1284,12 @@ pub fn run(args: &[String]) -> i32 {
                         return EXIT_USAGE_ERROR;
                     }
                 };
-                let result = Store::backup_zip_dir(dir, file);
+                let models = if flag("without-models").is_some() {
+                    ModelCopy::Exclude
+                } else {
+                    ModelCopy::Include
+                };
+                let result = Store::backup_zip_dir_with(dir, file, models);
                 if result.is_ok() {
                     // Opened for writing: Windows refuses to flush a read-only handle.
                     let _ = std::fs::OpenOptions::new()
@@ -1138,6 +1310,7 @@ pub fn run(args: &[String]) -> i32 {
                             report.files.len(),
                             report.bytes
                         );
+                        out!("{}", models_carried(&report.models));
                         for warning in &report.warnings {
                             errln!("warning: {warning}");
                         }
@@ -1145,6 +1318,12 @@ pub fn run(args: &[String]) -> i32 {
                     }
                     Err(err) => fail(err),
                 };
+            }
+            if flag("without-models").is_some() {
+                return usage(
+                    "--without-models applies to a ZIP backup (--zip): a backup directory is \
+                     a copy of the whole store, models included",
+                );
             }
             let mode = if flag("full").is_some() {
                 BackupMode::Full
@@ -1215,12 +1394,26 @@ pub fn run(args: &[String]) -> i32 {
                     return EXIT_USAGE_ERROR;
                 }
             };
-            match Store::export_packed_dir(&positional[0], commit, std::io::BufWriter::new(file)) {
+            let (models, carried) = if flag("without-models").is_some() {
+                (ModelCopy::Exclude, Vec::new())
+            } else {
+                (
+                    ModelCopy::Include,
+                    Store::models_dir(positional[0].as_str()).unwrap_or_default(),
+                )
+            };
+            match Store::export_packed_dir_with(
+                &positional[0],
+                commit,
+                std::io::BufWriter::new(file),
+                models,
+            ) {
                 Ok(info) => {
                     outln!(
                         "Exported the snapshot at commit {} to {target}.",
                         info.commit_seq
                     );
+                    out!("{}", models_carried(&carried));
                     EXIT_OK
                 }
                 Err(err) => {
