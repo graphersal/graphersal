@@ -452,6 +452,16 @@ fn compile_uncached(
     })
 }
 
+/// The functions `ast` defines by name: the closures in their bodies (`|x| ..`), which Rhai
+/// compiles into functions named `anon$<hash>`, are part of the function that holds them.
+fn named_functions(ast: &rhai::AST) -> impl Iterator<Item = &rhai::ScriptFuncDef> {
+    // Rhai's prefix for a closure (`crate::engine::FN_ANONYMOUS`, not exported); `$` cannot
+    // start a function name, so no named function carries it.
+    ast.iter_fn_def()
+        .filter(|function| !function.name.starts_with("anon$"))
+        .map(|function| &**function)
+}
+
 /// The signature of the one function `ast` defines, which must be named `name`.
 fn single_function(ast: &rhai::AST, name: &str) -> Result<Vec<String>, String> {
     if !ast.statements().is_empty() {
@@ -460,7 +470,7 @@ fn single_function(ast: &rhai::AST, name: &str) -> Result<Vec<String>, String> {
                 .to_string(),
         );
     }
-    let functions: Vec<_> = ast.iter_fn_def().collect();
+    let functions: Vec<_> = named_functions(ast).collect();
     let function = match functions.as_slice() {
         [] => {
             return Err(format!(
@@ -1188,8 +1198,7 @@ impl ScriptGraphTraversalSource {
             })
         };
         let signature = single_function(&ast, &name).map_err(invalid)?;
-        let doc = ast
-            .iter_fn_def()
+        let doc = named_functions(&ast)
             .next()
             .and_then(|function| doc_text(&function.comments[..]));
         let params = params_of(&ctx, &name, &signature, declared)?;
@@ -1262,7 +1271,7 @@ impl ScriptGraphTraversalSource {
                     .to_string(),
             ));
         }
-        let mut functions: Vec<_> = ast.iter_fn_def().collect();
+        let mut functions: Vec<_> = named_functions(&ast).collect();
         functions.sort_by(|a, b| a.name.cmp(&b.name));
         if functions.is_empty() {
             return Err(invalid("*", "the source defines no function".to_string()));
