@@ -334,3 +334,32 @@ fn a_damaged_older_store_is_not_upgraded() {
     assert_eq!(dir.file_names(), before, "nothing was written");
     assert_eq!(StoreFailure::DamagedSource.name(), "damaged_source");
 }
+
+/// The causes of the embedding models a store keeps (format spec 4.5).
+#[test]
+fn an_unknown_or_invalid_model_is_refused_with_its_cause() {
+    use graphersal::persist::{ModelRole, NewModel};
+    use std::io::Cursor;
+    let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
+    assert_cause(
+        store.remove_model("model2vec/acme/none@0123456789ab"),
+        StoreFailure::UnknownModel,
+        "graphersal store models",
+    );
+    assert_cause(
+        store.read_model_file("model2vec-0123456789ab", "config.json"),
+        StoreFailure::UnknownModel,
+        "embed-model download",
+    );
+    assert_cause(
+        store.add_model(NewModel::new().with_file(
+            "config.json",
+            ModelRole::Config,
+            Cursor::new(b"{}".to_vec()),
+        )),
+        StoreFailure::InvalidModel,
+        "embed-model import",
+    );
+    assert_eq!(StoreFailure::UnknownModel.name(), "unknown_model");
+    assert_eq!(StoreFailure::InvalidModel.name(), "invalid_model");
+}

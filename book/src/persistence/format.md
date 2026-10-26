@@ -192,6 +192,11 @@ BACKUP                        an empty file; the backup pin (12.10)
 INTENT                        present only while a multi-file operation runs (11.1)
 marks                         the marks, derived from the WAL (10)
 WORKLOAD                      the workload statistics sidecar (4.4); optional, instance data
+models/                       the embedding models the store keeps (4.5); optional
+    model2vec-0123456789ab/   one model; the name is its content address
+        graphersal-embed-model.json   its manifest, written last
+        config.json  tokenizer.json  model.safetensors  README.md  LICENSE ...
+    tmp-<32 hex digits>/      a model being added, copied or removed (never listed, removed on open)
 snapshots/
     00000000000000052817/     one snapshot; the name is its commit_seq, 20 decimal digits
         manifest              6
@@ -281,6 +286,82 @@ and replaces the file at its next write), never damage, never a reason to refuse
 series of a kind or channel it does not know is skipped by its byte length, a tier it does not
 know by its bucket count; a reader keeps at most 60 minute, 48 hour and 90 day buckets. The magic is none of
 a segment's or a WAL segment's, so the version guard (15) ignores the file.
+
+### 4.5 Embedding models
+
+`models/` holds embedding models the store keeps beside its graph (book page "Embedding Models
+in a Store"), so a schema's vector properties find the model that made them (their `embedder`
+identity, `model2vec/<repo>@<12 hex>`) wherever the store goes. A model enters a store only by an
+explicit add and leaves it only by an explicit removal; nothing else (checkpoint, prune, compact,
+rollback, attic operations) touches `models/`.
+
+**One directory per model**, named by its **content address** `model2vec-<12 hex>`: the 12 hex
+digits of the model identity, the first 12 lowercase hex digits of the SHA-256 of the text
+`model2vec-identity/1\n` followed by one line `<role> <size> <sha256 hex>\n` per identity file,
+for the roles `config`, `tokenizer` and `model` in that order (the rule of the Model2Vec loader;
+no path and no repository name is part of it). The same files are the same directory; the
+schema's identity names the directory directly. A name under `models/` that is neither such a
+directory nor a `tmp-` entry is a problem for verify (12.9).
+
+**Files.** The model's own files (the three identity files under the names they had, for
+example `config.json` or `config_sentence_transformers.json`, `tokenizer.json`,
+`model.safetensors`), its card `README.md`, the repository's licence and notice files (`LICENSE*`,
+`LICENCE*`, `COPYING*`, `NOTICE*`), and the manifest `graphersal-embed-model.json`. Every file
+name is 1 to 40 bytes of ASCII letters, digits, `.`, `_` and `-`, not starting with `.` or
+`tmp-` (so `<id>.<file>` stays within the 64 bytes of a plain name of a ZIP backup, 12.8, and of
+a packed snapshot's file, 8). A model has at most 64 files besides its manifest, each at most
+8 GiB.
+
+**Manifest** (UTF-8 JSON, at most 1 MiB; the format 1 of Graphersal 0.3.0's model downloads
+is a subset and reads the same way):
+
+| Key | Content |
+|---|---|
+| `format` | `2`; a reader that sees a higher value keeps and copies the model but does not use it (newer content, 16 rule 9) |
+| `family` | `model2vec`; another family is kept and copied, not used |
+| `identity` | `model2vec/<repo>@<12 hex>`, or `model2vec@<12 hex>` without `repo`; MUST match the files (optional, recomputed) |
+| `repo`, `revision`, `commit` | the Hugging Face repository (`name` or `owner/name`), the revision asked for, the commit it resolved to (optional) |
+| `license` | the licence as an SPDX id as the repository states it (`cardData.license`), else `unknown` |
+| `license_text` | where the licence text comes from: `file` (a licence file of the repository), `template` (the repository has none: the writer stored the standard text of `license` as `LICENSE`, for MIT and Apache-2.0, with a first paragraph saying so) or `none` |
+| `base_models` | `[{repo, license?}]`: the models this one was made from (`cardData.base_model`), with their licences when known |
+| `gated` | whether the repository is gated (its terms may restrict passing the model on) |
+| `added_at` (or `downloaded_at`) | RFC 3339 time (informative) |
+| `files` | `[{name, role, size, sha256}]`: every file of the directory but the manifest; `role` is `config`, `tokenizer`, `model` (exactly one each), `card`, `license`, `notice` (a role a reader does not know is kept) |
+
+Unknown keys are allowed and kept: a copy copies the manifest byte for byte.
+
+**Writing.** An add streams every file into `models/tmp-<32 hex>/` computing its SHA-256,
+writes the manifest last, syncs, and renames the directory to its id (a model already present
+is left as it is). A removal renames the directory to a `tmp-` name, then deletes it. An open of
+a writable store deletes leftover `models/tmp-*` entries. A store's lock rules apply: an add or
+removal of a closed store takes the writer lock; a removal waits for no backup and is refused
+while the backup pin is held shared.
+
+**Checks.** A model is intact when its manifest parses, lists exactly the files of its
+directory, every file has the listed size and SHA-256, and the identity files give its id.
+Files from a foreign store are hostile input: a reader bounds every count and size before it
+allocates. A damaged model is a problem of `verify` (12.9) under its path; it is not damage of
+the graph: it never makes an open store read-only (13).
+
+**Copies.** Unlike `WORKLOAD`, the models are part of what a store hands on. Every copy carries
+every model, each checked against its manifest while it is copied: a full or incremental backup
+(12.6, 12.7; an increment adds the models the backup lacks and removes the ones the store no
+longer holds, after the increment itself), a ZIP backup (12.8: entries `models/<id>/<file>`), a
+backup from memory (12.11: intact models only), a fork and an attic fork (12.5), a repair (13.4:
+intact models only, the others reported), a conversion and a copying upgrade (file by file), a
+restore (a backup directory has them in place; a ZIP restore checks them), and a packed snapshot
+(8: as files of segment kind 3). A damaged model stops a backup, a fork or an export; the ZIP
+backup and the packed export can leave the models out (a copy to hand on without
+redistributing them).
+
+**Readers without models** (Graphersal 0.3.0 and older; the store and file format versions are
+unchanged, 15):
+
+| Copy with models | What 0.3.0 does |
+|---|---|
+| a store directory or single-file store | opens, reads, writes, checkpoints, prunes, compacts and verifies it; ignores `models/` and keeps it; its backups and forks do not carry the models |
+| a ZIP backup | refuses the restore as written by a newer version (12.8, 16 rule 9; nothing is written); an archive without models restores |
+| a packed snapshot | loads it and ignores the models (8: ignorable files, checked by length and CRC); a store created from it keeps them as ignorable files of its first snapshot, dropped by its next checkpoint |
 
 ## 5. The `GRAPH` file
 
@@ -662,6 +743,14 @@ chunk index row names it.
 - Kinds **128..255** are **critical**: a store whose base snapshot has such a row opens
   read-only for a reader that does not know the kind (16 rule 3).
 
+Assigned kinds: **3**, an embedding model's file (4.5), written only into packed snapshots (8):
+`path` is `<model id>.<file name>` (a plain name, at most 64 bytes), `first id` the model id,
+`last id` the file name, `element count` 0. A reader that knows the kind puts the file into
+`models/<model id>/<file name>` of the store a packed snapshot is imported into (never into the
+snapshot directory) and checks each model against its manifest (4.5); it treats a kind-3 row
+of a snapshot directory (one a reader without models imported) as a model file when it exports
+the snapshot again.
+
 ## 8. The packed snapshot
 
 A packed snapshot (`.gsnap`) is a whole snapshot in one stream:
@@ -680,6 +769,14 @@ trailer = CRC-32C u32 of every byte before it, from the magic on
 | 4 | an edge segment |
 | 5 | a named extra file: `name string` followed by the file's bytes; the file of a segment-table row of another kind (7.5), `name` = the row's path |
 | 0, 6..255 | invalid |
+
+A packed snapshot exported from a store carries the store's embedding models (4.5) unless the
+export leaves them out: each model file is a segment-table row of kind 3 (7.5) after the
+snapshot's own rows, so a named extra file (section kind 5), each model's manifest after its
+other files. The manifest of the packed snapshot is re-encoded with those rows (its checksums
+recomputed); the snapshot's own rows and chunk index are unchanged. Importing the packed
+snapshot into a store moves the model files into `models/` and writes the snapshot's manifest
+without their rows.
 
 The sections appear in this order: the manifest, `schema.json`, the vertex segments, the edge
 segments, the named extra files, each in the manifest's table order; the section count is 2 + the
@@ -1201,7 +1298,8 @@ snapshot of the store or of an attic entry references is a problem (a lost manif
 prune left). A segment file the newest snapshot shares with the previous one (a break of the
 donor rule, 12.3) is a **warning**, not damage: the range has no independent donor; the next
 checkpoint finds no twin for it and copies it. It is meant to be run regularly: it finds damage while donors
-still exist.
+still exist. Verification also checks every embedding model (4.5): its manifest, the
+set of files, every file's size and SHA-256; a model of a newer manifest format is a note.
 
 ### 12.10 Locks and pins
 
@@ -1626,6 +1724,11 @@ store format version 3 and file format version 3:
    - an `INTENT` operation (11.1) or a `GRAPH` state value (5.1) the reader does not know, and a
      well-formed entry outside its layout in a backup archive (12.8): refused as unsupported,
      never damage.
+10. **Side areas of the store.** A directory at the store root that a reader does not know (as
+    `models/` is for a reader older than 4.5) is left alone: never listed as damage, never
+    removed by a prune or a compaction, not copied by that reader's copies. A new side area
+    therefore needs no new version when an older reader ignoring it cannot misread the store;
+    the copies it misses are listed with the area (4.5).
 
 ## 17. Conformance notes
 

@@ -74,6 +74,8 @@ it with a `match`; `StoreFailure::name()` is the stable name, which the Python e
 | `AlreadyCurrent` (`already_current`) | `store upgrade <dir> <new>` of a store that already has the current format | open it as it is; for a copy use `store convert` or a backup |
 | `DamagedSource` (`damaged_source`) | the store to upgrade does not verify (the message lists the first problems); nothing was written | `graphersal store repair <dir> --to <new_dir>` reads the older store and writes a repaired one in the current format; or upgrade a backup instead |
 | `UpgradeNeedsCopy` (`upgrade_needs_copy`) | `store upgrade <dir> --in-place` of a store whose version the [upgrade table](store_versions.md#the-upgrade-table) upgrades only into a copy; nothing was written | `graphersal store upgrade <dir> <new_dir>` (the older store stays as it is) |
+| `UnknownModel` (`unknown_model`) | `store models remove`, `Store::remove_model` or `read_model_file` of an embedding model the store does not keep | `graphersal store models <dir>` lists the identities and ids |
+| `InvalidModel` (`invalid_model`) | an embedding model to add lacks its config, tokenizer or weights file, has a file name that is not allowed, a file over 8 GiB, or a repository or licence that is not a valid name; nothing was added | check the model directory (`--embedder name=<dir>` loads it) and `graphersal embed-model import <dir> --into <store>` again |
 
 ## Questions
 

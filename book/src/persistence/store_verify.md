@@ -1,6 +1,10 @@
 # Verify
 
 `verify` is the store's scrub: it reads every byte the store holds and checks it.
+It also checks every [embedding model](store_models.md) the store keeps (each file's size and
+SHA-256 against the model's manifest, `VerifyReport::models_checked`): a damaged model is a
+problem under `models/<id>/`, but it never makes an open store read-only (it is no graph data);
+remove it and add it again.
 
 ```rust,no_run
 # use graphersal::persist::{Store, StoreOptions};

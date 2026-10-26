@@ -683,6 +683,12 @@ let embedders = Embedders::builder().with(Arc::new(model))?.default_name("potion
   embedding is `EmbedError::Failed`, never a panic. A text with no known token (an empty text, or
   only unknown words) fails like an empty text for `hash-ngram/1`.
 
+- **Models in a Store**: a Store keeps the models its schema needs beside the graph
+  (`Store::add_model`, CLI `graphersal embed-model download <repo> --into <store>`), carries them
+  in every copy with their licences, and `Store::stored_embedders(&registered)` registers the
+  ones the schema names at open, an embedder the host registered for the same model winning:
+  [Embedding Models in a Store](../persistence/store_models.md).
+
 ## Storage and exchange
 
 | Format | A vector |

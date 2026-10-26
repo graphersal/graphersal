@@ -789,9 +789,9 @@ keys); the table below and the linked pages describe every answer.
 | `GET /api/export?format=graphson\|graphml` | `saveGraph(format)` (download) |
 | `GET /api/export?format=gsnap` | `saveGraph('snapshot')`: the current state as a packed snapshot (binary download) |
 | `POST /api/save` | Save to file: `{path, format, bytes, warnings}`, plus `schemaPath` when the schema was written to the `--schema` file, or `warning` when a stored schema could not be saved (GraphML/GraphSON without `--schema`) |
-| `GET /api/store` | `storeInfo()`: `{store: null}` without a Store, else position, snapshots, marks, WAL, the creation parameters (`storeId`, `damagePolicy`, `createdText`, `chunkBytes`), `damageFound` (`[{foundBy, atText, problems}]`), `frozenByDamage`, `damageText`, `backupFromMemory` |
+| `GET /api/store` | `storeInfo()`: `{store: null}` without a Store, else position, snapshots, marks, WAL, the creation parameters (`storeId`, `damagePolicy`, `createdText`, `chunkBytes`), `damageFound` (`[{foundBy, atText, problems}]`), `frozenByDamage`, `damageText`, `backupFromMemory`, `models` (the [embedding models](store_models.md) with their licences and `usedBySchema`) and `missingModels` |
 | `POST /api/store/checkpoint` `{name}`, `POST /api/store/mark` `{name}` | `checkpoint(name)`, `mark(name)` (422 with the diagnostic on failure; 409 without a Store) |
-| `GET /api/store/snapshot?commit=N` | a stored snapshot as `.gsnap` (no `commit`: the latest) |
+| `GET /api/store/snapshot?commit=N[&models=without]` | a stored snapshot as `.gsnap` (no `commit`: the latest), with the store's [embedding models](store_models.md) unless `models=without` |
 | `POST /api/store/view` `{target}` | `openView(target)`: serve the state at the target read-only: `{view: {commitSeq, label, timeText, target}, graph}`; `GET /api/info` and `GET /api/store` report `view` |
 | `POST /api/store/live` | `closeView()`: back to the live graph |
 | `POST /api/store/fork` `{target, dir}` | `fork(target, dir)`: `{fork: {dir, commitSeq, graphId, open, undo}}` (409: the directory exists) |
