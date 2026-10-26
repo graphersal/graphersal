@@ -253,6 +253,7 @@ impl Model2Vec {
     /// 4.5): the same checks and identity as a directory load, with `options`' repository
     /// (checked as a repository name) in the identity. `location` names the model in messages
     /// (`model2vec-0123456789ab in the store /data/x`).
+    #[cfg_attr(not(feature = "persist"), allow(dead_code))]
     pub(crate) fn load_bytes(
         name: CompactString,
         config: Vec<u8>,

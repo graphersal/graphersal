@@ -36,6 +36,7 @@ pub(crate) fn identity_text(repo: Option<&str>, digest: &str) -> String {
 
 /// The parts of a Model2Vec identity: the repository (when it names one), the 12 hex digits and
 /// the normalization override (`?normalize=true|false`), or `None` when `identity` is not one.
+#[cfg_attr(not(feature = "persist"), allow(dead_code))]
 pub(crate) fn parse_identity(identity: &str) -> Option<ParsedIdentity<'_>> {
     let (base, normalize) = match identity.split_once('?') {
         Some((base, "normalize=true")) => (base, Some(true)),
@@ -65,6 +66,7 @@ pub(crate) fn parse_identity(identity: &str) -> Option<ParsedIdentity<'_>> {
 
 /// A parsed Model2Vec identity ([`parse_identity`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "persist"), allow(dead_code))]
 pub(crate) struct ParsedIdentity<'a> {
     /// The repository, when the identity names one.
     pub(crate) repo: Option<&'a str>,
