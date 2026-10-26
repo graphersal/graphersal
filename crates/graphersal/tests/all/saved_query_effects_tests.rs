@@ -549,3 +549,31 @@ fn the_rust_api_infers_effects_and_dialects_for_front_ends() {
     .unwrap_err();
     assert_contains(&refused, "it changes the schema");
 }
+
+#[test]
+fn a_closure_writes_inside_its_query() {
+    // Issue #16: a closure's writes are inferred like the function's, also when it captures a
+    // parameter (Rhai compiles that into `curry(Fn("anon$.."), ..)`, which hides nothing).
+    let graph = Arc::new(GraphSource::tinkerpop_modern());
+    let _ = ok(
+        &graph,
+        r#"g.define_query(#{name: "add_named", params: #{label: "string"},
+            body: `fn add_named(label) {
+                       ["p1", "p2"].for_each(|n| g.add_v(label).property("name", n).iterate());
+                   }`})"#,
+    );
+    assert_eq!(dialect(&graph, "add_named"), "graphersal-rhai/2");
+    assert_eq!(
+        effect_texts(&graph, "add_named", "effects"),
+        ["Create Data(vertex)", "Update Data(vertex)"]
+    );
+    let _ = ok(&graph, r#"g.query("add_named", #{label: "dog"})"#);
+    assert_eq!(count(&graph, r#"g.v().has_label("dog").count().next()"#), 2);
+
+    // A closure called through a variable still hides what it calls.
+    let message = err(
+        &graph,
+        r#"g.define_query(#{name: "hidden", body: "fn hidden() { let f = |x| g.add_v(\"a\").iterate(); f.call(1) }"})"#,
+    );
+    assert_contains(&message, "uses call, which hides what it calls");
+}

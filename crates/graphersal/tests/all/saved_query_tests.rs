@@ -343,6 +343,45 @@ fn a_body_must_be_exactly_one_function_named_like_the_query() {
 }
 
 #[test]
+fn closures_are_part_of_the_one_function() {
+    // Issue #16: Rhai compiles every closure into a function of its own (`anon$..`); it is
+    // part of the query's function, not a second one.
+    let graph = modern();
+    let _ = ok(
+        &graph,
+        r#"g.define_query(#{name: "long_names", params: #{min: "integer"},
+            body: `/// Names longer than min, upper case.
+                   fn long_names(min) {
+                       g.v().values("name").to_list().filter(|n| n.len() > min).map(|n| n.to_upper())
+                   }`})"#,
+    );
+    assert_eq!(
+        text(ok(&graph, r#"g.query("long_names", #{min: 4})"#)),
+        r#"["MARKO", "VADAS", "RIPPLE", "PETER"]"#
+    );
+    // The doc comment is the named function's, not a closure's.
+    assert_eq!(
+        text(ok(&graph, r#"g.get_query("long_names")["description"]"#)),
+        "Names longer than min, upper case."
+    );
+    // A closure never becomes a query of its own in define_queries.
+    let names = ok(
+        &graph,
+        r#"g.define_queries("f", `fn a() { [1, 2, 3].filter(|i| i > 1) }
+                                   fn b() { [1].map(|i| i * 2) }`)"#,
+    );
+    assert_eq!(text(names), r#"["a", "b"]"#);
+    assert_eq!(text(ok(&graph, r#"g.query("a")"#)), "[2, 3]");
+    // Two named functions are still refused, closures or not.
+    let message = err(
+        &graph,
+        r#"g.define_query(#{name: "q", body: "fn q() { [1].map(|i| i) } fn r() { 2 }"})"#,
+    );
+    assert_contains(&message, "it defines 2 functions (");
+    assert!(!message.contains("anon$"), "{message}");
+}
+
+#[test]
 fn the_catalog_rules_apply_to_a_dsl_definition() {
     let graph = modern();
     // A parameter default that violates its schema.

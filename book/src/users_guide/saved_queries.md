@@ -58,7 +58,8 @@ name. The keys:
 The definition is checked before anything is stored, and refused with an error naming the
 problem:
 
-- the body compiles and is exactly one function named like the query, with nothing beside it;
+- the body compiles and is exactly one function named like the query, with nothing beside it
+  (closures inside it, such as `.filter(|n| n.len() > 3)`, are part of that function);
 - every parameter of the function is declared in `params`, and `params` declares nothing else;
 - the catalog rules: name, folder (at most 8 segments, 255 bytes), sizes (source at most 64 KiB),
   parameter names (not a DSL global such as `g`, `P` or `T`), every parameter schema, and every
@@ -204,7 +205,9 @@ The inference may claim more than a body writes, never less. What it cannot see,
   `create_index`, `export_graphml`, `import_graphson`, `mark`, ...) is refused when it is saved:
   a saved query writes data only;
 - a body that **writes and hides what it calls** (`Fn(..)`, `call`, `curry`, `eval`, `import`, or
-  `g.query(name)` with a computed name) is refused when it is saved. Without writes such a body is
+  `g.query(name)` with a computed name) is refused when it is saved. A closure passed to a method
+  (`names.for_each(|n| g.add_v(label).property("name", n).iterate())`) hides nothing: its writes
+  are inferred like the function's, also when it uses the function's parameters. Without writes such a body is
   saved as a read-only query, and whatever it reaches stays read-only.
 
 ```rhai

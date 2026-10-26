@@ -31,7 +31,8 @@
 //!
 //! Constructs that hide what a body calls (`Fn(..)`, `call`, `curry`, `eval`, `import`, a
 //! function pointer to a named function, `g.query(name)` with a computed name) make the body
-//! *dynamic*: such a query stays read-only, and a dynamic body that also writes is refused when
+//! *dynamic*; a closure (`|n| ..`, also one capturing variables) does not, its body is walked
+//! with the function's: such a query stays read-only, and a dynamic body that also writes is refused when
 //! it is defined. Writes of the schema, the catalog or files (`set_schema`, `define_query`,
 //! `create_index`, `export_graphml`, ...) are refused: a saved query writes data only.
 
@@ -244,6 +245,11 @@ pub(crate) fn analyze(ast: &rhai::AST) -> Result<BodyEffects, String> {
             }
             // A method called like a function (`drop(x)`, `query(g, "q")`): its receiver is the
             // first argument, whose flow is not stated.
+            // A closure that captures variables (`|n| g.add_v(l)..`) is compiled into
+            // `curry(Fn("anon$.."), captured..)`: it calls its own body, which is walked like
+            // the function's, so it hides nothing.
+            ASTNode::Expr(Expr::FnCall(call, _)) | ASTNode::Stmt(Stmt::FnCall(call, _))
+                if call.name.as_str() == "curry" && call.args.first().is_some_and(is_closure) => {}
             ASTNode::Expr(Expr::FnCall(call, _)) | ASTNode::Stmt(Stmt::FnCall(call, _)) => {
                 let args = call.args.get(1..).unwrap_or_default();
                 analysis.call(call.name.as_str(), args, &mut AccessFlow::default());
@@ -262,6 +268,16 @@ pub(crate) fn analyze(ast: &rhai::AST) -> Result<BodyEffects, String> {
     match analysis.refused {
         Some(reason) => Err(reason),
         None => Ok(analysis.effects),
+    }
+}
+
+/// Whether `expr` is a closure (`|x| ..`): a constant pointer to an anonymous function.
+fn is_closure(expr: &Expr) -> bool {
+    match expr {
+        Expr::DynamicConstant(value, _) => value
+            .read_lock::<rhai::FnPtr>()
+            .is_some_and(|pointer| pointer.is_anonymous()),
+        _ => false,
     }
 }
 
