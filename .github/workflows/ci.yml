@@ -3,7 +3,7 @@ name: CI
 # Runs the core of local acceptance (CLAUDE.md "Commands"): format, clippy, feature combinations,
 # the tests, the dependency audit, the MSRV and the playground. rustdoc, the book and the TinkerPop
 # suite on `Forwarding` are release checks (`book/src/for_developers/release_plan.md`), not CI jobs.
-# The Python binding's tests and wheels live in python.yml, the DCO sign-off check in dco.yml.
+# The Python binding's tests and wheels live in python.yml, the CLA check in cla.yml.
 # Caches: Swatinem/rust-cache, one cache per job; a run on `main` saves them.
 # Manual only (a project decision: Actions minutes are limited): `gh workflow run CI`, or "Run
 # workflow" on the Actions tab, on `main` or on a branch (`--ref <branch>`). `full` adds Windows to

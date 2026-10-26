@@ -20,16 +20,18 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 `docs(book): the Store's backup page`. Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`,
 `build` and `chore`.
 
-## Sign-off (DCO)
+## Contributor License Agreement
 
-Graphersal is licensed under Apache-2.0, and contributions are accepted under the same licence; there is no
-Contributor License Agreement. Instead, every commit carries a sign-off that certifies the Developer Certificate of
-Origin 1.1 (the `DCO` file in the repository root):
+Graphersal is licensed under Apache-2.0, and contributions are accepted under the Contributor License Agreement
+(the `CLA.md` file in the repository root): the author keeps the copyright and grants the maintainer a licence to
+use, distribute and sublicense the contribution, including under licence terms other than Apache-2.0, plus a
+patent licence. A version already published under Apache-2.0 stays available under it.
 
-```bash
-git commit -s -m "fix(step): ..."
-# adds:  Signed-off-by: Your Name <you@example.com>
+The agreement is signed once, by a comment on the first pull request; a CI check (`.github/workflows/cla.yml`)
+asks for it and keeps the signatures on the branch `cla-signatures`:
+
+```text
+I have read the CLA Document and I hereby sign the CLA
 ```
 
-The name and e-mail must match the commit author. A CI check rejects pull requests with commits that are not signed
-off; to fix an existing branch, run `git rebase --signoff <base>` and force-push it.
+A pull request is merged only when every author of its commits has signed. No `Signed-off-by:` line is needed.

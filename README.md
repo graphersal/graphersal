@@ -268,7 +268,8 @@ cargo build --release -p graphersal-cli      # target/release/graphersal
 ## Contributing
 
 Bug reports, questions and pull requests are welcome. Contributions are accepted under the
-Apache-2.0 licence with a DCO sign-off (`git commit -s`); see [CONTRIBUTING.md](CONTRIBUTING.md).
+[Contributor License Agreement](CLA.md), signed once with a comment on your first pull request; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 Please report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License

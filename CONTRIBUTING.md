@@ -115,22 +115,24 @@ review the diff) in the same change. See `crates/graphersal/tests/tinkerpop/READ
 - Do not infer types from string content.
 - Documentation, comments and commit messages are in English.
 
-## Licence of contributions and sign-off (DCO)
+## Contributor License Agreement (CLA)
 
-Graphersal is licensed under Apache-2.0 and will stay open source under that licence. Contributions are accepted
-under the same licence (Apache-2.0, section 5: "inbound = outbound"); you keep your copyright. There is no
-Contributor License Agreement for this repository.
+Graphersal is licensed under Apache-2.0. Contributions are accepted under the
+[Contributor License Agreement](CLA.md): you keep the copyright in your contribution and grant the maintainer a
+licence to use, distribute and sublicense it, including under licence terms other than Apache-2.0, plus a patent
+licence for it. This keeps the project able to change the licence of future versions; a version already published
+under Apache-2.0 stays available under it.
 
-Instead, every commit carries a sign-off that certifies the [Developer Certificate of Origin](DCO) 1.1: that you
-wrote the change or otherwise have the right to submit it under the project's licence. Sign off with `-s`:
+You sign once. When you open your first pull request, the CLA check posts a comment with a link to the agreement;
+reply with the comment
 
-```bash
-git commit -s -m "fix(step): ..."
-# adds:  Signed-off-by: Your Name <you@example.com>
+```text
+I have read the CLA Document and I hereby sign the CLA
 ```
 
-The name and e-mail must match the commit author. A CI check rejects pull requests with commits that are not
-signed off; to fix an existing branch, run `git rebase --signoff <base>` and force-push it.
+and the check turns green for this and every later pull request (comment `recheck` to run it again). If you
+contribute on behalf of your employer, make sure you are allowed to accept the agreement for it (section 1 of
+[CLA.md](CLA.md)). A pull request is merged only when every author of its commits has signed.
 
 Contributions to a future Graphersal server, which will live in its own repository, may follow a different
 process; that repository will say so.
