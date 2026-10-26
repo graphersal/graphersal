@@ -2936,7 +2936,10 @@ impl DiagnosticError for ScriptError {
                     "Saved queries take maps and strings: \
                      g.define_query(#{name: \"top\", folder: \"reports\", description: \"..\", \
                      params: #{limit: #{schema: #{type: \"integer\", minimum: 1}, default: 20}}, \
-                     body: \"fn top(limit) { g.v().limit(limit) }\"}) (name and body required), \
+                     body: \"fn top(limit) { g.v().limit(limit) }\"}) (name and body required; \
+                     params may also be the list get_query returns, so a definition is changed \
+                     with let q = g.get_query(\"top\"); g.define_query(#{name: \"top\", \
+                     params: q[\"params\"], body: q[\"body\"]})), \
                      g.define_queries(\"reports\", source, #{top: #{limit: \"integer\"}}), \
                      g.query(\"top\", #{limit: 5}) (named arguments in a map), \
                      g.move_query(\"top\", \"archive\") and g.describe_query(\"top\", \"..\") \

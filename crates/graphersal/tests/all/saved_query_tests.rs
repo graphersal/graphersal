@@ -382,6 +382,75 @@ fn closures_are_part_of_the_one_function() {
 }
 
 #[test]
+fn get_query_params_are_given_back_to_define_query() {
+    // Issue #17: the list `get_query` returns is accepted as `params`, so get -> change ->
+    // define round-trips.
+    let graph = with_people();
+    let before = text(ok(&graph, r#"g.get_query("people")["params"]"#));
+    let _ = ok(
+        &graph,
+        r#"let q = g.get_query("people");
+           let body = q["body"];
+           body.replace("P.gt", "P.gte");
+           g.define_query(#{name: "people", folder: q["folder"], params: q["params"], body: body})"#,
+    );
+    assert_eq!(
+        text(ok(&graph, r#"g.get_query("people")["params"]"#)),
+        before
+    );
+    assert_eq!(
+        text(ok(
+            &graph,
+            r#"g.query("people", #{min: 32}).values("name").to_list()"#
+        )),
+        r#"["josh", "peter"]"#
+    );
+    // Without a default the parameter is required; define_queries takes the list too.
+    let _ = ok(
+        &graph,
+        r#"g.define_queries("f", "fn twice(n) { n * 2 }",
+               #{twice: [#{name: "n", schema: #{type: "integer"}, required: true}]})"#,
+    );
+    assert_eq!(text(ok(&graph, r#"g.query("twice", #{n: 4})"#)), "8");
+    assert_contains(
+        &err(&graph, r#"g.query("twice")"#),
+        "needs the argument 'n' (int64), it has no default",
+    );
+
+    let refused = [
+        (
+            r#"[#{name: "n", schema: "integer", required: false}]"#,
+            "the parameter 'n' with required: false but without a default",
+        ),
+        (
+            r#"[#{name: "n", schema: "integer", default: 1, required: true}]"#,
+            "the parameter 'n' with required: true and a default",
+        ),
+        (
+            r#"[#{name: "n", schema: "integer"}, #{name: "n", schema: "integer"}]"#,
+            "the parameter 'n' twice",
+        ),
+        (r#"[#{schema: "integer"}]"#, "a list item without a name"),
+        (
+            r#"[#{name: "n", kind: 1}]"#,
+            "a list item with the key 'kind'",
+        ),
+        (r#"["n"]"#, "a list item of type string"),
+    ];
+    for (params, expected) in refused {
+        let message = err(
+            &graph,
+            &format!(
+                r#"g.define_query(#{{name: "q", params: {params}, body: "fn q(n) {{ n }}"}})"#
+            ),
+        );
+        assert_contains(&message, "Argument mismatch for step 'define_query'");
+        assert_contains(&message, expected);
+        assert_contains(&message, "params may also be the list get_query returns");
+    }
+}
+
+#[test]
 fn the_catalog_rules_apply_to_a_dsl_definition() {
     let graph = modern();
     // A parameter default that violates its schema.
