@@ -23,6 +23,19 @@ g.V().where(P.eq(111)).count().next()          // 0, no error
 g.V().has("age", P.gt("x")).count().next()     // 0, a number never compares with a string
 ```
 
+**Operands are single values**: a string, a number, a boolean, a date or time, a UUID, a vector
+or `()` (the items of `P.within([..])` / `P.without([..])` each). A list, a map or a traversal as
+an operand is an `ArgumentMismatch` naming the predicate when the step is built, never compared
+as its text. Comparing a list or map *inside* a predicate is not supported; to match a list or
+map property as a whole, pass the value itself, as in `has("tags", ["a", "b"])`. `P.within()` /
+`P.without()` without arguments are the empty set.
+
+```rhai,graph=modern
+g.V().has("name", P.gt(["a"])).count().next()          // error: Argument mismatch for step 'P.gt'
+g.V().has("name", P.within(["a", "b"])).count().next()  // 0: the list holds the values
+g.V().has("name", P.without()).count().next()           // 6
+```
+
 ## Text predicates match strings only
 
 `TextP.startingWith`, `endingWith`, `containing` and their negations (also spelled

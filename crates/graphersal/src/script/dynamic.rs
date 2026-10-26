@@ -334,11 +334,16 @@ pub(super) fn split_token_args(
             rhai::Position::NONE,
         )));
     }
-    let predicate = try_dynamic_to_argp(&args[0])?;
+    // `P.eq(x)` / `P.within(xs)` become literals, checked like any literal (an element given
+    // by its map is its id); the other predicates compare values.
+    let predicate = read_argp(&args[0])?;
     Ok(match predicate {
         ArgP::Eq(value) => TokenArgs::Literals(vec![value]),
         ArgP::WithIn(values) => TokenArgs::Literals(values),
-        other => TokenArgs::Predicate(other),
+        other => {
+            check_operands(&other)?;
+            TokenArgs::Predicate(other)
+        }
     })
 }
 
@@ -905,7 +910,78 @@ pub(super) fn predicate_operand(
     }
 }
 
+/// [`read_argp`] with every operand checked ([`check_operands`]): what a step comparing values
+/// takes (`has(key, P)`, `is(P)`, `where(P)`, ...).
 pub(super) fn try_dynamic_to_argp(arg: &Dynamic) -> Result<ArgP, Box<rhai::EvalAltResult>> {
+    let predicate = read_argp(arg)?;
+    check_operands(&predicate)?;
+    Ok(predicate)
+}
+
+/// A single value the engine compares a predicate operand as (issue #14): a string, a number,
+/// a boolean, a character, `()`, a UUID, a date or time, a vector. Anything else (a list, a map,
+/// a traversal, ...) used to be compared as its text, which matches by accident or never.
+fn is_operand_value(value: &Dynamic) -> bool {
+    value.is_string()
+        || value.is_int()
+        || value.is_float()
+        || value.is_bool()
+        || value.is_char()
+        || value.is_unit()
+        || value.is::<ScriptUuid>()
+        || is_temporal(value)
+        || value.is::<ScriptVector>()
+}
+
+/// Refuses a predicate with an operand that is not a single value ([`is_operand_value`]),
+/// naming the predicate: `P.gt(["a"])` fails instead of comparing with the text `["a"]`. The
+/// items of `P.within([..])` / `P.without([..])` are its operands; `and`/`or`/`not` are checked
+/// through.
+pub(super) fn check_operands(predicate: &ArgP) -> Result<(), Box<rhai::EvalAltResult>> {
+    let check = |name: &str, operands: &[&Dynamic]| match operands
+        .iter()
+        .find(|value| !is_operand_value(value))
+    {
+        None => Ok(()),
+        Some(value) => Err(script_error_from_script(
+            crate::error::ScriptError::ArgumentMismatch {
+                step_name: name.to_string(),
+                expected: "a single value to compare with (a string, number, boolean, \
+                               date or time, UUID, vector or ())"
+                    .to_string(),
+                actual: type_name_of(value),
+            },
+        )),
+    };
+    match predicate {
+        ArgP::Eq(value) => check("P.eq", &[value]),
+        ArgP::Neq(value) => check("P.neq", &[value]),
+        ArgP::Lt(value) => check("P.lt", &[value]),
+        ArgP::Gt(value) => check("P.gt", &[value]),
+        ArgP::Lte(value) => check("P.lte", &[value]),
+        ArgP::Gte(value) => check("P.gte", &[value]),
+        ArgP::WithIn(values) => check("P.within", &values.iter().collect::<Vec<_>>()),
+        ArgP::WithOut(values) => check("P.without", &values.iter().collect::<Vec<_>>()),
+        ArgP::Inside(low, high) => check("P.inside", &[low, high]),
+        ArgP::Outside(low, high) => check("P.outside", &[low, high]),
+        ArgP::Between(low, high) => check("P.between", &[low, high]),
+        ArgP::StartingWith(value) => check("TextP.starting_with", &[value]),
+        ArgP::NotStartingWith(value) => check("TextP.not_starting_with", &[value]),
+        ArgP::EndingWith(value) => check("TextP.ending_with", &[value]),
+        ArgP::NotEndingWith(value) => check("TextP.not_ending_with", &[value]),
+        ArgP::Containing(value) => check("TextP.containing", &[value]),
+        ArgP::NotContaining(value) => check("TextP.not_containing", &[value]),
+        ArgP::Regex(_) | ArgP::NotRegex(_) | ArgP::TypeOf(_) => Ok(()),
+        ArgP::And(left, right) | ArgP::Or(left, right) => {
+            check_operands(left)?;
+            check_operands(right)
+        }
+        ArgP::Not(inner) => check_operands(inner),
+    }
+}
+
+/// The predicate `arg` holds, or a bare value as `P.eq(value)`; its operands unchecked.
+fn read_argp(arg: &Dynamic) -> Result<ArgP, Box<rhai::EvalAltResult>> {
     if let Some(p) = arg.clone().read_lock::<ArgP>() {
         Ok((*p).clone())
     } else {
@@ -1296,7 +1372,10 @@ pub(super) fn predicate_to_gts(
         return try_dynamic_to_gts(arg);
     }
     match arg.clone().try_cast::<ArgP>() {
-        Some(p) => Ok(one_step_source(Step::Is(p))),
+        Some(p) => {
+            check_operands(&p)?;
+            Ok(one_step_source(Step::Is(p)))
+        }
         None => Err(choose_mismatch(
             step_name,
             "a traversal or a predicate (P.gt(1), ...)",

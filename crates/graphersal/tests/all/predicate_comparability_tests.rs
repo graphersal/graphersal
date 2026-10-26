@@ -204,3 +204,124 @@ fn rust_api_uses_the_same_rules() {
     assert_eq!(count(P::Neq(PValue::from(f64::NAN))), 4);
     assert_eq!(count(P::Between(PValue::from(27.5), PValue::from(33))), 2);
 }
+
+/// The error of `script` on the modern graph.
+fn error(script: &str) -> String {
+    match eval_value(modern(), script) {
+        Ok(value) => panic!("{script} must fail, got {value:?}"),
+        Err(err) => err.to_string(),
+    }
+}
+
+#[test]
+fn an_operand_that_is_not_a_single_value_is_an_error() {
+    // Issue #14: a list, map or traversal operand used to be compared as its text.
+    let cases = [
+        (
+            r#"g.v().has("name", P.gt(["a"])).count().next()"#,
+            "P.gt",
+            "array",
+        ),
+        (
+            r#"g.v().has("name", P.eq(#{a: 1})).count().next()"#,
+            "P.eq",
+            "map",
+        ),
+        (
+            r#"g.v().has("name", P.within([["a"]])).count().next()"#,
+            "P.within",
+            "array",
+        ),
+        (
+            r#"g.v().has("name", P.without("a", [1])).count().next()"#,
+            "P.without",
+            "array",
+        ),
+        (
+            r#"g.v().has("age", P.between(1, [2])).count().next()"#,
+            "P.between",
+            "array",
+        ),
+        (
+            r#"g.v().has("name", TextP.containing(["a"])).count().next()"#,
+            "TextP.containing",
+            "array",
+        ),
+        (
+            r#"g.v().has("name", P.gt("a").or(P.not(P.lt([1])))).count().next()"#,
+            "P.lt",
+            "array",
+        ),
+        (
+            r#"g.v().values("age").is(P.eq(__.constant(1))).count().next()"#,
+            "P.eq",
+            "GraphTraversalSource",
+        ),
+        (
+            r#"g.v().values("age").where(P.gt([1])).count().next()"#,
+            "P.gt",
+            "array",
+        ),
+        (
+            r#"g.v().has_id(P.neq(["1"])).count().next()"#,
+            "P.neq",
+            "array",
+        ),
+        (
+            r#"g.v().values("age").choose(P.gt([30]), __.constant(1), __.constant(2)).to_list()"#,
+            "P.gt",
+            "array",
+        ),
+        (
+            r#"g.v().values("age").choose(__.identity()).option(P.gt([30]), __.constant(1)).to_list()"#,
+            "P.gt",
+            "array",
+        ),
+    ];
+    for (script, predicate, actual) in cases {
+        let message = error(script);
+        assert!(
+            message.contains(&format!("Argument mismatch for step '{predicate}'")),
+            "{script}: {message}"
+        );
+        assert!(
+            message.contains(&format!("got {actual}")),
+            "{script}: {message}"
+        );
+        assert!(
+            message.contains("Help: A predicate compares with single values"),
+            "{script}: {message}"
+        );
+    }
+}
+
+#[test]
+fn single_value_operands_and_element_ids_keep_working() {
+    let count = |script: &str| {
+        eval_value(modern(), script)
+            .unwrap_or_else(|e| panic!("{script}: {e}"))
+            .as_int()
+            .unwrap()
+    };
+    // has_id(P.eq(v)) / has_id(P.within([v])) take an element by its id, as has_id(v) does.
+    assert_eq!(
+        count(r#"let v = g.v("1").next(); g.v().has_id(P.within([v])).count().next()"#),
+        1
+    );
+    assert_eq!(
+        count(r#"let v = g.v("1").next(); g.v().has_id(P.eq(v)).count().next()"#),
+        1
+    );
+    // A list given to has() is the whole value, not a predicate operand.
+    assert_eq!(count(r#"g.v().has("name", ["marko"]).count().next()"#), 0);
+    // No arguments: the empty set.
+    assert_eq!(count(r#"g.v().has("name", P.within()).count().next()"#), 0);
+    assert_eq!(count(r#"g.v().has("name", P.without()).count().next()"#), 6);
+    assert_eq!(count(r#"g.v().has("name", P.WithOut()).count().next()"#), 6);
+    // A character is a one-letter string.
+    assert_eq!(count(r#"g.v().has("name", P.lt('m')).count().next()"#), 2);
+    assert_eq!(
+        count(r#"g.v().has("birth", P.lt(date("2000-01-01"))).count().next()"#),
+        0
+    );
+}
