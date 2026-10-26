@@ -32,6 +32,11 @@ pub(super) fn register(registry: &mut Registry) {
         .register_fn("between", |_: ScriptP, v1: Dynamic, v2: Dynamic| {
             ArgP::Between(v1, v2)
         })
+        // `P.within()` / `P.without()`: the empty set (no value is within it).
+        .register_fn("within", |_: ScriptP| ArgP::WithIn(Vec::new()))
+        .register_fn("without", |_: ScriptP| ArgP::WithOut(Vec::new()))
+        .register_fn("WithIn", |_: ScriptP| ArgP::WithIn(Vec::new()))
+        .register_fn("WithOut", |_: ScriptP| ArgP::WithOut(Vec::new()))
         .register_fn("within", |_: ScriptP, val: Dynamic| script_p_within(val))
         .register_fn("without", |_: ScriptP, val: Dynamic| script_p_without(val))
         // `P.WithIn`/`P.WithOut` (dot, PascalCase): the same casing gap `Order.Desc` had before

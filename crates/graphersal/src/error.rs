@@ -2771,6 +2771,20 @@ impl DiagnosticError for ScriptError {
                 )
             }
             ScriptError::ArgumentMismatch { step_name, .. }
+                if step_name.starts_with("P.") || step_name.starts_with("TextP.") =>
+            {
+                Some(
+                    "A predicate compares with single values: g.v().has(\"name\", P.gt(\"a\")). \
+                     To match any of several values list them in P.within: \
+                     g.v().has(\"name\", P.within([\"marko\", \"josh\"])) (its items are \
+                     single values as well). To match a list or map property as a whole, pass \
+                     the value itself instead of a predicate: g.v().has(\"tags\", [\"a\", \
+                     \"b\"]). To compare with what a traversal yields, use where() with a step \
+                     label: g.v().as(\"a\").out(\"knows\").where(P.gt(\"a\")).by(\"age\")."
+                        .to_string(),
+                )
+            }
+            ScriptError::ArgumentMismatch { step_name, .. }
                 if matches!(step_name.as_str(), "and" | "or" | "not" | "negate") =>
             {
                 Some(

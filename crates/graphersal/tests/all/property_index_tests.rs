@@ -104,13 +104,19 @@ const OPERANDS: [&str; 22] = [
     "[1]",
 ];
 
+/// The operands a predicate takes: the single values of [`OPERANDS`], without the list `[1]`
+/// (a list operand of `P.eq`, `P.gt`, ... is an error since issue #14; `has(key, [1])` still
+/// compares the whole value).
+const SCALARS: &[&str] = OPERANDS.split_last().expect("OPERANDS is not empty").1;
+
 /// A random condition on `key` as DSL text: a plain `has(key, value)` or a predicate.
 fn random_condition(rng: &mut Rng, key: &str) -> String {
-    let a = *rng.pick(&OPERANDS);
-    let b = *rng.pick(&OPERANDS);
-    let c = *rng.pick(&OPERANDS);
+    let value = *rng.pick(&OPERANDS);
+    let a = *rng.pick(SCALARS);
+    let b = *rng.pick(SCALARS);
+    let c = *rng.pick(SCALARS);
     match rng.below(13) {
-        0 | 1 => format!("has(\"{key}\", {a})"),
+        0 | 1 => format!("has(\"{key}\", {value})"),
         2 => format!("has(\"{key}\", P.eq({a}))"),
         3 => format!("has(\"{key}\", P.within({a}, {b}, {c}))"),
         4 => format!("has(\"{key}\", P.gt({a}))"),
