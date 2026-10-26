@@ -182,9 +182,12 @@ export class WasmEngine extends Engine {
     return (await this.call('mark', name)).mark;
   }
 
-  /** The stored snapshot at `commit` as `.gsnap` bytes (a Uint8Array). */
-  async snapshotBytes(commit) {
-    return this.call('storeSnapshot', commit);
+  /**
+   * The stored snapshot at `commit` as `.gsnap` bytes (a Uint8Array), with the store's embedding
+   * models unless `withModels` is false.
+   */
+  async snapshotBytes(commit, withModels = true) {
+    return withModels ? this.call('storeSnapshot', commit) : this.call('storeSnapshotWith', commit, false);
   }
 
   /** A read-only view of the state at `target`: `{view, graph}`. */

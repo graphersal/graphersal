@@ -463,6 +463,17 @@ impl Session {
         let mut reader = bytes;
         let graph = self.factory.load_snapshot(&mut reader)?;
         self.replace(graph, name, "file");
+        // The embedding models the file carries go into the store in memory (format spec
+        // 4.5): kept and handed on with it, even where they cannot run (the browser).
+        if let Some(store) = self.active_store() {
+            let mut packed = bytes;
+            if let Err(err) = store.import_models_from_packed(&mut packed) {
+                self.warnings.push(format!(
+                    "the embedding models of the file were not kept: {}",
+                    format_diagnostic(&err)
+                ));
+            }
+        }
         Ok(self.info())
     }
 

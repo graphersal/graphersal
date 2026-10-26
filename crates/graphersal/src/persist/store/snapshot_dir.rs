@@ -309,6 +309,59 @@ pub(crate) fn import_packed(
     result
 }
 
+/// The models a packed stream carries (format spec 4.5, 8), put into the store at `store`
+/// (its other sections are checked and skipped): each model staged under `models/tmp-*`,
+/// checked against its manifest and renamed into place; a model the store holds already is
+/// kept as it is. Returns the models of the stream.
+pub(crate) fn import_packed_models(
+    store: &DirPath,
+    packed: impl Read,
+) -> Result<Vec<super::models::StoredModel>, PersistError> {
+    let mut reader = PackedReader::open(packed)?;
+    let mut staged: Vec<(String, DirPath)> = Vec::new();
+    let result = (|| {
+        for entry in reader.manifest.segments.clone() {
+            if entry.kind == super::models::PACKED_MODEL_KIND
+                && let Some((id, file)) = super::models::parse_packed_name(&entry.path)
+            {
+                let dir = match staged.iter().find(|(staged_id, _)| staged_id == id) {
+                    Some((_, dir)) => dir.clone(),
+                    None => {
+                        let dir = super::models::models_dir(store)
+                            .join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7()));
+                        dir.create_dir_all()
+                            .map_err(|err| PersistError::io("creating a model directory", err))?;
+                        staged.push((id.to_string(), dir.clone()));
+                        dir
+                    }
+                };
+                write_file(&dir.join(file), |out| reader.copy_segment(out).map(|_| ()))?;
+            } else {
+                reader.copy_segment(&mut std::io::sink())?;
+            }
+        }
+        let models = std::mem::take(&mut staged);
+        reader.finish()?;
+        let mut installed = Vec::new();
+        for (index, (id, dir)) in models.iter().enumerate() {
+            match super::models::install_staged(store, id, dir) {
+                Ok(model) => installed.push(model),
+                Err(err) => {
+                    for (_, rest) in &models[index..] {
+                        let _ = super::files::remove_path(rest);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(installed)
+    })();
+    for (_, dir) in &staged {
+        let _ = super::files::remove_path(dir);
+    }
+    result
+}
+
 /// Reads a snapshot's manifest file.
 pub(crate) fn read_manifest(snapshot: &DirPath) -> Result<(Vec<u8>, Manifest), PersistError> {
     let location = format!("{}/{MANIFEST_FILE}", snapshot.display());

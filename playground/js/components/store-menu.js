@@ -30,7 +30,7 @@ import {
 import {
   EXPLAIN, actionsFor, commitTarget, markTarget, parseCommit, parseTime, atticRows, viewBanner,
   storeWhere, databaseRows, backupBanner, compactionModel, actionDisabled, storeTask, taskButton,
-  waitTitle, storeButtonText,
+  waitTitle, storeButtonText, modelRows, offersWithoutModels, snapshotFileName,
 } from '../store-model.js';
 import { recentHistory } from '../store-calendar.js';
 import { formatBytes, formatCount } from '../statistics.js';
@@ -194,6 +194,8 @@ export const StoreMenu = {
     const atticDialog = (mode, row) => dialog.value && dialog.value.open(mode, { entry: row });
 
     const databases = computed(() => databaseRows(info.value));
+    const models = computed(() => modelRows(info.value));
+    const withoutModels = computed(() => offersWithoutModels(info.value));
     const switchTo = (row) => act('switch', async () => {
       const res = await switchDatabase(row.id);
       return res ? `Switched to "${row.label}" (commit ${row.commit}).` : '';
@@ -229,8 +231,9 @@ export const StoreMenu = {
       actions: computed(() => actionsFor(memory.value, !!(info.value && info.value.backup))),
       backupBanner,
       bytesText: formatBytes,
-      snapshotUrl: (commit) => (state.engine.snapshotUrl ? state.engine.snapshotUrl(commit) : null),
-      downloadSnapshot: (commit) => downloadStoredSnapshot(commit),
+      snapshotUrl: (commit, withModels = true) => (state.engine.snapshotUrl ? state.engine.snapshotUrl(commit, withModels) : null),
+      downloadSnapshot: (commit, withModels = true) => downloadStoredSnapshot(commit, withModels),
+      models, withoutModels, snapshotFileName,
       saveSnapshot: () => saveGraph('snapshot'),
       locked,
     };
@@ -364,16 +367,35 @@ export const StoreMenu = {
         <div class="store-actions">
           <button v-for="a in actions" :key="a.id" class="btn small" :disabled="actionDisabled(info, a.id, s.commitSeq, locked)"
                   :title="wait(a.title)" @click.stop="action(a.id, commitTarget(s.commitSeq))">{{ a.short }}</button>
-          <a v-if="snapshotUrl(s.commitSeq)" class="btn small" :href="snapshotUrl(s.commitSeq)" :download="'graph-' + s.commitSeq + '.gsnap'"
-             title="Download this snapshot as one packed file (.gsnap)">.gsnap</a>
+          <a v-if="snapshotUrl(s.commitSeq)" class="btn small" :href="snapshotUrl(s.commitSeq)" :download="snapshotFileName(s.commitSeq)"
+             :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the store\'s embedding models and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</a>
           <button v-else class="btn small" @click.stop="downloadSnapshot(s.commitSeq)"
-                  title="Download this snapshot as one packed file (.gsnap)">.gsnap</button>
+                  :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the store\'s embedding models and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</button>
+          <template v-if="withoutModels">
+            <a v-if="snapshotUrl(s.commitSeq, false)" class="btn small" :href="snapshotUrl(s.commitSeq, false)" :download="snapshotFileName(s.commitSeq, false)"
+               title="Download this snapshot WITHOUT the embedding models (to hand it on without redistributing them)">.gsnap without models</a>
+            <button v-else class="btn small" @click.stop="downloadSnapshot(s.commitSeq, false)"
+                    title="Download this snapshot WITHOUT the embedding models (to hand it on without redistributing them)">.gsnap without models</button>
+          </template>
         </div>
       </div>
       <button v-if="info.marks.length || info.snapshots.length" class="menu-item store-more" @click="openCalendar"
               :title="'Every mark and snapshot on a month calendar (local time), with the same actions'">
         {{ recent.more ? 'See all (' + recent.markCount + ' marks, ' + recent.snapshotCount + ' snapshots) in the calendar…' : 'Calendar…' }}
       </button>
+
+      <template v-if="models.length">
+        <div class="menu-sep"></div>
+        <div class="menu-title">Models ({{ models.filter((m) => !m.missing).length }})</div>
+        <div class="store-explain">{{ EXPLAIN.model }}</div>
+        <div v-for="m in models" :key="m.id" class="menu-item store-row store-model">
+          <div class="store-row-head">
+            <span :style="m.missing ? 'color:var(--danger)' : ''">{{ m.identity }}</span>
+            <small v-if="!m.missing">{{ m.size }} · licence {{ m.licence }} ({{ m.licenceText }}){{ m.gated ? ' · gated repository' : '' }} · {{ m.used ? 'used by the schema' : 'not used by the schema' }}</small>
+          </div>
+          <div v-if="m.problem"><small style="color:var(--danger)">{{ m.problem }}</small></div>
+        </div>
+      </template>
 
       <div class="menu-sep"></div>
       <div class="menu-title">Go to any point</div>

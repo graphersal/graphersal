@@ -344,3 +344,10 @@ test('a compression estimate maps to POST /api/compression/estimate', async () =
   assert.deepEqual(await engine.estimateCompression(spec), answer);
   assert.deepEqual(JSON.parse(calls.find((c) => c.path === '/api/compression/estimate').init.body), spec);
 });
+
+test('the snapshot download URL leaves the models out on request', async () => {
+  const { HttpEngine } = await import('../js/engine/http-engine.js');
+  const engine = new HttpEngine({ store: '/tmp/data' }, { base: 'http://127.0.0.1:1/', fetch: async () => { throw new Error('no fetch'); } });
+  assert.equal(engine.snapshotUrl(2), 'http://127.0.0.1:1/api/store/snapshot?commit=2');
+  assert.equal(engine.snapshotUrl(2, false), 'http://127.0.0.1:1/api/store/snapshot?commit=2&models=without');
+});

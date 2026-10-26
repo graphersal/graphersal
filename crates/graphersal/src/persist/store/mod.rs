@@ -1332,6 +1332,20 @@ impl<S: PersistentStorage + Default> Store<S> {
         remove_model_at(&self.core.shared.dir, key)
     }
 
+    /// Puts the embedding models a packed snapshot carries (format spec 4.5, 8) into this open
+    /// store, leaving its graph alone: a host that loaded a `.gsnap` into a new store through
+    /// its graph ([`Store::create_with`]) keeps the file's models this way
+    /// ([`Store::create_from_packed`] does it itself). Every model file is checked against its
+    /// manifest; a model the store holds already stays as it is. Returns the models of the
+    /// file. Refused on a read-only store.
+    pub fn import_models_from_packed(
+        &self,
+        packed: impl std::io::Read,
+    ) -> Result<Vec<StoredModel>, PersistError> {
+        self.core.writable("add the models of a packed snapshot")?;
+        snapshot_dir::import_packed_models(&self.core.shared.dir, packed)
+    }
+
     /// The bytes of the file `name` of the stored model `key` names (identity or id), checked
     /// against the model's manifest (size and SHA-256).
     pub fn read_model_file(&self, key: &str, name: &str) -> Result<Vec<u8>, PersistError> {

@@ -781,6 +781,7 @@ pub(crate) fn stray_entries(root: &DirPath) -> Vec<(String, String)> {
 
 /// Checks a model file read as a stream (an entry of a backup archive) against `model`'s
 /// manifest: problems as text.
+#[cfg_attr(not(feature = "persist-zip"), allow(dead_code))]
 pub(crate) fn check_stream(model: &StoredModel, name: &str, reader: &mut dyn Read) -> Vec<String> {
     let Some(file) = model.files.iter().find(|f| f.name == name) else {
         return vec!["a file the model's manifest does not list".into()];

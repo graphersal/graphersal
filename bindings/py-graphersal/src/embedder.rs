@@ -46,6 +46,16 @@ impl RegistryCell {
         }
     }
 
+    /// Replaces the registry (a store's models added at open).
+    #[cfg_attr(not(feature = "model2vec"), allow(dead_code))]
+    pub(crate) fn replace(&self, next: Arc<Embedders>) {
+        let mut guard = match self.0.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = next;
+    }
+
     /// Registers `embedder` (as the default with `default`): a new registry swapped in.
     pub(crate) fn register(&self, embedder: Arc<dyn Embedder>, default: bool) -> PyResult<()> {
         let mut guard = match self.0.write() {

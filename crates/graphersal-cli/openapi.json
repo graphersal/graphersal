@@ -2872,7 +2872,7 @@
           "Store"
         ],
         "summary": "Download a snapshot",
-        "description": "A stored snapshot as `.gsnap` (no `commit`: the latest).",
+        "description": "A stored snapshot as `.gsnap` (no `commit`: the latest), with the store's embedding models (and their licences) unless `models=without`.",
         "operationId": "getApiStoreSnapshot",
         "parameters": [
           {
@@ -2882,6 +2882,16 @@
             "description": "The snapshot's commit.",
             "schema": {
               "type": "integer"
+            }
+          },
+          {
+            "name": "models",
+            "in": "query",
+            "required": false,
+            "description": "`with` (the default) carries the store's embedding models; `without` leaves them out.",
+            "schema": {
+              "type": "string",
+              "enum": ["with", "without"]
             }
           }
         ],
@@ -2899,6 +2909,12 @@
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/E400"
+          },
+          "422": {
+            "$ref": "#/components/responses/E422"
           },
           "404": {
             "$ref": "#/components/responses/E404"

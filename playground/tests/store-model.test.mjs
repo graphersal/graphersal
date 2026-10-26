@@ -321,3 +321,31 @@ test('the live region announces the start and the end', () => {
   assert.equal(taskEndText('verify', 42_000, true), 'Verify the store finished after 0:42.');
   assert.equal(taskEndText('backup', 61_000, false), 'Back up failed after 1:01.');
 });
+
+// Embedding models kept in the store (format spec 4.5).
+import { modelRows, offersWithoutModels, snapshotFileName } from '../js/store-model.js';
+
+test('the menu lists the store models with their licences and the models the schema misses', () => {
+  const store = {
+    models: [
+      { id: 'model2vec-0123456789ab', identity: 'model2vec/acme/tiny@0123456789ab', bytesText: '1.0 MiB', license: 'mit', licenseText: 'template', gated: false, usedBySchema: true, problem: null },
+      { id: 'model2vec-aaaaaaaaaaaa', identity: 'model2vec/acme/gated@aaaaaaaaaaaa', bytesText: '2.0 MiB', license: 'other', licenseText: 'file', gated: true, usedBySchema: false, problem: null },
+    ],
+    missingModels: ['model2vec/acme/gone@bbbbbbbbbbbb'],
+  };
+  const rows = modelRows(store);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].licence, 'mit');
+  assert.match(rows[0].licenceText, /standard licence text/);
+  assert.equal(rows[0].used, true);
+  assert.equal(rows[1].gated, true);
+  assert.match(rows[1].licenceText, /from the repository/);
+  assert.equal(rows[2].missing, true);
+  assert.match(rows[2].problem, /does not keep it/);
+  assert.equal(offersWithoutModels(store), true);
+  assert.equal(offersWithoutModels({ models: [] }), false);
+  assert.deepEqual(modelRows({}), []);
+  assert.match(EXPLAIN.model, /redistributes/);
+  assert.equal(snapshotFileName(7), 'graph-7.gsnap');
+  assert.equal(snapshotFileName(7, false), 'graph-7-without-models.gsnap');
+});
