@@ -197,7 +197,7 @@ export const AiChat = {
             <div v-else-if="it.type === 'assistant'" class="chat-msg assistant"><markdown-view :text="it.text"></markdown-view></div>
             <div v-else-if="it.type === 'done' && it.stopped" class="chat-notice faint">Stopped.</div>
           </template>
-          <div v-if="timingText(en)" class="chat-timing faint" title="Time the server spent on this turn, and the part of it spent in tool calls">{{ timingText(en) }}</div>
+          <div v-if="timingText(en)" class="chat-timing faint" title="Time the server spent on this turn, the part of it spent in tool calls, and the tokens the model read (cached ones included) and wrote for this answer">{{ timingText(en) }}</div>
         </div>
       </template>
 

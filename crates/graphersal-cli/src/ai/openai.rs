@@ -96,6 +96,9 @@ pub(crate) fn request(config: &AiConfig, conversation: &Conversation) -> Provide
             })
             .collect();
         body.insert("tools".into(), Value::Array(tools));
+        if conversation.answer_only {
+            body.insert("tool_choice".into(), json!("none"));
+        }
     }
     let length_key = if openai_host(config) {
         "max_completion_tokens"

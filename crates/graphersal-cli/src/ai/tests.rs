@@ -145,6 +145,7 @@ fn text_conversation() -> Conversation {
         system: SYSTEM.to_string(),
         tools: vec![],
         messages: vec![Message::User("Hello?".to_string())],
+        answer_only: false,
     }
 }
 
@@ -153,6 +154,7 @@ fn tool_conversation() -> Conversation {
         system: SYSTEM.to_string(),
         tools: vec![query_tool()],
         messages: vec![Message::User(QUESTION.to_string())],
+        answer_only: false,
     }
 }
 
@@ -574,4 +576,35 @@ fn a_raw_call_without_an_id_is_matched_by_position() {
                "function": {"name": "query", "arguments": "{}"},
                "extra_content": {"google": {"thought_signature": "sig"}}})
     );
+}
+
+#[test]
+fn an_answer_only_call_keeps_the_tools_and_forbids_calling_them() {
+    let mut conversation = tool_conversation();
+    let openai_config = config("openai", "gpt-test", "http://127.0.0.1:1/v1");
+    let anthropic_config = config("anthropic", "claude-test", "http://127.0.0.1:1");
+    let plain = super::openai::request(&openai_config, &conversation).body;
+    assert!(plain.get("tool_choice").is_none(), "{plain}");
+    let plain = super::anthropic::request(&anthropic_config, &conversation).body;
+    assert!(plain.get("tool_choice").is_none(), "{plain}");
+    conversation.answer_only = true;
+    let body = super::openai::request(&openai_config, &conversation).body;
+    assert_eq!(body["tool_choice"], "none", "{body}");
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(1), "{body}");
+    let body = super::anthropic::request(&anthropic_config, &conversation).body;
+    assert_eq!(body["tool_choice"], json!({"type": "none"}), "{body}");
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(1), "{body}");
+}
+
+#[test]
+fn request_tokens_count_the_cached_ones_in_each_dialect() {
+    use super::config::Provider;
+    let usage = Usage {
+        input_tokens: 100,
+        output_tokens: 7,
+        cache_read_tokens: 60,
+        cache_write_tokens: 5,
+    };
+    assert_eq!(usage.request_tokens(Provider::OpenAi), 100);
+    assert_eq!(usage.request_tokens(Provider::Anthropic), 165);
 }

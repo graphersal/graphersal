@@ -34,6 +34,10 @@ pub struct Conversation {
     pub tools: Vec<ToolDefinition>,
     /// The messages, oldest first.
     pub messages: Vec<Message>,
+    /// The model must answer without a tool call (`tool_choice` "none"): the last call of a turn
+    /// that reached its tool-call limit. The tools stay defined, since the history holds calls
+    /// of them (Anthropic refuses tool use blocks without the tool definitions).
+    pub answer_only: bool,
 }
 
 /// A tool the model may call.
@@ -139,6 +143,20 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Input tokens written to the prompt cache.
     pub cache_write_tokens: u64,
+}
+
+impl Usage {
+    /// Every input token of the call, cached ones included: OpenAI's `prompt_tokens` already
+    /// counts the cached ones, Anthropic's `input_tokens` does not.
+    pub fn request_tokens(&self, provider: Provider) -> u64 {
+        match provider {
+            Provider::OpenAi => self.input_tokens,
+            Provider::Anthropic => self
+                .input_tokens
+                .saturating_add(self.cache_read_tokens)
+                .saturating_add(self.cache_write_tokens),
+        }
+    }
 }
 
 /// What went wrong in a provider call.

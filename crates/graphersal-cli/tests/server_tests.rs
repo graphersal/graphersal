@@ -4275,6 +4275,17 @@ mod ai_chat {
                 )
             };
         }
+        // Calls tools until the request forbids them (`tool_choice` "none"), then answers.
+        if user == "LOOP FINAL" {
+            return if body["tool_choice"] == "none" {
+                (text("FINAL from what I have"), Duration::ZERO)
+            } else {
+                (
+                    tool_call(id, "query", json!({"script": "g.v().count()"})),
+                    Duration::ZERO,
+                )
+            };
+        }
         if user == "LOOP" {
             return (
                 tool_call(id, "query", json!({"script": "g.v().count()"})),
@@ -4668,6 +4679,79 @@ mod ai_chat {
         assert!(message.contains("limit of 2 tool calls"), "{error}");
         assert_eq!(turn.last().unwrap()["type"], "done");
         assert_eq!(turn.last().unwrap()["toolCalls"], 2);
+    }
+
+    /// At the tool-call limit the model is asked once more, without tools, to answer from what
+    /// it has; the done event sums the tokens of the turn's provider calls.
+    #[test]
+    fn at_the_tool_call_limit_the_model_answers_with_what_it_has() {
+        let mock = MockLlm::start();
+        let server = start_ai("ai-limit-final", &mock, r#", "max_tool_calls_per_turn": 2"#);
+        let port = server.port;
+        let id = create(port, "page-l");
+        assert_eq!(send(port, "page-l", &id, "LOOP FINAL").status, 200);
+        let list = finished(port, "page-l", &id);
+        assert_eq!(of(&list, "tool_result").len(), 2, "{list:?}");
+        assert!(of(&list, "error").is_empty(), "{list:?}");
+        assert_eq!(of(&list, "assistant")[0]["text"], "FINAL from what I have");
+        let done = list.last().unwrap();
+        assert_eq!(done["type"], "done", "{list:?}");
+        assert_eq!(done["limitReached"], true, "{done}");
+        assert_eq!(done["toolCalls"], 2, "{done}");
+        // Four answered provider calls (two calls run, the third asked beyond the limit, the
+        // final answer) of the mock's 10 prompt and 5 completion tokens each.
+        assert_eq!(done["llmCalls"], 4, "{done}");
+        assert_eq!(done["inputTokens"], 40, "{done}");
+        assert_eq!(done["outputTokens"], 20, "{done}");
+        assert_eq!(done["cachedTokens"], 0, "{done}");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 4);
+        let last = requests.last().unwrap();
+        assert_eq!(last["tool_choice"], "none", "{last}");
+        assert!(last["tools"].as_array().is_some_and(|t| !t.is_empty()));
+        assert!(requests[1].get("tool_choice").is_none());
+        let tool_texts: Vec<&str> = last["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(tool_texts.len(), 3, "{tool_texts:?}");
+        assert!(
+            tool_texts[0].contains("1 of 2 tool calls left"),
+            "{tool_texts:?}"
+        );
+        assert!(
+            tool_texts[1].contains("0 of 2 tool calls left"),
+            "{tool_texts:?}"
+        );
+        assert!(
+            tool_texts[2].contains("reached its limit of 2 tool calls. Do not call any tool"),
+            "{tool_texts:?}"
+        );
+        let system = last["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("at most 2 tool calls"), "{system}");
+
+        // The finished turn is stored compressed and still continues the chat.
+        let stats = get(port, "/api/statistics").json();
+        let chat = &stats["process"]["aiChat"];
+        let stored = chat["historyBytes"].as_u64().unwrap();
+        let raw = chat["historyUncompressedBytes"].as_u64().unwrap();
+        assert!(stored > 0 && stored <= raw, "{chat}");
+        assert_eq!(send(port, "page-l", &id, "hello").status, 200);
+        let all = finished(port, "page-l", &id);
+        assert_eq!(
+            &all[..list.len()],
+            &list[..],
+            "the sealed events read back unchanged"
+        );
+        let requests = mock.requests();
+        let messages = requests.last().unwrap()["messages"].as_array().unwrap();
+        // system, user, 2 x (assistant + tool), the not-run call and its result, the final
+        // answer, the new user message.
+        assert_eq!(messages.len(), 10, "{messages:?}");
     }
 
     #[test]

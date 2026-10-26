@@ -55,8 +55,9 @@ default = ["dev-server", "ai", "model2vec"]
 dev-server = ["dep:tiny_http", "dep:rand"]
 # `--ai FILE`: the AI Chat of the dev server, an LLM agent working on the served graph
 # (EXPERIMENTAL). `ureq` calls the provider (OpenAI-compatible Chat Completions or Anthropic
-# Messages) over HTTPS.
-ai = ["dev-server", "dep:ureq"]
+# Messages) over HTTPS; `lz4_flex` (already in the tree through graphersal's `persist`)
+# compresses the stored chat history.
+ai = ["dev-server", "dep:ureq", "dep:lz4_flex"]
 # Real embedding models: `--embedder NAME=PATH|REPO` loads a Model2Vec model (graphersal's
 # `model2vec` feature, pure Rust) for every mode, and `graphersal embed-model download <repo>`
 # fetches one from Hugging Face over HTTPS (`ureq`, SHA-256 checked with `ring`, the manifest
@@ -80,6 +81,7 @@ tiny_http = { workspace = true, optional = true }
 serde_json = { workspace = true }
 rand = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 
 [dev-dependencies]
