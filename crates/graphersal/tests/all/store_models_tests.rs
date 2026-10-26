@@ -405,22 +405,25 @@ fn every_copy_carries_the_models() {
     assert_eq!(ids_in(temp.join("attic-fork").as_path()), want);
 
     // ZIP backup and restore, with and without the models.
-    let mut zip = Cursor::new(Vec::new());
-    let report = store.backup_zip(&mut zip).unwrap();
-    assert_eq!(ids(&report.models), want);
-    Store::restore_zip(Cursor::new(zip.into_inner()), temp.join("restored")).unwrap();
-    assert_eq!(ids_in(temp.join("restored").as_path()), want);
-    assert!(Store::verify_dir(temp.join("restored")).unwrap().is_ok());
-    let mut zip = Cursor::new(Vec::new());
-    let report = store.backup_zip_with(&mut zip, ModelCopy::Exclude).unwrap();
-    assert!(report.models.is_empty());
-    let bytes = zip.into_inner();
-    assert!(
-        !bytes.windows(7).any(|w| w == b"models/"),
-        "an archive without models names none"
-    );
-    Store::restore_zip(Cursor::new(bytes), temp.join("restored-bare")).unwrap();
-    assert!(ids_in(temp.join("restored-bare").as_path()).is_empty());
+    #[cfg(feature = "persist-zip")]
+    {
+        let mut zip = Cursor::new(Vec::new());
+        let report = store.backup_zip(&mut zip).unwrap();
+        assert_eq!(ids(&report.models), want);
+        Store::restore_zip(Cursor::new(zip.into_inner()), temp.join("restored")).unwrap();
+        assert_eq!(ids_in(temp.join("restored").as_path()), want);
+        assert!(Store::verify_dir(temp.join("restored")).unwrap().is_ok());
+        let mut zip = Cursor::new(Vec::new());
+        let report = store.backup_zip_with(&mut zip, ModelCopy::Exclude).unwrap();
+        assert!(report.models.is_empty());
+        let bytes = zip.into_inner();
+        assert!(
+            !bytes.windows(7).any(|w| w == b"models/"),
+            "an archive without models names none"
+        );
+        Store::restore_zip(Cursor::new(bytes), temp.join("restored-bare")).unwrap();
+        assert!(ids_in(temp.join("restored-bare").as_path()).is_empty());
+    }
 
     // A packed snapshot, with and without the models.
     store.checkpoint(None).unwrap();
@@ -475,14 +478,17 @@ fn a_damaged_model_stops_a_copy_but_not_a_repair() {
         Err(PersistError::BackupDamaged(_))
     ));
     assert!(!temp.join("backup").join("GRAPH").exists());
-    let mut zip = Cursor::new(Vec::new());
-    assert!(matches!(
-        store.backup_zip(&mut zip),
-        Err(PersistError::BackupDamaged(_))
-    ));
-    // Without the models, the ZIP backup works.
-    let mut zip = Cursor::new(Vec::new());
-    store.backup_zip_with(&mut zip, ModelCopy::Exclude).unwrap();
+    #[cfg(feature = "persist-zip")]
+    {
+        let mut zip = Cursor::new(Vec::new());
+        assert!(matches!(
+            store.backup_zip(&mut zip),
+            Err(PersistError::BackupDamaged(_))
+        ));
+        // Without the models, the ZIP backup works.
+        let mut zip = Cursor::new(Vec::new());
+        store.backup_zip_with(&mut zip, ModelCopy::Exclude).unwrap();
+    }
     let mut packed = Vec::new();
     assert!(matches!(
         store.export_packed(None, &mut packed),

@@ -4283,8 +4283,8 @@ impl Store {
         models::list(&dir)
     }
 
-    /// [`Store::add_model`] to the CLOSED store in `dir` (`graphersal embed-model download
-    /// <repo> --into <dir>`): takes the writer lock (a store open elsewhere is refused with
+    /// [`Store::add_model`] to the CLOSED store in `dir` (CLI:
+    /// `graphersal embed-model download <repo> --into <dir>`): takes the writer lock (a store open elsewhere is refused with
     /// [`PersistError::Locked`]); refused on a backup.
     pub fn add_model_dir(
         dir: impl IntoStoreDir,
@@ -4299,8 +4299,8 @@ impl Store {
         })
     }
 
-    /// [`Store::remove_model`] from the CLOSED store in `dir` (`graphersal store models remove
-    /// <dir> <identity>`): takes the writer lock; refused on a backup and while a backup copies
+    /// [`Store::remove_model`] from the CLOSED store in `dir` (CLI:
+    /// `graphersal store models remove <dir> <identity>`): takes the writer lock; refused on a backup and while a backup copies
     /// the store's files.
     pub fn remove_model_dir(
         dir: impl IntoStoreDir,
