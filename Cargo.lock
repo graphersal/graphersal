@@ -650,6 +650,7 @@ dependencies = [
  "ctrlc",
  "graphersal",
  "graphersal-session",
+ "lz4_flex",
  "rand 0.8.8",
  "rhai",
  "ring",

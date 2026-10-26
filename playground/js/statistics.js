@@ -80,7 +80,8 @@ export function processMemoryRows(process) {
   const chat = process.aiChat;
   if (chat) {
     const n = chat.conversations;
-    rows.push({ name: 'AI Chat history', text: `${formatBytes(chat.historyBytes)} (${n} ${n === 1 ? 'conversation' : 'conversations'})` });
+    const raw = chat.historyUncompressedBytes > chat.historyBytes ? `, ${formatBytes(chat.historyUncompressedBytes)} uncompressed` : '';
+    rows.push({ name: 'AI Chat history', text: `${formatBytes(chat.historyBytes)} (${n} ${n === 1 ? 'conversation' : 'conversations'}${raw})` });
   }
   return rows.length ? rows : null;
 }

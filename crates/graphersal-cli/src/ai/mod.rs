@@ -5,6 +5,7 @@
 //!   limits), read strictly;
 //! - [`client`]: the provider-neutral conversation model and the one call
 //!   [`client::Client::complete`];
+//! - [`history`]: a conversation's stored messages and events, compressed per finished turn;
 //! - `openai` / `anthropic`: the two provider adapters (Chat Completions with tools; the
 //!   Messages API with tool use and prompt caching of the static system prefix), over plain
 //!   HTTPS with a synchronous client (`ureq` + rustls; no async runtime, no SDK).
@@ -17,6 +18,7 @@
 mod anthropic;
 pub mod client;
 pub mod config;
+pub mod history;
 mod openai;
 
 #[cfg(test)]

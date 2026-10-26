@@ -7,9 +7,16 @@
 //! without the MCP transport; they queue on the session thread like every browser and MCP call,
 //! and the change feed records their commits with the client `ai` and the conversation id as
 //! `detail`), sends the results back, and repeats until the model answers without a tool call
-//! or the turn reaches `max_tool_calls_per_turn`.
+//! or the turn reaches `max_tool_calls_per_turn`. At the limit the calls beyond it are not run:
+//! their results say so, and one more provider call with `tool_choice` "none" asks the model to
+//! answer from the results it has (a model that keeps calling tools all the same ends the turn
+//! with the limit error). The prompt states the budget, and the last results before the limit
+//! say how many calls are left, so a model that asks for one value per call learns to combine
+//! its queries.
 //!
-//! Conversations live in memory, keyed by a random, unguessable id (128 bits). The server keeps
+//! Conversations live in memory, keyed by a random, unguessable id (128 bits), their history
+//! compressed per finished turn ([`History`]; the system prompt's static prefix is kept once for
+//! all, each conversation keeps only its graph summary). The server keeps
 //! the client that created one (`X-Graphersal-Client`); every other client gets `403` for it,
 //! so the AI Chat tabs of one page and of several browser tabs are separate conversations. Per
 //! conversation: its own history, tool-call counter, pending provider call and running query;
@@ -31,8 +38,11 @@
 //! - `POST /api/ai/conversations/<id>/messages` `{text}` -> `{turn}` (`409` while a turn runs);
 //! - `GET /api/ai/conversations/<id>/events?after=N` -> `{events, running, last}`: the events
 //!   after sequence number `N` (`user`, `assistant`, `tool_call {name, args}`, `tool_result
-//!   {name, ok, summary, text}`, `error {message, help}`, `done {stopped, toolCalls, elapsedMs, toolMs}`: the turn's wall time and the part of
-//!   it spent in tool calls);
+//!   {name, ok, summary, text}`, `error {message, help}`, `done {stopped, toolCalls, elapsedMs,
+//!   toolMs, llmCalls, inputTokens, outputTokens, cachedTokens, limitReached}`: the turn's wall
+//!   time and the part of it spent in tool calls, its provider calls and their tokens summed
+//!   (input = every request token, the cached ones included), and whether it reached the
+//!   tool-call limit);
 //! - `POST /api/ai/conversations/<id>/stop` -> `{stopped}`;
 //! - `DELETE /api/ai/conversations/<id>`: drops the conversation (its pending call abandoned,
 //!   its query cancelled); later requests for it are `404`.
@@ -46,9 +56,10 @@ use tiny_http::{Method, Request};
 
 use crate::ai::client::{
     AssistantTurn, Client as LlmClient, Conversation as LlmConversation, Message, StopReason,
-    ToolCall, ToolDefinition, ToolResult,
+    ToolCall, ToolDefinition, ToolResult, Usage,
 };
-use crate::ai::config::AiConfig;
+use crate::ai::config::{AiConfig, Provider};
+use crate::ai::history::History;
 
 use super::mcp::{self, ToolCaller};
 use super::{Answer, Client, Context, HttpError, json_body, json_response, query_number, value};
@@ -61,6 +72,9 @@ const MAX_MESSAGE_CHARS: usize = 100_000;
 const EVENT_TEXT_CHARS: usize = 4_000;
 /// Most characters of a tool result's `summary` (its first line).
 const SUMMARY_CHARS: usize = 200;
+/// The results of a round tell the model how many tool calls are left once this many or fewer
+/// remain (or a quarter of the limit, when that is more).
+const CALLS_LEFT_NOTE_AT: u32 = 3;
 
 /// What the agent is told beyond the MCP instructions: the untrusted-data rule and the answer
 /// format.
@@ -129,19 +143,19 @@ struct Conversation {
 
 #[derive(Default)]
 struct State {
-    /// The messages sent to the provider, oldest first.
-    history: Vec<Message>,
-    /// The events, oldest first; an event's `seq` is its index + 1.
-    events: Vec<Value>,
+    /// The messages sent to the provider and the events, oldest first; an event's `seq` is its
+    /// index + 1. Compressed per finished turn.
+    log: History,
     /// The running turn, if any.
     turn: Option<Turn>,
     /// The timing of the running turn.
     timing: Option<TurnTiming>,
     /// The id the next turn gets.
     next_turn: u64,
-    /// The system prompt, built at the first turn (the graph summary of that moment): the same
-    /// text for every later call keeps the provider's prompt cache valid.
-    system: Option<String>,
+    /// The graph summary of the system prompt, built at the first turn: the same text for every
+    /// later call keeps the provider's prompt cache valid (the prompt is [`Ai::prefix`], which
+    /// never changes, and this summary).
+    summary: Option<String>,
     /// The conversation was deleted (or dropped as the oldest).
     closed: bool,
     /// Saved queries that write, which the agent was told to confirm with the user in this
@@ -157,67 +171,97 @@ struct Turn {
     cancel: CancelToken,
 }
 
-/// The timing of the running turn (the `done` event's `elapsedMs` and `toolMs`).
+/// The timing and token usage of the running turn (the `done` event's figures).
 struct TurnTiming {
     /// When the turn started.
     started: Instant,
     /// Milliseconds spent in tool calls so far.
     tool_ms: u64,
+    /// Provider calls answered so far.
+    llm_calls: u32,
+    /// Request tokens of those calls, cached ones included.
+    input_tokens: u64,
+    /// Answer tokens of those calls.
+    output_tokens: u64,
+    /// Request tokens read from the prompt cache.
+    cached_tokens: u64,
 }
 
 impl TurnTiming {
-    /// `(elapsedMs, toolMs)` of the turn so far; the tool time never exceeds the wall time.
-    fn totals(&self) -> (u64, u64) {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            tool_ms: 0,
+            llm_calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
+        }
+    }
+
+    /// Adds the usage of one answered provider call.
+    fn add_usage(&mut self, usage: &Usage, provider: Provider) {
+        self.llm_calls = self.llm_calls.saturating_add(1);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(usage.request_tokens(provider));
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cache_read_tokens);
+    }
+
+    /// The figures of the `done` event: the tool time never exceeds the wall time.
+    fn done_fields(&self) -> Value {
         let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        (elapsed, self.tool_ms.min(elapsed))
+        json!({
+            "elapsedMs": elapsed,
+            "toolMs": self.tool_ms.min(elapsed),
+            "llmCalls": self.llm_calls,
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+            "cachedTokens": self.cached_tokens,
+        })
     }
 }
 
 impl State {
-    /// An estimate of the bytes of the stored history: message texts, tool arguments and
-    /// results, the provider's replayed content, the events and the system prompt.
-    fn approx_bytes(&self) -> usize {
-        let json_len = |v: &Value| v.to_string().len();
-        let history: usize = self
-            .history
-            .iter()
-            .map(|message| match message {
-                Message::User(text) => text.len(),
-                Message::Assistant(turn) => {
-                    turn.text.len()
-                        + turn
-                            .tool_calls
-                            .iter()
-                            .map(|c| c.id.len() + c.name.len() + json_len(&c.arguments))
-                            .sum::<usize>()
-                }
-                Message::ToolResults(results) => results
-                    .iter()
-                    .map(|r| r.call_id.len() + r.content.len())
-                    .sum(),
-            })
-            .sum();
-        let events: usize = self.events.iter().map(json_len).sum();
-        history + events + self.system.as_ref().map_or(0, String::len)
+    /// `(stored, uncompressed)` bytes of the history: the messages sent to the provider (texts,
+    /// tool arguments and results, the provider's replayed content), the events and the graph
+    /// summary of the system prompt.
+    fn history_bytes(&self) -> (usize, usize) {
+        let (stored, raw) = self.log.bytes();
+        let summary = self.summary.as_ref().map_or(0, String::len);
+        (stored + summary, raw + summary)
     }
 
     fn push(&mut self, mut event: Value) {
-        event["seq"] = json!(self.events.len() + 1);
-        self.events.push(event);
+        event["seq"] = json!(self.log.event_count() + 1);
+        self.log.push_event(event);
     }
 
     fn is_current(&self, turn: u64) -> bool {
         !self.closed && self.turn.as_ref().is_some_and(|t| t.id == turn)
     }
 
+    /// Pushes the `done` event of the ending turn and seals the turn into the compressed
+    /// history.
+    fn push_done(&mut self, stopped: bool, tool_calls: Value, limit_reached: bool) {
+        let mut done = json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls});
+        let figures = self
+            .timing
+            .take()
+            .map_or_else(|| TurnTiming::new().done_fields(), |t| t.done_fields());
+        if let (Some(done), Value::Object(figures)) = (done.as_object_mut(), figures) {
+            done.extend(figures);
+        }
+        done["limitReached"] = json!(limit_reached);
+        self.push(done);
+        self.log.seal();
+    }
+
     /// Ends the running turn with a `done` event.
-    fn finish(&mut self, stopped: bool, tool_calls: u32) {
-        let (elapsed_ms, tool_ms) = self.timing.take().map_or((0, 0), |t| t.totals());
+    fn finish(&mut self, stopped: bool, tool_calls: u32, limit_reached: bool) {
         self.turn = None;
-        self.push(
-            json!({"type": "done", "stopped": stopped, "toolCalls": tool_calls,
-                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}),
-        );
+        self.push_done(stopped, json!(tool_calls), limit_reached);
     }
 
     /// Stops the running turn: its query cancelled, its pending provider call abandoned, and
@@ -228,8 +272,7 @@ impl State {
             return false;
         };
         turn.cancel.cancel();
-        let (elapsed_ms, tool_ms) = self.timing.take().map_or((0, 0), |t| t.totals());
-        if let Some(Message::Assistant(last)) = self.history.last()
+        if let Some(Message::Assistant(last)) = self.log.tail_messages().last()
             && !last.tool_calls.is_empty()
         {
             let results = last
@@ -241,12 +284,9 @@ impl State {
                     is_error: true,
                 })
                 .collect();
-            self.history.push(Message::ToolResults(results));
+            self.log.push_message(Message::ToolResults(results));
         }
-        self.push(
-            json!({"type": "done", "stopped": true, "toolCalls": Value::Null,
-                         "elapsedMs": elapsed_ms, "toolMs": tool_ms}),
-        );
+        self.push_done(true, Value::Null, false);
         true
     }
 }
@@ -313,6 +353,8 @@ impl Ai {
         prefix.push_str(mcp::instructions());
         prefix.push_str("\n\n");
         prefix.push_str(AGENT_RULES);
+        prefix.push_str("\n\n");
+        prefix.push_str(&budget_rule(self.config().max_tool_calls_per_turn));
         if self.config().read_only {
             prefix.push_str("\n\n");
             prefix.push_str(READ_ONLY_RULE);
@@ -345,17 +387,35 @@ pub(super) fn status(context: &Context) -> Value {
     })
 }
 
-/// `{conversations, historyBytes}` for the process memory report (`None` without `--ai`): the
-/// number of conversations kept and an estimate of the bytes their stored history takes (the
-/// messages sent to the provider, the events shown to the page and the system prompt).
+/// The tool-call budget of the system prompt.
+fn budget_rule(max_calls: u32) -> String {
+    format!(
+        "Tool-call budget: one question of the user allows at most {max_calls} tool calls. Plan \
+         them: fetch what you need in few queries, one query returning several values at once \
+         (Gremlin project(..).by(..), group(), value_map(), or a script whose last statement is \
+         a map of several results; GQL RETURN with several columns, or aggregates such as \
+         count(*) and collect(..)) instead of one query per value or per element. When a tool \
+         result says that few calls are left, combine what you still need into one query or \
+         answer with what you have, and say what you could not check."
+    )
+}
+
+/// `{conversations, historyBytes, historyUncompressedBytes}` for the process memory report
+/// (`None` without `--ai`): the number of conversations kept, the bytes their stored history
+/// takes (compressed per finished turn: the messages sent to the provider, the events shown to
+/// the page and each conversation's graph summary) and the bytes it would take uncompressed.
 pub(super) fn process_memory(context: &Context) -> Option<Value> {
     let ai = context.ai.as_ref()?;
     let list = ai.conversations.lock().ok()?.clone();
-    let bytes: usize = list
+    let (stored, raw) = list
         .iter()
-        .filter_map(|c| c.state.lock().ok().map(|state| state.approx_bytes()))
-        .sum();
-    Some(json!({ "conversations": list.len(), "historyBytes": bytes }))
+        .filter_map(|c| c.state.lock().ok().map(|state| state.history_bytes()))
+        .fold((0, 0), |(s, r), (stored, raw)| (s + stored, r + raw));
+    Some(json!({
+        "conversations": list.len(),
+        "historyBytes": stored,
+        "historyUncompressedBytes": raw,
+    }))
 }
 
 /// Routes `/api/ai/conversations*` (`endpoint` without the `/api/` prefix).
@@ -404,11 +464,14 @@ pub(super) fn route(
             let conversation = ai.conversation(id, client)?;
             let after = query_number(query, "after").unwrap_or(0);
             let state = lock(&conversation)?;
-            let events: Vec<Value> = state.events.iter().skip(after).cloned().collect();
+            let events = state
+                .log
+                .events_after(after)
+                .map_err(|err| HttpError(500, err))?;
             value(json!({
                 "events": events,
                 "running": state.turn.is_some(),
-                "last": state.events.len(),
+                "last": state.log.event_count(),
             }))
         }
         (Method::Post, [id, "stop"]) => {
@@ -498,12 +561,9 @@ fn send(
             id: turn,
             cancel: cancel.clone(),
         });
-        state.timing = Some(TurnTiming {
-            started: Instant::now(),
-            tool_ms: 0,
-        });
+        state.timing = Some(TurnTiming::new());
         state.push(json!({"type": "user", "text": text}));
-        state.history.push(Message::User(text));
+        state.log.push_message(Message::User(text));
         (turn, cancel)
     };
     let thread_context = context.clone();
@@ -517,13 +577,17 @@ fn send(
             json!({"type": "error", "message": format!("cannot start the turn: {err}"),
                           "help": "Try again."}),
         );
-        state.finish(false, 0);
+        state.finish(false, 0, false);
     }
     value(json!({ "turn": turn }))
 }
 
 /// One turn: provider call, tool calls, results, ... until a final answer, an error, the
 /// tool-call limit, or Stop/delete (then the thread leaves without touching the conversation).
+///
+/// At the limit the calls beyond it are answered "not run" and the provider is called once more
+/// with `answer_only`: the model answers from the results it has. Only when it asks for tools
+/// all the same does the turn end with the limit error.
 fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: CancelToken) {
     let Some(ai) = &context.ai else {
         return;
@@ -543,7 +607,7 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
             && state.is_current(turn)
         {
             state.push(json!({"type": "error", "message": message, "help": help}));
-            state.finish(false, calls);
+            state.finish(false, calls, false);
         }
     };
     let tools = match mcp::tool_listings(context, config.read_only, false) {
@@ -561,40 +625,55 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
             .state
             .lock()
             .ok()
-            .and_then(|s| s.system.clone());
-        match existing {
-            Some(system) => system,
-            None => match system_prompt(ai, context) {
-                Ok(system) => {
-                    if let Ok(mut state) = conversation.state.lock() {
-                        state.system.get_or_insert(system.clone());
-                    }
-                    system
+            .and_then(|s| s.summary.clone());
+        let summary = match existing {
+            Some(summary) => Ok(summary),
+            None => graph_summary_now(context).inspect(|summary| {
+                if let Ok(mut state) = conversation.state.lock() {
+                    state.summary.get_or_insert(summary.clone());
                 }
-                Err(err) => {
-                    return fail(
-                        format!("cannot build the system prompt: {err}"),
-                        "Try again.".into(),
-                        0,
-                    );
-                }
-            },
+            }),
+        };
+        match summary.and_then(|summary| Ok(format!("{}\n\n{summary}", ai.prefix(context)?))) {
+            Ok(system) => system,
+            Err(err) => {
+                return fail(
+                    format!("cannot build the system prompt: {err}"),
+                    "Try again.".into(),
+                    0,
+                );
+            }
         }
     };
     // The user's message of this turn answers the confirmations asked in the previous one.
     if let Ok(mut state) = conversation.state.lock() {
         state.confirmed = std::mem::take(&mut state.asked);
     }
+    let limit_error = || {
+        json!({
+            "type": "error",
+            "message": format!("the turn reached its limit of {max_calls} tool calls"),
+            "help": "Send a message to continue (e.g. \"go on\"), ask a narrower question, \
+                     or raise \"max_tool_calls_per_turn\" in the --ai file.",
+        })
+    };
     let mut calls: u32 = 0;
+    // The limit was reached: this provider call must answer without tools.
+    let mut answer_only = false;
     loop {
         let messages = match conversation.state.lock() {
-            Ok(state) if state.is_current(turn) => state.history.clone(),
+            Ok(state) if state.is_current(turn) => state.log.messages(),
             _ => return,
+        };
+        let messages = match messages {
+            Ok(messages) => messages,
+            Err(err) => return fail(err, "Start a new conversation.".into(), calls),
         };
         let request = LlmConversation {
             system: system.clone(),
             tools: tools.clone(),
             messages,
+            answer_only,
         };
         let answer = ai.llm.complete(&request);
         let assistant: AssistantTurn = {
@@ -622,11 +701,16 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
                     };
                     state.push(json!({"type": "error", "message": message,
                                       "help": err.help()}));
-                    state.finish(false, calls);
+                    state.finish(false, calls, answer_only);
                     return;
                 }
                 Ok(assistant) => {
-                    state.history.push(Message::Assistant(assistant.clone()));
+                    if let Some(t) = state.timing.as_mut() {
+                        t.add_usage(&assistant.usage, config.provider);
+                    }
+                    state
+                        .log
+                        .push_message(Message::Assistant(assistant.clone()));
                     if !assistant.text.is_empty() {
                         state.push(json!({"type": "assistant", "text": assistant.text}));
                     }
@@ -641,7 +725,24 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
                                 "help": "Rephrase the question."})),
                             _ => {}
                         }
-                        state.finish(false, calls);
+                        state.finish(false, calls, answer_only);
+                        return;
+                    }
+                    if answer_only {
+                        // The provider ignored `tool_choice`: the calls are not run, and the
+                        // history stays valid for the next message.
+                        let results = assistant
+                            .tool_calls
+                            .iter()
+                            .map(|call| ToolResult {
+                                call_id: call.id.clone(),
+                                content: limit_text(max_calls),
+                                is_error: true,
+                            })
+                            .collect();
+                        state.log.push_message(Message::ToolResults(results));
+                        state.push(limit_error());
+                        state.finish(false, calls, true);
                         return;
                     }
                     for call in &assistant.tool_calls {
@@ -653,15 +754,12 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
             }
         };
         let mut results = Vec::with_capacity(assistant.tool_calls.len());
-        let mut limit_reached = false;
         for call in &assistant.tool_calls {
             if calls >= max_calls {
-                limit_reached = true;
+                answer_only = true;
                 results.push(ToolResult {
                     call_id: call.id.clone(),
-                    content: format!(
-                        "Not run: this turn reached its limit of {max_calls} tool calls."
-                    ),
+                    content: limit_text(max_calls),
                     is_error: true,
                 });
                 continue;
@@ -696,24 +794,40 @@ fn run_turn(context: &Context, conversation: &Conversation, turn: u64, cancel: C
                 is_error,
             });
         }
+        if !answer_only && let Some(last) = results.last_mut() {
+            last.content.push_str(&calls_left_note(max_calls, calls));
+        }
         let Ok(mut state) = conversation.state.lock() else {
             return;
         };
         if !state.is_current(turn) {
             return;
         }
-        state.history.push(Message::ToolResults(results));
-        if limit_reached {
-            state.push(json!({
-                "type": "error",
-                "message": format!("the turn reached its limit of {max_calls} tool calls"),
-                "help": "Send a message to continue (e.g. \"go on\"), ask a narrower question, \
-                         or raise \"max_tool_calls_per_turn\" in the --ai file.",
-            }));
-            state.finish(false, calls);
-            return;
-        }
+        state.log.push_message(Message::ToolResults(results));
     }
+}
+
+/// The result of a tool call beyond the turn's limit.
+fn limit_text(max_calls: u32) -> String {
+    format!(
+        "Not run: this question reached its limit of {max_calls} tool calls. Do not call any \
+         tool now: answer the user with what the tool results above show, and say what you \
+         could not check (the user can send \"go on\" to continue)."
+    )
+}
+
+/// The note appended to the last result of a round when few tool calls are left (empty
+/// otherwise): the model learns its budget before it runs out.
+fn calls_left_note(max_calls: u32, calls: u32) -> String {
+    let left = max_calls.saturating_sub(calls);
+    if left > CALLS_LEFT_NOTE_AT.max(max_calls / 4) {
+        return String::new();
+    }
+    let plural = if max_calls == 1 { "" } else { "s" };
+    format!(
+        "\n\n[Graphersal server: {left} of {max_calls} tool call{plural} left for this question. \
+         Combine what you still need into one query, or answer with what you have.]"
+    )
 }
 
 /// The refusal of a `run_saved_query` call of a saved query that writes which the user has not
@@ -788,14 +902,13 @@ fn tool_definition(listing: &Value) -> ToolDefinition {
     }
 }
 
-/// The system prompt of a conversation: the static prefix and a short summary of the graph at
+/// The graph summary of a conversation's system prompt (after the static prefix): the graph at
 /// the start of the conversation (labels and counts, not the schema).
-fn system_prompt(ai: &Ai, context: &Context) -> Result<String, String> {
-    let prefix = ai.prefix(context)?;
+fn graph_summary_now(context: &Context) -> Result<String, String> {
     let (info, statistics) = context
         .call(|s| (s.info(), s.statistics()))
         .map_err(|err| err.1)?;
-    Ok(format!("{prefix}\n\n{}", graph_summary(&info, &statistics)))
+    Ok(graph_summary(&info, &statistics))
 }
 
 /// The graph summary of the system prompt.
@@ -887,20 +1000,26 @@ mod tests {
             }),
             ..State::default()
         };
-        state.history.push(Message::User("q".into()));
-        state.history.push(Message::Assistant(AssistantTurn::new(
-            "",
-            vec![ToolCall {
-                id: "c1".into(),
-                name: "query".into(),
-                arguments: json!({}),
-            }],
-            StopReason::ToolUse,
-        )));
+        state.log.push_message(Message::User("q".into()));
+        state
+            .log
+            .push_message(Message::Assistant(AssistantTurn::new(
+                "",
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "query".into(),
+                    arguments: json!({}),
+                }],
+                StopReason::ToolUse,
+            )));
         assert!(state.stop());
         assert!(cancel.is_cancelled());
-        assert!(matches!(state.history.last(), Some(Message::ToolResults(r)) if r.len() == 1));
+        let messages = state.log.messages().unwrap();
+        assert!(matches!(messages.last(), Some(Message::ToolResults(r)) if r.len() == 1));
         assert!(!state.stop(), "nothing runs any more");
-        assert_eq!(state.events.last().unwrap()["type"], "done");
+        assert_eq!(
+            state.log.events_after(0).unwrap().last().unwrap()["type"],
+            "done"
+        );
     }
 }

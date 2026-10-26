@@ -617,3 +617,20 @@ test('timingText: the turn time and the tool time of the done event', async () =
   ]);
   assert.equal(timingText(turn), '1.5 s');
 });
+
+test('timingText: the tokens of the turn and the tool-call limit', async () => {
+  const { tokenCountText, timingText, groupTurns } = await import('../js/ai-chat.js');
+  assert.equal(tokenCountText(830), '830');
+  assert.equal(tokenCountText(1250), '1.25k');
+  assert.equal(tokenCountText(12000), '12k');
+  assert.equal(tokenCountText(15234), '15.2k');
+  assert.equal(tokenCountText(1000000), '1M');
+  const [turn] = groupTurns([
+    { type: 'user', text: 'q', seq: 1 },
+    { type: 'assistant', text: 'a', seq: 2 },
+    { type: 'done', stopped: false, toolCalls: 20, elapsedMs: 12400, toolMs: 3100, llmCalls: 21,
+      inputTokens: 15234, outputTokens: 830, cachedTokens: 12000, limitReached: true, seq: 3 },
+  ]);
+  assert.equal(timingText(turn), '12.4 s · tools 3.1 s · tokens 15.2k in (12k cached) / 830 out · tool-call limit reached');
+  assert.equal(timingText({ elapsedMs: 800, toolMs: 0, inputTokens: 40, outputTokens: 5 }), '800 ms · tokens 40 in / 5 out');
+});

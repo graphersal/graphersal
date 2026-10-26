@@ -7,7 +7,8 @@
 // by the page's `X-Graphersal-Client`), sends a message (a turn runs on the server) and polls the
 // conversation's events (`GET .../events?after=N`) until the turn is done. The events are
 // `user {text}`, `assistant {text}`, `tool_call {id, name, args}`, `tool_result {id, name, ok,
-// summary, text}`, `error {message, help}` and `done {stopped, toolCalls, elapsedMs, toolMs}`, each with `seq`.
+// summary, text}`, `error {message, help}` and `done {stopped, toolCalls, elapsedMs, toolMs,
+// llmCalls, inputTokens, outputTokens, cachedTokens, limitReached}`, each with `seq`.
 //
 // Isolation: every chat tab owns its own conversation, cursor (`after`), poll loop, Stop and
 // error. The transcript and the conversation id persist with the tab (localStorage, shared by
@@ -255,6 +256,11 @@ function finishTurn(turn, running) {
   turn.toolCalls = calls.length;
   turn.elapsedMs = done && Number.isFinite(done.elapsedMs) ? done.elapsedMs : null;
   turn.toolMs = done && Number.isFinite(done.toolMs) ? done.toolMs : 0;
+  const count = (key) => (done && Number.isFinite(done[key]) ? done[key] : null);
+  turn.inputTokens = count('inputTokens');
+  turn.outputTokens = count('outputTokens');
+  turn.cachedTokens = count('cachedTokens') || 0;
+  turn.limitReached = !!(done && done.limitReached);
   turn.ran = calls.length - open.length;
   turn.names = names;
   turn.current = state === 'running' && open.length ? open[open.length - 1].name : null;
@@ -294,15 +300,32 @@ export function durationText(ms) {
   return `${Math.floor(total / 60)} min ${total % 60} s`;
 }
 
+/** A token count for the answer's timing line: "830", "15.2k", "1.25M". */
+export function tokenCountText(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1e6) return `${(n / 1000).toFixed(n < 1e4 ? 2 : 1).replace(/\.?0+$/, '')}k`;
+  return `${(n / 1e6).toFixed(2).replace(/\.?0+$/, '')}M`;
+}
+
 /**
  * The muted line under a turn's answer: the time the server spent on the turn and the part of it
- * spent in tool calls, e.g. "12.4 s · tools 3.1 s" (just "800 ms" for a turn without tool time).
- * Empty when the `done` event carries no timing (an older server, an interrupted turn).
+ * spent in tool calls, the request and answer tokens of its provider calls (the cached part of
+ * the request named), and whether the turn reached its tool-call limit, e.g. "12.4 s · tools
+ * 3.1 s · tokens 15.2k in (12k cached) / 830 out" (just "800 ms" for a turn without tool time
+ * and token counts). Empty when the `done` event carries no timing (an older server, an
+ * interrupted turn).
  */
 export function timingText(turn) {
   if (!turn || turn.elapsedMs == null) return '';
-  const total = durationText(turn.elapsedMs);
-  return turn.toolMs > 0 ? `${total} · tools ${durationText(turn.toolMs)}` : total;
+  const parts = [durationText(turn.elapsedMs)];
+  if (turn.toolMs > 0) parts.push(`tools ${durationText(turn.toolMs)}`);
+  if (turn.inputTokens || turn.outputTokens) {
+    const cached = turn.cachedTokens > 0 ? ` (${tokenCountText(turn.cachedTokens)} cached)` : '';
+    parts.push(`tokens ${tokenCountText(turn.inputTokens || 0)} in${cached} / ${tokenCountText(turn.outputTokens || 0)} out`);
+  }
+  if (turn.limitReached) parts.push('tool-call limit reached');
+  return parts.join(' · ');
 }
 
 /** The status of an HTTP error thrown by the engine (`err.status`), or 0. */

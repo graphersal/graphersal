@@ -68,6 +68,9 @@ pub(crate) fn request(config: &AiConfig, conversation: &Conversation) -> Provide
             })
             .collect();
         body.insert("tools".into(), Value::Array(tools));
+        if conversation.answer_only {
+            body.insert("tool_choice".into(), json!({"type": "none"}));
+        }
     }
     body.insert("messages".into(), Value::Array(messages));
     let mut headers = vec![("anthropic-version", API_VERSION.to_string())];
