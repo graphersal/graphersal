@@ -768,6 +768,27 @@ mod auto_load {
         }
     }
 
+    /// A stored model the schema does not name yet is registered too: the first
+    /// `embed_property` with it needs it.
+    #[test]
+    fn every_stored_model_is_registered_at_open() {
+        let temp = Temp::new("all");
+        let dir = model_dir(&temp, "acme/tiny");
+        let identity = Model2Vec::model_identity(&dir).unwrap();
+        let store = Store::create(temp.join("s"), options()).unwrap();
+        store.add_model(new_model(&dir, "acme/tiny")).unwrap();
+        let found = store.stored_embedders(&Embedders::default());
+        assert!(found.notes.is_empty(), "{:?}", found.notes);
+        assert_eq!(
+            found.loaded,
+            vec![("acme/tiny".to_string(), identity.clone())]
+        );
+        assert_eq!(
+            found.embedders.get("acme/tiny").unwrap().info().model,
+            identity
+        );
+    }
+
     #[test]
     fn a_model_neither_registered_nor_stored_is_a_note_with_the_command() {
         let temp = Temp::new("missing");

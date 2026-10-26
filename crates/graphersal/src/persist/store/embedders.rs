@@ -1,7 +1,7 @@
 //! The embedders of the models a Store keeps (features `persist` + `model2vec`, native only;
 //! format spec 4.5, book page "Embedding Models in a Store"): at open, a front end asks
 //! [`Store::stored_embedders`] for a registry holding its own embedders plus every stored model
-//! the schema names that none of them provides. Its own embedders win: a stored model is
+//! none of them provides (the ones the schema names under the schema's identity). Its own embedders win: a stored model is
 //! loaded only for an identity no registered embedder has.
 
 use std::sync::Arc;
@@ -31,10 +31,13 @@ pub struct StoredEmbedders {
 }
 
 impl<S: PersistentStorage> Store<S> {
-    /// The registry `registered` plus every embedding model this store keeps that the schema
-    /// names (its vector properties' `embedder` identity, `model2vec/<repo>@<12 hex>`) and no
-    /// embedder of `registered` provides: what a front end serves the store with (format spec
-    /// 4.5). An embedder the host registered for an identity always wins. A model the schema
+    /// The registry `registered` plus the embedding models this store keeps that no embedder
+    /// of `registered` provides: what a front end serves the store with (format spec 4.5).
+    /// Every model the schema names (its vector properties' `embedder` identity,
+    /// `model2vec/<repo>@<12 hex>`) is loaded under the identity the schema records; every
+    /// other stored model under its own identity (it was put into the store to be used: the
+    /// first `embed_property` with it needs it before the schema names it). An embedder the
+    /// host registered for an identity always wins. A model the schema
     /// names but neither `registered` nor the store holds, or one whose files do not load, is a
     /// note with the command that adds it. Never fails: without a schema or models it returns
     /// `registered` unchanged.
@@ -65,12 +68,20 @@ pub(crate) fn load(
         loaded: Vec::new(),
         notes: Vec::new(),
     };
-    let Some(schema) = schema else {
-        return found;
-    };
+    let named = schema.map(schema_models).unwrap_or_default();
     let mut current = registered.clone();
     let mut added = Vec::new();
-    for (identity, place) in schema_models(schema) {
+    // Every model the store keeps is registered too (it was put there to be used, and the first
+    // `embed_property` with it needs it before the schema names it); a model the schema names
+    // first, under the identity the schema records.
+    let stored_models = models::list(dir).unwrap_or_default();
+    let mut used_ids: Vec<String> = Vec::new();
+    for (identity, _) in &named {
+        if let Some(id) = models::id_of(identity) {
+            used_ids.push(id);
+        }
+    }
+    for (identity, place) in named {
         if registered.by_model(&identity).is_some() {
             continue;
         }
@@ -119,6 +130,32 @@ pub(crate) fn load(
             Err(reason) => found.notes.push(format!(
                 "the stored model {identity} ({place}) does not load: {reason}; remove it with \
                  `graphersal store models remove {location} {}` and {add_hint}",
+                stored.id
+            )),
+        }
+    }
+    for stored in stored_models {
+        if stored.problem.is_some() || used_ids.contains(&stored.id) {
+            continue;
+        }
+        let identity = stored.identity.clone();
+        if current.by_model(&identity).is_some() {
+            continue;
+        }
+        let repo = stored.repo.clone();
+        match load_one(dir, &stored, &identity, repo.as_deref(), None, &current) {
+            Ok((name, embedder)) => match current.to_builder().with(embedder) {
+                Ok(next) => {
+                    current = next.build();
+                    added.push((name, identity));
+                }
+                Err(err) => found.notes.push(format!(
+                    "the stored model {identity} could not be registered: {err}"
+                )),
+            },
+            Err(reason) => found.notes.push(format!(
+                "the stored model {identity} does not load: {reason}; remove it with \
+                 `graphersal store models remove {location} {}`",
                 stored.id
             )),
         }

@@ -455,8 +455,8 @@ and the licence id beside the model, and warns about an unknown or non-commercia
 gated repository; `embed-model list` shows the licences.
 
 **A model inside a store.** `graphersal embed-model download minishlab/potion-base-8M --into
-data/` puts the model into the Store `data/` instead: whenever the store is opened, the models
-its schema names are loaded without `--embedder`, and every copy of the store carries them with
+data/` puts the model into the Store `data/` instead: whenever the store is opened, its models
+are loaded without `--embedder`, and every copy of the store carries them with
 their licences (see [Embedding Models in a Store](../persistence/store_models.md)).
 
 The Rust library has the same embedder as `graphersal::vector::Model2Vec` (feature

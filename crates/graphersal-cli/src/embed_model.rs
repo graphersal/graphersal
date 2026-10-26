@@ -65,7 +65,7 @@ COMMANDS:
                Hugging Face states for a large file is checked; nothing is left behind when the
                download fails. --revision: a branch, tag or commit (default main).
                --into STORE: put the model into that Store (a closed store directory or
-               .gstore file) instead of the models directory; the schema's models are loaded
+               .gstore file) instead of the models directory; the store's models are loaded
                whenever the store is opened, and every copy of the store carries them.
     import     Put the Model2Vec model in MODEL-DIR (a download, or any directory with
                config.json, tokenizer.json and model.safetensors) into the Store STORE, with

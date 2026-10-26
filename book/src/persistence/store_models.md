@@ -31,9 +31,15 @@ on an open store, `Store::add_model_dir` on a closed one.
 ## Opening a store loads its models
 
 When a store is opened (`graphersal --graph data/`, the dev server, Python `Store.open`), every
-model **the schema names** that the store keeps is registered as an embedder (under its
-repository name, `minishlab/potion-base-8M`), so text queries and `embed_property()` work without
-`--embedder`. An embedder you register yourself for the same model wins (`--embedder
+model the store keeps is registered as an embedder (under its repository name,
+`minishlab/potion-base-8M`; a model **the schema names** under the identity the schema records),
+so text queries and `embed_property()` work without `--embedder`:
+
+```bash
+graphersal --graph data/ -e 'g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "minishlab/potion-base-8M"})'
+graphersal --graph data/ -e 'g.v().has_label("doc").nearest("emb", "connected data", 3).values("text").to_list()'
+```
+ An embedder you register yourself for the same model wins (`--embedder
 potion=...`, Python `embedders=[...]`): the stored copy is not loaded then. A model the schema
 names that neither you nor the store provides is a note on stderr (Python: a `UserWarning`)
 naming the command that adds it:

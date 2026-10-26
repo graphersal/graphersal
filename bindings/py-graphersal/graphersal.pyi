@@ -818,7 +818,7 @@ class Store:
         "base_models", "bytes", "files", "used_by_schema", "problem"}``. ``license_text``:
         ``"file"`` (the repository's licence file), ``"template"`` (the standard text of the
         licence, written beside the model) or ``"none"``. Every copy of the store carries them:
-        handing the store on redistributes them. The models the schema names are registered
+        handing the store on redistributes them. The store's models are registered
         when the store is opened (an ``embedders=`` embedder of the same model wins; a model
         neither provides is a ``UserWarning`` naming the command that adds it)."""
     def export(

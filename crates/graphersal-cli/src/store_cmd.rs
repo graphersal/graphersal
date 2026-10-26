@@ -91,7 +91,7 @@ A backup directory is read-only (info, list, marks, verify, export, fork, prune 
 Embedding models (models/ in the store) enter it only by `graphersal embed-model download
 <REPO> --into <DIR>` or `embed-model import <MODEL_DIR> --into <DIR>`; every copy (backup,
 fork, convert, repair, export) carries them with their licences: a store handed on
-redistributes its models. The schema's models are loaded when the store is opened.
+redistributes its models. The store's models are loaded when the store is opened.
 
 Snapshots and marks: a snapshot is a full copy of the graph at a commit (a fast start, a
 `.gsnap` download); a mark is a name for a position in the history. Every commit can be a
