@@ -721,6 +721,10 @@ fn refuse_newer_files(root: &DirPath, at: &DirPath, depth: usize) -> Result<(), 
     };
     for (name, kind) in entries {
         let path = at.join(&name);
+        // The embedding models (format spec 4.5) hold no file of the store's own formats.
+        if depth == 0 && name == super::models::MODELS_DIR {
+            continue;
+        }
         match kind {
             EntryKind::Dir => refuse_newer_files(root, &path, depth + 1)?,
             EntryKind::File => match newer_file_version(&path) {

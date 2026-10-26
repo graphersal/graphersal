@@ -82,6 +82,9 @@ pub struct ForkReport {
     /// order. A fork starts a new lineage with its own, empty set of marks (format spec 10):
     /// these names stay targets in the source store only.
     pub marks_not_carried: Vec<Mark>,
+    /// The embedding models the new store holds: every model of the source is carried
+    /// (format spec 4.5).
+    pub models: Vec<super::StoredModel>,
 }
 
 impl std::fmt::Display for ForkReport {
@@ -93,8 +96,29 @@ impl std::fmt::Display for ForkReport {
             crate::value::uuid::format_canonical(self.snapshot.graph_id),
             crate::value::uuid::format_canonical(self.snapshot.parent_graph_id),
         )?;
-        write_marks_not_carried(f, &self.marks_not_carried)
+        write_marks_not_carried(f, &self.marks_not_carried)?;
+        write_models_carried(f, &self.models)
     }
+}
+
+/// The lines of the models a copy carried (`  model carried: identity (licence mit)`).
+pub(super) fn write_models_carried(
+    f: &mut std::fmt::Formatter<'_>,
+    models: &[super::StoredModel],
+) -> std::fmt::Result {
+    for model in models {
+        writeln!(
+            f,
+            "  model carried: {} (licence {})",
+            if model.identity.is_empty() {
+                &model.id
+            } else {
+                &model.identity
+            },
+            model.license
+        )?;
+    }
+    Ok(())
 }
 
 /// The lines of marks a fork or repair did not carry (`  mark not carried: name @ commit N`).
@@ -1267,6 +1291,7 @@ pub(super) fn attic_fork(
         time: crate::graph::undo::now_micros(),
     }];
     lineage.extend(old.lineage.iter().copied());
+    let existed = new_dir.exists();
     super::StoreCore::create_lineage(
         new_dir,
         &graph,
@@ -1274,6 +1299,7 @@ pub(super) fn attic_fork(
         WriteOptions::new().with_parent(parent_id, branched_at),
         &options,
     )?;
+    let models = super::models::carry_into_new(dir, new_dir, existed)?;
     let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
         PersistError::store(
             "fork the attic entry",
@@ -1284,6 +1310,7 @@ pub(super) fn attic_fork(
     Ok(ForkReport {
         snapshot: super::snapshot_dir::read_listing(&path)?,
         marks_not_carried: attic_marks(dir, &entry, branched_at),
+        models,
     })
 }
 

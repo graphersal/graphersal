@@ -1,5 +1,5 @@
-//! SHA-256 (FIPS 180-4), for the model identity of [`Model2Vec`](super::Model2Vec): a hash over
-//! the model's files. A plain, dependency-free implementation (no SHA-256 crate is in the
+//! SHA-256 (FIPS 180-4), for the model identity of a Model2Vec model (a hash over the model's
+//! files) and the file hashes of the models a Store keeps (format spec 4.5). A plain, dependency-free implementation (no SHA-256 crate is in the
 //! dependency tree of `graphersal`); not used for anything secret, so constant time does not
 //! matter. Tested against the FIPS 180-4 examples.
 

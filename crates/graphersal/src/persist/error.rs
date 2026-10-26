@@ -439,6 +439,11 @@ pub enum StoreFailure {
     /// ([`Store::upgrade_in_place`](super::Store::upgrade_in_place)) is upgraded only into a NEW
     /// copy (the upgrade table, format spec 15.1): nothing was written.
     UpgradeNeedsCopy,
+    /// The store holds no embedding model of that identity or id (format spec 4.5).
+    UnknownModel,
+    /// An embedding model to add is not usable: a file name or role is missing or not
+    /// allowed, a file is too large, the repository or licence is not a valid name.
+    InvalidModel,
 }
 
 impl StoreFailure {
@@ -469,6 +474,8 @@ impl StoreFailure {
             StoreFailure::AlreadyCurrent => "already_current",
             StoreFailure::DamagedSource => "damaged_source",
             StoreFailure::UpgradeNeedsCopy => "upgrade_needs_copy",
+            StoreFailure::UnknownModel => "unknown_model",
+            StoreFailure::InvalidModel => "invalid_model",
         }
     }
 
@@ -607,6 +614,21 @@ impl StoreFailure {
                  upgrade <dir> <new_dir>; Python graphersal.Store.upgrade(source, target)). The \
                  supported upgrades are listed in the format versions table of the book \
                  (persistence/store_versions.md)."
+            }
+            StoreFailure::UnknownModel => {
+                "List the models the store holds and their identities (Store::models; CLI: \
+                 graphersal store models <dir>) and name one of them, by its identity \
+                 (model2vec/<repo>@<12 hex>) or its id (model2vec-<12 hex>). A model enters a \
+                 store only by an explicit add (CLI: graphersal embed-model download <repo> \
+                 --into <dir>, or embed-model import <model_dir> --into <dir>)."
+            }
+            StoreFailure::InvalidModel => {
+                "Nothing was added. A Model2Vec model is one config, one tokenizer and one \
+                 weights file (config.json, tokenizer.json, model.safetensors), plus its card \
+                 (README.md) and licence files; file names are 1 to 40 ASCII letters, digits, \
+                 '.', '_' and '-'. Check the model directory (it loads with `graphersal \
+                 --embedder name=<model_dir>`) and add it again (CLI: graphersal embed-model \
+                 import <model_dir> --into <dir>)."
             }
         }
     }

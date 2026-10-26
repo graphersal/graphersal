@@ -25,6 +25,7 @@ use safetensors::SafeTensors;
 use safetensors::tensor::Dtype;
 use serde_json::Value;
 
+use super::identity::{identity_digest, identity_text, is_repo_name};
 use super::sha256::{Sha256, hex};
 use super::{EmbedContext, EmbedError, Embedder, EmbedderInfo, MAX_EMBEDDER_NAME_BYTES};
 use crate::value::vector::MAX_VECTOR_DIMENSION;
@@ -215,6 +216,20 @@ impl Model2Vec {
         read_files(dir.as_ref(), None).map(|files| files.identity)
     }
 
+    /// The three files of the model in `dir` that a load reads and the identity covers, in the
+    /// order config, tokenizer, model (`config.json` or `config_sentence_transformers.json`,
+    /// `tokenizer.json`, `model.safetensors`, in `dir` or its `0_StaticEmbedding` directory):
+    /// what `graphersal embed-model import` copies into a Store (format spec 4.5). Nothing is
+    /// read.
+    ///
+    /// # Errors
+    ///
+    /// [`EmbedError::Unavailable`] when the directory holds no model layout.
+    pub fn model_files(dir: impl AsRef<Path>) -> Result<[PathBuf; 3], EmbedError> {
+        let layout = resolve(dir.as_ref())?;
+        Ok([layout.config, layout.tokenizer, layout.model])
+    }
+
     /// The most tokens of one text that are pooled.
     pub fn max_tokens(&self) -> usize {
         self.max_tokens
@@ -231,10 +246,54 @@ impl Model2Vec {
         options: &Model2VecOptions,
     ) -> Result<Self, EmbedError> {
         let files = read_files(dir, options.repo.as_deref())?;
+        Self::from_files(name, files, options, &format!("'{}'", dir.display()))
+    }
+
+    /// Loads a model from the bytes of its three files (a model a Store keeps, format spec
+    /// 4.5): the same checks and identity as a directory load, with `options`' repository
+    /// (checked as a repository name) in the identity. `location` names the model in messages
+    /// (`model2vec-0123456789ab in the store /data/x`).
+    pub(crate) fn load_bytes(
+        name: CompactString,
+        config: Vec<u8>,
+        tokenizer: Vec<u8>,
+        model: Vec<u8>,
+        options: &Model2VecOptions,
+        location: &str,
+    ) -> Result<Self, EmbedError> {
+        let repo = options.repo.as_deref();
+        if let Some(repo) = repo
+            && !is_repo_name(repo)
+        {
+            return Err(unavailable(format!(
+                "the model name {repo:?} is not a Hugging Face repository name (name or \
+                 owner/name, letters, digits, '.', '_' and '-')"
+            )));
+        }
+        let digest = identity_digest([
+            (config.len() as u64, &sha256_hex(&config)),
+            (tokenizer.len() as u64, &sha256_hex(&tokenizer)),
+            (model.len() as u64, &sha256_hex(&model)),
+        ]);
+        let files = ModelFiles {
+            config,
+            tokenizer,
+            model,
+            identity: identity_text(repo, &digest),
+        };
+        Self::from_files(name, files, options, location)
+    }
+
+    /// The load of files read: `location` names them in messages.
+    fn from_files(
+        name: CompactString,
+        files: ModelFiles,
+        options: &Model2VecOptions,
+        location: &str,
+    ) -> Result<Self, EmbedError> {
         let config: Value = serde_json::from_slice(&files.config).map_err(|err| {
             unavailable(format!(
-                "the config of the model in '{}' is not JSON: {err}",
-                dir.display()
+                "the config of the model in {location} is not JSON: {err}"
             ))
         })?;
         let config_normalize = config
@@ -242,12 +301,11 @@ impl Model2Vec {
             .and_then(Value::as_bool)
             .unwrap_or(true);
         let normalize = options.normalize.unwrap_or(config_normalize);
-        let (rows, cols) = check_model(dir, &files.tokenizer, &files.model)?;
+        let (rows, cols) = check_model(location, &files.tokenizer, &files.model)?;
         if cols == 0 || cols > MAX_VECTOR_DIMENSION {
             return Err(unavailable(format!(
-                "the model in '{}' has dimension {cols}; a vector has 1 to \
-                 {MAX_VECTOR_DIMENSION} components",
-                dir.display()
+                "the model in {location} has dimension {cols}; a vector has 1 to \
+                 {MAX_VECTOR_DIMENSION} components"
             )));
         }
         let loaded = catch_unwind(AssertUnwindSafe(|| {
@@ -262,14 +320,13 @@ impl Model2Vec {
             Ok(Ok(model)) => model,
             Ok(Err(err)) => {
                 return Err(unavailable(format!(
-                    "the model in '{}' does not load: {err:#}",
-                    dir.display()
+                    "the model in {location} does not load: {err:#}"
                 )));
             }
             Err(_) => {
                 return Err(unavailable(format!(
-                    "the model in '{}' does not load (model2vec-rs failed while reading it)",
-                    dir.display()
+                    "the model in {location} does not load (model2vec-rs failed while reading \
+                     it)"
                 )));
             }
         };
@@ -419,20 +476,11 @@ fn read_files(dir: &Path, repo: Option<&str>) -> Result<ModelFiles, EmbedError> 
     let config = read(&layout.config)?;
     let tokenizer = read(&layout.tokenizer)?;
     let model = read(&layout.model)?;
-    let mut hash = Sha256::new();
-    hash.update(b"model2vec-identity/1\n");
-    for (role, bytes) in [
-        ("config", &config),
-        ("tokenizer", &tokenizer),
-        ("model", &model),
-    ] {
-        let mut file_hash = Sha256::new();
-        file_hash.update(bytes);
-        let line = format!("{role} {} {}\n", bytes.len(), hex(&file_hash.finish()));
-        hash.update(line.as_bytes());
-    }
-    let digest = hex(&hash.finish());
-    let short = &digest[..12];
+    let digest = identity_digest([
+        (config.len() as u64, &sha256_hex(&config)),
+        (tokenizer.len() as u64, &sha256_hex(&tokenizer)),
+        (model.len() as u64, &sha256_hex(&model)),
+    ]);
     let repo = match (repo, manifest_repo(dir)?) {
         (Some(given), Some(manifest)) if given != manifest => {
             return Err(unavailable(format!(
@@ -444,10 +492,7 @@ fn read_files(dir: &Path, repo: Option<&str>) -> Result<ModelFiles, EmbedError> 
         (Some(given), _) => Some(given.to_string()),
         (None, manifest) => manifest,
     };
-    let identity = match repo {
-        Some(repo) => format!("model2vec/{repo}@{short}"),
-        None => format!("model2vec@{short}"),
-    };
+    let identity = identity_text(repo.as_deref(), &digest);
     Ok(ModelFiles {
         config,
         tokenizer,
@@ -481,33 +526,25 @@ fn manifest_repo(dir: &Path) -> Result<Option<String>, EmbedError> {
     Ok(Some(repo.to_string()))
 }
 
-/// Whether `repo` is a Hugging Face repository name: `name` or `owner/name`, each part of
-/// ASCII letters, digits, `.`, `_` and `-`, not starting with `.`.
-fn is_repo_name(repo: &str) -> bool {
-    let part_ok = |part: &str| {
-        !part.is_empty()
-            && part.len() <= 96
-            && !part.starts_with('.')
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    };
-    let mut parts = repo.split('/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(name), None, None) => part_ok(name),
-        (Some(owner), Some(name), None) => part_ok(owner) && part_ok(name),
-        _ => false,
-    }
+/// The SHA-256 hex digest of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(bytes);
+    hex(&hash.finish())
 }
 
 /// Checks the tokenizer against the embedding matrix: every token id of the vocabulary (through
 /// the `mapping` tensor when there is one) must name a row. Returns the matrix's rows and
 /// columns.
-fn check_model(dir: &Path, tokenizer: &[u8], model: &[u8]) -> Result<(usize, usize), EmbedError> {
+fn check_model(
+    location: &str,
+    tokenizer: &[u8],
+    model: &[u8],
+) -> Result<(usize, usize), EmbedError> {
     let tensors = SafeTensors::deserialize(model).map_err(|err| {
         unavailable(format!(
-            "the model.safetensors in '{}' does not parse: {err}",
-            dir.display()
+            "the model.safetensors in {} does not parse: {err}",
+            location
         ))
     })?;
     let Some(embeddings) = EMBEDDING_TENSORS
@@ -515,21 +552,21 @@ fn check_model(dir: &Path, tokenizer: &[u8], model: &[u8]) -> Result<(usize, usi
         .find_map(|name| tensors.tensor(name).ok())
     else {
         return Err(unavailable(format!(
-            "the model.safetensors in '{}' has no embedding tensor (\"embeddings\")",
-            dir.display()
+            "the model.safetensors in {} has no embedding tensor (\"embeddings\")",
+            location
         )));
     };
     let [rows, cols] = embeddings.shape() else {
         return Err(unavailable(format!(
-            "the embedding tensor in '{}' is not 2-dimensional",
-            dir.display()
+            "the embedding tensor in {} is not 2-dimensional",
+            location
         )));
     };
     let (rows, cols) = (*rows, *cols);
     if !matches!(embeddings.dtype(), Dtype::F32 | Dtype::F16 | Dtype::I8) {
         return Err(unavailable(format!(
-            "the embedding tensor in '{}' has the element type {:?} (f32, f16 or i8 expected)",
-            dir.display(),
+            "the embedding tensor in {} has the element type {:?} (f32, f16 or i8 expected)",
+            location,
             embeddings.dtype()
         )));
     }
@@ -552,9 +589,9 @@ fn check_model(dir: &Path, tokenizer: &[u8], model: &[u8]) -> Result<(usize, usi
                     .collect(),
                 other => {
                     return Err(unavailable(format!(
-                        "the mapping tensor in '{}' has the element type {other:?} (i32 or i64 \
+                        "the mapping tensor in {} has the element type {other:?} (i32 or i64 \
                          expected)",
-                        dir.display()
+                        location
                     )));
                 }
             })
@@ -567,14 +604,14 @@ fn check_model(dir: &Path, tokenizer: &[u8], model: &[u8]) -> Result<(usize, usi
         Ok(Ok(tokenizer)) => tokenizer,
         Ok(Err(err)) => {
             return Err(unavailable(format!(
-                "the tokenizer.json in '{}' does not load: {err}",
-                dir.display()
+                "the tokenizer.json in {} does not load: {err}",
+                location
             )));
         }
         Err(_) => {
             return Err(unavailable(format!(
-                "the tokenizer.json in '{}' does not load",
-                dir.display()
+                "the tokenizer.json in {} does not load",
+                location
             )));
         }
     };
@@ -586,10 +623,10 @@ fn check_model(dir: &Path, tokenizer: &[u8], model: &[u8]) -> Result<(usize, usi
         };
         if row.is_none_or(|row| row >= rows) {
             return Err(unavailable(format!(
-                "the token {token:?} (id {id}) of the tokenizer in '{}' has no row in the \
+                "the token {token:?} (id {id}) of the tokenizer in {} has no row in the \
                  embedding matrix of {rows} rows: tokenizer.json and model.safetensors do not \
                  belong together",
-                dir.display()
+                location
             )));
         }
     }

@@ -211,3 +211,34 @@ pub(crate) struct TextCandidate {
     /// The registered embedder of that model.
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
 }
+
+/// Every model identity the schema's `embedder` keywords name, with one place each names it
+/// (`label.key`), in schema order (vertex labels, then edge labels), each model once: what a
+/// Store looks up among its models at open (format spec 4.5).
+#[cfg_attr(
+    not(all(
+        feature = "persist",
+        feature = "model2vec",
+        not(target_arch = "wasm32")
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn schema_models(schema: &GraphSchema) -> Vec<(String, String)> {
+    let mut models: Vec<(String, String)> = Vec::new();
+    let roots = schema
+        .vertices
+        .iter()
+        .map(|(label, v)| (label, &v.schema))
+        .chain(schema.edges.iter().map(|(label, e)| (label, &e.schema)));
+    for (label, root) in roots {
+        for (key, node) in &root.properties {
+            let Some(model) = node.vector.as_ref().and_then(|v| v.embedder.as_deref()) else {
+                continue;
+            };
+            if !models.iter().any(|(m, _)| m == model) {
+                models.push((model.to_string(), format!("{label}.{key}")));
+            }
+        }
+    }
+    models
+}

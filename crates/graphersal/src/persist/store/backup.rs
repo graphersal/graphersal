@@ -104,7 +104,13 @@ pub(super) fn backup_into(
         )));
     }
     files::refuse_other_version(target)?;
-    increment(dir, durable, target)
+    let mut report = increment(dir, durable, target)?;
+    // The models follow the store's (format spec 4.5): each one added or removed whole, after
+    // the increment (they are no part of its INTENT; an interrupted sync is completed by the
+    // next increment).
+    super::models::sync_models(dir, target)?;
+    report.models = super::models::list(target)?;
+    Ok(report)
 }
 
 /// How far WAL segment `first` of the store may be copied, checked (format spec 12.6): up to

@@ -80,13 +80,17 @@ pub use snapshot::{
 pub use wal::{JournalReader, JournalRecord, TornTail, read_journal};
 
 pub use store::{
-    AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, ChangesSince, CheckpointReport,
-    CompactReport, CompactionAdvice, CompactionPolicy, CutTail, DEFAULT_CHECKPOINT_AFTER_BYTES,
-    DEFAULT_CHECKPOINT_MERGE_BYTES, DEFAULT_STORE_SEGMENT_BYTES, DEFAULT_WAL_SEGMENT_BYTES, Damage,
-    DamageKind, DamagePolicy, DamageReport, Diverged, Donor, ForkReport, FoundDamage, IdRange,
-    LineageEntry, OpenReport, PruneReport, RepairReport, RollbackMode, RollbackReport, Store,
-    StoreInfo, StoreOptions, UpgradeReport, VerifyProblem, VerifyReport,
+    AddModelReport, AdviceRule, AtticEntry, BackupMarker, BackupMode, BackupReport, BaseModel,
+    ChangesSince, CheckpointReport, CompactReport, CompactionAdvice, CompactionPolicy, CutTail,
+    DEFAULT_CHECKPOINT_AFTER_BYTES, DEFAULT_CHECKPOINT_MERGE_BYTES, DEFAULT_STORE_SEGMENT_BYTES,
+    DEFAULT_WAL_SEGMENT_BYTES, Damage, DamageKind, DamagePolicy, DamageReport, Diverged, Donor,
+    ForkReport, FoundDamage, IdRange, LineageEntry, ModelCopy, ModelFile, ModelRole, NewModel,
+    OpenReport, PruneReport, RepairReport, RollbackMode, RollbackReport, Store, StoreInfo,
+    StoreOptions, StoredModel, UpgradeReport, VerifyProblem, VerifyReport,
 };
+
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+pub use store::StoredEmbedders;
 
 /// The file extension of packed snapshots written by the bindings (`graph.gsnap`).
 pub const SNAPSHOT_EXTENSION: &str = "gsnap";

@@ -278,6 +278,11 @@ fn allowed(name: &str) -> bool {
             .strip_suffix(&format!(".{WAL_EXTENSION}"))
             .is_some_and(digits),
         [dir, seq, file] if *dir == SNAPSHOTS_DIR => digits(seq) && plain(file),
+        // A model (format spec 4.5, 12.8): `models/<id>/<file>`.
+        [dir, id, file] if *dir == super::models::MODELS_DIR => {
+            super::models::is_model_id(id)
+                && (*file == super::models::MODEL_MANIFEST || super::models::is_file_name(file))
+        }
         _ => false,
     }
 }
@@ -567,6 +572,14 @@ mod tests {
         assert!(!allowed("snapshots/00000000000000000000/../x"));
         assert!(!allowed("wal/1.wal"));
         assert!(!allowed("LOCK"));
+        // The models of a store (format spec 4.5).
+        assert!(allowed("models/model2vec-0123456789ab/model.safetensors"));
+        assert!(allowed(
+            "models/model2vec-0123456789ab/graphersal-embed-model.json"
+        ));
+        assert!(!allowed("models/model2vec-0123456789ab/.hidden"));
+        assert!(!allowed("models/other/model.safetensors"));
+        assert!(!allowed("models/model2vec-0123456789ab/a/b"));
     }
 
     /// A well-formed entry outside this version's layout is a file of a newer version (format
