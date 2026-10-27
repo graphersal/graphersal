@@ -624,6 +624,21 @@ lists the commands. Each chat tab is its own conversation, and a conversation be
 that created it: after a reload the transcript stays as history and the next message starts a new
 conversation. Conversations live in the server's memory only (at most 64; a restart ends them).
 
+**Export ▾** in the chat's header downloads the transcript of this chat tab as a file named after
+the tab and the time (`graphersal-chat-2-20261027-090507.md`): **Markdown (.md)** (a title, the
+export time, model, server and graph, then per turn your question, the steps with each tool call's
+arguments as a JSON block, its result summary and result text, the answer as the model wrote it,
+errors with their help and the timing line) or **JSON (.json)** (`{"format":
+"graphersal-ai-chat", "version": 1, "exportedAt", "meta": {chat, provider, model, readOnly,
+server, graph}, "preamble": [...], "turns": [{question, state, steps, answer, tail, done,
+timing}]}`, where `steps` are `{type: "text", text}` and `{type: "tool", id, name, args, ok,
+summary, result, resultTruncated}`, `tail` holds `error {message, help}`, `notice {text}`, `text
+{text}` and `stopped`, and `done` the turn's figures `elapsedMs`, `toolMs`, `llmCalls`,
+`inputTokens`, `outputTokens`, `cachedTokens`, `toolCalls`, `limitReached`, `stopped`). It holds
+what the page holds: a transcript restored after a reload keeps the newest 300 items and each tool
+result text shortened to 2000 characters (marked "shortened" in Markdown, `resultTruncated` in
+JSON).
+
 When the agent changes the graph, the page reloads it like after an MCP change: the change feed
 names the client `ai` (with the conversation id), and the other tabs' results are marked
 "possibly stale".

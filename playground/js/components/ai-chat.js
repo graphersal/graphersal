@@ -10,10 +10,14 @@ import { ref, computed, watch, nextTick, onMounted } from 'vue';
 import {
   state, aiChatMode, chatController, chatSubmit, chatStop, setChatDraft, openQueryTab,
 } from '../store.js';
-import { groupTurns, turnSummary, timingText, toolCallQuery, COMMAND_HINT } from '../ai-chat.js';
+import {
+  groupTurns, turnSummary, timingText, toolCallQuery, COMMAND_HINT, chatToMarkdown, chatToJson, chatExportFileName,
+} from '../ai-chat.js';
+import { downloadBlob } from '../export.js';
 import { AI_CHAT_UNAVAILABLE } from '../engine/engine.js';
 import { LINKS } from '../config.js';
 import { MarkdownView } from './markdown-view.js';
+import { DropMenu } from './drop-menu.js';
 
 /** The book section that explains the AI Chat (relative to the book root). */
 const BOOK_PAGE = 'persistence/dev_server.html#ai-chat';
@@ -21,7 +25,7 @@ const BOOK_PAGE = 'persistence/dev_server.html#ai-chat';
 const API_NAMES = Object.freeze({ openai: 'OpenAI-compatible API', anthropic: 'Anthropic API' });
 
 export const AiChat = {
-  components: { MarkdownView },
+  components: { MarkdownView, DropMenu },
   props: { tab: { type: Object, required: true } },
   setup(props) {
     const list = ref(null);
@@ -109,8 +113,29 @@ export const AiChat = {
       if (script) openQueryTab({ title: 'From chat', script, execute });
     }
 
+    // Export (issue #18): the transcript this page holds, as Markdown or JSON (js/ai-chat.js).
+    function exportChat(kind) {
+      const items = chat.value.items;
+      if (!items.length) return;
+      const now = new Date();
+      const a = ai.value || {};
+      const meta = {
+        chat: props.tab.name,
+        provider: a.provider,
+        model: a.model,
+        readOnly: !!a.readOnly,
+        server: state.engineInfo && state.engineInfo.server ? window.location.host : undefined,
+        graph: state.graph ? state.graph.name : undefined,
+        exportedAt: now,
+      };
+      const md = kind === 'md';
+      const text = md ? chatToMarkdown(items, meta) : chatToJson(items, meta);
+      const type = md ? 'text/markdown;charset=utf-8' : 'application/json';
+      downloadBlob(new Blob([text], { type }), chatExportFileName(props.tab.name, md ? 'md' : 'json', now));
+    }
+
     return {
-      state, mode, ai, chat, entries, opened, toggle, turnSummary, timingText, thinking, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
+      exportChat, state, mode, ai, chat, entries, opened, toggle, turnSummary, timingText, thinking, busy, draft, notice, list, input, bookUrl, COMMAND_HINT,
       AI_CHAT_UNAVAILABLE, send, onKey, stop: () => chatStop(props.tab.id), argsText, toolCallQuery, openQuery,
     };
   },
@@ -125,6 +150,15 @@ export const AiChat = {
       </template>
       <span v-else-if="mode === 'off'" class="faint">not enabled on this server</span>
       <span v-else-if="mode === 'wasm'" class="faint">read-only here</span>
+      <span class="spacer"></span>
+      <drop-menu v-if="mode !== 'off' || chat.items.length" button-class="btn small" title="Download this chat as a file (what the transcript in this page holds)">
+        <template #trigger>Export ▾</template>
+        <div class="menu-title">This chat as a file</div>
+        <button class="menu-item" :disabled="!chat.items.length" @click="exportChat('md')"
+                title="The questions, the steps with tool calls and results, the answers, errors and timing as Markdown">Markdown (.md)</button>
+        <button class="menu-item" :disabled="!chat.items.length" @click="exportChat('json')"
+                title="The same transcript as JSON (format graphersal-ai-chat, version 1)">JSON (.json)</button>
+      </drop-menu>
     </div>
 
     <div class="ai-chat-list" ref="list" role="log" aria-live="polite" aria-label="Chat transcript">
