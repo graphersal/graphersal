@@ -10,6 +10,8 @@ use serde_json::Value;
 
 /// How many labels of each kind the block names (the largest first); the rest is `+N more`.
 const MAX_LABELS: usize = 10;
+/// How many embedding models the memory row names; the rest is `+N more`.
+const MAX_MODELS: usize = 5;
 
 /// The `loaded` row's value: the load time, and for a Store how it was loaded (`replayed` is the
 /// WAL commits the open replayed onto its snapshot; `None`: not a Store).
@@ -24,8 +26,10 @@ pub(super) fn loaded(load_time: Duration, replayed: Option<u64>) -> String {
 }
 
 /// The rows of the Graph section: the totals, the vertex and edge labels (when there are any),
-/// the graph's memory and the process heap (`live_heap`, `0` = unknown), the compressed and the
-/// deduplicated values (when there are any).
+/// the memory (the graph's; its workload statistics, `0 B` until queries ran unless a Store
+/// brought its saved ones; the loaded embedding models when there are any; the process heap,
+/// `live_heap`, `0` = unknown), the compressed and the deduplicated
+/// values (when there are any).
 pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     let stats = &statistics["statistics"];
@@ -64,6 +68,12 @@ pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> 
             bytes("property_bytes")
         ));
     }
+    if let Some(n) = memory["workload_bytes"].as_u64() {
+        parts.push(format!("workload statistics {}", bytes_text(n)));
+    }
+    if let Some(models) = models_text(&statistics["process"]["models"]) {
+        parts.push(models);
+    }
     if live_heap > 0 {
         parts.push(format!("process heap {}", bytes_text(live_heap)));
     }
@@ -98,6 +108,34 @@ pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> 
         ));
     }
     rows
+}
+
+/// `models 61.2 MiB (minilm 30.6 MiB, potion 30.6 MiB)`: the loaded embedding models of
+/// `process.models` (each `{name, bytes}`); `None` without any.
+fn models_text(models: &Value) -> Option<String> {
+    let models = models.as_array().filter(|models| !models.is_empty())?;
+    let size = |model: &Value| model["bytes"].as_u64().unwrap_or(0);
+    let total: u64 = models.iter().map(size).sum();
+    let mut shown: Vec<String> = models
+        .iter()
+        .take(MAX_MODELS)
+        .map(|model| {
+            format!(
+                "{} {}",
+                model["name"].as_str().unwrap_or("?"),
+                bytes_text(size(model))
+            )
+        })
+        .collect();
+    if models.len() > MAX_MODELS {
+        shown.push(format!("+{} more", models.len() - MAX_MODELS));
+    }
+    let title = if models.len() == 1 { "model" } else { "models" };
+    Some(format!(
+        "{title} {} ({})",
+        bytes_text(total),
+        shown.join(", ")
+    ))
 }
 
 /// `12 labels: person 4,000, software 2, ... +2 more`; `None` without labels.
@@ -239,6 +277,37 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    fn the_memory_row_names_the_workload_statistics_and_the_loaded_models() {
+        let memory = json!({"structure_bytes": 1024, "index_bytes": 512, "property_bytes": 2048,
+                            "total_bytes": 3584, "workload_bytes": 4096});
+        let models: Vec<Value> = (0..7)
+            .map(|i| json!({"name": format!("m{i}"), "bytes": 1 << 20}))
+            .collect();
+        let statistics = json!({"statistics": {}, "memory": memory,
+                                "process": {"models": models}});
+        let all = rows(&statistics, 8 << 20);
+        let memory = &all.iter().find(|(name, _)| name == "memory").unwrap().1;
+        let lines: Vec<&str> = memory.lines().collect();
+        assert_eq!(lines.len(), 4, "{memory}");
+        assert_eq!(lines[1], "workload statistics 4.0 KiB");
+        assert_eq!(
+            lines[2],
+            "models 7.0 MiB (m0 1.0 MiB, m1 1.0 MiB, m2 1.0 MiB, m3 1.0 MiB, m4 1.0 MiB, +2 more)"
+        );
+        assert_eq!(lines[3], "process heap 8.0 MiB");
+        // One model; empty workload statistics still have their line.
+        let statistics = json!({"statistics": {}, "memory": {"workload_bytes": 0},
+            "process": {"models": [{"name": "potion", "bytes": 31 << 20}]}});
+        let rows = rows(&statistics, 0);
+        let memory = &rows.iter().find(|(name, _)| name == "memory").unwrap().1;
+        assert!(
+            memory.ends_with("\nmodel 31.0 MiB (potion 31.0 MiB)"),
+            "{memory}"
+        );
+        assert!(memory.contains("\nworkload statistics 0 B\n"), "{memory}");
     }
 
     #[test]
