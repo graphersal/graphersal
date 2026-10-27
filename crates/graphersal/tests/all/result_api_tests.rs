@@ -75,7 +75,9 @@ fn try_write_checked_tells_busy_from_forbidden() {
     let mark = graph.begin_unit().unwrap();
     {
         let _view = graph.read();
-        let err = graph.try_write_checked().err().expect("forbidden");
+        let Err(err) = graph.try_write_checked() else {
+            panic!("forbidden");
+        };
         assert!(matches!(err, GraphError::GraphViewHeld { .. }), "{err:?}");
         assert!(err.to_string().contains("write the graph"), "{err}");
         assert!(graph.try_write().is_none());

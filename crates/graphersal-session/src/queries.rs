@@ -1333,10 +1333,7 @@ mod tests {
         move_query_in(&mut fw, "older", None).unwrap();
         let text = catalog_text(&tg);
         assert_eq!(text, catalog_text(&fw));
-        assert_eq!(
-            remove_definition_in(&mut fw, DefinitionKind::QUERY, "older").unwrap(),
-            true
-        );
+        assert!(remove_definition_in(&mut fw, DefinitionKind::QUERY, "older").unwrap());
         assert_eq!(count_kind(&fw, DefinitionKind::QUERY), 0);
         let definitions = catalog_from_json(&text).unwrap();
         load_catalog_in(&mut fw, definitions.clone(), true).unwrap();

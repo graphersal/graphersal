@@ -133,8 +133,8 @@ impl From<crate::error::SessionError> for StoreError {
     fn from(err: crate::error::SessionError) -> Self {
         use crate::error::SessionError;
         match err {
-            SessionError::Graph(err) => StoreError::from(err),
-            SessionError::Persist(err) => StoreError::refused(err),
+            SessionError::Graph(err) => StoreError::from(*err),
+            SessionError::Persist(err) => StoreError::refused(*err),
             SessionError::Invalid(text) => StoreError::bad_request(text),
             other => StoreError::new(422, other.to_string()),
         }

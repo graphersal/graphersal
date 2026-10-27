@@ -796,7 +796,7 @@ mod auto_load {
             store.close().unwrap();
 
             let store = Store::open(&path, options()).unwrap();
-            let found = store.stored_embedders(&Embedders::default());
+            let found = store.stored_embedders(&Embedders::default()).unwrap();
             assert!(found.notes.is_empty(), "{:?}", found.notes);
             assert_eq!(
                 found.loaded,
@@ -813,7 +813,7 @@ mod auto_load {
             // A registered embedder of the same model wins: nothing is loaded.
             let own = Model2Vec::load("mine", &dir).unwrap();
             let registered = Embedders::builder().with(Arc::new(own)).unwrap().build();
-            let found = store.stored_embedders(&registered);
+            let found = store.stored_embedders(&registered).unwrap();
             assert!(found.loaded.is_empty());
             assert_eq!(
                 found.embedders.by_model(&identity).unwrap().info().name,
@@ -831,7 +831,7 @@ mod auto_load {
         let identity = Model2Vec::model_identity(&dir).unwrap();
         let store = Store::create(temp.join("s"), options()).unwrap();
         store.add_model(new_model(&dir, "acme/tiny")).unwrap();
-        let found = store.stored_embedders(&Embedders::default());
+        let found = store.stored_embedders(&Embedders::default()).unwrap();
         assert!(found.notes.is_empty(), "{:?}", found.notes);
         assert_eq!(
             found.loaded,
@@ -848,7 +848,7 @@ mod auto_load {
         let temp = Temp::new("missing");
         let store = Store::create(temp.join("s"), options()).unwrap();
         set_schema(&store, "model2vec/acme/gone@0123456789ab");
-        let found = store.stored_embedders(&Embedders::default());
+        let found = store.stored_embedders(&Embedders::default()).unwrap();
         assert!(found.loaded.is_empty());
         assert_eq!(found.notes.len(), 1);
         assert!(
@@ -867,7 +867,7 @@ mod auto_load {
                 .join(&stored.id)
                 .join("model.safetensors"),
         );
-        let found = store.stored_embedders(&Embedders::default());
+        let found = store.stored_embedders(&Embedders::default()).unwrap();
         assert!(found.loaded.is_empty());
         assert!(
             found.notes[0].contains("does not load"),

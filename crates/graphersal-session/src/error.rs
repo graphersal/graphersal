@@ -13,7 +13,7 @@ use graphersal::persist::PersistError;
 
 /// Why a session operation failed. `#[non_exhaustive]`: new kinds are added without a breaking
 /// change; match the ones a front end treats specially and show the rest with `Display`.
-/// Deliberately not `Serialize`: a JSON answer carries its text (`to_string()`), so a
+/// The engine's errors are boxed, so the error stays small. Deliberately not `Serialize`: a JSON answer carries its text (`to_string()`), so a
 /// `Result` cannot end up in an answer by mistake.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -21,9 +21,9 @@ pub enum SessionError {
     /// The graph refused the operation: a view the current thread may not have
     /// ([`GraphError::GraphViewHeld`]), an operation the storage does not support, a unit
     /// error. `Display` is the error's message.
-    Graph(GraphError),
+    Graph(Box<GraphError>),
     /// A Store operation failed. `Display` is the error's message.
-    Persist(PersistError),
+    Persist(Box<PersistError>),
     /// The request cannot be served as asked: malformed JSON, an unknown name, kind or job, a
     /// value out of range. The text says what and how to fix it.
     Invalid(String),
@@ -57,8 +57,8 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SessionError::Graph(err) => Some(err),
-            SessionError::Persist(err) => Some(err),
+            SessionError::Graph(err) => Some(&**err),
+            SessionError::Persist(err) => Some(&**err),
             SessionError::Invalid(_) | SessionError::Failed(_) => None,
         }
     }
@@ -66,13 +66,13 @@ impl std::error::Error for SessionError {
 
 impl From<GraphError> for SessionError {
     fn from(err: GraphError) -> Self {
-        SessionError::Graph(err)
+        SessionError::Graph(Box::new(err))
     }
 }
 
 impl From<PersistError> for SessionError {
     fn from(err: PersistError) -> Self {
-        SessionError::Persist(err)
+        SessionError::Persist(Box::new(err))
     }
 }
 

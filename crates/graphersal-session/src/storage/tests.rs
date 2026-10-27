@@ -501,7 +501,7 @@ fn session_graph_reads_answer_a_forbidden_view_with_its_error() {
         held(graph.indexes());
         assert!(matches!(
             session.info(),
-            Err(SessionError::Graph(GraphError::GraphViewHeld { .. }))
+            Err(SessionError::Graph(err)) if matches!(*err, GraphError::GraphViewHeld { .. })
         ));
         assert!(session.statistics().is_err());
         assert!(session.list_queries(None).is_err());
