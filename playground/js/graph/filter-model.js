@@ -494,9 +494,9 @@ export function filteredText(view, scope = 'graph', before = null) {
 }
 
 /**
- * The drawer's label rows of one side: every known label (statistics order: largest first) with
- * its count, whether it is shown, and its conditions with their key types, op lists and the
- * problem or engine error at each row.
+ * The drawer's label rows of one side: every known label in alphabetical order with its count,
+ * whether it is shown, and its conditions with their key types, op lists and the problem or
+ * engine error at each row.
  * @param {Object} model  The filter state.
  * @param {'vertices'|'edges'} field
  * @param {Array<{label:string, count:number}>} labels
@@ -507,7 +507,8 @@ export function labelRows(model, field, labels, types, { problems = [], error = 
   const kind = field === 'vertices' ? 'vertex' : 'edge';
   const side = (model && model[field]) || { off: [], conds: {} };
   const off = new Set(side.off || []);
-  return labels.map(({ label, count }) => {
+  const sorted = [...labels].sort((a, b) => a.label.localeCompare(b.label));
+  return sorted.map(({ label, count }) => {
     const keyTypes = types[kind][label] || {};
     const conds = ((side.conds || {})[label] || []).map((c, index) => {
       const type = c.key ? keyType(types, kind, label, c) : 'unknown';

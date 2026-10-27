@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use graphersal::advisor::{Advice, AdviceRequest, Confidence, RecommendedAction};
+use graphersal::advisor::{Advice, AdviceRequest, Confidence, Impact, RecommendedAction};
 use graphersal::prelude::*;
 use graphersal::workload::{WorkloadLevel, WorkloadStats};
 
@@ -243,4 +243,34 @@ fn a_dismissed_recommendation_waits_and_an_applied_one_reports_its_outcome() {
     assert_eq!(outcome.index_lookups, None);
     let json = after.to_json();
     assert!(json.contains("\"applied\":[{"), "{json}");
+}
+
+#[test]
+fn the_impact_is_the_share_of_the_graph_and_independent_of_the_confidence() {
+    let id = "add_compression:vertex:customer:cv";
+    // The texts are most of a small graph: freeing them is worth a lot.
+    let small = Arc::new(customers());
+    let advice = small.advise(&AdviceRequest::everything()).unwrap();
+    let cv = advice.recommendations.iter().find(|r| r.id == id).unwrap();
+    assert!(advice.graph_bytes >= advice.memory_bytes, "{advice:?}");
+    assert_eq!(cv.impact, Impact::High, "{cv:?} of {}", advice.graph_bytes);
+    let json = advice.to_json();
+    assert!(json.contains("\"impact\":\"high\""), "{json}");
+    assert!(json.contains("\"graph_bytes\""), "{json}");
+
+    // The same saving in a much larger graph: measured as exactly, worth little.
+    let large = Arc::new(customers());
+    run(
+        &large,
+        r#"for i in 0..150000 { g.add_v("item").property("n", i).property("m", i * 2).iterate(); }"#,
+    );
+    let advice = large.advise(&AdviceRequest::everything()).unwrap();
+    let cv = advice.recommendations.iter().find(|r| r.id == id).unwrap();
+    let share = cv.memory_bytes as f64 * 100.0 / advice.graph_bytes as f64;
+    assert!(share < 2.0, "{share} % of {}", advice.graph_bytes);
+    assert_eq!(cv.impact, Impact::Low, "{cv:?}");
+    assert_eq!(cv.confidence, Confidence::High, "{cv:?}");
+    // Ordered by impact, the highest first.
+    let impacts: Vec<Impact> = advice.recommendations.iter().map(|r| r.impact).collect();
+    assert!(impacts.windows(2).all(|w| w[0] >= w[1]), "{impacts:?}");
 }

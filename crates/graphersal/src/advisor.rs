@@ -8,6 +8,6 @@
 //! front end shows.
 
 pub use crate::graph::advisor::{
-    Advice, AdviceRequest, AppliedOutcome, Confidence, DismissedRecommendation, Recommendation,
-    RecommendedAction, compute, measured_bytes,
+    Advice, AdviceRequest, AppliedOutcome, Confidence, DismissedRecommendation, Impact,
+    Recommendation, RecommendedAction, compute, measured_bytes,
 };

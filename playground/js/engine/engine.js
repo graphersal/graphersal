@@ -764,8 +764,9 @@ export class Engine {
   /**
    * The storage advisor's recommendations for a spec of thresholds (`{}`: the defaults,
    * `{everything: true}`: every candidate): `{ok: true, advice: {workload_level, observed_since,
-   * commit_seq, property_bytes, estimates, recommendations: [{id, kind, element, label, key,
-   * title, evidence, cost, memory_bytes, measured, confidence, reversible, command, action}]}}`
+   * commit_seq, property_bytes, memory_bytes, graph_bytes, estimates, recommendations: [{id,
+   * kind, element, label, key, title, evidence, cost, memory_bytes, measured, impact,
+   * confidence, reversible, command, action}]}}`
    * or `{ok: false, error}`. Read-only.
    */
   async advise(spec) { throw notImplemented('advise'); }

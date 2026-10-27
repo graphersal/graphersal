@@ -10,9 +10,10 @@
 //!   [`AdviceRequest`], from its defaults, or from [`AdviceRequest::everything`] (every
 //!   candidate, for small graphs) with `everything: true`; a given threshold wins either way;
 //! - the **advice** (`advise`): `{ok: true, advice}` with [`graphersal::advisor::Advice::to_property`]
-//!   as JSON (`{workload_level, observed_since, commit_seq, property_bytes, estimates,
-//!   recommendations: [{id, kind, element, label, key, title, evidence, cost, memory_bytes,
-//!   measured, confidence, reversible, command, action}]}`), or `{ok: false, error}`;
+//!   as JSON (`{workload_level, observed_since, commit_seq, property_bytes, memory_bytes,
+//!   graph_bytes, estimates, recommendations: [{id, kind, element, label, key, title, evidence,
+//!   cost, memory_bytes, measured, impact, confidence, reversible, command, action}]}`), or
+//!   `{ok: false, error}`;
 //! - **apply** (`apply_recommendation`): recomputes the advice with the same spec, finds the
 //!   recommendation `id` and runs its catalog command through the session's own operation
 //!   (`create_index`, `drop_index`, `define_compression`, `drop_compression`: one commit, the

@@ -50,9 +50,23 @@ export function effectText(bytes, measured) {
   return `takes ${measured ? '' : 'about '}${amount}`;
 }
 
+/**
+ * The share of the graph's memory a change of `bytes` is: `0.9 % of the graph`, `< 0.1 % of the
+ * graph`; empty without a graph size or a change.
+ */
+export function shareText(bytes, graphBytes) {
+  const n = Math.abs(Number(bytes) || 0);
+  const total = Number(graphBytes) || 0;
+  if (!n || total <= 0) return '';
+  const percent = (n * 100) / total;
+  if (percent < 0.1) return '< 0.1 % of the graph';
+  return `${percent < 10 ? percent.toFixed(1) : Math.round(percent)} % of the graph`;
+}
+
 /** The rows of the recommendation list. */
 export function recommendationRows(advice) {
   const list = (advice && advice.recommendations) || [];
+  const graphBytes = advice && advice.graph_bytes;
   return list.map((r) => ({
     id: r.id,
     kind: r.kind,
@@ -61,7 +75,9 @@ export function recommendationRows(advice) {
     evidence: r.evidence,
     cost: r.cost,
     effect: effectText(r.memory_bytes, r.measured),
+    share: shareText(r.memory_bytes, graphBytes),
     frees: (Number(r.memory_bytes) || 0) > 0,
+    impact: r.impact || null,
     confidence: r.confidence,
     reversible: !!r.reversible,
     command: r.command,

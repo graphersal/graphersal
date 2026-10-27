@@ -4,7 +4,7 @@ The storage advisor turns what the engine already measures into concrete advice:
 [memory report](../users_guide/memory_and_profiling.md) (what the graph holds), the
 [workload statistics](workload_statistics.md) (how it is used) and the catalog. Every
 recommendation names the ordinary catalog command that applies it, a savings figure measured on
-the data where one can be measured, its cost and how sure the advisor is. Nothing is applied
+the data where one can be measured, its cost, its impact and how sure the advisor is. Nothing is applied
 automatically, and every action of this version can be undone (drop the index or the rule
 again).
 
@@ -17,8 +17,22 @@ again).
 | compress or deduplicate | a top-level string property of at least 256 KiB without a rule, not indexed, read fewer than 1,000 times in two days, whose best codec (`lz4` or `dedup`) saves at least 64 KiB and 20 % | frees memory, measured by [`estimate_compression`](../users_guide/compressed_properties.md) with the rule's own code |
 | stop compressing | a compressed key read at least 1,000 times in two days | reads stop decompressing; memory grows back (measured) |
 
-The list is ordered: new indexes first (by the elements their scans read), then compression by
-bytes saved, then unused indexes and hot compressed keys. The thresholds can be lowered: *Every
+Every recommendation has an **impact**, what applying it is worth, and a **confidence**, how much
+data its figures rest on: the two are separate, so a saving measured exactly on all the data
+(confidence `high`) can still be worth little (impact `low`).
+
+| Kind | Impact `high` | Impact `medium` | Impact `low` |
+|---|---|---|---|
+| compress or deduplicate, drop an index | frees 10 % of the graph's memory or more | from 2 % | below 2 % |
+| create an index | its scans read 100 million elements or more in two days | from 10 million | below |
+| stop compressing | read 100,000 times or more in two days | from 10,000 | below |
+
+The graph's memory is its estimated total footprint (the memory report's totals). A saving of
+6 MiB in a graph of 700 MiB (under 1 %) is advised with impact `low`.
+
+The list is ordered by impact, the highest first; within one impact new indexes come first (by
+the elements their scans read), then compression by bytes saved, then unused indexes and hot
+compressed keys. The thresholds can be lowered: *Every
 candidate* in the playground, `everything: true` in the API, or each threshold on its own. Without
 workload statistics (a graph outside a store) only the data is looked at, so there is no index
 advice.
@@ -37,8 +51,8 @@ records are settings of the instance, not data: they are kept in the store's
 
 The top bar's **Optimize** opens one panel with three tabs:
 
-- **Recommendations**: each with its evidence, cost, memory effect, confidence and the exact
-  command; **Apply** runs it (one commit, recorded in the change feed like any catalog change),
+- **Recommendations**: each with its impact, its evidence, cost, memory effect (with its share
+  of the graph's memory), confidence and the exact command; **Apply** runs it (one commit, recorded in the change feed like any catalog change),
   **Copy** copies the command, **Snooze 7 days** and **Dismiss** hide it; below the list,
   *Applied* (the outcomes) and *Dismissed* (with **Restore**).
 - **Workload**: the workload statistics as tables (queries, properties, locks, jobs) for a window
@@ -79,10 +93,11 @@ assert_eq!(index.action.command(), r#"g.create_index(#{label: "person", key: "na
 ```
 
 The JSON form (`Advice::to_json`, the answer of every front end) has `workload_level`,
-`observed_since`, `commit_seq`, `property_bytes`, `estimates` and `recommendations`, each with
+`observed_since`, `commit_seq`, `property_bytes`, `graph_bytes` (the memory impact is measured
+against), `estimates` and `recommendations`, each with
 `id` (stable: the kind and the target), `kind`, `element`, `label`, `key`, `title`, `evidence`,
-`cost`, `memory_bytes` (freed; negative when it takes memory), `measured`, `confidence` (`low`,
-`medium`, `high`), `reversible`, `command` and `action` (the catalog change as fields); then
+`cost`, `memory_bytes` (freed; negative when it takes memory), `measured`, `impact` and
+`confidence` (each `low`, `medium` or `high`), `reversible`, `command` and `action` (the catalog change as fields); then
 `dismissed` (`id`, `title`, `until`: `null` for good) and `applied` (`id`, `kind`, `title`, `at`,
 `promised_bytes`, `measured_bytes`, `index_lookups`), and `memory_bytes`, the figure the outcomes
 are measured on.

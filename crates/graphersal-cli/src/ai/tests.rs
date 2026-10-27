@@ -608,3 +608,39 @@ fn request_tokens_count_the_cached_ones_in_each_dialect() {
     assert_eq!(usage.request_tokens(Provider::OpenAi), 100);
     assert_eq!(usage.request_tokens(Provider::Anthropic), 165);
 }
+
+#[test]
+fn openai_usage_is_read_in_the_responses_spelling_too() {
+    let config = config("openai", "gpt-test", "http://localhost:1/v1");
+    let answer = |usage: Value| {
+        json!({"choices": [{"message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop"}],
+               "usage": usage})
+    };
+    let chat = super::openai::response(
+        &config,
+        &answer(json!({"prompt_tokens": 30, "completion_tokens": 4,
+                       "prompt_tokens_details": {"cached_tokens": 10}})),
+    )
+    .expect("chat completions usage");
+    let responses = super::openai::response(
+        &config,
+        &answer(json!({"input_tokens": 30, "output_tokens": 4,
+                       "input_tokens_details": {"cached_tokens": 10}})),
+    )
+    .expect("responses usage");
+    let expected = Usage {
+        input_tokens: 30,
+        output_tokens: 4,
+        cache_read_tokens: 10,
+        cache_write_tokens: 0,
+    };
+    assert_eq!(chat.usage, expected);
+    assert_eq!(responses.usage, expected);
+    let none = super::openai::response(
+        &config,
+        &json!({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}),
+    )
+    .expect("no usage");
+    assert_eq!(none.usage, Usage::default());
+}

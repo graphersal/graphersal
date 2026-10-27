@@ -245,8 +245,9 @@ export const OptimizePanel = {
             <span class="badge">{{ r.badge }}</span>
             <strong>{{ r.title }}</strong>
             <span class="spacer"></span>
-            <span :class="['op-effect', r.frees ? 'good' : 'cost']">{{ r.effect }}</span>
-            <span class="badge" :title="'Confidence: how much data the recommendation rests on'">{{ r.confidence }}</span>
+            <span :class="['op-effect', r.frees ? 'good' : 'cost']">{{ r.effect }}<span v-if="r.share" class="muted"> ({{ r.share }})</span></span>
+            <span v-if="r.impact" :class="['badge', 'op-impact', r.impact]" title="Impact: what applying it is worth (for memory: its share of the graph's memory; high from 10 %, medium from 2 %)">{{ r.impact }} impact</span>
+            <span class="badge muted" title="Confidence: how much data the figures rest on (high: measured on all the data), not how much the recommendation is worth">confidence {{ r.confidence }}</span>
           </div>
           <div class="op-rec-line"><span class="muted">Why:</span> {{ r.evidence }}</div>
           <div class="op-rec-line"><span class="muted">Cost:</span> {{ r.cost }}</div>

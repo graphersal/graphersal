@@ -2471,7 +2471,7 @@
           "Optimize"
         ],
         "summary": "Storage advice",
-        "description": "The storage advisor's recommendations (create or drop an index, add or drop a compression rule), each with evidence, cost, memory effect, confidence and its command; `dismissed` and `applied` outcomes. Read-only. `{ok: true, advice}` or `{ok: false, error}`.",
+        "description": "The storage advisor's recommendations (create or drop an index, add or drop a compression rule), each with evidence, cost, memory effect, impact (ordered by it), confidence and its command; `dismissed` and `applied` outcomes. Read-only. `{ok: true, advice}` or `{ok: false, error}`.",
         "operationId": "postApiAdvise",
         "requestBody": {
           "required": true,
