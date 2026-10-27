@@ -323,7 +323,7 @@ is a subset and reads the same way):
 | `repo`, `revision`, `commit` | the Hugging Face repository (`name` or `owner/name`), the revision asked for, the commit it resolved to (optional) |
 | `license` | the licence as an SPDX id as the repository states it (`cardData.license`), else `unknown` |
 | `license_text` | where the licence text comes from: `file` (a licence file of the repository), `template` (the repository has none: the writer stored the standard text of `license` as `LICENSE`, for MIT and Apache-2.0, with a first paragraph saying so) or `none` |
-| `base_models` | `[{repo, license?}]`: the models this one was made from (`cardData.base_model`), with their licences when known |
+| `base_models` | `[{repo, license?}]`: the models this one was made from (`cardData.base_model`), with their licences when known. For every known base licence other than `license` with a bundled text (MIT, Apache-2.0) the writer stores its standard text as the file `LICENSE-BASE-<licence>` (lowercase SPDX id, role `license`, one file per licence, a first paragraph naming the base models), since parts of a base model (such as a tokenizer) may be in the model |
 | `gated` | whether the repository is gated (its terms may restrict passing the model on) |
 | `added_at` (or `downloaded_at`) | RFC 3339 time (informative) |
 | `files` | `[{name, role, size, sha256}]`: every file of the directory but the manifest; `role` is `config`, `tokenizer`, `model` (exactly one each), `card`, `license`, `notice` (a role a reader does not know is kept) |
