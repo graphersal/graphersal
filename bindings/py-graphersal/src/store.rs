@@ -201,7 +201,9 @@ impl Store {
         #[cfg(feature = "model2vec")]
         {
             let registered = embedders.current();
-            let found = py.detach(|| store.stored_embedders(&registered));
+            let found = py
+                .detach(|| store.stored_embedders(&registered))
+                .map_err(|err| store_error(py, err))?;
             if !found.loaded.is_empty() {
                 embedders.replace(found.embedders);
             }
@@ -752,7 +754,7 @@ impl Store {
     /// created (``Store.create(path, on_damage=...)``); nothing changes it.
     #[getter]
     fn damage_policy(&self, py: Python<'_>) -> PyResult<String> {
-        self.with(py, |store| Ok(store.damage_policy().name().to_string()))
+        self.with(py, |store| Ok(store.damage_policy()?.name().to_string()))
     }
 
     /// ``store.store_id``: the store's identity as a canonical UUID string, fixed when the
@@ -760,7 +762,7 @@ impl Store {
     /// restored backup keeps it. An incremental backup requires the same id.
     #[getter]
     fn store_id(&self, py: Python<'_>) -> PyResult<String> {
-        let id = self.with(py, |store| Ok(store.store_id()))?;
+        let id = self.with(py, |store| store.store_id())?;
         let h = format!("{id:032x}");
         Ok(format!(
             "{}-{}-{}-{}-{}",
@@ -777,7 +779,7 @@ impl Store {
     /// while none was.
     #[getter]
     fn damage_found(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let found = self.with(py, |store| Ok(store.damage_found()))?;
+        let found = self.with(py, |store| store.damage_found())?;
         let list = PyList::empty(py);
         for item in found {
             let dict = PyDict::new(py);
@@ -892,7 +894,17 @@ impl Store {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         py.detach(move || {
-            let store = inner.lock().ok().and_then(|mut guard| guard.take());
+            // A poisoned lock is an error (a thread panicked while it held the store), never
+            // "already closed": the store may still be open.
+            let store = inner
+                .lock()
+                .map_err(|_| -> Failure {
+                    (
+                        "Error: the store lock is poisoned".to_string(),
+                        Some(StoreFailure::LockPoisoned.name()),
+                    )
+                })?
+                .take();
             match store {
                 Some(store) => store.close().map_err(|err| failure_parts(&err)),
                 None => Ok(()),

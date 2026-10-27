@@ -551,7 +551,7 @@ pub fn advice_text(advice: &CompactionAdvice, dir: &str) -> String {
 pub fn graph_file_repaired_note(path: &str, store: &Store) -> Option<String> {
     let read_only = store.backup_marker().is_some()
         || store.maintenance().is_some()
-        || store.read_only_reason().is_some();
+        || !matches!(store.read_only_reason(), Ok(None));
     store
         .open_report()
         .graph_file_repaired
@@ -587,7 +587,17 @@ pub fn create_refusal(path: &str) -> Option<String> {
     if !dir.is_dir() {
         return None;
     }
-    if Store::is_store(path) {
+    let is_store = match Store::is_store(path) {
+        Ok(is_store) => is_store,
+        // A directory whose files cannot be read: creating there would fail too.
+        Err(err) => {
+            return Some(format!(
+                "Error: cannot create a store in {path}: {}",
+                graphersal::error::format_diagnostic(&err)
+            ));
+        }
+    };
+    if is_store {
         return Some(format!(
             "Error: cannot create a store in {path}: it is a store already\nHelp: open it \
              (`graphersal --graph {path}`), see what it holds (`graphersal store info {path}`), \
@@ -1159,7 +1169,7 @@ pub fn run(args: &[String]) -> i32 {
                 }
                 // Both GRAPH copies damaged: verify cannot read the identity, the damage scan
                 // can (it rebuilds the lineage from the snapshots and WAL headers).
-                Err(err) if Store::is_store(positional[0].as_str()) => {
+                Err(err) if matches!(Store::is_store(positional[0].as_str()), Ok(true)) => {
                     match Store::damage_report_dir(positional[0].as_str()) {
                         Ok(damage) if !damage.is_empty() => {
                             out!("{damage}");
@@ -1344,7 +1354,9 @@ pub fn run(args: &[String]) -> i32 {
         "restore" => {
             if positional.len() == 1 {
                 let dir = &positional[0];
-                if Path::new(dir).is_file() && !SingleFileDir::is_single_file(dir) {
+                if Path::new(dir).is_file()
+                    && matches!(SingleFileDir::is_single_file(dir), Ok(false))
+                {
                     return usage(&format!(
                         "'{dir}' is a file: unpack a ZIP backup with `graphersal store restore \
                          {dir} <NEW_DIR>`"
@@ -1852,25 +1864,28 @@ mod tests {
     #[test]
     fn at_time_takes_rfc_3339_and_microseconds() {
         const T: i64 = 1_760_000_000_000_000; // 2025-10-09T08:53:20Z
-        assert_eq!(parse_time("1760000000000000"), Ok(T));
+        assert_eq!(parse_time("1760000000000000").unwrap(), T);
         // A whole second (minute) covers all of it: the last microsecond.
-        assert_eq!(parse_time("2025-10-09T08:53:20Z"), Ok(T + 999_999));
-        assert_eq!(parse_time(" 2025-10-09t08:53:20z "), Ok(T + 999_999));
-        assert_eq!(parse_time("2025-10-09 08:53:20Z"), Ok(T + 999_999));
+        assert_eq!(parse_time("2025-10-09T08:53:20Z").unwrap(), T + 999_999);
+        assert_eq!(parse_time(" 2025-10-09t08:53:20z ").unwrap(), T + 999_999);
+        assert_eq!(parse_time("2025-10-09 08:53:20Z").unwrap(), T + 999_999);
         assert_eq!(
-            parse_time("2025-10-09T08:53Z"),
-            Ok(T - 20_000_000 + 59_999_999)
+            parse_time("2025-10-09T08:53Z").unwrap(),
+            T - 20_000_000 + 59_999_999
         );
-        assert_eq!(parse_time("2025-10-09T08:53:20.5Z"), Ok(T + 599_999));
-        assert_eq!(parse_time("2025-10-09T08:53:20.000042Z"), Ok(T + 42));
-        assert_eq!(parse_time("2025-10-09T08:53:20.0000429Z"), Ok(T + 42));
-        assert_eq!(parse_time("2025-10-09T10:53:20+02:00"), Ok(T + 999_999));
-        assert_eq!(parse_time("2025-10-09T10:53:20+0200"), Ok(T + 999_999));
-        assert_eq!(parse_time("2025-10-09T06:53:20-02"), Ok(T + 999_999));
-        assert_eq!(parse_time("1970-01-01T00:00:00Z"), Ok(999_999));
+        assert_eq!(parse_time("2025-10-09T08:53:20.5Z").unwrap(), T + 599_999);
+        assert_eq!(parse_time("2025-10-09T08:53:20.000042Z").unwrap(), T + 42);
+        assert_eq!(parse_time("2025-10-09T08:53:20.0000429Z").unwrap(), T + 42);
         assert_eq!(
-            parse_time("2024-02-29T00:00Z"),
-            Ok(1_709_164_800_000_000 + 59_999_999)
+            parse_time("2025-10-09T10:53:20+02:00").unwrap(),
+            T + 999_999
+        );
+        assert_eq!(parse_time("2025-10-09T10:53:20+0200").unwrap(), T + 999_999);
+        assert_eq!(parse_time("2025-10-09T06:53:20-02").unwrap(), T + 999_999);
+        assert_eq!(parse_time("1970-01-01T00:00:00Z").unwrap(), 999_999);
+        assert_eq!(
+            parse_time("2024-02-29T00:00Z").unwrap(),
+            1_709_164_800_000_000 + 59_999_999
         );
         // The printed form is accepted back and covers the printed commit.
         let printed = format_time(T + 123_456);
@@ -1891,7 +1906,7 @@ mod tests {
             "-5",
         ] {
             let err = parse_time(bad).unwrap_err();
-            assert!(err.contains("RFC 3339"), "{bad}: {err}");
+            assert!(err.to_string().contains("RFC 3339"), "{bad}: {err}");
         }
     }
 

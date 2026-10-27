@@ -587,9 +587,13 @@ impl Graph {
         if let Some(n) = max_value_depth {
             limits.max_value_depth = n;
         }
-        if let Ok(mut current) = self.limits.lock() {
-            *current = limits;
-        }
+        // The whole value is replaced, so a lock poisoned by an earlier panic holds a
+        // consistent value again afterwards: written through, then the poison cleared.
+        *self
+            .limits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = limits;
+        self.limits.clear_poison();
     }
 
     /// ``graph.execute(script, params=None, *, atomic=False, policy=None)``: evaluates a
@@ -1560,11 +1564,17 @@ impl Graph {
         params: Option<&Bound<'_, PyDict>>,
         policy: Option<&AccessPolicy>,
     ) -> PyResult<ScriptRequest> {
+        // A poisoned lock is an error, never the default limits (which may be looser than the
+        // ones the host set).
         let limits = self
             .limits
             .lock()
             .map(|limits| limits.clone())
-            .unwrap_or_default();
+            .map_err(|_| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "the graph's limits lock is poisoned: a thread panicked while it held it",
+                )
+            })?;
         let params = match params {
             None => Default::default(),
             Some(params) => python_params_to_element_properties(params)?,

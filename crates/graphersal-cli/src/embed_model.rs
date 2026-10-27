@@ -536,6 +536,7 @@ fn download(
 ) -> Result<(), DownloadError> {
     if let Some(store) = into
         && !Store::is_store(store)
+            .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
     {
         return Err(DownloadError::Usage(format!(
             "--into {store}: not a Graphersal store (create one with `graphersal store create \
@@ -816,7 +817,9 @@ fn import(
     repo: Option<&str>,
     license: Option<&str>,
 ) -> Result<(), DownloadError> {
-    if !Store::is_store(store) {
+    if !Store::is_store(store)
+        .map_err(|err| DownloadError::Usage(format!("--into {store}: {err}")))?
+    {
         return Err(DownloadError::Usage(format!(
             "--into {store}: not a Graphersal store (create one with `graphersal store create \
              {store}`)"

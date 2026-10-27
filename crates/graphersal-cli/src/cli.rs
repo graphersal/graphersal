@@ -192,9 +192,12 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
 /// 4.5) beside the `--embedder` ones, which win; prints what it loaded and every model the
 /// schema names that neither provides as a note on stderr.
 #[cfg(feature = "model2vec")]
-fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
-    let found = store.stored_embedders(&embedders());
-    let stored = store.models().unwrap_or_default();
+fn register_stored_models(
+    path: &str,
+    store: &graphersal::persist::Store,
+) -> Result<(), graphersal::persist::PersistError> {
+    let found = store.stored_embedders(&embedders())?;
+    let stored = store.models()?;
     for (name, identity) in &found.loaded {
         let model = stored
             .iter()
@@ -251,24 +254,27 @@ fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
     if !found.loaded.is_empty() {
         set_embedders(found.embedders);
     }
+    Ok(())
 }
 
 /// Without the `model2vec` feature no stored model can be loaded: the schema's models are
 /// named in a note.
 #[cfg(not(feature = "model2vec"))]
-fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
+fn register_stored_models(
+    path: &str,
+    store: &graphersal::persist::Store,
+) -> Result<(), graphersal::persist::PersistError> {
     let registered = embedders();
-    if let Ok(info) = store.info() {
-        for identity in info.schema_models {
-            if registered.by_model(&identity).is_none() {
-                model_note(format!(
-                    "the schema names the embedding model {identity}; this graphersal was built \
-                     without the `model2vec` feature and cannot load it (from {path} or \
-                     elsewhere)"
-                ));
-            }
+    for identity in store.info()?.schema_models {
+        if registered.by_model(&identity).is_none() {
+            model_note(format!(
+                "the schema names the embedding model {identity}; this graphersal was built \
+                 without the `model2vec` feature and cannot load it (from {path} or \
+                 elsewhere)"
+            ));
         }
     }
+    Ok(())
 }
 
 /// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
@@ -687,7 +693,9 @@ impl GraphSpec {
                 || std::path::Path::new(spec).extension().is_some_and(|ext| {
                     ext.eq_ignore_ascii_case(graphersal::persist::SINGLE_FILE_EXTENSION)
                 })
-                || graphersal::persist::SingleFileDir::is_single_file(spec) =>
+                // A file that cannot be read is opened as a store: the open names the read
+                // error (a plain graph file would only be refused as unreadable later).
+                || !matches!(graphersal::persist::SingleFileDir::is_single_file(spec), Ok(false)) =>
             {
                 GraphSpec::Store(spec.to_string())
             }
@@ -814,7 +822,7 @@ impl GraphSpec {
         let format = |err: graphersal::persist::PersistError| {
             StartError::failed(graphersal::error::format_diagnostic(&err))
         };
-        let store = if Store::is_store(path) {
+        let store = if Store::is_store(path).map_err(format)? {
             // A backup opens read-only (it is restored with `store restore`).
             match Store::backup_marker_dir(path) {
                 Ok(Some(marker)) => {
@@ -832,9 +840,9 @@ impl GraphSpec {
                 _ => {
                     let store = Store::open(path, StoreOptions::new()).map_err(format)?;
                     if let Some(wanted) = on_damage
-                        && store.damage_policy() != wanted
+                        && store.damage_policy().map_err(format)? != wanted
                     {
-                        let have = store.damage_policy();
+                        let have = store.damage_policy().map_err(format)?;
                         drop(store);
                         return Err(format!(
                             "Error: the store {path} exists with the damage policy \"{have}\"; \
@@ -890,7 +898,7 @@ impl GraphSpec {
         for warning in &report.warnings {
             errln!("warning: {warning}");
         }
-        register_stored_models(path, &store);
+        register_stored_models(path, &store).map_err(format)?;
         Ok(Opened {
             graph: store.graph().clone(),
             store: Some(Arc::new(store)),

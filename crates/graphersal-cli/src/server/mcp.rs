@@ -1330,7 +1330,8 @@ fn call_tool_as_client(
             let wanted = name.to_string();
             let entry = context
                 .call(move |s| s.get_query(&wanted))
-                .map_err(|err| CallRefused::Internal(err.1))?;
+                .map_err(|err| CallRefused::Internal(err.1))?
+                .map_err(|err| CallRefused::Internal(err.to_string()))?;
             if !entry.is_null() {
                 let Some(given) = args.as_object() else {
                     return Err(CallRefused::Params("arguments must be an object".into()));
@@ -1611,7 +1612,9 @@ fn run_tool(
         "query" => query(context, caller, args),
         "gql" => gql(context, caller, args),
         "get_schema" => {
-            let text = context.call(|s| s.get_schema_text()).map_err(http_failed)?;
+            let text = context
+                .call(|s| s.get_schema_text())
+                .map_err(http_failed)??;
             Ok(if text == "null" {
                 "null: the graph stores no schema (mode none). infer_schema shows what the data \
                  has; set_schema stores one."
@@ -1620,7 +1623,9 @@ fn run_tool(
                 text
             })
         }
-        "infer_schema" => context.call(|s| s.infer_schema_text()).map_err(http_failed),
+        "infer_schema" => Ok(context
+            .call(|s| s.infer_schema_text())
+            .map_err(http_failed)??),
         "validate_schema" => {
             let schema = json_arg(args, "schema", str_arg(args, "mode"))?;
             fallible(context, move |s| s.validate_schema(&schema))
@@ -1653,7 +1658,7 @@ fn run_tool(
         }
         "statistics" => Ok(compact(&super::with_process_memory(
             context,
-            context.call(|s| s.statistics()).map_err(http_failed)?,
+            context.call(|s| s.statistics()).map_err(http_failed)??,
         ))),
         "workload_statistics" => {
             let max_rows = args
@@ -1662,7 +1667,9 @@ fn run_tool(
                 .unwrap_or(50)
                 .max(1) as usize;
             let mut report = match args.get("history").and_then(Value::as_str) {
-                None => context.call(|s| s.workload_report()).map_err(http_failed)?,
+                None => context
+                    .call(|s| s.workload_report())
+                    .map_err(http_failed)??,
                 Some(tier) => {
                     let tier = tier.to_string();
                     context
@@ -1700,7 +1707,7 @@ fn run_tool(
         }
         "list_jobs" => Ok(format!(
             "Scheduled jobs (times in microseconds since the Unix epoch):\n{}",
-            compact(&context.call(|s| s.jobs_view()).map_err(http_failed)?)
+            compact(&context.call(|s| s.jobs_view()).map_err(http_failed)??)
         )),
         "memory_report" => {
             let mut spec = match args {
@@ -1733,7 +1740,7 @@ fn run_tool(
         "list_compressions" => {
             let list = context
                 .call(|s| s.list_compressions())
-                .map_err(http_failed)?;
+                .map_err(http_failed)??;
             Ok(if list.as_array().is_some_and(Vec::is_empty) {
                 "The graph has no compression rules (define_compression adds one).".to_string()
             } else {
@@ -1805,7 +1812,7 @@ fn run_tool(
             fallible(context, move |s| s.recompress(&name))
         }
         "list_indexes" => {
-            let list = context.call(|s| s.list_indexes()).map_err(http_failed)?;
+            let list = context.call(|s| s.list_indexes()).map_err(http_failed)??;
             Ok(if list.as_array().is_some_and(Vec::is_empty) {
                 "The graph has no property indexes (create_index adds one).".to_string()
             } else {
@@ -1840,7 +1847,7 @@ fn run_tool(
             })
         }
         "graph_info" => {
-            let mut info = context.call(|s| s.info()).map_err(http_failed)?;
+            let mut info = context.call(|s| s.info()).map_err(http_failed)??;
             info["source"] = json!(context.source.as_ref().map(|p| p.display().to_string()));
             info["store"] = json!(context.store.as_ref().map(|s| s.location()));
             let view = current_view(context);
@@ -1849,9 +1856,11 @@ fn run_tool(
             }
             info["view"] = view;
             // Damage found on disk while the store is open (writes refused when frozen).
-            info["damageFound"] = context.store.as_ref().map_or(Value::Null, |s| {
-                graphersal_session::store::found_damage_value(&**s)
-            });
+            info["damageFound"] = match context.store.as_ref() {
+                None => Value::Null,
+                Some(store) => graphersal_session::store::found_damage_value(&**store)
+                    .map_err(|err| err.to_string())?,
+            };
             info["readOnly"] = json!(caller.read_only);
             info["answerLimitChars"] = json!(caller.max_chars);
             if let Some(mcp) = &context.mcp {
@@ -1863,11 +1872,16 @@ fn run_tool(
     }
 }
 
-fn fallible(
+fn fallible<E: std::fmt::Display + Send + 'static>(
     context: &Context,
-    job: impl FnOnce(&mut Session) -> Result<Value, String> + Send + 'static,
+    job: impl FnOnce(&mut Session) -> Result<Value, E> + Send + 'static,
 ) -> Result<String, String> {
-    Ok(compact(&context.call(job).map_err(http_failed)??))
+    Ok(compact(
+        &context
+            .call(job)
+            .map_err(http_failed)?
+            .map_err(|err| err.to_string())?,
+    ))
 }
 
 /// The saved queries as the agent sees them: the session's entries (`folder` prefix, `search`
@@ -1883,7 +1897,7 @@ fn saved_queries(
 ) -> Result<Vec<Value>, String> {
     let list = context
         .call(move |s| s.list_queries(folder.as_deref()))
-        .map_err(http_failed)?;
+        .map_err(http_failed)??;
     let search = search.map(|s| s.to_lowercase());
     Ok(list
         .as_array()
@@ -1962,7 +1976,7 @@ fn run_saved_query(context: &Context, caller: &ToolCaller, args: &Value) -> Resu
         let wanted = name.to_string();
         let entry = context
             .call(move |s| s.get_query(&wanted))
-            .map_err(http_failed)?;
+            .map_err(http_failed)??;
         if entry["writes"].as_bool().unwrap_or(false) {
             return Err(format!(
                 "the saved query \"{name}\" changes data, and this server is read-only for MCP"
@@ -2211,6 +2225,7 @@ fn run_script(
         }
     };
     let (text, commit_seq) = answer.map_err(http_failed)?;
+    let commit_seq = commit_seq.map_err(|err| err.to_string())?;
     let response: Value =
         serde_json::from_str(&text).map_err(|err| format!("malformed engine answer: {err}"))?;
     Ok(query_text(&response, commit_seq, profile, &page, head))
@@ -2516,13 +2531,15 @@ const RESOURCES: [Resource; 5] = [
 /// `graphersal://saved-queries`.
 fn read_resource(context: &Context, uri: &str, read_only: bool) -> Result<String, String> {
     match uri {
-        "graphersal://schema" => context.call(|s| s.get_schema_text()).map_err(http_failed),
+        "graphersal://schema" => Ok(context
+            .call(|s| s.get_schema_text())
+            .map_err(http_failed)??),
         "graphersal://saved-queries" => Ok(compact(&Value::Array(saved_queries(
             context, None, None, read_only,
         )?))),
         "graphersal://statistics" => Ok(compact(&super::with_process_memory(
             context,
-            context.call(|s| s.statistics()).map_err(http_failed)?,
+            context.call(|s| s.statistics()).map_err(http_failed)??,
         ))),
         "graphersal://dsl-reference" => {
             static REFERENCE: OnceLock<String> = OnceLock::new();

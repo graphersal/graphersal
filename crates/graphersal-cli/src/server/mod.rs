@@ -215,13 +215,13 @@ pub(crate) fn as_client<T>(client: Client, run: impl FnOnce() -> T) -> T {
 }
 
 /// The commit position of the graph the session serves, and which graph it is (a view or a
-/// rollback swaps it).
-fn position(session: &Session) -> (usize, u64) {
+/// rollback swaps it). Fails when the graph cannot be read.
+fn position(session: &Session) -> Result<(usize, u64), graphersal::error::GraphError> {
     let graph = session.graph();
-    (
+    Ok((
         Arc::as_ptr(graph) as *const () as usize,
-        graph.last_commit_seq(),
-    )
+        graph.last_commit_seq()?,
+    ))
 }
 
 /// The `X-Graphersal-Client` id of a request: up to 64 letters, digits, `-` and `_`.
@@ -619,10 +619,10 @@ fn start_session(
             );
             let mut session = Session::with_presets(presets);
             let loaded = match (shared, preloaded) {
-                (Some((store, name)), _) => {
-                    session.attach_store(store, &name);
-                    Ok(())
-                }
+                (Some((store, name)), _) => session
+                    .attach_store(store, &name)
+                    .map(|_| ())
+                    .map_err(|err| err.to_string()),
                 (None, Some((graph, name))) => {
                     let kind = match &spec {
                         GraphSpec::File(_) => "file",
@@ -632,8 +632,10 @@ fn start_session(
                         GraphSpec::FileTree => "tree",
                         GraphSpec::Store(_) => "store",
                     };
-                    session.load_shared(graph, &name, kind);
-                    Ok(())
+                    session
+                        .load_shared(graph, &name, kind)
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())
                 }
                 (None, None) => load_graph(&mut session, &spec, source.as_deref()),
             };
@@ -641,11 +643,17 @@ fn start_session(
                 let _ = ready.send(Err(err));
                 return;
             }
-            let _ = ready.send(Ok((
-                session.cancel_token(),
-                position(&session).1,
-                session.statistics(),
-            )));
+            let started = position(&session)
+                .map_err(|err| err.to_string())
+                .and_then(|(_, seq)| {
+                    let statistics = session.statistics().map_err(|err| err.to_string())?;
+                    Ok((session.cancel_token(), seq, statistics))
+                });
+            let failed = started.is_err();
+            let _ = ready.send(started);
+            if failed {
+                return;
+            }
             for job in queue {
                 // A panic is a bug; the session (its graph rolled back by the unit) serves on.
                 if std::panic::catch_unwind(AssertUnwindSafe(|| job(&mut session))).is_err() {
@@ -745,10 +753,18 @@ impl Context {
             let before = position(session);
             let out = graphersal::workload::scope(channel, true, || job(session));
             let after = position(session);
-            if before != after
-                && let Ok(mut feed) = feed.lock()
-            {
-                feed.record(client, after.1);
+            // The change feed is a notification for the other clients: a position that cannot
+            // be read before or after counts as a change (they reload and see for themselves).
+            let changed = match (&before, &after) {
+                (Ok(before), Ok(after)) => before != after,
+                _ => true,
+            };
+            if changed && let Ok(mut feed) = feed.lock() {
+                let seq = match (&after, &before) {
+                    (Ok(after), _) | (Err(_), Ok(after)) => after.1,
+                    (Err(_), Err(_)) => 0,
+                };
+                feed.record(client, seq);
             }
             let _ = reply.send(out);
         });
@@ -765,11 +781,12 @@ impl Context {
     }
 
     /// A session method that fails with a diagnostic: the failure is a 422 answer.
-    fn call_fallible<T: Send + 'static>(
+    fn call_fallible<T: Send + 'static, E: std::fmt::Display + Send + 'static>(
         &self,
-        job: impl FnOnce(&mut Session) -> Result<T, String> + Send + 'static,
+        job: impl FnOnce(&mut Session) -> Result<T, E> + Send + 'static,
     ) -> Result<T, HttpError> {
-        self.call(job)?.map_err(|message| HttpError(422, message))
+        self.call(job)?
+            .map_err(|message| HttpError(422, message.to_string()))
     }
 
     /// The hosts a request to this server may name (`Host`, and the origin of `Origin`).
@@ -880,7 +897,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             }
             Ok(json_response(200, &json!({ "cancelled": running })))
         }
-        (Method::Get, "graph") => value(context.call(|s| s.info())?),
+        (Method::Get, "graph") => value(context.call_fallible(|s| s.info())?),
         (Method::Post, "execute") => {
             let body = json_body(request)?;
             let script = body
@@ -900,17 +917,19 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             context.running.fetch_sub(1, Ordering::SeqCst);
             Ok(text_response(200, answer?))
         }
-        (Method::Get, "schema") => value(context.call(|s| s.graph().schema_view())?),
+        (Method::Get, "schema") => value(context.call_fallible(|s| s.graph().schema_view())?),
         (Method::Post, "schema/view") => {
             let body = text_body(request)?;
             value(context.call_fallible(move |s| s.schema_view_of(&body))?)
         }
-        (Method::Get, "schema/stored") => {
-            Ok(text_response(200, context.call(|s| s.get_schema_text())?))
-        }
-        (Method::Get, "schema/infer") => {
-            Ok(text_response(200, context.call(|s| s.infer_schema_text())?))
-        }
+        (Method::Get, "schema/stored") => Ok(text_response(
+            200,
+            context.call_fallible(|s| s.get_schema_text())?,
+        )),
+        (Method::Get, "schema/infer") => Ok(text_response(
+            200,
+            context.call_fallible(|s| s.infer_schema_text())?,
+        )),
         (Method::Post, "schema/set") => {
             let body = text_body(request)?;
             let mode = query_value(query, "mode");
@@ -938,11 +957,12 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         (Method::Get, "graph-view") => {
             let max_nodes = query_number(query, "maxNodes").unwrap_or(500);
             let max_edges = query_number(query, "maxEdges").unwrap_or(1000);
-            let view = context.call(move |s| {
-                serde_json::to_value(s.graph().graph_view(max_nodes, max_edges))
+            let view = context.call_fallible(move |s| {
+                s.graph()
+                    .graph_view(max_nodes, max_edges)
                     .map_err(|err| err.to_string())
             })?;
-            value(view.map_err(|err| HttpError(500, err))?)
+            value(serde_json::to_value(view).map_err(|err| HttpError(500, err.to_string()))?)
         }
         // The Graph panel with a filter and/or degree columns
         // (`graphersal_session::views::GraphViewRequest`); an invalid filter is a 400 naming
@@ -1004,9 +1024,9 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Get, "completions") => value(context.call(|s| views::completions(s.engine()))?),
         (Method::Get, "token-values") => value(context.call(|s| s.token_values())?),
-        (Method::Get, "memory") => value(context.call(|s| s.graph().memory_view())?),
+        (Method::Get, "memory") => value(context.call_fallible(|s| s.graph().memory_view())?),
         // The scheduled jobs of the active store (`graphersal_session::jobs`).
-        (Method::Get, "jobs") => value(context.call(|s| s.jobs_view())?),
+        (Method::Get, "jobs") => value(context.call_fallible(|s| s.jobs_view())?),
         // The dev server's user owns the machine's files (the Store menu writes backups
         // anywhere), so a backup job may name any directory.
         (Method::Post, "jobs/define") => {
@@ -1050,7 +1070,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         // The workload statistics (`Session::workload_report`).
         // `?history=minutes|hours|days` adds every row's buckets of that tier (chart data).
         (Method::Get, "workload") => match query_value(query, "history") {
-            None => value(context.call(|s| s.workload_report())?),
+            None => value(context.call_fallible(|s| s.workload_report())?),
             Some(tier) => {
                 value(context.call_fallible(move |s| s.workload_report_with_history(&tier))?)
             }
@@ -1095,7 +1115,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Get, "statistics") => value(with_process_memory(
             context,
-            context.call(|s| s.statistics())?,
+            context.call_fallible(|s| s.statistics())?,
         )),
         (Method::Get, "export") if query_value(query, "format").as_deref() == Some("gsnap") => {
             let bytes = context.call_fallible(|s| s.save_snapshot())?;
@@ -1103,11 +1123,11 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
         }
         (Method::Get, "queries") => {
             let folder = query_text(query, "folder");
-            value(context.call(move |s| s.list_queries(folder.as_deref()))?)
+            value(context.call_fallible(move |s| s.list_queries(folder.as_deref()))?)
         }
         (Method::Get, "queries/get") => {
             let name = query_text(query, "name").unwrap_or_default();
-            value(context.call(move |s| s.get_query(&name))?)
+            value(context.call_fallible(move |s| s.get_query(&name))?)
         }
         (Method::Post, "queries/define") => {
             let body = json_body(request)?;
@@ -1143,16 +1163,17 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             value(json!({ "text": text }))
         }
         // The whole catalog (saved queries, compression rules, every other kind) as one file.
-        (Method::Get, "catalog/export") => {
-            Ok(text_response(200, context.call(|s| s.save_catalog_text())?))
-        }
+        (Method::Get, "catalog/export") => Ok(text_response(
+            200,
+            context.call_fallible(|s| s.save_catalog_text())?,
+        )),
         (Method::Post, "catalog/load") => {
             let body = text_body(request)?;
             let replace = query_value(query, "replace").as_deref() == Some("true");
             value(context.call_fallible(move |s| s.load_catalog(&body, replace))?)
         }
         // Compression rules (`graphersal_session::compression`).
-        (Method::Get, "compression") => value(context.call(|s| s.list_compressions())?),
+        (Method::Get, "compression") => value(context.call_fallible(|s| s.list_compressions())?),
         (Method::Post, "compression/define") => {
             let body = json_body(request)?;
             value(context.call(move |s| s.define_compression(&body))?)
@@ -1171,7 +1192,7 @@ fn route(context: &Arc<Context>, request: &mut Request) -> Result<Answer, HttpEr
             value(context.call_fallible(move |s| s.recompress(&name))?)
         }
         // Property indexes (`graphersal_session::indexes`).
-        (Method::Get, "indexes") => value(context.call(|s| s.list_indexes())?),
+        (Method::Get, "indexes") => value(context.call_fallible(|s| s.list_indexes())?),
         (Method::Post, "indexes/create") => {
             let body = json_body(request)?;
             value(context.call(move |s| s.create_index(&body))?)
@@ -1321,7 +1342,11 @@ fn info(context: &Context) -> Value {
         "maintenance": context.store.as_ref().and_then(|s| s.maintenance()).map(damage_value),
         // Damage found on disk while the store is open (a backup, a checkpoint, verify): a
         // banner; read-only when the store's damage policy is `maintenance`.
-        "damageFound": context.store.as_ref().map_or(Value::Null, |s| found_damage_value(&**s)),
+        "damageFound": match context.store.as_ref() {
+            None => Value::Null,
+            Some(store) => found_damage_value(&**store)
+                .unwrap_or_else(|err| json!({ "error": err.to_string() })),
+        },
         // A backup directory opened read-only: the UI shows a banner and offers nothing that
         // writes (restore is a CLI operation).
         "backup": context.store.as_ref().and_then(|s| {
@@ -1425,10 +1450,12 @@ fn changes(context: &Context) -> Value {
     answer["view"] = store::current_view(context);
     answer["mcp"] = mcp::status(context);
     // Damage found while the store is open: the banner appears without a reload.
-    answer["damageFound"] = context
-        .store
-        .as_ref()
-        .map_or(Value::Null, |s| found_damage_value(&**s));
+    answer["damageFound"] = match context.store.as_ref() {
+        None => Value::Null,
+        Some(store) => {
+            found_damage_value(&**store).unwrap_or_else(|err| json!({ "error": err.to_string() }))
+        }
+    };
     answer
 }
 

@@ -843,7 +843,12 @@ fn unconfirmed_write(
     }
     let name = call.arguments.get("name")?.as_str()?.to_string();
     let wanted = name.clone();
-    let entry = context.call(move |s| s.get_query(&wanted)).ok()?;
+    // A query whose entry cannot be read is treated as one that writes: the user is asked
+    // (never run unconfirmed because the answer was unknown).
+    let entry = match context.call(move |s| s.get_query(&wanted)) {
+        Ok(Ok(entry)) => entry,
+        Ok(Err(_)) | Err(_) => json!({"writes": true}),
+    };
     if !entry["writes"].as_bool().unwrap_or(false) {
         return None;
     }
@@ -908,7 +913,10 @@ fn graph_summary_now(context: &Context) -> Result<String, String> {
     let (info, statistics) = context
         .call(|s| (s.info(), s.statistics()))
         .map_err(|err| err.1)?;
-    Ok(graph_summary(&info, &statistics))
+    Ok(graph_summary(
+        &info.map_err(|err| err.to_string())?,
+        &statistics.map_err(|err| err.to_string())?,
+    ))
 }
 
 /// The graph summary of the system prompt.
