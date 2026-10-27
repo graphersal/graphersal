@@ -1,5 +1,6 @@
 //! The read-only views of the playground: schema, graph drawing, memory usage, completions.
 
+use crate::error::SessionError;
 use std::collections::BTreeMap;
 
 use graphersal::prelude::*;
@@ -190,7 +191,7 @@ pub struct GraphViewRequest {
 pub fn graph_view_request<S: GraphStorage>(
     g: &S,
     request: &GraphViewRequest,
-) -> Result<CompactGraph, String> {
+) -> Result<CompactGraph, SessionError> {
     let max_nodes = request.max_nodes.unwrap_or(500);
     let max_edges = request.max_edges.unwrap_or(1000);
     let mut view = match request.filter.as_ref().filter(|f| !f.is_null()) {
@@ -212,7 +213,7 @@ fn filtered_graph_view<S: GraphStorage>(
     filter: &crate::filter::GraphFilter,
     max_nodes: usize,
     max_edges: usize,
-) -> Result<CompactGraph, String> {
+) -> Result<CompactGraph, SessionError> {
     use std::collections::HashSet;
     // Visible vertices: `None` = every vertex.
     let listed = filter.vertices(g, None)?;
@@ -267,7 +268,7 @@ fn filtered_graph_view<S: GraphStorage>(
 }
 
 /// The Rhai query selecting what the filter `spec` shows ([`crate::filter::filter_query`]).
-pub fn graph_filter_query<S: GraphStorage>(g: &S, spec: &Value) -> Result<String, String> {
+pub fn graph_filter_query<S: GraphStorage>(g: &S, spec: &Value) -> Result<String, SessionError> {
     let filter = crate::filter::GraphFilter::compile(g, spec)?;
     Ok(crate::filter::filter_query(&filter))
 }
@@ -352,7 +353,7 @@ pub fn memory_usage<S: GraphStorage>(g: &S) -> Value {
 /// The request of a memory report spec `{sample_every?, max_elements?, max_rows?,
 /// path_depth?}` (`null`: a full report; [`crate::Session::memory_report`]), or what is wrong
 /// with it.
-pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, String> {
+pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, SessionError> {
     const KEYS: [&str; 5] = [
         "sample_every",
         "max_elements",
@@ -376,14 +377,15 @@ pub fn memory_report_request(spec: &Value) -> Result<MemoryReportRequest, String
         return Err(format!(
             "unknown key '{unknown}' in the memory report spec (keys: {})",
             KEYS.join(", ")
-        ));
+        )
+        .into());
     }
-    let positive = |key: &str| -> Result<Option<u64>, String> {
+    let positive = |key: &str| -> Result<Option<u64>, SessionError> {
         match fields.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(value) => match value.as_u64() {
                 Some(n) if n > 0 => Ok(Some(n)),
-                _ => Err(format!("{key} must be a positive integer, not {value}")),
+                _ => Err(format!("{key} must be a positive integer, not {value}").into()),
             },
         }
     };

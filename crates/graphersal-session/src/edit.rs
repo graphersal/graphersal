@@ -32,6 +32,7 @@
 //!   errors: [{field, message, help?}]}` with `field` the top-level key a failure belongs to or
 //!   `general`.
 
+use crate::error::SessionError;
 use graphersal::prelude::*;
 use graphersal::prelude::{CompactString, Number, PropertyMap};
 use graphersal::storage::ElementKind;
@@ -103,7 +104,7 @@ fn typed_entries(fields: &PropertyMap) -> Vec<Value> {
 }
 
 /// A value from its typed form (module docs); the error says what is wrong, for the editor.
-pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
+pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, SessionError> {
     let ty = typed
         .get("type")
         .and_then(Value::as_str)
@@ -114,11 +115,11 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
         "boolean" => value
             .as_bool()
             .map(ElementProperty::Boolean)
-            .ok_or_else(|| "a boolean is true or false".to_string()),
+            .ok_or_else(|| SessionError::invalid("a boolean is true or false")),
         "string" => value
             .as_str()
             .map(ElementProperty::from)
-            .ok_or_else(|| "a string value must be text".to_string()),
+            .ok_or_else(|| SessionError::invalid("a string value must be text")),
         "int64" => {
             let parsed = match value {
                 Value::String(text) => text.trim().parse::<i64>().ok(),
@@ -128,6 +129,7 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
             parsed
                 .map(|i| ElementProperty::Number(Number::from_i64(i)))
                 .ok_or_else(|| format!("{value} is not an int64 (a whole number)"))
+                .map_err(SessionError::from)
         }
         "float64" => {
             let parsed = match value {
@@ -143,15 +145,18 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
             parsed
                 .map(|f| ElementProperty::Number(Number::from_f64(f)))
                 .ok_or_else(|| format!("{value} is not a float64 (a number)"))
+                .map_err(SessionError::from)
         }
         "uuid" => {
             let text = value.as_str().ok_or("a uuid value must be text")?;
-            ElementProperty::uuid_from_string(text).map_err(|_| {
-                format!(
-                    "\"{text}\" is not a canonical uuid (lowercase 8-4-4-4-12 hex digits, e.g. \
+            ElementProperty::uuid_from_string(text)
+                .map_err(|_| {
+                    format!(
+                        "\"{text}\" is not a canonical uuid (lowercase 8-4-4-4-12 hex digits, e.g. \
                      550e8400-e29b-41d4-a716-446655440000)"
-                )
-            })
+                    )
+                })
+                .map_err(SessionError::from)
         }
         "array" => value
             .as_array()
@@ -187,6 +192,7 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
             Temporal::parse_strict(kind, text)
                 .map(ElementProperty::Temporal)
                 .map_err(|err| err.to_string())
+                .map_err(SessionError::from)
         }
         "vector" => {
             let element = match typed.get("element") {
@@ -194,7 +200,11 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
                 Some(Value::String(name)) => VectorElement::from_name(name).ok_or_else(|| {
                     format!("unknown vector element \"{name}\": f32, f16, i8 or bit")
                 })?,
-                Some(_) => return Err("a vector's element is f32, f16, i8 or bit".to_string()),
+                Some(_) => {
+                    return Err("a vector's element is f32, f16, i8 or bit"
+                        .to_string()
+                        .into());
+                }
             };
             let items = value
                 .as_array()
@@ -210,29 +220,31 @@ pub fn value_from_typed(typed: &Value) -> Result<ElementProperty, String> {
                 .and_then(|vector| vector.quantize(element))
                 .map(ElementProperty::Vector)
                 .map_err(|err| err.to_string())
+                .map_err(SessionError::from)
         }
         other => Err(format!(
             "unknown type \"{other}\": null, boolean, int64, float64, string, uuid, datetime, \
              localdatetime, date, time, offsettime, duration, vector, array or object"
-        )),
+        )
+        .into()),
     }
 }
 
 /// `[key, typed]` of a pair.
-pub(crate) fn key_and_value(pair: &Value) -> Result<(&str, &Value), String> {
+pub(crate) fn key_and_value(pair: &Value) -> Result<(&str, &Value), SessionError> {
     match pair.as_array().map(Vec::as_slice) {
         Some([Value::String(key), value]) => Ok((key.as_str(), value)),
-        _ => Err("expected a [key, typed value] pair".to_string()),
+        _ => Err("expected a [key, typed value] pair".to_string().into()),
     }
 }
 
-pub(crate) fn kind_of(kind: &str) -> Result<ElementKind, String> {
+pub(crate) fn kind_of(kind: &str) -> Result<ElementKind, SessionError> {
     match kind {
         "vertex" => Ok(ElementKind::Vertex),
         "edge" => Ok(ElementKind::Edge),
-        other => Err(format!(
-            "unknown element kind \"{other}\": expected \"vertex\" or \"edge\""
-        )),
+        other => {
+            Err(format!("unknown element kind \"{other}\": expected \"vertex\" or \"edge\"").into())
+        }
     }
 }
 
@@ -478,48 +490,63 @@ impl Session {
     /// damage found while open, or read-only for a reason the engine gives (a critical
     /// definition or segment it does not know). A write would be refused anyway (a commit hook
     /// vetoes it); the editor says why before the user types.
-    pub fn read_only_reason(&self) -> Option<String> {
+    ///
+    /// Fails when the store cannot say whether it is read-only (a poisoned store lock,
+    /// [`graphersal::persist::StoreFailure::LockPoisoned`]); [`Self::write_refusal`] turns that
+    /// into a refusal.
+    pub fn read_only_reason(&self) -> Result<Option<String>, SessionError> {
         if !self.store_view().is_null() {
-            return Some(
+            return Ok(Some(
                 "a read-only view of a past state is open: go back to the live graph (Store \
                  menu) to edit"
                     .to_string(),
-            );
+            ));
         }
-        let store = self.active_store()?;
+        let Some(store) = self.active_store() else {
+            return Ok(None);
+        };
         if let Some(marker) = store.backup_marker() {
-            return Some(format!(
+            return Ok(Some(format!(
                 "this is a backup (up to commit {}): it is read-only; restore it or fork it to \
                  edit",
                 marker.commit_seq
-            ));
+            )));
         }
         if store.maintenance().is_some() {
-            return Some(
+            return Ok(Some(
                 "the store is in maintenance mode (damage found when it was opened): it is \
                  read-only until it is repaired"
                     .to_string(),
-            );
+            ));
         }
         if store.is_frozen_by_damage() {
-            return Some(
+            return Ok(Some(
                 "damage was found on disk while the store was open: it is read-only now (damage \
                  policy maintenance); back it up and repair it"
                     .to_string(),
-            );
+            ));
         }
-        store
-            .read_only_reason()
-            .map(|reason| format!("the store is read-only: {reason}"))
+        Ok(store
+            .read_only_reason()?
+            .map(|reason| format!("the store is read-only: {reason}")))
+    }
+
+    /// Why a write is refused now: [`Self::read_only_reason`], or the error that kept it from
+    /// answering (a write is refused then too, with that error as its reason).
+    pub(crate) fn write_refusal(&self) -> Option<String> {
+        match self.read_only_reason() {
+            Ok(reason) => reason,
+            Err(err) => Some(err.to_string()),
+        }
     }
 
     /// The element `id` of `kind` (`"vertex"` or `"edge"`) as the property editor's edit view
     /// (module docs); `Value::Null` when there is none. An unknown kind is an error.
-    pub fn element_for_edit(&self, kind: &str, id: &str) -> Result<Value, String> {
+    pub fn element_for_edit(&self, kind: &str, id: &str) -> Result<Value, SessionError> {
         let kind = kind_of(kind)?;
-        let mut view = self.graph.element_view(kind, id);
+        let mut view = self.graph.element_view(kind, id)?;
         if let Value::Object(map) = &mut view {
-            map.insert("readOnly".into(), json!(self.read_only_reason()));
+            map.insert("readOnly".into(), json!(self.read_only_reason()?));
         }
         Ok(view)
     }
@@ -545,7 +572,7 @@ impl Session {
             )]);
         };
         let validate_only = request.get("validateOnly").and_then(Value::as_bool) == Some(true);
-        if let Some(reason) = self.read_only_reason() {
+        if let Some(reason) = self.write_refusal() {
             return refused(vec![FieldError::new("general", reason)]);
         }
         let current = |s: &Self| {
@@ -618,7 +645,7 @@ mod tests {
         // A stored datetime needs its offset or zone: the instant is never guessed.
         let err = value_from_typed(&json!({"type": "datetime", "value": "2023-08-02T09:30"}))
             .unwrap_err();
-        assert!(err.contains("2023-08-02T09:30"), "{err}");
+        assert!(err.to_string().contains("2023-08-02T09:30"), "{err}");
         let zoned = value_from_typed(
             &json!({"type": "datetime", "value": "2023-08-02T09:30[Europe/Berlin]"}),
         )
@@ -633,7 +660,7 @@ mod tests {
         assert!(value_from_typed(&json!({"type": "offsettime", "value": "09:30"})).is_err());
         assert!(value_from_typed(&json!({"type": "duration", "value": 5})).is_err());
         let unknown = value_from_typed(&json!({"type": "instant", "value": "x"})).unwrap_err();
-        assert!(unknown.contains("datetime"), "{unknown}");
+        assert!(unknown.to_string().contains("datetime"), "{unknown}");
     }
 
     #[test]
@@ -672,7 +699,7 @@ mod tests {
     #[test]
     fn update_sets_and_removes_in_one_commit() {
         let mut s = modern();
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         let answer = s.update_element(&json!({
             "kind": "vertex", "id": "1",
             "set": [["age", {"type": "int64", "value": "30"}],
@@ -681,7 +708,7 @@ mod tests {
         }));
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["changed"], true);
-        assert_eq!(s.graph().last_commit_seq(), before + 1);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before + 1);
         let v = &answer["element"];
         assert_eq!(prop(v, "age").unwrap()["value"], "30");
         assert!(prop(v, "name").is_none());
@@ -691,14 +718,14 @@ mod tests {
     #[test]
     fn a_dry_run_changes_nothing() {
         let mut s = modern();
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         let answer = s.update_element(&json!({
             "kind": "edge", "id": "0", "validateOnly": true,
             "set": [["weight", {"type": "float64", "value": 0.9}]],
         }));
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["changed"], false);
-        assert_eq!(s.graph().last_commit_seq(), before);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before);
         let e = s.element_for_edit("edge", "0").unwrap();
         assert_eq!(prop(&e, "weight").unwrap()["value"], 0.5);
     }
@@ -713,7 +740,7 @@ mod tests {
             None,
         )
         .expect("schema");
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         for validate_only in [true, false] {
             let answer = s.update_element(&json!({
                 "kind": "vertex", "id": "1", "validateOnly": validate_only,
@@ -733,7 +760,7 @@ mod tests {
             assert!(!fields.contains(&"nick"), "{answer}");
         }
         // Nothing was applied, not even the valid key.
-        assert_eq!(s.graph().last_commit_seq(), before);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before);
         let v = s.element_for_edit("vertex", "1").unwrap();
         assert!(prop(&v, "nick").is_none());
         assert_eq!(prop(&v, "name").unwrap()["value"], "marko");
@@ -766,14 +793,14 @@ mod tests {
         let mut s = Session::new();
         s.set_memory_stores(true);
         s.load_sample("modern").expect("modern");
-        assert_eq!(s.read_only_reason(), None);
+        assert_eq!(s.read_only_reason().unwrap(), None);
         s.execute(
             "g.v(\"1\").property(\"age\", 30).iterate()",
             &Default::default(),
         );
         s.store_open_view(&json!({"target": {"commit": 0}}))
             .expect("view");
-        let reason = s.read_only_reason().expect("read-only");
+        let reason = s.read_only_reason().unwrap().expect("read-only");
         assert!(reason.contains("read-only view"), "{reason}");
         let v = s.element_for_edit("vertex", "1").unwrap();
         assert_eq!(v["readOnly"], json!(reason));
@@ -783,7 +810,7 @@ mod tests {
         }));
         assert_eq!(answer["ok"], false);
         s.store_close_view().expect("live");
-        assert_eq!(s.read_only_reason(), None);
+        assert_eq!(s.read_only_reason().unwrap(), None);
     }
 
     /// The modern graph twice: as a `TraversalGraph` and wrapped in the `Forwarding` storage

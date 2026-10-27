@@ -23,6 +23,7 @@
 //!   rights and stores the effects they allow); answers `{ok: true, job: entry}` or `{ok:
 //!   false, errors: [{field, message, help?}]}` with `field` one of the keys or `general`.
 
+use crate::error::SessionError;
 use std::sync::{Arc, Weak};
 
 use graphersal::catalog::{Definition, DefinitionKind, JobDefinition, JobTask};
@@ -44,12 +45,15 @@ pub struct SessionJobs {
     current: Option<(Weak<dyn SessionStore>, Scheduler)>,
     /// The catalog's job definitions the scheduler's user jobs were built from.
     user_jobs: Vec<graphersal::catalog::Definition>,
+    /// The job definitions of the catalog the store does not schedule, with the reason
+    /// ([`graphersal::persist::UserJobs::not_scheduled`]).
+    not_scheduled: Vec<graphersal::persist::NotScheduledJob>,
 }
 
 impl Session {
     /// Sets the time zone the scheduled jobs run in (the instance's local zone, which the host
     /// knows: `TZ` or `/etc/localtime` natively, the browser's zone in the playground).
-    pub fn set_time_zone(&mut self, name: &str) -> Result<(), String> {
+    pub fn set_time_zone(&mut self, name: &str) -> Result<(), SessionError> {
         Scheduler::new()
             .with_time_zone(name)
             .map_err(|err| err.to_string())?;
@@ -59,11 +63,13 @@ impl Session {
         Ok(())
     }
 
-    /// The scheduler of the active store, built when the active store changed.
-    fn scheduler(&mut self) -> Option<&mut Scheduler> {
+    /// The scheduler of the active store, built when the active store changed (`None`: no
+    /// store). Fails when the catalog or the store's jobs cannot be read, the time zone set
+    /// before no longer resolves, or a system job is refused by the scheduler.
+    fn scheduler(&mut self) -> Result<Option<&mut Scheduler>, SessionError> {
         let Some(store) = self.active_store() else {
             self.jobs.current = None;
-            return None;
+            return Ok(None);
         };
         let same = self
             .jobs
@@ -71,41 +77,54 @@ impl Session {
             .as_ref()
             .is_some_and(|(known, _)| std::ptr::addr_eq(known.as_ptr(), Arc::as_ptr(&store)));
         if !same {
-            // The zone was checked when it was set; an unknown one falls back to UTC.
-            let zoned = match &self.jobs.time_zone {
-                Some(zone) => Scheduler::new().with_time_zone(zone).ok(),
-                None => None,
+            // The zone was checked when it was set ([`Self::set_time_zone`]): one that no
+            // longer resolves is an error, never a silent UTC.
+            let scheduler = match &self.jobs.time_zone {
+                Some(zone) => Scheduler::new()
+                    .with_time_zone(zone)
+                    .map_err(|err| SessionError::failed(err.to_string()))?,
+                None => Scheduler::new(),
             };
-            let mut scheduler = zoned.unwrap_or_default().with_stats(store.workload_stats());
+            let mut scheduler = scheduler.with_stats(store.workload_stats());
             for job in store.system_jobs() {
-                let _ = scheduler.add(job);
+                scheduler
+                    .add(job)
+                    .map_err(|err| SessionError::failed(err.to_string()))?;
             }
             self.jobs.current = Some((Arc::downgrade(&store), scheduler));
             self.jobs.user_jobs.clear();
+            self.jobs.not_scheduled.clear();
         }
         // The user jobs follow the catalog: rebuilt when its job definitions changed (a define,
         // a drop, a rollback or a catalog load).
         let definitions = self
             .graph()
-            .definitions(Some(graphersal::catalog::DefinitionKind::JOB));
-        let (_, scheduler) = self.jobs.current.as_mut()?;
+            .definitions(Some(graphersal::catalog::DefinitionKind::JOB))?;
+        let Some((_, scheduler)) = self.jobs.current.as_mut() else {
+            return Ok(None);
+        };
         if definitions != self.jobs.user_jobs {
-            scheduler.sync_user_jobs(store.user_jobs());
+            let found = store.user_jobs()?;
+            scheduler.sync_user_jobs(found.jobs);
+            self.jobs.not_scheduled = found.not_scheduled;
             self.jobs.user_jobs = definitions;
         }
-        self.jobs.current.as_mut().map(|(_, scheduler)| scheduler)
+        Ok(self.jobs.current.as_mut().map(|(_, scheduler)| scheduler))
     }
 
     /// Runs the due jobs of the active store at `now` (microseconds since the Unix epoch);
-    /// returns the names of the jobs that ran.
-    pub fn tick_jobs(&mut self, now: i64) -> Vec<String> {
-        self.scheduler()
-            .map_or_else(Vec::new, |scheduler| scheduler.tick(now))
+    /// returns the names of the jobs that ran. Fails when the scheduler cannot be built
+    /// (the catalog or the store's jobs cannot be read).
+    pub fn tick_jobs(&mut self, now: i64) -> Result<Vec<String>, SessionError> {
+        Ok(self
+            .scheduler()?
+            .map_or_else(Vec::new, |scheduler| scheduler.tick(now)))
     }
 
     /// The jobs of the served graph (module docs, "List"): the active store's system jobs, then
-    /// the catalog's jobs of users by name.
-    pub fn jobs_view(&mut self) -> Value {
+    /// the catalog's jobs of users by name. Fails when the catalog, the store's jobs or the
+    /// workload statistics cannot be read.
+    pub fn jobs_view(&mut self) -> Result<Value, SessionError> {
         let zone = self
             .jobs
             .time_zone
@@ -114,10 +133,10 @@ impl Session {
         let store = self.active_store();
         let stats = store.as_ref().map(|store| store.workload_stats());
         let scheduled: Vec<JobInfo> = self
-            .scheduler()
+            .scheduler()?
             .map(|scheduler| scheduler.jobs())
             .unwrap_or_default();
-        let runs = self.job_runs();
+        let runs = self.job_runs()?;
         let mut jobs: Vec<Value> = scheduled
             .iter()
             .filter(|job| job.kind == JobKind::System)
@@ -135,7 +154,7 @@ impl Session {
                 entry
             })
             .collect();
-        let definitions = self.graph().definitions(Some(DefinitionKind::JOB));
+        let definitions = self.graph().definitions(Some(DefinitionKind::JOB))?;
         for definition in &definitions {
             let Some(job) = definition.as_job() else {
                 continue;
@@ -148,7 +167,16 @@ impl Session {
                 (Some(_), _) => None,
                 (None, Some(reason)) => Some(reason),
                 (None, None) if store.is_none() => Some(NO_STORE.to_string()),
-                (None, None) => Some(NAMED_LIKE_SYSTEM.to_string()),
+                (None, None) => Some(
+                    self.jobs
+                        .not_scheduled
+                        .iter()
+                        .find(|skipped| skipped.name == definition.name())
+                        .map_or_else(
+                            || NAMED_LIKE_SYSTEM.to_string(),
+                            |skipped| skipped.reason.clone(),
+                        ),
+                ),
             };
             entry["scheduled"] = json!(running.is_some());
             entry["reason"] = json!(reason);
@@ -162,23 +190,24 @@ impl Session {
             let name = entry["name"].as_str().unwrap_or_default().to_string();
             entry["runs"] = runs.get(&name).cloned().unwrap_or(Value::Null);
         }
-        json!({ "timeZone": zone, "store": store.is_some(), "jobs": jobs })
+        Ok(json!({ "timeZone": zone, "store": store.is_some(), "jobs": jobs }))
     }
 
-    /// The job `name` as its list entry (module docs), `null` when there is none.
-    pub fn job_entry(&mut self, name: &str) -> Value {
-        self.jobs_view()["jobs"]
+    /// The job `name` as its list entry (module docs), `null` when there is none. Fails like
+    /// [`Self::jobs_view`].
+    pub fn job_entry(&mut self, name: &str) -> Result<Value, SessionError> {
+        Ok(self.jobs_view()?["jobs"]
             .as_array()
             .and_then(|jobs| jobs.iter().find(|job| job["name"] == name))
             .cloned()
-            .unwrap_or(Value::Null)
+            .unwrap_or(Value::Null))
     }
 
     /// The run counts of every job from the workload statistics: name -> `{last_hour,
     /// last_two_days, last_ninety_days}` (each `{count, failed, total_micros, max_micros, ..}`).
-    fn job_runs(&self) -> std::collections::HashMap<String, Value> {
-        let report = self.workload_report();
-        report["jobs"]
+    fn job_runs(&self) -> Result<std::collections::HashMap<String, Value>, SessionError> {
+        let report = self.workload_report()?;
+        Ok(report["jobs"]
             .as_array()
             .map(|rows| {
                 rows.iter()
@@ -195,7 +224,7 @@ impl Session {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Defines (or replaces) a job of a user from a spec (module docs, "Define") with the
@@ -212,11 +241,12 @@ impl Session {
         spec: &Value,
         authorizer: Arc<dyn graphersal::auth::Authorizer>,
     ) -> Value {
+        let queries = match self.graph().definitions(Some(DefinitionKind::QUERY)) {
+            Ok(queries) => queries,
+            Err(err) => return field_errors(&[FieldError::new("general", err.to_string())]),
+        };
         let script = match job_call_text(spec, |name| {
-            self.graph()
-                .definitions(Some(DefinitionKind::QUERY))
-                .iter()
-                .any(|definition| definition.name() == name)
+            queries.iter().any(|definition| definition.name() == name)
         }) {
             Ok(script) => script,
             Err(errors) => return field_errors(&errors),
@@ -232,7 +262,10 @@ impl Session {
         ) {
             Ok(_) => {
                 let name = spec["name"].as_str().unwrap_or_default().trim().to_string();
-                json!({"ok": true, "job": self.job_entry(&name)})
+                match self.job_entry(&name) {
+                    Ok(job) => json!({"ok": true, "job": job}),
+                    Err(err) => field_errors(&[FieldError::new("general", err.to_string())]),
+                }
             }
             Err(err) => {
                 let text = graphersal::script::map_eval_error(err, &limits).to_string();
@@ -242,15 +275,15 @@ impl Session {
     }
 
     /// Drops the job of a user `name`: `true`, or `false` when there was none.
-    pub fn drop_job(&mut self, name: &str) -> Result<bool, String> {
+    pub fn drop_job(&mut self, name: &str) -> Result<bool, SessionError> {
         self.graph.drop_definition(DefinitionKind::JOB, name)
     }
 
     /// Switches job `name` on or off: a job of a user in its catalog definition (one commit;
     /// its stored effects stay), a system job in the instance's settings (kept in the store's
     /// workload sidecar). Answers the job's entry.
-    pub fn set_job_enabled(&mut self, name: &str, enabled: bool) -> Result<Value, String> {
-        if let Some(definition) = self.graph().definition(DefinitionKind::JOB, name) {
+    pub fn set_job_enabled(&mut self, name: &str, enabled: bool) -> Result<Value, SessionError> {
+        if let Some(definition) = self.graph().definition(DefinitionKind::JOB, name)? {
             let job = definition
                 .as_job()
                 .ok_or_else(|| format!("the job '{name}' is kept opaque and cannot be changed"))?
@@ -259,7 +292,7 @@ impl Session {
             self.graph
                 .set_definitions(vec![Definition::job(name, job)])
                 .map_err(|err| err.to_string())?;
-            return Ok(self.job_entry(name));
+            return self.job_entry(name);
         }
         self.change_system_job(name, |setting| setting.with_enabled(enabled))
     }
@@ -271,11 +304,16 @@ impl Session {
         &mut self,
         name: &str,
         schedule: Option<&str>,
-    ) -> Result<Value, String> {
-        if self.graph().definition(DefinitionKind::JOB, name).is_some() {
+    ) -> Result<Value, SessionError> {
+        if self
+            .graph()
+            .definition(DefinitionKind::JOB, name)?
+            .is_some()
+        {
             return Err(format!(
                 "'{name}' is a job of a user: define it again with the new schedule"
-            ));
+            )
+            .into());
         }
         let schedule = schedule.map(str::trim).filter(|text| !text.is_empty());
         if let Some(text) = schedule {
@@ -294,10 +332,10 @@ impl Session {
         &mut self,
         name: &str,
         change: impl FnOnce(JobOverride) -> JobOverride,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, SessionError> {
         let store = self.active_store().ok_or_else(|| NO_STORE.to_string())?;
         if !store.system_jobs().iter().any(|job| job.name() == name) {
-            return Err(format!("no job named '{name}'"));
+            return Err(format!("no job named '{name}'").into());
         }
         let stats = store.workload_stats();
         let setting = change(stats.job_override(name).unwrap_or_default());
@@ -308,30 +346,32 @@ impl Session {
             .system_jobs()
             .into_iter()
             .find(|job| job.name() == name);
-        if let (Some(job), Some(scheduler)) = (job, self.scheduler()) {
+        if let (Some(job), Some(scheduler)) = (job, self.scheduler()?) {
             scheduler
                 .set_schedule(name, job.schedule().clone())
                 .and_then(|()| scheduler.set_enabled(name, job.enabled()))
                 .map_err(|err| err.to_string())?;
         }
-        Ok(self.job_entry(name))
+        self.job_entry(name)
     }
 
     /// Runs job `name` now, whatever its schedule (its planned time stays). Answers the job's
     /// entry, whose `last` is this run.
-    pub fn run_job_now(&mut self, name: &str) -> Result<Value, String> {
+    pub fn run_job_now(&mut self, name: &str) -> Result<Value, SessionError> {
         let now = now_micros();
-        let scheduler = self.scheduler().ok_or_else(|| NO_STORE.to_string())?;
+        let scheduler = self
+            .scheduler()?
+            .ok_or_else(|| SessionError::invalid(NO_STORE))?;
         scheduler
             .run_now(name, now)
             .map_err(|err| err.to_string())?;
-        Ok(self.job_entry(name))
+        self.job_entry(name)
     }
 
     /// The run history of job `name` in tier `tier` (`minutes`, `hours`, `days`): `{tier,
     /// buckets: [{start, count, failed, total_micros, max_micros, items}]}`, oldest first (the
     /// data of a chart; empty when it never ran in that window).
-    pub fn job_history(&self, name: &str, tier: &str) -> Result<Value, String> {
+    pub fn job_history(&self, name: &str, tier: &str) -> Result<Value, SessionError> {
         let report = self.workload_report_with_history(tier)?;
         let buckets = report["jobs"]
             .as_array()
@@ -357,21 +397,28 @@ impl Session {
     /// The workload statistics of the served graph
     /// ([`graphersal::workload::WorkloadReport::to_property`] as JSON: `{level, queries,
     /// properties, locks, jobs}`); a graph without statistics (not in a store) answers level
-    /// `off` with empty lists. Reading it is not counted.
-    pub fn workload_report(&self) -> Value {
+    /// `off` with empty lists. Reading it is not counted. Fails when the report does not read
+    /// back as JSON (never expected: the report writes its own JSON).
+    pub fn workload_report(&self) -> Result<Value, SessionError> {
         self.workload_report_in(None)
     }
 
     /// [`Self::workload_report`] with every row's `history` of the tier `tier` (`minutes`,
     /// `hours` or `days`: its buckets, oldest first, the data of a chart) and `history_tier`;
     /// `Err` names the tiers for another `tier`.
-    pub fn workload_report_with_history(&self, tier: &str) -> Result<Value, String> {
-        let tier = graphersal::workload::HistoryTier::from_name(tier)
-            .ok_or_else(|| format!("unknown history tier '{tier}': use minutes, hours or days"))?;
-        Ok(self.workload_report_in(Some(tier)))
+    pub fn workload_report_with_history(&self, tier: &str) -> Result<Value, SessionError> {
+        let tier = graphersal::workload::HistoryTier::from_name(tier).ok_or_else(|| {
+            SessionError::invalid(format!(
+                "unknown history tier '{tier}': use minutes, hours or days"
+            ))
+        })?;
+        self.workload_report_in(Some(tier))
     }
 
-    fn workload_report_in(&self, history: Option<graphersal::workload::HistoryTier>) -> Value {
+    fn workload_report_in(
+        &self,
+        history: Option<graphersal::workload::HistoryTier>,
+    ) -> Result<Value, SessionError> {
         let now = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.as_micros() as i64);
@@ -384,7 +431,8 @@ impl Session {
             Some(tier) => stats.report_with_history(now, tier),
             None => stats.report(now),
         };
-        serde_json::from_str(&report.to_json()).unwrap_or(Value::Null)
+        serde_json::from_str(&report.to_json())
+            .map_err(|err| SessionError::failed(format!("the workload report is not JSON: {err}")))
     }
 }
 
@@ -655,31 +703,31 @@ mod tests {
     fn the_active_store_s_system_jobs_tick() {
         let mut s = Session::new();
         // Without a store there are no jobs.
-        assert_eq!(s.jobs_view()["jobs"], json!([]));
-        assert!(s.tick_jobs(T0).is_empty());
+        assert_eq!(s.jobs_view().unwrap()["jobs"], json!([]));
+        assert!(s.tick_jobs(T0).unwrap().is_empty());
         s.set_memory_stores(true);
         s.load_sample("modern").unwrap();
         s.set_time_zone("Europe/Berlin").unwrap();
         assert!(s.set_time_zone("Nowhere/Land").is_err());
-        let view = s.jobs_view();
+        let view = s.jobs_view().unwrap();
         assert_eq!(view["timeZone"], "Europe/Berlin");
         assert_eq!(view["jobs"][0]["name"], "stats_flush");
         assert_eq!(view["jobs"][0]["kind"], "system");
         assert_eq!(view["jobs"][1]["enabled"], false);
-        s.tick_jobs(T0);
-        assert_eq!(s.tick_jobs(T0 + MINUTE), ["stats_flush"]);
-        let view = s.jobs_view();
+        s.tick_jobs(T0).unwrap();
+        assert_eq!(s.tick_jobs(T0 + MINUTE).unwrap(), ["stats_flush"]);
+        let view = s.jobs_view().unwrap();
         assert!(view["jobs"][0]["last"]["error"].is_null(), "{view}");
         // Another active store gets its own scheduler (planned anew).
         s.load_sample("modern").unwrap();
-        assert!(s.jobs_view()["jobs"][0]["last"].is_null());
+        assert!(s.jobs_view().unwrap()["jobs"][0]["last"].is_null());
     }
 
     #[test]
     fn only_the_users_queries_count_under_the_hosts_channel() {
         use graphersal::workload::{Channel, scope};
         let mut s = Session::new();
-        assert_eq!(s.workload_report()["level"], "off");
+        assert_eq!(s.workload_report().unwrap()["level"], "off");
         s.set_memory_stores(true);
         s.load_sample("modern").unwrap();
         scope(Channel::Mcp, true, || {
@@ -691,7 +739,7 @@ mod tests {
             );
             assert!(answer.contains("marko"), "{answer}");
         });
-        let report = s.workload_report();
+        let report = s.workload_report().unwrap();
         let queries = report["queries"].as_array().unwrap();
         assert_eq!(queries.len(), 1, "{report}");
         assert_eq!(queries[0]["channel"], "mcp");
@@ -722,10 +770,15 @@ mod tests {
         assert_eq!(history.len(), 1, "{report}");
         assert_eq!(history[0]["count"], 1);
         assert!(history[0]["start"].as_i64().unwrap() > 0);
-        assert!(s.workload_report()["queries"][0].get("history").is_none());
+        assert!(
+            s.workload_report().unwrap()["queries"][0]
+                .get("history")
+                .is_none()
+        );
         assert!(
             s.workload_report_with_history("weeks")
                 .unwrap_err()
+                .to_string()
                 .contains("minutes")
         );
     }
@@ -743,7 +796,7 @@ mod tests {
             answer.contains("\"ok\": true") || answer.contains("\"ok\":true"),
             "{answer}"
         );
-        let view = s.jobs_view();
+        let view = s.jobs_view().unwrap();
         let cp = view["jobs"]
             .as_array()
             .unwrap()
@@ -752,11 +805,15 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(cp["kind"], "user", "{view}");
-        s.tick_jobs(T0);
-        assert!(s.tick_jobs(T0 + MINUTE).contains(&"cp".to_string()));
+        s.tick_jobs(T0).unwrap();
+        assert!(
+            s.tick_jobs(T0 + MINUTE)
+                .unwrap()
+                .contains(&"cp".to_string())
+        );
         // Dropped: gone from the scheduler at the next look.
         s.execute(r#"g.drop_job("cp")"#, &crate::RunOptions::default());
-        let view = s.jobs_view();
+        let view = s.jobs_view().unwrap();
         assert!(
             !view["jobs"]
                 .as_array()
@@ -770,10 +827,12 @@ mod tests {
     #[test]
     fn the_statistics_memory_is_in_the_sessions_statistics() {
         let mut s = Session::new();
-        assert_eq!(s.statistics()["memory"]["workload_bytes"], 0);
+        assert_eq!(s.statistics().unwrap()["memory"]["workload_bytes"], 0);
         s.set_memory_stores(true);
         s.load_sample("modern").unwrap();
-        let bytes = s.statistics()["memory"]["workload_bytes"].as_u64().unwrap();
+        let bytes = s.statistics().unwrap()["memory"]["workload_bytes"]
+            .as_u64()
+            .unwrap();
         assert!(bytes > 0, "{bytes}");
     }
 
@@ -823,7 +882,7 @@ mod tests {
             .collect();
         assert_eq!(effects, ["Execute", "Delete"]);
         // The list: system jobs first, then this one.
-        let view = s.jobs_view();
+        let view = s.jobs_view().unwrap();
         assert_eq!(view["store"], true);
         let names: Vec<&str> = view["jobs"]
             .as_array()
@@ -848,10 +907,15 @@ mod tests {
         assert!(count.contains("\"0\"") || count.contains(": 0"), "{count}");
         let history = s.job_history("nightly_purge", "minutes").unwrap();
         assert_eq!(history["buckets"].as_array().unwrap().len(), 1, "{history}");
-        assert!(s.run_job_now("nowhere").unwrap_err().contains("nowhere"));
+        assert!(
+            s.run_job_now("nowhere")
+                .unwrap_err()
+                .to_string()
+                .contains("nowhere")
+        );
         assert!(s.drop_job("nightly_purge").unwrap());
         assert!(!s.drop_job("nightly_purge").unwrap());
-        assert!(s.job_entry("nightly_purge").is_null());
+        assert!(s.job_entry("nightly_purge").unwrap().is_null());
     }
 
     #[test]
@@ -886,7 +950,7 @@ mod tests {
             "name": "b", "schedule": "* * * * *", "action": "backup", "path": "/tmp/backups"
         }));
         assert_eq!(fields(&answer), ["path"], "{answer}");
-        assert_eq!(s.jobs_view()["jobs"].as_array().unwrap().len(), 2);
+        assert_eq!(s.jobs_view().unwrap()["jobs"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -901,6 +965,7 @@ mod tests {
         assert!(
             s.set_job_schedule("nowhere", None)
                 .unwrap_err()
+                .to_string()
                 .contains("nowhere")
         );
         // The store hands its system jobs out with the setting applied.
@@ -921,6 +986,7 @@ mod tests {
         assert!(
             s.set_job_schedule("cp", Some("0 * * * *"))
                 .unwrap_err()
+                .to_string()
                 .contains("define")
         );
     }

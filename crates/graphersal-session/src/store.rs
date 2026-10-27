@@ -13,6 +13,7 @@
 //! A target is a JSON object: `{"commit": N}`, `{"mark": "name"}` or `{"time": T}` with `T` an
 //! RFC 3339 date-time (`"2026-10-08T02:43:00Z"`) or microseconds.
 
+use crate::error::SessionError;
 use std::sync::Arc;
 
 use graphersal::changes::{ChangeSet, CommitHook, HookError, HookRefusal, Mutation};
@@ -35,8 +36,11 @@ const MAX_SAMPLES: usize = 5;
 
 /// A failed store operation: an HTTP-like status (400 a malformed request, 404 nothing there,
 /// 409 not possible in this state, 422 the store refused it, 500 an internal failure) and the
-/// diagnostic.
+/// diagnostic. `#[non_exhaustive]`: built through its constructors ([`Self::new`],
+/// [`Self::bad_request`], [`Self::conflict`], [`Self::refused`], [`Self::internal`], `From`
+/// the session's and the engine's errors), so fields can be added later.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoreError {
     /// The status.
     pub status: u16,
@@ -49,6 +53,21 @@ pub struct StoreError {
 }
 
 impl StoreError {
+    /// An error of `status` with `message` and no structured fields.
+    pub fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// The error with the structured fields `data` (an object, see [`Self::data`]).
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
     /// A malformed request (400).
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self {
@@ -67,7 +86,8 @@ impl StoreError {
         }
     }
 
-    fn refused(err: PersistError) -> Self {
+    /// The store refused the operation (422), with the error's diagnostic.
+    pub fn refused(err: PersistError) -> Self {
         Self {
             status: 422,
             message: graphersal::error::format_diagnostic(&err),
@@ -75,7 +95,8 @@ impl StoreError {
         }
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    /// An internal failure (500).
+    pub fn internal(message: impl Into<String>) -> Self {
         Self {
             status: 500,
             message: message.into(),
@@ -91,6 +112,34 @@ impl std::fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+/// A store refusal (422).
+impl From<PersistError> for StoreError {
+    fn from(err: PersistError) -> Self {
+        StoreError::refused(err)
+    }
+}
+
+/// A graph that refused the read or write (a view the thread may not have): 409.
+impl From<graphersal::error::GraphError> for StoreError {
+    fn from(err: graphersal::error::GraphError) -> Self {
+        StoreError::conflict(err.to_string())
+    }
+}
+
+/// A session error with its status: a graph refusal 409, a malformed request 400, a store or
+/// engine refusal 422.
+impl From<crate::error::SessionError> for StoreError {
+    fn from(err: crate::error::SessionError) -> Self {
+        use crate::error::SessionError;
+        match err {
+            SessionError::Graph(err) => StoreError::from(err),
+            SessionError::Persist(err) => StoreError::refused(err),
+            SessionError::Invalid(text) => StoreError::bad_request(text),
+            other => StoreError::new(422, other.to_string()),
+        }
+    }
+}
 
 /// Where a fork goes.
 pub enum ForkInto {
@@ -152,8 +201,13 @@ impl Session {
 
     /// Serves `store` as the session's database "main" (the dev server's `--graph <dir>`; a
     /// `Store<S>` of any storage): its graph is the session's graph. Replaces the stores the
-    /// session had.
-    pub fn attach_store(&mut self, store: Arc<dyn SessionStore>, label: &str) -> Value {
+    /// session had. Returns the graph info; an error reading it is returned (the store stays
+    /// attached).
+    pub fn attach_store(
+        &mut self,
+        store: Arc<dyn SessionStore>,
+        label: &str,
+    ) -> Result<Value, SessionError> {
         let graph = store.session_graph();
         self.stores = Some(Stores {
             databases: vec![Database {
@@ -291,7 +345,7 @@ impl Session {
             .ok_or_else(|| StoreError::conflict("no store is active"))?;
         let (graph, label) = (db.store.session_graph(), db.label.clone());
         self.set_view(None);
-        Ok(self.load_shared(graph, &label, "store"))
+        Ok(self.load_shared(graph, &label, "store")?)
     }
 
     /// `GET /api/store`: identity, position, snapshots, marks, attic (with whether each entry
@@ -323,7 +377,12 @@ impl Session {
         // attic AND the small files GRAPH, GRAPH.copy, marks, ...), the figure the compaction
         // advice works with. Snapshots + WAL + attic alone (without the small files) would be
         // a second, smaller "store size"; it is only the fallback without an advice.
-        let advice = store.compaction_advice().ok();
+        // An advice that cannot be computed (an unreadable file of a damaged store) does not
+        // hide the rest of the info: it is `compactionError`, beside `compaction: null`.
+        let (advice, advice_error) = match store.compaction_advice() {
+            Ok(advice) => (Some(advice), None),
+            Err(err) => (None, Some(graphersal::error::format_diagnostic(&err))),
+        };
         let store_bytes = advice.as_ref().map_or_else(
             || {
                 info.snapshot_bytes
@@ -334,7 +393,7 @@ impl Session {
         );
         let graph_bytes = store
             .session_graph()
-            .memory_usage()
+            .memory_usage()?
             .map(|m| m.total_bytes());
         answer["memory"] = json!(store.dir().is_volatile());
         answer["kind"] = json!(if store.dir().is_volatile() {
@@ -355,12 +414,17 @@ impl Session {
         });
         // Cheap (no data is read): the menu shows it on every refresh.
         answer["compaction"] = advice.as_ref().map_or(Value::Null, advice_value);
+        answer["compactionError"] = json!(advice_error);
         answer["storeBytes"] = json!(store_bytes);
         answer["storeBytesText"] = json!(bytes_text(store_bytes));
         answer["graphBytes"] = json!(graph_bytes);
         answer["graphBytesText"] = json!(graph_bytes.map(bytes_text));
         answer["walSinceCheckpoint"] = json!(store.wal_bytes_since_checkpoint());
-        answer["lastAutoCheckpointError"] = json!(store.last_auto_checkpoint_error());
+        answer["lastAutoCheckpointError"] = json!(
+            store
+                .last_auto_checkpoint_error()?
+                .map(|err| err.to_string())
+        );
         answer["maintenance"] = store.maintenance().map(damage_value).unwrap_or(Value::Null);
         answer["backupFromMemory"] =
             json!(!info.damage_found.is_empty() && store.maintenance().is_none());
@@ -372,15 +436,15 @@ impl Session {
                 .iter()
                 .enumerate()
                 .map(|(i, db)| {
-                    json!({
+                    Ok(json!({
                         "id": db.id,
                         "label": db.label,
                         "active": i == stores.active,
-                        "commitSeq": db.store.session_graph().last_commit_seq(),
+                        "commitSeq": db.store.session_graph().last_commit_seq()?,
                         "location": db.store.location(),
-                    })
+                    }))
                 })
-                .collect(),
+                .collect::<Result<_, StoreError>>()?,
         );
         Ok(answer)
     }
@@ -560,11 +624,7 @@ impl Session {
         let opened = self
             .factory
             .open_store(Arc::new(dir), StoreOptions::new())
-            .map_err(|message| StoreError {
-                status: 422,
-                message,
-                data: None,
-            })?;
+            .map_err(|message| StoreError::new(422, message.to_string()))?;
         let stores = self
             .stores
             .as_mut()
@@ -816,11 +876,7 @@ impl Session {
             .databases
             .iter()
             .position(|db| db.id == id)
-            .ok_or_else(|| StoreError {
-                status: 404,
-                message: format!("there is no database {id:?}"),
-                data: None,
-            })?;
+            .ok_or_else(|| StoreError::new(404, format!("there is no database {id:?}")))?;
         stores.active = index;
         let graph = self.serve_live()?;
         Ok(json!({ "graph": graph, "store": self.store_info()? }))
@@ -837,11 +893,7 @@ impl Session {
             .databases
             .iter()
             .position(|db| db.id == id)
-            .ok_or_else(|| StoreError {
-                status: 404,
-                message: format!("there is no database {id:?}"),
-                data: None,
-            })?;
+            .ok_or_else(|| StoreError::new(404, format!("there is no database {id:?}")))?;
         if index == stores.active {
             return Err(StoreError::conflict(
                 "this is the database in use: switch to another one first",
@@ -851,7 +903,9 @@ impl Session {
         if index < stores.active {
             stores.active -= 1;
         }
-        let _ = db.store.shutdown();
+        // Removed from the session either way; a failing close is the answer (its files stay
+        // as the last durable commit left them).
+        db.store.shutdown().map_err(StoreError::refused)?;
         Ok(json!({ "closed": id, "store": self.store_info()? }))
     }
 }
@@ -1164,19 +1218,20 @@ fn missing_models(info: &StoreInfo) -> Vec<String> {
 
 /// The damage found on disk while `store` is open, as the UI's banner reads it (cheap: no file
 /// is read): `{text, frozen, foundBy, policy, problems}`, or `null` while none was found.
-pub fn found_damage_value(store: &dyn SessionStore) -> Value {
-    let found = store.damage_found();
+/// Fails when the store's lock of that list is poisoned.
+pub fn found_damage_value(store: &dyn SessionStore) -> Result<Value, PersistError> {
+    let found = store.damage_found()?;
     let Some(first) = found.first() else {
-        return Value::Null;
+        return Ok(Value::Null);
     };
     let frozen = store.is_frozen_by_damage();
-    json!({
+    Ok(json!({
         "text": found_damage_text(&store.location(), &found, frozen),
         "frozen": frozen,
         "foundBy": first.found_by,
-        "policy": store.damage_policy().name(),
+        "policy": store.damage_policy()?.name(),
         "problems": found.iter().map(|f| f.problems.len()).sum::<usize>(),
-    })
+    }))
 }
 
 /// What the UI says about damage found while the store at `location` is open (empty when none
@@ -1352,12 +1407,13 @@ fn bare_date_message(date: &str) -> String {
 /// seconds, includes the commit listed with it). A time without a zone is refused (it would
 /// depend on the machine's time zone), and so is a bare date (`2026-10-08`): the error shows
 /// the explicit forms (`2026-10-08T23:59:59Z`, `2026-10-08T00:00:00+02:00`).
-pub fn parse_time(text: &str) -> Result<i64, String> {
+pub fn parse_time(text: &str) -> Result<i64, SessionError> {
     let text = text.trim();
     if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
         return text
             .parse::<i64>()
-            .map_err(|_| format!("{text:?} is too large for microseconds since the epoch"));
+            .map_err(|_| format!("{text:?} is too large for microseconds since the epoch"))
+            .map_err(SessionError::from);
     }
     let bad = |why: &str| {
         format!(
@@ -1375,22 +1431,22 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
         }
     };
     let (Some(year), Some(month), Some(day)) = (digits(0, 4), digits(5, 2), digits(8, 2)) else {
-        return Err(bad("the date must be YYYY-MM-DD"));
+        return Err(bad("the date must be YYYY-MM-DD").into());
     };
     if bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
-        return Err(bad("the date must be YYYY-MM-DD"));
+        return Err(bad("the date must be YYYY-MM-DD").into());
     }
     if bytes.len() == 10 {
-        return Err(bare_date_message(text));
+        return Err(bare_date_message(text).into());
     }
     if !matches!(bytes.get(10), Some(b'T' | b't' | b' ')) {
-        return Err(bad("the time follows the date after a 'T'"));
+        return Err(bad("the time follows the date after a 'T'").into());
     }
     let (Some(hour), Some(minute)) = (digits(11, 2), digits(14, 2)) else {
-        return Err(bad("the time must be HH:MM or HH:MM:SS"));
+        return Err(bad("the time must be HH:MM or HH:MM:SS").into());
     };
     if bytes.get(13) != Some(&b':') {
-        return Err(bad("the time must be HH:MM or HH:MM:SS"));
+        return Err(bad("the time must be HH:MM or HH:MM:SS").into());
     }
     let mut pos = 16;
     // The microseconds the written precision leaves open (the rest of the unit it names).
@@ -1409,7 +1465,7 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
             }
             let written = &text[start..pos];
             if written.is_empty() {
-                return Err(bad("a fraction needs digits"));
+                return Err(bad("a fraction needs digits").into());
             }
             let kept: String = written.chars().take(6).collect();
             let scale = 10_i64.pow(6 - kept.len() as u32);
@@ -1428,10 +1484,10 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
                 _ => (None, None),
             };
             let (Some(h), Some(m)) = (h, m) else {
-                return Err(bad("the offset must be +HH:MM, +HHMM or +HH"));
+                return Err(bad("the offset must be +HH:MM, +HHMM or +HH").into());
             };
             if h > 23 || m > 59 {
-                return Err(bad("the offset is out of range"));
+                return Err(bad("the offset is out of range").into());
             }
             let minutes = h * 60 + m;
             if *sign == b'-' { -minutes } else { minutes }
@@ -1440,9 +1496,10 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
             return Err(bad(
                 "add a zone: Z for UTC or an offset like +02:00 (a local time would depend on \
                  this machine's time zone)",
-            ));
+            )
+            .into());
         }
-        _ => return Err(bad("unexpected text after the time")),
+        _ => return Err(bad("unexpected text after the time").into()),
     };
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
     let month_days = match month {
@@ -1450,13 +1507,13 @@ pub fn parse_time(text: &str) -> Result<i64, String> {
         4 | 6 | 9 | 11 => 30,
         2 if leap => 29,
         2 => 28,
-        _ => return Err(bad("the month must be 01..12")),
+        _ => return Err(bad("the month must be 01..12").into()),
     };
     if day < 1 || day > month_days {
-        return Err(bad("the day does not exist in that month"));
+        return Err(bad("the day does not exist in that month").into());
     }
     if hour > 23 || minute > 59 || second > 59 {
-        return Err(bad("the time is out of range"));
+        return Err(bad("the time is out of range").into());
     }
     // Days since 1970-01-01 from the civil date (Howard Hinnant's algorithm).
     let y = if month <= 2 { year - 1 } else { year };
@@ -1643,7 +1700,7 @@ mod tests {
             .store_open_view(&json!({"target": {"mark": "after-ann"}}))
             .unwrap();
         assert_eq!(view["view"]["commitSeq"], 1);
-        assert_eq!(s.info()["vertexCount"], 7);
+        assert_eq!(s.info().unwrap()["vertexCount"], 7);
         let refused: Value =
             serde_json::from_str(&s.execute("g.add_v(\"x\").next()", &RunOptions::default()))
                 .unwrap();
@@ -1666,7 +1723,7 @@ mod tests {
         assert!(!text.contains("run the query again"), "{text}");
         assert_eq!(s.store_mark("m").unwrap_err().status, 409);
         s.store_close_view().unwrap();
-        assert_eq!(s.info()["vertexCount"], 8);
+        assert_eq!(s.info().unwrap()["vertexCount"], 8);
 
         // Rollback, attic, restore; verify.
         let rolled = s.store_rollback(&json!({"target": {"commit": 1}})).unwrap();
@@ -1694,14 +1751,14 @@ mod tests {
         );
         assert_eq!(fork["store"]["databases"].as_array().unwrap().len(), 2);
         // Still on main; the fork is a separate graph.
-        assert_eq!(s.info()["vertexCount"], 7);
+        assert_eq!(s.info().unwrap()["vertexCount"], 7);
         let switched = s.store_switch(&id).unwrap();
         assert_eq!(switched["graph"]["vertexCount"], 6);
         add(&mut s, "bob");
         assert_eq!(s.store_info().unwrap()["commitSeq"], 1);
         assert_eq!(s.store_close(&id).unwrap_err().status, 409);
         s.store_switch("main").unwrap();
-        assert_eq!(s.info()["vertexCount"], 7);
+        assert_eq!(s.info().unwrap()["vertexCount"], 7);
         let closed = s.store_close(&id).unwrap();
         assert_eq!(closed["store"]["databases"].as_array().unwrap().len(), 1);
         assert_eq!(s.store_switch(&id).unwrap_err().status, 404);
@@ -1904,7 +1961,7 @@ mod tests {
             let store: Store =
                 Store::create(failing.clone() as Arc<dyn StoreDir>, StoreOptions::new()).unwrap();
             let mut s = Session::new();
-            s.attach_store(Arc::new(store), "main");
+            s.attach_store(Arc::new(store), "main").unwrap();
             add(&mut s, "ann");
             add(&mut s, "bob");
             failing.left.store(n, Ordering::Release);
@@ -1932,7 +1989,7 @@ mod tests {
                 "{}",
                 err.message
             );
-            assert_eq!(s.info()["vertexCount"], 0);
+            assert_eq!(s.info().unwrap()["vertexCount"], 0);
             let info = s.store_info().unwrap();
             let stopped = info["stopped"].as_str().unwrap_or_default();
             assert!(stopped.contains("was emptied"), "{info}");
@@ -1946,7 +2003,7 @@ mod tests {
                 "{}",
                 mark.message
             );
-            assert_eq!(s.info()["vertexCount"], 0);
+            assert_eq!(s.info().unwrap()["vertexCount"], 0);
             return;
         }
     }
@@ -1954,7 +2011,7 @@ mod tests {
     #[test]
     fn texts_round_trip() {
         assert_eq!(format_time(0), "-");
-        assert_eq!(parse_time("1970-01-01T00:00:01Z"), Ok(1_999_999));
+        assert_eq!(parse_time("1970-01-01T00:00:01Z").unwrap(), 1_999_999);
         assert_eq!(bytes_text(2048), "2.0 KiB");
         assert_eq!(uuid_text(1), "00000000-0000-0000-0000-000000000001");
     }

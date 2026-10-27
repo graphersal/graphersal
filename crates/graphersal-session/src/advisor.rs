@@ -25,6 +25,7 @@
 //!   `dismissed`; kept in the store's workload sidecar (an instance preference, not data). Both
 //!   answer `{ok: true}` or `{ok: false, error}` (no store: no statistics to keep it in).
 
+use crate::error::SessionError;
 use graphersal::advisor::{AdviceRequest, RecommendedAction};
 use graphersal::storage::ElementKind;
 use serde_json::{Value, json};
@@ -45,30 +46,31 @@ const KEYS: [&str; 9] = [
 ];
 
 /// The request of a spec (module docs).
-pub fn advice_request(spec: &Value) -> Result<AdviceRequest, String> {
+pub fn advice_request(spec: &Value) -> Result<AdviceRequest, SessionError> {
     let object = match spec {
         Value::Null => return Ok(AdviceRequest::new()),
         Value::Object(object) => object,
-        _ => return Err("the advice spec is a JSON object of thresholds".to_string()),
+        _ => {
+            return Err("the advice spec is a JSON object of thresholds"
+                .to_string()
+                .into());
+        }
     };
     if let Some(unknown) = object.keys().find(|key| !KEYS.contains(&key.as_str())) {
-        return Err(format!(
-            "unknown key '{unknown}' (the keys are {})",
-            KEYS.join(", ")
-        ));
+        return Err(format!("unknown key '{unknown}' (the keys are {})", KEYS.join(", ")).into());
     }
     let mut request = match object.get("everything") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => AdviceRequest::new(),
         Some(Value::Bool(true)) => AdviceRequest::everything(),
-        Some(_) => return Err("everything is true or false".to_string()),
+        Some(_) => return Err("everything is true or false".to_string().into()),
     };
-    let number = |key: &str| -> Result<Option<u64>, String> {
+    let number = |key: &str| -> Result<Option<u64>, SessionError> {
         match object.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(value) => value
                 .as_u64()
                 .map(Some)
-                .ok_or_else(|| format!("{key} is a non-negative integer")),
+                .ok_or_else(|| SessionError::invalid(format!("{key} is a non-negative integer"))),
         }
     };
     if let Some(n) = number("min_filter_runs")? {
@@ -111,13 +113,14 @@ impl Session {
         }
     }
 
-    fn advice(&self, spec: &Value) -> Result<graphersal::advisor::Advice, String> {
+    fn advice(&self, spec: &Value) -> Result<graphersal::advisor::Advice, SessionError> {
         let request = advice_request(spec)?;
         let cancel = self.cancel_token();
         cancel.reset();
         cancel
             .scope(|| self.graph.advise(&request))
             .map_err(|err| graphersal::error::format_diagnostic(&*err))
+            .map_err(SessionError::from)
     }
 
     /// Applies the recommendation `id` of the advice for `spec` (module docs).

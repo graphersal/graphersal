@@ -235,7 +235,7 @@ fn the_limits_cut_after_filtering() {
     assert!(plain_ids.iter().all(|id| !all.contains(id)));
     assert_eq!(
         plain,
-        serde_json::to_value(s.graph().graph_view(10, 4)).unwrap(),
+        serde_json::to_value(s.graph().graph_view(10, 4).unwrap()).unwrap(),
         "no filter: exactly the plain view"
     );
 }
@@ -266,7 +266,10 @@ fn the_neighbourhood_filter_drops_what_it_hides() {
     let bad =
         json!({"ids": ["1"], "filter": {"vertices": {"person": [{"key": "age", "op": "near"}]}}});
     let err = s.neighbourhood(&bad.to_string()).unwrap_err();
-    assert!(err.contains("person") && err.contains("near"), "{err}");
+    assert!(
+        err.to_string().contains("person") && err.to_string().contains("near"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -304,7 +307,7 @@ fn values_of_declared_keys_are_coerced_like_writes() {
         .graph_view(&json!({"filter": bad}).to_string())
         .unwrap_err();
     assert!(
-        err.contains("vertices.ev[0]") && err.contains("key \"d\""),
+        err.to_string().contains("vertices.ev[0]") && err.to_string().contains("key \"d\""),
         "{err}"
     );
     assert!(s.graph_filter_query(&bad.to_string()).is_err());
@@ -367,7 +370,7 @@ fn invalid_filters_are_errors_naming_the_condition() {
         let err = s
             .graph_view(&json!({"filter": filter}).to_string())
             .unwrap_err();
-        assert!(err.contains(needle), "{filter}: {err}");
+        assert!(err.to_string().contains(needle), "{filter}: {err}");
         assert!(
             s.graph_filter_query(&filter.to_string()).is_err(),
             "{filter}"
@@ -381,7 +384,8 @@ fn invalid_filters_are_errors_naming_the_condition() {
         )
         .unwrap_err();
     assert!(
-        err.contains("edges.knows[0] (key \"weight\", op \"gt\")"),
+        err.to_string()
+            .contains("edges.knows[0] (key \"weight\", op \"gt\")"),
         "{err}"
     );
     assert!(s.graph_view(r#"{"maxNodes": 1, "colour": 1}"#).is_err());
@@ -727,7 +731,7 @@ fn invalid_new_fields_are_errors() {
         let err = s
             .graph_view(&json!({"filter": filter}).to_string())
             .unwrap_err();
-        assert!(err.contains(needle), "{filter}: {err}");
+        assert!(err.to_string().contains(needle), "{filter}: {err}");
         assert!(s.graph_filter_query(&filter.to_string()).is_err());
     }
 }

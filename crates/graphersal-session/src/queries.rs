@@ -32,6 +32,7 @@
 //!   of `name`, `folder`, `description`, `meta`, `language`, `body`, `params`,
 //!   `params.<parameter>`, or `general`, so an editor shows each next to its input.
 
+use crate::error::SessionError;
 use graphersal::auth::{AccessRequestBuf, Resource};
 use graphersal::catalog::{
     Definition, DefinitionKind, GQL_QUERY_DIALECT, QueryDefinition, QueryParam,
@@ -43,6 +44,42 @@ use graphersal::script::{saved_query_effects, with_inferred_dialect};
 use serde_json::{Map, Value, json};
 
 use crate::Session;
+
+/// The catalog of the session's graph as the saved-query analysis looks queries up
+/// ([`CatalogLookup::query`]): a failing read is kept for [`CatalogLookup::finish`], never taken
+/// for "no such query".
+struct CatalogLookup<'a> {
+    graph: &'a dyn crate::storage::SessionGraph,
+    error: std::cell::RefCell<Option<graphersal::error::GraphError>>,
+}
+
+impl<'a> CatalogLookup<'a> {
+    fn new(graph: &'a dyn crate::storage::SessionGraph) -> Self {
+        Self {
+            graph,
+            error: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// The saved query `name`; `None` when there is none or the catalog could not be read.
+    fn query(&self, name: &str) -> Option<QueryDefinition> {
+        match self.graph.query(name) {
+            Ok(query) => query,
+            Err(err) => {
+                self.error.borrow_mut().get_or_insert(err);
+                None
+            }
+        }
+    }
+
+    /// The first failed read, if any.
+    fn finish(&self) -> Result<(), SessionError> {
+        match self.error.borrow_mut().take() {
+            Some(err) => Err(err.into()),
+            None => Ok(()),
+        }
+    }
+}
 
 /// How deep the call text of a parameter set may nest (the value depth bound of a script).
 const MAX_LITERAL_DEPTH: usize = 128;
@@ -171,11 +208,13 @@ fn rhai_key(key: &str) -> String {
 }
 
 /// The Rhai literal of a JSON value: `()`, `true`, `5`, `2.5`, `"x"`, `[..]`, `#{k: v}`.
-pub(crate) fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Result<(), String> {
+pub(crate) fn rhai_literal(
+    value: &Value,
+    depth: usize,
+    out: &mut String,
+) -> Result<(), SessionError> {
     if depth > MAX_LITERAL_DEPTH {
-        return Err(format!(
-            "the arguments nest deeper than {MAX_LITERAL_DEPTH} levels"
-        ));
+        return Err(format!("the arguments nest deeper than {MAX_LITERAL_DEPTH} levels").into());
     }
     match value {
         Value::Null => out.push_str("()"),
@@ -194,7 +233,7 @@ pub(crate) fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Res
                     out.push_str(".0");
                 }
             }
-            _ => return Err(format!("the number {n} has no Rhai literal")),
+            _ => return Err(format!("the number {n} has no Rhai literal").into()),
         },
         Value::String(text) => out.push_str(&rhai_string(text)),
         Value::Array(items) => {
@@ -227,7 +266,7 @@ pub(crate) fn rhai_literal(value: &Value, depth: usize, out: &mut String) -> Res
 /// `null` or `{}`: no arguments): `g.query("top", #{country: "DE", limit: 50})`. Values are
 /// written as Rhai literals (strings escaped, nothing cut), so the text runs exactly that call;
 /// the engine checks them against the parameter schemas when it runs.
-pub fn query_call_text(name: &str, args: &Value) -> Result<String, String> {
+pub fn query_call_text(name: &str, args: &Value) -> Result<String, SessionError> {
     call_text("g.query", name, args, "the arguments of a saved query")
 }
 
@@ -235,12 +274,12 @@ pub fn query_call_text(name: &str, args: &Value) -> Result<String, String> {
 /// in the query reads the entry `name`; `null` or `{}`: none): `g.gql("MATCH ..", #{min: 30})`.
 /// The query is written as one Rhai string literal and the parameters as Rhai literals, so
 /// parameter values are never spliced into the query text.
-pub fn gql_call_text(query: &str, params: &Value) -> Result<String, String> {
+pub fn gql_call_text(query: &str, params: &Value) -> Result<String, SessionError> {
     call_text("g.gql", query, params, "the parameters of a GQL query")
 }
 
 /// `<head>("<first>"[, #{args}])`; `what` names the arguments in the error of a non-object.
-fn call_text(head: &str, first: &str, args: &Value, what: &str) -> Result<String, String> {
+fn call_text(head: &str, first: &str, args: &Value, what: &str) -> Result<String, SessionError> {
     let mut out = format!("{head}({}", rhai_string(first));
     match args {
         Value::Null => {}
@@ -258,7 +297,8 @@ fn call_text(head: &str, first: &str, args: &Value, what: &str) -> Result<String
                     Value::Number(_) => "a number",
                     _ => "a boolean",
                 }
-            ));
+            )
+            .into());
         }
     }
     out.push(')');
@@ -280,30 +320,38 @@ impl Session {
     /// like `g.queries(folder)`), by name: the entries described in the module docs, with
     /// `status` from compiling each body (a body that no longer compiles is listed with its
     /// error). Other kinds of definitions are not listed.
-    pub fn list_queries(&self, folder: Option<&str>) -> Value {
-        let queries = self.graph.queries(folder);
-        Value::Array(
+    ///
+    /// Fails when the catalog cannot be read ([`SessionError::Graph`]).
+    pub fn list_queries(&self, folder: Option<&str>) -> Result<Value, SessionError> {
+        let queries = self.graph.queries(folder)?;
+        Ok(Value::Array(
             queries
                 .iter()
                 .map(|(name, query)| self.query_entry(name, query, false))
-                .collect(),
-        )
+                .collect::<Result<_, _>>()?,
+        ))
     }
 
     /// The saved query `name` (its entry plus `body` and `meta`), `null` when there is none.
-    pub fn get_query(&self, name: &str) -> Value {
-        match self.graph.query(name) {
+    /// Fails like [`Self::list_queries`].
+    pub fn get_query(&self, name: &str) -> Result<Value, SessionError> {
+        match self.graph.query(name)? {
             Some(query) => self.query_entry(name, &query, true),
-            None => Value::Null,
+            None => Ok(Value::Null),
         }
     }
 
-    /// How many saved queries the graph holds.
-    pub fn query_count(&self) -> usize {
-        self.graph.count_kind(DefinitionKind::QUERY)
+    /// How many saved queries the graph holds. Fails like [`Self::list_queries`].
+    pub fn query_count(&self) -> Result<usize, SessionError> {
+        Ok(self.graph.count_kind(DefinitionKind::QUERY)?)
     }
 
-    fn query_entry(&self, name: &str, query: &QueryDefinition, full: bool) -> Value {
+    fn query_entry(
+        &self,
+        name: &str,
+        query: &QueryDefinition,
+        full: bool,
+    ) -> Result<Value, SessionError> {
         let params: Vec<Value> = query
             .params()
             .iter()
@@ -332,8 +380,10 @@ impl Session {
             "description": query.description(),
             "params": params,
         });
-        let catalog = |name: &str| self.graph.query(name);
-        let effects = match saved_query_effects(&self.engine, &catalog, name, query) {
+        let lookup = CatalogLookup::new(&*self.graph);
+        let analysed = saved_query_effects(&self.engine, &|name| lookup.query(name), name, query);
+        lookup.finish()?;
+        let effects = match analysed {
             Ok(effects) => {
                 entry["status"] = json!("ok");
                 effects
@@ -353,7 +403,7 @@ impl Session {
             entry["body"] = json!(query.source());
             entry["meta"] = json!(query.meta());
         }
-        entry
+        Ok(entry)
     }
 
     /// Defines (or replaces) a saved query from a spec (module docs): checked like the DSL's
@@ -568,20 +618,25 @@ impl Session {
             return Err(vec![FieldError::of(&err)]);
         }
         // The body checked like `g.define_query` checks it, and the dialect its effects give.
-        let catalog = |name: &str| self.graph.query(name);
-        let query =
-            with_inferred_dialect(&self.engine, &catalog, &name, query).map_err(|reason| {
-                vec![FieldError::new(
-                    "body",
-                    format!("The body is not a valid saved query: {reason}"),
-                )]
-            })?;
+        let lookup = CatalogLookup::new(&*self.graph);
+        let inferred =
+            with_inferred_dialect(&self.engine, &|name| lookup.query(name), &name, query);
+        lookup
+            .finish()
+            .map_err(|err| vec![FieldError::new("general", err.to_string())])?;
+        let query = inferred.map_err(|reason| {
+            vec![FieldError::new(
+                "body",
+                format!("The body is not a valid saved query: {reason}"),
+            )]
+        })?;
         let definition = Definition::query(name.as_str(), query);
 
         // New, replace or rename: the name rules of the editor.
         self.graph
             .store_query(definition, is_edit, replaces.as_deref())?;
-        Ok(self.get_query(&name))
+        self.get_query(&name)
+            .map_err(|err| vec![FieldError::new("general", err.to_string())])
     }
 
     /// The preview of a call of the saved query `name` with the named arguments `args` (a JSON
@@ -641,22 +696,24 @@ impl Session {
     }
 
     /// Drops the saved query `name`: `true`, or `false` when there was none. One commit.
-    pub fn drop_query(&mut self, name: &str) -> Result<bool, String> {
+    pub fn drop_query(&mut self, name: &str) -> Result<bool, SessionError> {
         self.graph.drop_definition(DefinitionKind::QUERY, name)
     }
 
     /// Moves the saved query `name` into `folder` (`None` or `""`: the root). One commit.
-    pub fn move_query(&mut self, name: &str, folder: Option<&str>) -> Result<Value, String> {
+    pub fn move_query(&mut self, name: &str, folder: Option<&str>) -> Result<Value, SessionError> {
         let folder = folder.map(str::trim).filter(|f| !f.is_empty());
         self.graph.move_query_into(name, folder)?;
-        Ok(self.get_query(name))
+        self.get_query(name)
     }
 
     /// The catalog as its JSON exchange form (`{"definitions": [..]}`, every kind: saved
     /// queries, compression rules and kinds this version does not know): the playground's
     /// catalog file (`graphersal-catalog-<stamp>.json`, Catalog ▸ Save catalog).
-    pub fn save_catalog_text(&self) -> String {
-        self.graph.catalog_text()
+    ///
+    /// Fails when the catalog cannot be read ([`SessionError::Graph`]).
+    pub fn save_catalog_text(&self) -> Result<String, SessionError> {
+        Ok(self.graph.catalog_text()?)
     }
 
     /// "Load catalog": stores every definition of a catalog file (`{"definitions": [..]}`,
@@ -665,7 +722,7 @@ impl Session {
     /// compression rule in it runs its re-encode pass in that commit. Bodies of saved queries
     /// are not compiled here (a query that does not compile is listed with its error). Answers
     /// `{loaded, graph}` (`graph`: the graph info).
-    pub fn load_catalog(&mut self, text: &str, replace: bool) -> Result<Value, String> {
+    pub fn load_catalog(&mut self, text: &str, replace: bool) -> Result<Value, SessionError> {
         let definitions =
             catalog_from_json(text).map_err(|err| format_diagnostic(&GraphError::from(err)))?;
         let loaded = definitions.len();
@@ -744,10 +801,11 @@ pub fn remove_definition_in<S: GraphStorage>(
     g: &mut S,
     kind: DefinitionKind,
     name: &str,
-) -> Result<bool, String> {
+) -> Result<bool, SessionError> {
     GraphTraversalSource::new(g)
         .remove_definition(kind, name)
         .map_err(|err| format_diagnostic(&*err))
+        .map_err(SessionError::from)
 }
 
 /// Moves the saved query `name` of `g` into `folder` (`None`: the root), one commit; an error
@@ -756,10 +814,11 @@ pub fn move_query_in<S: GraphStorage>(
     g: &mut S,
     name: &str,
     folder: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     GraphTraversalSource::new(g)
         .move_query(name, folder)
         .map_err(|err| format_diagnostic(&*err))
+        .map_err(SessionError::from)
 }
 
 /// The catalog of `g` as its JSON exchange form (`{"definitions": [..]}`, every kind), with a
@@ -777,7 +836,7 @@ pub fn load_catalog_in<S: GraphStorage>(
     g: &mut S,
     definitions: Vec<Definition>,
     replace: bool,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     g.transaction(|unit| {
         let stale: Vec<(DefinitionKind, String)> = if replace {
             unit.definitions()
@@ -801,6 +860,7 @@ pub fn load_catalog_in<S: GraphStorage>(
         Ok::<(), BoxedTraverserError>(())
     })
     .map_err(|err| format_diagnostic(&*err))
+    .map_err(SessionError::from)
 }
 
 /// Copies `catalog` into `g` (a graph nobody sees yet, loaded from a file that carries no
@@ -808,7 +868,7 @@ pub fn load_catalog_in<S: GraphStorage>(
 pub(crate) fn carry_catalog<S: GraphStorage>(
     g: &mut S,
     catalog: Vec<Definition>,
-) -> Result<(), String> {
+) -> Result<(), SessionError> {
     if catalog.is_empty() {
         return Ok(());
     }
@@ -819,6 +879,7 @@ pub(crate) fn carry_catalog<S: GraphStorage>(
         Ok::<(), GraphError>(())
     })
     .map_err(|err| format_diagnostic(&err))
+    .map_err(SessionError::from)
 }
 
 #[cfg(test)]
@@ -866,7 +927,10 @@ mod tests {
             "g.gql(\"MATCH (p {name: \\\"x\\\"})\\nWHERE p.age > $min RETURN p\", #{min: 30, name: \"a\\\"b\"})"
         );
         let err = gql_call_text("MATCH (p) RETURN p", &json!([1])).unwrap_err();
-        assert!(err.starts_with("the parameters of a GQL query"), "{err}");
+        assert!(
+            err.to_string().starts_with("the parameters of a GQL query"),
+            "{err}"
+        );
     }
 
     fn modern() -> Session {
@@ -901,7 +965,7 @@ mod tests {
             "body": "fn add_person(name) { g.add_v(\"person\").property(\"name\", name).next() }",
         }));
         assert_eq!(answer["ok"], true, "{answer}");
-        let entry = s.get_query("add_person");
+        let entry = s.get_query("add_person").unwrap();
         assert_eq!(entry["dialect"], "graphersal-rhai/2");
         assert_eq!(entry["writes"], true);
         assert_eq!(
@@ -910,7 +974,7 @@ mod tests {
                    "text": "Create Data(vertex \"person\")"})
         );
         assert_eq!(entry["denied_writes"], json!([]));
-        assert_eq!(s.list_queries(None)[0]["writes"], true);
+        assert_eq!(s.list_queries(None).unwrap()[0]["writes"], true);
         // The preview runs the call as a dry run: nothing stays.
         let preview = s.preview_query("add_person", &json!({"name": "ann"}));
         assert_eq!(preview["ok"], true, "{preview}");
@@ -936,8 +1000,11 @@ mod tests {
             "body": "fn add_person(name) { g.v().has(\"name\", name).count() }",
         }));
         assert_eq!(answer["ok"], true, "{answer}");
-        assert_eq!(s.get_query("add_person")["dialect"], "graphersal-rhai/1");
-        assert_eq!(s.get_query("add_person")["writes"], false);
+        assert_eq!(
+            s.get_query("add_person").unwrap()["dialect"],
+            "graphersal-rhai/1"
+        );
+        assert_eq!(s.get_query("add_person").unwrap()["writes"], false);
         // A body that writes the schema is refused at its field.
         let refused = s.define_query(&json!({"name": "s", "body": "fn s() { g.set_schema(#{}) }"}));
         assert_eq!(refused["errors"][0]["field"], "body");
@@ -970,7 +1037,7 @@ mod tests {
                 .unwrap()
                 .starts_with("MATCH (p:person)")
         );
-        let listed = &s.list_queries(None)[0];
+        let listed = &s.list_queries(None).unwrap()[0];
         assert_eq!(listed["language"], "gql");
         assert_eq!(listed["dialect"], "graphersal-gql/1");
         assert!(listed.get("body").is_none());
@@ -1034,7 +1101,7 @@ mod tests {
             "name": "q", "language": "cypher", "body": "MATCH (p) RETURN p",
         }));
         assert_eq!(refused["errors"][0]["field"], "language", "{refused}");
-        assert_eq!(s.query_count(), 3);
+        assert_eq!(s.query_count().unwrap(), 3);
     }
 
     #[test]
@@ -1050,13 +1117,27 @@ mod tests {
         assert_eq!(entry["params"][1]["description"], "years");
         assert_eq!(entry["status"], "ok");
         assert!(entry["body"].as_str().unwrap().starts_with("fn older_than"));
-        assert_eq!(s.info()["savedQueries"], 1);
+        assert_eq!(s.info().unwrap()["savedQueries"], 1);
 
-        let list = s.list_queries(None);
+        let list = s.list_queries(None).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert!(list[0].get("body").is_none());
-        assert_eq!(s.list_queries(Some("people")).as_array().unwrap().len(), 1);
-        assert_eq!(s.list_queries(Some("peop")).as_array().unwrap().len(), 0);
+        assert_eq!(
+            s.list_queries(Some("people"))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            s.list_queries(Some("peop"))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
 
         // The call text runs the query.
         let text = query_call_text("older_than", &json!({"label": "person"})).unwrap();
@@ -1078,16 +1159,16 @@ mod tests {
         edit["description"] = json!("changed");
         assert_eq!(s.define_query(&edit)["query"]["description"], "changed");
         // A rename: new name stored, the old one dropped, one commit.
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         let mut renamed = older_than();
         renamed["name"] = json!("elders");
         renamed["body"] =
             json!("fn elders(label, age) { g.v().has_label(label).has(\"age\", P.gt(age)) }");
         renamed["replaces"] = json!("older_than");
         assert_eq!(s.define_query(&renamed)["ok"], true);
-        assert_eq!(s.graph().last_commit_seq(), before + 1);
-        assert!(s.get_query("older_than").is_null());
-        assert_eq!(s.get_query("elders")["name"], "elders");
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before + 1);
+        assert!(s.get_query("older_than").unwrap().is_null());
+        assert_eq!(s.get_query("elders").unwrap()["name"], "elders");
 
         assert_eq!(
             s.move_query("elders", Some("archive")).unwrap()["folder"],
@@ -1099,7 +1180,7 @@ mod tests {
         );
         assert!(s.drop_query("elders").unwrap());
         assert!(!s.drop_query("elders").unwrap());
-        assert_eq!(s.query_count(), 0);
+        assert_eq!(s.query_count().unwrap(), 0);
     }
 
     #[test]
@@ -1139,14 +1220,14 @@ mod tests {
         assert_eq!(answer["errors"][0]["field"], "body");
         let answer = s.define_query(&json!({"name": "q", "body": "", "oops": 1}));
         assert_eq!(answer["errors"][0]["field"], "general");
-        assert_eq!(s.query_count(), 0);
+        assert_eq!(s.query_count().unwrap(), 0);
     }
 
     #[test]
     fn a_catalog_file_round_trips_and_survives_a_graph_file_load() {
         let mut s = modern();
         assert_eq!(s.define_query(&older_than())["ok"], true);
-        let file = s.save_catalog_text();
+        let file = s.save_catalog_text().unwrap();
         assert!(file.contains("\"older_than\""));
 
         // A run that defines a query reports the catalog change.
@@ -1165,9 +1246,9 @@ mod tests {
         );
         let loaded = other.load_catalog(&file, false).unwrap();
         assert_eq!(loaded["loaded"], 1);
-        assert_eq!(other.query_count(), 2);
+        assert_eq!(other.query_count().unwrap(), 2);
         other.load_catalog(&file, true).unwrap();
-        assert_eq!(other.query_count(), 1);
+        assert_eq!(other.query_count().unwrap(), 1);
         assert!(other.load_catalog("{\"definitions\": 3}", false).is_err());
 
         // A graph file carries no catalog: the session keeps it across the load.
@@ -1175,10 +1256,10 @@ mod tests {
         other
             .load_graphson(saved["text"].as_str().unwrap().as_bytes(), "g.json", None)
             .unwrap();
-        assert_eq!(other.query_count(), 1);
+        assert_eq!(other.query_count().unwrap(), 1);
         // A sample starts without one.
         other.load_sample("modern").unwrap();
-        assert_eq!(other.query_count(), 0);
+        assert_eq!(other.query_count().unwrap(), 0);
     }
 
     #[test]
@@ -1186,13 +1267,13 @@ mod tests {
         let mut s = modern();
         let r = run(&mut s, "g.create_index(#{label: \"person\", key: \"age\"})");
         assert_eq!(r["changes"]["definitions"], true, "{r}");
-        let file = s.save_catalog_text();
+        let file = s.save_catalog_text().unwrap();
         assert!(file.contains("\"kind\":\"property_index\""), "{file}");
 
         let mut other = modern();
         let loaded = other.load_catalog(&file, true).unwrap();
         assert_eq!(loaded["loaded"], 1);
-        assert_eq!(other.save_catalog_text(), file);
+        assert_eq!(other.save_catalog_text().unwrap(), file);
         // The loaded definition is served: the profile shows the index.
         let r = run(
             &mut other,
@@ -1252,8 +1333,8 @@ mod tests {
         let text = catalog_text(&tg);
         assert_eq!(text, catalog_text(&fw));
         assert_eq!(
-            remove_definition_in(&mut fw, DefinitionKind::QUERY, "older"),
-            Ok(true)
+            remove_definition_in(&mut fw, DefinitionKind::QUERY, "older").unwrap(),
+            true
         );
         assert_eq!(count_kind(&fw, DefinitionKind::QUERY), 0);
         let definitions = catalog_from_json(&text).unwrap();

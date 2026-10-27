@@ -48,6 +48,7 @@ use graphersal::storage::{
 use serde_json::Value;
 
 use crate::display::{CompactGraph, InspectedElement};
+use crate::error::SessionError;
 use crate::queries::FieldError;
 use crate::selection::{MetaGraph, NeighbourhoodRequest, SampleRequest, SelectionView};
 
@@ -74,73 +75,78 @@ pub fn unsupported_text(what: &str, storage: &str) -> String {
 /// storage). Internal like the rest of this crate: methods are added as the session needs
 /// them.
 ///
-/// The methods never panic on the graph's lock: on the thread that holds the graph's unit, a
-/// view it may not have (a write view alive there, as in a commit hook of that unit;
-/// `Graph::read_checked`) is the error of a method that returns one (its text, a `general`
-/// field error) and makes a method without an error answer as for no data (`0`, `null`, empty,
-/// `None`).
+/// The methods never panic on the graph's lock and never answer as for no data: on the thread
+/// that holds the graph's unit, a view it may not have (a write view alive there, as in a commit
+/// hook of that unit; `Graph::read_checked`) is the method's error
+/// ([`GraphError::GraphViewHeld`], inside [`SessionError::Graph`] or as a `general` field
+/// error). Every method that reads or writes the graph returns a `Result`, also where it cannot
+/// fail today.
 pub trait SessionGraph: AnyGraph {
     /// The number of vertices.
-    fn vertex_count(&self) -> usize;
+    fn vertex_count(&self) -> Result<usize, GraphError>;
 
     /// The number of edges.
-    fn edge_count(&self) -> usize;
+    fn edge_count(&self) -> Result<usize, GraphError>;
 
     /// The schema the stored data satisfies ([`GraphStorage::infer_schema`], mode `none`).
-    fn inferred_schema(&self) -> GraphSchema;
+    fn inferred_schema(&self) -> Result<GraphSchema, GraphError>;
 
     /// [`crate::views::schema_view`] of the graph.
-    fn schema_view(&self) -> Value;
+    fn schema_view(&self) -> Result<Value, GraphError>;
 
     /// [`crate::views::schema_view_of`]: the views of `schema` with the graph's label counts.
-    fn schema_view_of(&self, schema: GraphSchema) -> Value;
+    fn schema_view_of(&self, schema: GraphSchema) -> Result<Value, GraphError>;
 
     /// [`crate::views::graph_view`] of the graph.
-    fn graph_view(&self, max_nodes: usize, max_edges: usize) -> CompactGraph;
+    fn graph_view(&self, max_nodes: usize, max_edges: usize) -> Result<CompactGraph, GraphError>;
 
     /// [`crate::views::graph_view_request`]: the drawing with a filter and degree columns.
     fn graph_view_request(
         &self,
         request: &crate::views::GraphViewRequest,
-    ) -> Result<CompactGraph, String>;
+    ) -> Result<CompactGraph, SessionError>;
 
     /// [`crate::views::graph_filter_query`]: the Rhai query of a filter.
-    fn graph_filter_query(&self, filter: &Value) -> Result<String, String>;
+    fn graph_filter_query(&self, filter: &Value) -> Result<String, SessionError>;
 
     /// [`CompactGraph::add_degrees`] (a result's subgraph asked with degrees).
-    fn add_degrees(&self, view: &mut CompactGraph);
+    fn add_degrees(&self, view: &mut CompactGraph) -> Result<(), GraphError>;
 
     /// [`crate::views::statistics_view`] of the graph.
-    fn statistics_view(&self) -> Value;
+    fn statistics_view(&self) -> Result<Value, GraphError>;
 
     /// [`crate::views::memory_usage`] of the graph.
-    fn memory_view(&self) -> Value;
+    fn memory_view(&self) -> Result<Value, GraphError>;
 
     /// [`crate::display::element_of`]: one element for the inspector.
-    fn element(&self, kind: ElementKind, id: &str) -> Option<InspectedElement>;
+    fn element(&self, kind: ElementKind, id: &str) -> Result<Option<InspectedElement>, GraphError>;
 
     /// [`crate::display::collect_subgraph`]: the elements `results` refer to.
-    fn subgraph(&self, results: &[ElementProperty], max_elements: usize) -> Option<CompactGraph>;
+    fn subgraph(
+        &self,
+        results: &[ElementProperty],
+        max_elements: usize,
+    ) -> Result<Option<CompactGraph>, GraphError>;
 
     /// [`crate::selection::neighbourhood`].
     fn neighbourhood(
         &self,
         request: &NeighbourhoodRequest,
         cancel: &CancelToken,
-    ) -> Result<SelectionView, String>;
+    ) -> Result<SelectionView, SessionError>;
 
     /// [`crate::selection::label_sample`].
     fn label_sample(
         &self,
         request: &SampleRequest,
         cancel: &CancelToken,
-    ) -> Result<SelectionView, String>;
+    ) -> Result<SelectionView, SessionError>;
 
     /// [`crate::selection::meta_graph`].
-    fn meta_graph(&self, cancel: &CancelToken) -> Result<MetaGraph, String>;
+    fn meta_graph(&self, cancel: &CancelToken) -> Result<MetaGraph, SessionError>;
 
     /// [`crate::edit::element_view`]: the property editor's view of one element.
-    fn element_view(&self, kind: ElementKind, id: &str) -> Value;
+    fn element_view(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError>;
 
     /// The writes of an update request (`set`, `remove`; [`crate::edit`]) to the element `id`
     /// of `kind` as ONE unit (`validate_only`: a dry run): `Ok(changed)` or the field errors.
@@ -153,7 +159,7 @@ pub trait SessionGraph: AnyGraph {
     ) -> Result<bool, Vec<FieldError>>;
 
     /// [`crate::create::label_choices_in`].
-    fn label_choices(&self, request: &Value) -> Result<Value, String>;
+    fn label_choices(&self, request: &Value) -> Result<Value, SessionError>;
 
     /// A creation request of `kind` ([`crate::create`]) as ONE unit (`validate_only`: a dry
     /// run): `Ok(Some(id))` of the stored element, `Ok(None)` for a dry run, or the field
@@ -166,10 +172,10 @@ pub trait SessionGraph: AnyGraph {
     ) -> Result<Option<String>, Vec<FieldError>>;
 
     /// [`crate::create::drawn_in`].
-    fn drawn(&self, kind: ElementKind, id: &str) -> Value;
+    fn drawn(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError>;
 
     /// [`crate::create::incident_edges`].
-    fn incident_edges(&self, kind: ElementKind, id: &str) -> Option<usize>;
+    fn incident_edges(&self, kind: ElementKind, id: &str) -> Result<Option<usize>, GraphError>;
 
     /// [`crate::create::delete_in`].
     fn delete_element(
@@ -180,13 +186,13 @@ pub trait SessionGraph: AnyGraph {
     ) -> Result<bool, GraphError>;
 
     /// [`crate::queries::queries_in`].
-    fn queries(&self, folder: Option<&str>) -> Vec<(String, QueryDefinition)>;
+    fn queries(&self, folder: Option<&str>) -> Result<Vec<(String, QueryDefinition)>, GraphError>;
 
     /// [`crate::queries::query_in`].
-    fn query(&self, name: &str) -> Option<QueryDefinition>;
+    fn query(&self, name: &str) -> Result<Option<QueryDefinition>, GraphError>;
 
     /// [`crate::queries::count_kind`].
-    fn count_kind(&self, kind: DefinitionKind) -> usize;
+    fn count_kind(&self, kind: DefinitionKind) -> Result<usize, GraphError>;
 
     /// Stores a checked saved query with the editor's name rules, in ONE commit.
     fn store_query(
@@ -197,26 +203,27 @@ pub trait SessionGraph: AnyGraph {
     ) -> Result<(), Vec<FieldError>>;
 
     /// [`crate::queries::remove_definition_in`].
-    fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, String>;
+    fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, SessionError>;
 
     /// [`crate::queries::move_query_in`].
-    fn move_query_into(&self, name: &str, folder: Option<&str>) -> Result<(), String>;
+    fn move_query_into(&self, name: &str, folder: Option<&str>) -> Result<(), SessionError>;
 
     /// [`crate::queries::catalog_text`].
-    fn catalog_text(&self) -> String;
+    fn catalog_text(&self) -> Result<String, GraphError>;
 
     /// [`crate::queries::load_catalog_in`].
-    fn load_catalog(&self, definitions: Vec<Definition>, replace: bool) -> Result<(), String>;
+    fn load_catalog(&self, definitions: Vec<Definition>, replace: bool)
+    -> Result<(), SessionError>;
 
     /// Copies `catalog` into the graph in one commit (a graph loaded from a file that carries
     /// no catalog).
-    fn carry_catalog(&self, catalog: Vec<Definition>) -> Result<(), String>;
+    fn carry_catalog(&self, catalog: Vec<Definition>) -> Result<(), SessionError>;
 
     /// [`crate::compression::compressions_in`].
-    fn compressions(&self) -> Value;
+    fn compressions(&self) -> Result<Value, GraphError>;
 
     /// [`crate::compression::compression_in`].
-    fn compression(&self, name: &str) -> Value;
+    fn compression(&self, name: &str) -> Result<Value, GraphError>;
 
     /// Stores a checked compression rule with the form's name rules, in ONE commit.
     fn store_compression(
@@ -228,20 +235,20 @@ pub trait SessionGraph: AnyGraph {
 
     /// [`crate::compression::recompress_in`]; a storage without compressed properties fails
     /// with its `Unsupported` diagnostic.
-    fn recompress_rule(&self, name: &str) -> Result<(), String>;
+    fn recompress_rule(&self, name: &str) -> Result<(), SessionError>;
 
     /// [`crate::compression::estimate_compression_in`] under the read lock; a storage without
     /// compressed properties fails with its `Unsupported` diagnostic.
     fn estimate_compression_json(
         &self,
         request: &graphersal::catalog::CompressionEstimateRequest,
-    ) -> Result<Value, String>;
+    ) -> Result<Value, SessionError>;
 
     /// [`crate::indexes::indexes_in`].
-    fn indexes(&self) -> Value;
+    fn indexes(&self) -> Result<Value, GraphError>;
 
     /// [`crate::indexes::index_in`].
-    fn index(&self, name: &str) -> Value;
+    fn index(&self, name: &str) -> Result<Value, GraphError>;
 
     /// Stores a checked property index (a free name), in ONE commit; a storage without
     /// property indexes refuses it with its `Unsupported` diagnostic.
@@ -252,49 +259,55 @@ pub trait SessionGraph: AnyGraph {
     fn begin_run(&self) -> Result<UnitMark, GraphError>;
 
     /// What the run's unit changed so far ([`GraphStorage::unit_changes`]).
-    fn run_changes(&self, mark: UnitMark) -> UnitChanges;
+    fn run_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError>;
 
     /// Commits the run's unit ([`GraphStorage::commit_unit`]).
     fn commit_run(&self, mark: UnitMark) -> Result<(), GraphError>;
 
     /// Rolls the run's unit back ([`GraphStorage::rollback_unit`]).
-    fn rollback_run(&self, mark: UnitMark, reason: &RollbackReason);
+    fn rollback_run(&self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError>;
 
     /// Registers a commit hook ([`GraphStorage::register_commit_hook`]): a read-only view's
     /// refusal.
     fn register_hook(&self, hook: Box<dyn CommitHook>) -> Result<(), GraphError>;
 }
 
-/// A read of `graph` for a [`SessionGraph`] method: `answer` on the read view, or `nothing`
-/// with the error when the current thread may not have one ([`Graph::read_checked`]: it holds
-/// the graph's unit and a write view of it is alive, as in a commit hook of that unit); never a
-/// panic.
+/// A read of `graph` for a [`SessionGraph`] method: `answer` on the read view, or the refusal
+/// when the current thread may not have one ([`Graph::read_checked`]: it holds the graph's unit
+/// and a write view of it is alive, as in a commit hook of that unit); never a panic.
 fn reading<S: GraphStorage, T>(
     graph: &Graph<S>,
-    nothing: impl FnOnce(GraphError) -> T,
     answer: impl FnOnce(&S) -> T,
-) -> T {
-    match graph.read_checked() {
-        Ok(guard) => answer(&guard),
-        Err(err) => nothing(err),
-    }
+) -> Result<T, GraphError> {
+    Ok(answer(&*graph.read_checked()?))
 }
 
-/// A write of `graph` for a [`SessionGraph`] method, like [`reading`] ([`Graph::write_checked`]).
-fn writing<S: GraphStorage, T>(
+/// [`reading`] for an answer that can fail itself.
+fn reading_with<S: GraphStorage, T, E: From<GraphError>>(
     graph: &Graph<S>,
-    nothing: impl FnOnce(GraphError) -> T,
-    change: impl FnOnce(&mut S) -> T,
-) -> T {
+    answer: impl FnOnce(&S) -> Result<T, E>,
+) -> Result<T, E> {
+    answer(&*graph.read_checked()?)
+}
+
+/// A write of `graph` for a [`SessionGraph`] method, like [`reading_with`]
+/// ([`Graph::write_checked`]).
+fn writing_with<S: GraphStorage, T, E: From<GraphError>>(
+    graph: &Graph<S>,
+    change: impl FnOnce(&mut S) -> Result<T, E>,
+) -> Result<T, E> {
+    change(&mut *graph.write_checked()?)
+}
+
+/// A write of `graph` whose refusal is a `general` field error.
+fn writing_fields<S: GraphStorage, T>(
+    graph: &Graph<S>,
+    change: impl FnOnce(&mut S) -> Result<T, Vec<FieldError>>,
+) -> Result<T, Vec<FieldError>> {
     match graph.write_checked() {
         Ok(mut guard) => change(&mut guard),
-        Err(err) => nothing(err),
+        Err(err) => Err(field_errors(err)),
     }
-}
-
-/// The diagnostic text of a refused view.
-fn text(err: GraphError) -> String {
-    err.to_string()
 }
 
 /// The field errors of a refused view (field `general`).
@@ -306,123 +319,95 @@ impl<S> SessionGraph for Graph<S>
 where
     S: GraphStorage + Default + Send + Sync + 'static,
 {
-    fn vertex_count(&self) -> usize {
-        reading(self, |_| 0, |g| g.vertex_count())
+    fn vertex_count(&self) -> Result<usize, GraphError> {
+        reading(self, |g| g.vertex_count())
     }
 
-    fn edge_count(&self) -> usize {
-        reading(self, |_| 0, |g| g.edge_count())
+    fn edge_count(&self) -> Result<usize, GraphError> {
+        reading(self, |g| g.edge_count())
     }
 
-    fn inferred_schema(&self) -> GraphSchema {
-        reading(self, |_| GraphSchema::default(), |g| g.infer_schema())
+    fn inferred_schema(&self) -> Result<GraphSchema, GraphError> {
+        reading(self, |g| g.infer_schema())
     }
 
-    fn schema_view(&self) -> Value {
-        reading(self, |_| Value::Null, crate::views::schema_view)
+    fn schema_view(&self) -> Result<Value, GraphError> {
+        reading(self, crate::views::schema_view)
     }
 
-    fn schema_view_of(&self, schema: GraphSchema) -> Value {
-        reading(
-            self,
-            |_| Value::Null,
-            |g| crate::views::schema_view_of(g, schema),
-        )
+    fn schema_view_of(&self, schema: GraphSchema) -> Result<Value, GraphError> {
+        reading(self, |g| crate::views::schema_view_of(g, schema))
     }
 
-    fn graph_view(&self, max_nodes: usize, max_edges: usize) -> CompactGraph {
-        reading(
-            self,
-            |_| CompactGraph::default(),
-            |g| crate::views::graph_view(g, max_nodes, max_edges),
-        )
+    fn graph_view(&self, max_nodes: usize, max_edges: usize) -> Result<CompactGraph, GraphError> {
+        reading(self, |g| crate::views::graph_view(g, max_nodes, max_edges))
     }
 
     fn graph_view_request(
         &self,
         request: &crate::views::GraphViewRequest,
-    ) -> Result<CompactGraph, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::views::graph_view_request(g, request),
-        )
+    ) -> Result<CompactGraph, SessionError> {
+        reading_with(self, |g| crate::views::graph_view_request(g, request))
     }
 
-    fn graph_filter_query(&self, filter: &Value) -> Result<String, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::views::graph_filter_query(g, filter),
-        )
+    fn graph_filter_query(&self, filter: &Value) -> Result<String, SessionError> {
+        reading_with(self, |g| crate::views::graph_filter_query(g, filter))
     }
 
-    fn add_degrees(&self, view: &mut CompactGraph) {
-        reading(self, |_| (), |g| view.add_degrees(g));
+    fn add_degrees(&self, view: &mut CompactGraph) -> Result<(), GraphError> {
+        reading(self, |g| view.add_degrees(g))
     }
 
-    fn statistics_view(&self) -> Value {
-        reading(self, |_| Value::Null, crate::views::statistics_view)
+    fn statistics_view(&self) -> Result<Value, GraphError> {
+        reading(self, crate::views::statistics_view)
     }
 
-    fn memory_view(&self) -> Value {
-        let mut view = reading(self, |_| Value::Null, crate::views::memory_usage);
+    fn memory_view(&self) -> Result<Value, GraphError> {
+        let mut view = reading(self, crate::views::memory_usage)?;
         if let (Some(stats), Some(map)) = (Graph::workload_stats(self), view.as_object_mut()) {
             map.insert("workload_bytes".into(), stats.memory_bytes().into());
         }
-        view
+        Ok(view)
     }
 
-    fn element(&self, kind: ElementKind, id: &str) -> Option<InspectedElement> {
-        reading(self, |_| None, |g| crate::display::element_of(g, kind, id))
+    fn element(&self, kind: ElementKind, id: &str) -> Result<Option<InspectedElement>, GraphError> {
+        reading(self, |g| crate::display::element_of(g, kind, id))
     }
 
-    fn subgraph(&self, results: &[ElementProperty], max_elements: usize) -> Option<CompactGraph> {
-        reading(
-            self,
-            |_| None,
-            |g| crate::display::collect_subgraph(g, results, max_elements),
-        )
+    fn subgraph(
+        &self,
+        results: &[ElementProperty],
+        max_elements: usize,
+    ) -> Result<Option<CompactGraph>, GraphError> {
+        reading(self, |g| {
+            crate::display::collect_subgraph(g, results, max_elements)
+        })
     }
 
     fn neighbourhood(
         &self,
         request: &NeighbourhoodRequest,
         cancel: &CancelToken,
-    ) -> Result<SelectionView, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::selection::neighbourhood(g, request, cancel),
-        )
+    ) -> Result<SelectionView, SessionError> {
+        reading_with(self, |g| {
+            crate::selection::neighbourhood(g, request, cancel)
+        })
     }
 
     fn label_sample(
         &self,
         request: &SampleRequest,
         cancel: &CancelToken,
-    ) -> Result<SelectionView, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::selection::label_sample(g, request, cancel),
-        )
+    ) -> Result<SelectionView, SessionError> {
+        reading_with(self, |g| crate::selection::label_sample(g, request, cancel))
     }
 
-    fn meta_graph(&self, cancel: &CancelToken) -> Result<MetaGraph, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::selection::meta_graph(g, cancel),
-        )
+    fn meta_graph(&self, cancel: &CancelToken) -> Result<MetaGraph, SessionError> {
+        reading_with(self, |g| crate::selection::meta_graph(g, cancel))
     }
 
-    fn element_view(&self, kind: ElementKind, id: &str) -> Value {
-        reading(
-            self,
-            |_| Value::Null,
-            |g| crate::edit::element_view(g, kind, id),
-        )
+    fn element_view(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError> {
+        reading(self, |g| crate::edit::element_view(g, kind, id))
     }
 
     fn update_element(
@@ -432,19 +417,13 @@ where
         request: &Value,
         validate_only: bool,
     ) -> Result<bool, Vec<FieldError>> {
-        writing(
-            self,
-            |err| Err(field_errors(err)),
-            |g| crate::edit::update_request_in(g, kind, id, request, validate_only),
-        )
+        writing_fields(self, |g| {
+            crate::edit::update_request_in(g, kind, id, request, validate_only)
+        })
     }
 
-    fn label_choices(&self, request: &Value) -> Result<Value, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::create::label_choices_in(g, request),
-        )
+    fn label_choices(&self, request: &Value) -> Result<Value, SessionError> {
+        reading_with(self, |g| crate::create::label_choices_in(g, request))
     }
 
     fn create_element(
@@ -453,27 +432,17 @@ where
         request: &Value,
         validate_only: bool,
     ) -> Result<Option<String>, Vec<FieldError>> {
-        writing(
-            self,
-            |err| Err(field_errors(err)),
-            |g| crate::create::create_request_in(g, kind, request, validate_only),
-        )
+        writing_fields(self, |g| {
+            crate::create::create_request_in(g, kind, request, validate_only)
+        })
     }
 
-    fn drawn(&self, kind: ElementKind, id: &str) -> Value {
-        reading(
-            self,
-            |_| Value::Null,
-            |g| crate::create::drawn_in(g, kind, id),
-        )
+    fn drawn(&self, kind: ElementKind, id: &str) -> Result<Value, GraphError> {
+        reading(self, |g| crate::create::drawn_in(g, kind, id))
     }
 
-    fn incident_edges(&self, kind: ElementKind, id: &str) -> Option<usize> {
-        reading(
-            self,
-            |_| None,
-            |g| crate::create::incident_edges(g, kind, id),
-        )
+    fn incident_edges(&self, kind: ElementKind, id: &str) -> Result<Option<usize>, GraphError> {
+        reading(self, |g| crate::create::incident_edges(g, kind, id))
     }
 
     fn delete_element(
@@ -482,25 +451,21 @@ where
         id: &str,
         validate_only: bool,
     ) -> Result<bool, GraphError> {
-        writing(self, Err, |g| {
+        writing_with(self, |g| {
             crate::create::delete_in(g, kind, id, validate_only)
         })
     }
 
-    fn queries(&self, folder: Option<&str>) -> Vec<(String, QueryDefinition)> {
-        reading(
-            self,
-            |_| Vec::new(),
-            |g| crate::queries::queries_in(g, folder),
-        )
+    fn queries(&self, folder: Option<&str>) -> Result<Vec<(String, QueryDefinition)>, GraphError> {
+        reading(self, |g| crate::queries::queries_in(g, folder))
     }
 
-    fn query(&self, name: &str) -> Option<QueryDefinition> {
-        reading(self, |_| None, |g| crate::queries::query_in(g, name))
+    fn query(&self, name: &str) -> Result<Option<QueryDefinition>, GraphError> {
+        reading(self, |g| crate::queries::query_in(g, name))
     }
 
-    fn count_kind(&self, kind: DefinitionKind) -> usize {
-        reading(self, |_| 0, |g| crate::queries::count_kind(g, kind))
+    fn count_kind(&self, kind: DefinitionKind) -> Result<usize, GraphError> {
+        reading(self, |g| crate::queries::count_kind(g, kind))
     }
 
     fn store_query(
@@ -509,59 +474,45 @@ where
         is_edit: bool,
         replaces: Option<&str>,
     ) -> Result<(), Vec<FieldError>> {
-        writing(
-            self,
-            |err| Err(field_errors(err)),
-            |g| crate::queries::store_query(g, definition, is_edit, replaces),
-        )
+        writing_fields(self, |g| {
+            crate::queries::store_query(g, definition, is_edit, replaces)
+        })
     }
 
-    fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, String> {
-        writing(
-            self,
-            |err| Err(text(err)),
-            |g| crate::queries::remove_definition_in(g, kind, name),
-        )
+    fn drop_definition(&self, kind: DefinitionKind, name: &str) -> Result<bool, SessionError> {
+        writing_with(self, |g| {
+            crate::queries::remove_definition_in(g, kind, name)
+        })
     }
 
-    fn move_query_into(&self, name: &str, folder: Option<&str>) -> Result<(), String> {
-        writing(
-            self,
-            |err| Err(text(err)),
-            |g| crate::queries::move_query_in(g, name, folder),
-        )
+    fn move_query_into(&self, name: &str, folder: Option<&str>) -> Result<(), SessionError> {
+        writing_with(self, |g| crate::queries::move_query_in(g, name, folder))
     }
 
-    fn catalog_text(&self) -> String {
-        reading(self, |_| String::new(), crate::queries::catalog_text)
+    fn catalog_text(&self) -> Result<String, GraphError> {
+        reading(self, crate::queries::catalog_text)
     }
 
-    fn load_catalog(&self, definitions: Vec<Definition>, replace: bool) -> Result<(), String> {
-        writing(
-            self,
-            |err| Err(text(err)),
-            |g| crate::queries::load_catalog_in(g, definitions, replace),
-        )
+    fn load_catalog(
+        &self,
+        definitions: Vec<Definition>,
+        replace: bool,
+    ) -> Result<(), SessionError> {
+        writing_with(self, |g| {
+            crate::queries::load_catalog_in(g, definitions, replace)
+        })
     }
 
-    fn carry_catalog(&self, catalog: Vec<Definition>) -> Result<(), String> {
-        writing(
-            self,
-            |err| Err(text(err)),
-            |g| crate::queries::carry_catalog(g, catalog),
-        )
+    fn carry_catalog(&self, catalog: Vec<Definition>) -> Result<(), SessionError> {
+        writing_with(self, |g| crate::queries::carry_catalog(g, catalog))
     }
 
-    fn compressions(&self) -> Value {
-        reading(self, |_| Value::Null, crate::compression::compressions_in)
+    fn compressions(&self) -> Result<Value, GraphError> {
+        reading(self, crate::compression::compressions_in)
     }
 
-    fn compression(&self, name: &str) -> Value {
-        reading(
-            self,
-            |_| Value::Null,
-            |g| crate::compression::compression_in(g, name),
-        )
+    fn compression(&self, name: &str) -> Result<Value, GraphError> {
+        reading(self, |g| crate::compression::compression_in(g, name))
     }
 
     fn store_compression(
@@ -570,46 +521,34 @@ where
         is_edit: bool,
         replaces: Option<&str>,
     ) -> Result<(), Vec<FieldError>> {
-        writing(
-            self,
-            |err| Err(field_errors(err)),
-            |g| crate::compression::store_compression(g, definition, is_edit, replaces),
-        )
+        writing_fields(self, |g| {
+            crate::compression::store_compression(g, definition, is_edit, replaces)
+        })
     }
 
-    fn recompress_rule(&self, name: &str) -> Result<(), String> {
-        writing(
-            self,
-            |err| Err(text(err)),
-            |g| crate::compression::recompress_in(g, name),
-        )
+    fn recompress_rule(&self, name: &str) -> Result<(), SessionError> {
+        writing_with(self, |g| crate::compression::recompress_in(g, name))
     }
 
     fn estimate_compression_json(
         &self,
         request: &graphersal::catalog::CompressionEstimateRequest,
-    ) -> Result<Value, String> {
-        reading(
-            self,
-            |err| Err(text(err)),
-            |g| crate::compression::estimate_compression_in(g, request),
-        )
+    ) -> Result<Value, SessionError> {
+        reading_with(self, |g| {
+            crate::compression::estimate_compression_in(g, request)
+        })
     }
 
-    fn indexes(&self) -> Value {
-        reading(self, |_| Value::Null, crate::indexes::indexes_in)
+    fn indexes(&self) -> Result<Value, GraphError> {
+        reading(self, crate::indexes::indexes_in)
     }
 
-    fn index(&self, name: &str) -> Value {
-        reading(self, |_| Value::Null, |g| crate::indexes::index_in(g, name))
+    fn index(&self, name: &str) -> Result<Value, GraphError> {
+        reading(self, |g| crate::indexes::index_in(g, name))
     }
 
     fn store_index(&self, definition: Definition) -> Result<(), Vec<FieldError>> {
-        writing(
-            self,
-            |err| Err(field_errors(err)),
-            |g| crate::indexes::store_index(g, definition),
-        )
+        writing_fields(self, |g| crate::indexes::store_index(g, definition))
     }
 
     fn begin_run(&self) -> Result<UnitMark, GraphError> {
@@ -618,24 +557,22 @@ where
         Graph::begin_unit(self)
     }
 
-    fn run_changes(&self, mark: UnitMark) -> UnitChanges {
-        // `UnitNotHeld` only when called on another thread than `begin_run`: nothing changed
-        // in a unit this thread holds.
-        Graph::unit_changes(self, mark).unwrap_or_default()
+    fn run_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
+        // `UnitNotHeld` when called on another thread than `begin_run`: the caller's error.
+        Graph::unit_changes(self, mark)
     }
 
     fn commit_run(&self, mark: UnitMark) -> Result<(), GraphError> {
         Graph::commit_unit(self, mark)
     }
 
-    fn rollback_run(&self, mark: UnitMark, reason: &RollbackReason) {
-        // `UnitNotHeld` only when called on another thread than `begin_run`, where there is
-        // nothing to roll back.
-        let _ = Graph::rollback_unit(self, mark, reason);
+    fn rollback_run(&self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        // `UnitNotHeld` when called on another thread than `begin_run`: the caller's error.
+        Graph::rollback_unit(self, mark, reason)
     }
 
     fn register_hook(&self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
-        writing(self, Err, |g| g.register_commit_hook(hook))
+        writing_with(self, |g| g.register_commit_hook(hook))
     }
 }
 
@@ -677,11 +614,11 @@ pub trait GraphFactory: Send + Sync {
     /// `graph` (a sample, or what a GraphML/GraphSON load built, with its schema and catalog)
     /// as a graph of this storage: itself when the storage IS [`TraversalGraph`], otherwise a
     /// copy (see [`StorageKind`]). An error as its diagnostic text.
-    fn adopt(&self, graph: TraversalGraph) -> Result<Arc<dyn SessionGraph>, String>;
+    fn adopt(&self, graph: TraversalGraph) -> Result<Arc<dyn SessionGraph>, SessionError>;
 
     /// A graph read from a packed snapshot (`.gsnap`): only for a [`PersistentStorage`],
     /// otherwise the "not supported" error ([`unsupported_text`]).
-    fn load_snapshot(&self, reader: &mut dyn Read) -> Result<Arc<dyn SessionGraph>, String>;
+    fn load_snapshot(&self, reader: &mut dyn Read) -> Result<Arc<dyn SessionGraph>, SessionError>;
 
     /// Whether [`Self::create_store`] and [`Self::open_store`] work (a [`PersistentStorage`]).
     fn supports_stores(&self) -> bool;
@@ -693,14 +630,14 @@ pub trait GraphFactory: Send + Sync {
         dir: Arc<dyn StoreDir>,
         graph: Arc<dyn SessionGraph>,
         options: StoreOptions,
-    ) -> Result<Arc<dyn SessionStore>, String>;
+    ) -> Result<Arc<dyn SessionStore>, SessionError>;
 
     /// Opens the Store in `dir` with this storage. An error as its diagnostic text.
     fn open_store(
         &self,
         dir: Arc<dyn StoreDir>,
         options: StoreOptions,
-    ) -> Result<Arc<dyn SessionStore>, String>;
+    ) -> Result<Arc<dyn SessionStore>, SessionError>;
 }
 
 /// A store of the session's storage, or why it could not be created or opened.
@@ -806,24 +743,25 @@ where
         Arc::new((self.wrap)(S::default()))
     }
 
-    fn adopt(&self, graph: TraversalGraph) -> Result<Arc<dyn SessionGraph>, String> {
+    fn adopt(&self, graph: TraversalGraph) -> Result<Arc<dyn SessionGraph>, SessionError> {
         let boxed: Box<dyn Any> = Box::new(graph);
         let storage = match boxed.downcast::<S>() {
             Ok(same) => *same,
             Err(boxed) => match boxed.downcast::<TraversalGraph>() {
                 Ok(graph) => (self.copy)(&graph).map_err(|err| format_diagnostic(&err))?,
-                Err(_) => return Err("internal: a loaded graph of an unknown type".to_string()),
+                Err(_) => {
+                    return Err("internal: a loaded graph of an unknown type"
+                        .to_string()
+                        .into());
+                }
             },
         };
         Ok(Arc::new((self.wrap)(storage)))
     }
 
-    fn load_snapshot(&self, reader: &mut dyn Read) -> Result<Arc<dyn SessionGraph>, String> {
+    fn load_snapshot(&self, reader: &mut dyn Read) -> Result<Arc<dyn SessionGraph>, SessionError> {
         let Some(ops) = &self.persistent else {
-            return Err(unsupported_text(
-                "packed snapshots (.gsnap)",
-                self.storage_name(),
-            ));
+            return Err(unsupported_text("packed snapshots (.gsnap)", self.storage_name()).into());
         };
         let storage = (ops.read_snapshot)(reader).map_err(|err| format_diagnostic(&err))?;
         Ok(Arc::new((self.wrap)(storage)))
@@ -838,9 +776,9 @@ where
         dir: Arc<dyn StoreDir>,
         graph: Arc<dyn SessionGraph>,
         options: StoreOptions,
-    ) -> Result<Arc<dyn SessionStore>, String> {
+    ) -> Result<Arc<dyn SessionStore>, SessionError> {
         let Some(ops) = &self.persistent else {
-            return Err(unsupported_text("stores", self.storage_name()));
+            return Err(unsupported_text("stores", self.storage_name()).into());
         };
         let any: Arc<dyn AnyGraph> = graph;
         let shared = any
@@ -850,18 +788,22 @@ where
         let graph = Arc::try_unwrap(shared)
             .map_err(|_| "the graph is shared with another owner".to_string())?
             .into_inner();
-        (ops.create_store)(dir, graph, options).map_err(|err| format_diagnostic(&err))
+        (ops.create_store)(dir, graph, options)
+            .map_err(|err| format_diagnostic(&err))
+            .map_err(SessionError::from)
     }
 
     fn open_store(
         &self,
         dir: Arc<dyn StoreDir>,
         options: StoreOptions,
-    ) -> Result<Arc<dyn SessionStore>, String> {
+    ) -> Result<Arc<dyn SessionStore>, SessionError> {
         let Some(ops) = &self.persistent else {
-            return Err(unsupported_text("stores", self.storage_name()));
+            return Err(unsupported_text("stores", self.storage_name()).into());
         };
-        (ops.open_store)(dir, options).map_err(|err| format_diagnostic(&err))
+        (ops.open_store)(dir, options)
+            .map_err(|err| format_diagnostic(&err))
+            .map_err(SessionError::from)
     }
 }
 
@@ -989,23 +931,23 @@ pub trait SessionStore: Send + Sync {
     /// [`Store::backup_marker`].
     fn backup_marker(&self) -> Option<BackupMarker>;
     /// [`Store::read_only_reason`].
-    fn read_only_reason(&self) -> Option<String>;
+    fn read_only_reason(&self) -> Result<Option<String>, PersistError>;
     /// [`Store::is_frozen_by_damage`].
     fn is_frozen_by_damage(&self) -> bool;
     /// [`Store::damage_found`].
-    fn damage_found(&self) -> Vec<FoundDamage>;
+    fn damage_found(&self) -> Result<Vec<FoundDamage>, PersistError>;
     /// [`Store::damage_policy`].
-    fn damage_policy(&self) -> DamagePolicy;
+    fn damage_policy(&self) -> Result<DamagePolicy, PersistError>;
     /// [`Store::wal_bytes_since_checkpoint`].
     fn wal_bytes_since_checkpoint(&self) -> u64;
     /// [`Store::last_auto_checkpoint_error`].
-    fn last_auto_checkpoint_error(&self) -> Option<String>;
+    fn last_auto_checkpoint_error(&self) -> Result<Option<Arc<PersistError>>, PersistError>;
     /// [`Store::run_due_checkpoint`].
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError>;
     /// [`Store::system_jobs`].
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job>;
     /// [`Store::user_jobs`].
-    fn user_jobs(&self) -> Vec<graphersal::jobs::Job>;
+    fn user_jobs(&self) -> Result<graphersal::persist::UserJobs, PersistError>;
     /// [`Store::workload_stats`].
     fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats>;
     /// [`Store::checkpoint`].
@@ -1102,22 +1044,22 @@ where
     fn backup_marker(&self) -> Option<BackupMarker> {
         Store::<S>::backup_marker(self)
     }
-    fn read_only_reason(&self) -> Option<String> {
+    fn read_only_reason(&self) -> Result<Option<String>, PersistError> {
         Store::<S>::read_only_reason(self)
     }
     fn is_frozen_by_damage(&self) -> bool {
         Store::<S>::is_frozen_by_damage(self)
     }
-    fn damage_found(&self) -> Vec<FoundDamage> {
+    fn damage_found(&self) -> Result<Vec<FoundDamage>, PersistError> {
         Store::<S>::damage_found(self)
     }
-    fn damage_policy(&self) -> DamagePolicy {
+    fn damage_policy(&self) -> Result<DamagePolicy, PersistError> {
         Store::<S>::damage_policy(self)
     }
     fn wal_bytes_since_checkpoint(&self) -> u64 {
         Store::<S>::wal_bytes_since_checkpoint(self)
     }
-    fn last_auto_checkpoint_error(&self) -> Option<String> {
+    fn last_auto_checkpoint_error(&self) -> Result<Option<Arc<PersistError>>, PersistError> {
         Store::<S>::last_auto_checkpoint_error(self)
     }
     fn run_due_checkpoint(&self) -> Result<Option<SnapshotInfo>, PersistError> {
@@ -1126,7 +1068,7 @@ where
     fn system_jobs(&self) -> Vec<graphersal::jobs::Job> {
         Store::<S>::system_jobs(self)
     }
-    fn user_jobs(&self) -> Vec<graphersal::jobs::Job> {
+    fn user_jobs(&self) -> Result<graphersal::persist::UserJobs, PersistError> {
         Store::<S>::user_jobs(self)
     }
     fn workload_stats(&self) -> Arc<graphersal::workload::WorkloadStats> {

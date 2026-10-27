@@ -34,6 +34,7 @@
 //! temporary non-numeric id (the id sequences move only for numeric ids), and the unit is
 //! always rolled back.
 
+use crate::error::SessionError;
 use std::collections::HashSet;
 
 use graphersal::prelude::*;
@@ -266,7 +267,7 @@ fn choice(label: &str, declared: bool, count: usize, connects: Option<bool>) -> 
 /// The labels the creation dialog offers in `g` (module docs) for `request` (`{kind:
 /// "vertex"}` or `{kind: "edge", from, to}`), without `readOnly` (the session's to add). An
 /// unknown kind or a missing endpoint is an error.
-pub fn label_choices_in<S: GraphStorage>(g: &S, request: &Value) -> Result<Value, String> {
+pub fn label_choices_in<S: GraphStorage>(g: &S, request: &Value) -> Result<Value, SessionError> {
     let kind = kind_of(request.get("kind").and_then(Value::as_str).unwrap_or(""))?;
     let schema = g.get_schema().unwrap_or_default();
     let closed = schema.mode == SchemaMode::Closed;
@@ -310,7 +311,7 @@ pub fn label_choices_in<S: GraphStorage>(g: &S, request: &Value) -> Result<Value
             }
         }
         ElementKind::Edge => {
-            let endpoint = |field: &str| -> Result<Vec<String>, String> {
+            let endpoint = |field: &str| -> Result<Vec<String>, SessionError> {
                 let id = id_text(request.get(field))
                     .ok_or_else(|| format!("an edge's label choices need \"{field}\""))?;
                 let v = g
@@ -554,10 +555,10 @@ pub(crate) fn create_request_in<S: GraphStorage>(
 impl Session {
     /// The labels the creation dialog offers (module docs): `{kind: "vertex"}` or `{kind:
     /// "edge", from, to}`. An unknown kind or a missing endpoint is an error.
-    pub fn label_choices(&self, request: &Value) -> Result<Value, String> {
+    pub fn label_choices(&self, request: &Value) -> Result<Value, SessionError> {
         let mut choices = self.graph.label_choices(request)?;
         if let Value::Object(map) = &mut choices {
-            map.insert("readOnly".into(), json!(self.read_only_reason()));
+            map.insert("readOnly".into(), json!(self.read_only_reason()?));
         }
         Ok(choices)
     }
@@ -570,7 +571,7 @@ impl Session {
             Err(message) => return refused(vec![FieldError::new("general", message)]),
         };
         let validate_only = request.get("validateOnly").and_then(Value::as_bool) == Some(true);
-        if let Some(reason) = self.read_only_reason() {
+        if let Some(reason) = self.write_refusal() {
             return refused(vec![FieldError::new("general", reason)]);
         }
         if validate_only {
@@ -597,8 +598,8 @@ impl Session {
     }
 
     /// `{kind, id, label, caption, source?, target?}` of an element, as the graph view draws it.
-    fn drawn(&self, kind: ElementKind, id: &str) -> Value {
-        self.graph.drawn(kind, id)
+    fn drawn(&self, kind: ElementKind, id: &str) -> Result<Value, SessionError> {
+        Ok(self.graph.drawn(kind, id)?)
     }
 
     /// Deletes a vertex (with its edges) or an edge as ONE unit (module docs); `validateOnly:
@@ -615,7 +616,7 @@ impl Session {
             )]);
         };
         let validate_only = request.get("validateOnly").and_then(Value::as_bool) == Some(true);
-        if let Some(reason) = self.read_only_reason() {
+        if let Some(reason) = self.write_refusal() {
             return refused(vec![FieldError::new("general", reason)]);
         }
         let gone = || {
@@ -627,8 +628,10 @@ impl Session {
                 ),
             )])
         };
-        let Some(edges) = self.graph.incident_edges(kind, &id) else {
-            return gone();
+        let edges = match self.graph.incident_edges(kind, &id) {
+            Ok(Some(edges)) => edges,
+            Ok(None) => return gone(),
+            Err(err) => return refused(vec![FieldError::new("general", err.to_string())]),
         };
         if validate_only {
             return match self.graph.delete_element(kind, &id, true) {
@@ -706,7 +709,7 @@ mod tests {
     #[test]
     fn creates_a_vertex_in_one_commit_and_a_dry_run_uses_no_id() {
         let mut s = modern();
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         let request = json!({
             "kind": "vertex", "labels": ["person"], "validateOnly": true,
             "properties": [["name", {"type": "string", "value": "ann"}],
@@ -717,19 +720,19 @@ mod tests {
             assert_eq!(checked["ok"], true, "{checked}");
             assert_eq!(checked["created"], false);
         }
-        assert_eq!(s.graph().last_commit_seq(), before);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before);
         let mut real = request.clone();
         real["validateOnly"] = json!(false);
         let answer = s.create_element(&real);
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["created"], true);
-        assert_eq!(s.graph().last_commit_seq(), before + 1);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before + 1);
         // The dry runs consumed no automatic id: the modern graph's next vertex id is 7.
         assert_eq!(answer["drawn"]["id"], "7", "{answer}");
         assert_eq!(answer["drawn"]["caption"], "ann");
         assert_eq!(answer["drawn"]["label"], "person");
         assert_eq!(answer["element"]["properties"][1][1]["type"], "int64");
-        assert_eq!(s.graph().vertex_count(), 7);
+        assert_eq!(s.graph().vertex_count().unwrap(), 7);
     }
 
     #[test]
@@ -754,7 +757,7 @@ mod tests {
     fn schema_errors_are_reported_at_their_fields_and_nothing_is_written() {
         let mut s = modern();
         s.set_schema(SCHEMA, None).expect("schema");
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         for validate_only in [true, false] {
             // Two bad values and an undeclared key: all three reported.
             let answer = s.create_element(&json!({
@@ -789,8 +792,8 @@ mod tests {
             }));
             assert_eq!(fields(&id), vec!["id"], "{id}");
         }
-        assert_eq!(s.graph().last_commit_seq(), before);
-        assert_eq!(s.graph().vertex_count(), 6);
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before);
+        assert_eq!(s.graph().vertex_count().unwrap(), 6);
     }
 
     #[test]
@@ -836,18 +839,18 @@ mod tests {
     #[test]
     fn deletes_a_vertex_with_its_edges_in_one_commit() {
         let mut s = modern();
-        let before = s.graph().last_commit_seq();
+        let before = s.graph().last_commit_seq().unwrap();
         let preview = s.delete_element(&json!({"kind": "vertex", "id": "1", "validateOnly": true}));
         assert_eq!(preview["ok"], true, "{preview}");
         assert_eq!(preview["edges"], 3);
         assert_eq!(preview["deleted"], false);
-        assert_eq!(s.graph().vertex_count(), 6);
+        assert_eq!(s.graph().vertex_count().unwrap(), 6);
         let answer = s.delete_element(&json!({"kind": "vertex", "id": "1"}));
         assert_eq!(answer["deleted"], true, "{answer}");
-        assert_eq!(s.graph().last_commit_seq(), before + 1);
-        assert_eq!(s.graph().vertex_count(), 5);
-        assert_eq!(s.graph().edge_count(), 3);
-        let left = s.graph().graph_view(10, 10).edge_ids[0].clone();
+        assert_eq!(s.graph().last_commit_seq().unwrap(), before + 1);
+        assert_eq!(s.graph().vertex_count().unwrap(), 5);
+        assert_eq!(s.graph().edge_count().unwrap(), 3);
+        let left = s.graph().graph_view(10, 10).unwrap().edge_ids[0].clone();
         let edge = s.delete_element(&json!({"kind": "edge", "id": left}));
         assert_eq!(edge["deleted"], true, "{edge}");
         let gone = s.delete_element(&json!({"kind": "vertex", "id": "1"}));

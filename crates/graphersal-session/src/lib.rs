@@ -32,7 +32,7 @@
 //!
 //! // A graph the host already holds (of any storage) is served as it is.
 //! let shared = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
-//! let info = session.load_shared(shared, "host graph", "host");
+//! let info = session.load_shared(shared, "host graph", "host").unwrap();
 //! assert_eq!(info["vertexCount"], 6);
 //! ```
 //!
@@ -49,6 +49,7 @@ pub mod compression;
 pub mod create;
 pub mod display;
 pub mod edit;
+pub mod error;
 pub mod filter;
 pub mod indexes;
 pub mod jobs;
@@ -61,6 +62,7 @@ pub mod storage;
 pub mod store;
 pub mod views;
 
+pub use error::SessionError;
 pub use session::{
     RunOptions, Session, SessionPresets, playground_authorizer, read_only_authorizer,
 };

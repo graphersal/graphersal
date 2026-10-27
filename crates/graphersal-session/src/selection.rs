@@ -8,6 +8,7 @@
 //! (the dev server's Stop) every [`CANCEL_CHECK_EVERY`] steps. Results are
 //! [`CompactGraph`] columns like every drawing, so the page draws them with the same code.
 
+use crate::error::SessionError;
 use std::collections::{HashMap, HashSet};
 
 use graphersal::exec::CancelToken;
@@ -129,10 +130,10 @@ struct Ticker<'a> {
 }
 
 impl Ticker<'_> {
-    fn tick(&mut self) -> Result<(), String> {
+    fn tick(&mut self) -> Result<(), SessionError> {
         self.n += 1;
         if self.n.is_multiple_of(CANCEL_CHECK_EVERY) && self.cancel.is_cancelled() {
-            return Err(CANCELLED.to_string());
+            return Err(CANCELLED.to_string().into());
         }
         Ok(())
     }
@@ -146,7 +147,7 @@ fn edges_among<S: GraphStorage>(
     vertices: &[S::VertexId],
     max_edges: usize,
     ticker: &mut Ticker<'_>,
-) -> Result<(Vec<S::EdgeId>, usize, usize), String> {
+) -> Result<(Vec<S::EdgeId>, usize, usize), SessionError> {
     let inside: HashSet<S::VertexId> = vertices.iter().copied().collect();
     let mut edges = Vec::new();
     let mut hidden = 0usize;
@@ -284,13 +285,13 @@ pub fn neighbourhood<S: GraphStorage>(
     g: &S,
     request: &NeighbourhoodRequest,
     cancel: &CancelToken,
-) -> Result<SelectionView, String> {
+) -> Result<SelectionView, SessionError> {
     let (max_nodes, max_edges) = limits(request.max_nodes, request.max_edges);
     let hops = request.hops.unwrap_or(1);
     if hops > MAX_HOPS {
         return Err(format!(
             "the depth is at most {MAX_HOPS} hops, got {hops} (expand further by double-clicking a vertex)"
-        ));
+        ).into());
     }
     let mut ticker = Ticker { cancel, n: 0 };
     let mut missing = Vec::new();
@@ -329,8 +330,8 @@ pub fn neighbourhood<S: GraphStorage>(
     }
     if vertices.is_empty() {
         return Err(match request.ids.first().or(request.keep.first()) {
-            Some(id) => format!("there is no vertex with id \"{id}\""),
-            None => "name at least one vertex id".to_string(),
+            Some(id) => format!("there is no vertex with id \"{id}\"").into(),
+            None => "name at least one vertex id".to_string().into(),
         });
     }
     let mut complete = true;
@@ -408,7 +409,7 @@ fn edges_leading_out<S: GraphStorage>(
     filter: &crate::filter::GraphFilter,
     vertices: &[S::VertexId],
     ticker: &mut Ticker<'_>,
-) -> Result<usize, String> {
+) -> Result<usize, SessionError> {
     let inside: HashSet<S::VertexId> = vertices.iter().copied().collect();
     let mut leading: Vec<(S::EdgeId, S::VertexId)> = Vec::new();
     for v in vertices {
@@ -462,7 +463,7 @@ fn filter_drawing<S: GraphStorage>(
     filter: &crate::filter::GraphFilter,
     vertices: Vec<S::VertexId>,
     edges: Vec<S::EdgeId>,
-) -> Result<Drawing<S>, String> {
+) -> Result<Drawing<S>, SessionError> {
     let vertices = filter.vertices(g, Some(&vertices))?.unwrap_or(vertices);
     let visible: HashSet<S::VertexId> = vertices.iter().copied().collect();
     let edges: Vec<S::EdgeId> = filter
@@ -551,7 +552,7 @@ pub fn label_sample<S: GraphStorage>(
     g: &S,
     request: &SampleRequest,
     cancel: &CancelToken,
-) -> Result<SelectionView, String> {
+) -> Result<SelectionView, SessionError> {
     let (max_nodes, max_edges) = limits(request.max_nodes, request.max_edges);
     let mut ticker = Ticker { cancel, n: 0 };
     match (&request.vertices, &request.edge) {
@@ -723,7 +724,7 @@ pub struct MetaGraph {
 /// The label meta-graph of `g` (see [`MetaGraph`]). Vertex counts come from the statistics
 /// (a scan of the vertices for a storage without them); the pair counts from one scan of at most
 /// [`META_SCAN_MAX_EDGES`] edges.
-pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGraph, String> {
+pub fn meta_graph<S: GraphStorage>(g: &S, cancel: &CancelToken) -> Result<MetaGraph, SessionError> {
     let mut ticker = Ticker { cancel, n: 0 };
     let mut counts: Vec<(String, usize)> = match g.statistics() {
         Some(stats) => stats
@@ -921,6 +922,7 @@ mod tests {
         assert!(
             neighbourhood(&*g, &unknown, &token)
                 .unwrap_err()
+                .to_string()
                 .contains("\"nope\"")
         );
         let far = NeighbourhoodRequest {
@@ -938,7 +940,7 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let err = meta_graph(&*g, &token).unwrap_err();
-        assert!(err.contains("cancelled"), "{err}");
+        assert!(err.to_string().contains("cancelled"), "{err}");
         let req = SampleRequest {
             vertices: Some(LabelFilter {
                 labels: vec!["x".into()],

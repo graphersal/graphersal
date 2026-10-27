@@ -41,6 +41,7 @@
 //!   warnings: [{code, message}], elapsedMs, graphChanged: false}`; `best` is the index of the
 //!   candidate that saves the most (`null`: none saves anything).
 
+use crate::error::SessionError;
 use graphersal::catalog::{
     Codec, CompressionCandidate, CompressionDefinition, CompressionEstimate,
     CompressionEstimateRequest,
@@ -328,18 +329,20 @@ fn field_of(err: &DefinitionError) -> FieldError {
 
 impl Session {
     /// The compression rules of the graph, by name, with their current stats (module docs).
-    pub fn list_compressions(&self) -> Value {
-        self.graph.compressions()
+    /// Fails when the graph cannot be read ([`SessionError::Graph`]).
+    pub fn list_compressions(&self) -> Result<Value, SessionError> {
+        Ok(self.graph.compressions()?)
     }
 
-    /// The rule `name` as its entry, `null` when there is none.
-    pub fn get_compression(&self, name: &str) -> Value {
-        self.graph.compression(name)
+    /// The rule `name` as its entry, `null` when there is none. Fails like
+    /// [`Self::list_compressions`].
+    pub fn get_compression(&self, name: &str) -> Result<Value, SessionError> {
+        Ok(self.graph.compression(name)?)
     }
 
-    /// How many compression rules the graph holds.
-    pub fn compression_count(&self) -> usize {
-        self.graph.count_kind(DefinitionKind::COMPRESSION)
+    /// How many compression rules the graph holds. Fails like [`Self::list_compressions`].
+    pub fn compression_count(&self) -> Result<usize, SessionError> {
+        Ok(self.graph.count_kind(DefinitionKind::COMPRESSION)?)
     }
 
     /// Defines (or replaces) a compression rule from a spec (module docs), in ONE commit: the
@@ -499,7 +502,8 @@ impl Session {
         let definition = Definition::compression(name.as_str(), rule);
         self.graph
             .store_compression(definition, is_edit, replaces.as_deref())?;
-        Ok(self.get_compression(&name))
+        self.get_compression(&name)
+            .map_err(|err| vec![FieldError::new("general", err.to_string())])
     }
 
     /// Estimates compression rules for the `(element, label, path)` of an estimate spec
@@ -513,7 +517,7 @@ impl Session {
             cancel.reset();
             self.graph
                 .estimate_compression_json(&request.with_cancel(cancel))
-                .map_err(|message| vec![FieldError::new("general", message)])
+                .map_err(|message| vec![FieldError::new("general", message.to_string())])
         });
         match answer {
             Ok(estimate) => json!({"ok": true, "estimate": estimate}),
@@ -526,16 +530,16 @@ impl Session {
 
     /// Drops the compression rule `name` (its values are decompressed in the same commit):
     /// `true`, or `false` when there was none.
-    pub fn drop_compression(&mut self, name: &str) -> Result<bool, String> {
+    pub fn drop_compression(&mut self, name: &str) -> Result<bool, SessionError> {
         self.graph
             .drop_definition(DefinitionKind::COMPRESSION, name)
     }
 
     /// Re-runs the explicit pass of the rule `name` (a new dictionary from the current values,
     /// every value re-encoded); changes no data, commits nothing. Answers the rule's entry.
-    pub fn recompress(&mut self, name: &str) -> Result<Value, String> {
+    pub fn recompress(&mut self, name: &str) -> Result<Value, SessionError> {
         self.graph.recompress_rule(name)?;
-        Ok(self.get_compression(name))
+        self.get_compression(name)
     }
 }
 
@@ -571,11 +575,12 @@ pub fn compression_in<S: GraphStorage>(g: &S, name: &str) -> Value {
 pub fn estimate_compression_in<S: GraphStorage>(
     g: &S,
     request: &CompressionEstimateRequest,
-) -> Result<Value, String> {
+) -> Result<Value, SessionError> {
     GraphTraversalSource::new(g)
         .estimate_compression(request)
         .map(|estimate| estimate_json(&estimate))
         .map_err(|err| format_diagnostic(&*err))
+        .map_err(SessionError::from)
 }
 
 /// Stores the checked compression rule `definition` in `g` in ONE commit, with the form's
@@ -620,10 +625,11 @@ pub(crate) fn store_compression<S: GraphStorage>(
 /// Re-runs the explicit pass of the rule `name` of `g` (changes no data, commits nothing); an
 /// error (no such rule; a storage without compressed properties: `Unsupported`) as its
 /// diagnostic text.
-pub fn recompress_in<S: GraphStorage>(g: &mut S, name: &str) -> Result<(), String> {
+pub fn recompress_in<S: GraphStorage>(g: &mut S, name: &str) -> Result<(), SessionError> {
     GraphTraversalSource::new(g)
         .recompress(name)
         .map_err(|err| format_diagnostic(&*err))
+        .map_err(SessionError::from)
 }
 
 #[cfg(test)]
@@ -650,8 +656,8 @@ mod tests {
         assert_eq!(defined["ok"], true, "{defined}");
         assert_eq!(defined["rule"]["path"], "$.cv");
         assert_eq!(defined["rule"]["stats"]["compressedValues"], 1);
-        assert_eq!(s.list_compressions().as_array().unwrap().len(), 1);
-        assert_eq!(s.compression_count(), 1);
+        assert_eq!(s.list_compressions().unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(s.compression_count().unwrap(), 1);
         let again = s.define_compression(&json!({"name": "cv", "label": "customer", "path": "x"}));
         assert_eq!(again["errors"][0]["field"], "name", "{again}");
         let edited = s.define_compression(&json!({
@@ -659,7 +665,7 @@ mod tests {
             "dictionary": false
         }));
         assert_eq!(edited["ok"], true, "{edited}");
-        assert_eq!(s.list_compressions()[0]["name"], "cv2");
+        assert_eq!(s.list_compressions().unwrap()[0]["name"], "cv2");
         assert_eq!(s.recompress("cv2").unwrap()["stats"]["compressedValues"], 1);
         assert!(s.recompress("nope").is_err());
         assert!(s.drop_compression("cv2").unwrap());
@@ -708,7 +714,7 @@ mod tests {
     #[test]
     fn an_estimate_answers_candidates_and_changes_nothing() {
         let mut s = session_with_text();
-        let info = s.statistics();
+        let info = s.statistics().unwrap();
         let answer = s.estimate_compression(&json!({"label": "customer", "path": "cv"}));
         assert_eq!(answer["ok"], true, "{answer}");
         let estimate = &answer["estimate"];
@@ -719,8 +725,8 @@ mod tests {
         assert_eq!(estimate["histogram"][0]["minBytes"], 0);
         assert!(estimate["best"].is_u64(), "{estimate}");
         assert_eq!(estimate["current"], Value::Null);
-        assert_eq!(s.statistics(), info, "nothing changed");
-        assert_eq!(s.compression_count(), 0);
+        assert_eq!(s.statistics().unwrap(), info, "nothing changed");
+        assert_eq!(s.compression_count().unwrap(), 0);
         // One candidate; defining it gives what it promised.
         let one = s.estimate_compression(&json!({
             "label": "customer", "path": "cv", "minBytes": 64, "dictionary": false
@@ -908,7 +914,10 @@ mod tests {
             "{listed}"
         );
         let err = recompress_in(&mut g, "cv").unwrap_err();
-        assert!(err.contains("not known to this version"), "{err}");
+        assert!(
+            err.to_string().contains("not known to this version"),
+            "{err}"
+        );
         // A rule this version applies is served, without a reason.
         let known = CompressionDefinition::new(ElementKind::Vertex, "customer", "bio").unwrap();
         g.set_definition(Definition::compression("bio", known))

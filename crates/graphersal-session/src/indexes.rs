@@ -33,6 +33,7 @@
 //!   indexes refuses every create with its `Unsupported` diagnostic (field `general`), as
 //!   `recompress` does on a storage without compressed properties.
 
+use crate::error::SessionError;
 use graphersal::catalog::{
     Definition, DefinitionKind, PropertyIndexDefinition, PropertyIndexTransform, PropertyIndexType,
 };
@@ -124,18 +125,20 @@ fn field_of(err: &DefinitionError) -> FieldError {
 
 impl Session {
     /// The property indexes of the graph, by name, with their current stats (module docs).
-    pub fn list_indexes(&self) -> Value {
-        self.graph.indexes()
+    /// Fails when the graph cannot be read ([`SessionError::Graph`]).
+    pub fn list_indexes(&self) -> Result<Value, SessionError> {
+        Ok(self.graph.indexes()?)
     }
 
-    /// The index `name` as its entry, `null` when there is none.
-    pub fn get_index(&self, name: &str) -> Value {
-        self.graph.index(name)
+    /// The index `name` as its entry, `null` when there is none. Fails like
+    /// [`Self::list_indexes`].
+    pub fn get_index(&self, name: &str) -> Result<Value, SessionError> {
+        Ok(self.graph.index(name)?)
     }
 
-    /// How many property indexes the graph holds.
-    pub fn index_count(&self) -> usize {
-        self.graph.count_kind(DefinitionKind::PROPERTY_INDEX)
+    /// How many property indexes the graph holds. Fails like [`Self::list_indexes`].
+    pub fn index_count(&self) -> Result<usize, SessionError> {
+        Ok(self.graph.count_kind(DefinitionKind::PROPERTY_INDEX)?)
     }
 
     /// Creates a property index from a spec (module docs) in ONE commit, which also builds it.
@@ -156,11 +159,12 @@ impl Session {
         let definition = index_definition(spec)?;
         let name = definition.name().to_string();
         self.graph.store_index(definition)?;
-        Ok(self.get_index(&name))
+        self.get_index(&name)
+            .map_err(|err| vec![FieldError::new("general", err.to_string())])
     }
 
     /// Drops the property index `name`: `true`, or `false` when there was none.
-    pub fn drop_index(&mut self, name: &str) -> Result<bool, String> {
+    pub fn drop_index(&mut self, name: &str) -> Result<bool, SessionError> {
         self.graph
             .drop_definition(DefinitionKind::PROPERTY_INDEX, name)
     }
@@ -343,13 +347,13 @@ mod tests {
         }));
         assert_eq!(edge["index"]["name"], "w", "{edge}");
         assert_eq!(edge["index"]["stats"]["entries"], 2);
-        let list = s.list_indexes();
+        let list = s.list_indexes().unwrap();
         assert_eq!(list.as_array().unwrap().len(), 2);
         assert_eq!(list[0]["name"], "person_age");
-        assert_eq!(s.index_count(), 2);
-        assert_eq!(s.info()["propertyIndexes"], 2);
-        assert_eq!(s.info()["catalog"]["property_index"], 2);
-        let memory = &s.statistics()["memory"];
+        assert_eq!(s.index_count().unwrap(), 2);
+        assert_eq!(s.info().unwrap()["propertyIndexes"], 2);
+        assert_eq!(s.info().unwrap()["catalog"]["property_index"], 2);
+        let memory = &s.statistics().unwrap()["memory"];
         assert!(
             memory["property_index_bytes"].as_u64().unwrap() > 0,
             "{memory}"
@@ -362,8 +366,8 @@ mod tests {
         assert!(out.contains("marko"), "{out}");
         assert!(s.drop_index("person_age").unwrap());
         assert!(!s.drop_index("person_age").unwrap());
-        assert_eq!(s.get_index("person_age"), Value::Null);
-        assert_eq!(s.index_count(), 1);
+        assert_eq!(s.get_index("person_age").unwrap(), Value::Null);
+        assert_eq!(s.index_count().unwrap(), 1);
     }
 
     #[test]
@@ -404,7 +408,7 @@ mod tests {
                 .contains("drop_index"),
             "{conflict}"
         );
-        assert_eq!(s.index_count(), 1);
+        assert_eq!(s.index_count().unwrap(), 1);
     }
 
     #[test]
@@ -457,7 +461,7 @@ mod tests {
         );
         let refused = s.create_index(&json!({"label": "doc", "key": "tags"}));
         assert_eq!(refused["errors"][0]["field"], "key", "{refused}");
-        assert_eq!(s.index_count(), 2);
+        assert_eq!(s.index_count().unwrap(), 2);
         // The known types for a form.
         assert_eq!(index_types()[0]["name"], "memory-ordered");
         assert!(index_types()[0]["description"].is_string());
@@ -499,7 +503,7 @@ mod tests {
         let refused =
             s.create_index(&json!({"label": "item", "key": "code", "transform": "to_lower"}));
         assert_eq!(refused["errors"][0]["field"], "key", "{refused}");
-        assert_eq!(s.index_count(), 3);
+        assert_eq!(s.index_count().unwrap(), 3);
         // The served query.
         let out = s.execute(
             r#"g.v().has_label("person").has("name", __.to_lower().is("josh")).values("name").to_list()"#,

@@ -91,12 +91,12 @@ fn execute_commits_and_rolls_back_alike() {
 #[test]
 fn views_and_selections_are_equal() {
     let mut s = both(false);
-    same(&mut s, |s| s.graph().schema_view());
+    same(&mut s, |s| s.graph().schema_view().unwrap());
     same(&mut s, |s| {
-        serde_json::to_value(s.graph().graph_view(100, 100)).unwrap()
+        serde_json::to_value(s.graph().graph_view(100, 100).unwrap()).unwrap()
     });
     same(&mut s, |s| {
-        let mut statistics = s.statistics();
+        let mut statistics = s.statistics().unwrap();
         // The footprint is the storage's own business.
         statistics["memory"] = Value::Null;
         statistics
@@ -111,8 +111,8 @@ fn views_and_selections_are_equal() {
             .unwrap()
     });
     same(&mut s, |s| s.meta_graph().unwrap());
-    same(&mut s, |s| s.infer_schema());
-    same(&mut s, |s| s.info());
+    same(&mut s, |s| s.infer_schema().unwrap());
+    same(&mut s, |s| s.info().unwrap());
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn edits_and_creations_preview_and_commit_alike() {
     assert_eq!(same(&mut s, |s| s.delete_element(&delete))["edges"], 1);
     let delete = json!({"kind": "vertex", "id": "v9"});
     assert_eq!(same(&mut s, |s| s.delete_element(&delete))["deleted"], true);
-    same(&mut s, |s| s.info());
+    same(&mut s, |s| s.info().unwrap());
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn saved_queries_and_the_catalog_file_are_equal() {
         "body": "fn older_than(age) { g.v().has(\"age\", P.gt(age)).values(\"name\") }",
     });
     assert_eq!(same(&mut s, |s| s.define_query(&spec))["ok"], true);
-    same(&mut s, |s| s.list_queries(None));
+    same(&mut s, |s| s.list_queries(None).unwrap());
     let ran = same(&mut s, |s| {
         run(s, r#"g.query("older_than", #{age: 31}).to_list()"#)
     });
@@ -180,7 +180,7 @@ fn saved_queries_and_the_catalog_file_are_equal() {
     let loaded = same(&mut s, |s| s.load_catalog(&text, false).unwrap());
     assert_eq!(loaded["loaded"], 1);
     assert_eq!(
-        same(&mut s, |s| s.get_query("older_than"))["folder"],
+        same(&mut s, |s| s.get_query("older_than").unwrap())["folder"],
         "people"
     );
     // A GraphML load keeps the catalog, on both storages.
@@ -203,7 +203,7 @@ fn compression_rules_work_and_a_storage_without_compression_says_so() {
     let defined = same(&mut s, |s| s.define_compression(&rule));
     assert_eq!(defined["rule"]["stats"]["compressedValues"], 1, "{defined}");
     same(&mut s, |s| s.recompress("cv").unwrap());
-    same(&mut s, |s| s.list_compressions());
+    same(&mut s, |s| s.list_compressions().unwrap());
 
     // A storage that keeps rules but has no compressed properties: list, define and drop work
     // and persist (a fork of its store has the rule); the stats are `null`; recompress is the
@@ -215,10 +215,11 @@ fn compression_rules_work_and_a_storage_without_compression_says_so() {
     let defined = plain.define_compression(&rule);
     assert_eq!(defined["ok"], true, "{defined}");
     assert_eq!(defined["rule"]["stats"], Value::Null);
-    assert_eq!(plain.list_compressions()[0]["name"], "cv");
+    assert_eq!(plain.list_compressions().unwrap()[0]["name"], "cv");
     let err = plain.recompress("cv").unwrap_err();
     assert!(
-        err.contains("does not support compressed properties"),
+        err.to_string()
+            .contains("does not support compressed properties"),
         "{err}"
     );
     let fork = plain
@@ -227,9 +228,9 @@ fn compression_rules_work_and_a_storage_without_compression_says_so() {
     plain
         .store_switch(fork["fork"]["database"].as_str().unwrap())
         .unwrap();
-    assert_eq!(plain.compression_count(), 1);
+    assert_eq!(plain.compression_count().unwrap(), 1);
     assert!(plain.drop_compression("cv").unwrap());
-    assert_eq!(plain.compression_count(), 0);
+    assert_eq!(plain.compression_count().unwrap(), 0);
     // The value was never compressed: it reads back as it was written.
     let read = run(
         &mut plain,
@@ -330,7 +331,7 @@ fn loads_go_through_the_factory() {
     let mut back = Session::new();
     back.load_snapshot(&fw.save_snapshot().unwrap(), "back")
         .unwrap();
-    assert_eq!(back.info()["vertexCount"], 6);
+    assert_eq!(back.info().unwrap()["vertexCount"], 6);
 }
 
 #[test]
@@ -339,7 +340,9 @@ fn load_shared_serves_a_graph_of_any_storage() {
     let graph = Arc::new(Graph::new(Forwarding::new(
         TraversalGraph::tinkerpop_modern(),
     )));
-    let info = session.load_shared(graph.clone(), "host graph", "host");
+    let info = session
+        .load_shared(graph.clone(), "host graph", "host")
+        .unwrap();
     assert_eq!(info["vertexCount"], 6);
     assert_eq!(run(&mut session, r#"g.add_v("person").next()"#)["ok"], true);
     // The host's own handle sees the commit.
@@ -368,7 +371,11 @@ fn a_storage_without_persistence_serves_graphs_without_stores() {
     // `.gsnap` is refused; everything else works.
     let snapshot = Session::new().save_snapshot().unwrap();
     let err = s.load_snapshot(&snapshot, "x").unwrap_err();
-    assert!(err.contains("does not support packed snapshots"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("does not support packed snapshots"),
+        "{err}"
+    );
     let [mut tg, _] = both(false);
     let ran = run(
         &mut s,
@@ -389,15 +396,15 @@ fn property_indexes_work_and_a_storage_without_them_says_so() {
     let mut s = both(false);
     let created = same(&mut s, |s| s.create_index(&spec));
     assert_eq!(created["index"]["stats"]["entries"], 4, "{created}");
-    same(&mut s, |s| s.list_indexes());
+    same(&mut s, |s| s.list_indexes().unwrap());
     same(&mut s, |s| {
         run(
             s,
             r#"g.v().has_label("person").has("age", P.gt(30)).values("name").to_list()"#,
         )
     });
-    let text = s[0].save_catalog_text();
-    assert_eq!(text, s[1].save_catalog_text());
+    let text = s[0].save_catalog_text().unwrap();
+    assert_eq!(text, s[1].save_catalog_text().unwrap());
 
     // A storage that keeps index definitions but serves none: create is its "not supported"
     // error; a catalog file brings the definition in, listed as not served.
@@ -413,10 +420,10 @@ fn property_indexes_work_and_a_storage_without_them_says_so() {
             .contains("property indexes"),
         "{refused}"
     );
-    assert_eq!(plain.index_count(), 0);
+    assert_eq!(plain.index_count().unwrap(), 0);
     plain.load_catalog(&text, false).unwrap();
-    assert_eq!(plain.index_count(), 1);
-    let listed = plain.list_indexes();
+    assert_eq!(plain.index_count().unwrap(), 1);
+    let listed = plain.list_indexes().unwrap();
     assert_eq!(listed[0]["served"], false, "{listed}");
     assert_eq!(listed[0]["stats"], Value::Null);
     assert!(plain.drop_index("person_age").unwrap());

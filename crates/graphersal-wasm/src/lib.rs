@@ -31,6 +31,19 @@ fn to_text(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
+/// A JSON answer as text, or its error as the exception (the session's errors, a graph that
+/// refused the read): never an empty answer in place of an error.
+fn json_text<E: std::fmt::Display>(result: Result<Value, E>) -> Result<String, JsError> {
+    result
+        .map(|v| to_text(&v))
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// A text answer, or its error as the exception.
+fn plain_text<E: std::fmt::Display>(result: Result<String, E>) -> Result<String, JsError> {
+    result.map_err(|e| JsError::new(&e.to_string()))
+}
+
 fn store_text(result: Result<Value, StoreError>) -> Result<String, JsError> {
     result
         .map(|v| to_text(&v))
@@ -93,7 +106,7 @@ impl Playground {
         self.session
             .load_sample(kind)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Replaces the graph by one imported from GraphML text; returns the graph info JSON. The new
@@ -122,7 +135,7 @@ impl Playground {
         self.session
             .load_graphml(bytes, name, schema.as_deref())
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Replaces the graph by one imported from GraphSON text (line or wrapped form); returns the
@@ -151,7 +164,7 @@ impl Playground {
         self.session
             .load_graphson(bytes, name, schema.as_deref())
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Replaces the graph by one read from a packed snapshot (`.gsnap`, the lossless binary
@@ -162,14 +175,16 @@ impl Playground {
         self.session
             .load_snapshot(bytes, name)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// "Save graph" as a packed snapshot: the bytes of a `.gsnap` file (data, schema, lineage
     /// id, commit position; lossless).
     #[wasm_bindgen(js_name = saveSnapshot)]
     pub fn save_snapshot(&self) -> Result<Vec<u8>, JsError> {
-        self.session.save_snapshot().map_err(|e| JsError::new(&e))
+        self.session
+            .save_snapshot()
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// `set_schema` ("Load schema"): replaces the graph's schema with JSON text in the schema
@@ -182,14 +197,14 @@ impl Playground {
         self.session
             .set_schema(json, mode.as_deref())
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// `get_schema`: the stored schema as JSON text (the schema format, canonical key and
     /// property order), or `null`.
     #[wasm_bindgen(js_name = getSchema)]
-    pub fn get_schema(&self) -> String {
-        self.session.get_schema_text()
+    pub fn get_schema(&self) -> Result<String, JsError> {
+        plain_text(self.session.get_schema_text())
     }
 
     /// `patch_schema`: applies a JSON Merge Patch (JSON text) to the stored schema and stores
@@ -198,7 +213,7 @@ impl Playground {
     pub fn patch_schema(&mut self, patch: &str) -> Result<String, JsError> {
         self.session
             .patch_schema_text(patch)
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// `validate_schema`: `{violations, diff, compatible}` of a proposed schema (JSON text)
@@ -208,7 +223,7 @@ impl Playground {
         self.session
             .validate_schema(json)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// `validate_schema_patch`: `validateSchema` of the stored schema patched with `patch`.
@@ -217,13 +232,13 @@ impl Playground {
         self.session
             .validate_schema_patch(patch)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// `infer_schema`: the schema the data satisfies, as JSON text; stores nothing.
     #[wasm_bindgen(js_name = inferSchema)]
-    pub fn infer_schema(&self) -> String {
-        self.session.infer_schema_text()
+    pub fn infer_schema(&self) -> Result<String, JsError> {
+        plain_text(self.session.infer_schema_text())
     }
 
     /// `diff_schema`: `{changes, compatible}` from the stored schema to a proposed one.
@@ -232,12 +247,12 @@ impl Playground {
         self.session
             .diff_schema(json)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The loaded graph: `{name, kind, vertexCount, edgeCount, schemaMode, warnings}`.
-    pub fn info(&self) -> String {
-        to_text(&self.session.info())
+    pub fn info(&self) -> Result<String, JsError> {
+        json_text(self.session.info())
     }
 
     /// Runs a script; `options` is the JSON of `RunOptions` (`{profile, profile_types,
@@ -255,8 +270,8 @@ impl Playground {
 
     /// The schema views: `{mode, source, table, json, mermaid, graph: {nodes, edges}, truncated,
     /// total_labels}`.
-    pub fn schema(&self) -> String {
-        to_text(&self.session.graph().schema_view())
+    pub fn schema(&self) -> Result<String, JsError> {
+        json_text(self.session.graph().schema_view())
     }
 
     /// The schema views of the schema `json` (the editor's draft) with the graph's label
@@ -266,16 +281,20 @@ impl Playground {
         self.session
             .schema_view_of(json)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The graph to draw as columns (`CompactGraph`: `{vertexIds, vertexLabel, vertexName,
     /// edgeIds, edgeSource, edgeTarget, edgeLabel, labels, truncated, totalNodes, totalEdges}`),
     /// without properties (see [`Self::element`]).
     #[wasm_bindgen(js_name = graphView)]
-    pub fn graph_view(&self, max_nodes: usize, max_edges: usize) -> String {
-        serde_json::to_string(&self.session.graph().graph_view(max_nodes, max_edges))
-            .unwrap_or_else(|_| "null".to_string())
+    pub fn graph_view(&self, max_nodes: usize, max_edges: usize) -> Result<String, JsError> {
+        let view = self
+            .session
+            .graph()
+            .graph_view(max_nodes, max_edges)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        serde_json::to_string(&view).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The graph to draw for a request (JSON `{maxNodes?, maxEdges?, degrees?, filter?}`,
@@ -287,7 +306,7 @@ impl Playground {
         self.session
             .graph_view(request)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The Rhai query selecting what a Graph panel filter (JSON text) shows, as JSON text of a
@@ -297,13 +316,15 @@ impl Playground {
         self.session
             .graph_filter_query(filter)
             .map(|text| to_text(&Value::String(text)))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// One element with its properties, for the inspector: `kind` `"vertex"` or `"edge"`.
     /// `null` when it does not exist (any more); an unknown kind throws.
     pub fn element(&self, kind: &str, id: &str) -> Result<String, JsError> {
-        self.session.element(kind, id).map_err(|e| JsError::new(&e))
+        self.session
+            .element(kind, id)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// One element for the property editor, its properties in the typed form
@@ -314,7 +335,7 @@ impl Playground {
         self.session
             .element_for_edit(kind, id)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The property editor's Save (or, with `validateOnly`, its check): `request` is JSON
@@ -335,7 +356,7 @@ impl Playground {
         self.session
             .label_choices(&request)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Creates a vertex (`{kind: "vertex", labels, id?, properties, validateOnly?}`) or an edge
@@ -366,7 +387,7 @@ impl Playground {
         self.session
             .neighbourhood(request)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// A sample of one vertex label (`{vertices: {labels, exclude?}}`) or one label pair
@@ -377,7 +398,7 @@ impl Playground {
         self.session
             .label_sample(request)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The label meta-graph: `{labels: [{label, count}], other, edges: [{label, from, to,
@@ -388,7 +409,7 @@ impl Playground {
         self.session
             .meta_graph()
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Starts the engine's force layout of a drawing (`vertexCount` vertices, edges from
@@ -427,7 +448,7 @@ impl Playground {
         self.session
             .layout_start(request, budget_ms)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Runs the next slice (`budgetMs`) of layout `job`; answers its status (see
@@ -437,7 +458,7 @@ impl Playground {
         self.session
             .layout_step(u64::from(job), budget_ms)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Cancels layout `job`, keeping the positions reached so far; answers its status.
@@ -446,7 +467,7 @@ impl Playground {
         self.session
             .layout_cancel(u64::from(job))
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The positions of layout `job` as a `Float32Array` (`x, y` per vertex); a job that is no
@@ -455,21 +476,24 @@ impl Playground {
     pub fn layout_positions(&mut self, job: u32) -> Result<Vec<f32>, JsError> {
         self.session
             .layout_positions(u64::from(job))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The graph's own memory footprint (`g.memory_usage()`), or `null`.
     #[wasm_bindgen(js_name = memoryUsage)]
-    pub fn memory_usage(&self) -> String {
-        to_text(&self.session.graph().memory_view())
+    pub fn memory_usage(&self) -> Result<String, JsError> {
+        json_text(self.session.graph().memory_view())
     }
 
     /// The statistics panel: `{statistics, memory, process, limits: {presets, defaults}}` (see
     /// [`Session::statistics`]).
-    pub fn statistics(&self) -> String {
-        let mut statistics = self.session.statistics();
+    pub fn statistics(&self) -> Result<String, JsError> {
+        let mut statistics = self
+            .session
+            .statistics()
+            .map_err(|e| JsError::new(&e.to_string()))?;
         graphersal_session::process::add_to_statistics(&mut statistics);
-        to_text(&statistics)
+        Ok(to_text(&statistics))
     }
 
     /// The memory report from a spec (JSON text, `{sample_every?, max_elements?, max_rows?, max_labels?}`;
@@ -487,12 +511,8 @@ impl Playground {
     #[wasm_bindgen(js_name = workloadReport)]
     pub fn workload_report(&self, history: Option<String>) -> Result<String, JsError> {
         match history {
-            None => Ok(to_text(&self.session.workload_report())),
-            Some(tier) => self
-                .session
-                .workload_report_with_history(&tier)
-                .map(|report| to_text(&report))
-                .map_err(|err| JsError::new(&err)),
+            None => json_text(self.session.workload_report()),
+            Some(tier) => json_text(self.session.workload_report_with_history(&tier)),
         }
     }
 
@@ -502,22 +522,24 @@ impl Playground {
     pub fn set_time_zone(&mut self, name: &str) -> Result<(), JsError> {
         self.session
             .set_time_zone(name)
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Runs the due scheduled jobs of the active store at `now_ms` (milliseconds since the Unix
     /// epoch, `Date.now()`; the worker's timer calls it): the names of the jobs that ran.
     #[wasm_bindgen(js_name = tickJobs)]
-    pub fn tick_jobs(&mut self, now_ms: f64) -> String {
-        to_text(&serde_json::json!(
-            self.session.tick_jobs((now_ms * 1000.0) as i64)
-        ))
+    pub fn tick_jobs(&mut self, now_ms: f64) -> Result<String, JsError> {
+        json_text(
+            self.session
+                .tick_jobs((now_ms * 1000.0) as i64)
+                .map(|ran| serde_json::json!(ran)),
+        )
     }
 
     /// The scheduled jobs of the active store (see `Session::jobs_view`).
     #[wasm_bindgen(js_name = jobs)]
-    pub fn jobs(&mut self) -> String {
-        to_text(&self.session.jobs_view())
+    pub fn jobs(&mut self) -> Result<String, JsError> {
+        json_text(self.session.jobs_view())
     }
 
     /// The storage advisor's recommendations for a spec of thresholds (JSON text, `{}` for the
@@ -567,7 +589,7 @@ impl Playground {
         self.session
             .drop_job(name)
             .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Switches job `name` on or off: its entry.
@@ -576,7 +598,7 @@ impl Playground {
         self.session
             .set_job_enabled(name, enabled)
             .map(|entry| to_text(&entry))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Gives the system job `name` a schedule (`null`: its built-in one again): its entry.
@@ -589,7 +611,7 @@ impl Playground {
         self.session
             .set_job_schedule(name, schedule.as_deref())
             .map(|entry| to_text(&entry))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Runs job `name` now: its entry, `last` being this run.
@@ -598,7 +620,7 @@ impl Playground {
         self.session
             .run_job_now(name)
             .map(|entry| to_text(&entry))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The run buckets of job `name` in `tier` (`minutes`, `hours`, `days`): `{tier, buckets}`.
@@ -607,7 +629,7 @@ impl Playground {
         self.session
             .job_history(name, tier)
             .map(|history| to_text(&history))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Every DSL function, from the Rhai engine's metadata (completion catalogue).
@@ -629,7 +651,7 @@ impl Playground {
         self.session
             .save_graphml()
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The Store menu (the store in memory): identity, position, snapshots, marks, attic, the
@@ -766,14 +788,14 @@ impl Playground {
     /// The saved queries (`folder`: only those in it and below it), as JSON text:
     /// `[{name, folder, description, params, status, error?}]` (`graphersal_session::queries`).
     #[wasm_bindgen(js_name = listQueries)]
-    pub fn list_queries(&self, folder: Option<String>) -> String {
-        to_text(&self.session.list_queries(folder.as_deref()))
+    pub fn list_queries(&self, folder: Option<String>) -> Result<String, JsError> {
+        json_text(self.session.list_queries(folder.as_deref()))
     }
 
     /// The saved query `name` with its body, or `null`.
     #[wasm_bindgen(js_name = getQuery)]
-    pub fn get_query(&self, name: &str) -> String {
-        to_text(&self.session.get_query(name))
+    pub fn get_query(&self, name: &str) -> Result<String, JsError> {
+        json_text(self.session.get_query(name))
     }
 
     /// Defines or replaces a saved query from the editor's spec (JSON text): `{ok, query}` or
@@ -790,7 +812,7 @@ impl Playground {
         self.session
             .drop_query(name)
             .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Moves the saved query `name` into `folder` (empty: the root); its entry.
@@ -799,7 +821,7 @@ impl Playground {
         self.session
             .move_query(name, Some(folder))
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The call text of a saved query with the named arguments `args` (JSON text of an
@@ -813,7 +835,7 @@ impl Playground {
         };
         graphersal_session::queries::query_call_text(name, &args)
             .map(|text| to_text(&Value::String(text)))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The preview of a call of the saved query `name` with the named arguments `args` (JSON
@@ -832,8 +854,8 @@ impl Playground {
     /// "Catalog ▸ Save catalog": the whole catalog (saved queries, compression rules, every
     /// other kind) as its JSON exchange form (`{"definitions": [..]}`).
     #[wasm_bindgen(js_name = saveCatalog)]
-    pub fn save_catalog(&self) -> String {
-        self.session.save_catalog_text()
+    pub fn save_catalog(&self) -> Result<String, JsError> {
+        plain_text(self.session.save_catalog_text())
     }
 
     /// "Catalog ▸ Load catalog": stores the definitions of a catalog file (JSON text) in one
@@ -843,14 +865,14 @@ impl Playground {
         self.session
             .load_catalog(text, replace)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The compression rules with their current stats, as JSON text: `[{name, element, label,
     /// path, codec, minBytes, dictionary, stats}]` (`graphersal_session::compression`).
     #[wasm_bindgen(js_name = listCompressions)]
-    pub fn list_compressions(&self) -> String {
-        to_text(&self.session.list_compressions())
+    pub fn list_compressions(&self) -> Result<String, JsError> {
+        json_text(self.session.list_compressions())
     }
 
     /// Defines or replaces a compression rule from the form's spec (JSON text): `{ok, rule}` or
@@ -867,7 +889,7 @@ impl Playground {
         self.session
             .drop_compression(name)
             .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds the rule's dictionary and re-encodes its values (no data change): its entry.
@@ -876,7 +898,7 @@ impl Playground {
         self.session
             .recompress(name)
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Estimates compression rules for an estimate spec (JSON text `{label, path, element?,
@@ -892,8 +914,8 @@ impl Playground {
     /// The property indexes with their current stats, as JSON text: `[{name, element, label,
     /// key, served, stats}]` (`graphersal_session::indexes`).
     #[wasm_bindgen(js_name = listIndexes)]
-    pub fn list_indexes(&self) -> String {
-        to_text(&self.session.list_indexes())
+    pub fn list_indexes(&self) -> Result<String, JsError> {
+        json_text(self.session.list_indexes())
     }
 
     /// Creates a property index from the form's spec (JSON text `{label, key, element?,
@@ -911,7 +933,7 @@ impl Playground {
         self.session
             .drop_index(name)
             .map(|dropped| to_text(&serde_json::json!({ "dropped": dropped })))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// "Save graph" as GraphSON: `{text, schema, warnings}`: the graph as GraphSON 3.0 text (line
@@ -921,7 +943,7 @@ impl Playground {
         self.session
             .save_graphson()
             .map(|v| to_text(&v))
-            .map_err(|e| JsError::new(&e))
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 }
 
@@ -980,17 +1002,17 @@ mod tests {
         p.load_sample("modern").unwrap();
         let spec = r#"{"name": "names", "body": "fn names() { g.v().values(\"name\") }"}"#;
         assert_eq!(json(p.define_query(spec).unwrap())["ok"], true);
-        assert_eq!(json(p.list_queries(None))[0]["name"], "names");
-        assert_eq!(json(p.get_query("names"))["status"], "ok");
+        assert_eq!(json(p.list_queries(None).unwrap())[0]["name"], "names");
+        assert_eq!(json(p.get_query("names").unwrap())["status"], "ok");
         assert_eq!(
             json(p.query_call_text("names", "").unwrap()),
             "g.query(\"names\")"
         );
         assert_eq!(json(p.move_query("names", "x").unwrap())["folder"], "x");
-        let file = p.save_catalog();
+        let file = p.save_catalog().unwrap();
         assert_eq!(json(p.drop_query("names").unwrap())["dropped"], true);
         assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
-        assert_eq!(json(p.info())["savedQueries"], 1);
+        assert_eq!(json(p.info().unwrap())["savedQueries"], 1);
     }
 
     #[test]
@@ -1014,7 +1036,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(refused["errors"][0]["field"], "path");
-        assert_eq!(json(p.info())["compressionRules"], 0);
+        assert_eq!(json(p.info().unwrap())["compressionRules"], 0);
     }
 
     #[test]
@@ -1025,20 +1047,20 @@ mod tests {
         let spec = r#"{"name": "names", "label": "person", "path": "name", "minBytes": 1}"#;
         let defined = json(p.define_compression(spec).unwrap());
         assert_eq!(defined["ok"], true, "{defined}");
-        assert_eq!(json(p.list_compressions())[0]["path"], "$.name");
+        assert_eq!(json(p.list_compressions().unwrap())[0]["path"], "$.name");
         assert_eq!(json(p.recompress("names").unwrap())["name"], "names");
         let refused = json(
             p.define_compression(r#"{"name": "x", "label": "person", "path": "a[0]"}"#)
                 .unwrap(),
         );
         assert_eq!(refused["errors"][0]["field"], "path");
-        let file = p.save_catalog();
+        let file = p.save_catalog().unwrap();
         assert!(file.contains("\"compression\""), "{file}");
         assert_eq!(json(p.drop_compression("names").unwrap())["dropped"], true);
-        assert_eq!(json(p.info())["compressionRules"], 0);
+        assert_eq!(json(p.info().unwrap())["compressionRules"], 0);
         assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
-        assert_eq!(json(p.info())["compressionRules"], 1);
-        assert_eq!(json(p.info())["catalog"]["compression"], 1);
+        assert_eq!(json(p.info().unwrap())["compressionRules"], 1);
+        assert_eq!(json(p.info().unwrap())["catalog"]["compression"], 1);
     }
 
     #[test]
@@ -1052,7 +1074,7 @@ mod tests {
         );
         assert_eq!(defined["ok"], true, "{defined}");
         // The playground's graph is in a store in memory: the job is scheduled.
-        let jobs = json(p.jobs());
+        let jobs = json(p.jobs().unwrap());
         assert_eq!(jobs["store"], true);
         let cp = jobs["jobs"]
             .as_array()
@@ -1077,7 +1099,7 @@ mod tests {
         );
         assert_eq!(refused["errors"][0]["field"], "path", "{refused}");
         // The catalog file carries the job.
-        let file = p.save_catalog();
+        let file = p.save_catalog().unwrap();
         assert!(file.contains("\"job\""), "{file}");
         assert_eq!(json(p.drop_job("cp").unwrap())["dropped"], true);
         assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
@@ -1085,7 +1107,7 @@ mod tests {
             json(p.job_history("cp", "minutes").unwrap())["tier"],
             "minutes"
         );
-        let back = json(p.jobs());
+        let back = json(p.jobs().unwrap());
         let cp = back["jobs"]
             .as_array()
             .unwrap()
@@ -1106,16 +1128,16 @@ mod tests {
         );
         assert_eq!(created["ok"], true, "{created}");
         assert_eq!(created["index"]["name"], "person_age");
-        assert_eq!(json(p.list_indexes())[0]["stats"]["entries"], 4);
+        assert_eq!(json(p.list_indexes().unwrap())[0]["stats"]["entries"], 4);
         let refused = json(p.create_index(r#"{"label": "person"}"#).unwrap());
         assert_eq!(refused["errors"][0]["field"], "key");
-        assert_eq!(json(p.info())["propertyIndexes"], 1);
-        let file = p.save_catalog();
+        assert_eq!(json(p.info().unwrap())["propertyIndexes"], 1);
+        let file = p.save_catalog().unwrap();
         assert!(file.contains("\"property_index\""), "{file}");
         assert_eq!(json(p.drop_index("person_age").unwrap())["dropped"], true);
-        assert_eq!(json(p.info())["propertyIndexes"], 0);
+        assert_eq!(json(p.info().unwrap())["propertyIndexes"], 0);
         assert_eq!(json(p.load_catalog(&file, true).unwrap())["loaded"], 1);
-        assert_eq!(json(p.info())["catalog"]["property_index"], 1);
+        assert_eq!(json(p.info().unwrap())["catalog"]["property_index"], 1);
     }
 
     /// The property editor: the typed edit view, a dry run, a save, a refused value.

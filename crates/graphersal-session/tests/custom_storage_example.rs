@@ -74,7 +74,7 @@ fn a_host_plugs_its_own_storage_into_every_front_end() -> Result<(), Box<dyn std
     // 4. A session over the storage: every graph it builds (samples, loads, stores in memory,
     //    forks) is a `MyStorage`; here it serves the Store opened above.
     let mut session = Session::with_storage(Arc::new(StorageKind::<MyStorage>::persistent()));
-    session.attach_store(Arc::new(store), "my store");
+    session.attach_store(Arc::new(store), "my store")?;
     let answer = session.execute(
         r#"g.V().has("name", "ada").count().next()"#,
         &RunOptions::default(),

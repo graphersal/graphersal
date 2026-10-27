@@ -6,6 +6,7 @@
 //! data stays [`ElementProperty`] (or the engine's own JSON text) until it is written out, so map
 //! keys keep the engine's order.
 
+use crate::error::SessionError;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
@@ -350,11 +351,19 @@ impl Session {
             if ops & 255 != 0 {
                 return None;
             }
-            if token.lock().ok()?.is_cancelled() {
+            // Both slots hold a plain value (a token, an instant) that a panic cannot leave
+            // half-written: a poisoned lock is read through, never taken as "not cancelled".
+            if token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_cancelled()
+            {
                 return Some(Dynamic::from(CANCELLED_DIAGNOSTIC));
             }
             let limit = budget?;
-            let start = (*clock.lock().ok()?)?;
+            let start = (*clock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))?;
             let elapsed = start.elapsed();
             (elapsed >= limit).then(|| Dynamic::from(script_timeout_diagnostic(limit, elapsed)))
         });
@@ -399,17 +408,17 @@ impl Session {
     }
 
     /// Replaces the graph by a sample (`empty`, `modern`, `large`, `tree`).
-    pub fn load_sample(&mut self, kind: &str) -> Result<Value, String> {
+    pub fn load_sample(&mut self, kind: &str) -> Result<Value, SessionError> {
         let (graph, name) = match kind {
             "empty" => (GraphSource::empty(), "Empty graph"),
             "modern" => (GraphSource::tinkerpop_modern(), "Modern (TinkerPop)"),
             "large" => (GraphSource::large_110k(), "Large generated graph"),
             "tree" => (GraphSource::file_tree(), "File tree"),
-            other => return Err(format!("Unknown sample graph: {other}")),
+            other => return Err(format!("Unknown sample graph: {other}").into()),
         };
         let graph = self.factory.adopt(graph.into_inner())?;
         self.replace(graph, name, kind);
-        Ok(self.info())
+        self.info()
     }
 
     /// Replaces the graph by one imported from GraphML text ("Load graph"). The new graph starts
@@ -424,13 +433,13 @@ impl Session {
         text: &[u8],
         name: &str,
         schema: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, SessionError> {
         let schema = parse_schema_file(schema)?;
         let graph = import_with_schema(text, schema)?;
-        crate::queries::carry_catalog(&mut *graph.write(), self.catalog())?;
+        crate::queries::carry_catalog(&mut *graph.write(), self.catalog()?)?;
         let graph = self.factory.adopt(graph.into_inner())?;
         self.replace(graph, name, "file");
-        Ok(self.info())
+        self.info()
     }
 
     /// Replaces the graph by one imported from GraphSON text (line or wrapped form). Like
@@ -444,14 +453,14 @@ impl Session {
         text: &[u8],
         name: &str,
         schema: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, SessionError> {
         let schema = parse_schema_file(schema)?;
         let (graph, report) = import_graphson_with_schema(text, schema)?;
-        crate::queries::carry_catalog(&mut *graph.write(), self.catalog())?;
+        crate::queries::carry_catalog(&mut *graph.write(), self.catalog()?)?;
         let graph = self.factory.adopt(graph.into_inner())?;
         self.replace(graph, name, "file");
         self.warnings = report_warnings(&report);
-        Ok(self.info())
+        self.info()
     }
 
     /// Replaces the graph by one read from a packed snapshot (`.gsnap`): the lossless format,
@@ -459,7 +468,7 @@ impl Session {
     /// On failure (a damaged file) the current graph stays. Only a session over a
     /// [`graphersal::storage::PersistentStorage`] reads snapshots ([`StorageKind::persistent`]);
     /// any other fails with the "not supported by this storage" error.
-    pub fn load_snapshot(&mut self, bytes: &[u8], name: &str) -> Result<Value, String> {
+    pub fn load_snapshot(&mut self, bytes: &[u8], name: &str) -> Result<Value, SessionError> {
         let mut reader = bytes;
         let graph = self.factory.load_snapshot(&mut reader)?;
         self.replace(graph, name, "file");
@@ -474,12 +483,12 @@ impl Session {
                 ));
             }
         }
-        Ok(self.info())
+        self.info()
     }
 
     /// "Save graph" as a packed snapshot: the bytes of a `.gsnap` file (data, schema, lineage
     /// id, commit position), checked by reading them back.
-    pub fn save_snapshot(&self) -> Result<Vec<u8>, String> {
+    pub fn save_snapshot(&self) -> Result<Vec<u8>, SessionError> {
         let mut bytes = Vec::new();
         self.graph
             .write_snapshot(&mut bytes)
@@ -494,7 +503,7 @@ impl Session {
     /// the inferred schema with a mode freezes the structure the graph has. In mode
     /// `open`/`closed` the existing data is validated first; on violations nothing changes and
     /// the error carries the report. Returns the graph info.
-    pub fn set_schema(&mut self, json: &str, mode: Option<&str>) -> Result<Value, String> {
+    pub fn set_schema(&mut self, json: &str, mode: Option<&str>) -> Result<Value, SessionError> {
         let mut schema = GraphSchema::from_json(json).map_err(|err| format_diagnostic(&err))?;
         if let Some(name) = mode {
             schema =
@@ -503,33 +512,33 @@ impl Session {
         self.graph
             .set_schema(schema)
             .map_err(|err| format_diagnostic(&*err))?;
-        Ok(self.info())
+        self.info()
     }
 
     /// `get_schema`: the stored schema (the schema format), or `null` without one. Never
-    /// inferred.
-    pub fn get_schema(&self) -> Value {
-        parse_schema_text(&self.get_schema_text())
+    /// inferred. Fails when the graph cannot be read ([`SessionError::Graph`]).
+    pub fn get_schema(&self) -> Result<Value, SessionError> {
+        Ok(parse_schema_text(&self.get_schema_text()?))
     }
 
     /// [`Self::get_schema`] as JSON text in the canonical form, keys in the canonical order
     /// (property order kept), `null` without a stored schema. A [`Value`] would sort the keys.
-    pub fn get_schema_text(&self) -> String {
-        match self.graph.get_schema() {
+    pub fn get_schema_text(&self) -> Result<String, SessionError> {
+        Ok(match self.graph.get_schema()? {
             Some(schema) => schema.to_json(),
             None => "null".to_string(),
-        }
+        })
     }
 
     /// `patch_schema`: applies a JSON Merge Patch to the stored schema and stores the result
     /// (validated against the data, like `set_schema`); returns the new schema.
-    pub fn patch_schema(&mut self, patch: &str) -> Result<Value, String> {
+    pub fn patch_schema(&mut self, patch: &str) -> Result<Value, SessionError> {
         self.patch_schema_text(patch)
             .map(|text| parse_schema_text(&text))
     }
 
     /// [`Self::patch_schema`] returning the new schema as canonical JSON text.
-    pub fn patch_schema_text(&mut self, patch: &str) -> Result<String, String> {
+    pub fn patch_schema_text(&mut self, patch: &str) -> Result<String, SessionError> {
         let patch = SchemaPatch::from_json(patch).map_err(|err| format_diagnostic(&err))?;
         let schema = self
             .graph
@@ -540,7 +549,7 @@ impl Session {
 
     /// `validate_schema`: `{violations, diff, compatible}` of a proposed schema against the
     /// data; nothing is applied.
-    pub fn validate_schema(&self, json: &str) -> Result<Value, String> {
+    pub fn validate_schema(&self, json: &str) -> Result<Value, SessionError> {
         let schema = GraphSchema::from_json(json).map_err(|err| format_diagnostic(&err))?;
         let validation = self
             .graph
@@ -552,13 +561,13 @@ impl Session {
     /// The schema views (`{mode, source, table, json, mermaid, graph, truncated,
     /// total_labels}`, [`crate::views::schema_view_of`]) of the schema `json`, e.g. the
     /// editor's draft, with the graph's label counts. Nothing is stored or checked against data.
-    pub fn schema_view_of(&self, json: &str) -> Result<Value, String> {
+    pub fn schema_view_of(&self, json: &str) -> Result<Value, SessionError> {
         let schema = GraphSchema::from_json(json).map_err(|err| format_diagnostic(&err))?;
-        Ok(self.graph.schema_view_of(schema))
+        Ok(self.graph.schema_view_of(schema)?)
     }
 
     /// `validate_schema_patch`: [`Self::validate_schema`] of the stored schema patched.
-    pub fn validate_schema_patch(&self, patch: &str) -> Result<Value, String> {
+    pub fn validate_schema_patch(&self, patch: &str) -> Result<Value, SessionError> {
         let patch = SchemaPatch::from_json(patch).map_err(|err| format_diagnostic(&err))?;
         let validation = self
             .graph
@@ -567,18 +576,19 @@ impl Session {
         value_json(&validation.to_value())
     }
 
-    /// `infer_schema`: the schema the data satisfies (mode `none`); stores nothing.
-    pub fn infer_schema(&self) -> Value {
-        parse_schema_text(&self.infer_schema_text())
+    /// `infer_schema`: the schema the data satisfies (mode `none`); stores nothing. Fails when
+    /// the graph cannot be read ([`SessionError::Graph`]).
+    pub fn infer_schema(&self) -> Result<Value, SessionError> {
+        Ok(parse_schema_text(&self.infer_schema_text()?))
     }
 
     /// [`Self::infer_schema`] as canonical JSON text (keys in the canonical order).
-    pub fn infer_schema_text(&self) -> String {
-        self.graph.inferred_schema().to_json()
+    pub fn infer_schema_text(&self) -> Result<String, SessionError> {
+        Ok(self.graph.inferred_schema()?.to_json())
     }
 
     /// `diff_schema`: `{changes, compatible}` from the stored schema to a proposed one.
-    pub fn diff_schema(&self, json: &str) -> Result<Value, String> {
+    pub fn diff_schema(&self, json: &str) -> Result<Value, SessionError> {
         let schema = GraphSchema::from_json(json).map_err(|err| format_diagnostic(&err))?;
         let diff = self
             .graph
@@ -589,8 +599,14 @@ impl Session {
 
     /// Serves a graph that another owner keeps (the dev server's Store: its graph journals
     /// every commit; a host's own graph of any storage, [`IntoSessionGraph`]). Returns the
-    /// graph info.
-    pub fn load_shared(&mut self, graph: impl IntoSessionGraph, name: &str, kind: &str) -> Value {
+    /// graph info. The graph is served from then on; an error reading its info is returned
+    /// (and the graph stays served).
+    pub fn load_shared(
+        &mut self,
+        graph: impl IntoSessionGraph,
+        name: &str,
+        kind: &str,
+    ) -> Result<Value, SessionError> {
         self.warnings.clear();
         self.graph = graph.into_session_graph();
         self.name = name.to_string();
@@ -599,8 +615,8 @@ impl Session {
     }
 
     /// The definitions of the current graph's catalog (saved queries, ...).
-    fn catalog(&self) -> Vec<Definition> {
-        self.graph.definitions(None)
+    fn catalog(&self) -> Result<Vec<Definition>, SessionError> {
+        Ok(self.graph.definitions(None)?)
     }
 
     fn replace(&mut self, graph: Arc<dyn SessionGraph>, name: &str, kind: &str) {
@@ -618,10 +634,11 @@ impl Session {
     /// `{name, kind, vertexCount, edgeCount, schemaMode, savedQueries, compressionRules,
     /// propertyIndexes, catalog, warnings}` of the loaded graph (`savedQueries`,
     /// `compressionRules`, `propertyIndexes`: how many of each its catalog holds; `catalog`:
-    /// every kind's count by kind name).
-    pub fn info(&self) -> Value {
+    /// every kind's count by kind name). Fails when the graph cannot be read
+    /// ([`SessionError::Graph`]).
+    pub fn info(&self) -> Result<Value, SessionError> {
         let g = &self.graph;
-        let definitions = g.definitions(None);
+        let definitions = g.definitions(None)?;
         let mut catalog = serde_json::Map::new();
         for definition in &definitions {
             let count = catalog
@@ -629,12 +646,12 @@ impl Session {
                 .or_insert(json!(0));
             *count = json!(count.as_u64().unwrap_or(0) + 1);
         }
-        json!({
+        Ok(json!({
             "name": self.name,
             "kind": self.kind,
-            "vertexCount": g.vertex_count(),
-            "edgeCount": g.edge_count(),
-            "schemaMode": g.get_schema().map(|s| s.mode.as_str()),
+            "vertexCount": g.vertex_count()?,
+            "edgeCount": g.edge_count()?,
+            "schemaMode": g.get_schema()?.map(|s| s.mode.as_str()),
             "savedQueries": definitions
                 .iter()
                 .filter(|d| d.kind() == DefinitionKind::QUERY)
@@ -649,7 +666,7 @@ impl Session {
                 .count(),
             "catalog": catalog,
             "warnings": self.warnings,
-        })
+        }))
     }
 
     /// The memory the process holds beside the graph: `{models: [{name, model, dimension,
@@ -686,26 +703,28 @@ impl Session {
     /// engine's defaults of every traversal limit the presets do not set
     /// ([`graphersal::exec::traversal_limit_defaults`]: what a query runs under unless it sets the
     /// option itself). Limits are not data counts, so they stay out of `GraphStatistics`.
-    pub fn statistics(&self) -> Value {
+    /// Fails when the graph cannot be read ([`SessionError::Graph`]) or a limit default does not
+    /// serialize.
+    pub fn statistics(&self) -> Result<Value, SessionError> {
         let mut defaults = serde_json::Map::new();
         for (key, value) in graphersal::exec::traversal_limit_defaults() {
             if self.presets.options.iter().any(|(preset, _)| preset == key) {
                 continue;
             }
-            defaults.insert(
-                key.to_string(),
-                serde_json::to_value(&value).unwrap_or(Value::Null),
-            );
+            let value = serde_json::to_value(&value).map_err(|err| {
+                SessionError::failed(format!("the default of {key} is not JSON: {err}"))
+            })?;
+            defaults.insert(key.to_string(), value);
         }
-        json!({
-            "statistics": self.graph.statistics_view(),
-            "memory": self.graph.memory_view(),
+        Ok(json!({
+            "statistics": self.graph.statistics_view()?,
+            "memory": self.graph.memory_view()?,
             "process": self.process_memory(),
             "limits": {
                 "presets": self.presets.to_value(),
                 "defaults": defaults,
             },
-        })
+        }))
     }
 
     /// The memory report ([`graphersal::storage::MemoryReport::to_property`] as JSON, snake_case
@@ -720,12 +739,15 @@ impl Session {
             self.graph
                 .memory_report(&request.with_cancel(cancel))
                 .map_err(|err| graphersal::error::format_diagnostic(&*err))
+                .map_err(SessionError::from)
+        });
+        let answer = answer.and_then(|report| {
+            serde_json::from_str::<Value>(&report.to_json()).map_err(|err| {
+                SessionError::failed(format!("the memory report is not JSON: {err}"))
+            })
         });
         match answer {
-            Ok(report) => json!({
-                "ok": true,
-                "report": serde_json::from_str::<Value>(&report.to_json()).unwrap_or(Value::Null),
-            }),
+            Ok(report) => json!({"ok": true, "report": report}),
             Err(error) => json!({"ok": false, "error": error}),
         }
     }
@@ -736,17 +758,19 @@ impl Session {
     /// whole graph, drawn or not), `{kind, id, label, source, target, properties}` for an
     /// edge, the properties in the engine's order; `null` when no element of that kind has the
     /// id (it was dropped since it was drawn). An unknown `kind` is an error.
-    pub fn element(&self, kind: &str, id: &str) -> Result<String, String> {
+    pub fn element(&self, kind: &str, id: &str) -> Result<String, SessionError> {
         let kind = match kind {
             "vertex" => ElementKind::Vertex,
             "edge" => ElementKind::Edge,
             other => {
                 return Err(format!(
                     "unknown element kind \"{other}\": expected \"vertex\" or \"edge\""
-                ));
+                )
+                .into());
             }
         };
-        serde_json::to_string(&self.graph.element(kind, id)).map_err(|e| e.to_string())
+        serde_json::to_string(&self.graph.element(kind, id)?)
+            .map_err(|e| SessionError::failed(e.to_string()))
     }
 
     /// The whole graph to draw (`request`: JSON of [`crate::views::GraphViewRequest`],
@@ -754,16 +778,18 @@ impl Session {
     /// ([`crate::filter`]) applied before the limits plus `matchedNodes` / `matchedEdges`, with
     /// `degrees: true` the `vertexInDegree` / `vertexOutDegree` columns. An invalid request or
     /// filter is an error naming the label, key and operator at fault.
-    pub fn graph_view(&self, request: &str) -> Result<Value, String> {
+    pub fn graph_view(&self, request: &str) -> Result<Value, SessionError> {
         let request: crate::views::GraphViewRequest = serde_json::from_str(request)
             .map_err(|e| format!("invalid graph view request: {e}"))?;
         let view = self.graph.graph_view_request(&request)?;
-        serde_json::to_value(view).map_err(|e| e.to_string())
+        serde_json::to_value(view)
+            .map_err(|e| e.to_string())
+            .map_err(SessionError::from)
     }
 
     /// The Rhai query that selects the vertices and edges the filter `filter` (JSON, see
     /// [`crate::filter`]) shows, for the Graph panel's "Open as query".
-    pub fn graph_filter_query(&self, filter: &str) -> Result<String, String> {
+    pub fn graph_filter_query(&self, filter: &str) -> Result<String, SessionError> {
         let filter: Value =
             serde_json::from_str(filter).map_err(|e| format!("invalid filter: {e}"))?;
         self.graph.graph_filter_query(&filter)
@@ -774,32 +800,38 @@ impl Session {
     /// a [`crate::selection::SelectionView`] (the drawing's columns plus `seeds`, `missing`,
     /// `hiddenEdges`). Bounded by its limits; the session's cancellation token stops it (like
     /// [`Self::execute`], it resets the token when it starts).
-    pub fn neighbourhood(&self, request: &str) -> Result<Value, String> {
+    pub fn neighbourhood(&self, request: &str) -> Result<Value, SessionError> {
         let request: crate::selection::NeighbourhoodRequest = serde_json::from_str(request)
             .map_err(|e| format!("invalid neighbourhood request: {e}"))?;
         self.cancel.reset();
         let view = self.graph.neighbourhood(&request, &self.cancel)?;
-        serde_json::to_value(view).map_err(|e| e.to_string())
+        serde_json::to_value(view)
+            .map_err(|e| e.to_string())
+            .map_err(SessionError::from)
     }
 
     /// A sample of one vertex label or one label pair (`request`: JSON of
     /// [`crate::selection::SampleRequest`]) as a [`crate::selection::SelectionView`] with
     /// `sample: {kind, shown, total, complete}`. Bounded and cancellable like
     /// [`Self::neighbourhood`].
-    pub fn label_sample(&self, request: &str) -> Result<Value, String> {
+    pub fn label_sample(&self, request: &str) -> Result<Value, SessionError> {
         let request: crate::selection::SampleRequest =
             serde_json::from_str(request).map_err(|e| format!("invalid sample request: {e}"))?;
         self.cancel.reset();
         let view = self.graph.label_sample(&request, &self.cancel)?;
-        serde_json::to_value(view).map_err(|e| e.to_string())
+        serde_json::to_value(view)
+            .map_err(|e| e.to_string())
+            .map_err(SessionError::from)
     }
 
     /// The label meta-graph ([`crate::selection::MetaGraph`]): vertex labels with their counts
     /// and the label pairs of the edges with theirs. Cancellable like [`Self::neighbourhood`].
-    pub fn meta_graph(&self) -> Result<Value, String> {
+    pub fn meta_graph(&self) -> Result<Value, SessionError> {
         self.cancel.reset();
         let meta = self.graph.meta_graph(&self.cancel)?;
-        serde_json::to_value(meta).map_err(|e| e.to_string())
+        serde_json::to_value(meta)
+            .map_err(|e| e.to_string())
+            .map_err(SessionError::from)
     }
 
     /// Starts a force layout of a drawing's topology (`request`: `{vertexCount, edgeSource,
@@ -813,14 +845,18 @@ impl Session {
         &mut self,
         request: crate::layout::LayoutRequest,
         budget_ms: f64,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, SessionError> {
         let options = request.options();
         let job = self.layouts.start(request.input, options)?;
         self.layout_step(job, budget_ms)
     }
 
     /// [`Self::layout_start`] with the request as JSON text.
-    pub fn layout_start_json(&mut self, request: &str, budget_ms: f64) -> Result<Value, String> {
+    pub fn layout_start_json(
+        &mut self,
+        request: &str,
+        budget_ms: f64,
+    ) -> Result<Value, SessionError> {
         let request =
             serde_json::from_str(request).map_err(|e| format!("invalid layout request: {e}"))?;
         self.layout_start(request, budget_ms)
@@ -830,20 +866,20 @@ impl Session {
     /// [`crate::layout::MAX_SLICE_MS`]; at least one iteration). The session's cancellation token
     /// ([`Self::cancel_token`], the dev server's Stop) ends it as `cancelled`; like
     /// [`Self::execute`], a slice resets the token when it starts.
-    pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, String> {
+    pub fn layout_step(&mut self, job: u64, budget_ms: f64) -> Result<Value, SessionError> {
         self.cancel.reset();
         let budget = crate::layout::slice_budget(budget_ms);
         self.layouts.step(job, budget, &self.cancel)
     }
 
     /// Cancels layout `job`; it keeps the positions reached so far ([`Self::layout_positions`]).
-    pub fn layout_cancel(&mut self, job: u64) -> Result<Value, String> {
+    pub fn layout_cancel(&mut self, job: u64) -> Result<Value, SessionError> {
         self.layouts.cancel(job)
     }
 
     /// The positions of layout `job`: `x, y` per vertex, centred, the median edge 70 units long.
     /// A job that is no longer running is forgotten afterwards.
-    pub fn layout_positions(&mut self, job: u64) -> Result<Vec<f32>, String> {
+    pub fn layout_positions(&mut self, job: u64) -> Result<Vec<f32>, SessionError> {
         let status = self.layouts.status(job)?;
         let positions = self.layouts.positions(job)?;
         if status["state"] != "running" {
@@ -918,20 +954,25 @@ impl Session {
         authorizer: Arc<dyn Authorizer>,
         cancel: &CancelToken,
     ) -> String {
-        let previous = self
-            .run_cancel
-            .lock()
-            .map(|mut slot| std::mem::replace(&mut *slot, cancel.clone()))
-            .ok();
+        // The slot holds a plain token: a poisoned lock is used as it is (module docs of the
+        // progress check above), so a run is always stoppable through its own token.
+        let previous = std::mem::replace(
+            &mut *self
+                .run_cancel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            cancel.clone(),
+        );
         // The user's query counts in the workload statistics under the host's channel, even
         // where the host marks the session's other work (drawing, panels) as technical.
         let answer =
             graphersal::workload::scope(graphersal::workload::current_channel(), false, || {
                 cancel.scope(|| self.execute_in_scope(script, options, authorizer))
             });
-        if let (Some(previous), Ok(mut slot)) = (previous, self.run_cancel.lock()) {
-            *slot = previous;
-        }
+        *self
+            .run_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
         // Without a checkpoint thread (wasm32) the automatic checkpoint runs here.
         self.run_due_checkpoint();
         answer
@@ -949,9 +990,10 @@ impl Session {
         authorizer: Arc<dyn Authorizer>,
     ) -> String {
         let started = web_time::Instant::now();
-        if let Ok(mut clock) = self.started.lock() {
-            *clock = Some(started);
-        }
+        *self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(started);
         let render = options.render_options();
         let mut scope_options = self.presets.option_slice();
         scope_options.extend(render_scope_options(&render));
@@ -959,8 +1001,19 @@ impl Session {
         let mut scope = graph_scope_with_options(any, &scope_options, authorizer);
         graphersal::script::set_scope_embedders(&mut scope, self.presets.embedders.clone());
         let hint = trailing_terminal(script);
-        let seq_before = self.graph.last_commit_seq();
-        let counts_before = (self.graph.vertex_count(), self.graph.edge_count());
+        // Read before the run: a graph that cannot be read runs nothing.
+        let before = self
+            .graph
+            .last_commit_seq()
+            .and_then(|seq| Ok((seq, (self.graph.vertex_count()?, self.graph.edge_count()?))));
+        let (seq_before, counts_before) = match before {
+            Ok(before) => before,
+            Err(err) => {
+                let diagnostic = format_diagnostic(&TraverserError::from(err));
+                let out = Outcome::failed("unknown", &error_of_diagnostic(&diagnostic));
+                return self.response_of_refused_run(out, started);
+            }
+        };
         // The whole run is one unit (the host option of `book/src/users_guide/transactions.md`):
         // every statement and the implicit execution of a trailing traversal are savepoints of
         // it, and it commits only when the run is reported as `ok`, so a run that shows an
@@ -994,44 +1047,85 @@ impl Session {
         unwind_guard.disarm();
         let mut changes = Changes::default();
         let mut change_summary = None;
+        // The first failed read after the run: it turns the answer into an error (the
+        // `changes` and `mutated` fields still say what was committed), never an empty part.
+        let mut read_error: Option<GraphError> = None;
         if out.ok {
-            let unit = self.graph.run_changes(mark);
-            changes = Changes {
-                data: unit.data,
-                schema: unit.schema,
-                definitions: unit.definitions,
-            };
-            if let Err(err) = self.graph.commit_run(mark) {
+            let committed = self.graph.run_changes(mark).and_then(|unit| {
+                changes = Changes {
+                    data: unit.data,
+                    schema: unit.schema,
+                    definitions: unit.definitions,
+                };
+                self.graph.commit_run(mark)
+            });
+            if let Err(err) = committed {
+                // A failed commit rolled the unit back itself (`UnitNotHeld` of another thread
+                // has nothing to roll back).
                 changes = Changes::default();
                 let diagnostic = format_diagnostic(&TraverserError::from(err));
                 out = Outcome::failed(out.terminal, &error_of_diagnostic(&diagnostic));
             } else if changes.data {
                 let delta = |after: usize, before: usize| after as i64 - before as i64;
-                change_summary = Some(ChangeSummary::of(
-                    delta(self.graph.vertex_count(), counts_before.0),
-                    delta(self.graph.edge_count(), counts_before.1),
-                ));
+                match (self.graph.vertex_count(), self.graph.edge_count()) {
+                    (Ok(vertices), Ok(edges)) => {
+                        change_summary = Some(ChangeSummary::of(
+                            delta(vertices, counts_before.0),
+                            delta(edges, counts_before.1),
+                        ));
+                    }
+                    (Err(err), _) | (_, Err(err)) => read_error = Some(err),
+                }
             }
-        } else {
-            self.graph
-                .rollback_run(mark, &RollbackReason::failed(&"the playground run failed"));
+        } else if let Err(err) = self
+            .graph
+            .rollback_run(mark, &RollbackReason::failed(&"the playground run failed"))
+        {
+            read_error.get_or_insert(err);
         }
-        let mut subgraph = self.graph.subgraph(
+        let mut subgraph = match self.graph.subgraph(
             &out.results,
             options
                 .subgraph_max_elements
                 .unwrap_or(crate::display::DEFAULT_SUBGRAPH_MAX_ELEMENTS),
-        );
+        ) {
+            Ok(subgraph) => subgraph,
+            Err(err) => {
+                read_error.get_or_insert(err);
+                None
+            }
+        };
         if options.subgraph_degrees
             && let Some(view) = subgraph.as_mut()
+            && let Err(err) = self.graph.add_degrees(view)
         {
-            self.graph.add_degrees(view);
+            read_error.get_or_insert(err);
+        }
+        let mutated = match self.graph.last_commit_seq() {
+            Ok(seq) => seq > seq_before,
+            Err(err) => {
+                read_error.get_or_insert(err);
+                false
+            }
+        };
+        let graph_info = match self.info() {
+            Ok(info) => info,
+            Err(err) => {
+                if read_error.is_none() {
+                    out = Outcome::failed(out.terminal, &error_of_diagnostic(&err.to_string()));
+                }
+                Value::Null
+            }
+        };
+        if let Some(err) = read_error {
+            let diagnostic = format_diagnostic(&TraverserError::from(err));
+            out = Outcome::failed(out.terminal, &error_of_diagnostic(&diagnostic));
         }
         let response = Response {
             ok: out.ok,
             terminal: out.terminal,
             implicit: out.implicit,
-            mutated: self.graph.last_commit_seq() > seq_before,
+            mutated,
             changes,
             change_summary,
             execution: RawValue::from_string(out.execution).unwrap_or_else(|_| null_raw()),
@@ -1039,14 +1133,14 @@ impl Session {
             subgraph,
             preferred_view: out.preferred_view,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            graph: self.info(),
+            graph: graph_info.clone(),
         };
         serde_json::to_string(&response).unwrap_or_else(|err| {
             json!({"ok": false, "terminal": "unknown", "implicit": false, "mutated": false,
                    "changes": {"data": false, "schema": false, "definitions": false},
                    "execution": {"results": [], "error": {"message": err.to_string(),
                    "diagnostic": err.to_string()}, "profile": null},
-                   "display": null, "subgraph": null, "elapsed_ms": 0, "graph": self.info()})
+                   "display": null, "subgraph": null, "elapsed_ms": 0, "graph": graph_info})
             .to_string()
         })
     }
@@ -1054,6 +1148,9 @@ impl Session {
     /// The answer to a run the graph refused to open a unit for (`begin_run` failed: a view of
     /// the graph alive on this thread); nothing ran, nothing changed.
     fn response_of_refused_run(&self, out: Outcome, started: web_time::Instant) -> String {
+        // The answer is already the refusal: a graph whose info cannot be read either is shown
+        // without it (`graph: null`), the refusal names the cause.
+        let graph_info = self.info().unwrap_or(Value::Null);
         let response = Response {
             ok: out.ok,
             terminal: out.terminal,
@@ -1066,14 +1163,14 @@ impl Session {
             subgraph: None,
             preferred_view: out.preferred_view,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            graph: self.info(),
+            graph: graph_info.clone(),
         };
         serde_json::to_string(&response).unwrap_or_else(|err| {
             json!({"ok": false, "terminal": "unknown", "implicit": false, "mutated": false,
                    "changes": {"data": false, "schema": false, "definitions": false},
                    "execution": {"results": [], "error": {"message": err.to_string(),
                    "diagnostic": err.to_string()}, "profile": null},
-                   "display": null, "subgraph": null, "elapsed_ms": 0, "graph": self.info()})
+                   "display": null, "subgraph": null, "elapsed_ms": 0, "graph": graph_info})
             .to_string()
         })
     }
@@ -1296,20 +1393,23 @@ impl Session {
     /// playground does (the schema first, then the GraphML): a warning names a property whose
     /// logical type does not survive (an undeclared `uuid`, `array` or `object` comes back as a
     /// string, a key with different types on different labels), or says why loading fails.
-    pub fn save_graphml(&self) -> Result<Value, String> {
+    pub fn save_graphml(&self) -> Result<Value, SessionError> {
         let mut buf = Vec::new();
         self.graph
             .export_graphml(&mut buf, true)
             .map_err(|err| format_diagnostic(&err))?;
         let text = String::from_utf8(buf).map_err(|err| err.to_string())?;
-        let stored = self.graph.get_schema();
+        let stored = self.graph.get_schema()?;
         let schema_json = stored.as_ref().map(GraphSchema::to_json_pretty);
         let warnings = match import_with_schema(text.as_bytes(), stored) {
             Err(err) => vec![format!(
                 "Loading the saved files back fails: {}",
-                first_line(&err)
+                first_line(&err.to_string())
             )],
-            Ok(loaded) => type_drift(&self.graph.inferred_schema(), &loaded.read().infer_schema()),
+            Ok(loaded) => type_drift(
+                &self.graph.inferred_schema()?,
+                &loaded.read().infer_schema(),
+            ),
         };
         Ok(json!({"text": text, "schema": schema_json, "warnings": warnings}))
     }
@@ -1320,23 +1420,23 @@ impl Session {
     /// in the line form (which keeps `uuid`, `array` and `object` values typed and carries no
     /// schema), `schema` the stored schema JSON text or `null`. A warning says why loading the
     /// files back (schema first) would fail.
-    pub fn save_graphson(&self) -> Result<Value, String> {
+    pub fn save_graphson(&self) -> Result<Value, SessionError> {
         let mut buf = Vec::new();
         self.graph
             .export_graphson(&mut buf)
             .map_err(|err| format_diagnostic(&err))?;
         let text = String::from_utf8(buf).map_err(|err| err.to_string())?;
-        let stored = self.graph.get_schema();
+        let stored = self.graph.get_schema()?;
         let schema_json = stored.as_ref().map(GraphSchema::to_json_pretty);
         let warnings = match import_graphson_with_schema(text.as_bytes(), stored) {
             Err(err) => vec![format!(
                 "Loading the saved files back fails: {}",
-                first_line(&err)
+                first_line(&err.to_string())
             )],
             Ok((loaded, report)) => {
                 let mut warnings = report_warnings(&report);
                 warnings.extend(type_drift(
-                    &self.graph.inferred_schema(),
+                    &self.graph.inferred_schema()?,
                     &loaded.read().infer_schema(),
                 ));
                 warnings
@@ -1366,12 +1466,13 @@ fn report_warnings(report: &graphersal::io::ImportReport) -> Vec<String> {
 fn import_graphson_with_schema(
     text: &[u8],
     schema: Option<GraphSchema>,
-) -> Result<(Graph, graphersal::io::ImportReport), String> {
+) -> Result<(Graph, graphersal::io::ImportReport), SessionError> {
     let Some(schema) = schema else {
         // A graph nobody sees yet: loaded outside units (no undo log, no change capture).
         return graphersal::io::GraphSONImport::new()
             .load(Cursor::new(text))
-            .map_err(|err| format_diagnostic(&err));
+            .map_err(|err| format_diagnostic(&err))
+            .map_err(SessionError::from);
     };
     let mut graph = GraphSource::empty();
     graph
@@ -1468,7 +1569,14 @@ fn execution_outcome(mut exec: ScriptExecution, render: &RenderOptions, offset: 
     // key) and their kind: a vertex or an edge stays one, so the table shows its id and label
     // apart from its properties and the result graph finds it.
     let results: Vec<ElementProperty> = if ok {
-        exec.result_values().unwrap_or_default()
+        match exec.result_values() {
+            Ok(values) => values,
+            // The values that the execution reported as its results cannot be read back: the
+            // run's answer is that error, never an empty result list.
+            Err(err) => {
+                return Outcome::failed("execute", &error_of_diagnostic(&err.to_string()));
+            }
+        }
     } else {
         Vec::new()
     };
@@ -1514,20 +1622,22 @@ fn execution_outcome(mut exec: ScriptExecution, render: &RenderOptions, offset: 
 /// order "schema first, then the graph" that restores the declared logical types.
 /// The optional schema file of a graph load, parsed (`None`: the graph gets no schema). An
 /// error names the schema file, so it is not mistaken for a problem of the graph file.
-fn parse_schema_file(schema: Option<&str>) -> Result<Option<GraphSchema>, String> {
+fn parse_schema_file(schema: Option<&str>) -> Result<Option<GraphSchema>, SessionError> {
     schema
         .map(|json| {
             GraphSchema::from_json(json)
                 .map_err(|err| format!("Schema file: {}", format_diagnostic(&err)))
         })
         .transpose()
+        .map_err(SessionError::from)
 }
 
-fn import_with_schema(text: &[u8], schema: Option<GraphSchema>) -> Result<Graph, String> {
+fn import_with_schema(text: &[u8], schema: Option<GraphSchema>) -> Result<Graph, SessionError> {
     let Some(schema) = schema else {
         // A graph nobody sees yet: loaded outside units (no undo log, no change capture).
         return GraphSource::from_graphml_reader(Cursor::new(text))
-            .map_err(|err| format_diagnostic(&err));
+            .map_err(|err| format_diagnostic(&err))
+            .map_err(SessionError::from);
     };
     let mut graph = GraphSource::empty();
     graph
@@ -1704,8 +1814,10 @@ fn parse_schema_text(text: &str) -> Value {
 }
 
 /// An engine value (a validation report, a diff) as a JSON value.
-fn value_json(value: &ElementProperty) -> Result<Value, String> {
-    serde_json::to_value(json_safe(value)).map_err(|err| err.to_string())
+fn value_json(value: &ElementProperty) -> Result<Value, SessionError> {
+    serde_json::to_value(json_safe(value))
+        .map_err(|err| err.to_string())
+        .map_err(SessionError::from)
 }
 
 /// Properties whose logical type differs between the saved graph and the graph loaded back from
@@ -1762,7 +1874,9 @@ impl RunUnitGuard {
 impl Drop for RunUnitGuard {
     fn drop(&mut self) {
         if let Some(mark) = self.mark.take() {
-            self.graph.rollback_run(
+            // Unwinding: the panic is what the host reports (the dev server catches it); a
+            // failing rollback here (`UnitNotHeld` of another thread) has no caller to go to.
+            let _ = self.graph.rollback_run(
                 mark,
                 &RollbackReason::failed(&"a panic unwound through the playground run"),
             );
@@ -2071,6 +2185,7 @@ mod tests {
             session
                 .neighbourhood(r#"{"ids": ["1"], "hops": 6}"#)
                 .unwrap_err()
+                .to_string()
                 .contains("at most 5")
         );
         let grown = session
@@ -2118,6 +2233,7 @@ mod tests {
             session
                 .element("graph", "1")
                 .unwrap_err()
+                .to_string()
                 .contains("unknown element kind")
         );
     }
@@ -2427,7 +2543,7 @@ mod tests {
         let middle = damaged.len() / 2;
         damaged[middle] ^= 1;
         assert!(t.load_snapshot(&damaged, "bad.gsnap").is_err());
-        assert_eq!(t.info()["name"], "saved.gsnap");
+        assert_eq!(t.info().unwrap()["name"], "saved.gsnap");
     }
 
     /// Skipped data is listed in the info's warnings until the next load.
@@ -2457,7 +2573,7 @@ mod tests {
         assert_eq!(info["warnings"], json!([]));
         // A malformed file fails and keeps the current graph.
         assert!(s.load_graphson(b"{bad", "bad.json", None).is_err());
-        assert_eq!(s.info()["vertexCount"], 6);
+        assert_eq!(s.info().unwrap()["vertexCount"], 6);
     }
 
     #[test]
@@ -2536,16 +2652,16 @@ mod tests {
         s.set_schema(r#"{"mode": "closed"}"#, Some("closed"))
             .expect_err("closed without declarations rejects the modern data");
         s.set_schema(TYPED_SCHEMA, None).expect("schema applies");
-        assert_eq!(s.info()["schemaMode"], "open");
+        assert_eq!(s.info().unwrap()["schemaMode"], "open");
         let info = s.load_graphson(text.as_bytes(), "g.json", None).unwrap();
         assert_eq!(info["schemaMode"], Value::Null, "{info}");
-        assert_eq!(s.get_schema(), Value::Null);
+        assert_eq!(s.get_schema().unwrap(), Value::Null);
         s.set_schema(TYPED_SCHEMA, None).expect("schema applies");
         let info = s
             .load_graphml(graphml.as_bytes(), "g.graphml", None)
             .unwrap();
         assert_eq!(info["schemaMode"], Value::Null, "{info}");
-        assert_eq!(s.get_schema(), Value::Null);
+        assert_eq!(s.get_schema().unwrap(), Value::Null);
     }
 
     /// A schema the data violates fails the load with the violation, and nothing changes: the
@@ -2564,21 +2680,21 @@ mod tests {
             "properties": {"name": {"type": "string"}, "age": {"type": "string"}}}}}}"#;
         let mut s = Session::new();
         s.load_sample("tree").unwrap();
-        let before = s.info();
+        let before = s.info().unwrap();
         let err = s
             .load_graphson(text.as_bytes(), "g.json", Some(strict))
             .unwrap_err();
-        assert!(err.contains("person.age"), "{err}");
+        assert!(err.to_string().contains("person.age"), "{err}");
         let err = s
             .load_graphml(graphml.as_bytes(), "g.graphml", Some(strict))
             .unwrap_err();
-        assert!(err.contains("age"), "{err}");
-        assert_eq!(s.info(), before);
+        assert!(err.to_string().contains("age"), "{err}");
+        assert_eq!(s.info().unwrap(), before);
         let err = s
             .load_graphson(text.as_bytes(), "g.json", Some("{not json"))
             .unwrap_err();
-        assert!(err.starts_with("Schema file: "), "{err}");
-        assert_eq!(s.info(), before);
+        assert!(err.to_string().starts_with("Schema file: "), "{err}");
+        assert_eq!(s.info().unwrap(), before);
         // An open schema the data satisfies loads with it.
         let info = s
             .load_graphson(text.as_bytes(), "g.json", Some(r#"{"mode": "open"}"#))
@@ -2591,33 +2707,40 @@ mod tests {
     fn set_schema_rejects_bad_json_and_violating_data() {
         let mut s = modern();
         let err = s.set_schema("{not json", None).unwrap_err();
-        assert!(err.contains("not valid JSON"), "{err}");
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
         let err = s.set_schema(r#"{"mdoe": "closed"}"#, None).unwrap_err();
-        assert!(err.contains("unknown key 'mdoe'"), "{err}");
+        assert!(err.to_string().contains("unknown key 'mdoe'"), "{err}");
         let err = s
             .set_schema(r#"{"mode": "closed", "vertices": {"person": {}}}"#, None)
             .unwrap_err();
-        assert!(!err.is_empty());
-        assert_eq!(s.info()["schemaMode"], Value::Null, "nothing changed");
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            s.info().unwrap()["schemaMode"],
+            Value::Null,
+            "nothing changed"
+        );
     }
 
     /// "Freeze as open/closed": the inferred schema with a mode.
     #[test]
     fn set_schema_with_a_mode_freezes_the_inferred_schema() {
         let mut s = modern();
-        let inferred = s.infer_schema_text();
+        let inferred = s.infer_schema_text().unwrap();
         let info = s.set_schema(&inferred, Some("closed")).unwrap();
         assert_eq!(info["schemaMode"], "closed");
         let err = s.set_schema(&inferred, Some("Closed")).unwrap_err();
-        assert!(err.contains("unknown mode 'Closed'"), "{err}");
-        assert_eq!(s.info()["schemaMode"], "closed", "nothing changed");
+        assert!(err.to_string().contains("unknown mode 'Closed'"), "{err}");
+        assert_eq!(s.info().unwrap()["schemaMode"], "closed", "nothing changed");
         // Unlabeled elements: closed names them, open freezes.
         let mut e = Session::new();
         let r = run(&mut e, r#"g.add_v().next(); g.add_v("a").next()"#);
         assert_eq!(r["ok"], true, "{r}");
-        let inferred = e.infer_schema_text();
+        let inferred = e.infer_schema_text().unwrap();
         let err = e.set_schema(&inferred, Some("closed")).unwrap_err();
-        assert!(err.contains("1 vertex without a label"), "{err}");
+        assert!(
+            err.to_string().contains("1 vertex without a label"),
+            "{err}"
+        );
         assert_eq!(
             e.set_schema(&inferred, Some("open")).unwrap()["schemaMode"],
             "open"
@@ -2629,7 +2752,7 @@ mod tests {
     #[test]
     fn statistics_memory_carries_shape_and_dedup_bytes() {
         let s = modern();
-        let stats = s.statistics();
+        let stats = s.statistics().unwrap();
         let memory = &stats["memory"];
         let shapes = memory["shape_bytes"].as_u64().expect("shape_bytes");
         let properties = memory["property_bytes"].as_u64().expect("property_bytes");
@@ -2643,7 +2766,7 @@ mod tests {
     #[test]
     fn statistics_report_counts_memory_and_limits() {
         let mut s = modern();
-        let stats = s.statistics();
+        let stats = s.statistics().unwrap();
         let counts = &stats["statistics"];
         assert_eq!(counts["vertex_count"], 6, "{stats}");
         assert_eq!(counts["edge_count"], 6, "{stats}");
@@ -2674,7 +2797,7 @@ mod tests {
         assert_eq!(limits["defaults"].as_object().unwrap().len(), 6);
         // A run that adds data is counted.
         run(&mut s, r#"g.add_v(["person", "admin"]).next()"#);
-        let counts = &s.statistics()["statistics"];
+        let counts = &s.statistics().unwrap()["statistics"];
         assert_eq!(counts["vertex_count"], 7);
         assert_eq!(
             counts["vertex_labels"][0],
@@ -2697,14 +2820,14 @@ mod tests {
                 .with_option("traversal.max_traversers", ElementProperty::from(5_i64))
                 .with_script_timeout_ms(Some(100)),
         );
-        let limits = &s.statistics()["limits"];
+        let limits = &s.statistics().unwrap()["limits"];
         assert_eq!(limits["presets"]["options"]["traversal.max_traversers"], 5);
         assert_eq!(limits["presets"]["scriptTimeoutMs"], 100);
         assert!(limits["defaults"].get("traversal.max_traversers").is_none());
         assert_eq!(limits["defaults"].as_object().unwrap().len(), 5);
         // The large sample has one label per vertex: the list is cut, the totals are not.
         s.load_sample("large").unwrap();
-        let counts = &s.statistics()["statistics"];
+        let counts = &s.statistics().unwrap()["statistics"];
         assert_eq!(counts["truncated"], true);
         assert_eq!(
             counts["vertex_labels"].as_array().unwrap().len(),
@@ -2718,10 +2841,14 @@ mod tests {
     #[test]
     fn the_schema_methods_and_the_changes_of_a_run() {
         let mut s = modern();
-        assert_eq!(s.get_schema(), Value::Null);
-        let inferred = s.infer_schema();
+        assert_eq!(s.get_schema().unwrap(), Value::Null);
+        let inferred = s.infer_schema().unwrap();
         assert_eq!(inferred["mode"], "none");
-        assert_eq!(s.get_schema(), Value::Null, "inference stores nothing");
+        assert_eq!(
+            s.get_schema().unwrap(),
+            Value::Null,
+            "inference stores nothing"
+        );
         let validation = s
             .validate_schema(r#"{"mode": "closed", "vertices": {"person": {}}}"#)
             .unwrap();
@@ -2738,7 +2865,7 @@ mod tests {
             .patch_schema(r#"{"vertices": {"person": {"schema": {"properties": {"x": {"type": "integer"}}}}}}"#)
             .unwrap();
         assert!(patched["vertices"]["person"]["schema"]["properties"]["x"].is_object());
-        assert_eq!(s.get_schema(), patched);
+        assert_eq!(s.get_schema().unwrap(), patched);
         let check = s.validate_schema_patch(r#"{"mode": "closed"}"#).unwrap();
         assert_eq!(check["violations"]["total_violations"], 0, "{check}");
         let diff = s.diff_schema(&inferred.to_string()).unwrap();
@@ -2776,7 +2903,7 @@ mod tests {
             json!({"data": false, "schema": false, "definitions": false})
         );
         assert_eq!(
-            s.get_schema()["mode"],
+            s.get_schema().unwrap()["mode"],
             "open",
             "the failed run is rolled back"
         );
@@ -2795,7 +2922,7 @@ mod tests {
     fn the_schema_editor_flow() {
         let mut s = modern();
         // No stored schema: the editor shows the inferred one, and its patch is the whole draft.
-        let mut draft = s.infer_schema();
+        let mut draft = s.infer_schema().unwrap();
         draft["mode"] = json!("closed");
         let person = &mut draft["vertices"]["person"]["schema"];
         person["properties"]["email"] = json!({"type": "string", "default": "n/a"});
@@ -2816,7 +2943,7 @@ mod tests {
         assert_eq!(missing["count"], 4);
         // Apply is blocked by the check; the engine refuses the patch too and changes nothing.
         assert!(s.patch_schema(&text).is_err());
-        assert_eq!(s.get_schema(), Value::Null);
+        assert_eq!(s.get_schema().unwrap(), Value::Null);
 
         // `violationQuery` of that group shows exactly the offending vertices.
         let shown = run(
@@ -2842,7 +2969,7 @@ mod tests {
             backfilled["changes"],
             json!({"data": true, "schema": true, "definitions": false})
         );
-        assert_eq!(s.get_schema()["mode"], "closed");
+        assert_eq!(s.get_schema().unwrap()["mode"], "closed");
         let filled = run(&mut s, r#"g.V().has("email", "n/a").count().next()"#);
         assert_eq!(filled["execution"]["results"][0], 4, "{filled}");
 
@@ -2864,10 +2991,10 @@ mod tests {
     #[test]
     fn schemas_reach_the_playground_in_the_canonical_order() {
         let mut s = modern();
-        assert_eq!(s.get_schema_text(), "null");
+        assert_eq!(s.get_schema_text().unwrap(), "null");
         s.set_schema(r#"{"vertices": {"person": {"schema": {"type": "object", "properties": {"zeta": {"type": "string"}, "alpha": {"type": "integer"}}}}}, "mode": "open"}"#, None)
             .unwrap();
-        let text = s.get_schema_text();
+        let text = s.get_schema_text().unwrap();
         let order = |keys: &[&str]| {
             let at: Vec<usize> = keys.iter().map(|k| text.find(k).unwrap()).collect();
             at.windows(2).all(|w| w[0] < w[1])
@@ -2885,7 +3012,7 @@ mod tests {
             at("\"zeta\"") < at("\"alpha\"") && at("\"alpha\"") < at("\"beta\""),
             "{patched}"
         );
-        assert!(s.infer_schema_text().starts_with("{\"$schema\""));
+        assert!(s.infer_schema_text().unwrap().starts_with("{\"$schema\""));
     }
 
     /// The force layout through the session: a JSON request, slices, the cancel token (the dev
@@ -2962,7 +3089,7 @@ mod tests {
             assert_eq!(r["ok"], false, "{r}");
             let diagnostic = r["execution"]["error"]["diagnostic"].as_str().unwrap();
             assert!(diagnostic.contains("cancelled"), "{diagnostic}");
-            assert_eq!(session.info()["vertexCount"], 6);
+            assert_eq!(session.info().unwrap()["vertexCount"], 6);
         }
         // `execute` resets the token: the next run is not cancelled.
         assert_eq!(run(&mut session, "g.v().count().next()")["ok"], true);
@@ -3003,7 +3130,7 @@ mod tests {
             .unwrap();
             canceller.join().unwrap();
             assert_eq!(r["ok"], false, "{r}");
-            assert_eq!(session.info()["vertexCount"], 6);
+            assert_eq!(session.info().unwrap()["vertexCount"], 6);
         }
     }
 
@@ -3091,7 +3218,7 @@ mod tests {
         let mut s =
             Session::with_presets(SessionPresets::new().with_embedders(Arc::new(embedders)));
         s.load_sample("modern").unwrap();
-        let stats = s.statistics();
+        let stats = s.statistics().unwrap();
         let models = stats["process"]["models"].as_array().unwrap();
         assert_eq!(models.len(), 1, "{stats}");
         assert_eq!(models[0]["name"], "acme/m");
@@ -3099,13 +3226,16 @@ mod tests {
         assert_eq!(models[0]["default"], false);
         assert_eq!(stats["statistics"]["vertex_count"], 6);
         // The default session has only the built-in embedder, which reports no size.
-        assert_eq!(modern().statistics()["process"]["models"], json!([]));
+        assert_eq!(
+            modern().statistics().unwrap()["process"]["models"],
+            json!([])
+        );
     }
 
     /// `process.memory` is always present with a `source`; its figures are optional.
     #[test]
     fn statistics_carry_the_memory_of_the_whole_process() {
-        let mut stats = modern().statistics();
+        let mut stats = modern().statistics().unwrap();
         assert!(
             stats["process"].get("memory").is_none(),
             "volatile: hosts add it"

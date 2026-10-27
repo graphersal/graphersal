@@ -25,6 +25,7 @@
 //! [`LayoutJobs`] holds the running jobs of a session and a small cache of finished layouts,
 //! keyed by the input (topology and options), so drawing the same view again costs nothing.
 
+use crate::error::SessionError;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -73,25 +74,28 @@ pub struct LayoutInput {
 impl LayoutInput {
     /// Checks the bounds: equal edge columns, indices below `vertex_count`, at most
     /// [`MAX_LAYOUT_VERTICES`] vertices and [`MAX_LAYOUT_EDGES`] edges.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), SessionError> {
         if self.vertex_count > MAX_LAYOUT_VERTICES {
             return Err(format!(
                 "a layout takes at most {MAX_LAYOUT_VERTICES} vertices, got {}",
                 self.vertex_count
-            ));
+            )
+            .into());
         }
         if self.edge_source.len() != self.edge_target.len() {
             return Err(format!(
                 "edgeSource ({}) and edgeTarget ({}) must have the same length",
                 self.edge_source.len(),
                 self.edge_target.len()
-            ));
+            )
+            .into());
         }
         if self.edge_source.len() > MAX_LAYOUT_EDGES {
             return Err(format!(
                 "a layout takes at most {MAX_LAYOUT_EDGES} edges, got {}",
                 self.edge_source.len()
-            ));
+            )
+            .into());
         }
         if let Some(bad) = self
             .edge_source
@@ -102,7 +106,8 @@ impl LayoutInput {
             return Err(format!(
                 "edge endpoint {bad} is not a vertex index (vertexCount {})",
                 self.vertex_count
-            ));
+            )
+            .into());
         }
         Ok(())
     }
@@ -634,7 +639,11 @@ pub fn slice_budget(ms: f64) -> Duration {
 impl LayoutJobs {
     /// Starts a layout of `input` (or finds it in the cache: `state` is `done` at once, `cached`
     /// true) and returns its job id.
-    pub fn start(&mut self, input: LayoutInput, options: LayoutOptions) -> Result<u64, String> {
+    pub fn start(
+        &mut self,
+        input: LayoutInput,
+        options: LayoutOptions,
+    ) -> Result<u64, SessionError> {
         input.validate()?;
         self.next += 1;
         let id = self.next;
@@ -664,10 +673,14 @@ impl LayoutJobs {
         Ok(id)
     }
 
-    fn job(&mut self, id: u64) -> Result<&mut Job, String> {
-        self.jobs.iter_mut().find(|j| j.id == id).ok_or_else(|| {
-            format!("no layout job {id} (finished long ago, or replaced by newer ones)")
-        })
+    fn job(&mut self, id: u64) -> Result<&mut Job, SessionError> {
+        self.jobs
+            .iter_mut()
+            .find(|j| j.id == id)
+            .ok_or_else(|| {
+                format!("no layout job {id} (finished long ago, or replaced by newer ones)")
+            })
+            .map_err(SessionError::from)
     }
 
     /// Runs one slice of job `id` within `budget`; `cancel` ends it early as cancelled. A
@@ -677,7 +690,7 @@ impl LayoutJobs {
         id: u64,
         budget: Duration,
         cancel: &CancelToken,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, SessionError> {
         let job = self.job(id)?;
         if job.state == SliceOutcome::Running {
             job.state = job.layout.run_slice(budget, cancel);
@@ -695,7 +708,7 @@ impl LayoutJobs {
     }
 
     /// Cancels job `id`: it keeps the positions reached so far.
-    pub fn cancel(&mut self, id: u64) -> Result<Value, String> {
+    pub fn cancel(&mut self, id: u64) -> Result<Value, SessionError> {
         let job = self.job(id)?;
         if job.state == SliceOutcome::Running {
             job.state = SliceOutcome::Cancelled;
@@ -704,16 +717,16 @@ impl LayoutJobs {
     }
 
     /// The status of job `id` (see [`Self::step`]).
-    pub fn status(&mut self, id: u64) -> Result<Value, String> {
+    pub fn status(&mut self, id: u64) -> Result<Value, SessionError> {
         Ok(status_of(self.job(id)?))
     }
 
     /// The positions of job `id` (`x, y` per vertex; the cached ones of a cache hit). A running
     /// job answers the positions reached so far.
-    pub fn positions(&mut self, id: u64) -> Result<Vec<f32>, String> {
+    pub fn positions(&mut self, id: u64) -> Result<Vec<f32>, SessionError> {
         self.job(id)?;
         let Some(job) = self.jobs.iter().find(|j| j.id == id) else {
-            return Err(format!("no layout job {id}"));
+            return Err(format!("no layout job {id}").into());
         };
         if job.cached
             && let Some((_, positions)) = self.cache.iter().find(|(k, _)| *k == job.key)
@@ -942,11 +955,18 @@ mod tests {
             input(2, &[(0, 2)])
                 .validate()
                 .unwrap_err()
+                .to_string()
                 .contains("not a vertex index")
         );
         let mut uneven = input(2, &[(0, 1)]);
         uneven.edge_target.clear();
-        assert!(uneven.validate().unwrap_err().contains("same length"));
+        assert!(
+            uneven
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("same length")
+        );
         assert!(input(MAX_LAYOUT_VERTICES + 1, &[]).validate().is_err());
     }
 

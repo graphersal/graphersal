@@ -53,6 +53,7 @@
 //! labels are never enumerated). [`filter_query`] writes the equivalent query as Rhai text.
 //! Every check runs against a read-only view (`&S`): a filter can never write.
 
+use crate::error::SessionError;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
@@ -124,19 +125,21 @@ const FIELDS: [&str; 7] = [
 impl GraphFilter {
     /// Checks and compiles the JSON filter `spec` against the schema of `g` (for the coercion
     /// of values of declared keys). An error names the label, key and operator at fault.
-    pub fn compile<S: GraphStorage>(g: &S, spec: &Value) -> Result<GraphFilter, String> {
+    pub fn compile<S: GraphStorage>(g: &S, spec: &Value) -> Result<GraphFilter, SessionError> {
         let Value::Object(fields) = spec else {
             return Err(format!(
                 "the filter is a JSON object {{{}}} (every field optional)",
                 FIELDS.join(", ")
-            ));
+            )
+            .into());
         };
         for key in fields.keys() {
             if !FIELDS.contains(&key.as_str()) {
                 return Err(format!(
                     "unknown filter field \"{key}\" (expected {})",
                     FIELDS.join(", ")
-                ));
+                )
+                .into());
             }
         }
         let schema = g.get_schema();
@@ -181,7 +184,7 @@ impl GraphFilter {
         &self,
         g: &S,
         candidates: Option<&[S::VertexId]>,
-    ) -> Result<Option<Vec<S::VertexId>>, String> {
+    ) -> Result<Option<Vec<S::VertexId>>, SessionError> {
         if matches!(self.vertices, Side::All) {
             return Ok(None);
         }
@@ -191,23 +194,24 @@ impl GraphFilter {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         });
-        let passing = |label: &str, conditions: &[Condition]| -> Result<Vec<S::VertexId>, String> {
-            if ids.as_ref().is_some_and(Vec::is_empty) {
-                return Ok(Vec::new());
-            }
-            let start = GraphTraversalSource::new(g);
-            let start = match &ids {
-                None => start.v(None::<()>),
-                Some(ids) => start.v(ids.clone()),
+        let passing =
+            |label: &str, conditions: &[Condition]| -> Result<Vec<S::VertexId>, SessionError> {
+                if ids.as_ref().is_some_and(Vec::is_empty) {
+                    return Ok(Vec::new());
+                }
+                let start = GraphTraversalSource::new(g);
+                let start = match &ids {
+                    None => start.v(None::<()>),
+                    Some(ids) => start.v(ids.clone()),
+                };
+                let traversal = with_conditions(start.has_label(label), conditions);
+                Ok(
+                    element_ids(traversal.id().to_list(), label, ElementKind::Vertex)?
+                        .iter()
+                        .filter_map(|id| g.get_vertex_by_id(id))
+                        .collect(),
+                )
             };
-            let traversal = with_conditions(start.has_label(label), conditions);
-            Ok(
-                element_ids(traversal.id().to_list(), label, ElementKind::Vertex)?
-                    .iter()
-                    .filter_map(|id| g.get_vertex_by_id(id))
-                    .collect(),
-            )
-        };
         let label_index = |label: &str| -> Vec<S::VertexId> {
             match candidates {
                 None => g.vertices_by_label(label).collect(),
@@ -235,7 +239,7 @@ impl GraphFilter {
         &self,
         g: &S,
         candidates: Option<&[S::EdgeId]>,
-    ) -> Result<Option<Vec<S::EdgeId>>, String> {
+    ) -> Result<Option<Vec<S::EdgeId>>, SessionError> {
         if matches!(self.edges, Side::All) {
             return Ok(None);
         }
@@ -245,23 +249,24 @@ impl GraphFilter {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         });
-        let passing = |label: &str, conditions: &[Condition]| -> Result<Vec<S::EdgeId>, String> {
-            if ids.as_ref().is_some_and(Vec::is_empty) {
-                return Ok(Vec::new());
-            }
-            let start = GraphTraversalSource::new(g);
-            let start = match &ids {
-                None => start.e(None::<()>),
-                Some(ids) => start.e(ids.clone()),
+        let passing =
+            |label: &str, conditions: &[Condition]| -> Result<Vec<S::EdgeId>, SessionError> {
+                if ids.as_ref().is_some_and(Vec::is_empty) {
+                    return Ok(Vec::new());
+                }
+                let start = GraphTraversalSource::new(g);
+                let start = match &ids {
+                    None => start.e(None::<()>),
+                    Some(ids) => start.e(ids.clone()),
+                };
+                let traversal = with_conditions(start.has_label(label), conditions);
+                Ok(
+                    element_ids(traversal.id().to_list(), label, ElementKind::Edge)?
+                        .iter()
+                        .filter_map(|id| g.get_edge_by_id(id))
+                        .collect(),
+                )
             };
-            let traversal = with_conditions(start.has_label(label), conditions);
-            Ok(
-                element_ids(traversal.id().to_list(), label, ElementKind::Edge)?
-                    .iter()
-                    .filter_map(|id| g.get_edge_by_id(id))
-                    .collect(),
-            )
-        };
         let label_index = |label: &str| -> Vec<S::EdgeId> {
             match candidates {
                 None => g.edges_by_label(label).collect(),
@@ -291,9 +296,9 @@ fn evaluate<Id, I>(
     candidates: Option<&[Id]>,
     all: impl FnOnce() -> I,
     label_index: impl Fn(&str) -> Vec<Id>,
-    passing: impl Fn(&str, &[Condition]) -> Result<Vec<Id>, String>,
+    passing: impl Fn(&str, &[Condition]) -> Result<Vec<Id>, SessionError>,
     labels_ok: impl Fn(Id, &dyn Fn(&str) -> bool) -> bool,
-) -> Result<Option<Vec<Id>>, String>
+) -> Result<Option<Vec<Id>>, SessionError>
 where
     Id: Copy + Eq + Hash,
     I: Iterator<Item = Id>,
@@ -364,7 +369,7 @@ fn element_ids(
     result: Result<Vec<ElementProperty>, graphersal::error::BoxedTraverserError>,
     label: &str,
     kind: ElementKind,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, SessionError> {
     let ids = result.map_err(|err| {
         format!(
             "filter: {} label \"{label}\": {}",
@@ -402,7 +407,7 @@ fn side_of(
     fields: &Map<String, Value>,
     kind: ElementKind,
     schema: Option<&GraphSchema>,
-) -> Result<Side, String> {
+) -> Result<Side, SessionError> {
     let (map_name, hidden_name, other_name) = field_names(kind);
     let listed = labels_of(fields.get(map_name), kind, schema)?;
     let hidden: BTreeSet<String> = match fields.get(hidden_name) {
@@ -414,13 +419,13 @@ fn side_of(
                 _ => Err(format!("filter: {hidden_name} is a list of label names")),
             })
             .collect::<Result<_, _>>()?,
-        Some(_) => return Err(format!("filter: {hidden_name} is a list of label names")),
+        Some(_) => return Err(format!("filter: {hidden_name} is a list of label names").into()),
     };
     let others_visible = match fields.get(other_name) {
         None | Some(Value::Null) => listed.is_none(),
         Some(Value::String(s)) if s == "visible" => true,
         Some(Value::String(s)) if s == "hidden" => false,
-        Some(_) => return Err(format!("filter: {other_name} is \"visible\" or \"hidden\"")),
+        Some(_) => return Err(format!("filter: {other_name} is \"visible\" or \"hidden\"").into()),
     };
     let mut labels = listed.unwrap_or_default();
     labels.retain(|label, _| !hidden.contains(label));
@@ -442,7 +447,7 @@ fn labels_of(
     field: Option<&Value>,
     kind: ElementKind,
     schema: Option<&GraphSchema>,
-) -> Result<Option<LabelConditions>, String> {
+) -> Result<Option<LabelConditions>, SessionError> {
     let map = match field {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::Object(map)) => map,
@@ -450,7 +455,8 @@ fn labels_of(
             return Err(format!(
                 "filter: {} is an object (label -> list of conditions)",
                 field_name(kind)
-            ));
+            )
+            .into());
         }
     };
     let mut labels = LabelConditions::new();
@@ -462,7 +468,8 @@ fn labels_of(
                 return Err(format!(
                     "filter: {}.{label} is a list of conditions",
                     field_name(kind)
-                ));
+                )
+                .into());
             }
         };
         let compiled = list
@@ -482,36 +489,33 @@ fn condition_of(
     label: &str,
     index: usize,
     schema: Option<&GraphSchema>,
-) -> Result<Condition, String> {
+) -> Result<Condition, SessionError> {
     let at = format!("filter: {}.{label}[{index}]", field_name(kind));
     let Value::Object(fields) = spec else {
-        return Err(format!(
-            "{at}: a condition is an object {{key, op, value?}}"
-        ));
+        return Err(format!("{at}: a condition is an object {{key, op, value?}}").into());
     };
     for name in fields.keys() {
         if !matches!(name.as_str(), "key" | "op" | "value") {
-            return Err(format!(
-                "{at}: unknown field \"{name}\" (expected key, op, value)"
-            ));
+            return Err(format!("{at}: unknown field \"{name}\" (expected key, op, value)").into());
         }
     }
     let key = match fields.get("key") {
         Some(Value::String(key)) if !key.is_empty() => key.clone(),
-        _ => return Err(format!("{at}: \"key\" is a non-empty property name")),
+        _ => return Err(format!("{at}: \"key\" is a non-empty property name").into()),
     };
     let op = match fields.get("op") {
         Some(Value::String(op)) => op.as_str(),
-        _ => return Err(format!("{at} (key \"{key}\"): \"op\" is one of {OPS}")),
+        _ => return Err(format!("{at} (key \"{key}\"): \"op\" is one of {OPS}").into()),
     };
     let at = format!("{at} (key \"{key}\", op \"{op}\")");
     let value = fields.get("value");
-    let needs_value = |value: Option<&Value>| -> Result<Value, String> {
+    let needs_value = |value: Option<&Value>| -> Result<Value, SessionError> {
         value
             .cloned()
             .ok_or_else(|| format!("{at}: this operator needs a \"value\""))
+            .map_err(SessionError::from)
     };
-    let scalar = |value: &Value| -> Result<PValue, String> {
+    let scalar = |value: &Value| -> Result<PValue, SessionError> {
         let property = json_scalar(value).map_err(|e| format!("{at}: {e}"))?;
         let property = match schema {
             Some(schema) => schema
@@ -519,18 +523,20 @@ fn condition_of(
                 .map_err(|e| format!("{at}: {}", format_diagnostic(&e)))?,
             None => property,
         };
-        pvalue_of(property).map_err(|e| format!("{at}: {e}"))
+        pvalue_of(property)
+            .map_err(|e| format!("{at}: {e}"))
+            .map_err(SessionError::from)
     };
-    let text = |value: &Value| -> Result<String, String> {
+    let text = |value: &Value| -> Result<String, SessionError> {
         match value {
             Value::String(s) => Ok(s.clone()),
-            _ => Err(format!("{at}: the value of a text operator is a string")),
+            _ => Err(format!("{at}: the value of a text operator is a string").into()),
         }
     };
     let test = match op {
         "exists" | "missing" => {
             if value.is_some_and(|v| !v.is_null()) {
-                return Err(format!("{at}: this operator takes no \"value\""));
+                return Err(format!("{at}: this operator takes no \"value\"").into());
             }
             if op == "exists" {
                 Test::Exists
@@ -548,7 +554,7 @@ fn condition_of(
             Value::Array(bounds) if bounds.len() == 2 => {
                 Test::Pred(P::Between(scalar(&bounds[0])?, scalar(&bounds[1])?))
             }
-            _ => return Err(format!("{at}: the value of between is [low, high]")),
+            _ => return Err(format!("{at}: the value of between is [low, high]").into()),
         },
         "contains" => Test::Pred(P::Containing(PValue::from(text(&needs_value(value)?)?))),
         "starts_with" => Test::Pred(P::StartingWith(PValue::from(text(&needs_value(value)?)?))),
@@ -558,9 +564,9 @@ fn condition_of(
             Test::Pred(P::regex(&pattern).map_err(|e| format!("{at}: {}", format_diagnostic(&*e)))?)
         }
         other => {
-            return Err(format!(
-                "{at}: unknown operator \"{other}\" (expected one of {OPS})"
-            ));
+            return Err(
+                format!("{at}: unknown operator \"{other}\" (expected one of {OPS})").into(),
+            );
         }
     };
     Ok(Condition { key, test })
@@ -568,7 +574,7 @@ fn condition_of(
 
 /// A JSON scalar as a value, literally: a number stays a number (an integer an `int64`, any
 /// other a `float64`), a string a string.
-fn json_scalar(value: &Value) -> Result<ElementProperty, String> {
+fn json_scalar(value: &Value) -> Result<ElementProperty, SessionError> {
     Ok(match value {
         Value::Null => ElementProperty::Null,
         Value::Bool(b) => ElementProperty::Boolean(*b),
@@ -576,7 +582,7 @@ fn json_scalar(value: &Value) -> Result<ElementProperty, String> {
         Value::Number(n) => match (n.as_i64(), n.as_f64()) {
             (Some(i), _) => ElementProperty::Number(Number::from_i64(i)),
             (None, Some(f)) => ElementProperty::Number(Number::from_f64(f)),
-            _ => return Err(format!("the number {n} is out of range")),
+            _ => return Err(format!("the number {n} is out of range").into()),
         },
         Value::Array(_) | Value::Object(_) => {
             return Err("the value is a string, number, boolean or null".into());
@@ -585,7 +591,7 @@ fn json_scalar(value: &Value) -> Result<ElementProperty, String> {
 }
 
 /// A (coerced) scalar as a predicate operand.
-fn pvalue_of(value: ElementProperty) -> Result<PValue, String> {
+fn pvalue_of(value: ElementProperty) -> Result<PValue, SessionError> {
     Ok(match value {
         ElementProperty::Null => PValue::Null,
         ElementProperty::Boolean(b) => PValue::Boolean(b),
