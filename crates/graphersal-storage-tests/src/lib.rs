@@ -63,6 +63,7 @@
 
 pub mod contract;
 pub mod extension;
+pub mod failing;
 pub mod forwarding;
 pub mod smoke;
 

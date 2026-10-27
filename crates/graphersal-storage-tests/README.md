@@ -90,6 +90,15 @@ use graphersal_storage_tests::forwarding::Forwarding;
 let graph = std::sync::Arc::new(Graph::new(Forwarding::new(TraversalGraph::tinkerpop_modern())));
 ```
 
+## The `Failing` helper (EXPERIMENTAL)
+
+`graphersal_storage_tests::failing::Failing` wraps a `Forwarding` and fails on demand: its shared `Faults`
+switches make the statistics, the property indexes, the index lookups, `begin_unit`, `rollback_unit` (after the
+wrapped graph rolled back), the execution policy or the schema return `GraphError::StorageFailed`. The tests in
+`tests/failing_storage.rs` check that the engine fails the query or unit with that error, never panics, never
+answers with made-up data, reports a failed rollback as `GraphError::RollbackFailed`, and that the graph serves
+the next operation normally.
+
 ## Contract points the trait documents
 
 - `stale_handle_never_aliases`: a handle to a removed element never resolves to another element, also not after the

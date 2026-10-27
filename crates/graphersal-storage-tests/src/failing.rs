@@ -1,0 +1,506 @@
+//! [`Failing`]: a storage whose backend fails on demand, to check that the engine reports a
+//! storage error instead of panicking or answering with made-up data.
+//!
+//! **EXPERIMENTAL**, like the rest of this crate. It wraps a [`Forwarding`] (so it is not
+//! `TraversalGraph` either) and forwards every method; a [`Faults`] switch makes one group of
+//! methods return [`GraphError::StorageFailed`]: the statistics, the property indexes, the index
+//! lookups, opening a unit, rolling a unit back (the wrapped graph IS rolled back, then the
+//! failure is reported, like a backend whose undo half failed), the execution policy, the schema.
+//! The switches are shared ([`Failing::faults`]), so a test can turn a fault on while the storage
+//! sits inside a `Graph`. The [`failing`](self) contract functions use it.
+//!
+//! This file uses only `graphersal`'s public facade, like [`forwarding`](crate::forwarding).
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::forwarding::{ForwardEdgeId, ForwardVertexId, Forwarding};
+use graphersal::ElementProperty;
+use graphersal::TraversalGraph;
+use graphersal::storage::{
+    ChangeSet, CommitHook, CommitMetadata, CompactString, CompressionEstimate,
+    CompressionEstimateRequest, CompressionStats, Definition, DefinitionKind, ExecutionPolicy,
+    GraphError, GraphNodeType, GraphSchema, GraphStatistics, GraphStorage, JsonPath, Mark,
+    MemoryStats, PropertyIndexInfo, PropertyIndexRange, PropertyIndexTransform, PropertyMap,
+    PropertySchema, RollbackReason, StorageCapabilities, UnitChanges, UnitMark,
+};
+
+/// The fault switches of a [`Failing`] storage: while a switch is on, the methods of its group
+/// fail with [`GraphError::StorageFailed`]. All off by default.
+#[derive(Debug, Default)]
+pub struct Faults {
+    /// `statistics`.
+    pub statistics: AtomicBool,
+    /// `property_indexes`.
+    pub property_indexes: AtomicBool,
+    /// The four property index lookups.
+    pub index_lookup: AtomicBool,
+    /// `begin_unit` and `begin_unit_at`.
+    pub begin_unit: AtomicBool,
+    /// `rollback_unit` (after the wrapped graph rolled back).
+    pub rollback_unit: AtomicBool,
+    /// `execution_policy`.
+    pub execution_policy: AtomicBool,
+    /// `get_schema`.
+    pub get_schema: AtomicBool,
+}
+
+impl Faults {
+    /// Turns `switch` on (`true`) or off.
+    pub fn set(switch: &AtomicBool, on: bool) {
+        switch.store(on, Ordering::SeqCst);
+    }
+
+    /// The backend error of `operation` while `switch` is on.
+    fn check(&self, switch: &AtomicBool, operation: &'static str) -> Result<(), GraphError> {
+        match switch.load(Ordering::SeqCst) {
+            true => Err(GraphError::storage_failed(
+                operation,
+                "the backend is unavailable",
+            )),
+            false => Ok(()),
+        }
+    }
+}
+
+/// A [`GraphStorage`] that forwards to a [`Forwarding`] and fails where its [`Faults`] say. See
+/// the [module docs](self).
+///
+/// ```
+/// use graphersal::TraversalGraph;
+/// use graphersal::storage::GraphStorage;
+/// use graphersal_storage_tests::failing::{Failing, Faults};
+///
+/// let storage = Failing::new(TraversalGraph::tinkerpop_modern());
+/// assert!(storage.statistics().is_ok());
+/// Faults::set(&storage.faults().statistics, true);
+/// assert!(storage.statistics().is_err());
+/// ```
+#[derive(Default)]
+pub struct Failing {
+    inner: Forwarding,
+    faults: Arc<Faults>,
+}
+
+impl Failing {
+    /// Wraps `graph`, every fault off.
+    pub fn new(graph: TraversalGraph) -> Self {
+        Self {
+            inner: Forwarding::new(graph),
+            faults: Arc::default(),
+        }
+    }
+
+    /// The fault switches, shared with this storage.
+    pub fn faults(&self) -> Arc<Faults> {
+        Arc::clone(&self.faults)
+    }
+}
+
+impl GraphStorage for Failing {
+    type VertexId = ForwardVertexId;
+    type EdgeId = ForwardEdgeId;
+
+    fn vertex_count(&self) -> usize {
+        GraphStorage::vertex_count(&self.inner)
+    }
+
+    fn edge_count(&self) -> usize {
+        GraphStorage::edge_count(&self.inner)
+    }
+
+    fn vertices(&self) -> impl Iterator<Item = ForwardVertexId> + '_ {
+        GraphStorage::vertices(&self.inner)
+    }
+
+    fn edges(&self) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+        GraphStorage::edges(&self.inner)
+    }
+
+    fn get_vertex_by_id(&self, id: &str) -> Option<ForwardVertexId> {
+        GraphStorage::get_vertex_by_id(&self.inner, id)
+    }
+
+    fn get_edge_by_id(&self, id: &str) -> Option<ForwardEdgeId> {
+        GraphStorage::get_edge_by_id(&self.inner, id)
+    }
+
+    fn out_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+        GraphStorage::out_edges(&self.inner, node)
+    }
+
+    fn in_edges(&self, node: ForwardVertexId) -> impl Iterator<Item = ForwardEdgeId> + '_ {
+        GraphStorage::in_edges(&self.inner, node)
+    }
+
+    fn vertex_id(&self, node: ForwardVertexId) -> Option<&str> {
+        GraphStorage::vertex_id(&self.inner, node)
+    }
+
+    fn edge_id(&self, edge: ForwardEdgeId) -> Option<&str> {
+        GraphStorage::edge_id(&self.inner, edge)
+    }
+
+    fn vertex_label(&self, node: ForwardVertexId) -> Option<&str> {
+        GraphStorage::vertex_label(&self.inner, node)
+    }
+
+    fn edge_label(&self, edge: ForwardEdgeId) -> Option<&str> {
+        GraphStorage::edge_label(&self.inner, edge)
+    }
+
+    fn vertex_labels(&self, node: ForwardVertexId) -> &[CompactString] {
+        GraphStorage::vertex_labels(&self.inner, node)
+    }
+
+    fn vertex_properties(&self, node: ForwardVertexId) -> Option<&PropertyMap> {
+        GraphStorage::vertex_properties(&self.inner, node)
+    }
+
+    fn edge_properties(&self, edge: ForwardEdgeId) -> Option<&PropertyMap> {
+        GraphStorage::edge_properties(&self.inner, edge)
+    }
+
+    fn edge_endpoints(&self, edge: ForwardEdgeId) -> Option<(ForwardVertexId, ForwardVertexId)> {
+        GraphStorage::edge_endpoints(&self.inner, edge)
+    }
+
+    fn contains_vertex(&self, node: ForwardVertexId) -> bool {
+        GraphStorage::contains_vertex(&self.inner, node)
+    }
+
+    fn contains_edge(&self, edge: ForwardEdgeId) -> bool {
+        GraphStorage::contains_edge(&self.inner, edge)
+    }
+
+    fn vertices_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Box<dyn Iterator<Item = ForwardVertexId> + 'a> {
+        GraphStorage::vertices_by_label(&self.inner, label)
+    }
+
+    fn edges_by_label<'a>(
+        &'a self,
+        label: &'a str,
+    ) -> Box<dyn Iterator<Item = ForwardEdgeId> + 'a> {
+        GraphStorage::edges_by_label(&self.inner, label)
+    }
+
+    fn statistics(&self) -> Result<Option<&GraphStatistics>, GraphError> {
+        self.faults
+            .check(&self.faults.statistics, "read its statistics")?;
+        GraphStorage::statistics(&self.inner)
+    }
+
+    fn set_schema(&mut self, schema: GraphSchema) -> Result<(), GraphError> {
+        GraphStorage::set_schema(&mut self.inner, schema)
+    }
+
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
+        self.faults
+            .check(&self.faults.get_schema, "read its schema")?;
+        GraphStorage::get_schema(&self.inner)
+    }
+
+    fn declared_property_schema(
+        &self,
+        kind: GraphNodeType,
+        labels: &[CompactString],
+        key: &str,
+    ) -> Result<Option<PropertySchema>, GraphError> {
+        GraphStorage::declared_property_schema(&self.inner, kind, labels, key)
+    }
+
+    fn definitions(&self) -> Result<impl Iterator<Item = &Definition> + '_, GraphError> {
+        GraphStorage::definitions(&self.inner)
+    }
+
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<&Definition>, GraphError> {
+        GraphStorage::definition(&self.inner, kind, name)
+    }
+
+    fn set_definition(&mut self, definition: Definition) -> Result<(), GraphError> {
+        GraphStorage::set_definition(&mut self.inner, definition)
+    }
+
+    fn remove_definition(&mut self, kind: DefinitionKind, name: &str) -> Result<bool, GraphError> {
+        GraphStorage::remove_definition(&mut self.inner, kind, name)
+    }
+
+    fn recompress(&mut self, name: &str) -> Result<bool, GraphError> {
+        GraphStorage::recompress(&mut self.inner, name)
+    }
+
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
+        GraphStorage::compression_stats(&self.inner, name)
+    }
+
+    fn estimate_compression(
+        &self,
+        request: &CompressionEstimateRequest,
+    ) -> Result<CompressionEstimate, GraphError> {
+        GraphStorage::estimate_compression(&self.inner, request)
+    }
+
+    fn property_indexes(&self) -> Result<Vec<PropertyIndexInfo>, GraphError> {
+        self.faults
+            .check(&self.faults.property_indexes, "read its property indexes")?;
+        GraphStorage::property_indexes(&self.inner)
+    }
+
+    fn vertices_by_property_index<'a>(
+        &'a self,
+        label: &'a str,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
+        self.faults
+            .check(&self.faults.index_lookup, "read a property index")?;
+        GraphStorage::vertices_by_property_index(&self.inner, label, key, range)
+    }
+
+    fn edges_by_property_index<'a>(
+        &'a self,
+        label: &'a str,
+        key: &'a str,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
+        self.faults
+            .check(&self.faults.index_lookup, "read a property index")?;
+        GraphStorage::edges_by_property_index(&self.inner, label, key, range)
+    }
+
+    fn vertices_by_transformed_property_index<'a>(
+        &'a self,
+        label: &'a str,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardVertexId> + 'a>>, GraphError> {
+        self.faults
+            .check(&self.faults.index_lookup, "read a property index")?;
+        GraphStorage::vertices_by_transformed_property_index(
+            &self.inner,
+            label,
+            key,
+            transform,
+            range,
+        )
+    }
+
+    fn edges_by_transformed_property_index<'a>(
+        &'a self,
+        label: &'a str,
+        key: &'a str,
+        transform: &PropertyIndexTransform,
+        range: &PropertyIndexRange,
+    ) -> Result<Option<Box<dyn Iterator<Item = ForwardEdgeId> + 'a>>, GraphError> {
+        self.faults
+            .check(&self.faults.index_lookup, "read a property index")?;
+        GraphStorage::edges_by_transformed_property_index(&self.inner, label, key, transform, range)
+    }
+
+    fn insert_vertex(
+        &mut self,
+        id: Option<CompactString>,
+        labels: Vec<CompactString>,
+        properties: PropertyMap,
+    ) -> Result<ForwardVertexId, GraphError> {
+        GraphStorage::insert_vertex(&mut self.inner, id, labels, properties)
+    }
+
+    fn add_vertex_label(
+        &mut self,
+        node: ForwardVertexId,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        GraphStorage::add_vertex_label(&mut self.inner, node, label)
+    }
+
+    fn remove_vertex_label(
+        &mut self,
+        node: ForwardVertexId,
+        label: &str,
+    ) -> Result<bool, GraphError> {
+        GraphStorage::remove_vertex_label(&mut self.inner, node, label)
+    }
+
+    fn set_edge_label(
+        &mut self,
+        edge: ForwardEdgeId,
+        label: CompactString,
+    ) -> Result<bool, GraphError> {
+        GraphStorage::set_edge_label(&mut self.inner, edge, label)
+    }
+
+    fn insert_edge(
+        &mut self,
+        id: Option<CompactString>,
+        label: Option<CompactString>,
+        from: ForwardVertexId,
+        to: ForwardVertexId,
+        properties: PropertyMap,
+    ) -> Result<ForwardEdgeId, GraphError> {
+        GraphStorage::insert_edge(&mut self.inner, id, label, from, to, properties)
+    }
+
+    fn set_vertex_property(
+        &mut self,
+        node: ForwardVertexId,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        GraphStorage::set_vertex_property(&mut self.inner, node, key, value)
+    }
+
+    fn set_edge_property(
+        &mut self,
+        edge: ForwardEdgeId,
+        key: CompactString,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        GraphStorage::set_edge_property(&mut self.inner, edge, key, value)
+    }
+
+    fn set_vertex_property_path(
+        &mut self,
+        node: ForwardVertexId,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        GraphStorage::set_vertex_property_path(&mut self.inner, node, path, value)
+    }
+
+    fn set_edge_property_path(
+        &mut self,
+        edge: ForwardEdgeId,
+        path: &JsonPath,
+        value: ElementProperty,
+    ) -> Result<(), GraphError> {
+        GraphStorage::set_edge_property_path(&mut self.inner, edge, path, value)
+    }
+
+    fn remove_vertex_property_path(
+        &mut self,
+        node: ForwardVertexId,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        GraphStorage::remove_vertex_property_path(&mut self.inner, node, path)
+    }
+
+    fn remove_edge_property_path(
+        &mut self,
+        edge: ForwardEdgeId,
+        path: &JsonPath,
+    ) -> Result<(), GraphError> {
+        GraphStorage::remove_edge_property_path(&mut self.inner, edge, path)
+    }
+
+    fn drop_vertex(&mut self, node: ForwardVertexId) -> Result<(), GraphError> {
+        GraphStorage::drop_vertex(&mut self.inner, node)
+    }
+
+    fn drop_vertex_property(
+        &mut self,
+        prop: &str,
+        node: ForwardVertexId,
+    ) -> Result<(), GraphError> {
+        GraphStorage::drop_vertex_property(&mut self.inner, prop, node)
+    }
+
+    fn drop_edge(&mut self, edge: ForwardEdgeId) -> Result<(), GraphError> {
+        GraphStorage::drop_edge(&mut self.inner, edge)
+    }
+
+    fn drop_edge_property(&mut self, prop: &str, edge: ForwardEdgeId) -> Result<(), GraphError> {
+        GraphStorage::drop_edge_property(&mut self.inner, prop, edge)
+    }
+
+    fn shrink_to_fit(&mut self) -> Result<(), GraphError> {
+        GraphStorage::shrink_to_fit(&mut self.inner)
+    }
+
+    fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
+        GraphStorage::memory_usage(&self.inner)
+    }
+
+    fn memory_footprint_bytes(&self) -> Result<Option<u64>, GraphError> {
+        GraphStorage::memory_footprint_bytes(&self.inner)
+    }
+
+    fn execution_policy(&self) -> Result<ExecutionPolicy, GraphError> {
+        self.faults
+            .check(&self.faults.execution_policy, "read its execution policy")?;
+        GraphStorage::execution_policy(&self.inner)
+    }
+
+    fn begin_unit(&mut self) -> Result<UnitMark, GraphError> {
+        self.faults.check(&self.faults.begin_unit, "open a unit")?;
+        GraphStorage::begin_unit(&mut self.inner)
+    }
+
+    fn begin_unit_at(&mut self, started_at: i128) -> Result<UnitMark, GraphError> {
+        self.faults.check(&self.faults.begin_unit, "open a unit")?;
+        GraphStorage::begin_unit_at(&mut self.inner, started_at)
+    }
+
+    fn next_unit_started_at(&self) -> Result<Option<i128>, GraphError> {
+        GraphStorage::next_unit_started_at(&self.inner)
+    }
+
+    fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
+        GraphStorage::commit_unit(&mut self.inner, mark)
+    }
+
+    fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
+        let undone = GraphStorage::rollback_unit(&mut self.inner, mark, reason);
+        self.faults
+            .check(&self.faults.rollback_unit, "roll a unit back")?;
+        undone
+    }
+
+    fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
+        GraphStorage::unit_changes(&self.inner, mark)
+    }
+
+    fn set_unit_metadata(&mut self, metadata: CommitMetadata) -> Result<(), GraphError> {
+        GraphStorage::set_unit_metadata(&mut self.inner, metadata)
+    }
+
+    fn discard_unit(&mut self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
+        GraphStorage::discard_unit(&mut self.inner, mark)
+    }
+
+    fn mark(&mut self, name: &str) -> Result<Mark, GraphError> {
+        GraphStorage::mark(&mut self.inner, name)
+    }
+
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        GraphStorage::capabilities(&self.inner)
+    }
+
+    fn register_commit_hook(&mut self, hook: Box<dyn CommitHook>) -> Result<(), GraphError> {
+        GraphStorage::register_commit_hook(&mut self.inner, hook)
+    }
+
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
+        GraphStorage::last_commit_seq(&self.inner)
+    }
+
+    fn unit_started_at(&self) -> Option<i128> {
+        GraphStorage::unit_started_at(&self.inner)
+    }
+
+    fn raise_id_sequences(
+        &mut self,
+        node_sequence: u64,
+        edge_sequence: u64,
+    ) -> Result<(), GraphError> {
+        GraphStorage::raise_id_sequences(&mut self.inner, node_sequence, edge_sequence)
+    }
+}
