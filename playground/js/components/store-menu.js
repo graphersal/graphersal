@@ -368,9 +368,9 @@ export const StoreMenu = {
           <button v-for="a in actions" :key="a.id" class="btn small" :disabled="actionDisabled(info, a.id, s.commitSeq, locked)"
                   :title="wait(a.title)" @click.stop="action(a.id, commitTarget(s.commitSeq))">{{ a.short }}</button>
           <a v-if="snapshotUrl(s.commitSeq)" class="btn small" :href="snapshotUrl(s.commitSeq)" :download="snapshotFileName(s.commitSeq)"
-             :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the store\'s embedding models and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</a>
+             :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the embedding models of the store and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</a>
           <button v-else class="btn small" @click.stop="downloadSnapshot(s.commitSeq)"
-                  :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the store\'s embedding models and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</button>
+                  :title="withoutModels ? 'Download this snapshot as one packed file (.gsnap) WITH the embedding models of the store and their licences' : 'Download this snapshot as one packed file (.gsnap)'">.gsnap</button>
           <template v-if="withoutModels">
             <a v-if="snapshotUrl(s.commitSeq, false)" class="btn small" :href="snapshotUrl(s.commitSeq, false)" :download="snapshotFileName(s.commitSeq, false)"
                title="Download this snapshot WITHOUT the embedding models (to hand it on without redistributing them)">.gsnap without models</a>
