@@ -647,3 +647,128 @@ test('timingText: a provider that sends no token counts is named', async () => {
   // No provider call answered (an older server, or the call failed): nothing about tokens.
   assert.equal(timingText({ elapsedMs: 900, toolMs: 0, llmCalls: 0 }), '900 ms');
 });
+
+// ---- Export as Markdown / JSON (issue #18) ----------------------------------------------------
+
+/** A transcript: a notice, a turn with an interim text, a tool call + result and an answer
+ * (with a done event), and a turn that ends in a server error. */
+function exportTranscript() {
+  return [
+    { type: 'notice', text: 'A new conversation.' },
+    { type: 'user', text: 'Who knows whom?\nOnly people.', seq: 1 },
+    { type: 'assistant', text: 'Let me look.', seq: 2 },
+    { type: 'tool_call', id: 't1', name: 'query', args: { script: 'g.v().has_label("person").count()' }, seq: 3 },
+    { type: 'tool_result', id: 't1', name: 'query', ok: true, summary: '1 result', text: '[4]', seq: 4 },
+    { type: 'assistant', text: 'There are **4** people:\n\n| a | b |\n|---|---|\n| 1 | 2 |', seq: 5 },
+    { type: 'done', stopped: false, toolCalls: 1, elapsedMs: 12400, toolMs: 3100, llmCalls: 2,
+      inputTokens: 15234, outputTokens: 830, cachedTokens: 12000, limitReached: false, seq: 6 },
+    { type: 'user', text: 'And now?', seq: 7 },
+    { type: 'error', message: 'the provider answered 500', help: 'Try again later.', seq: 8 },
+    { type: 'done', stopped: false, toolCalls: 0, elapsedMs: 900, toolMs: 0, llmCalls: 1,
+      inputTokens: 0, outputTokens: 0, cachedTokens: 0, limitReached: false, seq: 9 },
+  ];
+}
+
+const EXPORT_META = Object.freeze({
+  chat: 'Chat 1', provider: 'anthropic', model: 'model-x', server: '127.0.0.1:8080', graph: 'modern',
+  exportedAt: new Date(Date.UTC(2026, 9, 27, 12, 0, 0)),
+});
+
+test('export as Markdown: metadata, question, tool call with args and result, answer as is, error, timing', async () => {
+  const { chatToMarkdown } = await import('../js/ai-chat.js');
+  const md = chatToMarkdown(exportTranscript(), EXPORT_META);
+  assert.ok(md.startsWith('# AI Chat: Chat 1\n\n- Exported: 2026-10-27T12:00:00.000Z\n- Model: model-x (anthropic API)\n- Server: 127.0.0.1:8080\n- Graph: modern\n'), md);
+  assert.ok(md.includes('> Note: A new conversation.'));
+  assert.ok(md.includes('## Turn 1\n\n**You:**\n\n> Who knows whom?\n> Only people.'));
+  assert.ok(md.includes('### Steps\n\nLet me look.\n\n**Tool call `query`**: ✓ 1 result'));
+  assert.ok(md.includes('Arguments:\n\n```json\n{\n  "script": "g.v().has_label(\\"person\\").count()"\n}\n```'));
+  assert.ok(md.includes('Result:\n\n```\n[4]\n```'));
+  // The answer is copied exactly (it is Markdown already).
+  assert.ok(md.includes('### Answer\n\nThere are **4** people:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n*12.4 s · tools 3.1 s · tokens 15.2k in (12k cached) / 830 out*'));
+  assert.ok(md.includes('## Turn 2\n\n**You:**\n\n> And now?\n\n> **Error:** the provider answered 500\n>\n> Try again later.'));
+  assert.ok(md.includes('*900 ms · tokens not reported by the provider*'));
+  assert.ok(md.endsWith('\n') && !md.endsWith('\n\n'));
+});
+
+test('export as JSON: a stable documented shape with the done figures', async () => {
+  const { chatToJson, CHAT_EXPORT_FORMAT, CHAT_EXPORT_VERSION } = await import('../js/ai-chat.js');
+  const doc = JSON.parse(chatToJson(exportTranscript(), { ...EXPORT_META, readOnly: true, extra: 'x' }));
+  assert.equal(doc.format, CHAT_EXPORT_FORMAT);
+  assert.equal(doc.format, 'graphersal-ai-chat');
+  assert.equal(doc.version, CHAT_EXPORT_VERSION);
+  assert.equal(doc.version, 1);
+  assert.equal(doc.exportedAt, '2026-10-27T12:00:00.000Z');
+  assert.deepEqual(doc.meta, {
+    chat: 'Chat 1', provider: 'anthropic', model: 'model-x', server: '127.0.0.1:8080', graph: 'modern', readOnly: true,
+  });
+  assert.deepEqual(doc.preamble, [{ type: 'notice', text: 'A new conversation.' }]);
+  assert.equal(doc.turns.length, 2);
+  const [t1, t2] = doc.turns;
+  assert.equal(t1.question, 'Who knows whom?\nOnly people.');
+  assert.equal(t1.state, 'done');
+  assert.deepEqual(t1.steps, [
+    { type: 'text', text: 'Let me look.' },
+    { type: 'tool', id: 't1', name: 'query', args: { script: 'g.v().has_label("person").count()' },
+      ok: true, summary: '1 result', result: '[4]', resultTruncated: false },
+  ]);
+  assert.ok(t1.answer.startsWith('There are **4** people'));
+  assert.deepEqual(t1.tail, []);
+  assert.deepEqual(t1.done, {
+    elapsedMs: 12400, toolMs: 3100, llmCalls: 2, inputTokens: 15234, outputTokens: 830, cachedTokens: 12000,
+    toolCalls: 1, limitReached: false, stopped: false,
+  });
+  assert.equal(t1.timing, '12.4 s · tools 3.1 s · tokens 15.2k in (12k cached) / 830 out');
+  assert.equal(t2.state, 'error');
+  assert.equal(t2.answer, null);
+  assert.deepEqual(t2.tail, [{ type: 'error', message: 'the provider answered 500', help: 'Try again later.' }]);
+  assert.equal(t2.done.elapsedMs, 900);
+});
+
+test('export: a tool result shortened in the stored transcript is marked; an interrupted turn says so', async () => {
+  const { chatToMarkdown, chatToJson, serializeChat, createChat, MAX_SAVED_TEXT } = await import('../js/ai-chat.js');
+  const chat = createChat();
+  chat.items = [
+    { type: 'user', text: 'big', seq: 1 },
+    { type: 'tool_call', id: 'a', name: 'query', args: { script: 'g.v()' }, seq: 2 },
+    { type: 'tool_result', id: 'a', name: 'query', ok: true, summary: 'many', text: 'x'.repeat(MAX_SAVED_TEXT + 50), seq: 3 },
+  ];
+  const restored = createChat(JSON.parse(JSON.stringify(serializeChat(chat))));
+  const doc = JSON.parse(chatToJson(restored.items));
+  assert.equal(doc.turns[0].steps[0].resultTruncated, true);
+  assert.equal(doc.turns[0].state, 'interrupted');
+  assert.equal(doc.turns[0].done, null);
+  assert.equal(doc.turns[0].timing, '');
+  const md = chatToMarkdown(restored.items);
+  assert.ok(md.includes('Result (shortened in the stored transcript):'));
+  assert.ok(md.includes('*Interrupted: the turn has no end (the conversation ended).*'));
+  // The live (unshortened) text is not marked.
+  assert.equal(JSON.parse(chatToJson(chat.items)).turns[0].steps[0].resultTruncated, false);
+});
+
+test('export: code fences are longer than any backtick run in their content', async () => {
+  const { chatToMarkdown, fenceFor } = await import('../js/ai-chat.js');
+  assert.equal(fenceFor('plain'), '```');
+  assert.equal(fenceFor('a ``` b'), '````');
+  assert.equal(fenceFor('`````'), '``````');
+  const md = chatToMarkdown([
+    { type: 'user', text: 'q', seq: 1 },
+    { type: 'tool_call', id: 'a', name: 'query', args: { script: 'x' }, seq: 2 },
+    { type: 'tool_result', id: 'a', name: 'query', ok: false, summary: 'failed', text: 'see:\n````\ncode\n````', seq: 3 },
+    { type: 'assistant', text: 'done', seq: 4 },
+  ]);
+  assert.ok(md.includes('**Tool call `query`**: ✗ failed'));
+  assert.ok(md.includes('Result:\n\n`````\nsee:\n````\ncode\n````\n`````'), md);
+});
+
+test('export: an empty transcript and the file name', async () => {
+  const { chatToMarkdown, chatToJson, chatExportFileName } = await import('../js/ai-chat.js');
+  const at = new Date(2026, 9, 27, 9, 5, 7);
+  const md = chatToMarkdown([], { exportedAt: at });
+  assert.ok(md.startsWith('# AI Chat\n\n- Exported: '));
+  assert.ok(md.includes('*The transcript is empty.*'));
+  const doc = JSON.parse(chatToJson([], { exportedAt: at }));
+  assert.deepEqual([doc.meta, doc.preamble, doc.turns], [{}, [], []]);
+  assert.equal(chatExportFileName('Chat 2', 'md', at), 'graphersal-chat-2-20261027-090507.md');
+  assert.equal(chatExportFileName('Sales / Q3: "people"', 'json', at), 'graphersal-chat-sales-q3-people-20261027-090507.json');
+  assert.equal(chatExportFileName('', 'md', at), 'graphersal-chat-20261027-090507.md');
+});

@@ -282,6 +282,12 @@ place of the editor. The agent runs in the dev server (`graphersal --server --ai
   "Stopped after 1 tool call: …"); it starts collapsed, also while the turn runs, and the
   person's choice to open it is kept for that turn while the page lives (`chat.openSteps`, not
   persisted). A turn without tool calls has no group. Send = Enter, Shift+Enter = new line.
+- **Export ▾** (header, `DropMenu`): the tab's transcript as Markdown or JSON (pure
+  `chatToMarkdown`/`chatToJson` over `chatExportModel`, which follows `groupTurns`; JSON
+  `{format: "graphersal-ai-chat", version: 1, ...}`, shape in the book's "AI Chat" section),
+  downloaded through `export.js` `downloadBlob` as `chatExportFileName(tab name)`; both items are
+  disabled for an empty transcript. Only what the page holds: a restored transcript has the capped
+  items and shortened tool result texts (marked `resultTruncated`).
 - **Rendering** (`js/markdown.js` + `components/markdown-view.js`, no library): paragraphs,
   emphasis, inline code, lists, headings, quotes, links (http/https only, new tab,
   `rel="noopener noreferrer"`), fenced code, GFM tables. Model text is never HTML: the tree holds
