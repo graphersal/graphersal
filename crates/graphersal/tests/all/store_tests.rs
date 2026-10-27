@@ -1845,3 +1845,50 @@ fn two_rollbacks_to_the_same_commit_get_their_own_attic_entries() {
     drop(store);
     assert_eq!(graph_dump(&Store::open(&dir, options).unwrap()), before);
 }
+
+/// REPRO (branch `nonblocking-readers`, ai/roadmap/snapshot-reads.md section 1): a run that keeps
+/// its unit open between its per-traversal locks, as the playground session does (`begin_run` =
+/// `write().begin_unit()`, then one lock per traversal, then `commit_run`/`rollback_run`), and a
+/// checkpoint encoded from the graph in that window (`checkpoint_merge_bytes(0)`: always from the
+/// graph, as the automatic checkpoint falls back to when the WAL is too large to merge). The
+/// run then fails and rolls back. Nothing it wrote may survive a reopen.
+#[test]
+fn a_checkpoint_while_a_unit_is_open_keeps_no_uncommitted_data() {
+    let dir = TempDir::new("open-unit-checkpoint");
+    let options = StoreOptions::new()
+        .with_checkpoint_after_bytes(0)
+        .with_checkpoint_merge_bytes(0);
+    let store = Store::create(dir.path(), options.clone()).unwrap();
+    let graph = store.graph().clone();
+    GraphTraversalSource::new(&mut *graph.write())
+        .add_v("person")
+        .property("name", "kept")
+        .next()
+        .unwrap();
+
+    // The run: its unit stays open while the lock is free between its traversals.
+    let mark = graph.write().begin_unit();
+    GraphTraversalSource::new(&mut *graph.write())
+        .add_v("person")
+        .property("name", "uncommitted")
+        .next()
+        .unwrap();
+
+    // Another thread (the Store's checkpoint thread) writes a checkpoint in the window.
+    let checkpointed = std::thread::scope(|s| s.spawn(|| store.checkpoint(None)).join().unwrap());
+
+    // The run fails: its unit is rolled back.
+    graph
+        .write()
+        .rollback_unit(mark, &graphersal::changes::RollbackReason::failed(&"the script failed"));
+    assert_eq!(names(&graph.read()), ["kept"], "live graph after the rollback");
+    drop(graph);
+    store.close().unwrap();
+
+    let reopened = Store::open(dir.path(), options).unwrap();
+    assert_eq!(
+        names(&reopened.graph().read()),
+        ["kept"],
+        "reopened store (the checkpoint written in the window: {checkpointed:?})"
+    );
+}
