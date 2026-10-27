@@ -634,3 +634,16 @@ test('timingText: the tokens of the turn and the tool-call limit', async () => {
   assert.equal(timingText(turn), '12.4 s · tools 3.1 s · tokens 15.2k in (12k cached) / 830 out · tool-call limit reached');
   assert.equal(timingText({ elapsedMs: 800, toolMs: 0, inputTokens: 40, outputTokens: 5 }), '800 ms · tokens 40 in / 5 out');
 });
+
+test('timingText: a provider that sends no token counts is named', async () => {
+  const { timingText, groupTurns } = await import('../js/ai-chat.js');
+  const [turn] = groupTurns([
+    { type: 'user', text: 'q', seq: 1 },
+    { type: 'assistant', text: 'a', seq: 2 },
+    { type: 'done', stopped: false, toolCalls: 0, elapsedMs: 900, toolMs: 0, llmCalls: 1,
+      inputTokens: 0, outputTokens: 0, cachedTokens: 0, limitReached: false, seq: 3 },
+  ]);
+  assert.equal(timingText(turn), '900 ms · tokens not reported by the provider');
+  // No provider call answered (an older server, or the call failed): nothing about tokens.
+  assert.equal(timingText({ elapsedMs: 900, toolMs: 0, llmCalls: 0 }), '900 ms');
+});

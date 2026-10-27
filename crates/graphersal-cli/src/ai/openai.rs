@@ -241,21 +241,31 @@ pub(crate) fn response(config: &AiConfig, value: &Value) -> Result<AssistantTurn
         Some("content_filter") => StopReason::Refusal,
         Some(other) => StopReason::Other(other.to_string()),
     };
-    let count = |path: &[&str]| {
-        let mut node = value.get("usage");
-        for key in path {
-            node = node.and_then(|n| n.get(*key));
-        }
-        node.and_then(Value::as_u64).unwrap_or(0)
+    // Chat Completions names the counts `prompt_tokens`/`completion_tokens`; some compatible
+    // servers and gateways use the Responses API's `input_tokens`/`output_tokens` instead.
+    let count = |paths: &[&[&str]]| {
+        paths
+            .iter()
+            .find_map(|path| {
+                let mut node = value.get("usage");
+                for key in *path {
+                    node = node.and_then(|n| n.get(*key));
+                }
+                node.and_then(Value::as_u64)
+            })
+            .unwrap_or(0)
     };
     Ok(AssistantTurn {
         text,
         tool_calls,
         stop,
         usage: Usage {
-            input_tokens: count(&["prompt_tokens"]),
-            output_tokens: count(&["completion_tokens"]),
-            cache_read_tokens: count(&["prompt_tokens_details", "cached_tokens"]),
+            input_tokens: count(&[&["prompt_tokens"], &["input_tokens"]]),
+            output_tokens: count(&[&["completion_tokens"], &["output_tokens"]]),
+            cache_read_tokens: count(&[
+                &["prompt_tokens_details", "cached_tokens"],
+                &["input_tokens_details", "cached_tokens"],
+            ]),
             cache_write_tokens: 0,
         },
         raw: Some((Provider::OpenAi, message.clone())),

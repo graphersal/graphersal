@@ -313,3 +313,11 @@ test('drawer rows: labels with counts, keys, conditions with their types, proble
   assert.equal(rows[0].conds[1].arity, 1);
   assert.deepEqual(ids(rows[0].conds[1].ops), ids(opsForType('string')));
 });
+
+test('labelRows: the labels in alphabetical order, whatever order the statistics give', () => {
+  const rows = labelRows(emptyFilter(), 'edges', [
+    { label: 'knows', count: 900 }, { label: 'created', count: 40 }, { label: 'Bought', count: 7 }, { label: 'likes', count: 300 },
+  ], known.types);
+  assert.deepEqual(rows.map((r) => r.label), ['Bought', 'created', 'knows', 'likes']);
+  assert.deepEqual(rows.map((r) => r.count), [7, 40, 900, 300]);
+});

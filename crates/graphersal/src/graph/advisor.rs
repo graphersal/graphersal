@@ -13,8 +13,16 @@
 //! | `add_compression` | a top-level string property of at least `min_compression_bytes` without a rule, not indexed, read fewer than `hot_reads` times in two days, whose best measured codec saves at least `min_saving_bytes` and `min_saving_percent` | frees memory (measured on the data by `estimate_compression`); reads decompress |
 //! | `drop_compression` | a compressed key read at least `hot_reads` times in two days | reads stop decompressing; memory grows back (measured) |
 //!
-//! Order: `create_index` by the elements its scans read, then `add_compression` by bytes saved,
-//! `drop_index` by bytes freed, `drop_compression` by reads.
+//! Impact ([`Impact`], what applying it is worth): for a change of memory (`add_compression`,
+//! `drop_index`) its share of the graph's memory ([`Advice::graph_bytes`]): `high` from 10 %,
+//! `medium` from 2 %, `low` below; for `create_index` the elements its scans read in two days
+//! (`high` from 100 million, `medium` from 10 million); for `drop_compression` the reads in two
+//! days (`high` from 100,000, `medium` from 10,000). Confidence ([`Confidence`]) is another
+//! axis: how much data the figures rest on, not how much they are worth.
+//!
+//! Order: by impact, the highest first; within one impact `create_index` by the elements its
+//! scans read, then `add_compression` by bytes saved, `drop_index` by bytes freed,
+//! `drop_compression` by reads.
 //!
 //! The instance's marks ([`AdviceMark`], kept in the workload statistics) leave a dismissed
 //! recommendation out until its time ([`Advice::dismissed`]) and turn an applied one into an
@@ -217,6 +225,54 @@ impl Confidence {
     }
 }
 
+/// What applying a recommendation is worth (module docs): its share of the graph's memory, or
+/// for a change of speed the work it saves. Not to be confused with [`Confidence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Impact {
+    /// A small effect (below 2 % of the graph's memory, for one).
+    Low,
+    /// A noticeable effect.
+    Medium,
+    /// A large effect (10 % of the graph's memory or more, for one).
+    High,
+}
+
+impl Impact {
+    /// `low`, `medium`, `high`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Impact::Low => "low",
+            Impact::Medium => "medium",
+            Impact::High => "high",
+        }
+    }
+
+    /// The impact of freeing (or taking) `bytes` of a graph of `graph_bytes`.
+    fn of_memory(bytes: u64, graph_bytes: u64) -> Impact {
+        let share = u128::from(bytes) * 100;
+        let graph = u128::from(graph_bytes.max(1));
+        if share >= graph * 10 {
+            Impact::High
+        } else if share >= graph * 2 {
+            Impact::Medium
+        } else {
+            Impact::Low
+        }
+    }
+
+    /// The impact of a count against its `medium` and `high` thresholds.
+    fn of_count(count: u64, medium: u64, high: u64) -> Impact {
+        if count >= high {
+            Impact::High
+        } else if count >= medium {
+            Impact::Medium
+        } else {
+            Impact::Low
+        }
+    }
+}
+
 /// One recommendation.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -241,6 +297,8 @@ pub struct Recommendation {
     pub memory_bytes: i64,
     /// Whether [`Self::memory_bytes`] is measured on the data (`false`: estimated).
     pub measured: bool,
+    /// What applying it is worth.
+    pub impact: Impact,
     /// How sure the advisor is.
     pub confidence: Confidence,
     /// Whether it can be undone exactly (every action of this version can: drop the rule or
@@ -307,6 +365,10 @@ pub struct Advice {
     /// The property bytes plus the property index bytes ([`measured_bytes`]): the figure an
     /// applied recommendation's outcome is measured on.
     pub memory_bytes: u64,
+    /// The graph's memory a recommendation's [`Impact`] is measured against: the estimated
+    /// total footprint ([`MemoryReport::estimated_total_bytes`]), or [`Self::memory_bytes`]
+    /// when the storage does not report its structure.
+    pub graph_bytes: u64,
     /// How many properties `estimate_compression` measured.
     pub estimates: usize,
 }
@@ -458,6 +520,8 @@ pub fn compute(
     });
     let observed_days = observed_since.map_or(0, |since| ((now - since).max(0) / DAY) as u64);
     let level = workload.map_or(WorkloadLevel::Off, |w| w.level);
+    let bytes_now = measured_bytes(memory);
+    let graph_bytes = memory.estimated_total_bytes().unwrap_or(bytes_now);
     let mut index_advice: Vec<(u64, Recommendation)> = Vec::new();
     let mut compression_advice: Vec<(u64, Recommendation)> = Vec::new();
     let mut drop_index_advice: Vec<(u64, Recommendation)> = Vec::new();
@@ -553,6 +617,7 @@ pub fn compute(
                     ),
                     memory_bytes: -(cost_bytes.min(i64::MAX as u64) as i64),
                     measured: false,
+                    impact: Impact::of_count(scanned, 10_000_000, 100_000_000),
                     confidence,
                     reversible: true,
                 },
@@ -592,6 +657,7 @@ pub fn compute(
                     ),
                     memory_bytes: index.stats.bytes.min(i64::MAX as u64) as i64,
                     measured: true,
+                    impact: Impact::of_memory(index.stats.bytes, graph_bytes),
                     confidence,
                     reversible: true,
                 },
@@ -633,6 +699,7 @@ pub fn compute(
                 cost: format!("{} more memory", bytes_text(grows)),
                 memory_bytes: -(grows.min(i64::MAX as u64) as i64),
                 measured: rule.stats.is_some(),
+                impact: Impact::of_count(uses.reads, 10_000, 100_000),
                 confidence: Confidence::Medium,
                 reversible: true,
             },
@@ -728,6 +795,7 @@ pub fn compute(
                 },
                 memory_bytes: saved.min(i64::MAX as u64) as i64,
                 measured: true,
+                impact: Impact::of_memory(saved, graph_bytes),
                 confidence: if measured.sampled {
                     Confidence::Medium
                 } else {
@@ -748,6 +816,8 @@ pub fn compute(
         group.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
         all.extend(group.into_iter().map(|(_, r)| r));
     }
+    // Stable: within one impact the order of the groups above stays.
+    all.sort_by_key(|r| std::cmp::Reverse(r.impact));
     let mark_of = |id: &str| marks.iter().find(|(m, _)| m == id).map(|(_, mark)| mark);
     let mut recommendations = Vec::new();
     let mut dismissed = Vec::new();
@@ -761,7 +831,6 @@ pub fn compute(
             _ => recommendations.push(r),
         }
     }
-    let bytes_now = measured_bytes(memory);
     let mut applied: Vec<AppliedOutcome> = marks
         .iter()
         .filter_map(|(id, mark)| {
@@ -803,17 +872,18 @@ pub fn compute(
         commit_seq: memory.commit_seq,
         property_bytes: memory.property_bytes(),
         memory_bytes: bytes_now,
+        graph_bytes,
         estimates,
     }
 }
 
 impl Advice {
     /// The advice as a value: `{workload_level, observed_since, commit_seq, property_bytes,
-    /// estimates, recommendations: [{id, kind, element, label, key, title, evidence, cost,
-    /// memory_bytes, measured, confidence, reversible, command, action: {..}}], dismissed: [{id,
-    /// title, until (null: for good)}], applied: [{id, kind, title, at, promised_bytes,
-    /// measured_bytes, index_lookups}]}` (the one form every front end shows; snake_case keys
-    /// like the workload report).
+    /// memory_bytes, graph_bytes, estimates, recommendations: [{id, kind, element, label, key,
+    /// title, evidence, cost, memory_bytes, measured, impact, confidence, reversible, command,
+    /// action: {..}}], dismissed: [{id, title, until (null: for good)}], applied: [{id, kind,
+    /// title, at, promised_bytes, measured_bytes, index_lookups}]}` (the one form every front
+    /// end shows; snake_case keys like the workload report).
     pub fn to_property(&self) -> ElementProperty {
         let text = |value: &str| ElementProperty::from(value);
         let int = |value: i64| ElementProperty::from(value);
@@ -865,6 +935,7 @@ impl Advice {
                 map.insert("cost", text(&r.cost));
                 map.insert("memory_bytes", int(r.memory_bytes));
                 map.insert("measured", ElementProperty::from(r.measured));
+                map.insert("impact", text(r.impact.name()));
                 map.insert("confidence", text(r.confidence.name()));
                 map.insert("reversible", ElementProperty::from(r.reversible));
                 map.insert("command", text(&r.action.command()));
@@ -927,6 +998,10 @@ impl Advice {
         map.insert(
             "memory_bytes",
             int(i64::try_from(self.memory_bytes).unwrap_or(i64::MAX)),
+        );
+        map.insert(
+            "graph_bytes",
+            int(i64::try_from(self.graph_bytes).unwrap_or(i64::MAX)),
         );
         map.insert("estimates", int(self.estimates as i64));
         map.insert("recommendations", ElementProperty::Array(recommendations));

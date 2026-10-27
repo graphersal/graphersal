@@ -260,6 +260,7 @@ function finishTurn(turn, running) {
   turn.inputTokens = count('inputTokens');
   turn.outputTokens = count('outputTokens');
   turn.cachedTokens = count('cachedTokens') || 0;
+  turn.llmCalls = count('llmCalls') || 0;
   turn.limitReached = !!(done && done.limitReached);
   turn.ran = calls.length - open.length;
   turn.names = names;
@@ -313,7 +314,8 @@ export function tokenCountText(n) {
  * spent in tool calls, the request and answer tokens of its provider calls (the cached part of
  * the request named), and whether the turn reached its tool-call limit, e.g. "12.4 s · tools
  * 3.1 s · tokens 15.2k in (12k cached) / 830 out" (just "800 ms" for a turn without tool time
- * and token counts). Empty when the `done` event carries no timing (an older server, an
+ * and token counts; "tokens not reported by the provider" when the model answered without
+ * them). Empty when the `done` event carries no timing (an older server, an
  * interrupted turn).
  */
 export function timingText(turn) {
@@ -323,6 +325,9 @@ export function timingText(turn) {
   if (turn.inputTokens || turn.outputTokens) {
     const cached = turn.cachedTokens > 0 ? ` (${tokenCountText(turn.cachedTokens)} cached)` : '';
     parts.push(`tokens ${tokenCountText(turn.inputTokens || 0)} in${cached} / ${tokenCountText(turn.outputTokens || 0)} out`);
+  } else if (turn.llmCalls > 0) {
+    // The model answered, but its provider sent no token counts (`usage`).
+    parts.push('tokens not reported by the provider');
   }
   if (turn.limitReached) parts.push('tool-call limit reached');
   return parts.join(' · ');

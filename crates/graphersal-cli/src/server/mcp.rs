@@ -1157,9 +1157,11 @@ fn all_tools() -> Vec<Tool> {
              property index for a key filtered often by a full scan, drop an index no query \
              used, compress or deduplicate large strings (savings measured on the data), stop \
              compressing a key read often. Each has evidence, cost, memory_bytes (freed; \
-             negative = taken), confidence and the exact command applying it (create_index, \
-             drop_index, define_compression, drop_compression: apply one only when the user \
-             asked for it). everything: true lists every candidate (small graphs).",
+             negative = taken), impact (what it is worth: low, medium, high; for memory its \
+             share of the graph), confidence (how much data it rests on) and the exact command \
+             applying it (create_index, drop_index, define_compression, drop_compression: \
+             apply one only when the user asked for it). The list is ordered by impact. \
+             everything: true lists every candidate (small graphs).",
             json!({
                 "type": "object",
                 "properties": {

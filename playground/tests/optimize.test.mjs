@@ -146,3 +146,22 @@ test('dismissed and applied recommendations become rows', () => {
   assert.equal(row.lookups, '12 indexed lookups since');
   assert.deepEqual(dismissedRows(null), []);
 });
+
+test('a recommendation row names its impact and its share of the graph', async () => {
+  const { shareText } = await import('../js/optimize.js');
+  assert.equal(shareText(6 * 2 ** 20, 700 * 2 ** 20), '0.9 % of the graph');
+  assert.equal(shareText(-140 * 2 ** 20, 700 * 2 ** 20), '20 % of the graph');
+  assert.equal(shareText(10, 700 * 2 ** 20), '< 0.1 % of the graph');
+  assert.equal(shareText(1024, 0), '');
+  assert.equal(shareText(0, 1024), '');
+  const advice = {
+    graph_bytes: 700 * 2 ** 20,
+    recommendations: [{ ...ADVICE.recommendations[1], memory_bytes: 6 * 2 ** 20, impact: 'low', confidence: 'high' }],
+  };
+  const [row] = recommendationRows(advice);
+  assert.equal(row.impact, 'low');
+  assert.equal(row.confidence, 'high');
+  assert.equal(row.share, '0.9 % of the graph');
+  // An older server without impact: no badge.
+  assert.equal(recommendationRows(ADVICE)[0].impact, null);
+});
