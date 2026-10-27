@@ -3,7 +3,7 @@
 // and query limits are the Statistics tab of the Profile panel (statistics-view.js).
 
 import { ref, computed, watch } from 'vue';
-import { state, reveal, run, showNeighbourhood } from '../store.js';
+import { state, reveal, run, showNeighbourhood, isServerMode } from '../store.js';
 import { formatMs, toMarkdownTable } from '../util.js';
 import { PanelFrame, PanelTabs, CopyButton } from './panel-frame.js';
 import { DataTable } from './data-table.js';
@@ -81,7 +81,7 @@ export const ResultsPanel = {
       },
     };
 
-    return { state, tab, TABS, result, meta, copyLabel, copyTextOfTab, refresh, vertexAction, showProfile: () => reveal('profile') };
+    return { state, tab, TABS, result, meta, copyLabel, copyTextOfTab, refresh, vertexAction, showProfile: () => reveal('profile'), serverMode: isServerMode };
   },
   template: `
   <panel-frame title="Results" refresh-title="Run the last query again" @refresh="refresh">
@@ -94,7 +94,7 @@ export const ResultsPanel = {
       <template v-if="!result">
         <div class="placeholder">
           <span>Run a query to see its results here.</span>
-          <span>Press <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> in the editor, or pick one from <b>Examples</b>.</span>
+          <span>Press <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> in the editor<template v-if="!serverMode()">, or pick one from <b>Examples</b></template>.</span>
         </div>
       </template>
       <template v-else-if="!result.ok">

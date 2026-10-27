@@ -25,7 +25,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } 
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import {
   state, run, runAllTabs, stopRun, saveScript, openScript, clearHistory, setRunOption, loadGraph,
-  setTabLanguage, saveParams, addQueryParams, gqlVocabulary, toast,
+  setTabLanguage, saveParams, addQueryParams, gqlVocabulary, toast, isServerMode,
 } from '../store.js';
 import { formatMs, modKey } from '../util.js';
 import { EXAMPLES } from '../config.js';
@@ -387,7 +387,7 @@ export const QueryEditor = {
     expose({ focus: () => view && view.focus() });
 
     return {
-      state, host, cursorText, status, runningHere, isChat, runningText, examples: EXAMPLES, modKey, setRunOption, stopRun,
+      state, host, cursorText, status, runningHere, isChat, runningText, examples: EXAMPLES, serverMode: isServerMode, modKey, setRunOption, stopRun,
       useExample, useHistory, wrapAsGql, oneLine, clearHistory, runNow, hasSelection, runTitle,
       isGql, switchLanguage, paramsError, missingParams, onParams, addQueryParams,
     };
@@ -423,7 +423,8 @@ export const QueryEditor = {
         <input type="checkbox" :checked="state.tab.runOptions.memory" :disabled="!state.tab.runOptions.profile"
                @change="setRunOption('memory', $event.target.checked)"> Memory
       </label>
-      <examples-panel :examples="examples" @use="useExample" @wrap-gql="wrapAsGql()"></examples-panel>
+      <!-- The examples are written for the sample graphs; the dev server serves its own graph. -->
+      <examples-panel v-if="!serverMode()" :examples="examples" @use="useExample" @wrap-gql="wrapAsGql()"></examples-panel>
       <drop-menu title="Query history (Alt+Up / Alt+Down in the editor)" menu-style="width: min(460px, 90vw); max-height: 60vh; overflow-y: auto">
         <template #trigger>History ▾</template>
           <div class="menu-title">Recent queries</div>
