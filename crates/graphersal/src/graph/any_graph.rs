@@ -58,7 +58,11 @@ mod sealed {
 /// its thread across locks, `Graph::begin_unit`; it no longer needs the bound itself.)
 ///
 /// Every method is ONE operation on the locked graph: the reads take the read lock, the
-/// writes the write lock, for the duration of the call. The methods mirror what the script
+/// writes the write lock, for the duration of the call. On the thread that holds a unit of the
+/// graph (`Graph::begin_unit`) they use views of the unit's lock; a view that thread may not
+/// have (a commit hook or an embedder asking about the graph its unit is changing,
+/// [`GraphError::GraphViewHeld`]) is the error of a method that returns one, and makes a method
+/// without an error answer as for no data (`None`, empty, `0`, no capabilities), never a panic. The methods mirror what the script
 /// layer calls today; they ask no authorizer (the front end checks access before it calls)
 /// and run like the [`GraphTraversalSource`] method of the same name on the locked storage.
 /// Results never carry a storage's element ids.
@@ -290,6 +294,24 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
 impl<S> sealed::Sealed for Graph<S> where S: GraphStorage + Default + Send + Sync + 'static {}
 
+/// A read of `graph` for a method whose answer has no error: `answer` on the read view, or,
+/// when the current thread may not have one ([`GraphError::GraphViewHeld`]: a commit hook or
+/// an embedder asking about the graph its unit is changing), `nothing` (logged), never a panic.
+fn read_or<S: GraphStorage, T>(
+    graph: &Graph<S>,
+    what: &'static str,
+    nothing: impl FnOnce() -> T,
+    answer: impl FnOnce(&S) -> T,
+) -> T {
+    match graph.read_checked() {
+        Ok(guard) => answer(&guard),
+        Err(err) => {
+            tracing::warn!("AnyGraph::{what}: {err}; answered as for no data");
+            nothing()
+        }
+    }
+}
+
 impl<S> AnyGraph for Graph<S>
 where
     S: GraphStorage + Default + Send + Sync + 'static,
@@ -307,19 +329,24 @@ where
     }
 
     fn capabilities(&self) -> StorageCapabilities {
-        self.read().capabilities()
+        read_or(
+            self,
+            "capabilities",
+            StorageCapabilities::none,
+            GraphStorage::capabilities,
+        )
     }
 
     fn last_commit_seq(&self) -> u64 {
-        self.read().last_commit_seq()
+        read_or(self, "last_commit_seq", || 0, GraphStorage::last_commit_seq)
     }
 
     fn statistics(&self) -> Option<GraphStatistics> {
-        self.read().statistics().cloned()
+        read_or(self, "statistics", || None, |g| g.statistics().cloned())
     }
 
     fn memory_usage(&self) -> Option<MemoryStats> {
-        let mut stats = self.read().memory_usage()?;
+        let mut stats = read_or(self, "memory_usage", || None, GraphStorage::memory_usage)?;
         stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
         Some(stats)
     }
@@ -332,7 +359,7 @@ where
         &self,
         request: &crate::graph::MemoryReportRequest,
     ) -> TraverserResult<crate::graph::MemoryReport> {
-        GraphTraversalSource::new(&*self.read()).memory_report(request)
+        GraphTraversalSource::new(&*self.read_checked()?).memory_report(request)
     }
 
     fn advise(
@@ -343,51 +370,57 @@ where
     }
 
     fn listing(&self, keep: Option<usize>) -> TraverserResult<crate::value::ElementProperty> {
-        crate::graph::subgraph::graph_listing(&*self.read(), keep)
+        crate::graph::subgraph::graph_listing(&*self.read_checked()?, keep)
     }
 
     fn get_schema(&self) -> Option<GraphSchema> {
-        self.read().get_schema()
+        read_or(self, "get_schema", || None, GraphStorage::get_schema)
     }
 
     fn set_schema(&self, schema: GraphSchema) -> TraverserResult<()> {
-        GraphTraversalSource::new(&mut *self.write()).set_schema(schema)
+        GraphTraversalSource::new(&mut *self.write_checked()?).set_schema(schema)
     }
 
     fn patch_schema(&self, patch: &SchemaPatch) -> TraverserResult<GraphSchema> {
-        GraphTraversalSource::new(&mut *self.write()).patch_schema(patch)
+        GraphTraversalSource::new(&mut *self.write_checked()?).patch_schema(patch)
     }
 
     fn validate_schema(&self, schema: &GraphSchema) -> TraverserResult<SchemaValidation> {
-        GraphTraversalSource::new(&*self.read()).validate_schema(schema)
+        GraphTraversalSource::new(&*self.read_checked()?).validate_schema(schema)
     }
 
     fn validate_schema_patch(&self, patch: &SchemaPatch) -> TraverserResult<SchemaValidation> {
-        GraphTraversalSource::new(&*self.read()).validate_schema_patch(patch)
+        GraphTraversalSource::new(&*self.read_checked()?).validate_schema_patch(patch)
     }
 
     fn infer_schema(&self) -> TraverserResult<GraphSchema> {
-        GraphTraversalSource::new(&*self.read()).infer_schema()
+        GraphTraversalSource::new(&*self.read_checked()?).infer_schema()
     }
 
     fn diff_schema(&self, schema: &GraphSchema) -> TraverserResult<SchemaDiff> {
-        GraphTraversalSource::new(&*self.read()).diff_schema(schema)
+        GraphTraversalSource::new(&*self.read_checked()?).diff_schema(schema)
     }
 
     fn definitions(&self, kind: Option<DefinitionKind>) -> Vec<Definition> {
-        self.read()
-            .definitions()
-            .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
-            .cloned()
-            .collect()
+        read_or(self, "definitions", Vec::new, |g| {
+            g.definitions()
+                .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
+                .cloned()
+                .collect()
+        })
     }
 
     fn definition(&self, kind: DefinitionKind, name: &str) -> Option<Definition> {
-        self.read().definition(kind, name).cloned()
+        read_or(
+            self,
+            "definition",
+            || None,
+            |g| g.definition(kind, name).cloned(),
+        )
     }
 
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()> {
-        self.write().transaction(|unit| {
+        self.write_checked()?.transaction(|unit| {
             for definition in definitions {
                 GraphTraversalSource::new(&mut *unit).set_definition(definition)?;
             }
@@ -396,30 +429,35 @@ where
     }
 
     fn remove_definition(&self, kind: DefinitionKind, name: &str) -> TraverserResult<bool> {
-        GraphTraversalSource::new(&mut *self.write()).remove_definition(kind, name)
+        GraphTraversalSource::new(&mut *self.write_checked()?).remove_definition(kind, name)
     }
 
     fn move_query(&self, name: &str, folder: Option<&str>) -> TraverserResult<()> {
-        GraphTraversalSource::new(&mut *self.write()).move_query(name, folder)
+        GraphTraversalSource::new(&mut *self.write_checked()?).move_query(name, folder)
     }
 
     fn describe_query(&self, name: &str, description: Option<&str>) -> TraverserResult<()> {
-        GraphTraversalSource::new(&mut *self.write()).describe_query(name, description)
+        GraphTraversalSource::new(&mut *self.write_checked()?).describe_query(name, description)
     }
 
     fn recompress(&self, name: &str) -> TraverserResult<()> {
-        GraphTraversalSource::new(&mut *self.write()).recompress(name)
+        GraphTraversalSource::new(&mut *self.write_checked()?).recompress(name)
     }
 
     fn compression_stats(&self, name: &str) -> Option<CompressionStats> {
-        self.read().compression_stats(name)
+        read_or(
+            self,
+            "compression_stats",
+            || None,
+            |g| g.compression_stats(name),
+        )
     }
 
     fn estimate_compression(
         &self,
         request: &crate::graph::CompressionEstimateRequest,
     ) -> TraverserResult<crate::graph::CompressionEstimate> {
-        GraphTraversalSource::new(&*self.read()).estimate_compression(request)
+        GraphTraversalSource::new(&*self.read_checked()?).estimate_compression(request)
     }
 
     fn embed_property(
@@ -433,11 +471,16 @@ where
     }
 
     fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
-        self.read().property_indexes()
+        read_or(
+            self,
+            "property_indexes",
+            Vec::new,
+            GraphStorage::property_indexes,
+        )
     }
 
     fn mark(&self, name: &str) -> Result<Mark, GraphError> {
-        self.write().mark(name)
+        self.write_checked()?.mark(name)
     }
 
     #[cfg(feature = "io")]
@@ -447,7 +490,7 @@ where
         presets: Option<&PresetOptions>,
     ) -> Result<(), IOError> {
         crate::io::GraphMLImport {}.import_reader_with(
-            &mut *self.write(),
+            &mut *self.write_checked()?,
             quick_xml::Reader::from_reader(reader),
             presets,
         )
@@ -459,7 +502,11 @@ where
         reader: &mut dyn std::io::BufRead,
         presets: Option<&PresetOptions>,
     ) -> Result<ImportReport, IOError> {
-        crate::io::GraphSONImport::new().import_reader_with(&mut *self.write(), reader, presets)
+        crate::io::GraphSONImport::new().import_reader_with(
+            &mut *self.write_checked()?,
+            reader,
+            presets,
+        )
     }
 
     #[cfg(feature = "io")]
@@ -470,12 +517,12 @@ where
     ) -> Result<(), IOError> {
         crate::io::GraphMLExport::new()
             .with_beautify(beautify)
-            .export_writer(&*self.read(), writer)
+            .export_writer(&*self.read_checked()?, writer)
     }
 
     #[cfg(feature = "io")]
     fn export_graphson(&self, writer: &mut dyn std::io::Write) -> Result<(), IOError> {
-        crate::io::GraphSONExport::new().export_writer(&*self.read(), writer)
+        crate::io::GraphSONExport::new().export_writer(&*self.read_checked()?, writer)
     }
 
     #[cfg(feature = "persist")]
@@ -486,10 +533,13 @@ where
         // The writer of `Graph::new_persistent` (design 5.3); a `TraversalGraph` wrapped by
         // plain `Graph::new` is persistent all the same, so it is written without one.
         if let Some(write) = self.snapshot_writer() {
-            return write(&*self.read(), writer);
+            return write(&*self.read_checked().map_err(PersistError::Graph)?, writer);
         }
         match self.as_any().downcast_ref::<Graph<crate::TraversalGraph>>() {
-            Some(graph) => graph.read().write_snapshot(writer),
+            Some(graph) => graph
+                .read_checked()
+                .map_err(PersistError::Graph)?
+                .write_snapshot(writer),
             None => Err(PersistError::Graph(GraphError::unsupported("snapshots"))),
         }
     }

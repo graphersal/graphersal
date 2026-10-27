@@ -218,9 +218,23 @@ impl<S: GraphStorage> Graph<S> {
         progress: &mut dyn FnMut(&EmbedReport),
     ) -> Result<EmbedReport, EmbedJobError> {
         // A unit another thread holds shows in `unit_started_at` too: not this job's unit.
-        if self.holds_unit() || (!self.unit_held() && self.read().unit_started_at().is_some()) {
-            return job.run_in(&mut *self.write(), embedders, cancel, progress);
+        // Outside a held unit `read_checked` never fails (it only can on the owning thread).
+        let held = self.holds_unit()
+            || (!self.unit_held()
+                && self
+                    .read_checked()
+                    .is_ok_and(|graph| graph.unit_started_at().is_some()));
+        if held {
+            // Inside a held unit, a view this thread may not have (the job started by a commit
+            // hook of the unit it would write into) is the job's error, never a panic.
+            let mut graph = self.write_checked().map_err(|err| EmbedJobError {
+                error: Box::new(TraverserError::from(err)),
+                report: EmbedReport::default(),
+            })?;
+            return job.run_in(&mut *graph, embedders, cancel, progress);
         }
+        // Not inside a held unit of this thread: the phase locks below are plain locks, which
+        // never report a held view.
         run(&mut Shared(self), job, embedders, cancel, progress)
     }
 }

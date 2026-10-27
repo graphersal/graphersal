@@ -219,6 +219,12 @@ pub(crate) fn stored_edge_label<S: GraphStorage>(
 ///
 /// A wrapper forwards all three, like [`Self::begin_unit`].
 ///
+/// A storage with a unit clock ([`Self::unit_started_at`], the time of `defaultFunction`
+/// `now`/`today` and of the GQL clocks) also implements [`Self::next_unit_started_at`] and
+/// [`Self::begin_unit_at`]: a [`Graph`](crate::graph::Graph) pins a held unit's time when the
+/// unit opens and opens the storage's unit lazily at its first write with that time, so one
+/// unit reads one clock value. A wrapper forwards both.
+///
 /// ## Capabilities
 ///
 /// [`Self::capabilities`] states facts, not permissions ([`StorageCapabilities`]: `atomic`,
@@ -930,8 +936,65 @@ pub trait GraphStorage: Send + Sync {
     /// Default: a non-atomic storage. The mark carries nothing, commit and rollback do nothing,
     /// and a failing traversal keeps the changes it made before the error. [`TraversalGraph`]
     /// implements units with an internal undo log.
+    ///
+    /// # A unit behind a `Graph` lives inside one guard
+    ///
+    /// A unit opened on a storage that sits behind a [`Graph`](crate::graph::Graph) through a
+    /// write guard (`graph.write().begin_unit()`) must be committed or rolled back under that
+    /// SAME guard. Once the guard is dropped with the unit still open, every other thread's
+    /// `graph.read()` sees the unit's uncommitted changes, and a Store checkpoint may write them
+    /// to disk. To keep one unit over several locks, open it on the graph instead:
+    /// [`Graph::begin_unit`](crate::graph::Graph::begin_unit) ...
+    /// [`Graph::commit_unit`](crate::graph::Graph::commit_unit) (or `rollback_unit`) on one
+    /// thread; the graph holds the lock for the unit and opens the storage's unit at the unit's
+    /// first write ([`Self::begin_unit_at`]).
+    ///
+    /// ```
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    /// // Wrong: `let mark = graph.write().begin_unit();` and closing it under a later guard.
+    /// // Right: one unit over several locks, closed on the thread that opened it.
+    /// let mark = graph.begin_unit().unwrap();
+    /// GraphTraversalSource::new(&mut *graph.write()).add_v("person").iterate().unwrap();
+    /// assert_eq!(graph.read().vertex_count(), 7);
+    /// graph.commit_unit(mark).unwrap();
+    /// ```
     fn begin_unit(&mut self) -> UnitMark {
         UnitMark::default()
+    }
+
+    /// [`Self::begin_unit`] with the unit's start time given: when it opens the outermost unit,
+    /// [`Self::unit_started_at`] reports `started_at` until the unit closes.
+    ///
+    /// [`Graph`](crate::graph::Graph) calls it for a unit a thread holds across locks
+    /// ([`Graph::begin_unit`](crate::graph::Graph::begin_unit)): the graph takes the unit's
+    /// time when the unit opens (from [`Self::next_unit_started_at`], under a lock that keeps
+    /// every writer out, so nothing moves the storage's clock in between) but opens the
+    /// storage's unit only at the unit's first write, and passes the time here, so reads
+    /// before and after the first write see ONE clock value. `started_at` is never earlier than
+    /// what [`Self::next_unit_started_at`] returned at the graph's begin; an implementation may
+    /// still raise it to keep its own monotonic rule. Inside an open unit it opens a nested unit
+    /// and ignores `started_at`.
+    ///
+    /// Default: [`Self::begin_unit`] (a storage without a unit clock, or one that takes its own
+    /// time). A storage that overrides [`Self::unit_started_at`] overrides this and
+    /// [`Self::next_unit_started_at`] too; a wrapper forwards both, like `begin_unit`.
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        let _ = started_at;
+        self.begin_unit()
+    }
+
+    /// The start time, in nanoseconds since the Unix epoch, the outermost unit would get if it
+    /// opened now ([`Self::unit_started_at`]'s value for it): the system clock, never earlier
+    /// than the storage's monotonic floor (the previous unit's start, the last commit time).
+    /// [`Graph::begin_unit`](crate::graph::Graph::begin_unit) reads it once per held unit and
+    /// hands it to [`Self::begin_unit_at`] when the storage's unit opens. Changes nothing.
+    ///
+    /// Default: `None` (a storage without a unit clock; [`Self::unit_started_at`] stays
+    /// `None` too, and the graph pins no time). [`TraversalGraph`] returns its clock.
+    fn next_unit_started_at(&self) -> Option<i128> {
+        None
     }
 
     /// Closes the innermost unit `mark` and keeps its changes. When it is the outermost unit,
@@ -941,7 +1004,9 @@ pub trait GraphStorage: Send + Sync {
     /// unit that changed something runs every `before_commit` first; a veto rolls the whole
     /// unit back (every hook gets `after_rollback`) and is returned as
     /// [`GraphError::CommitRejected`]. The unit is closed either way. Default: a no-op returning
-    /// `Ok(())`; see [`Self::begin_unit`].
+    /// `Ok(())`; see [`Self::begin_unit`]. Behind a [`Graph`](crate::graph::Graph), a unit opened
+    /// through a write guard is committed under that same guard ([`Self::begin_unit`], "A unit
+    /// behind a `Graph` lives inside one guard").
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         let _ = mark;
         Ok(())
@@ -952,7 +1017,8 @@ pub trait GraphStorage: Send + Sync {
     /// Handles taken inside the unit are stale afterwards. `reason` is what the
     /// [commit hooks](crate::graph::CommitHook) receive in `after_rollback` when this is the
     /// outermost unit and it had changed something. Default: a no-op (nothing is undone); see
-    /// [`Self::begin_unit`].
+    /// [`Self::begin_unit`]. Behind a [`Graph`](crate::graph::Graph), a unit opened through a
+    /// write guard is rolled back under that same guard.
     fn rollback_unit(&mut self, mark: UnitMark, reason: &RollbackReason) {
         let _ = (mark, reason);
     }
@@ -2395,6 +2461,17 @@ impl GraphStorage for TraversalGraph {
         self.begin_undo_unit()
     }
 
+    /// The undo log's unit with `started_at` as its time (never earlier than the log's
+    /// monotonic floor), see [`GraphStorage::begin_unit_at`].
+    #[inline]
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        self.begin_undo_unit_at(started_at)
+    }
+
+    fn next_unit_started_at(&self) -> Option<i128> {
+        Some(self.undo_next_started_at())
+    }
+
     #[inline]
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         self.commit_undo_unit(mark)
@@ -2448,8 +2525,12 @@ impl GraphStorage for TraversalGraph {
         self.commit_seq()
     }
 
+    /// The undo log's unit start; before the storage's unit opens, the time a
+    /// [`Graph`](crate::graph::Graph) pinned for the unit the CURRENT thread holds on this
+    /// storage (`Graph::begin_unit` opens the storage's unit only at the unit's first write).
     fn unit_started_at(&self) -> Option<i128> {
         self.undo_unit_started_at()
+            .or_else(|| crate::graph::shared::held_unit_clock((self as *const Self).cast::<()>()))
     }
 
     /// `max` of each sequence and the given value; nothing is recorded (sequences are never
@@ -3242,6 +3323,16 @@ impl<G: GraphStorage> GraphStorage for Box<G> {
     }
 
     #[inline]
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        (**self).begin_unit_at(started_at)
+    }
+
+    #[inline]
+    fn next_unit_started_at(&self) -> Option<i128> {
+        (**self).next_unit_started_at()
+    }
+
+    #[inline]
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         (**self).commit_unit(mark)
     }
@@ -3682,6 +3773,16 @@ impl<G: GraphStorage> GraphStorage for &mut G {
     #[inline]
     fn begin_unit(&mut self) -> UnitMark {
         (**self).begin_unit()
+    }
+
+    #[inline]
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        (**self).begin_unit_at(started_at)
+    }
+
+    #[inline]
+    fn next_unit_started_at(&self) -> Option<i128> {
+        (**self).next_unit_started_at()
     }
 
     #[inline]
@@ -4266,6 +4367,19 @@ impl GraphStorage for Arc<TraversalGraph> {
     #[inline]
     fn begin_unit(&mut self) -> UnitMark {
         Arc::get_mut(self).map_or_else(UnitMark::default, GraphStorage::begin_unit)
+    }
+
+    #[inline]
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        Arc::get_mut(self).map_or_else(UnitMark::default, |graph| {
+            GraphStorage::begin_unit_at(graph, started_at)
+        })
+    }
+
+    /// The clock of the shared graph while this handle is the only one (units open only then).
+    #[inline]
+    fn next_unit_started_at(&self) -> Option<i128> {
+        GraphStorage::next_unit_started_at(self.as_ref())
     }
 
     #[inline]

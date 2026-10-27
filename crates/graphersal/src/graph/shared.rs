@@ -5,9 +5,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use parking_lot::lock_api::{
-    RawRwLock as _, RawRwLockUpgrade as _, RawRwLockUpgradeDowngrade as _,
-};
+use parking_lot::lock_api::{RawRwLock as _, RawRwLockUpgrade as _};
 use web_time::Instant;
 
 use crate::error::GraphError;
@@ -47,24 +45,38 @@ use crate::graph::{
 ///   threads keep reading (they see the committed state, because nothing changed yet), while
 ///   other writers and other units wait;
 /// - its first [`write`](Self::write) makes the lock exclusive (it waits for the current
-///   readers) until the unit closes: from then on other threads' reads wait too, so nobody
+///   readers) and opens the storage's unit ([`GraphStorage::begin_unit_at`]); the lock stays
+///   exclusive until the unit closes: from then on other threads' reads wait too, so nobody
 ///   ever sees uncommitted changes;
-/// - nested [`begin_unit`](Self::begin_unit) calls on the owning thread open savepoints;
-/// - opening, and closing a unit that never wrote, take the lock exclusively for the moment of
-///   the storage call (the storage's `begin_unit`/`commit_unit` need `&mut S`), so they wait
-///   for the readers in flight.
+/// - nested [`begin_unit`](Self::begin_unit) calls on the owning thread open savepoints (on
+///   the storage too once the unit wrote, else recorded and opened in order at its first
+///   write);
+/// - opening a unit, and closing one that never wrote, take no exclusive moment: they never
+///   wait for the readers in flight (only a dry run that never wrote,
+///   [`discard_unit`](Self::discard_unit), takes the lock exclusively to ask the storage for
+///   its change set);
+/// - the unit's time ([`GraphStorage::unit_started_at`], read by `defaultFunction`
+///   `now`/`today` and the GQL clocks) is pinned when the unit opens, so the unit's queries
+///   read one value before and after its first write: the owner's [`read`](Self::read) views
+///   of a [`TraversalGraph`] report it before the storage's unit opens, and a script's
+///   traversals inside the unit are pinned to it by the graph for any storage (a host storage's
+///   own read view reports `None` until the unit's first write, as before a unit opens).
 ///
 /// The owning thread must not hold a [`write`](Self::write) view together with another view of
-/// the same graph (a `&mut S` would alias a `&S`); outside a unit this deadlocks (the lock is
-/// not reentrant), inside one it panics as the engine bug it is. Opening a unit on a thread
-/// that already holds a guard of this graph deadlocks, as `write()` does there.
+/// the same graph (a `&mut S` would alias a `&S`): outside a unit this deadlocks (the lock is
+/// not reentrant); inside one, [`read`](Self::read) and [`write`](Self::write) panic (see their
+/// "Panics"), while [`read_checked`](Self::read_checked), [`write_checked`](Self::write_checked),
+/// [`try_read`](Self::try_read), [`try_write`](Self::try_write), [`begin_unit`](Self::begin_unit)
+/// and the closes return [`GraphError::GraphViewHeld`] (or `None`) instead. Opening a unit on
+/// a thread that already holds a guard of this graph taken outside a unit deadlocks (at the
+/// unit's first write at the latest), as `write()` does there.
 ///
 /// ```rust
 /// use graphersal::changes::RollbackReason;
 /// use graphersal::prelude::*;
 ///
 /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
-/// let mark = graph.begin_unit();
+/// let mark = graph.begin_unit().unwrap();
 /// // Reads of the unit's thread run inside it; other threads read on meanwhile.
 /// assert_eq!(graph.read().vertex_count(), 6);
 /// // The first write makes the unit exclusive until it closes.
@@ -114,6 +126,15 @@ struct UnitOwner {
 struct HeldUnit {
     /// Open units of the owner ([`Graph::begin_unit`] minus the closes): 1 = the outermost.
     depth: u32,
+    /// The storage's marks of the levels opened on the storage, outermost first. The
+    /// storage's units open lazily, all at once, when the lock becomes exclusive (the unit's
+    /// first write); from then on a nested level opens right away. Fewer marks than `depth`
+    /// while the unit has not written: the missing levels have nothing on the storage.
+    marks: Vec<UnitMark>,
+    /// The unit's time, pinned at the outermost begin
+    /// ([`GraphStorage::next_unit_started_at`]) and handed to
+    /// [`GraphStorage::begin_unit_at`] when the storage's unit opens.
+    started_at: Option<i128>,
     /// Whether the owner holds the lock exclusively (since its first `write()`).
     exclusive: bool,
     /// Live read views ([`GraphRead`]) of the owner.
@@ -127,13 +148,46 @@ struct HeldUnit {
 /// [`UnitOwner::thread`] when no thread holds a unit; never a [`thread_token`].
 const NO_OWNER: u64 = 0;
 
-/// The owner a unit opened while the thread's locals are being destroyed is recorded under:
-/// never a [`thread_token`], so that thread does not find it again (its later `read()`/`write()`
-/// lock normally, and closing the unit fails). Nothing in the engine opens a unit there.
-const UNKNOWN_OWNER: u64 = u64::MAX;
+thread_local! {
+    /// The times pinned for the units this thread holds ([`Graph::begin_unit`]), by the address
+    /// of the graph's storage: until the storage's own unit opens (the unit's first write), a
+    /// storage that knows this table ([`TraversalGraph`]'s `unit_started_at`) reports the pinned
+    /// time through the owner's read views. Only the owning thread sees an entry; a thread may
+    /// hold units of several graphs at once.
+    static HELD_UNIT_CLOCKS: std::cell::RefCell<Vec<(usize, i128)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
-/// A number for the current thread, unique in the process, never [`NO_OWNER`] or
-/// [`UNKNOWN_OWNER`]; `None` only while the thread's locals are being destroyed.
+/// The time pinned for the unit the current thread holds on the storage at `storage` (`None`:
+/// no such unit, or its storage has no unit clock).
+pub(crate) fn held_unit_clock(storage: *const ()) -> Option<i128> {
+    let address = storage as usize;
+    HELD_UNIT_CLOCKS
+        .try_with(|clocks| {
+            clocks
+                .borrow()
+                .iter()
+                .find(|(at, _)| *at == address)
+                .map(|(_, started_at)| *started_at)
+        })
+        .ok()
+        .flatten()
+}
+
+/// Records (`Some`) or removes (`None`) the pinned time of the unit this thread holds on the
+/// storage at `address`.
+fn set_held_unit_clock(address: usize, started_at: Option<i128>) {
+    let _ = HELD_UNIT_CLOCKS.try_with(|clocks| {
+        let mut clocks = clocks.borrow_mut();
+        clocks.retain(|(at, _)| *at != address);
+        if let Some(started_at) = started_at {
+            clocks.push((address, started_at));
+        }
+    });
+}
+
+/// A number for the current thread, unique in the process, never [`NO_OWNER`]; `None` only
+/// while the thread's locals are being destroyed.
 fn thread_token() -> Option<u64> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     thread_local! {
@@ -142,15 +196,21 @@ fn thread_token() -> Option<u64> {
     TOKEN.try_with(|token| *token).ok()
 }
 
-/// A view of the held lock is alive where it must not be: an engine bug (the same code
-/// deadlocks outside a unit, because the lock is not reentrant). Reported by a panic instead of
-/// handing out a `&mut S` that aliases a `&S`; every unit opener rolls back on unwind.
+/// The error of asking for a view of the held lock while another view is alive where it must
+/// not be (a `&mut S` would alias a `&S`; outside a unit the same code deadlocks).
+#[cold]
+fn view_held(operation: &'static str) -> GraphError {
+    GraphError::GraphViewHeld { operation }
+}
+
+/// The panic of the infallible [`Graph::read`] / [`Graph::write`] for such an error (their
+/// "Panics" section); the engine asks through the checked forms instead.
 #[cold]
 #[track_caller]
-fn aliasing_violation(what: &str) -> ! {
+fn view_panic(err: &GraphError) -> ! {
     panic!(
-        "Graph: {what} while the thread holds another view of the graph inside its unit \
-         (an engine bug: outside a unit this deadlocks)"
+        "Graph: {err} (outside a unit this deadlocks; Graph::read_checked, \
+         Graph::write_checked, Graph::try_read and Graph::try_write report it instead)"
     )
 }
 
@@ -172,12 +232,10 @@ impl Drop for HeldView<'_> {
 
 /// Finishes the close of a held unit when dropped, also when the storage call unwinds (a
 /// storage closes its unit before a panic of its own continues, `close_on_unwind`): one level
-/// less; at the outermost level the owner is cleared and the lock released, else a lock made
-/// exclusive only for the call goes back to upgradable.
+/// less (and its storage mark dropped); at the outermost level the owner is cleared and the
+/// lock released, exclusive or upgradable as it is held.
 struct FinishClose<'a, S: GraphStorage> {
     graph: &'a Graph<S>,
-    /// The lock was upgradable before the close and made exclusive for it.
-    briefly: bool,
 }
 
 impl<S: GraphStorage> Drop for FinishClose<'_, S> {
@@ -185,19 +243,19 @@ impl<S: GraphStorage> Drop for FinishClose<'_, S> {
         let graph = self.graph;
         let mut held = graph.unit.state.lock();
         held.depth = held.depth.saturating_sub(1);
+        let depth = held.depth as usize;
+        held.marks.truncate(depth);
         if held.depth > 0 {
-            if self.briefly {
-                held.exclusive = false;
-                drop(held);
-                // SAFETY: this thread made the lock exclusive for the close (`briefly`) and still
-                // holds the unit, which held it upgradable before.
-                unsafe { graph.raw().downgrade_to_upgradable() };
-            }
             return;
         }
+        let exclusive = held.exclusive;
         let since = held.exclusive_since.take();
+        let pinned = held.started_at.is_some();
         *held = HeldUnit::default();
         drop(held);
+        if pinned {
+            set_held_unit_clock(graph.lock.data_ptr() as usize, None);
+        }
         graph.unit.thread.store(NO_OWNER, Ordering::Release);
         if let Some(since) = since
             && let Some((stats, key)) = lock_series(&graph.workload, "write.hold")
@@ -208,32 +266,25 @@ impl<S: GraphStorage> Drop for FinishClose<'_, S> {
                 crate::graph::workload::Sample::new(0, since.elapsed().as_micros() as u64),
             );
         }
-        // SAFETY: this thread holds the lock exclusively (made so for the close, or since the
-        // unit's first write), and the owner is cleared, so no view refers to it any more.
-        unsafe { graph.raw().unlock_exclusive() };
+        match exclusive {
+            // SAFETY: this thread holds the lock exclusively (since the unit's first write, or
+            // made so for the close), and the owner is cleared, so no view refers to it.
+            true => unsafe { graph.raw().unlock_exclusive() },
+            // SAFETY: this thread holds the lock upgradable (taken by the outermost begin, never
+            // upgraded), and the owner is cleared.
+            false => unsafe { graph.raw().unlock_upgradable() },
+        }
     }
 }
 
-/// Releases the lock taken by an outermost [`Graph::begin_unit`] when the storage's
-/// `begin_unit` unwinds (no unit was recorded).
+/// Releases the upgradable lock taken by an outermost [`Graph::begin_unit`] when a storage call
+/// of the begin unwinds (no unit was recorded).
 struct AbandonBegin<'a>(&'a parking_lot::RawRwLock);
 
 impl Drop for AbandonBegin<'_> {
     fn drop(&mut self) {
-        // SAFETY: armed only while the beginning thread holds the lock exclusively.
-        unsafe { self.0.unlock_exclusive() };
-    }
-}
-
-/// Downgrades a lock made exclusive for a nested [`Graph::begin_unit`] back to upgradable when
-/// the storage's `begin_unit` unwinds.
-struct DowngradeOnUnwind<'a>(&'a parking_lot::RawRwLock);
-
-impl Drop for DowngradeOnUnwind<'_> {
-    fn drop(&mut self) {
-        // SAFETY: armed only while the owning thread holds the lock exclusively for the call
-        // and holds its unit (upgradable) otherwise.
-        unsafe { self.0.downgrade_to_upgradable() };
+        // SAFETY: armed only while the beginning thread holds the lock upgradable.
+        unsafe { self.0.unlock_upgradable() };
     }
 }
 
@@ -357,7 +408,7 @@ impl<S: GraphStorage> Graph<S> {
         let workload = self
             .workload_stats()
             .map(|stats| stats.report_with_history(now, crate::graph::workload::HistoryTier::Days));
-        let guard = self.read();
+        let guard = self.read_checked()?;
         let source = crate::GraphTraversalSource::new(&*guard);
         let memory =
             source.memory_report(&crate::graph::memory_report::MemoryReportRequest::new())?;
@@ -402,26 +453,46 @@ impl<S: GraphStorage> Graph<S> {
     /// written ([`Self::begin_unit`]). Several readers may hold it at once, also together with
     /// a unit that has only read so far. On the thread that holds a unit of this graph it
     /// returns a view of the unit's lock instead (no new lock, nothing counted).
+    ///
+    /// # Panics
+    ///
+    /// Like [`RefCell::borrow`](std::cell::RefCell::borrow), when the current thread holds a
+    /// unit of this graph and a [`write`](Self::write) view of it is alive on this thread (also
+    /// a commit hook or an embedder reaching back into the graph while its unit writes or
+    /// commits): a shared view would alias the `&mut S`. [`Self::read_checked`] returns
+    /// [`GraphError::GraphViewHeld`] instead, [`Self::try_read`] `None`. (Outside a unit the
+    /// same situation deadlocks, because the lock is not reentrant.)
+    #[track_caller]
     pub fn read(&self) -> GraphRead<'_, S> {
+        match self.read_checked() {
+            Ok(guard) => guard,
+            Err(err) => view_panic(&err),
+        }
+    }
+
+    /// [`Self::read`], but a view the current thread may not have
+    /// ([`read`](Self::read)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic.
+    /// Blocks like `read()`.
+    pub fn read_checked(&self) -> Result<GraphRead<'_, S>, GraphError> {
         let attached = self.attached();
         if self.holds_unit() {
-            return GraphRead {
-                guard: self.held_read(),
+            return Ok(GraphRead {
+                guard: self.held_read()?,
                 _attached: attached,
-            };
+            });
         }
         let Some((stats, key)) = lock_series(&self.workload, "read.wait") else {
-            return GraphRead {
+            return Ok(GraphRead {
                 guard: ReadAccess::Locked(self.lock.read()),
                 _attached: attached,
-            };
+            });
         };
         // Uncontended: no clock read, nothing counted.
         if let Some(guard) = self.lock.try_read() {
-            return GraphRead {
+            return Ok(GraphRead {
                 guard: ReadAccess::Locked(guard),
                 _attached: attached,
-            };
+            });
         }
         let asked = Instant::now();
         let guard = self.lock.read();
@@ -431,10 +502,31 @@ impl<S: GraphStorage> Graph<S> {
             now_micros(),
             crate::graph::workload::Sample::new(0, wait),
         );
-        GraphRead {
+        Ok(GraphRead {
             guard: ReadAccess::Locked(guard),
             _attached: attached,
+        })
+    }
+
+    /// Locks the graph for reading if that is possible right now, else returns `None` without
+    /// blocking or panicking: `None` while a writer or a unit that has written holds the lock
+    /// (also on this thread: a thread that holds the write lock gets `None` instead of a
+    /// deadlock), and on the thread that holds a unit of this graph while a
+    /// [`write`](Self::write) view of it is alive there. On the thread that holds a unit it
+    /// returns a view of the unit's lock otherwise, as [`Self::read`] does. A successful
+    /// `try_read` counts no wait.
+    pub fn try_read(&self) -> Option<GraphRead<'_, S>> {
+        if self.holds_unit() {
+            return self.held_read().ok().map(|guard| GraphRead {
+                guard,
+                _attached: self.attached(),
+            });
         }
+        let guard = self.lock.try_read()?;
+        Some(GraphRead {
+            guard: ReadAccess::Locked(guard),
+            _attached: self.attached(),
+        })
     }
 
     /// The guard that makes this graph's statistics the thread's (none attached: `None`).
@@ -447,22 +539,43 @@ impl<S: GraphStorage> Graph<S> {
     /// Locks the graph for writing, blocking until no reader, writer or unit
     /// ([`Self::begin_unit`]) holds it. On the thread that holds a unit of this graph it
     /// returns a view of the unit's lock instead, making that lock exclusive first (waiting for
-    /// the other threads' current readers) when this is the unit's first write; the lock then
-    /// stays exclusive until the unit closes.
+    /// the other threads' current readers) and opening the storage's unit when this is the
+    /// unit's first write; the lock then stays exclusive until the unit closes.
+    ///
+    /// # Panics
+    ///
+    /// Like [`RefCell::borrow_mut`](std::cell::RefCell::borrow_mut), when the current thread
+    /// holds a unit of this graph and another view of it ([`read`](Self::read) or `write`) is
+    /// alive on this thread (also a commit hook or an embedder reaching back into the graph
+    /// while its unit writes or commits): the `&mut S` would alias it.
+    /// [`Self::write_checked`] returns [`GraphError::GraphViewHeld`] instead,
+    /// [`Self::try_write`] `None`. (Outside a unit the same situation deadlocks, because the
+    /// lock is not reentrant.)
+    #[track_caller]
     pub fn write(&self) -> GraphWrite<'_, S> {
+        match self.write_checked() {
+            Ok(guard) => guard,
+            Err(err) => view_panic(&err),
+        }
+    }
+
+    /// [`Self::write`], but a view the current thread may not have
+    /// ([`write`](Self::write)'s "Panics") is [`GraphError::GraphViewHeld`] instead of a panic.
+    /// Blocks like `write()`.
+    pub fn write_checked(&self) -> Result<GraphWrite<'_, S>, GraphError> {
         if self.holds_unit() {
-            return GraphWrite {
-                guard: self.held_write(),
+            return Ok(GraphWrite {
+                guard: self.held_write()?,
                 held: None,
                 _attached: self.attached(),
-            };
+            });
         }
         let Some((stats, key)) = lock_series(&self.workload, "write.wait") else {
-            return GraphWrite {
+            return Ok(GraphWrite {
                 guard: WriteAccess::Locked(self.lock.write()),
                 held: None,
                 _attached: self.attached(),
-            };
+            });
         };
         let asked = Instant::now();
         let guard = self.lock.write();
@@ -473,17 +586,18 @@ impl<S: GraphStorage> Graph<S> {
             now_micros(),
             crate::graph::workload::Sample::new(0, wait),
         );
-        GraphWrite {
+        Ok(GraphWrite {
             guard: WriteAccess::Locked(guard),
             held: Some((acquired, stats)),
             _attached: self.attached(),
-        }
+        })
     }
 
     /// Locks the graph for writing if nobody holds it right now, else returns `None` without
-    /// blocking (a thread that already holds the lock gets `None` instead of a deadlock). On the
-    /// thread that holds a unit of this graph: a view of the unit's lock when it is exclusive
-    /// already or can be made exclusive without waiting, `None` while other threads read or
+    /// blocking or panicking (a thread that already holds the lock gets `None` instead of a
+    /// deadlock). On the thread that holds a unit of this graph: a view of the unit's lock when
+    /// it is exclusive already or can be made exclusive without waiting (then the storage's unit
+    /// opens, as at the unit's first [`write`](Self::write)), `None` while other threads read or
     /// the thread holds another view of the graph.
     pub fn try_write(&self) -> Option<GraphWrite<'_, S>> {
         if self.holds_unit() {
@@ -515,133 +629,189 @@ impl<S: GraphStorage> Graph<S> {
         self.unit.thread.load(Ordering::Acquire) != NO_OWNER
     }
 
-    /// Opens a unit of the storage ([`GraphStorage::begin_unit`]) that the current thread
-    /// holds across locks, until it closes it with [`Self::commit_unit`],
-    /// [`Self::commit_unit_with`], [`Self::rollback_unit`] or [`Self::discard_unit`] on the
-    /// same thread (the type docs, "Units across locks").
+    /// Opens a unit that the current thread holds across locks, until it closes it with
+    /// [`Self::commit_unit`], [`Self::commit_unit_with`], [`Self::rollback_unit`] or
+    /// [`Self::discard_unit`] on the same thread (the type docs, "Units across locks"). The mark
+    /// stands for the unit's level; pass it to the close.
     ///
-    /// The outermost call waits until no other unit and no writer holds the graph, takes the
-    /// lock exclusively for the moment of the storage call (so the unit's clock,
-    /// [`GraphStorage::unit_started_at`], is set when it opens) and then holds it upgradable:
-    /// other threads keep reading until the unit's first [`Self::write`]. A call on the thread
+    /// The outermost call waits until no other unit and no writer holds the graph, then holds
+    /// the lock upgradable: other threads keep reading until the unit's first [`Self::write`].
+    /// It takes no exclusive moment, so it never waits for the readers in flight: the storage's
+    /// own unit ([`GraphStorage::begin_unit_at`]) opens at the unit's first write, with the
+    /// unit's time pinned here ([`GraphStorage::next_unit_started_at`]). A call on the thread
     /// that holds a unit opens a nested unit (a savepoint). Never call it while the thread holds
     /// a guard of this graph taken outside a unit (a deadlock, as with `write()`).
-    pub fn begin_unit(&self) -> UnitMark {
+    ///
+    /// Fails with [`GraphError::GraphViewHeld`] when the thread holds a unit of this graph and a
+    /// view of it is alive (a [`read`](Self::read) or [`write`](Self::write) guard, a commit
+    /// hook of its unit), and with [`GraphError::Unsupported`] while the thread is exiting
+    /// (its thread-locals destroyed); nothing is opened then.
+    pub fn begin_unit(&self) -> Result<UnitMark, GraphError> {
         if self.holds_unit() {
             return self.begin_nested_unit();
         }
+        let Some(token) = thread_token() else {
+            return Err(GraphError::unsupported(
+                "opening a unit while the thread exits",
+            ));
+        };
         let raw = self.raw();
         raw.lock_upgradable();
-        // SAFETY: this thread holds the lock upgradable (taken just above).
-        unsafe { raw.upgrade() };
         let abandon = AbandonBegin(raw);
-        // SAFETY: this thread holds the lock exclusively and holds no unit yet, so no view of
-        // the storage exists anywhere.
-        let mark = unsafe { &mut *self.lock.data_ptr() }.begin_unit();
+        // SAFETY: this thread holds the lock upgradable, which keeps every writer out, so no
+        // thread has a `&mut S`; it holds no unit, so it has no view of its own.
+        let base = unsafe { &*self.lock.data_ptr() };
+        let started_at = base.next_unit_started_at();
         std::mem::forget(abandon);
-        // SAFETY: this thread holds the lock exclusively (upgraded above).
-        unsafe { raw.downgrade_to_upgradable() };
         *self.unit.state.lock() = HeldUnit {
             depth: 1,
+            started_at,
             ..HeldUnit::default()
         };
-        self.unit
-            .thread
-            .store(thread_token().unwrap_or(UNKNOWN_OWNER), Ordering::Release);
-        mark
+        self.unit.thread.store(token, Ordering::Release);
+        if started_at.is_some() {
+            set_held_unit_clock(self.lock.data_ptr() as usize, started_at);
+        }
+        Ok(UnitMark::new(0))
     }
 
-    /// [`Self::begin_unit`] on the thread that holds a unit: a savepoint.
-    fn begin_nested_unit(&self) -> UnitMark {
-        let exclusive = {
+    /// [`Self::begin_unit`] on the thread that holds a unit: a savepoint, opened on the storage
+    /// right away when the unit has written, else recorded (opened at the first write).
+    fn begin_nested_unit(&self) -> Result<UnitMark, GraphError> {
+        const OPERATION: &str = "begin a nested unit";
+        {
             let mut held = self.unit.state.lock();
             if held.reads > 0 || held.writes > 0 {
-                drop(held);
-                aliasing_violation("begin_unit()");
+                return Err(view_held(OPERATION));
+            }
+            if !(held.exclusive && held.marks.len() == held.depth as usize) {
+                held.depth = held.depth.saturating_add(1);
+                return Ok(UnitMark::new(u64::from(held.depth - 1)));
             }
             // The storage call counts as a write view (see `close_held_unit`).
             held.writes += 1;
-            held.exclusive
-        };
+        }
         let call = HeldView {
             unit: &self.unit,
             write: true,
         };
-        let mark = if exclusive {
-            // SAFETY: this thread holds the lock exclusively and no view of it (checked).
-            unsafe { &mut *self.lock.data_ptr() }.begin_unit()
-        } else {
-            let raw = self.raw();
-            // SAFETY: this thread holds the unit's lock upgradable.
-            unsafe { raw.upgrade() };
-            let downgrade = DowngradeOnUnwind(raw);
-            // SAFETY: exclusive for the call (just upgraded), no view of it on this thread.
-            let mark = unsafe { &mut *self.lock.data_ptr() }.begin_unit();
-            drop(downgrade);
-            mark
-        };
+        // SAFETY: this thread holds the lock exclusively and no view of it (checked, and the
+        // counted call refuses new ones).
+        let mark = unsafe { &mut *self.lock.data_ptr() }.begin_unit();
         drop(call);
         let mut held = self.unit.state.lock();
+        held.marks.push(mark);
         held.depth = held.depth.saturating_add(1);
-        mark
+        Ok(UnitMark::new(u64::from(held.depth - 1)))
     }
 
-    /// Commits the innermost unit `mark` the current thread holds
-    /// ([`GraphStorage::commit_unit`]: at the outermost unit the changes become final and the
-    /// commit hooks run, under the exclusive lock); the outermost close releases the lock. The
-    /// unit is closed also when the commit fails (a veto rolls it back).
+    /// The time pinned for the unit the current thread holds (`None`: no unit held, or a
+    /// storage without a unit clock): what [`GraphStorage::unit_started_at`] reports once the
+    /// storage's unit is open. The script layer pins its traversals inside a held unit to it, so
+    /// they read it also before the unit's first write.
+    pub(crate) fn held_unit_started_at(&self) -> Option<i128> {
+        match self.holds_unit() {
+            true => self.unit.state.lock().started_at,
+            false => None,
+        }
+    }
+
+    /// Commits the innermost unit the current thread holds ([`GraphStorage::commit_unit`]: at
+    /// the outermost unit the changes become final and the commit hooks run, under the
+    /// exclusive lock); the outermost close releases the lock. The unit is closed also when the
+    /// commit fails (a veto rolls it back). A unit that never wrote has nothing on the storage:
+    /// it closes without a storage call (no hooks) and without an exclusive moment.
     ///
     /// Fails with [`GraphError::UnitNotHeld`] when the current thread holds no unit of this
-    /// graph (nothing is closed), else with the storage's commit error.
+    /// graph, with [`GraphError::GraphViewHeld`] while a view of the graph is alive on this
+    /// thread (a guard, or a commit hook closing a unit of the graph it commits; nothing is
+    /// closed), else with the storage's commit error.
     pub fn commit_unit(&self, mark: UnitMark) -> Result<(), GraphError> {
-        self.close_held_unit("commit a unit", |storage| storage.commit_unit(mark))?
+        let _ = mark;
+        self.close_held_unit(
+            "commit a unit",
+            false,
+            |storage, mark| storage.commit_unit(mark),
+            || Ok(()),
+        )?
     }
 
     /// [`Self::commit_unit`] with [`CommitMetadata`] for the commit's
     /// [`ChangeSet`] ([`GraphStorage::set_unit_metadata`] right before the commit, as
     /// [`Transactional::transaction_with`](crate::graph::Transactional::transaction_with)
-    /// does).
+    /// does). A unit that never wrote reports nothing, so its metadata goes nowhere.
     pub fn commit_unit_with(
         &self,
         mark: UnitMark,
         metadata: CommitMetadata,
     ) -> Result<(), GraphError> {
-        self.close_held_unit("commit a unit", |storage| {
-            storage.set_unit_metadata(metadata);
-            storage.commit_unit(mark)
-        })?
+        let _ = mark;
+        self.close_held_unit(
+            "commit a unit",
+            false,
+            |storage, mark| {
+                storage.set_unit_metadata(metadata);
+                storage.commit_unit(mark)
+            },
+            || Ok(()),
+        )?
     }
 
-    /// Rolls back the innermost unit `mark` the current thread holds
-    /// ([`GraphStorage::rollback_unit`]); the outermost close releases the lock. Fails with
-    /// [`GraphError::UnitNotHeld`] when the current thread holds no unit of this graph
-    /// (nothing is rolled back).
+    /// Rolls back the innermost unit the current thread holds
+    /// ([`GraphStorage::rollback_unit`]); the outermost close releases the lock. A unit that
+    /// never wrote closes without a storage call and without an exclusive moment. Fails with
+    /// [`GraphError::UnitNotHeld`] when the current thread holds no unit of this graph and with
+    /// [`GraphError::GraphViewHeld`] while a view of the graph is alive on this thread (nothing
+    /// is rolled back).
     pub fn rollback_unit(&self, mark: UnitMark, reason: &RollbackReason) -> Result<(), GraphError> {
-        self.close_held_unit("roll back a unit", |storage| {
-            storage.rollback_unit(mark, reason)
-        })
+        let _ = mark;
+        self.close_held_unit(
+            "roll back a unit",
+            false,
+            |storage, mark| storage.rollback_unit(mark, reason),
+            || (),
+        )
     }
 
-    /// Closes the innermost unit `mark` the current thread holds by undoing it without the
-    /// commit hooks and returns what it changed ([`GraphStorage::discard_unit`], the end of a
-    /// dry run); the outermost close releases the lock. Fails with
-    /// [`GraphError::UnitNotHeld`] when the current thread holds no unit of this graph, else
-    /// with the storage's error (a storage without change capture: `Unsupported`, the unit
-    /// closed by a rollback).
+    /// Closes the innermost unit the current thread holds by undoing it without the commit
+    /// hooks and returns what it changed ([`GraphStorage::discard_unit`], the end of a dry
+    /// run); the outermost close releases the lock. A unit that never wrote opens the storage's
+    /// unit for this call (an exclusive moment that waits for the readers in flight) so the
+    /// storage describes its empty change set. Fails with [`GraphError::UnitNotHeld`] when the
+    /// current thread holds no unit of this graph, with [`GraphError::GraphViewHeld`] while a
+    /// view of the graph is alive on this thread, else with the storage's error (a storage
+    /// without change capture: `Unsupported`, the unit closed by a rollback).
     pub fn discard_unit(&self, mark: UnitMark) -> Result<ChangeSet, GraphError> {
-        self.close_held_unit("discard a unit", |storage| storage.discard_unit(mark))?
+        let _ = mark;
+        self.close_held_unit(
+            "discard a unit",
+            true,
+            |storage, mark| storage.discard_unit(mark),
+            || {
+                Err(GraphError::unsupported(
+                    "discarding a unit the storage did not open",
+                ))
+            },
+        )?
     }
 
-    /// What the open unit `mark` the current thread holds changed so far
-    /// ([`GraphStorage::unit_changes`]). Fails with [`GraphError::UnitNotHeld`] when the
-    /// current thread holds no unit of this graph.
+    /// What the open unit `mark` (a level the current thread holds) changed so far
+    /// ([`GraphStorage::unit_changes`]; a level that has not written: nothing). Fails with
+    /// [`GraphError::UnitNotHeld`] when the current thread holds no unit of this graph and with
+    /// [`GraphError::GraphViewHeld`] while a write view of it is alive on this thread.
     pub fn unit_changes(&self, mark: UnitMark) -> Result<UnitChanges, GraphError> {
         if !self.holds_unit() {
             return Err(GraphError::UnitNotHeld {
                 operation: "ask what a unit changed",
             });
         }
-        Ok(self.read().unit_changes(mark))
+        let guard = self.read_checked()?;
+        let level = usize::try_from(mark.raw()).unwrap_or(usize::MAX);
+        let stored = self.unit.state.lock().marks.get(level).copied();
+        Ok(match stored {
+            Some(stored) => guard.unit_changes(stored),
+            None => UnitChanges::NONE,
+        })
     }
 
     /// The raw lock, for the held-unit protocol.
@@ -652,13 +822,14 @@ impl<S: GraphStorage> Graph<S> {
         unsafe { self.lock.raw() }
     }
 
-    /// A read view of the unit the current thread holds.
-    fn held_read(&self) -> ReadAccess<'_, S> {
+    /// A read view of the unit the current thread holds; [`GraphError::GraphViewHeld`] while a
+    /// write view of it is alive on this thread.
+    fn held_read(&self) -> Result<ReadAccess<'_, S>, GraphError> {
+        const OPERATION: &str = "read the graph";
         {
             let mut held = self.unit.state.lock();
             if held.writes > 0 {
-                drop(held);
-                aliasing_violation("read()");
+                return Err(view_held(OPERATION));
             }
             held.reads = held.reads.saturating_add(1);
         }
@@ -669,17 +840,17 @@ impl<S: GraphStorage> Graph<S> {
         // SAFETY: this thread holds the unit's lock (upgradable or exclusive), so no other
         // thread has a `&mut S`; on this thread no write view is alive (checked) and none is
         // handed out while this one lives (`held_write` checks `reads`).
-        ReadAccess::Held(unsafe { &*self.lock.data_ptr() }, view)
+        Ok(ReadAccess::Held(unsafe { &*self.lock.data_ptr() }, view))
     }
 
     /// The write view of the unit the current thread holds; its first one makes the lock
-    /// exclusive until the unit closes.
-    fn held_write(&self) -> WriteAccess<'_, S> {
+    /// exclusive and opens the storage's units until the unit closes.
+    /// [`GraphError::GraphViewHeld`] while another view of it is alive on this thread.
+    fn held_write(&self) -> Result<WriteAccess<'_, S>, GraphError> {
         let exclusive = {
             let mut held = self.unit.state.lock();
             if held.reads > 0 || held.writes > 0 {
-                drop(held);
-                aliasing_violation("write()");
+                return Err(view_held("write the graph"));
             }
             held.writes += 1;
             held.exclusive
@@ -693,18 +864,22 @@ impl<S: GraphStorage> Graph<S> {
         }
         // SAFETY: this thread holds the lock exclusively, and no other view of it exists on
         // this thread (checked above, and the counter refuses new ones while this one lives).
-        WriteAccess::Held(unsafe { &mut *self.lock.data_ptr() }, view)
+        Ok(WriteAccess::Held(
+            unsafe { &mut *self.lock.data_ptr() },
+            view,
+        ))
     }
 
     /// [`Self::held_write`] without waiting: `None` while another view of the unit is alive on
     /// this thread or other threads read.
     fn try_held_write(&self) -> Option<WriteAccess<'_, S>> {
-        {
+        let upgraded = {
             let mut held = self.unit.state.lock();
             if held.reads > 0 || held.writes > 0 {
                 return None;
             }
-            if !held.exclusive {
+            let upgraded = !held.exclusive;
+            if upgraded {
                 // SAFETY: this thread holds the unit's lock upgradable.
                 if !unsafe { self.raw().try_upgrade() } {
                     return None;
@@ -714,11 +889,15 @@ impl<S: GraphStorage> Graph<S> {
                     lock_series(&self.workload, "write.hold").map(|_| Instant::now());
             }
             held.writes += 1;
-        }
+            upgraded
+        };
         let view = HeldView {
             unit: &self.unit,
             write: true,
         };
+        if upgraded {
+            self.open_storage_units();
+        }
         // SAFETY: as in `held_write`.
         Some(WriteAccess::Held(
             unsafe { &mut *self.lock.data_ptr() },
@@ -727,64 +906,106 @@ impl<S: GraphStorage> Graph<S> {
     }
 
     /// Upgrades the lock of the unit the current thread holds for good (its first write),
-    /// waiting for the other threads' readers; the wait counts as `write.wait`.
+    /// waiting for the other threads' readers (the wait counts as `write.wait`), then opens the
+    /// storage's units. The caller is the thread's only view of the graph.
     fn make_unit_exclusive(&self) {
         let series = lock_series(&self.workload, "write.wait");
         let asked = series.as_ref().map(|_| Instant::now());
         // SAFETY: this thread holds the unit's lock upgradable (not exclusive yet).
         unsafe { self.raw().upgrade() };
-        let mut held = self.unit.state.lock();
-        held.exclusive = true;
-        if let (Some((stats, key)), Some(asked)) = (series, asked) {
-            let acquired = Instant::now();
-            let wait = acquired.duration_since(asked).as_micros() as u64;
-            stats.record(
-                key,
-                now_micros(),
-                crate::graph::workload::Sample::new(0, wait),
-            );
-            held.exclusive_since = Some(acquired);
+        {
+            let mut held = self.unit.state.lock();
+            held.exclusive = true;
+            if let (Some((stats, key)), Some(asked)) = (series, asked) {
+                let acquired = Instant::now();
+                let wait = acquired.duration_since(asked).as_micros() as u64;
+                stats.record(
+                    key,
+                    now_micros(),
+                    crate::graph::workload::Sample::new(0, wait),
+                );
+                held.exclusive_since = Some(acquired);
+            }
+        }
+        self.open_storage_units();
+    }
+
+    /// Opens on the storage, in order, every level of the held unit not opened yet: the
+    /// outermost with the pinned time ([`GraphStorage::begin_unit_at`]), nested ones as
+    /// savepoints. The lock must be exclusive and the caller the thread's only view of it.
+    fn open_storage_units(&self) {
+        loop {
+            let (level, started_at) = {
+                let held = self.unit.state.lock();
+                if held.marks.len() >= held.depth as usize {
+                    return;
+                }
+                (held.marks.len(), held.started_at)
+            };
+            // SAFETY: this thread holds the lock exclusively, and the caller is its only view
+            // (none of its references is used during this call).
+            let storage = unsafe { &mut *self.lock.data_ptr() };
+            let mark = match (level, started_at) {
+                (0, Some(started_at)) => storage.begin_unit_at(started_at),
+                _ => storage.begin_unit(),
+            };
+            self.unit.state.lock().marks.push(mark);
         }
     }
 
-    /// Closes the innermost unit the current thread holds with `close` under the exclusive
-    /// lock (made exclusive for the call when the unit never wrote), then releases the lock at
-    /// the outermost level ([`FinishClose`], also on unwind).
+    /// Closes the innermost unit the current thread holds, then releases the lock at the
+    /// outermost level ([`FinishClose`], also on unwind). A level with a storage unit is closed
+    /// by `close` (with the storage's mark) under the exclusive lock. A level without one (the
+    /// unit never wrote) is closed by `skip`, without a storage call and without an exclusive
+    /// moment, unless `always_storage` (a dry run asks the storage for its change set): then the
+    /// lock is made exclusive and the storage's units are opened first.
     fn close_held_unit<R>(
         &self,
         operation: &'static str,
-        close: impl FnOnce(&mut S) -> R,
+        always_storage: bool,
+        close: impl FnOnce(&mut S, UnitMark) -> R,
+        skip: impl FnOnce() -> R,
     ) -> Result<R, GraphError> {
         if !self.holds_unit() {
             return Err(GraphError::UnitNotHeld { operation });
         }
+        let (level, opened) = {
+            let held = self.unit.state.lock();
+            if held.reads > 0 || held.writes > 0 {
+                return Err(view_held(operation));
+            }
+            let level = held.depth.saturating_sub(1) as usize;
+            (level, held.marks.get(level).is_some())
+        };
+        if !opened && !always_storage {
+            drop(FinishClose { graph: self });
+            return Ok(skip());
+        }
         let exclusive = {
             let mut held = self.unit.state.lock();
-            if held.reads > 0 || held.writes > 0 {
-                drop(held);
-                aliasing_violation(operation);
-            }
             // The storage call counts as a write view: a commit hook that reached for the graph
             // on this thread meanwhile would alias it.
             held.writes += 1;
             held.exclusive
         };
-        if !exclusive {
-            // SAFETY: this thread holds the unit's lock upgradable. A unit that never wrote
-            // changed nothing, but the storage closes it through `&mut S`.
-            unsafe { self.raw().upgrade() };
-        }
-        let finish = FinishClose {
-            graph: self,
-            briefly: !exclusive,
-        };
+        let finish = FinishClose { graph: self };
         // Dropped before `finish` (declared after it).
         let call = HeldView {
             unit: &self.unit,
             write: true,
         };
+        match exclusive {
+            false => self.make_unit_exclusive(),
+            true => self.open_storage_units(),
+        }
+        let Some(mark) = self.unit.state.lock().marks.get(level).copied() else {
+            // Not reached: the levels were just opened.
+            drop(call);
+            drop(finish);
+            return Ok(skip());
+        };
         // SAFETY: this thread holds the lock exclusively and no view of it (checked above).
-        let closed = close(unsafe { &mut *self.lock.data_ptr() });
+        let closed = close(unsafe { &mut *self.lock.data_ptr() }, mark);
         drop(call);
         drop(finish);
         Ok(closed)

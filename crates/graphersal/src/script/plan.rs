@@ -137,12 +137,62 @@ pub(crate) fn run_plan_on<S: GraphStorage>(
     plan: &ScriptPlan<'_>,
     terminal: Terminal,
 ) -> TerminalOutput {
+    // Inside a unit the thread holds, the traversal reads the unit's pinned time: the storage's
+    // unit opens only at the unit's first write (`Graph::begin_unit`).
+    let started_at = graph.held_unit_started_at();
+    // A view of the graph this thread may not have (a commit hook or an embedder querying
+    // the graph its unit is changing) is the terminal's error, never a panic.
     if plan.mutating {
-        let mut storage = graph.write();
-        run_terminal(plan.source.ast_convert_to_gts(&mut *storage), terminal)
+        let mut storage = match graph.write_checked() {
+            Ok(storage) => storage,
+            Err(err) => return terminal.failed(err),
+        };
+        let gts = pin_unit_clock(plan.source.ast_convert_to_gts(&mut *storage), started_at);
+        run_terminal(gts, terminal)
     } else {
-        let storage = graph.read();
-        run_terminal(plan.source.ast_convert_to_gts(&*storage), terminal)
+        let storage = match graph.read_checked() {
+            Ok(storage) => storage,
+            Err(err) => return terminal.failed(err),
+        };
+        let gts = pin_unit_clock(plan.source.ast_convert_to_gts(&*storage), started_at);
+        run_terminal(gts, terminal)
+    }
+}
+
+/// Pins `gts` to the held unit's time `started_at` (`with_now`) unless it is pinned already:
+/// the time `GraphStorage::unit_started_at` reports once the storage's unit is open, so the
+/// unit's traversals read one clock value before and after its first write.
+fn pin_unit_clock<'g, T: GraphStorage + 'g>(
+    gts: GraphTraversalSource<'g, T>,
+    started_at: Option<i128>,
+) -> GraphTraversalSource<'g, T> {
+    match started_at {
+        Some(nanos) if gts.create_time.is_none() => {
+            gts.with_now(crate::graph::schema::defaults::datetime_of_nanos(nanos))
+        }
+        _ => gts,
+    }
+}
+
+impl Terminal {
+    /// The output of this terminal's kind failing with `err` before it ran.
+    fn failed(self, err: GraphError) -> TerminalOutput {
+        let err: BoxedTraverserError = Box::new(TraverserError::from(err));
+        TerminalOutput(match self.0 {
+            TerminalKind::ToList => OutputKind::List(Err(err)),
+            TerminalKind::ListWithGraphs => OutputKind::Items(Err(err)),
+            TerminalKind::Profile(_) => OutputKind::Metrics(Err(err)),
+            TerminalKind::Execute(_) => OutputKind::Executed(ExecutedItems {
+                items: Vec::new(),
+                error: Some(err),
+                profile: None,
+                mutated: false,
+                changes: Default::default(),
+            }),
+            TerminalKind::Visualize { .. } => OutputKind::Rendered(Err(err)),
+            TerminalKind::Iterate => OutputKind::Unit(Err(err)),
+            TerminalKind::ToGraph => OutputKind::Graph(Err(err)),
+        })
     }
 }
 
@@ -208,7 +258,12 @@ pub(crate) fn run_unit_on<S: GraphStorage + Default + Send + Sync + 'static>(
     body: &mut dyn FnMut() -> UnitBody,
 ) -> UnitResult {
     let as_script_error = |err: GraphError| script_error(Box::new(TraverserError::from(err)));
-    let mark = graph.begin_unit();
+    // A view of the graph this thread may not have (a commit hook of this graph running a
+    // whole-script unit on it) is the script's error, never a panic.
+    let mark = match graph.begin_unit() {
+        Ok(mark) => mark,
+        Err(err) => return UnitResult(Err(as_script_error(err))),
+    };
     let dry_run = kind == UnitKind::DryRun;
     // A panic (an engine bug) closes the unit before it continues to the host. The close
     // cannot fail here: this thread holds the unit it just opened.

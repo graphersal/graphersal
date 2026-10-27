@@ -281,6 +281,27 @@ pub(crate) fn restore_stored_property(
 impl TraversalGraph {
     /// Opens a unit; the mark is the log position to roll back to.
     pub(crate) fn begin_undo_unit(&mut self) -> UnitMark {
+        self.begin_undo_unit_at(now_nanos())
+    }
+
+    /// The time the next outermost unit would start with now: the system clock, never earlier
+    /// than the previous unit's start or the last commit's time
+    /// (`GraphStorage::next_unit_started_at`).
+    pub(crate) fn undo_next_started_at(&self) -> i128 {
+        self.unit_start_from(now_nanos())
+    }
+
+    /// `clock` raised to the log's monotonic floor: never earlier than the previous unit's
+    /// start or the last commit's time, so a later unit never stores an earlier `now`.
+    fn unit_start_from(&self, clock: i128) -> i128 {
+        clock
+            .max(self.undo.last_started_at)
+            .max(self.undo.last_committed_at as i128 * 1000)
+    }
+
+    /// [`Self::begin_undo_unit`] whose outermost unit starts at `clock` (raised to the log's
+    /// monotonic floor; `GraphStorage::begin_unit_at`).
+    pub(crate) fn begin_undo_unit_at(&mut self, clock: i128) -> UnitMark {
         if self.undo.depth == 0 {
             // The outermost unit takes the starting point of the graph's memory budget, if its
             // policy sets one: the footprint is cached by the commit position, so this is no
@@ -290,9 +311,7 @@ impl TraversalGraph {
                     .map(|limit| MemoryBudget::new(limit).start(&*self));
             // The unit's time (`defaultFunction` `now`): never earlier than the previous unit's
             // or the last commit's, so a later unit never stores an earlier `now`.
-            let started_at = now_nanos()
-                .max(self.undo.last_started_at)
-                .max(self.undo.last_committed_at as i128 * 1000);
+            let started_at = self.unit_start_from(clock);
             self.undo.started_at = Some(started_at);
             self.undo.last_started_at = started_at;
         }

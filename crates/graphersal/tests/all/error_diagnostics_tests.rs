@@ -12240,3 +12240,37 @@ fn a_long_duration_range_help_names_date_part_and_as_string() {
         );
     }
 }
+
+/// Opening a nested unit while the owning thread still holds a read guard of the graph: the
+/// error names the operation and the help names the fix (drop the guard; a commit hook reads its
+/// change set instead of querying the graph it commits).
+#[test]
+fn graph_view_held_help_names_the_guard_and_the_commit_hook() {
+    let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    let mark = graph.begin_unit().unwrap();
+    let err = {
+        let _view = graph.read();
+        graph.begin_unit().unwrap_err()
+    };
+    assert!(
+        matches!(err, graphersal::error::GraphError::GraphViewHeld { .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("Cannot begin a nested unit: the current thread already holds another view"),
+        "{err}"
+    );
+    let help = graphersal::error::DiagnosticError::help(&err).expect("help");
+    assert!(
+        help.contains("Drop the guard of Graph::read or Graph::write"),
+        "{help}"
+    );
+    assert!(help.contains("Graph::begin_unit"), "{help}");
+    assert!(
+        help.contains("A commit hook must not query the graph it is committing"),
+        "{help}"
+    );
+    assert!(help.contains("ChangeSet"), "{help}");
+    graph.commit_unit(mark).unwrap();
+}

@@ -1786,6 +1786,22 @@ pub enum GraphError {
         operation: &'static str,
     },
 
+    /// The thread that holds a unit of a [`Graph`](crate::Graph) (`Graph::begin_unit`, a
+    /// whole-script unit) asked for the graph again while another view of it was alive on the
+    /// same thread: a write beside a read, anything beside a running write (a commit hook or an
+    /// embedder that queries the graph being changed), or a unit opened or closed while a guard
+    /// of the graph is held. Nothing was done; the unit stays open. `operation` names what was
+    /// asked.
+    #[error(
+        "Cannot {operation}: the current thread already holds another view of this graph inside \
+         its unit"
+    )]
+    #[non_exhaustive]
+    GraphViewHeld {
+        /// What was asked ("read the graph", "write the graph", "begin a nested unit", ...).
+        operation: &'static str,
+    },
+
     /// The storage does not support an operation: a [`GraphStorage`] method the storage leaves
     /// at its refusing default (schemas, the catalog, compressed properties, commit hooks on a
     /// storage that is not atomic, see [`StorageCapabilities`](crate::graph::StorageCapabilities)),
@@ -2217,6 +2233,16 @@ impl DiagnosticError for GraphError {
                  the mark begin_unit returned. To run work of another thread inside one unit, \
                  send the work to the owning thread instead of the mark; for a unit inside one \
                  lock, use Transactional::transaction on the guard of Graph::write."
+                    .to_string(),
+            ),
+            GraphError::GraphViewHeld { .. } => Some(
+                "A graph gives its unit's thread one write view at a time, and none beside a \
+                 read view. Drop the guard of Graph::read or Graph::write (end its scope) \
+                 before the next call, and open or close the unit (Graph::begin_unit, \
+                 Graph::commit_unit, Graph::rollback_unit) with no guard alive. A commit hook \
+                 must not query the graph it is committing: read what it needs from the \
+                 ChangeSet it receives, or run the query after the commit returns; an embedder \
+                 must not read the graph it embeds into."
                     .to_string(),
             ),
             GraphError::MarkRejected { .. } => Some(

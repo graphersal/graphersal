@@ -110,13 +110,29 @@ assert!(result.is_ok());
 - **A unit lives inside one guard.** A unit opened on the storage through a write guard
   (`graph.write().begin_unit()`) must be closed under that same guard: once the guard is dropped,
   other threads read its uncommitted changes (a Store checkpoint could even write them to disk).
-  To keep one unit over several locks, open it on the shared graph with `Graph::begin_unit()` and
-  close it on the same thread with `Graph::commit_unit`, `commit_unit_with`, `rollback_unit` or
-  `discard_unit`: the thread then holds the unit, its own `read()`/`write()` calls run inside it,
-  other threads read on until its first write and wait from then on until it closes, other
-  writers wait for it, and a nested `begin_unit()` on that thread is a savepoint. Closing it from
-  another thread fails with `GraphError::UnitNotHeld`. This is what the whole-script units below
-  and the playground's runs use.
+  To keep one unit over several locks, open it on the shared graph with `Graph::begin_unit()`
+  (it returns `Result<UnitMark, GraphError>`) and close it on the same thread with
+  `Graph::commit_unit`, `commit_unit_with`, `rollback_unit` or `discard_unit`: the thread then
+  holds the unit, its own `read()`/`write()` calls run inside it, other threads read on until its
+  first write and wait from then on until it closes, other writers wait for it, and a nested
+  `begin_unit()` on that thread is a savepoint. The storage's own unit opens only at the first
+  write, with the unit's time pinned when it opened (`defaultFunction` `now` and the GQL clocks
+  read one value for the whole unit). Closing it from another thread fails with
+  `GraphError::UnitNotHeld`; opening or closing it while the thread still holds a guard of the
+  graph, or reaching back into the graph from a commit hook of the unit, fails with
+  `GraphError::GraphViewHeld` (`read()`/`write()` panic there, like `RefCell::borrow_mut`;
+  `read_checked()`, `write_checked()`, `try_read()` and `try_write()` report it instead). This is
+  what the whole-script units below and the playground's runs use.
+
+  ```rust
+  # use graphersal::prelude::*;
+  let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+  // Not: `let mark = graph.write().begin_unit();` closed under a later guard.
+  let mark = graph.begin_unit().unwrap();
+  GraphTraversalSource::new(&mut *graph.write()).add_v("person").iterate().unwrap();
+  graph.commit_unit(mark).unwrap();
+  assert_eq!(graph.read().vertex_count(), 7);
+  ```
 - A rolled-back transaction leaves gaps in the automatic ids (they are never reused).
 
 `Execution::mutated()` (Rhai: `r.mutated`) of a traversal inside a transaction says whether it
@@ -179,8 +195,10 @@ g.V().values("name").asNumber(GType.LONG).toList();       // fails: the whole sc
   (and no other whole-script unit) of the same graph runs between its statements. Other readers
   are not blocked while the script only reads: they go on and see the committed state. From the
   script's first write until it ends they wait, so nobody ever sees its uncommitted changes.
-  Opening the unit and closing a unit that never wrote take the lock exclusively for a moment
-  (the storage's own `begin_unit`/`commit_unit` need it), waiting for the readers in flight.
+  Opening the unit and closing a unit that never wrote never wait for the readers in flight:
+  they take no exclusive moment, because the storage's own unit opens only at the script's first
+  write (a dry run that never wrote is the exception: its close asks the storage for the empty
+  change set under the exclusive lock).
 - A traversal the script returns without a terminal is not part of the unit: it runs when the
   host renders it, after the commit, as a unit of its own.
 - The script must not return a closure or function pointer (also inside an array or a map): it
@@ -547,7 +565,11 @@ Three more methods carry the explicit units of `Transactional`, each with a defa
 (default: ignored); `discard_unit(mark)` undoes a unit without hooks and returns its `ChangeSet`
 (the end of `dry_run`; it needs `change_capture`, the default rolls back and returns
 `GraphError::Unsupported`); `mark(name)` has the storage's journal record a named mark (Rhai
-`g.mark`; default `GraphError::MarkUnavailable`). The rustdoc of `GraphStorage` is the guide for
+`g.mark`; default `GraphError::MarkUnavailable`). A storage with a unit clock
+(`unit_started_at()`) also implements `next_unit_started_at()` and `begin_unit_at(started_at)`:
+`Graph::begin_unit` pins a held unit's time from the first and opens the storage's unit at the
+unit's first write with the second, so the unit reads one clock value (defaults: no clock, and
+`begin_unit()`). The rustdoc of `GraphStorage` is the guide for
 writing a storage; [Storage Conformance](../for_developers/storage_conformance.md) is its test
 suite.
 

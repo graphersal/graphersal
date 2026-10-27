@@ -44,7 +44,12 @@ a parameter means `Graph<TraversalGraph>`.
    sample, a file load) by reading it into a `TraversalGraph` and copying it into an
    `S::default()` (through the load sink of a `PersistentStorage`, through the write methods
    otherwise). A whole script runs as one unit that its thread holds across locks
-   (`Graph::begin_unit`), on your storage in place.
+   (`Graph::begin_unit`), on your storage in place: the graph holds the lock upgradable until
+   the script's first write and only then opens your storage's unit (`begin_unit_at` with the
+   time it pinned from `next_unit_started_at`, both defaulted), so opening and closing a unit
+   that never wrote take no exclusive moment. A unit you open yourself through a write guard
+   (`graph.write().begin_unit()`) must be closed under that same guard, else other threads read
+   its uncommitted changes and a Store checkpoint may persist them.
 3. **`Send + Sync + 'static`**, so the graph can be shared between threads.
 4. **Change capture** (optional; needed for commit hooks, dry runs and the Store). A storage that
    claims `change_capture` (and therefore `atomic`) in `capabilities()` builds the `ChangeSet` of

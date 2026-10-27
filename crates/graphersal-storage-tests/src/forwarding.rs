@@ -353,6 +353,12 @@ impl GraphStorage for Forwarding {
     fn begin_unit(&mut self) -> UnitMark {
         GraphStorage::begin_unit(&mut self.0)
     }
+    fn begin_unit_at(&mut self, started_at: i128) -> UnitMark {
+        GraphStorage::begin_unit_at(&mut self.0, started_at)
+    }
+    fn next_unit_started_at(&self) -> Option<i128> {
+        GraphStorage::next_unit_started_at(&self.0)
+    }
     fn commit_unit(&mut self, mark: UnitMark) -> Result<(), GraphError> {
         GraphStorage::commit_unit(&mut self.0, mark)
     }

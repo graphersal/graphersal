@@ -1874,7 +1874,7 @@ fn a_checkpoint_while_a_unit_is_open_keeps_no_uncommitted_data() {
     let graph = store.graph().clone();
 
     // The run: its unit stays open while it takes one lock per traversal.
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     GraphTraversalSource::new(&mut *graph.write())
         .add_v("person")
         .property("name", "uncommitted")
@@ -1925,7 +1925,7 @@ fn a_checkpoint_while_a_unit_is_open_keeps_the_committed_data() {
     let (store, options) = store_with_kept_vertex(&dir);
     let graph = store.graph().clone();
 
-    let mark = graph.begin_unit();
+    let mark = graph.begin_unit().unwrap();
     GraphTraversalSource::new(&mut *graph.write())
         .add_v("person")
         .property("name", "committed")

@@ -966,7 +966,14 @@ impl Session {
         // it, and it commits only when the run is reported as `ok`, so a run that shows an
         // error leaves nothing behind. The session is single-threaded and owns the graph, so
         // nobody else writes between the statements.
-        let mark = self.graph.begin_run();
+        let mark = match self.graph.begin_run() {
+            Ok(mark) => mark,
+            Err(err) => {
+                let diagnostic = format_diagnostic(&TraverserError::from(err));
+                let out = Outcome::failed("unknown", &error_of_diagnostic(&diagnostic));
+                return self.response_of_refused_run(out, started);
+            }
+        };
         // A panic in the run (an engine bug; the dev server catches it and keeps the session)
         // rolls the unit back, so the thread does not keep holding it.
         let unwind_guard = RunUnitGuard {
@@ -1030,6 +1037,33 @@ impl Session {
             execution: RawValue::from_string(out.execution).unwrap_or_else(|_| null_raw()),
             display: out.display,
             subgraph,
+            preferred_view: out.preferred_view,
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            graph: self.info(),
+        };
+        serde_json::to_string(&response).unwrap_or_else(|err| {
+            json!({"ok": false, "terminal": "unknown", "implicit": false, "mutated": false,
+                   "changes": {"data": false, "schema": false, "definitions": false},
+                   "execution": {"results": [], "error": {"message": err.to_string(),
+                   "diagnostic": err.to_string()}, "profile": null},
+                   "display": null, "subgraph": null, "elapsed_ms": 0, "graph": self.info()})
+            .to_string()
+        })
+    }
+
+    /// The answer to a run the graph refused to open a unit for (`begin_run` failed: a view of
+    /// the graph alive on this thread); nothing ran, nothing changed.
+    fn response_of_refused_run(&self, out: Outcome, started: web_time::Instant) -> String {
+        let response = Response {
+            ok: out.ok,
+            terminal: out.terminal,
+            implicit: out.implicit,
+            mutated: false,
+            changes: Changes::default(),
+            change_summary: None,
+            execution: RawValue::from_string(out.execution).unwrap_or_else(|_| null_raw()),
+            display: out.display,
+            subgraph: None,
             preferred_view: out.preferred_view,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             graph: self.info(),
