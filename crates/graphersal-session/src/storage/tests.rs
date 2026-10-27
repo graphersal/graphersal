@@ -170,7 +170,7 @@ fn saved_queries_and_the_catalog_file_are_equal() {
         json!(["josh", "peter"]),
         "{ran}"
     );
-    let text = same(&mut s, |s| json!(s.save_catalog_text()));
+    let text = same(&mut s, |s| json!(s.save_catalog_text().unwrap()));
     let text = text.as_str().unwrap().to_string();
     assert!(
         same(&mut s, |s| json!(s.drop_query("older_than").unwrap()))

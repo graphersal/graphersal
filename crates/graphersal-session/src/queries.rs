@@ -650,6 +650,7 @@ impl Session {
         let script = match query_call_text(name, args) {
             Ok(script) => script,
             Err(message) => {
+                let message = message.to_string();
                 return json!({"ok": false, "error": {"message": message, "diagnostic": message}});
             }
         };
@@ -727,7 +728,7 @@ impl Session {
             catalog_from_json(text).map_err(|err| format_diagnostic(&GraphError::from(err)))?;
         let loaded = definitions.len();
         self.graph.load_catalog(definitions, replace)?;
-        Ok(json!({"loaded": loaded, "graph": self.info()}))
+        Ok(json!({"loaded": loaded, "graph": self.info()?}))
     }
 }
 

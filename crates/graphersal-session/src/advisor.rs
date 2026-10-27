@@ -104,12 +104,13 @@ impl Session {
     /// The storage advisor's recommendations for the served graph (module docs); cancellable
     /// through [`Self::cancel_token`]. Read-only.
     pub fn advise(&self, spec: &Value) -> Value {
-        match self.advice(spec) {
-            Ok(advice) => json!({
-                "ok": true,
-                "advice": serde_json::from_str::<Value>(&advice.to_json()).unwrap_or(Value::Null),
-            }),
-            Err(error) => json!({"ok": false, "error": error}),
+        let answer = self.advice(spec).and_then(|advice| {
+            serde_json::from_str::<Value>(&advice.to_json())
+                .map_err(|err| SessionError::failed(format!("the advice is not JSON: {err}")))
+        });
+        match answer {
+            Ok(advice) => json!({"ok": true, "advice": advice}),
+            Err(error) => json!({"ok": false, "error": error.to_string()}),
         }
     }
 
@@ -127,7 +128,7 @@ impl Session {
     pub fn apply_recommendation(&mut self, id: &str, spec: &Value) -> Value {
         let advice = match self.advice(spec) {
             Ok(advice) => advice,
-            Err(error) => return json!({"ok": false, "error": error}),
+            Err(error) => return json!({"ok": false, "error": error.to_string()}),
         };
         let Some(recommendation) = advice.recommendations.into_iter().find(|r| r.id == id) else {
             return json!({
@@ -157,7 +158,7 @@ impl Session {
             }
             RecommendedAction::DropIndex { name } => match self.drop_index(name) {
                 Ok(dropped) => json!({"dropped": dropped}),
-                Err(error) => return json!({"ok": false, "error": error}),
+                Err(error) => return json!({"ok": false, "error": error.to_string()}),
             },
             RecommendedAction::AddCompression {
                 name,
@@ -182,7 +183,7 @@ impl Session {
             }
             RecommendedAction::DropCompression { name } => match self.drop_compression(name) {
                 Ok(dropped) => json!({"dropped": dropped}),
-                Err(error) => return json!({"ok": false, "error": error}),
+                Err(error) => return json!({"ok": false, "error": error.to_string()}),
             },
             _ => {
                 return json!({

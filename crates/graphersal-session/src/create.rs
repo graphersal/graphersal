@@ -586,12 +586,26 @@ impl Session {
         match stored {
             Ok(id) => {
                 let id = id.unwrap_or_default();
-                json!({
-                    "ok": true,
-                    "created": true,
-                    "element": self.element_for_edit(kind.as_str(), &id).unwrap_or(Value::Null),
-                    "drawn": self.drawn(kind, &id),
-                })
+                // The element is stored; a failure to read it back is said beside the answer
+                // (`readError`), never an element of `null` without a reason.
+                match (
+                    self.element_for_edit(kind.as_str(), &id),
+                    self.drawn(kind, &id),
+                ) {
+                    (Ok(element), Ok(drawn)) => json!({
+                        "ok": true,
+                        "created": true,
+                        "element": element,
+                        "drawn": drawn,
+                    }),
+                    (Err(err), _) | (_, Err(err)) => json!({
+                        "ok": true,
+                        "created": true,
+                        "element": null,
+                        "drawn": null,
+                        "readError": err.to_string(),
+                    }),
+                }
             }
             Err(errors) => refused(errors),
         }

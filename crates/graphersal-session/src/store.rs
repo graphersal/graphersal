@@ -565,7 +565,7 @@ impl Session {
                 ),
             }))
             .map_err(|err| StoreError::internal(err.to_string()))?;
-        let graph = self.load_shared(graph, &label, "store-view");
+        let graph = self.load_shared(graph, &label, "store-view")?;
         let view = json!({
             "commitSeq": commit,
             "target": target.to_string(),
@@ -666,6 +666,7 @@ impl Session {
         let report = store.rollback_to(target, mode);
         let graph = self.info();
         let report = report.map_err(StoreError::refused)?;
+        let graph = graph?;
         let location = store.location();
         let undo = report.attic.as_ref().map(|id| {
             if self.memory_stores {
@@ -716,6 +717,7 @@ impl Session {
         let restored = store.attic_restore(id);
         let graph = self.info();
         let commit = restored.map_err(StoreError::refused)?;
+        let graph = graph?;
         Ok(json!({
             "restored": { "commitSeq": commit },
             "graph": graph,

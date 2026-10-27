@@ -748,7 +748,7 @@ impl Session {
         });
         match answer {
             Ok(report) => json!({"ok": true, "report": report}),
-            Err(error) => json!({"ok": false, "error": error}),
+            Err(error) => json!({"ok": false, "error": error.to_string()}),
         }
     }
 

@@ -13,6 +13,8 @@ use graphersal::persist::PersistError;
 
 /// Why a session operation failed. `#[non_exhaustive]`: new kinds are added without a breaking
 /// change; match the ones a front end treats specially and show the rest with `Display`.
+/// Deliberately not `Serialize`: a JSON answer carries its text (`to_string()`), so a
+/// `Result` cannot end up in an answer by mistake.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -85,14 +87,6 @@ impl From<String> for SessionError {
 impl From<&str> for SessionError {
     fn from(text: &str) -> Self {
         SessionError::Failed(text.to_string())
-    }
-}
-
-/// Serialized as its text ([`Display`](std::fmt::Display)): the JSON answers carry errors as
-/// strings.
-impl serde::Serialize for SessionError {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
     }
 }
 
