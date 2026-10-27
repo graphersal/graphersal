@@ -294,6 +294,35 @@ pub fn is_repo_name(repo: &str) -> bool {
     }
 }
 
+/// The repository and the licence the manifest of the model `--embedder NAME=SPEC` names (a
+/// directory, or a repository downloaded into the models directory): `(None, "unknown")` when
+/// there is no manifest or it does not say.
+pub fn embedder_license(spec: &str) -> (Option<String>, String) {
+    let path = Path::new(spec);
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        match models_dir(None) {
+            Ok(models) => models.join(spec),
+            Err(_) => return (None, "unknown".to_string()),
+        }
+    };
+    let value: Value = fs::read_to_string(dir.join(Model2Vec::MANIFEST_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    let repo = value
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let license = value
+        .get("license")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    (repo, license)
+}
+
 /// Loads the model of `--embedder NAME=SPEC`: SPEC is a model directory, or a repository
 /// downloaded into the models directory.
 pub fn load_embedder(name: &str, spec: &str) -> Result<Model2Vec, String> {

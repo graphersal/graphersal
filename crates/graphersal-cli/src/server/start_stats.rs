@@ -1,7 +1,7 @@
-//! The block `--server` prints on stderr at start, after the graph is in memory: the load time
-//! and the graph's statistics, from the same data as the playground's Statistics tab
-//! ([`graphersal_session::Session::statistics`]: `{statistics, memory, limits}`; the limits
-//! have their own `Limits` line in the banner).
+//! The rows of the start banner's Graph section ([`super::start_banner`]), printed on stderr
+//! after the graph is in memory: the load time and the graph's statistics, from the same data
+//! as the playground's Statistics tab ([`graphersal_session::Session::statistics`]:
+//! `{statistics, memory, limits}`; the limits have their own row in the Server section).
 
 use std::time::Duration;
 
@@ -11,24 +11,24 @@ use serde_json::Value;
 /// How many labels of each kind the block names (the largest first); the rest is `+N more`.
 const MAX_LABELS: usize = 10;
 
-/// The lines of the start block: load time with the totals, the vertex and edge labels (when
-/// there are any), the graph's memory and the process heap (`live_heap`, `0` = unknown), the
-/// compressed values (when there are any). `replayed` is the WAL commits a Store open replayed
-/// onto its snapshot (`None`: not a Store).
-pub(super) fn lines(
-    statistics: &Value,
-    load_time: Duration,
-    replayed: Option<u64>,
-    live_heap: u64,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    let stats = &statistics["statistics"];
+/// The `loaded` row's value: the load time, and for a Store how it was loaded (`replayed` is the
+/// WAL commits the open replayed onto its snapshot; `None`: not a Store).
+pub(super) fn loaded(load_time: Duration, replayed: Option<u64>) -> String {
     let how = match replayed {
         Some(0) => " (snapshot, no WAL commits to replay)".to_string(),
         Some(1) => " (snapshot + 1 WAL commit replayed)".to_string(),
         Some(n) => format!(" (snapshot + {} WAL commits replayed)", count_text(n)),
         None => String::new(),
     };
+    format!("{}{how}", duration_text(load_time))
+}
+
+/// The rows of the Graph section: the totals, the vertex and edge labels (when there are any),
+/// the graph's memory and the process heap (`live_heap`, `0` = unknown), the compressed and the
+/// deduplicated values (when there are any).
+pub(super) fn rows(statistics: &Value, live_heap: u64) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let stats = &statistics["statistics"];
     let totals = if stats.is_object() {
         format!(
             "{} vertices, {} edges",
@@ -38,16 +38,13 @@ pub(super) fn lines(
     } else {
         "no statistics".to_string()
     };
-    lines.push(format!(
-        "Loaded in {}{how}: {totals}",
-        duration_text(load_time)
-    ));
+    rows.push(("size".to_string(), totals));
     for (title, key, total) in [
-        ("Vertex labels", "vertex_labels", "vertex_label_total"),
-        ("Edge labels", "edge_labels", "edge_label_total"),
+        ("vertices", "vertex_labels", "vertex_label_total"),
+        ("edges", "edge_labels", "edge_label_total"),
     ] {
-        if let Some(line) = labels_line(title, &stats[key], stats[total].as_u64()) {
-            lines.push(line);
+        if let Some(value) = labels_text(&stats[key], stats[total].as_u64()) {
+            rows.push((title.to_string(), value));
         }
     }
     let memory = &statistics["memory"];
@@ -71,34 +68,40 @@ pub(super) fn lines(
         parts.push(format!("process heap {}", bytes_text(live_heap)));
     }
     if !parts.is_empty() {
-        lines.push(format!("Memory: {}", parts.join("; ")));
+        rows.push(("memory".to_string(), parts.join("\n")));
     }
     let compressed = memory["compressed_values"].as_u64().unwrap_or(0);
     if compressed > 0 {
         let bytes = |key: &str| bytes_text(memory[key].as_u64().unwrap_or(0));
-        lines.push(format!(
-            "Compressed: {} values, {} stored as {} (dictionaries {})",
-            count_text(compressed),
-            bytes("compressed_plain_bytes"),
-            bytes("compressed_stored_bytes"),
-            bytes("compression_dictionary_bytes")
+        rows.push((
+            "compressed".to_string(),
+            format!(
+                "{} values, {} stored as {} (dictionaries {})",
+                count_text(compressed),
+                bytes("compressed_plain_bytes"),
+                bytes("compressed_stored_bytes"),
+                bytes("compression_dictionary_bytes")
+            ),
         ));
     }
     let deduped = memory["deduped_values"].as_u64().unwrap_or(0);
     if deduped > 0 {
         let bytes = |key: &str| bytes_text(memory[key].as_u64().unwrap_or(0));
-        lines.push(format!(
-            "Deduplicated: {} values, {} shared as {}",
-            count_text(deduped),
-            bytes("deduped_plain_bytes"),
-            bytes("dedup_table_bytes")
+        rows.push((
+            "deduplicated".to_string(),
+            format!(
+                "{} values, {} shared as {}",
+                count_text(deduped),
+                bytes("deduped_plain_bytes"),
+                bytes("dedup_table_bytes")
+            ),
         ));
     }
-    lines
+    rows
 }
 
-/// `Vertex labels (12): person 4,000, software 2, ... +2 more`; `None` without labels.
-fn labels_line(title: &str, labels: &Value, total: Option<u64>) -> Option<String> {
+/// `12 labels: person 4,000, software 2, ... +2 more`; `None` without labels.
+fn labels_text(labels: &Value, total: Option<u64>) -> Option<String> {
     let labels = labels.as_array().filter(|labels| !labels.is_empty())?;
     let total = total.unwrap_or(labels.len() as u64);
     let shown: Vec<String> = labels
@@ -119,8 +122,9 @@ fn labels_line(title: &str, labels: &Value, total: Option<u64>) -> Option<String
         String::new()
     };
     Some(format!(
-        "{title} ({}): {}{more}",
+        "{} {}: {}{more}",
         count_text(total),
+        if total == 1 { "label" } else { "labels" },
         shown.join(", ")
     ))
 }
@@ -187,22 +191,31 @@ mod tests {
                 "compressed_stored_bytes": 1024, "compression_dictionary_bytes": 0,
             },
         });
-        let lines = lines(&statistics, Duration::from_millis(5), Some(3), 2 << 20);
         assert_eq!(
-            lines[0],
-            "Loaded in 5.0 ms (snapshot + 3 WAL commits replayed): 12,000 vertices, 3 edges"
+            loaded(Duration::from_millis(5), Some(3)),
+            "5.0 ms (snapshot + 3 WAL commits replayed)"
         );
-        assert!(lines[1].starts_with("Vertex labels (12): l0 1,000, l1 999,"));
-        assert!(lines[1].ends_with("l9 991, +2 more"));
-        assert_eq!(lines[2], "Edge labels (1): knows 3");
+        let rows = rows(&statistics, 2 << 20);
+        assert_eq!(rows[0], ("size".into(), "12,000 vertices, 3 edges".into()));
+        assert_eq!(rows[1].0, "vertices");
+        assert!(rows[1].1.starts_with("12 labels: l0 1,000, l1 999,"));
+        assert!(rows[1].1.ends_with("l9 991, +2 more"));
+        assert_eq!(rows[2], ("edges".into(), "1 label: knows 3".into()));
         assert_eq!(
-            lines[3],
-            "Memory: graph 3.5 KiB (structure 1.0 KiB, indexes 512 B, properties 2.0 KiB); \
-             process heap 2.0 MiB"
+            rows[3],
+            (
+                "memory".into(),
+                "graph 3.5 KiB (structure 1.0 KiB, indexes 512 B, properties 2.0 KiB)\n\
+                 process heap 2.0 MiB"
+                    .into()
+            )
         );
         assert_eq!(
-            lines[4],
-            "Compressed: 2 values, 4.0 KiB stored as 1.0 KiB (dictionaries 0 B)"
+            rows[4],
+            (
+                "compressed".into(),
+                "2 values, 4.0 KiB stored as 1.0 KiB (dictionaries 0 B)".into()
+            )
         );
     }
 
@@ -216,11 +229,15 @@ mod tests {
                 "total_bytes": 5632, "property_index_bytes": 2048,
             },
         });
-        let lines = lines(&statistics, Duration::from_millis(5), None, 0);
+        let rows = rows(&statistics, 0);
         assert_eq!(
-            lines[1],
-            "Memory: graph 5.5 KiB (structure 1.0 KiB, indexes 512 B, properties 2.0 KiB, \
-             property indexes 2.0 KiB)"
+            rows[1],
+            (
+                "memory".into(),
+                "graph 5.5 KiB (structure 1.0 KiB, indexes 512 B, properties 2.0 KiB, \
+                 property indexes 2.0 KiB)"
+                    .into()
+            )
         );
     }
 
@@ -231,10 +248,10 @@ mod tests {
                            "edge_labels": [], "vertex_label_total": 0, "edge_label_total": 0},
             "memory": null,
         });
-        let lines = lines(&statistics, Duration::from_micros(10), None, 0);
+        assert_eq!(loaded(Duration::from_micros(10), None), "0.01 ms");
         assert_eq!(
-            lines,
-            vec!["Loaded in 0.01 ms: 0 vertices, 0 edges".to_string()]
+            rows(&statistics, 0),
+            vec![("size".to_string(), "0 vertices, 0 edges".to_string())]
         );
     }
 }

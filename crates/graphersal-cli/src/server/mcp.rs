@@ -148,22 +148,25 @@ impl Mcp {
         self
     }
 
-    /// The stderr lines that say where the endpoint is and how to connect Claude Code.
-    pub(super) fn banner(&self, port: u16) -> String {
+    /// The start banner's MCP rows: where the endpoint is, and the command that connects Claude
+    /// Code to it.
+    pub(super) fn banner(&self, port: u16) -> (String, String) {
         let url = format!("http://127.0.0.1:{port}/mcp");
         let header = match &self.token {
             Some(_) => " --header \"Authorization: Bearer <your --mcp-token>\"",
             None => "",
         };
-        format!(
-            "MCP endpoint{}{}: {url}\n  connect Claude Code: claude mcp add --transport http \
-             graphersal {url}{header}",
-            if self.read_only { " (read-only)" } else { "" },
-            if self.query_tools {
-                " (saved queries as tools)"
-            } else {
-                ""
-            }
+        (
+            format!(
+                "{url}{}{}",
+                if self.read_only { " (read-only)" } else { "" },
+                if self.query_tools {
+                    " (saved queries as tools)"
+                } else {
+                    ""
+                }
+            ),
+            format!("claude mcp add --transport http graphersal {url}{header}"),
         )
     }
 }

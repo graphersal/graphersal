@@ -48,6 +48,103 @@ fn set_embedders(embedders: Arc<graphersal::vector::Embedders>) {
     }
 }
 
+/// An embedding model the CLI serves besides the built-in `hash-ngram/1`: an `--embedder` model
+/// or one an opened Store keeps. The start banners name it with its licence.
+#[cfg_attr(
+    not(any(feature = "dev-server", feature = "model2vec")),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedModel {
+    /// The registry name queries call it by (`embed(text, name)`).
+    pub name: String,
+    /// The model identity (`model2vec/<repo>@<12 hex>`).
+    pub identity: String,
+    /// The repository (`owner/name`) when known, else the model identity.
+    pub label: String,
+    /// The licence: an SPDX id as the repository states it, or `unknown`.
+    pub license: String,
+    /// Where it comes from: `--embedder`, `stored in <store>`, or both (`--embedder; also
+    /// stored in <store>`).
+    pub source: String,
+}
+
+/// The models [`served_models`] lists, in the order they were registered.
+#[cfg_attr(
+    not(any(feature = "dev-server", feature = "model2vec")),
+    allow(dead_code)
+)]
+static SERVED_MODELS: Mutex<Vec<ServedModel>> = Mutex::new(Vec::new());
+
+/// The notes about models a Store's schema names that nobody provides.
+static MODEL_NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Set by the dev server: the model notes of a Store open are kept for its start banner
+/// instead of being printed at once.
+static DEFER_MODEL_NOTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The embedding models the CLI serves besides the built-in one, and the notes about models
+/// the opened Store's schema names that nobody provides.
+#[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
+pub fn served_models() -> (Vec<ServedModel>, Vec<String>) {
+    let models = SERVED_MODELS.lock().map(|m| m.clone()).unwrap_or_default();
+    let notes = MODEL_NOTES.lock().map(|n| n.clone()).unwrap_or_default();
+    (models, notes)
+}
+
+/// Keeps the model notes of the next Store open for the caller's own output (the dev server's
+/// start banner) instead of printing them as `note:` lines.
+#[cfg_attr(not(feature = "dev-server"), allow(dead_code))]
+pub fn defer_model_notes() {
+    DEFER_MODEL_NOTES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// An SPDX licence id as people write it (the Hub states ids in lower case: `mit`,
+/// `apache-2.0`); an id it does not know stays as it is.
+#[cfg_attr(
+    not(any(feature = "dev-server", feature = "model2vec")),
+    allow(dead_code)
+)]
+pub fn license_text(id: &str) -> String {
+    match id.to_ascii_lowercase().as_str() {
+        "mit" => "MIT".to_string(),
+        "apache-2.0" => "Apache-2.0".to_string(),
+        "bsd-2-clause" => "BSD-2-Clause".to_string(),
+        "bsd-3-clause" => "BSD-3-Clause".to_string(),
+        "cc-by-4.0" => "CC-BY-4.0".to_string(),
+        "cc-by-sa-4.0" => "CC-BY-SA-4.0".to_string(),
+        "cc-by-nc-4.0" => "CC-BY-NC-4.0".to_string(),
+        "gpl-3.0" => "GPL-3.0".to_string(),
+        "agpl-3.0" => "AGPL-3.0".to_string(),
+        _ => id.to_string(),
+    }
+}
+
+/// Records a served model.
+#[cfg_attr(not(feature = "model2vec"), allow(dead_code))]
+fn serve_model(model: ServedModel) {
+    if let Ok(mut models) = SERVED_MODELS.lock() {
+        models.push(model);
+    }
+}
+
+/// Records a model note, and prints it unless the notes are deferred ([`defer_model_notes`]).
+fn model_note(note: String) {
+    if !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+        errln!("note: {note}");
+    }
+    if let Ok(mut notes) = MODEL_NOTES.lock() {
+        notes.push(note);
+    }
+}
+
+/// The `@<12 hex>` part of a model identity (`model2vec/<repo>@<hex>`): the same files give the
+/// same hash whatever repository name an identity records.
+#[cfg(feature = "model2vec")]
+fn identity_hash(identity: &str) -> &str {
+    identity.rsplit_once('@').map_or(identity, |(_, hash)| hash)
+}
+
 /// Loads the models of `--embedder NAME=PATH|REPO` (once, at start) and registers them with
 /// `--default-embedder` as the default; [`embedders`] answers this registry from then on. A
 /// model that does not load is the error (with its help); the process then exits with
@@ -64,6 +161,14 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
         #[cfg(feature = "model2vec")]
         {
             let model = crate::embed_model::load_embedder(name, spec)?;
+            let (repo, license) = crate::embed_model::embedder_license(spec);
+            serve_model(ServedModel {
+                name: name.clone(),
+                identity: graphersal::vector::Embedder::info(&model).model.to_string(),
+                label: repo.unwrap_or_else(|| spec.clone()),
+                license,
+                source: "--embedder".to_string(),
+            });
             builder = builder
                 .with(Arc::new(model))
                 .map_err(|err| format!("--embedder {name}={spec}: {}", registry_error(err)))?;
@@ -89,11 +194,59 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
 #[cfg(feature = "model2vec")]
 fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
     let found = store.stored_embedders(&embedders());
+    let stored = store.models().unwrap_or_default();
     for (name, identity) in &found.loaded {
-        errln!("note: loaded the embedding model {identity} from the store {path} as {name}");
+        let model = stored
+            .iter()
+            .find(|model| identity_hash(&model.identity) == identity_hash(identity));
+        let license = model.map_or("unknown", |model| model.license.as_str());
+        if !DEFER_MODEL_NOTES.load(std::sync::atomic::Ordering::Relaxed) {
+            errln!(
+                "note: loaded the embedding model {identity} from the store {path} as {name} \
+                 (licence {})",
+                license_text(license)
+            );
+        }
+        serve_model(ServedModel {
+            name: name.clone(),
+            identity: identity.clone(),
+            label: model
+                .and_then(|model| model.repo.clone())
+                .unwrap_or_else(|| identity.clone()),
+            license: license.to_string(),
+            source: format!("stored in {path}"),
+        });
+    }
+    // A stored model another embedder serves (an `--embedder` of the same files) is named on
+    // that embedder's row; one that could not be used gets a row of its own.
+    for model in &stored {
+        let hash = identity_hash(&model.identity);
+        if found.loaded.iter().any(|(_, id)| identity_hash(id) == hash) {
+            continue;
+        }
+        let also = format!("also stored in {path}");
+        let covered = SERVED_MODELS.lock().ok().is_some_and(|mut served| {
+            served
+                .iter_mut()
+                .find(|served| identity_hash(&served.identity) == hash)
+                .map(|served| served.source = format!("{}; {also}", served.source))
+                .is_some()
+        });
+        if !covered {
+            serve_model(ServedModel {
+                name: "(unused)".to_string(),
+                identity: model.identity.clone(),
+                label: model.repo.clone().unwrap_or_else(|| model.identity.clone()),
+                license: model.license.clone(),
+                source: format!(
+                    "stored in {path}; not loaded: {}",
+                    model.problem.as_deref().unwrap_or("it does not load")
+                ),
+            });
+        }
     }
     for note in &found.notes {
-        errln!("note: {note}");
+        model_note(note.clone());
     }
     if !found.loaded.is_empty() {
         set_embedders(found.embedders);
@@ -108,11 +261,11 @@ fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
     if let Ok(info) = store.info() {
         for identity in info.schema_models {
             if registered.by_model(&identity).is_none() {
-                errln!(
-                    "note: the schema names the embedding model {identity}; this graphersal \
-                     was built without the `model2vec` feature and cannot load it (from {path} \
-                     or elsewhere)"
-                );
+                model_note(format!(
+                    "the schema names the embedding model {identity}; this graphersal was built \
+                     without the `model2vec` feature and cannot load it (from {path} or \
+                     elsewhere)"
+                ));
             }
         }
     }
