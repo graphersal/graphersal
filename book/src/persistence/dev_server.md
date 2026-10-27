@@ -45,7 +45,9 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
   - **Graph**: for a sample or a file its source and load time; the vertex and edge totals, the
     ten largest vertex and edge labels (`+N more` for the rest), the graph's memory (structure,
     indexes, properties, and the [property indexes](../users_guide/property_indexes.md) when
-    there are any) with the process heap, and the compressed and deduplicated values when there
+    there are any), the memory of its [workload statistics](workload_statistics.md)
+    (`0 B` until queries ran, unless a Store brought its saved ones), the loaded embedding models
+    (when there are any) and the process heap, and the compressed and deduplicated values when there
     are any (the same data as the playground's Profile -> Statistics tab);
   - **Embedding models** (when there are any): every model besides the built-in `hash-ngram/1`,
     with the name queries call it by, its repository and licence, and where it comes from
@@ -70,6 +72,8 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
     edges:     78 labels: CALLS 251,991, USES_TYPE 142,362, DECLARES 122,073, ...
     memory:    graph 703.2 MiB (structure 144.7 MiB, indexes 64.0 MiB, properties
                486.8 MiB, property indexes 7.6 MiB)
+               workload statistics 182.4 KiB
+               model 506.4 MiB (potion 506.4 MiB)
                process heap 1.6 GiB
 
   ── Embedding models ──────────────────────────────────────────────────────────
