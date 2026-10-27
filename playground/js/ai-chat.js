@@ -18,6 +18,7 @@
 // the next Send starts a new conversation and says so.
 
 import { createPoller } from './change-feed.js';
+import { exportFileName } from './export.js';
 
 /** Poll interval while a turn runs. */
 export const CHAT_POLL_MS = 700;
@@ -331,6 +332,251 @@ export function timingText(turn) {
   }
   if (turn.limitReached) parts.push('tool-call limit reached');
   return parts.join(' · ');
+}
+
+// ---- Export (issue #18): the transcript the page holds as a Markdown or JSON file ----------
+//
+// Both formats are derived from `groupTurns`, so they show the turns as the tab does. They hold
+// only what the page holds: a restored transcript keeps the newest `MAX_SAVED_ITEMS` items and
+// tool result texts cut to `MAX_SAVED_TEXT` characters (marked `resultTruncated`).
+
+/** The `format` member of an exported JSON chat. */
+export const CHAT_EXPORT_FORMAT = 'graphersal-ai-chat';
+/** The `version` member of an exported JSON chat (raised only on an incompatible change). */
+export const CHAT_EXPORT_VERSION = 1;
+
+/** Whether a stored tool result text was cut by `serializeChat`. */
+function isCutText(text) {
+  return typeof text === 'string' && text.length === MAX_SAVED_TEXT + 1 && text.endsWith('…');
+}
+
+/** A tail/preamble item as an export entry, or null for one that is not exported. */
+function exportEntry(it) {
+  switch (it.type) {
+    case 'error': return { type: 'error', message: String(it.message ?? ''), help: it.help ? String(it.help) : null };
+    case 'notice': return { type: 'notice', text: String(it.text ?? '') };
+    case 'assistant': return { type: 'text', text: String(it.text ?? '') };
+    case 'done': return it.stopped ? { type: 'stopped' } : null;
+    case 'tool_result': return exportTool({ id: it.id, name: it.name, args: null, result: it });
+    default: return null;
+  }
+}
+
+function exportTool(call) {
+  const r = call.result;
+  const text = r && typeof r.text === 'string' ? r.text : null;
+  return {
+    type: 'tool',
+    id: call.id ?? null,
+    name: String(call.name ?? ''),
+    args: call.args === undefined ? null : call.args,
+    ok: r ? !!r.ok : null,
+    summary: r && r.summary != null ? String(r.summary) : null,
+    result: text,
+    resultTruncated: isCutText(text),
+  };
+}
+
+function finite(v) {
+  return Number.isFinite(v) ? v : null;
+}
+
+/**
+ * The export model of a transcript (pure): `{preamble, turns}`. `preamble` are the entries before
+ * the first question; each turn is `{question, state, steps, answer, tail, done, timing}`:
+ * `steps` the interim texts (`{type: 'text', text}`) and tool calls (`{type: 'tool', id, name,
+ * args, ok, summary, result, resultTruncated}`; `ok`/`summary`/`result` null without a result),
+ * `answer` the final assistant text or null, `tail` the entries below the answer (`error
+ * {message, help}`, `notice {text}`, `text {text}`, `stopped`), `done` the figures of the turn's
+ * `done` event (`elapsedMs`, `toolMs`, `llmCalls`, `inputTokens`, `outputTokens`,
+ * `cachedTokens`, `toolCalls`, `limitReached`, `stopped`; null without one) and `timing` its
+ * `timingText` line ('' without one).
+ */
+export function chatExportModel(items) {
+  const list = Array.isArray(items) ? items : [];
+  const preamble = [];
+  const turns = [];
+  groupTurns(list).forEach((en) => {
+    if (en.kind === 'item') {
+      const e = exportEntry(en.item);
+      if (e) preamble.push(e);
+      return;
+    }
+    const raw = list.slice(list.indexOf(en.user) + 1);
+    const nextUser = raw.findIndex((it) => it.type === 'user');
+    const own = nextUser >= 0 ? raw.slice(0, nextUser) : raw;
+    const doneItem = own.find((it) => it.type === 'done') || null;
+    turns.push({
+      question: String(en.user.text ?? ''),
+      state: en.state,
+      steps: en.steps.map((s) => (s.type === 'tool_call' ? exportTool(s)
+        : s.type === 'assistant' ? { type: 'text', text: String(s.text ?? '') } : exportEntry(s)))
+        .filter(Boolean),
+      answer: en.answer ? String(en.answer.text ?? '') : null,
+      tail: en.tail.map(exportEntry).filter(Boolean),
+      done: doneItem ? {
+        elapsedMs: finite(doneItem.elapsedMs),
+        toolMs: finite(doneItem.toolMs),
+        llmCalls: finite(doneItem.llmCalls),
+        inputTokens: finite(doneItem.inputTokens),
+        outputTokens: finite(doneItem.outputTokens),
+        cachedTokens: finite(doneItem.cachedTokens),
+        toolCalls: finite(doneItem.toolCalls),
+        limitReached: !!doneItem.limitReached,
+        stopped: !!doneItem.stopped,
+      } : null,
+      timing: timingText(en),
+    });
+  });
+  return { preamble, turns };
+}
+
+/** The export metadata: only known members, all strings (`chat`, `provider`, `model`, `server`, `graph`). */
+function cleanMeta(meta) {
+  const out = {};
+  for (const key of ['chat', 'provider', 'model', 'server', 'graph']) {
+    const v = meta && meta[key];
+    if (typeof v === 'string' && v.trim()) out[key] = v.trim();
+  }
+  if (meta && meta.readOnly === true) out.readOnly = true;
+  return out;
+}
+
+function exportedAt(meta) {
+  const d = meta && meta.exportedAt instanceof Date ? meta.exportedAt : new Date();
+  return d.toISOString();
+}
+
+/**
+ * The transcript as JSON text (pure; stable shape, documented in the book page "Dev Server and
+ * MCP", section "AI Chat"): `{format: "graphersal-ai-chat", version: 1, exportedAt, meta:
+ * {chat?, provider?, model?, readOnly?, server?, graph?}, preamble, turns}` with `preamble` and
+ * `turns` from `chatExportModel`.
+ * @param {Array} items  The chat's transcript (chat.items).
+ * @param {{chat?: string, provider?: string, model?: string, readOnly?: boolean, server?: string,
+ *   graph?: string, exportedAt?: Date}} [meta]
+ */
+export function chatToJson(items, meta = {}) {
+  const model = chatExportModel(items);
+  const doc = {
+    format: CHAT_EXPORT_FORMAT,
+    version: CHAT_EXPORT_VERSION,
+    exportedAt: exportedAt(meta),
+    meta: cleanMeta(meta),
+    preamble: model.preamble,
+    turns: model.turns,
+  };
+  return `${JSON.stringify(doc, null, 2)}\n`;
+}
+
+/** A code fence longer than any backtick run in `text` (at least three backticks). */
+export function fenceFor(text) {
+  let longest = 0;
+  for (const m of String(text).matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
+function fenced(text, lang = '') {
+  const body = String(text);
+  const fence = fenceFor(body);
+  return `${fence}${lang}\n${body}${body.endsWith('\n') ? '' : '\n'}${fence}`;
+}
+
+/** Inline code that survives backticks in its text. */
+function inlineCode(text) {
+  const s = String(text);
+  let longest = 0;
+  for (const m of s.matchAll(/`+/g)) longest = Math.max(longest, m[0].length);
+  const ticks = '`'.repeat(longest + 1);
+  const pad = s.startsWith('`') || s.endsWith('`') ? ' ' : '';
+  return `${ticks}${pad}${s}${pad}${ticks}`;
+}
+
+/** Plain text as a Markdown block quote (every line, empty ones included). */
+function quote(text) {
+  return String(text).split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n');
+}
+
+function argsJson(args) {
+  try {
+    return JSON.stringify(args, null, 2) ?? String(args);
+  } catch (e) {
+    return String(args);
+  }
+}
+
+function entryMarkdown(e) {
+  switch (e.type) {
+    case 'error': return quote(`**Error:** ${e.message}${e.help ? `\n\n${e.help}` : ''}`);
+    case 'notice': return quote(`Note: ${e.text}`);
+    case 'text': return e.text;
+    case 'stopped': return '*Stopped.*';
+    case 'tool': return toolMarkdown(e);
+    default: return '';
+  }
+}
+
+function toolMarkdown(t) {
+  const status = t.ok == null ? 'no result' : `${t.ok ? '✓' : '✗'} ${t.summary ?? ''}`.trim();
+  const parts = [`**Tool call ${inlineCode(t.name)}**: ${status}`];
+  if (t.args != null) parts.push(`Arguments:\n\n${fenced(argsJson(t.args), 'json')}`);
+  if (t.result) {
+    const label = t.resultTruncated ? 'Result (shortened in the stored transcript):' : 'Result:';
+    parts.push(`${label}\n\n${fenced(t.result)}`);
+  }
+  return parts.join('\n\n');
+}
+
+const STATE_NOTES = Object.freeze({
+  running: '*Still running when exported.*',
+  interrupted: '*Interrupted: the turn has no end (the conversation ended).*',
+});
+
+/**
+ * The transcript as Markdown text (pure): a title, the metadata, then per turn the question (a
+ * block quote), the steps (interim texts; tool calls with their arguments as a fenced JSON block,
+ * the result summary and the stored result text, marked when the stored text was shortened), the
+ * answer exactly as the model wrote it (it is Markdown already), errors with their help, notices,
+ * and the timing line. Code fences are longer than any backtick run they enclose.
+ * @param {Array} items  The chat's transcript (chat.items).
+ * @param {object} [meta]  As for `chatToJson`.
+ */
+export function chatToMarkdown(items, meta = {}) {
+  const m = cleanMeta(meta);
+  const model = chatExportModel(items);
+  const out = [`# AI Chat${m.chat ? `: ${m.chat}` : ''}`];
+  const facts = [`- Exported: ${exportedAt(meta)}`];
+  if (m.model) facts.push(`- Model: ${m.model}${m.provider ? ` (${m.provider} API)` : ''}${m.readOnly ? ', read-only' : ''}`);
+  else if (m.provider) facts.push(`- Provider: ${m.provider} API`);
+  if (m.server) facts.push(`- Server: ${m.server}`);
+  if (m.graph) facts.push(`- Graph: ${m.graph}`);
+  out.push(facts.join('\n'));
+  for (const e of model.preamble) out.push(entryMarkdown(e));
+  if (!model.turns.length && !model.preamble.length) out.push('*The transcript is empty.*');
+  model.turns.forEach((t, i) => {
+    out.push('---', `## Turn ${i + 1}`, `**You:**\n\n${quote(t.question)}`);
+    if (t.steps.length) {
+      out.push('### Steps');
+      for (const s of t.steps) out.push(entryMarkdown(s));
+    }
+    if (t.answer != null) out.push('### Answer', t.answer);
+    for (const e of t.tail) out.push(entryMarkdown(e));
+    if (STATE_NOTES[t.state]) out.push(STATE_NOTES[t.state]);
+    if (t.timing) out.push(`*${t.timing}*`);
+  });
+  return `${out.filter((s) => s !== '').join('\n\n')}\n`;
+}
+
+/**
+ * The export file name: `graphersal-<chat tab name>-YYYYMMDD-HHMMSS.<ext>`, the name lower case
+ * with every run of other characters than a-z and 0-9 as one `-` (at most 40 characters;
+ * `chat-` put in front when it does not start with "chat").
+ */
+export function chatExportFileName(name, ext, d = new Date()) {
+  let slug = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    .slice(0, 40).replace(/-+$/, '');
+  if (!slug.startsWith('chat')) slug = slug ? `chat-${slug}` : 'chat';
+  return exportFileName(slug, ext, d);
 }
 
 /** The status of an HTTP error thrown by the engine (`err.status`), or 0. */
