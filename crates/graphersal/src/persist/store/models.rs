@@ -972,6 +972,7 @@ pub(crate) fn add(
         "file"
     } else if let Some(template) = super::licenses::template(&license, new.repo.as_deref())
         && !files_out.iter().any(|f| f.name == "LICENSE")
+        && files_out.len() < MAX_MODEL_FILES
     {
         let (bytes, sha256) = write_stream(&dir.tmp.join("LICENSE"), &mut template.as_bytes())?;
         files_out.push(ModelFile {
@@ -984,6 +985,42 @@ pub(crate) fn add(
     } else {
         "none"
     };
+    // Every other licence of the base models travels too (a tokenizer may come from one):
+    // `LICENSE-BASE-<licence>` with its standard text, one file per licence.
+    let mut base_licenses: Vec<String> = Vec::new();
+    for base in &new.base_models {
+        let Some(other) = base.license.as_deref().map(str::to_ascii_lowercase) else {
+            continue;
+        };
+        if other != license.to_ascii_lowercase() && !base_licenses.contains(&other) {
+            base_licenses.push(other);
+        }
+    }
+    for other in base_licenses {
+        let bases: Vec<&str> = new
+            .base_models
+            .iter()
+            .filter(|b| b.license.as_deref().map(str::to_ascii_lowercase) == Some(other.clone()))
+            .map(|b| b.repo.as_str())
+            .collect();
+        let name = format!("LICENSE-BASE-{other}");
+        let Some(text) = super::licenses::base_template(&other, &bases, new.repo.as_deref()) else {
+            continue;
+        };
+        if !is_file_name(&name)
+            || files_out.iter().any(|f| f.name == name)
+            || files_out.len() >= MAX_MODEL_FILES
+        {
+            continue;
+        }
+        let (bytes, sha256) = write_stream(&dir.tmp.join(&name), &mut text.as_bytes())?;
+        files_out.push(ModelFile {
+            name,
+            role: ModelRole::License.as_str().to_string(),
+            bytes,
+            sha256,
+        });
+    }
     let by_role = |role: ModelRole| {
         files_out
             .iter()

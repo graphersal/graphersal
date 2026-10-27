@@ -84,7 +84,11 @@ A model's licence is the model's own. When a model enters a store, its licence c
 - when the repository has no licence file (none of the Model2Vec models from MinishLab has one:
   their licence is only in the card), the **standard text** of an MIT or Apache-2.0 licence is
   written beside the model as `LICENSE`, marked as a template (`license_text: template`) and
-  saying where it comes from.
+  saying where it comes from;
+- when a **base model has another licence** than the model's own (a tokenizer may come from
+  it: `minishlab/M2V_multilingual_output` is MIT, its tokenizer comes from the Apache-2.0
+  `sentence-transformers/LaBSE`), the standard text of that licence (MIT or Apache-2.0) as
+  `LICENSE-BASE-<licence>`, e.g. `LICENSE-BASE-apache-2.0`, naming the base models it covers.
 
 `download` and `import` warn when the licence is unknown or non-commercial, or the repository is
 gated: the terms you accepted may restrict passing the model on.

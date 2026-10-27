@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use graphersal::persist::{
-    MemDir, ModelCopy, ModelRole, NewModel, PersistError, RecoveryTarget, RollbackMode, Store,
-    StoreFailure, StoreOptions, StoredModel,
+    BaseModel, MemDir, ModelCopy, ModelRole, NewModel, PersistError, RecoveryTarget, RollbackMode,
+    Store, StoreFailure, StoreOptions, StoredModel,
 };
 use graphersal::prelude::*;
 
@@ -218,6 +218,54 @@ fn the_licence_text_comes_from_a_file_a_template_or_nowhere() {
     assert!(model.gated);
     assert!(model.repo.is_none());
     assert!(model.identity.starts_with("model2vec@"));
+}
+
+/// A model made from base models under another licence carries that licence's standard text
+/// too (one file per licence); a base model under the model's own licence adds none.
+#[test]
+fn the_licences_of_the_base_models_travel_with_the_model() {
+    let store = Store::create(MemDir::new(), options()).unwrap();
+    let model = fake_model(7)
+        .with_base_model(BaseModel::new(
+            "sentence-transformers/LaBSE",
+            Some("apache-2.0".into()),
+        ))
+        .with_base_model(BaseModel::new("acme/other", Some("Apache-2.0".into())))
+        .with_base_model(BaseModel::new("acme/same", Some("mit".into())))
+        .with_base_model(BaseModel::new("acme/unknown", None));
+    let model = store.add_model(model).unwrap().model;
+    assert_eq!(model.license_text, "template", "the model's own MIT text");
+    let licences: Vec<&str> = model
+        .files
+        .iter()
+        .filter(|f| f.role == ModelRole::License.as_str())
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(licences, ["LICENSE", "LICENSE-BASE-apache-2.0"]);
+    let text = String::from_utf8(
+        store
+            .read_model_file(&model.id, "LICENSE-BASE-apache-2.0")
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        text.contains("acme/tiny was made from sentence-transformers/LaBSE, acme/other"),
+        "{text}"
+    );
+    assert!(text.contains("Apache License") && text.contains("Version 2.0"));
+    assert!(!text.contains("acme/same"), "{text}");
+    // Listed, verified and carried like every other file of the model.
+    assert_eq!(store.models().unwrap()[0].files, model.files);
+    assert!(store.verify().unwrap().is_ok());
+    let mut packed = Vec::new();
+    store
+        .export_packed_with(None, &mut packed, ModelCopy::Include)
+        .unwrap();
+    let copy = Store::create_from_packed(MemDir::new(), Cursor::new(packed), options()).unwrap();
+    assert!(
+        copy.read_model_file(&model.id, "LICENSE-BASE-apache-2.0")
+            .is_ok()
+    );
 }
 
 #[test]
