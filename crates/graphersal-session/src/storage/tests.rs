@@ -462,3 +462,54 @@ fn an_estimate_is_the_same_on_both_storages_and_unsupported_without_compression(
         "{refused}"
     );
 }
+
+/// On the thread that holds the graph's unit beside a live write view (a commit hook of that
+/// unit), every read of the session's graph is `GraphViewHeld`: formerly `0`, `null`, empty or
+/// `None`. A whole session answers it as its error too.
+#[test]
+fn session_graph_reads_answer_a_forbidden_view_with_its_error() {
+    use super::SessionGraph;
+    use crate::SessionError;
+    use graphersal::catalog::DefinitionKind;
+    use graphersal::storage::{ElementKind, GraphError};
+
+    fn held<T: std::fmt::Debug>(answer: Result<T, GraphError>) {
+        assert!(
+            matches!(answer, Err(GraphError::GraphViewHeld { .. })),
+            "{answer:?}"
+        );
+    }
+    let shared = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
+    let mut session = Session::new();
+    session.load_shared(shared.clone(), "held", "host").unwrap();
+    let graph: &dyn SessionGraph = &*shared;
+    let mark = shared.begin_unit().unwrap();
+    {
+        let _write = shared.write();
+        held(graph.vertex_count());
+        held(graph.edge_count());
+        held(graph.inferred_schema());
+        held(graph.schema_view());
+        held(graph.statistics_view());
+        held(graph.memory_view());
+        held(graph.element(ElementKind::Vertex, "1"));
+        held(graph.queries(None));
+        held(graph.query("anything"));
+        held(graph.count_kind(DefinitionKind::QUERY));
+        held(graph.catalog_text());
+        held(graph.compressions());
+        held(graph.indexes());
+        assert!(matches!(
+            session.info(),
+            Err(SessionError::Graph(GraphError::GraphViewHeld { .. }))
+        ));
+        assert!(session.statistics().is_err());
+        assert!(session.list_queries(None).is_err());
+        assert!(session.get_schema_text().is_err());
+    }
+    assert_eq!(graph.vertex_count().unwrap(), 6);
+    assert_eq!(session.info().unwrap()["vertexCount"], 6);
+    graph
+        .rollback_run(mark, &graphersal::changes::RollbackReason::failed(&"test"))
+        .unwrap();
+}

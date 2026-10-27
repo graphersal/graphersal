@@ -805,9 +805,16 @@ pub(super) fn apply_rollback(
 pub(super) fn attic_list(dir: &DirPath) -> Result<Vec<AtticEntry>, PersistError> {
     let root = dir.join(ATTIC_DIR);
     let mut out = Vec::new();
-    let Ok(entries) = root.list() else {
+    // No attic is an empty list; an attic that cannot be read is the error.
+    let kind = root
+        .try_kind()
+        .map_err(|err| PersistError::io("reading the attic", err))?;
+    if kind != Some(files::EntryKind::Dir) {
         return Ok(out);
-    };
+    }
+    let entries = root
+        .list()
+        .map_err(|err| PersistError::io("listing the attic", err))?;
     for (name, kind) in entries {
         if name.starts_with(REMOVING_PREFIX) || kind != files::EntryKind::Dir {
             continue;

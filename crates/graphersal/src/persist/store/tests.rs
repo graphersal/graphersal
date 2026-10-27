@@ -1416,3 +1416,93 @@ fn a_failed_manifest_read_after_the_load_fails_the_open() {
         assert_eq!(names_of(&store.graph().read()), ["ann", "bob", "cy", "dan"]);
     }
 }
+
+/// Poisons `lock`: a thread panics while it holds it (the panic is caught by the join).
+fn poison<T: Send>(lock: &std::sync::Mutex<T>) {
+    std::thread::scope(|scope| {
+        let joined = scope
+            .spawn(|| {
+                let _guard = lock.lock();
+                panic!("poisoning the lock on purpose");
+            })
+            .join();
+        assert!(joined.is_err());
+    });
+    assert!(lock.is_poisoned());
+}
+
+/// A store lock poisoned by a panicking thread is `StoreFailure::LockPoisoned` from every
+/// accessor that reads through it: formerly "writable" (`None`), an empty damage list, the
+/// default damage policy or the store id 0.
+#[test]
+fn a_poisoned_store_lock_is_an_error_not_a_default() {
+    let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
+    let poisoned = |err: PersistError| {
+        assert!(
+            matches!(
+                err,
+                PersistError::Store {
+                    cause: StoreFailure::LockPoisoned,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    };
+    assert_eq!(store.read_only_reason().unwrap(), None);
+    poison(&store.core.shared.read_only);
+    poisoned(store.read_only_reason().unwrap_err());
+    // A store that cannot say whether it is read-only writes nothing.
+    assert!(store.core.writes_nothing());
+
+    assert!(store.damage_found().unwrap().is_empty());
+    poison(&store.core.shared.found);
+    poisoned(store.damage_found().unwrap_err());
+
+    assert_eq!(store.stopped_reason().unwrap(), None);
+    poison(&store.core.shared.stopped);
+    poisoned(store.stopped_reason().unwrap_err());
+
+    assert!(store.store_id().unwrap() != 0);
+    poison(&store.core.shared.graph_file);
+    poisoned(store.store_id().unwrap_err());
+    poisoned(store.damage_policy().unwrap_err());
+
+    assert!(store.last_auto_checkpoint_error().unwrap().is_none());
+    poison(&store.core.shared.last_auto_error);
+    poisoned(store.last_auto_checkpoint_error().unwrap_err());
+}
+
+/// The copy `last_auto_checkpoint_error` keeps of an error that `run_due_checkpoint` also
+/// returns: the same variant and text, a graph error as `AutoCheckpointFailed` with its text.
+#[test]
+fn a_duplicated_persist_error_keeps_its_variant_and_text() {
+    let io = PersistError::io(
+        "writing a snapshot",
+        std::io::Error::new(std::io::ErrorKind::StorageFull, "disk full"),
+    );
+    let copy = io.duplicate();
+    assert!(
+        matches!(&copy, PersistError::Io { source, .. } if source.kind() == std::io::ErrorKind::StorageFull),
+        "{copy:?}"
+    );
+    assert_eq!(copy.to_string(), io.to_string());
+    let refused = PersistError::store("write a checkpoint", StoreFailure::NameTaken, "taken");
+    assert_eq!(refused.duplicate().to_string(), refused.to_string());
+    let graph = PersistError::Graph(crate::error::GraphError::unsupported("snapshots"));
+    let copy = graph.duplicate();
+    assert!(
+        matches!(
+            &copy,
+            PersistError::Store {
+                cause: StoreFailure::AutoCheckpointFailed,
+                ..
+            }
+        ),
+        "{copy:?}"
+    );
+    assert!(
+        copy.to_string().contains("does not support snapshots"),
+        "{copy}"
+    );
+}

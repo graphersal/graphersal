@@ -623,7 +623,8 @@ pub(crate) fn models_dir(root: &DirPath) -> DirPath {
 /// are not models (verify reports the other names).
 pub(crate) fn model_ids(root: &DirPath) -> Result<Vec<String>, PersistError> {
     let dir = models_dir(root);
-    if !dir.is_dir() {
+    // No models directory is no model; one that cannot be read is the error.
+    if dir.try_kind().map_err(io("reading the store's models"))? != Some(EntryKind::Dir) {
         return Ok(Vec::new());
     }
     let mut ids: Vec<String> = dir

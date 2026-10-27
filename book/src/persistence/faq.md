@@ -76,6 +76,7 @@ it with a `match`; `StoreFailure::name()` is the stable name, which the Python e
 | `UpgradeNeedsCopy` (`upgrade_needs_copy`) | `store upgrade <dir> --in-place` of a store whose version the [upgrade table](store_versions.md#the-upgrade-table) upgrades only into a copy; nothing was written | `graphersal store upgrade <dir> <new_dir>` (the older store stays as it is) |
 | `UnknownModel` (`unknown_model`) | `store models remove`, `Store::remove_model` or `read_model_file` of an embedding model the store does not keep | `graphersal store models <dir>` lists the identities and ids |
 | `InvalidModel` (`invalid_model`) | an embedding model to add lacks its config, tokenizer or weights file, has a file name that is not allowed, a file over 8 GiB, or a repository or licence that is not a valid name; nothing was added | check the model directory (`--embedder name=<dir>` loads it) and `graphersal embed-model import <dir> --into <store>` again |
+| `AutoCheckpointFailed` (`auto_checkpoint_failed`) | read from `Store::last_auto_checkpoint_error` after an automatic checkpoint run by `Store::run_due_checkpoint` (the browser) failed with a graph error; the caller of `run_due_checkpoint` got the error itself | nothing is lost: the commits are in the journal and the checkpoint is tried again at the next commit; `graphersal store checkpoint <dir>` reports a manual one with its own help |
 
 ## Questions
 

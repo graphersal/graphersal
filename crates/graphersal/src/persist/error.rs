@@ -1035,6 +1035,23 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The help of the copy an automatic checkpoint's graph error is kept as (rule 6): the
+    /// commits are safe, the checkpoint is retried, a manual one reports its own help.
+    #[test]
+    fn an_automatic_checkpoint_failure_says_the_commits_are_safe() {
+        let help = help_of(StoreFailure::AutoCheckpointFailed);
+        assert!(
+            help.contains("the commits are safe in the journal"),
+            "{help}"
+        );
+        assert!(help.contains("Store::run_due_checkpoint"), "{help}");
+        assert!(help.contains("graphersal store checkpoint <dir>"), "{help}");
+        assert_eq!(
+            StoreFailure::AutoCheckpointFailed.name(),
+            "auto_checkpoint_failed"
+        );
+    }
+
     /// The causes that need a fault inside the process (the others are triggered through the
     /// public API in `tests/all/store_error_tests.rs`).
     #[test]
