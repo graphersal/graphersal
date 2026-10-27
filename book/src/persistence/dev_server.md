@@ -191,7 +191,8 @@ graphersal --graph data/ --server --mcp --embedder potion=minishlab/potion-base-
   the server serves the one graph it was started with. To use another graph, restart the server.
 - Queries, results, profiles, the graph drawing, the schema views and the schema editor work as
   in the WebAssembly playground: both run the same session code (the internal crate
-  `graphersal-session`), so the answers are the same structures.
+  `graphersal-session`), so the answers are the same structures. The **Examples** menu is not
+  shown: its queries are written for the sample graphs, and the server serves its own.
 - The **Statistics** tab of the Profile panel shows the limits the server applies (its presets,
   from the options above) beside the engine's defaults for the rest, next to the graph's counts and
   memory footprint.
