@@ -132,16 +132,17 @@ impl DirPath {
         self.dir.entry_kind(&self.name).ok().flatten()
     }
 
+    /// [`Self::kind`] with the read error kept (`Ok(None)`: nothing there).
+    pub(crate) fn try_kind(&self) -> std::io::Result<Option<EntryKind>> {
+        self.dir.entry_kind(&self.name)
+    }
+
     pub(crate) fn exists(&self) -> bool {
         self.kind().is_some()
     }
 
     pub(crate) fn is_dir(&self) -> bool {
         self.kind() == Some(EntryKind::Dir)
-    }
-
-    pub(crate) fn is_file(&self) -> bool {
-        self.kind() == Some(EntryKind::File)
     }
 
     /// The children: `(name, kind)`.

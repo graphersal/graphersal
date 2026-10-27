@@ -352,6 +352,10 @@ pub struct RepairReport {
     /// The models that were NOT carried because their files are damaged, with the reason:
     /// add them to the repaired store again.
     pub models_not_carried: Vec<String>,
+    /// Why [`Self::marks_not_carried`] is empty although the damaged store may have marks: its
+    /// `marks` file and WAL could not be read (`None`: they were read). A repair still
+    /// completes then, because the damaged store's marks are not carried anyway.
+    pub marks_unreadable: Option<String>,
 }
 
 impl RepairReport {
@@ -404,6 +408,9 @@ impl std::fmt::Display for RepairReport {
             )?;
         }
         super::rollback::write_marks_not_carried(f, &self.marks_not_carried)?;
+        if let Some(reason) = &self.marks_unreadable {
+            writeln!(f, "  marks not listed: {reason}")?;
+        }
         super::rollback::write_models_carried(f, &self.models)?;
         for reason in &self.models_not_carried {
             writeln!(f, "  model not carried: {reason}")?;

@@ -66,8 +66,12 @@ use crate::graph::{
 /// the same graph (a `&mut S` would alias a `&S`): outside a unit this deadlocks (the lock is
 /// not reentrant); inside one, [`read`](Self::read) and [`write`](Self::write) panic (see their
 /// "Panics"), while [`read_checked`](Self::read_checked), [`write_checked`](Self::write_checked),
-/// [`try_read`](Self::try_read), [`try_write`](Self::try_write), [`begin_unit`](Self::begin_unit)
-/// and the closes return [`GraphError::GraphViewHeld`] (or `None`) instead. Opening a unit on
+/// [`try_read`](Self::try_read), [`try_write`](Self::try_write),
+/// [`try_write_checked`](Self::try_write_checked), [`begin_unit`](Self::begin_unit)
+/// and the closes return [`GraphError::GraphViewHeld`] (or `None`) instead.
+/// [`try_write_checked`](Self::try_write_checked) is the non-blocking write that tells "busy"
+/// (`Ok(None)`, try again later) from "not allowed on this thread" (`Err`, drop the other view
+/// first), which [`try_write`](Self::try_write) answers both as `None`. Opening a unit on
 /// a thread that already holds a guard of this graph taken outside a unit deadlocks (at the
 /// unit's first write at the latest), as `write()` does there.
 ///
@@ -396,8 +400,12 @@ impl<S: GraphStorage> Graph<S> {
     /// [`crate::advisor`]): the memory report and the measured compression candidates under one
     /// read lock, the workload statistics attached to the graph (none: only the data is looked
     /// at, so no index advice). Fails for a cancelled memory report or estimate (the running
-    /// thread's [`CancelToken`](crate::CancelToken)). Unauthorized: a front end asks its
-    /// authorizer for `Read` on the data first.
+    /// thread's [`CancelToken`](crate::CancelToken)), when the current thread may not read the
+    /// graph ([`GraphError::GraphViewHeld`]) and when a compression estimate fails for any other
+    /// reason than [`GraphError::Unsupported`] (a storage without compressed properties gets
+    /// advice without compression recommendations, which is its full answer): the advice is
+    /// never silently partial. Unauthorized: a front end asks its authorizer for `Read` on the
+    /// data first.
     pub fn advise(
         &self,
         request: &crate::graph::advisor::AdviceRequest,
@@ -417,12 +425,22 @@ impl<S: GraphStorage> Graph<S> {
             |request: &crate::graph::compression_estimate::CompressionEstimateRequest| {
                 match source.estimate_compression(request) {
                     Ok(estimate) => Some(estimate),
-                    Err(err) if matches!(*err, crate::TraverserError::Cancelled { .. }) => {
-                        failure = Some(err);
+                    // A storage without compressed properties: no compression advice (its
+                    // answer, not a failure).
+                    Err(err)
+                        if matches!(
+                            *err,
+                            crate::TraverserError::Graph(GraphError::Unsupported { .. })
+                        ) =>
+                    {
                         None
                     }
-                    // A storage without compressed properties: no compression advice.
-                    Err(_) => None,
+                    // Anything else (cancelled, a failing storage) fails the whole advice: an
+                    // answer without the compression part would read as "nothing to compress".
+                    Err(err) => {
+                        failure.get_or_insert(err);
+                        None
+                    }
                 }
             };
         let marks = self
@@ -599,22 +617,63 @@ impl<S: GraphStorage> Graph<S> {
     /// it is exclusive already or can be made exclusive without waiting (then the storage's unit
     /// opens, as at the unit's first [`write`](Self::write)), `None` while other threads read or
     /// the thread holds another view of the graph.
+    ///
+    /// `None` means both "busy" and "not allowed on this thread"; [`Self::try_write_checked`]
+    /// tells them apart.
     pub fn try_write(&self) -> Option<GraphWrite<'_, S>> {
+        self.try_write_checked().ok().flatten()
+    }
+
+    /// [`Self::try_write`] with the two refusals told apart: `Ok(Some(guard))` when the write
+    /// lock (or, on the thread that holds a unit of this graph, the unit's write view) was taken
+    /// without waiting, `Ok(None)` when the graph is busy right now (another thread reads,
+    /// writes or holds a unit; a thread that holds the lock itself outside a unit gets `Ok(None)`
+    /// too, because the lock does not know its holders), and
+    /// [`GraphError::GraphViewHeld`] when the current thread holds a unit of this graph and
+    /// another view of it is alive on this thread (a [`read`](Self::read) or `write` view, also
+    /// a commit hook or an embedder reaching back into the graph): waiting would not help, the
+    /// view has to go first. Never blocks, never panics. The error type is
+    /// `#[non_exhaustive]`, so new refusals can be reported later.
+    ///
+    /// ```rust
+    /// use graphersal::prelude::*;
+    ///
+    /// let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+    /// // Free: the guard.
+    /// assert!(graph.try_write_checked().unwrap().is_some());
+    /// // Busy: another reader holds the lock.
+    /// let reader = graph.read();
+    /// assert!(graph.try_write_checked().unwrap().is_none());
+    /// drop(reader);
+    /// // Forbidden: inside the thread's own unit, beside a live read view.
+    /// let mark = graph.begin_unit().unwrap();
+    /// let view = graph.read();
+    /// assert!(matches!(
+    ///     graph.try_write_checked(),
+    ///     Err(GraphError::GraphViewHeld { .. })
+    /// ));
+    /// drop(view);
+    /// assert!(graph.try_write_checked().unwrap().is_some());
+    /// graph.commit_unit(mark).unwrap();
+    /// ```
+    pub fn try_write_checked(&self) -> Result<Option<GraphWrite<'_, S>>, GraphError> {
         if self.holds_unit() {
-            return self.try_held_write().map(|guard| GraphWrite {
+            return Ok(self.try_held_write()?.map(|guard| GraphWrite {
                 guard,
                 held: None,
                 _attached: self.attached(),
-            });
+            }));
         }
-        let guard = self.lock.try_write()?;
+        let Some(guard) = self.lock.try_write() else {
+            return Ok(None);
+        };
         let held =
             lock_series(&self.workload, "write.hold").map(|(stats, _)| (Instant::now(), stats));
-        Some(GraphWrite {
+        Ok(Some(GraphWrite {
             guard: WriteAccess::Locked(guard),
             held,
             _attached: self.attached(),
-        })
+        }))
     }
 
     /// Whether the current thread holds a unit of this graph: one opened by
@@ -870,19 +929,19 @@ impl<S: GraphStorage> Graph<S> {
         ))
     }
 
-    /// [`Self::held_write`] without waiting: `None` while another view of the unit is alive on
-    /// this thread or other threads read.
-    fn try_held_write(&self) -> Option<WriteAccess<'_, S>> {
+    /// [`Self::held_write`] without waiting: [`GraphError::GraphViewHeld`] while another view
+    /// of the unit is alive on this thread, `None` while other threads read.
+    fn try_held_write(&self) -> Result<Option<WriteAccess<'_, S>>, GraphError> {
         let upgraded = {
             let mut held = self.unit.state.lock();
             if held.reads > 0 || held.writes > 0 {
-                return None;
+                return Err(view_held("write the graph"));
             }
             let upgraded = !held.exclusive;
             if upgraded {
                 // SAFETY: this thread holds the unit's lock upgradable.
                 if !unsafe { self.raw().try_upgrade() } {
-                    return None;
+                    return Ok(None);
                 }
                 held.exclusive = true;
                 held.exclusive_since =
@@ -899,10 +958,10 @@ impl<S: GraphStorage> Graph<S> {
             self.open_storage_units();
         }
         // SAFETY: as in `held_write`.
-        Some(WriteAccess::Held(
+        Ok(Some(WriteAccess::Held(
             unsafe { &mut *self.lock.data_ptr() },
             view,
-        ))
+        )))
     }
 
     /// Upgrades the lock of the unit the current thread holds for good (its first write),

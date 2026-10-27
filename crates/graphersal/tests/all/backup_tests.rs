@@ -378,7 +378,7 @@ fn assert_refused_as_different_store(copy: &Store, backup: &MemDir) {
 fn the_store_id_is_renewed_by_every_copy_and_kept_by_every_restore() {
     let dir = MemDir::new();
     let store = Store::create(&dir, options()).unwrap();
-    let id = store.store_id();
+    let id = store.store_id().unwrap();
     assert_ne!(id, 0);
     assert_eq!(store.info().unwrap().store_id, id);
     add_people(&store, "a", 3);
@@ -426,7 +426,7 @@ fn the_store_id_is_renewed_by_every_copy_and_kept_by_every_restore() {
     store
         .rollback_to(RecoveryTarget::CommitSeq(4), RollbackMode::Move)
         .unwrap();
-    assert_eq!(store.store_id(), id);
+    assert_eq!(store.store_id().unwrap(), id);
     add_person(&store, "c");
     assert!(store.backup(&backup).unwrap().incremental);
     // The attic fork is another store.
@@ -444,7 +444,7 @@ fn the_store_id_is_renewed_by_every_copy_and_kept_by_every_restore() {
         .unwrap();
     let newest = store.attic_list().unwrap().pop().unwrap();
     store.attic_restore(&newest.id).unwrap();
-    assert_eq!(store.store_id(), id);
+    assert_eq!(store.store_id().unwrap(), id);
     assert_eq!(store_id_of(&dir), id);
 
     // Convert (a copy of a closed store) gives the copy a new id.

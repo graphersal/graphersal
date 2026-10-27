@@ -246,7 +246,10 @@ impl ScriptGraphTraversalSource {
             optional_text(operation, "description", take("description"))?.unwrap_or_default();
 
         let graph = this.job_graph(operation)?;
-        let exists = graph.definition(DefinitionKind::JOB, &name).is_some();
+        let exists = graph
+            .definition(DefinitionKind::JOB, &name)
+            .map_err(graph_fail)?
+            .is_some();
         this.require_job(
             operation,
             if exists {
@@ -270,6 +273,7 @@ impl ScriptGraphTraversalSource {
                 effects.push(execute.to_owned_request());
                 let definition = graph
                     .definition(DefinitionKind::QUERY, &query_name)
+                    .map_err(graph_fail)?
                     .ok_or_else(|| {
                         graph_fail(crate::error::GraphError::from(
                             crate::error::DefinitionError::NotFound {
@@ -290,14 +294,15 @@ impl ScriptGraphTraversalSource {
                         invalid("it is kept opaque (this version could not decode it)".into())
                     })?
                     .clone();
-                let catalog = |name: &str| {
-                    graph
-                        .definition(DefinitionKind::QUERY, name)
-                        .and_then(|definition| definition.as_query().cloned())
-                };
-                let writes =
-                    super::saved_query_effects(ctx.engine(), &catalog, &query_name, &stored)
-                        .map_err(invalid)?;
+                let catalog = super::saved_query::StoredQueries::new(&**graph);
+                let writes = super::saved_query_effects(
+                    ctx.engine(),
+                    &|name| catalog.lookup(name),
+                    &query_name,
+                    &stored,
+                );
+                catalog.finish()?;
+                let writes = writes.map_err(invalid)?;
                 for effect in writes.effects {
                     this.require(operation, effect.as_request())?;
                     effects.push(effect);
@@ -386,6 +391,7 @@ impl ScriptGraphTraversalSource {
         Ok(self
             .job_graph("jobs")?
             .definitions(Some(DefinitionKind::JOB))
+            .map_err(graph_fail)?
             .iter()
             .filter_map(job_entry)
             .map(Dynamic::from_map)

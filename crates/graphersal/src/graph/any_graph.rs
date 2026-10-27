@@ -61,8 +61,10 @@ mod sealed {
 /// writes the write lock, for the duration of the call. On the thread that holds a unit of the
 /// graph (`Graph::begin_unit`) they use views of the unit's lock; a view that thread may not
 /// have (a commit hook or an embedder asking about the graph its unit is changing,
-/// [`GraphError::GraphViewHeld`]) is the error of a method that returns one, and makes a method
-/// without an error answer as for no data (`None`, empty, `0`, no capabilities), never a panic. The methods mirror what the script
+/// [`GraphError::GraphViewHeld`]) is the error of the method, never a panic and never an empty
+/// answer: every method that reads or writes the graph returns a `Result` (the error types are
+/// `#[non_exhaustive]`), even where it cannot fail today, so a new failure is never a breaking
+/// change. The methods mirror what the script
 /// layer calls today; they ask no authorizer (the front end checks access before it calls)
 /// and run like the [`GraphTraversalSource`] method of the same name on the locked storage.
 /// Results never carry a storage's element ids.
@@ -74,7 +76,7 @@ mod sealed {
 ///
 /// let graph = Arc::new(Graph::new(TraversalGraph::tinkerpop_modern()));
 /// let any: Arc<dyn AnyGraph> = graph.clone().into_any_graph();
-/// assert_eq!(any.statistics().unwrap().vertex_count(), 6);
+/// assert_eq!(any.statistics().unwrap().unwrap().vertex_count(), 6);
 /// assert!(any.as_any().downcast_ref::<Graph<TraversalGraph>>().is_some());
 /// ```
 pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
@@ -89,18 +91,21 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     /// is not stable.
     fn storage_type_name(&self) -> &'static str;
 
-    /// [`GraphStorage::capabilities`] of the storage.
-    fn capabilities(&self) -> StorageCapabilities;
+    /// [`GraphStorage::capabilities`] of the storage. Fails with
+    /// [`GraphError::GraphViewHeld`] when the current thread may not read the graph.
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError>;
 
-    /// [`GraphStorage::last_commit_seq`] of the storage.
-    fn last_commit_seq(&self) -> u64;
+    /// [`GraphStorage::last_commit_seq`] of the storage. Fails like [`Self::capabilities`].
+    fn last_commit_seq(&self) -> Result<u64, GraphError>;
 
-    /// [`GraphStorage::statistics`] of the storage, cloned out of the lock.
-    fn statistics(&self) -> Option<GraphStatistics>;
+    /// [`GraphStorage::statistics`] of the storage, cloned out of the lock (`None`: the
+    /// storage keeps none). Fails like [`Self::capabilities`].
+    fn statistics(&self) -> Result<Option<GraphStatistics>, GraphError>;
 
     /// [`GraphStorage::memory_usage`] of the storage, with the graph's
-    /// [`MemoryStats::workload_bytes`].
-    fn memory_usage(&self) -> Option<MemoryStats>;
+    /// [`MemoryStats::workload_bytes`] (`None`: the storage reports none). Fails like
+    /// [`Self::capabilities`].
+    fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError>;
 
     /// The workload statistics attached to the graph ([`Graph::attach_workload_stats`]).
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>>;
@@ -130,8 +135,9 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
     // ---- schema ---------------------------------------------------------------------------
 
-    /// The stored schema ([`GraphStorage::get_schema`]); `None` without one.
-    fn get_schema(&self) -> Option<GraphSchema>;
+    /// The stored schema ([`GraphStorage::get_schema`]); `None` without one. Fails like
+    /// [`Self::capabilities`].
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError>;
 
     /// [`GraphTraversalSource::set_schema`]: replaces the stored schema, in the current unit or
     /// as one of its own.
@@ -156,11 +162,16 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     // ---- catalog --------------------------------------------------------------------------
 
     /// The catalog's definitions of `kind` (`None`: every kind), by kind and then by name
-    /// ([`GraphTraversalSource::list_definitions`]).
-    fn definitions(&self, kind: Option<DefinitionKind>) -> Vec<Definition>;
+    /// ([`GraphTraversalSource::list_definitions`]). Fails like [`Self::capabilities`].
+    fn definitions(&self, kind: Option<DefinitionKind>) -> Result<Vec<Definition>, GraphError>;
 
-    /// The definition of `kind` named `name` ([`GraphStorage::definition`]).
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<Definition>;
+    /// The definition of `kind` named `name` ([`GraphStorage::definition`]); `None` without
+    /// one. Fails like [`Self::capabilities`].
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<Definition>, GraphError>;
 
     /// Stores every definition of `definitions` ([`GraphTraversalSource::set_definition`],
     /// each replacing the one of the same kind and name) in ONE unit
@@ -185,8 +196,8 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     fn recompress(&self, name: &str) -> TraverserResult<()>;
 
     /// [`GraphStorage::compression_stats`] of the rule `name`; `None` without such a rule or on
-    /// a storage without compressed properties.
-    fn compression_stats(&self, name: &str) -> Option<CompressionStats>;
+    /// a storage without compressed properties. Fails like [`Self::capabilities`].
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError>;
 
     /// [`GraphTraversalSource::estimate_compression`] under the read lock: what each candidate
     /// rule would hold over the current values at `(element, label, path)`; changes nothing. A
@@ -201,8 +212,9 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
     ) -> TraverserResult<crate::graph::CompressionEstimate>;
 
     /// [`GraphStorage::property_indexes`] of the storage: the property indexes it serves, with
-    /// their stats (empty on a storage without property indexes).
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo>;
+    /// their stats (empty on a storage without property indexes). Fails like
+    /// [`Self::capabilities`].
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError>;
 
     /// [`Graph::embed_property`]: the job `embed_property` (book page "Vectors"), two-phase
     /// (the embedder runs without this graph's lock), or under one write lock when the storage
@@ -294,24 +306,6 @@ pub trait AnyGraph: Send + Sync + 'static + sealed::Sealed {
 
 impl<S> sealed::Sealed for Graph<S> where S: GraphStorage + Default + Send + Sync + 'static {}
 
-/// A read of `graph` for a method whose answer has no error: `answer` on the read view, or,
-/// when the current thread may not have one ([`GraphError::GraphViewHeld`]: a commit hook or
-/// an embedder asking about the graph its unit is changing), `nothing` (logged), never a panic.
-fn read_or<S: GraphStorage, T>(
-    graph: &Graph<S>,
-    what: &'static str,
-    nothing: impl FnOnce() -> T,
-    answer: impl FnOnce(&S) -> T,
-) -> T {
-    match graph.read_checked() {
-        Ok(guard) => answer(&guard),
-        Err(err) => {
-            tracing::warn!("AnyGraph::{what}: {err}; answered as for no data");
-            nothing()
-        }
-    }
-}
-
 impl<S> AnyGraph for Graph<S>
 where
     S: GraphStorage + Default + Send + Sync + 'static,
@@ -328,27 +322,24 @@ where
         std::any::type_name::<S>()
     }
 
-    fn capabilities(&self) -> StorageCapabilities {
-        read_or(
-            self,
-            "capabilities",
-            StorageCapabilities::none,
-            GraphStorage::capabilities,
-        )
+    fn capabilities(&self) -> Result<StorageCapabilities, GraphError> {
+        Ok(self.read_checked()?.capabilities())
     }
 
-    fn last_commit_seq(&self) -> u64 {
-        read_or(self, "last_commit_seq", || 0, GraphStorage::last_commit_seq)
+    fn last_commit_seq(&self) -> Result<u64, GraphError> {
+        Ok(self.read_checked()?.last_commit_seq())
     }
 
-    fn statistics(&self) -> Option<GraphStatistics> {
-        read_or(self, "statistics", || None, |g| g.statistics().cloned())
+    fn statistics(&self) -> Result<Option<GraphStatistics>, GraphError> {
+        Ok(self.read_checked()?.statistics().cloned())
     }
 
-    fn memory_usage(&self) -> Option<MemoryStats> {
-        let mut stats = read_or(self, "memory_usage", || None, GraphStorage::memory_usage)?;
-        stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
-        Some(stats)
+    fn memory_usage(&self) -> Result<Option<MemoryStats>, GraphError> {
+        let stats = self.read_checked()?.memory_usage();
+        Ok(stats.map(|mut stats| {
+            stats.workload_bytes = Graph::workload_stats(self).map_or(0, |w| w.memory_bytes());
+            stats
+        }))
     }
 
     fn workload_stats(&self) -> Option<std::sync::Arc<crate::graph::workload::WorkloadStats>> {
@@ -373,8 +364,8 @@ where
         crate::graph::subgraph::graph_listing(&*self.read_checked()?, keep)
     }
 
-    fn get_schema(&self) -> Option<GraphSchema> {
-        read_or(self, "get_schema", || None, GraphStorage::get_schema)
+    fn get_schema(&self) -> Result<Option<GraphSchema>, GraphError> {
+        Ok(self.read_checked()?.get_schema())
     }
 
     fn set_schema(&self, schema: GraphSchema) -> TraverserResult<()> {
@@ -401,22 +392,21 @@ where
         GraphTraversalSource::new(&*self.read_checked()?).diff_schema(schema)
     }
 
-    fn definitions(&self, kind: Option<DefinitionKind>) -> Vec<Definition> {
-        read_or(self, "definitions", Vec::new, |g| {
-            g.definitions()
-                .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
-                .cloned()
-                .collect()
-        })
+    fn definitions(&self, kind: Option<DefinitionKind>) -> Result<Vec<Definition>, GraphError> {
+        Ok(self
+            .read_checked()?
+            .definitions()
+            .filter(|definition| kind.is_none_or(|kind| definition.kind() == kind))
+            .cloned()
+            .collect())
     }
 
-    fn definition(&self, kind: DefinitionKind, name: &str) -> Option<Definition> {
-        read_or(
-            self,
-            "definition",
-            || None,
-            |g| g.definition(kind, name).cloned(),
-        )
+    fn definition(
+        &self,
+        kind: DefinitionKind,
+        name: &str,
+    ) -> Result<Option<Definition>, GraphError> {
+        Ok(self.read_checked()?.definition(kind, name).cloned())
     }
 
     fn set_definitions(&self, definitions: Vec<Definition>) -> TraverserResult<()> {
@@ -444,13 +434,8 @@ where
         GraphTraversalSource::new(&mut *self.write_checked()?).recompress(name)
     }
 
-    fn compression_stats(&self, name: &str) -> Option<CompressionStats> {
-        read_or(
-            self,
-            "compression_stats",
-            || None,
-            |g| g.compression_stats(name),
-        )
+    fn compression_stats(&self, name: &str) -> Result<Option<CompressionStats>, GraphError> {
+        Ok(self.read_checked()?.compression_stats(name))
     }
 
     fn estimate_compression(
@@ -470,13 +455,8 @@ where
         Graph::embed_property(self, job, embedders, cancel, progress)
     }
 
-    fn property_indexes(&self) -> Vec<crate::graph::PropertyIndexInfo> {
-        read_or(
-            self,
-            "property_indexes",
-            Vec::new,
-            GraphStorage::property_indexes,
-        )
+    fn property_indexes(&self) -> Result<Vec<crate::graph::PropertyIndexInfo>, GraphError> {
+        Ok(self.read_checked()?.property_indexes())
     }
 
     fn mark(&self, name: &str) -> Result<Mark, GraphError> {

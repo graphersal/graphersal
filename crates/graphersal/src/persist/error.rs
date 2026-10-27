@@ -444,6 +444,11 @@ pub enum StoreFailure {
     /// An embedding model to add is not usable: a file name or role is missing or not
     /// allowed, a file is too large, the repository or licence is not a valid name.
     InvalidModel,
+    /// The automatic checkpoint run by [`Store::run_due_checkpoint`](super::Store::run_due_checkpoint)
+    /// failed with a graph error: the copy [`Store::last_auto_checkpoint_error`](super::Store::last_auto_checkpoint_error)
+    /// keeps of it (the caller of `run_due_checkpoint` got the error itself). Every other
+    /// failure of an automatic checkpoint is kept as it was raised.
+    AutoCheckpointFailed,
 }
 
 impl StoreFailure {
@@ -476,6 +481,7 @@ impl StoreFailure {
             StoreFailure::UpgradeNeedsCopy => "upgrade_needs_copy",
             StoreFailure::UnknownModel => "unknown_model",
             StoreFailure::InvalidModel => "invalid_model",
+            StoreFailure::AutoCheckpointFailed => "auto_checkpoint_failed",
         }
     }
 
@@ -630,6 +636,12 @@ impl StoreFailure {
                  --embedder name=<model_dir>`) and add it again (CLI: graphersal embed-model \
                  import <model_dir> --into <dir>)."
             }
+            StoreFailure::AutoCheckpointFailed => {
+                "The automatic checkpoint failed; the commits are safe in the journal. It is \
+                 tried again at the next commit while it is due (Store::run_due_checkpoint); a \
+                 manual checkpoint reports the failure with its own help (Store::checkpoint; \
+                 CLI: graphersal store checkpoint <dir>)."
+            }
         }
     }
 }
@@ -643,6 +655,147 @@ impl std::fmt::Display for StoreFailure {
 impl PersistError {
     pub(crate) fn io(context: &'static str, source: std::io::Error) -> Self {
         PersistError::Io { context, source }
+    }
+
+    /// A copy of this error, for a failure that is both returned and kept
+    /// ([`Store::last_auto_checkpoint_error`](super::Store::last_auto_checkpoint_error) after
+    /// [`Store::run_due_checkpoint`](super::Store::run_due_checkpoint)): exact, except that an
+    /// I/O source keeps its kind and text only, and a graph error becomes
+    /// [`StoreFailure::AutoCheckpointFailed`] with its text (a graph error cannot be copied).
+    pub(crate) fn duplicate(&self) -> PersistError {
+        match self {
+            PersistError::Io { context, source } => PersistError::Io {
+                context,
+                source: std::io::Error::new(source.kind(), source.to_string()),
+            },
+            PersistError::Corrupt {
+                location,
+                offset,
+                reason,
+            } => PersistError::Corrupt {
+                location: location.clone(),
+                offset: *offset,
+                reason: reason.clone(),
+            },
+            PersistError::UnsupportedVersion {
+                location,
+                found,
+                supported,
+            } => PersistError::UnsupportedVersion {
+                location: location.clone(),
+                found: *found,
+                supported: *supported,
+            },
+            PersistError::UnsupportedContent {
+                location,
+                offset,
+                reason,
+            } => PersistError::UnsupportedContent {
+                location: location.clone(),
+                offset: *offset,
+                reason: reason.clone(),
+            },
+            PersistError::MemoryBudget { needed, limit } => PersistError::MemoryBudget {
+                needed: *needed,
+                limit: *limit,
+            },
+            PersistError::LineageMismatch {
+                journal,
+                expected,
+                found,
+            } => PersistError::LineageMismatch {
+                journal: *journal,
+                expected: expected.clone(),
+                found: found.clone(),
+            },
+            PersistError::Gap {
+                journal,
+                offset,
+                expected,
+                found,
+            } => PersistError::Gap {
+                journal: *journal,
+                offset: *offset,
+                expected: *expected,
+                found: *found,
+            },
+            PersistError::TargetNotReached { target, reason } => PersistError::TargetNotReached {
+                target: target.clone(),
+                reason: reason.clone(),
+            },
+            PersistError::Encode { what, reason } => PersistError::Encode {
+                what: what.clone(),
+                reason: reason.clone(),
+            },
+            PersistError::CommitTooLarge {
+                commit_seq,
+                bytes,
+                limit,
+            } => PersistError::CommitTooLarge {
+                commit_seq: *commit_seq,
+                bytes: *bytes,
+                limit: *limit,
+            },
+            PersistError::Poisoned { reason } => PersistError::Poisoned {
+                reason: reason.clone(),
+            },
+            PersistError::Locked { path } => PersistError::Locked { path: path.clone() },
+            PersistError::NotAStore { path, reason } => PersistError::NotAStore {
+                path: path.clone(),
+                reason: reason.clone(),
+            },
+            PersistError::DirectoryNotEmpty { path } => {
+                PersistError::DirectoryNotEmpty { path: path.clone() }
+            }
+            PersistError::OlderFormat {
+                path,
+                found,
+                supported,
+            } => PersistError::OlderFormat {
+                path: path.clone(),
+                found: *found,
+                supported: *supported,
+            },
+            PersistError::Store {
+                operation,
+                cause,
+                reason,
+            } => PersistError::Store {
+                operation,
+                cause: *cause,
+                reason: reason.clone(),
+            },
+            PersistError::Maintenance { path, damage } => PersistError::Maintenance {
+                path: path.clone(),
+                damage: *damage,
+            },
+            PersistError::ReadOnly { path, reason } => PersistError::ReadOnly {
+                path: path.clone(),
+                reason: reason.clone(),
+            },
+            PersistError::IsBackup { path, commit_seq } => PersistError::IsBackup {
+                path: path.clone(),
+                commit_seq: *commit_seq,
+            },
+            PersistError::BackupRefused { reason } => PersistError::BackupRefused {
+                reason: reason.clone(),
+            },
+            PersistError::BackupDamaged(damage) => PersistError::BackupDamaged(damage.clone()),
+            PersistError::DamageFound {
+                path,
+                found_by,
+                problems,
+            } => PersistError::DamageFound {
+                path: path.clone(),
+                found_by: found_by.clone(),
+                problems: *problems,
+            },
+            PersistError::Graph(err) => PersistError::store(
+                "write the automatic checkpoint",
+                StoreFailure::AutoCheckpointFailed,
+                err.to_string(),
+            ),
+        }
     }
 
     pub(crate) fn corrupt(

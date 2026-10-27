@@ -324,7 +324,7 @@ fn an_automatic_checkpoint_runs_when_the_wal_grows_past_the_limit() {
         assert!(Instant::now() < deadline, "no automatic checkpoint");
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(store.last_auto_checkpoint_error().is_none());
+    assert!(store.last_auto_checkpoint_error().unwrap().is_none());
     let before = graph_dump(&store);
     store.close().unwrap();
     let store = Store::open(dir.path(), StoreOptions::new()).unwrap();

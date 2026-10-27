@@ -198,7 +198,7 @@ fn a_forwarding_store_creates_commits_reopens_and_checkpoints_on_every_backend()
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(store.last_auto_checkpoint_error().is_none());
+        assert!(store.last_auto_checkpoint_error().unwrap().is_none());
         let before = state(&*store.graph().read());
         store.close().unwrap();
         let store = open(&dir);
@@ -340,7 +340,7 @@ fn a_critical_unknown_definition_opens_a_forwarding_store_read_only() {
             .close()
             .unwrap();
         let store = open(&dir);
-        let reason = store.read_only_reason().expect("read-only");
+        let reason = store.read_only_reason().unwrap().expect("read-only");
         assert!(reason.contains("critical"), "{backend:?}: {reason}");
         assert_eq!(store.graph().read().definitions().count(), 1);
         let refused = store.graph().write().transaction(|g| {

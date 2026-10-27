@@ -337,7 +337,7 @@ fn definitions_of_a_newer_version_survive_every_store_path() {
 
     // From the WAL.
     let store = Store::open(&main, options()).unwrap();
-    assert_eq!(store.read_only_reason(), None);
+    assert_eq!(store.read_only_reason().unwrap(), None);
     assert!(store.maintenance().is_none());
     assert_eq!(catalog_of(&store), expected);
     assert!(
@@ -418,7 +418,7 @@ fn a_schema_of_a_newer_version_in_the_wal_opens_read_only_never_damage() {
     let graph_file = dir.read("GRAPH", u64::MAX).unwrap();
 
     let store = Store::open(&main, options()).unwrap();
-    let reason = store.read_only_reason().expect("read-only");
+    let reason = store.read_only_reason().unwrap().expect("read-only");
     assert!(reason.contains("newer Graphersal"), "{reason}");
     assert!(reason.contains("xFuture"), "{reason}");
     assert!(store.maintenance().is_none());

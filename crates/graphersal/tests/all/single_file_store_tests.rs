@@ -233,7 +233,7 @@ fn a_gstore_path_is_a_single_file_and_the_file_is_relocatable() {
     assert!(store.dir().local_path() == Some(path.as_path()));
     store.close().unwrap();
     assert!(path.is_file(), "one file, not a directory");
-    assert!(SingleFileDir::is_single_file(&path));
+    assert!(SingleFileDir::is_single_file(&path).unwrap());
     assert_eq!(
         fs::read_dir(&temp.0).unwrap().count(),
         1,
@@ -1139,7 +1139,10 @@ fn back_to_back_large_commits_are_all_checkpointed_automatically_on_every_backen
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(store.last_auto_checkpoint_error(), None, "{backend:?}");
+        assert!(
+            store.last_auto_checkpoint_error().unwrap().is_none(),
+            "{backend:?}"
+        );
         store.close().unwrap();
         let reopened = Store::open(&dir, options()).unwrap();
         assert_eq!(graph_names(&reopened).len(), 12, "{backend:?}");

@@ -160,6 +160,30 @@ impl<S: PersistentStorage> Store<S> {
     }
 }
 
+/// What [`Store::user_jobs`] found in the catalog: the jobs to schedule and the job
+/// definitions this instance does not schedule, each with the reason (front ends list them;
+/// none is dropped silently).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct UserJobs {
+    /// The jobs for the host's [`Scheduler`](crate::jobs::Scheduler), by name.
+    pub jobs: Vec<Job>,
+    /// The job definitions that are not scheduled, by name.
+    pub not_scheduled: Vec<NotScheduledJob>,
+}
+
+/// A job definition [`Store::user_jobs`] does not schedule, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NotScheduledJob {
+    /// The job's name.
+    pub name: String,
+    /// Why it is not scheduled: an action or `run_on` form this version does not know, `run_on`
+    /// `replica` on a single instance, a schedule that does not parse (a definition written by a
+    /// newer version, or stored without the DSL's checks), or a definition kept opaque.
+    pub reason: String,
+}
+
 impl<S: PersistentStorage + Default> Store<S> {
     /// The scheduled jobs of users in this store's catalog (kind `job`, book page "Scheduled
     /// Jobs"), for the host's [`Scheduler`](crate::jobs::Scheduler)
@@ -167,32 +191,65 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// changed): a `query` job calls its saved query as one unit carrying `{job: <name>}` in its
     /// commit metadata, under an authorizer limited to the job's stored effects (feature
     /// `script`); `checkpoint` writes a checkpoint, `backup` backs the store up into its directory
-    /// (not on wasm32). A disabled job is listed switched off; a job this version does not run
-    /// (an unknown action, `run_on` `replica` on a single instance) is left out.
-    pub fn user_jobs(&self) -> Vec<Job> {
+    /// (not on wasm32). A disabled job is listed switched off. A job this instance does not run
+    /// (an unknown action, `run_on` `replica` on a single instance, a schedule that does not
+    /// parse, a definition kept opaque) is in [`UserJobs::not_scheduled`] with its reason.
+    ///
+    /// Fails when the catalog cannot be read: [`PersistError::Graph`] holding
+    /// [`GraphError::GraphViewHeld`](crate::error::GraphError::GraphViewHeld) on a thread that
+    /// holds a unit of the graph beside another view of it.
+    pub fn user_jobs(&self) -> Result<UserJobs, PersistError> {
         let definitions: Vec<crate::graph::definition::Definition> = self
             .graph
-            .read()
+            .read_checked()
+            .map_err(PersistError::Graph)?
             .definitions()
             .filter(|d| d.kind() == crate::graph::definition::DefinitionKind::JOB)
             .cloned()
             .collect();
-        definitions
-            .iter()
-            .filter_map(|definition| self.user_job(definition.name(), definition.as_job()?))
-            .collect()
+        let mut found = UserJobs {
+            jobs: Vec::new(),
+            not_scheduled: Vec::new(),
+        };
+        for definition in &definitions {
+            let built = match definition.as_job() {
+                Some(job) => self.user_job(definition.name(), job),
+                None => Err("this version could not decode its definition (kept opaque)".into()),
+            };
+            match built {
+                Ok(job) => found.jobs.push(job),
+                Err(reason) => found.not_scheduled.push(NotScheduledJob {
+                    name: definition.name().to_string(),
+                    reason,
+                }),
+            }
+        }
+        Ok(found)
     }
 
-    fn user_job(&self, name: &str, job: &crate::graph::jobs::JobDefinition) -> Option<Job> {
+    /// The job `name` of `job`, or why this instance does not schedule it.
+    fn user_job(&self, name: &str, job: &crate::graph::jobs::JobDefinition) -> Result<Job, String> {
         use crate::graph::jobs::{JobTask, RunOn};
         if let Some(reason) = job.unserved_reason() {
-            tracing::info!("the job '{name}' is not scheduled: {reason}");
-            return None;
+            return Err(reason);
         }
-        if matches!(job.run_on(), RunOn::Replica | RunOn::Unknown(_)) {
-            return None;
+        match job.run_on() {
+            RunOn::Replica => {
+                return Err(
+                    "it runs on a replica (run_on \"replica\"), and this store is a \
+                            single instance"
+                        .into(),
+                );
+            }
+            RunOn::Unknown(form) => {
+                return Err(format!("its run_on {form:?} is not known to this version"));
+            }
+            _ => {}
         }
-        let schedule = job.schedule().parse().ok()?;
+        let schedule = job
+            .schedule()
+            .parse()
+            .map_err(|err| format!("its schedule {:?} does not parse: {err}", job.schedule()))?;
         let job_name = name.to_string();
         let action: crate::graph::jobs::JobAction = match job.action() {
             JobTask::Query { name: query, args } => {
@@ -220,13 +277,15 @@ impl<S: PersistentStorage + Default> Store<S> {
                 let core = Arc::clone(&self.core);
                 Box::new(move |_| backup_to(&core, &target))
             }
-            JobTask::Unknown(_) => return None,
+            JobTask::Unknown(_) => {
+                return Err("its action is not known to this version".into());
+            }
         };
         let mut built = Job::new(name, JobKind::User, schedule, action).with_limits(job.limits());
         if !job.enabled() {
             built = built.disabled();
         }
-        Some(built)
+        Ok(built)
     }
 
     #[cfg(feature = "script")]

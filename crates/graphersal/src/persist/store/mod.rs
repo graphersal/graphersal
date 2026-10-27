@@ -75,6 +75,7 @@ pub use models::{
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
 pub use upgrade::UpgradeReport;
 pub(crate) use upgrade::upgradable_from;
+pub use workload::{NotScheduledJob, UserJobs};
 
 pub(crate) use files::STORE_VERSION;
 use files::{
@@ -423,7 +424,7 @@ struct Shared {
     /// Serializes checkpoint, prune and close.
     maintenance: Mutex<()>,
     shutdown: AtomicBool,
-    last_auto_error: Mutex<Option<String>>,
+    last_auto_error: Mutex<Option<Arc<PersistError>>>,
     /// Why the store is read-only (format spec 16 rule 3: something critical this version does
     /// not know); `None`: writable (unless in maintenance mode, a backup, or closed).
     read_only: Mutex<Option<String>>,
@@ -613,7 +614,7 @@ impl Store {
         let from = DirPath::root(from.into_store_dir());
         let to = DirPath::root(to.into_store_dir());
         files::refuse_other_version(&from)?;
-        if !Self::is_store(from.store_dir()) {
+        if !Self::is_store(from.store_dir())? {
             return Err(PersistError::NotAStore {
                 path: from.display(),
                 reason: "it has no GRAPH file".into(),
@@ -714,7 +715,7 @@ impl Store {
     ) -> Result<CheckpointReport, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         files::refuse_other_version(&dir)?;
-        if !Self::is_store(dir.store_dir()) {
+        if !Self::is_store(dir.store_dir())? {
             return Err(PersistError::NotAStore {
                 path: dir.display(),
                 reason: "it has no GRAPH file".into(),
@@ -1167,7 +1168,10 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// a critical unknown segment kind): commits, marks, checkpoints, prune and rollback are
     /// refused with [`PersistError::ReadOnly`]; reading, [`Store::fork`], [`Store::backup`] and
     /// [`Store::verify`] work and keep it. `None`: not for that reason.
-    pub fn read_only_reason(&self) -> Option<String> {
+    ///
+    /// Fails with [`StoreFailure::LockPoisoned`] when a thread panicked while it held the
+    /// store's lock of that reason (the answer would be a guess).
+    pub fn read_only_reason(&self) -> Result<Option<String>, PersistError> {
         self.core.read_only_reason()
     }
 
@@ -1230,7 +1234,10 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// the last snapshot is still at or above [`StoreOptions::with_checkpoint_after_bytes`]
     /// (at most one attempt per commit, never in a loop of its own; on wasm32 at the next
     /// [`Store::run_due_checkpoint`]). A manual [`Store::checkpoint`] reports its own error.
-    pub fn last_auto_checkpoint_error(&self) -> Option<String> {
+    /// The error is the checkpoint's own [`PersistError`] (shared: it stays readable until the
+    /// next automatic checkpoint). Fails with [`StoreFailure::LockPoisoned`] when a thread
+    /// panicked while it held the lock of that error.
+    pub fn last_auto_checkpoint_error(&self) -> Result<Option<Arc<PersistError>>, PersistError> {
         self.core.last_auto_checkpoint_error()
     }
 
@@ -1415,14 +1422,17 @@ impl<S: PersistentStorage + Default> Store<S> {
     }
 
     /// What the store does when damage is found on disk while it is open (format spec 5.2
-    /// bit 5), fixed when the store was created ([`StoreOptions::with_damage_policy`]).
-    pub fn damage_policy(&self) -> DamagePolicy {
+    /// bit 5), fixed when the store was created ([`StoreOptions::with_damage_policy`]). Fails
+    /// with [`StoreFailure::LockPoisoned`] when a thread panicked while it held the lock of the
+    /// store's `GRAPH` file state.
+    pub fn damage_policy(&self) -> Result<DamagePolicy, PersistError> {
         self.core.damage_policy()
     }
 
     /// The store's identity ([`StoreInfo::store_id`], format spec 5.1), fixed when the store
-    /// was created; a fork, repair or conversion gets a new one.
-    pub fn store_id(&self) -> u128 {
+    /// was created; a fork, repair or conversion gets a new one. Fails like
+    /// [`Self::damage_policy`].
+    pub fn store_id(&self) -> Result<u128, PersistError> {
         self.core.store_id()
     }
 
@@ -1432,8 +1442,9 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// With the damage policy `maintenance` the first finding made the store read-only
     /// ([`PersistError::DamageFound`]); save its graph with [`Store::backup_from_memory`] and
     /// repair the store ([`Store::repair_dir`]). Damage found when the store was OPENED is
-    /// [`Store::maintenance`] instead.
-    pub fn damage_found(&self) -> Vec<FoundDamage> {
+    /// [`Store::maintenance`] instead. Fails with [`StoreFailure::LockPoisoned`] when a thread
+    /// panicked while it held the lock of that list.
+    pub fn damage_found(&self) -> Result<Vec<FoundDamage>, PersistError> {
         self.core.damage_found()
     }
 
@@ -1449,7 +1460,9 @@ impl<S: PersistentStorage + Default> Store<S> {
     /// commits, marks, checkpoints, prune, rollback and restore are refused
     /// ([`StoreFailure::Stopped`]) and closing it writes no `GRAPH`. Close it and open it again:
     /// the open completes the change from its `INTENT` (or undoes it). `None`: not stopped.
-    pub fn stopped_reason(&self) -> Option<String> {
+    /// Fails with [`StoreFailure::LockPoisoned`] when a thread panicked while it held the lock
+    /// of that reason.
+    pub fn stopped_reason(&self) -> Result<Option<String>, PersistError> {
         self.core.stopped_reason()
     }
 
@@ -2028,17 +2041,18 @@ impl StoreCore {
         })
     }
 
-    pub fn read_only_reason(&self) -> Option<String> {
-        self.shared.read_only.lock().ok().and_then(|r| r.clone())
+    pub fn read_only_reason(&self) -> Result<Option<String>, PersistError> {
+        Ok(poisoned_or(&self.shared.read_only, "read why the store is read-only")?.clone())
     }
 
-    pub fn stopped_reason(&self) -> Option<String> {
-        self.shared.stopped.lock().ok().and_then(|r| r.clone())
+    pub fn stopped_reason(&self) -> Result<Option<String>, PersistError> {
+        Ok(poisoned_or(&self.shared.stopped, "read why the store stopped")?.clone())
     }
 
-    /// Whether the store may write nothing to its files: read-only (format spec 16) or stopped.
+    /// Whether the store may write nothing to its files: read-only (format spec 16) or stopped;
+    /// a poisoned lock of either reason writes nothing as well.
     fn writes_nothing(&self) -> bool {
-        self.read_only_reason().is_some() || self.stopped_reason().is_some()
+        !matches!(self.read_only_reason(), Ok(None)) || !matches!(self.stopped_reason(), Ok(None))
     }
 
     fn open_in_maintenance(
@@ -2157,6 +2171,12 @@ impl StoreCore {
                 .with_name("repaired"),
             &options,
         )?;
+        // The marks of a damaged store are a report only: a failure to list them is reported,
+        // it does not fail the repair.
+        let (marks_not_carried, marks_unreadable) = match marks_up_to(dir, commit_seq) {
+            Ok(marks) => (marks, None),
+            Err(err) => (Vec::new(), Some(err.to_string())),
+        };
         // The intact models are carried; a damaged one is reported (format spec 4.5).
         let (models, models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
         let verified = maintenance::verify(new_dir, None)?;
@@ -2181,9 +2201,10 @@ impl StoreCore {
             lost_ranges: salvage.lost_ranges,
             lost_elements: salvage.lost_elements,
             diverged: salvage.diverged,
-            marks_not_carried: marks_up_to(dir, commit_seq),
+            marks_not_carried,
             models,
             models_not_carried,
+            marks_unreadable,
         })
     }
 
@@ -2288,12 +2309,12 @@ impl StoreCore {
         self.shared.durable.position()
     }
 
-    pub fn last_auto_checkpoint_error(&self) -> Option<String> {
-        self.shared
-            .last_auto_error
-            .lock()
-            .ok()
-            .and_then(|e| e.clone())
+    pub fn last_auto_checkpoint_error(&self) -> Result<Option<Arc<PersistError>>, PersistError> {
+        Ok(poisoned_or(
+            &self.shared.last_auto_error,
+            "read the last automatic checkpoint error",
+        )?
+        .clone())
     }
 
     pub fn checkpoint(&self, name: Option<&str>) -> Result<SnapshotInfo, PersistError> {
@@ -2368,9 +2389,9 @@ impl StoreCore {
             count_by_kind(self.shared.graph.read().definition_kinds().into_iter());
         info.definitions = info.definitions_by_kind.values().sum();
         info.schema_models = self.shared.graph.read().schema_models();
-        info.damage_found = self.damage_found();
+        info.damage_found = self.damage_found()?;
         info.frozen_by_damage = self.is_frozen_by_damage();
-        info.stopped = self.stopped_reason();
+        info.stopped = self.stopped_reason()?;
         Ok(info)
     }
 
@@ -2407,6 +2428,8 @@ impl StoreCore {
             .with_damage_policy(parent.damage_policy);
         let recovered = Self::load_at(dir, target, &options.read)?;
         let branched_at = recovered.graph.last_commit_seq();
+        // Listed before anything is written: a fork that cannot report them writes nothing.
+        let marks_not_carried = marks_up_to(dir, branched_at)?;
         let parent_id = recovered.graph.graph_id();
         let graph = recovered.graph.with_graph_id(crate::value::uuid::new_v7());
         let mut lineage = vec![LineageEntry {
@@ -2433,7 +2456,7 @@ impl StoreCore {
         })?;
         Ok(ForkReport {
             snapshot: read_listing(&path)?,
-            marks_not_carried: marks_up_to(dir, branched_at),
+            marks_not_carried,
             models,
         })
     }
@@ -2519,28 +2542,16 @@ impl StoreCore {
         self.maintenance.is_none() && self.backup.is_none()
     }
 
-    pub fn damage_policy(&self) -> DamagePolicy {
-        self.shared
-            .graph_file
-            .lock()
-            .map(|file| file.damage_policy)
-            .unwrap_or_default()
+    pub fn damage_policy(&self) -> Result<DamagePolicy, PersistError> {
+        Ok(poisoned_or(&self.shared.graph_file, "read the damage policy")?.damage_policy)
     }
 
-    pub fn store_id(&self) -> u128 {
-        self.shared
-            .graph_file
-            .lock()
-            .map(|file| file.store_id)
-            .unwrap_or_default()
+    pub fn store_id(&self) -> Result<u128, PersistError> {
+        Ok(poisoned_or(&self.shared.graph_file, "read the store id")?.store_id)
     }
 
-    pub fn damage_found(&self) -> Vec<FoundDamage> {
-        self.shared
-            .found
-            .lock()
-            .map(|found| found.clone())
-            .unwrap_or_default()
+    pub fn damage_found(&self) -> Result<Vec<FoundDamage>, PersistError> {
+        Ok(poisoned_or(&self.shared.found, "read the damage found")?.clone())
     }
 
     pub fn is_frozen_by_damage(&self) -> bool {
@@ -2591,7 +2602,7 @@ impl StoreCore {
                 self.shared.dir, self.shared.dir
             )));
         }
-        if self.damage_found().is_empty() {
+        if self.damage_found()?.is_empty() {
             return Err(refused(format!(
                 "a backup from memory is only for a store whose files are damaged, and no \
                  damage was found in {} while it is open: back up normally (Store::backup; it \
@@ -2872,13 +2883,13 @@ impl StoreCore {
                 damage: report.damage.len(),
             });
         }
-        if let Some(reason) = self.read_only_reason() {
+        if let Some(reason) = self.read_only_reason()? {
             return Err(PersistError::ReadOnly {
                 path: self.shared.dir.display(),
                 reason,
             });
         }
-        if let Some(reason) = self.stopped_reason() {
+        if let Some(reason) = self.stopped_reason()? {
             return Err(PersistError::store(
                 operation,
                 StoreFailure::Stopped,
@@ -3049,9 +3060,15 @@ impl StoreCore {
             .checkpoint(None, false)
             .map(|report| report.snapshot)
             .inspect_err(|err| self.shared.report_checkpoint_damage(err));
-        if let Ok(mut last) = self.shared.last_auto_error.lock() {
-            *last = result.as_ref().err().map(ToString::to_string);
-        }
+        let failed = match &result {
+            Ok(_) => None,
+            Err(err) => Some(Arc::new(err.duplicate())),
+        };
+        *self
+            .shared
+            .last_auto_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = failed;
         result.map(Some)
     }
 
@@ -3216,11 +3233,13 @@ impl Shared {
         if problems.is_empty() {
             return;
         }
+        // A poisoned lock still holds the file as last written: the policy is fixed at
+        // creation, so reading it through the poison is exact.
         let policy = self
             .graph_file
             .lock()
-            .map(|file| file.damage_policy)
-            .unwrap_or_default();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .damage_policy;
         tracing::warn!(
             "{found_by} found damage in the store {} ({} problem(s), first: {}: {}); damage \
              policy {policy}: {}",
@@ -3464,9 +3483,10 @@ fn checkpoint_loop(shared: &Shared) {
                 shared.report_checkpoint_damage(err);
             }
             again = result.as_ref().is_ok_and(|report| report.written) && is_due(shared);
-            if let Ok(mut last) = shared.last_auto_error.lock() {
-                *last = result.err().map(|err| err.to_string());
-            }
+            *shared
+                .last_auto_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = result.err().map(Arc::new);
         }
     }
 }
@@ -4137,11 +4157,28 @@ fn list_marks(dir: &DirPath) -> Result<Vec<Mark>, PersistError> {
 }
 
 /// The marks a target can reach at or before `up_to`, for the reports of a fork or repair that
-/// does not carry them (best effort: a damaged store lists what it can read).
-fn marks_up_to(dir: &DirPath, up_to: u64) -> Vec<Mark> {
-    let mut marks = list_marks(dir).unwrap_or_default();
+/// does not carry them. A fork computes them before it writes anything and fails when they
+/// cannot be read; a repair (of a damaged store) reports the failure in
+/// [`RepairReport::marks_unreadable`] instead.
+fn marks_up_to(dir: &DirPath, up_to: u64) -> Result<Vec<Mark>, PersistError> {
+    let mut marks = list_marks(dir)?;
     marks.retain(|mark| mark.commit_seq() <= up_to);
-    marks
+    Ok(marks)
+}
+
+/// The guard of `lock`, or [`StoreFailure::LockPoisoned`] naming `operation` when a thread
+/// panicked while it held it (what it guards may be half-changed: never answered as a value).
+fn poisoned_or<'a, T>(
+    lock: &'a Mutex<T>,
+    operation: &'static str,
+) -> Result<std::sync::MutexGuard<'a, T>, PersistError> {
+    lock.lock().map_err(|_| {
+        PersistError::store(
+            operation,
+            StoreFailure::LockPoisoned,
+            "a store lock is poisoned: a thread panicked while it held it",
+        )
+    })
 }
 
 /// Every mark of the `marks` file (a WAL scan when it is missing), reachable or not.
@@ -4176,7 +4213,7 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         wal_segments: segments.len(),
         wal_bytes,
         clean: file.clean,
-        attic: rollback::attic_list(dir).unwrap_or_default(),
+        attic: rollback::attic_list(dir)?,
         snapshot_bytes: rollback::tree_bytes(&dir.join(SNAPSHOTS_DIR)),
         backup: file.backup,
         space: dir.store_dir().space_usage(),
@@ -4187,7 +4224,7 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         damage_found: Vec::new(),
         frozen_by_damage: false,
         stopped: None,
-        models: models::list(dir).unwrap_or_default(),
+        models: models::list(dir)?,
         schema_models: Vec::new(),
     })
 }
@@ -4325,7 +4362,7 @@ impl Store {
     /// The writer lock of a closed store that is no backup (a model add or removal).
     fn closed_store_lock(dir: &DirPath) -> Result<DirLock, PersistError> {
         files::refuse_other_version(dir)?;
-        if !Self::is_store(dir.store_dir()) {
+        if !Self::is_store(dir.store_dir())? {
             return Err(PersistError::NotAStore {
                 path: dir.display(),
                 reason: "it has no GRAPH file".into(),
@@ -4357,16 +4394,23 @@ impl Store {
     }
 
     /// Whether `dir` holds a store (a `GRAPH` or `GRAPH.copy` file, or a single-file store of a
-    /// newer container version, which every operation then refuses as newer).
-    pub fn is_store(dir: impl IntoStoreDir) -> bool {
+    /// newer container version, which every operation then refuses as newer). A missing
+    /// directory is `Ok(false)`; a directory or file that cannot be read is
+    /// [`PersistError::Io`] (never "not a store").
+    pub fn is_store(dir: impl IntoStoreDir) -> Result<bool, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         // A single-file store of a newer container version is a store, which this build does
         // not read: the operation refuses it as newer (format spec 15), never "not a store".
         if files::refuse_newer_container(&dir).is_err() {
-            return true;
+            return Ok(true);
         }
-        dir.is_dir()
-            && (dir.join(files::GRAPH_FILE).is_file() || dir.join(files::GRAPH_COPY).is_file())
+        let kind = |at: &DirPath| {
+            at.try_kind()
+                .map_err(|err| PersistError::io("read a store directory", err))
+        };
+        Ok(kind(&dir)? == Some(files::EntryKind::Dir)
+            && (kind(&dir.join(files::GRAPH_FILE))? == Some(files::EntryKind::File)
+                || kind(&dir.join(files::GRAPH_COPY))? == Some(files::EntryKind::File)))
     }
 }
 

@@ -30,31 +30,37 @@ fn identity_and_downcast() {
     assert!(any.storage_type_name().ends_with("TraversalGraph"));
     let again = any.clone().into_any_graph();
     assert!(Arc::ptr_eq(&again, &any));
-    assert_eq!(any.capabilities(), graph.read().capabilities());
+    assert_eq!(any.capabilities().unwrap(), graph.read().capabilities());
 }
 
 #[test]
 fn statistics_memory_and_commit_position() {
     let (graph, any) = modern();
-    assert_eq!(any.statistics().as_ref(), graph.read().statistics());
-    assert_eq!(any.memory_usage(), graph.read().memory_usage());
-    let before = any.last_commit_seq();
+    assert_eq!(
+        any.statistics().unwrap().as_ref(),
+        graph.read().statistics()
+    );
+    assert_eq!(any.memory_usage().unwrap(), graph.read().memory_usage());
+    let before = any.last_commit_seq().unwrap();
     graph
         .write()
         .traversal_mut()
         .add_v("person")
         .to_list()
         .unwrap();
-    assert_eq!(any.last_commit_seq(), before + 1);
-    assert_eq!(any.last_commit_seq(), graph.read().last_commit_seq());
-    assert_eq!(any.statistics().unwrap().vertex_count(), 7);
+    assert_eq!(any.last_commit_seq().unwrap(), before + 1);
+    assert_eq!(
+        any.last_commit_seq().unwrap(),
+        graph.read().last_commit_seq()
+    );
+    assert_eq!(any.statistics().unwrap().unwrap().vertex_count(), 7);
 }
 
 #[test]
 fn schema_methods_match_the_traversal_source() {
     let (graph, any) = modern();
     let schema = GraphSchema::from_json(SCHEMA).unwrap();
-    assert_eq!(any.get_schema(), None);
+    assert_eq!(any.get_schema().unwrap(), None);
     assert_eq!(
         any.infer_schema().unwrap(),
         graph.read().traversal().infer_schema().unwrap()
@@ -68,8 +74,8 @@ fn schema_methods_match_the_traversal_source() {
         graph.read().traversal().diff_schema(&schema).unwrap()
     );
     any.set_schema(schema.clone()).unwrap();
-    assert_eq!(any.get_schema(), Some(schema.clone()));
-    assert_eq!(any.get_schema(), graph.read().get_schema());
+    assert_eq!(any.get_schema().unwrap(), Some(schema.clone()));
+    assert_eq!(any.get_schema().unwrap(), graph.read().get_schema());
     assert!(any.diff_schema(&schema).unwrap().changes.is_empty());
 
     let patch =
@@ -85,16 +91,16 @@ fn schema_methods_match_the_traversal_source() {
             .unwrap()
     );
     let patched = any.patch_schema(&patch).unwrap();
-    assert_eq!(any.get_schema(), Some(patched));
+    assert_eq!(any.get_schema().unwrap(), Some(patched));
 
     // A schema the data violates fails and changes nothing.
     let strict = GraphSchema::from_json(
         r#"{"mode": "closed", "vertices": {"person": {"schema": {"type": "object"}}}}"#,
     )
     .unwrap();
-    let stored = any.get_schema();
+    let stored = any.get_schema().unwrap();
     assert!(any.set_schema(strict).is_err());
-    assert_eq!(any.get_schema(), stored);
+    assert_eq!(any.get_schema().unwrap(), stored);
 }
 
 fn query(name: &str) -> Definition {
@@ -107,12 +113,16 @@ fn query(name: &str) -> Definition {
 #[test]
 fn definitions_are_stored_in_one_unit() {
     let (graph, any) = modern();
-    let before = any.last_commit_seq();
+    let before = any.last_commit_seq().unwrap();
     any.set_definitions(vec![query("first"), query("second")])
         .unwrap();
-    assert_eq!(any.last_commit_seq(), before + 1, "one unit, one commit");
     assert_eq!(
-        any.definitions(Some(DefinitionKind::QUERY)),
+        any.last_commit_seq().unwrap(),
+        before + 1,
+        "one unit, one commit"
+    );
+    assert_eq!(
+        any.definitions(Some(DefinitionKind::QUERY)).unwrap(),
         graph
             .read()
             .traversal()
@@ -121,12 +131,13 @@ fn definitions_are_stored_in_one_unit() {
     );
     let names: Vec<_> = any
         .definitions(None)
+        .unwrap()
         .iter()
         .map(|definition| definition.name().to_string())
         .collect();
     assert_eq!(names, ["first", "second"]);
     assert_eq!(
-        any.definition(DefinitionKind::QUERY, "first"),
+        any.definition(DefinitionKind::QUERY, "first").unwrap(),
         graph
             .read()
             .traversal()
@@ -135,16 +146,23 @@ fn definitions_are_stored_in_one_unit() {
     );
 
     // A failing definition rolls the whole unit back.
-    let position = any.last_commit_seq();
+    let position = any.last_commit_seq().unwrap();
     let failed = any.set_definitions(vec![query("third"), query("not a name")]);
     assert!(failed.is_err());
-    assert!(any.definition(DefinitionKind::QUERY, "third").is_none());
-    assert_eq!(any.definitions(None).len(), 2);
-    assert_eq!(any.last_commit_seq(), position);
+    assert!(
+        any.definition(DefinitionKind::QUERY, "third")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(any.definitions(None).unwrap().len(), 2);
+    assert_eq!(any.last_commit_seq().unwrap(), position);
 
     any.move_query("first", Some("folder")).unwrap();
     any.describe_query("first", Some("All vertices.")).unwrap();
-    let first = any.definition(DefinitionKind::QUERY, "first").unwrap();
+    let first = any
+        .definition(DefinitionKind::QUERY, "first")
+        .unwrap()
+        .unwrap();
     let first = first.as_query().unwrap();
     assert_eq!(first.folder(), Some("folder"));
     assert_eq!(first.description(), Some("All vertices."));
@@ -158,7 +176,7 @@ fn definitions_are_stored_in_one_unit() {
         !any.remove_definition(DefinitionKind::QUERY, "first")
             .unwrap()
     );
-    assert_eq!(any.definitions(None).len(), 1);
+    assert_eq!(any.definitions(None).unwrap().len(), 1);
 }
 
 fn compression_rule() -> Definition {
@@ -171,9 +189,9 @@ fn compression_on_traversal_graph() {
     let (_graph, any) = modern();
     any.set_definitions(vec![compression_rule()]).unwrap();
     any.recompress("bio").unwrap();
-    assert!(any.compression_stats("bio").is_some());
+    assert!(any.compression_stats("bio").unwrap().is_some());
     assert!(any.recompress("missing").is_err());
-    assert!(any.compression_stats("missing").is_none());
+    assert!(any.compression_stats("missing").unwrap().is_none());
 }
 
 #[test]
@@ -202,7 +220,7 @@ fn graphson_and_graphml_round_trips() {
         .import_graphson(&mut exported.as_slice(), None)
         .unwrap();
     assert!(!report.has_skips());
-    assert_eq!(target.statistics(), any.statistics());
+    assert_eq!(target.statistics().unwrap(), any.statistics().unwrap());
 
     let mut xml = Vec::new();
     any.export_graphml(&mut xml, true).unwrap();
@@ -214,8 +232,12 @@ fn graphson_and_graphml_round_trips() {
     assert_eq!(xml, direct);
     let target: Arc<dyn AnyGraph> = Arc::new(Graph::new(TraversalGraph::new()));
     target.import_graphml(&mut xml.as_slice(), None).unwrap();
-    assert_eq!(target.statistics(), any.statistics());
-    assert_eq!(target.last_commit_seq(), 1, "an import is one unit");
+    assert_eq!(target.statistics().unwrap(), any.statistics().unwrap());
+    assert_eq!(
+        target.last_commit_seq().unwrap(),
+        1,
+        "an import is one unit"
+    );
 }
 
 #[cfg(feature = "persist")]
@@ -381,12 +403,17 @@ fn a_foreign_storage_keeps_compression_rules_but_cannot_apply_them() {
     let any: Arc<dyn AnyGraph> = Arc::new(Graph::new(Foreign::default())).into_any_graph();
     assert!(any.as_any().downcast_ref::<Graph<Foreign>>().is_some());
     assert!(any.storage_type_name().ends_with("Foreign"));
-    assert_eq!(any.statistics(), None);
+    assert_eq!(any.statistics().unwrap(), None);
 
     // Decision 4: the rule is stored like any other definition ...
     any.set_definitions(vec![compression_rule(), query("people")])
         .unwrap();
-    assert_eq!(any.definitions(Some(DefinitionKind::COMPRESSION)).len(), 1);
+    assert_eq!(
+        any.definitions(Some(DefinitionKind::COMPRESSION))
+            .unwrap()
+            .len(),
+        1
+    );
     // ... but nothing applies it.
     let err = any.recompress("bio").unwrap_err();
     assert!(
@@ -396,7 +423,7 @@ fn a_foreign_storage_keeps_compression_rules_but_cannot_apply_them() {
         ),
         "{err:?}"
     );
-    assert!(any.compression_stats("bio").is_none());
+    assert!(any.compression_stats("bio").unwrap().is_none());
     assert!(matches!(
         any.mark("m"),
         Err(GraphError::MarkUnavailable { .. })
@@ -430,12 +457,13 @@ fn a_foreign_storage_keeps_index_definitions_but_does_not_serve_them() {
     // The definition is stored like any other (a catalog file loaded into it) ...
     any.set_definitions(vec![index.clone()]).unwrap();
     assert_eq!(
-        any.definitions(Some(DefinitionKind::PROPERTY_INDEX)),
+        any.definitions(Some(DefinitionKind::PROPERTY_INDEX))
+            .unwrap(),
         vec![index]
     );
     // ... but nothing serves it, and declaring one through the API is refused.
-    assert!(any.property_indexes().is_empty());
-    assert!(!any.capabilities().property_indexes);
+    assert!(any.property_indexes().unwrap().is_empty());
+    assert!(!any.capabilities().unwrap().property_indexes);
     let mut foreign = Foreign::default();
     let err = crate::GraphTraversalSource::new(&mut foreign)
         .create_index(

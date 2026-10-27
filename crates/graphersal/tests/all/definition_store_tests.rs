@@ -154,7 +154,7 @@ fn the_catalog_round_trips_on_every_backend_and_unknown_definitions_stay_byte_id
         let store = Store::open(&main, options()).unwrap();
         assert!(store.open_report().commits_replayed >= 2, "{backend:?}");
         assert_eq!(catalog(&store), expected, "{backend:?}");
-        assert!(store.read_only_reason().is_none());
+        assert!(store.read_only_reason().unwrap().is_none());
         // A checkpoint writes the table; the unknown definition is written back byte for byte.
         store.checkpoint(None).unwrap();
         assert!(
@@ -256,7 +256,7 @@ fn the_catalog_round_trips_on_every_backend_and_unknown_definitions_stay_byte_id
 fn assert_read_only(main: &Arc<dyn StoreDir>, backend: Backend) {
     let graph_file = main.read("GRAPH", u64::MAX).unwrap();
     let store = Store::open(main, options()).unwrap();
-    let reason = store.read_only_reason().expect("read-only");
+    let reason = store.read_only_reason().unwrap().expect("read-only");
     assert!(reason.contains("critical"), "{reason}");
     assert_eq!(
         store.open_report().read_only.as_deref(),
@@ -291,7 +291,7 @@ fn assert_read_only(main: &Arc<dyn StoreDir>, backend: Backend) {
     store.close().unwrap();
     assert_eq!(main.read("GRAPH", u64::MAX).unwrap(), graph_file);
     let forked = Store::open(&fork, options()).unwrap();
-    assert!(forked.read_only_reason().is_some(), "{backend:?}");
+    assert!(forked.read_only_reason().unwrap().is_some(), "{backend:?}");
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn a_host_kind_round_trips_through_every_store_path() {
         // WAL replay.
         let store = Store::open(&main, options()).unwrap();
         assert!(store.open_report().commits_replayed >= 2, "{backend:?}");
-        assert!(store.read_only_reason().is_none(), "{backend:?}");
+        assert!(store.read_only_reason().unwrap().is_none(), "{backend:?}");
         assert_eq!(catalog(&store), expected, "{backend:?}");
         assert_eq!(decoded(&store), payload, "{backend:?}");
         // Checkpoint: the record is written back byte for byte.

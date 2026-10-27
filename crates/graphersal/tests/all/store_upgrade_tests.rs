@@ -764,7 +764,7 @@ fn a_backup_directory_upgrades_and_stays_a_backup_that_takes_increments() {
     Store::restore_backup(&backup).unwrap();
     let live = Store::open(&backup, StoreOptions::new()).unwrap();
     assert!(names(&live.graph().read()).contains(&"katherine".to_string()));
-    assert_eq!(live.store_id(), identity(&original).store_id);
+    assert_eq!(live.store_id().unwrap(), identity(&original).store_id);
 }
 
 #[cfg(feature = "persist-zip")]
@@ -1007,7 +1007,7 @@ fn a_copying_upgrade_survives_a_crash_after_every_write() {
             .entry_kind("upgrade-in-progress.tmp")
             .unwrap()
             .is_some();
-        let complete = Store::is_store(shared(image));
+        let complete = Store::is_store(shared(image)).unwrap();
         if complete {
             assert_store_fixture(&open_holds(&image.deep_copy()), &original);
         }

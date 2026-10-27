@@ -1283,6 +1283,8 @@ pub(super) fn attic_fork(
         .with_chunk_bytes(old.chunk_bytes)
         .with_damage_policy(old.damage_policy);
     let branched_at = graph.last_commit_seq();
+    // Listed before anything is written: a fork that cannot report them writes nothing.
+    let marks_not_carried = attic_marks(dir, &entry, branched_at)?;
     let parent_id = graph.graph_id();
     let graph = graph.with_graph_id(crate::value::uuid::new_v7());
     let mut lineage = vec![LineageEntry {
@@ -1309,19 +1311,19 @@ pub(super) fn attic_fork(
     })?;
     Ok(ForkReport {
         snapshot: super::snapshot_dir::read_listing(&path)?,
-        marks_not_carried: attic_marks(dir, &entry, branched_at),
+        marks_not_carried,
         models,
     })
 }
 
-/// The marks of attic entry `entry`'s history up to `up_to` (best effort, for a report): the
-/// store's marks up to the entry's target, then the marks recorded in the entry's own WAL.
-fn attic_marks(dir: &DirPath, entry: &AtticEntry, up_to: u64) -> Vec<Mark> {
-    let mut marks = super::marks_up_to(dir, entry.target);
+/// The marks of attic entry `entry`'s history up to `up_to` (for a report): the store's marks
+/// up to the entry's target, then the marks recorded in the entry's own WAL. A failure to read
+/// them is the error.
+fn attic_marks(dir: &DirPath, entry: &AtticEntry, up_to: u64) -> Result<Vec<Mark>, PersistError> {
+    let mut marks = super::marks_up_to(dir, entry.target)?;
     let own = entry_path(dir, &entry.id)
         .and_then(|path| entry_wal(&path))
-        .map(|segments| scan_marks(&segments, crate::value::depth::DEFAULT_MAX_VALUE_DEPTH))
-        .unwrap_or_default();
+        .map(|segments| scan_marks(&segments, crate::value::depth::DEFAULT_MAX_VALUE_DEPTH))?;
     for mark in own {
         if mark.commit_seq() <= up_to
             && !marks
@@ -1332,7 +1334,7 @@ fn attic_marks(dir: &DirPath, entry: &AtticEntry, up_to: u64) -> Vec<Mark> {
         }
     }
     marks.sort_by_key(Mark::commit_seq);
-    marks
+    Ok(marks)
 }
 
 /// The base snapshots attic entries need (prune keeps them and the WAL after them).

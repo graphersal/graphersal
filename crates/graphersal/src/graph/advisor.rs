@@ -732,6 +732,11 @@ pub fn compute(
         let estimate_request = estimate_request.with_candidates(
             CompressionCandidate::matching_codecs(&[Codec::Lz4, Codec::Dedup], None, None),
         );
+        // A target no rule could have (an invalid label, path or threshold) gets no advice; it
+        // is not measured, so an estimate error is always a real failure (`Graph::advise`).
+        if estimate_request.validate().is_err() {
+            continue;
+        }
         let Some(measured) = estimate(&estimate_request) else {
             continue;
         };

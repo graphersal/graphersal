@@ -107,6 +107,9 @@ mod tests {
         let graph = wrap(TraversalGraph::tinkerpop_modern());
         let is_forwarding = graph.as_any().downcast_ref::<Graph<Forwarding>>().is_some();
         assert_eq!(is_forwarding, current() == TestStorage::Forwarding);
-        assert_eq!(graph.statistics().map(|s| s.vertex_count()), Some(6));
+        assert_eq!(
+            graph.statistics().unwrap().map(|s| s.vertex_count()),
+            Some(6)
+        );
     }
 }

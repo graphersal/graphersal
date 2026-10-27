@@ -20,7 +20,7 @@
 
 use crate::error::{ScriptError, TraverserError};
 use crate::gql::procedure::Procedures;
-use crate::graph::definition::{DefinitionKind, QueryDefinition};
+use crate::graph::definition::QueryDefinition;
 use crate::graph::{AccessRequestBuf, AnyGraph};
 
 /// A checked GQL body.
@@ -35,14 +35,20 @@ pub(super) struct GqlBody {
     pub(super) calls: Vec<String>,
 }
 
-/// The catalog of a script's graph, where a GQL body's `CALL`s are looked up (stage 3h).
-pub(super) struct GraphCatalog<'a>(pub(super) &'a dyn AnyGraph);
+/// The catalog of a script's graph, where a GQL body's `CALL`s are looked up (stage 3h). A
+/// failing read of the catalog answers "no such query" to the resolver and is kept: the
+/// caller asks [`super::saved_query::StoredQueries::finish`] (or `take_error`) afterwards.
+pub(super) struct GraphCatalog<'a>(pub(super) super::saved_query::StoredQueries<'a>);
+
+impl<'a> GraphCatalog<'a> {
+    pub(super) fn new(graph: &'a dyn AnyGraph) -> Self {
+        Self(super::saved_query::StoredQueries::new(graph))
+    }
+}
 
 impl Procedures for GraphCatalog<'_> {
     fn saved_query(&self, name: &str) -> Option<QueryDefinition> {
-        self.0
-            .definition(DefinitionKind::QUERY, name)
-            .and_then(|d| d.as_query().cloned())
+        self.0.lookup(name)
     }
 }
 

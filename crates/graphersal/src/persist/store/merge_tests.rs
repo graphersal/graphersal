@@ -1381,7 +1381,7 @@ fn a_schema_of_a_newer_version_opens_read_only_never_damage() {
     let graph_file = crate::persist::StoreDir::read(&dir, "GRAPH", u64::MAX).unwrap();
 
     let store = Store::open(&dir, StoreOptions::new()).unwrap();
-    let reason = store.read_only_reason().expect("read-only");
+    let reason = store.read_only_reason().unwrap().expect("read-only");
     assert!(reason.contains("newer Graphersal"), "{reason}");
     assert!(reason.contains("xFuture"), "{reason}");
     assert!(store.maintenance().is_none());

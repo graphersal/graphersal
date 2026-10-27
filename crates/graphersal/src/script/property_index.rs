@@ -161,6 +161,7 @@ impl ScriptGraphTraversalSource {
         let graph = self.index_graph(operation)?;
         let exists = graph
             .definition(DefinitionKind::PROPERTY_INDEX, &name)
+            .map_err(graph_fail)?
             .is_some();
         let action = if exists {
             Action::Update
@@ -168,13 +169,13 @@ impl ScriptGraphTraversalSource {
             Action::Create
         };
         self.require_index(operation, action, Some(&name))?;
-        if !graph.capabilities().property_indexes {
+        if !graph.capabilities().map_err(graph_fail)?.property_indexes {
             return Err(graph_fail(crate::error::GraphError::unsupported(
                 "property indexes",
             )));
         }
         index
-            .check_create(&name, graph.get_schema().as_ref())
+            .check_create(&name, graph.get_schema().map_err(graph_fail)?.as_ref())
             .map_err(|err| graph_fail(crate::error::GraphError::from(err)))?;
         graph
             .set_definitions(vec![definition])
@@ -188,9 +189,10 @@ impl ScriptGraphTraversalSource {
     pub fn indexes(&mut self) -> Result<rhai::Array, Box<EvalAltResult>> {
         self.require_index("indexes", Action::Read, None)?;
         let graph = self.index_graph("indexes")?;
-        let served = graph.property_indexes();
+        let served = graph.property_indexes().map_err(graph_fail)?;
         Ok(graph
             .definitions(Some(DefinitionKind::PROPERTY_INDEX))
+            .map_err(graph_fail)?
             .iter()
             .filter_map(|definition| {
                 let stats = served

@@ -88,6 +88,7 @@ pub use store::{
     OpenReport, PruneReport, RepairReport, RollbackMode, RollbackReport, Store, StoreInfo,
     StoreOptions, StoredModel, UpgradeReport, VerifyProblem, VerifyReport,
 };
+pub use store::{NotScheduledJob, UserJobs};
 
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 pub use store::StoredEmbedders;

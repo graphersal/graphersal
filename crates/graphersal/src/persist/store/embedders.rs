@@ -12,6 +12,7 @@ use super::files::DirPath;
 use super::{Store, models};
 use crate::graph::PersistentStorage;
 use crate::graph::schema::GraphSchema;
+use crate::persist::PersistError;
 use crate::value::vector::embed::identity::parse_identity;
 use crate::value::vector::embed::provenance::schema_models;
 use crate::value::{Embedder, Embedders, Model2Vec, Model2VecOptions};
@@ -39,13 +40,24 @@ impl<S: PersistentStorage> Store<S> {
     /// first `embed_property` with it needs it before the schema names it). An embedder the
     /// host registered for an identity always wins. A model the schema
     /// names but neither `registered` nor the store holds, or one whose files do not load, is a
-    /// note with the command that adds it. Never fails: without a schema or models it returns
-    /// `registered` unchanged.
+    /// note with the command that adds it. Without a schema or models it returns `registered`
+    /// unchanged. Fails when the schema cannot be read ([`PersistError::Graph`] holding
+    /// [`GraphError::GraphViewHeld`](crate::error::GraphError::GraphViewHeld) on a thread that
+    /// holds a unit of the graph beside another view) and when the store's model directory or a
+    /// model's manifest lookup cannot be read ([`PersistError::Io`]); a stored model that does
+    /// not load is a note, not an error.
     ///
     /// The loaded embedders are registered as the model's repository (`minishlab/potion-base-8M`),
     /// else as `model2vec-<12 hex>` (with `-<12 hex>` appended when the name is taken).
-    pub fn stored_embedders(&self, registered: &Embedders) -> StoredEmbedders {
-        let schema = self.graph.read().get_schema();
+    pub fn stored_embedders(
+        &self,
+        registered: &Embedders,
+    ) -> Result<StoredEmbedders, PersistError> {
+        let schema = self
+            .graph
+            .read_checked()
+            .map_err(PersistError::Graph)?
+            .get_schema();
         let location = self.core.shared.dir.display();
         load(
             &self.core.shared.dir,
@@ -62,7 +74,7 @@ pub(crate) fn load(
     schema: Option<&GraphSchema>,
     registered: &Embedders,
     location: &str,
-) -> StoredEmbedders {
+) -> Result<StoredEmbedders, PersistError> {
     let mut found = StoredEmbedders {
         embedders: Arc::new(registered.clone()),
         loaded: Vec::new(),
@@ -74,7 +86,7 @@ pub(crate) fn load(
     // Every model the store keeps is registered too (it was put there to be used, and the first
     // `embed_property` with it needs it before the schema names it); a model the schema names
     // first, under the identity the schema records.
-    let stored_models = models::list(dir).unwrap_or_default();
+    let stored_models = models::list(dir)?;
     let mut used_ids: Vec<String> = Vec::new();
     for (identity, _) in &named {
         if let Some(id) = models::id_of(identity) {
@@ -102,7 +114,7 @@ pub(crate) fn load(
                  pass it with --embedder NAME=<model_dir>"
             ),
         };
-        let stored = models::find(dir, &identity).ok().flatten();
+        let stored = models::find(dir, &identity)?;
         let Some(stored) = stored.filter(|m| m.problem.is_none()) else {
             found.notes.push(format!(
                 "the schema names the embedding model {identity} ({place}), which is neither \
@@ -164,7 +176,7 @@ pub(crate) fn load(
         found.embedders = Arc::new(current);
         found.loaded = added;
     }
-    found
+    Ok(found)
 }
 
 /// Loads the stored model `stored` for the schema's `identity` (its repository and

@@ -36,7 +36,7 @@ fn scheduler(store: &Store) -> Scheduler {
     for job in store.system_jobs() {
         scheduler.add(job).unwrap();
     }
-    scheduler.sync_user_jobs(store.user_jobs());
+    scheduler.sync_user_jobs(store.user_jobs().unwrap().jobs);
     scheduler.tick(T0);
     scheduler
 }
@@ -220,7 +220,7 @@ fn the_scheduler_follows_the_catalog() {
     );
     // Dropped in the catalog: gone after the next sync; the system jobs stay.
     run(&store, r#"g.drop_job("a")"#);
-    scheduler.sync_user_jobs(store.user_jobs());
+    scheduler.sync_user_jobs(store.user_jobs().unwrap().jobs);
     assert_eq!(names(&scheduler).len(), 3);
     assert!(!names(&scheduler).iter().any(|(n, _)| n == "a"));
 }

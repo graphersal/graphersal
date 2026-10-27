@@ -118,7 +118,7 @@ fn a_first_snapshot_interrupted_after_every_write_leaves_no_half_store() {
             }
             Err(_) => assert!(crashed, "an error without a crash after {budget} writes"),
         }
-        if Store::is_store(&image)
+        if Store::is_store(&image).unwrap()
             && let Ok(store) = Store::open(&image, options())
         {
             assert_eq!(dump(&store.graph().read()), expected, "budget {budget}");
@@ -144,7 +144,7 @@ fn a_first_snapshot_interrupted_after_every_write_leaves_no_half_store() {
             break;
         }
         assert!(result.is_err(), "crash after {budget} writes");
-        if Store::is_store(&image)
+        if Store::is_store(&image).unwrap()
             && let Ok(store) = Store::open(&image, options())
         {
             assert_eq!(dump(&store.graph().read()), forked_state);
@@ -224,7 +224,7 @@ fn a_damaged_packed_snapshot_is_refused_and_creates_nothing() {
         let dir = MemDir::new();
         let result = Store::create_from_packed(&dir, damaged.as_slice(), StoreOptions::new());
         match result {
-            Err(_) => assert!(!Store::is_store(&dir), "byte {at}"),
+            Err(_) => assert!(!Store::is_store(&dir).unwrap(), "byte {at}"),
             // A flip the format cannot see (none expected: every byte is under a CRC).
             Ok(_) => panic!("a flip at byte {at} was accepted"),
         }
@@ -236,7 +236,7 @@ fn a_damaged_packed_snapshot_is_refused_and_creates_nothing() {
             Store::create_from_packed(&dir, &packed[..cut], StoreOptions::new()).is_err(),
             "cut at {cut}"
         );
-        assert!(!Store::is_store(&dir));
+        assert!(!Store::is_store(&dir).unwrap());
     }
 }
 

@@ -326,6 +326,7 @@ impl ScriptGraphTraversalSource {
         let graph = self.compression_graph(operation)?;
         let exists = graph
             .definition(DefinitionKind::COMPRESSION, &name)
+            .map_err(graph_fail)?
             .is_some();
         let action = if exists {
             Action::Update
@@ -493,14 +494,19 @@ impl ScriptGraphTraversalSource {
     pub fn compressions(&mut self) -> Result<rhai::Array, Box<EvalAltResult>> {
         self.require_compression("compressions", Action::Read, None)?;
         let graph = self.compression_graph("compressions")?;
-        Ok(graph
+        let mut entries = rhai::Array::new();
+        for definition in graph
             .definitions(Some(DefinitionKind::COMPRESSION))
-            .iter()
-            .filter_map(|definition| {
-                rule_entry(definition, graph.compression_stats(definition.name()))
-            })
-            .map(Dynamic::from_map)
-            .collect())
+            .map_err(graph_fail)?
+        {
+            let stats = graph
+                .compression_stats(definition.name())
+                .map_err(graph_fail)?;
+            if let Some(entry) = rule_entry(&definition, stats) {
+                entries.push(Dynamic::from_map(entry));
+            }
+        }
+        Ok(entries)
     }
 
     /// `g.drop_compression(name)`: removes the rule and decompresses

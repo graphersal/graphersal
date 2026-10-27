@@ -350,7 +350,10 @@ impl ScriptGraphTraversalSource {
         let Some(g) = self.g.as_ref() else {
             return Ok(Dynamic::UNIT);
         };
-        let Some(stats) = g.memory_usage() else {
+        let Some(stats) = g
+            .memory_usage()
+            .map_err(crate::script::saved_query::graph_fail)?
+        else {
             return Ok(Dynamic::UNIT);
         };
         let mut map = rhai::Map::new();
@@ -412,7 +415,10 @@ impl ScriptGraphTraversalSource {
         let Some(g) = self.g.as_ref() else {
             return Ok(Dynamic::UNIT);
         };
-        let Some(stats) = g.statistics() else {
+        let Some(stats) = g
+            .statistics()
+            .map_err(crate::script::saved_query::graph_fail)?
+        else {
             return Ok(Dynamic::UNIT);
         };
         let count = |n: usize| Dynamic::from_int(i64::try_from(n).unwrap_or(i64::MAX));
@@ -557,10 +563,16 @@ impl ScriptGraphTraversalSource {
     /// `()` without one; never inferred. Asks for `Read` on `Schema`.
     pub fn get_schema(&mut self) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
         self.require_schema("get_schema", crate::graph::Action::Read)?;
-        Ok(match self.schema_graph("get_schema")?.get_schema() {
-            Some(schema) => element_property_to_dynamic(schema.to_value()),
-            None => Dynamic::UNIT,
-        })
+        Ok(
+            match self
+                .schema_graph("get_schema")?
+                .get_schema()
+                .map_err(crate::script::saved_query::graph_fail)?
+            {
+                Some(schema) => element_property_to_dynamic(schema.to_value()),
+                None => Dynamic::UNIT,
+            },
+        )
     }
 
     /// `g.set_schema(schema)`: replaces the stored schema with a map or

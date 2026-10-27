@@ -1103,7 +1103,7 @@ fn row07_commits_go_on_during_a_merge() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(store.snapshots().unwrap().len() > 1);
-    assert!(store.last_auto_checkpoint_error().is_none());
+    assert!(store.last_auto_checkpoint_error().unwrap().is_none());
     store.close().unwrap();
     let report = checkpoint_closed(&shared(&auto), &options, &write, "after automatic");
     let _ = report;

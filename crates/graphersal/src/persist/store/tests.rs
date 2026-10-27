@@ -310,7 +310,7 @@ fn files_of_other_segment_kinds_are_checked_skipped_and_a_critical_one_is_read_o
     let dir = MemDir::new();
     let store =
         Store::create_from_packed(dir.clone(), packed.as_slice(), StoreOptions::new()).unwrap();
-    assert!(store.read_only_reason().is_none());
+    assert!(store.read_only_reason().unwrap().is_none());
     assert!(store.verify().unwrap().is_ok());
     let first = store.snapshots().unwrap()[0].commit_seq;
     let first_dir = root(&dir)
@@ -342,7 +342,7 @@ fn files_of_other_segment_kinds_are_checked_skipped_and_a_critical_one_is_read_o
     let packed = packed_with_extra_file(&graph, 200, b"index");
     let store =
         Store::create_from_packed(MemDir::new(), packed.as_slice(), StoreOptions::new()).unwrap();
-    let reason = store.read_only_reason().unwrap();
+    let reason = store.read_only_reason().unwrap().unwrap();
     assert!(reason.contains("critical segment kind 200"), "{reason}");
     assert!(add_person(&store, "bob").unwrap_err().contains("read-only"));
 }
@@ -772,7 +772,7 @@ fn a_garbled_store_id_in_graph_is_damage() {
     let dir = MemDir::new();
     let store = Store::create(&dir, StoreOptions::new()).unwrap();
     add_person(&store, "ann").unwrap();
-    let id = store.store_id();
+    let id = store.store_id().unwrap();
     assert_ne!(id, 0);
     store.close().unwrap();
     let root = root(&dir);
@@ -997,7 +997,7 @@ fn a_large_commit_during_an_automatic_checkpoint_gets_its_own_checkpoint() {
     });
     // The Checkpoint records (at commits 1 and 2) never moved the durable end back.
     assert_eq!(store.durable_end().commit_seq, 2);
-    assert_eq!(store.last_auto_checkpoint_error(), None);
+    assert!(store.last_auto_checkpoint_error().unwrap().is_none());
 }
 
 /// A failed automatic checkpoint is retried at the next commit (which succeeds), and its
@@ -1009,14 +1009,14 @@ fn a_failed_automatic_checkpoint_is_retried_at_the_next_commit() {
     dir.set(false, 1);
     add_person(&store, &incompressible(1, 4000)).unwrap();
     eventually("the checkpoint to fail", || {
-        store.last_auto_checkpoint_error().is_some()
+        store.last_auto_checkpoint_error().unwrap().is_some()
     });
     assert_eq!(newest_snapshot(&store), 0);
     // A small commit is enough: the level is still above the threshold.
     add_person(&store, "ann").unwrap();
     eventually("a snapshot at commit 2", || newest_snapshot(&store) == 2);
     eventually("the error to clear", || {
-        store.last_auto_checkpoint_error().is_none()
+        store.last_auto_checkpoint_error().unwrap().is_none()
     });
 }
 
@@ -1030,7 +1030,7 @@ fn a_persistently_failing_automatic_checkpoint_does_not_spin() {
     dir.set(false, usize::MAX);
     add_person(&store, &incompressible(1, 4000)).unwrap();
     eventually("the checkpoint to fail", || {
-        store.last_auto_checkpoint_error().is_some()
+        store.last_auto_checkpoint_error().unwrap().is_some()
     });
     std::thread::sleep(std::time::Duration::from_millis(200));
     let after_first = dir.attempts();
@@ -1306,7 +1306,7 @@ fn a_failed_reload_leaves_an_empty_graph_a_stopped_store_and_a_clear_error() {
                     help.contains("Close the store and open it again (restart the server"),
                     "{context}: {help}"
                 );
-                let stopped = store.stopped_reason().expect("stopped");
+                let stopped = store.stopped_reason().unwrap().expect("stopped");
                 assert!(stopped.contains("was emptied"), "{context}: {stopped}");
                 assert_eq!(store.info().unwrap().stopped, Some(stopped), "{context}");
                 // Writes are refused: commits (the journal is detached), marks, checkpoints.
@@ -1323,7 +1323,7 @@ fn a_failed_reload_leaves_an_empty_graph_a_stopped_store_and_a_clear_error() {
                     "{context}"
                 );
                 assert!(store.checkpoint(None).is_err(), "{context}");
-            } else if store.stopped_reason().is_some() {
+            } else if store.stopped_reason().unwrap().is_some() {
                 // The files changed part-way: the graph keeps the state before the change.
                 assert_eq!(names_of(&store.graph().read()), other, "{context}: {err}");
                 assert!(add_person(&store, "eve").is_err(), "{context}");

@@ -34,11 +34,22 @@ impl ScriptGraphTraversalSource {
         #[cfg(feature = "gql")]
         if self.leading_gql().is_some() {
             let scratch = TraversalGraph::new();
-            let catalog = self.g.as_deref().map(super::saved_query_gql::GraphCatalog);
-            let catalog = catalog
+            let graph_catalog = self
+                .g
+                .as_deref()
+                .map(super::saved_query_gql::GraphCatalog::new);
+            let catalog = graph_catalog
                 .as_ref()
                 .map(|c| c as &dyn crate::gql::procedure::Procedures);
             let (_, start) = self.gql_start(GraphTraversalSource::new(&scratch), catalog);
+            // A catalog that could not be read leaves the calls unknown: claim a write (the
+            // sound answer of a classification), the run itself reports the error.
+            if graph_catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.0.take_error().is_some())
+            {
+                return true;
+            }
             let mut plan = self.lower_onto(true, start);
             return crate::traversal::permission_check::plan_mutates(&mut plan.steps);
         }

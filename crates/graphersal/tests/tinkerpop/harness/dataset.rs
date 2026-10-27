@@ -155,6 +155,7 @@ pub fn reload_template(setup: GraphSetup) {
 pub fn counts(graph: &Arc<dyn AnyGraph>) -> (usize, usize) {
     graph
         .statistics()
+        .unwrap()
         .map_or((0, 0), |s| (s.vertex_count(), s.edge_count()))
 }
 

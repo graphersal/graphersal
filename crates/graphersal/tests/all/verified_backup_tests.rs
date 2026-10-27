@@ -843,7 +843,7 @@ fn a_full_backup_interrupted_at_every_step() {
     let _ = store.verify();
     source.put_file("GRAPH", real.clone());
     source.put_file("GRAPH.copy", real);
-    assert!(!store.damage_found().is_empty());
+    assert!(!store.damage_found().unwrap().is_empty());
     for from_memory in [false, true] {
         for crash in [true, false] {
             let mut steps = 0;
@@ -991,7 +991,7 @@ fn a_backup_from_memory_is_refused_where_it_does_not_apply() {
     let (inner, _faults, store) = hooked_store(DamagePolicy::Continue);
     damage_wal(&inner);
     assert!(store.verify().is_ok());
-    assert_eq!(store.damage_found().len(), 1);
+    assert_eq!(store.damage_found().unwrap().len(), 1);
     // Not empty, no backup.
     let stray = MemDir::new();
     stray.put_file("x", vec![1]);
@@ -1043,7 +1043,7 @@ fn a_backup_from_memory_is_refused_where_it_does_not_apply() {
 fn damage_found_while_open_freezes_a_maintenance_store() {
     for trigger in ["backup", "checkpoint", "verify"] {
         let (inner, faults, store) = hooked_store(DamagePolicy::Maintenance);
-        assert_eq!(store.damage_policy(), DamagePolicy::Maintenance);
+        assert_eq!(store.damage_policy().unwrap(), DamagePolicy::Maintenance);
         commit(&store, "before").unwrap();
         damage_wal(&inner);
         match trigger {
@@ -1051,7 +1051,7 @@ fn damage_found_while_open_freezes_a_maintenance_store() {
             "checkpoint" => assert!(store.checkpoint(None).is_err()),
             _ => assert!(!store.verify().unwrap().is_ok()),
         }
-        let found = store.damage_found();
+        let found = store.damage_found().unwrap();
         assert_eq!(found.len(), 1, "{trigger}");
         assert_eq!(found[0].found_by, trigger);
         assert!(store.is_frozen_by_damage());
@@ -1107,8 +1107,8 @@ fn the_automatic_checkpoint_finding_damage_freezes_the_store() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert!(store.is_frozen_by_damage(), "after {round} rounds");
-    assert_eq!(store.damage_found()[0].found_by, "checkpoint");
-    assert!(store.last_auto_checkpoint_error().is_some());
+    assert_eq!(store.damage_found().unwrap()[0].found_by, "checkpoint");
+    assert!(store.last_auto_checkpoint_error().unwrap().is_some());
     let err = commit(&store, "late").unwrap_err();
     assert!(err.contains("checkpoint found damage"), "{err}");
 }
@@ -1230,7 +1230,7 @@ fn the_damage_policy_is_fixed_at_creation_and_carried_everywhere() {
         check(&dir, "close");
         // An open with the other policy changes nothing.
         let reopened = Store::open(&dir, options().with_damage_policy(other)).unwrap();
-        assert_eq!(reopened.damage_policy(), policy);
+        assert_eq!(reopened.damage_policy().unwrap(), policy);
         commit(&reopened, "d").unwrap();
         reopened.checkpoint(None).unwrap();
         reopened.close().unwrap();
@@ -1595,7 +1595,7 @@ fn a_damaged_backup_is_not_continued() {
     assert_eq!(damage.problems[0].path, last);
     assert_eq!(listing(&backup), before);
     assert!(
-        store.damage_found().is_empty(),
+        store.damage_found().unwrap().is_empty(),
         "the store's damage policy is not involved"
     );
 }
@@ -1667,7 +1667,7 @@ fn a_backup_from_memory_refuses_a_damaged_copy_and_follows_a_rollback() {
     commit(&store, "c").unwrap();
     damage_wal(&inner);
     let _ = store.verify();
-    assert!(!store.damage_found().is_empty());
+    assert!(!store.damage_found().unwrap().is_empty());
     let expected = exact(&store.graph().read());
     let from_memory = |t: &Arc<dyn StoreDir>| store.backup_from_memory(t, BackupMode::Auto);
     corrupt_every_write(&MemDir::new(), &expected, &from_memory, "memory full");

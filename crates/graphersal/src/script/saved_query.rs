@@ -848,15 +848,19 @@ fn gql_definition(
         .unwrap_or_default();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     // Its calls of saved queries are checked against the graph's catalog (stage 3h).
-    let catalog = graph.map(saved_query_gql::GraphCatalog);
-    let catalog = catalog
+    let graph_catalog = graph.map(saved_query_gql::GraphCatalog::new);
+    let catalog = graph_catalog
         .as_ref()
         .map(|c| c as &dyn crate::gql::procedure::Procedures);
-    let checked =
-        saved_query_gql::check(name, &body, &names, catalog).map_err(|error| match error {
-            saved_query_gql::GqlBodyError::Gql(error) => in_saved_query(*script_error(error), name),
-            saved_query_gql::GqlBodyError::Parameters(error) => fail(error),
-        })?;
+    let checked = saved_query_gql::check(name, &body, &names, catalog);
+    // A catalog that could not be read is the error, not the "unknown query" it caused.
+    if let Some(catalog) = &graph_catalog {
+        catalog.0.finish()?;
+    }
+    let checked = checked.map_err(|error| match error {
+        saved_query_gql::GqlBodyError::Gql(error) => in_saved_query(*script_error(error), name),
+        saved_query_gql::GqlBodyError::Parameters(error) => fail(error),
+    })?;
     let params = params_of(ctx, name, &checked.parameters, declared)?;
     let mut query = QueryDefinition::new(body).with_dialect(GQL_QUERY_DIALECT);
     for (parameter, param) in params {
@@ -1053,12 +1057,45 @@ fn in_folder(folder: Option<&str>, prefix: &str) -> bool {
 }
 
 /// The catalog of `graph` as the lookup [`saved_query_effects`] and [`with_inferred_dialect`]
-/// take: the saved query of a name, `None` when there is none (or it is kept opaque).
-fn stored_queries(graph: &Arc<dyn AnyGraph>) -> impl Fn(&str) -> Option<QueryDefinition> + '_ {
-    move |name| {
-        graph
-            .definition(DefinitionKind::QUERY, name)
-            .and_then(|definition| definition.as_query().cloned())
+/// take ([`Self::lookup`]): the saved query of a name, `None` when there is none (or it is kept
+/// opaque). A failing read of the catalog is kept and returned by [`Self::finish`], which every
+/// user calls after the lookups, so it is never mistaken for "no such query".
+pub(super) struct StoredQueries<'a> {
+    graph: &'a dyn AnyGraph,
+    error: std::cell::RefCell<Option<crate::error::GraphError>>,
+}
+
+impl<'a> StoredQueries<'a> {
+    pub(super) fn new(graph: &'a dyn AnyGraph) -> Self {
+        Self {
+            graph,
+            error: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// The saved query `name`, `None` when there is none, it is kept opaque or the catalog
+    /// could not be read (then kept for [`Self::finish`]).
+    pub(super) fn lookup(&self, name: &str) -> Option<QueryDefinition> {
+        match self.graph.definition(DefinitionKind::QUERY, name) {
+            Ok(definition) => definition.and_then(|definition| definition.as_query().cloned()),
+            Err(err) => {
+                self.error.borrow_mut().get_or_insert(err);
+                None
+            }
+        }
+    }
+
+    /// The first failed read of the catalog, if any.
+    pub(super) fn take_error(&self) -> Option<crate::error::GraphError> {
+        self.error.borrow_mut().take()
+    }
+
+    /// `Ok` when every lookup read the catalog, else the first failure as a script error.
+    pub(super) fn finish(&self) -> Result<(), Box<EvalAltResult>> {
+        match self.take_error() {
+            Some(err) => Err(graph_fail(err)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1099,7 +1136,10 @@ impl ScriptGraphTraversalSource {
     ) -> Result<(), Box<EvalAltResult>> {
         let graph = self.catalog_graph(operation)?;
         for (name, _) in &queries {
-            let exists = graph.definition(DefinitionKind::QUERY, name).is_some();
+            let exists = graph
+                .definition(DefinitionKind::QUERY, name)
+                .map_err(graph_fail)?
+                .is_some();
             let action = if exists {
                 Action::Update
             } else {
@@ -1219,13 +1259,16 @@ impl ScriptGraphTraversalSource {
                 None => query,
             };
             let graph = this.catalog_graph(operation)?.clone();
-            let query = with_inferred_dialect(ctx.engine(), &stored_queries(&graph), &name, query)
-                .map_err(|reason| {
-                    fail(ScriptError::InvalidQueryBody {
-                        query: name.clone(),
-                        reason,
-                    })
-                })?;
+            let stored = StoredQueries::new(&*graph);
+            let inferred =
+                with_inferred_dialect(ctx.engine(), &|name| stored.lookup(name), &name, query);
+            stored.finish()?;
+            let query = inferred.map_err(|reason| {
+                fail(ScriptError::InvalidQueryBody {
+                    query: name.clone(),
+                    reason,
+                })
+            })?;
             return this.store_queries(operation, vec![(name, query)]);
         }
         let ast = ctx.engine().compile(&body).map_err(|err| {
@@ -1260,8 +1303,11 @@ impl ScriptGraphTraversalSource {
             query = query.with_param(parameter, param);
         }
         let graph = this.catalog_graph(operation)?.clone();
-        let query = with_inferred_dialect(ctx.engine(), &stored_queries(&graph), &name, query)
-            .map_err(invalid)?;
+        let stored = StoredQueries::new(&*graph);
+        let inferred =
+            with_inferred_dialect(ctx.engine(), &|name| stored.lookup(name), &name, query);
+        stored.finish()?;
+        let query = inferred.map_err(invalid)?;
         this.store_queries(operation, vec![(name, query)])
     }
 
@@ -1375,7 +1421,7 @@ impl ScriptGraphTraversalSource {
         }
         // The dialects: a query of the source calling another one of it sees that one's effects
         // (it is saved in the same unit), any other through the catalog.
-        let stored = stored_queries(this.catalog_graph(operation)?);
+        let stored = StoredQueries::new(&**this.catalog_graph(operation)?);
         let mut dialects = Vec::with_capacity(queries.len());
         for (name, _, _) in &queries {
             let (effects, dynamic) = effects::transitive(name, &mut |next| match queries
@@ -1386,8 +1432,9 @@ impl ScriptGraphTraversalSource {
                     effects: own.clone(),
                     counts: true,
                 }),
-                None => node_of(ctx.engine(), next, &stored(next)?),
+                None => node_of(ctx.engine(), next, &stored.lookup(next)?),
             });
+            stored.finish()?;
             dialects.push(
                 dialect_for(false, &effects, dynamic.as_deref()).map_err(|r| invalid(name, r))?,
             );
@@ -1500,6 +1547,7 @@ impl ScriptGraphTraversalSource {
         let graph = self.catalog_graph("query")?;
         let definition = graph
             .definition(DefinitionKind::QUERY, name)
+            .map_err(graph_fail)?
             .ok_or_else(|| {
                 graph_fail(crate::error::GraphError::from(
                     crate::error::DefinitionError::NotFound {
@@ -1586,7 +1634,11 @@ impl ScriptGraphTraversalSource {
         // the queries it calls), none when it is read-only or called from a read-only body.
         let effects = match &compiled.effects {
             Ok(own) if is_writing(query.dialect()) && !self.access.read_only => {
-                resolve_effects(ctx.engine(), &stored_queries(graph), name, own).0
+                let stored = StoredQueries::new(&**graph);
+                let effects =
+                    resolve_effects(ctx.engine(), &|name| stored.lookup(name), name, own).0;
+                stored.finish()?;
+                effects
             }
             _ => Vec::new(),
         };
@@ -1780,23 +1832,27 @@ impl ScriptGraphTraversalSource {
         this.require_query("queries", Action::Read, None)?;
         let prefix = folder.trim().trim_end_matches('/');
         let graph = this.catalog_graph("queries")?;
-        let catalog = stored_queries(graph);
-        let definitions = graph.definitions(Some(DefinitionKind::QUERY));
-        Ok(definitions
+        let stored = StoredQueries::new(&**graph);
+        let definitions = graph
+            .definitions(Some(DefinitionKind::QUERY))
+            .map_err(graph_fail)?;
+        let entries = definitions
             .iter()
             .filter_map(|definition| {
                 let query = definition.as_query()?;
                 in_folder(query.folder(), prefix).then(|| {
                     Dynamic::from_map(query_entry(
                         ctx.engine(),
-                        &catalog,
+                        &|name| stored.lookup(name),
                         definition.name(),
                         query,
                         false,
                     ))
                 })
             })
-            .collect())
+            .collect();
+        stored.finish()?;
+        Ok(entries)
     }
 
     /// `g.get_query(name)`: the saved query as a map (the entry of
@@ -1809,19 +1865,25 @@ impl ScriptGraphTraversalSource {
     ) -> Result<Dynamic, Box<EvalAltResult>> {
         this.require_query("get_query", Action::Read, Some(name))?;
         let graph = this.catalog_graph("get_query")?;
-        let definition = graph.definition(DefinitionKind::QUERY, name);
-        Ok(definition
-            .as_ref()
-            .and_then(Definition::as_query)
-            .map_or(Dynamic::UNIT, |query| {
-                Dynamic::from_map(query_entry(
-                    ctx.engine(),
-                    &stored_queries(graph),
-                    name,
-                    query,
-                    true,
-                ))
-            }))
+        let definition = graph
+            .definition(DefinitionKind::QUERY, name)
+            .map_err(graph_fail)?;
+        let stored = StoredQueries::new(&**graph);
+        let entry =
+            definition
+                .as_ref()
+                .and_then(Definition::as_query)
+                .map_or(Dynamic::UNIT, |query| {
+                    Dynamic::from_map(query_entry(
+                        ctx.engine(),
+                        &|name| stored.lookup(name),
+                        name,
+                        query,
+                        true,
+                    ))
+                });
+        stored.finish()?;
+        Ok(entry)
     }
 
     /// `g.drop_query(name)`: removes the saved query; `false` when there

@@ -123,6 +123,30 @@ assert!(result.is_ok());
   `GraphError::GraphViewHeld` (`read()`/`write()` panic there, like `RefCell::borrow_mut`;
   `read_checked()`, `write_checked()`, `try_read()` and `try_write()` report it instead). This is
   what the whole-script units below and the playground's runs use.
+- **A write that must not wait.** `try_write()` answers `None` both when the graph is busy (another
+  thread reads, writes or holds a unit) and when the current thread may not write it at all (it
+  holds a unit and another view of the graph is alive on it). `try_write_checked()` tells them
+  apart: `Ok(Some(guard))`, `Ok(None)` for busy (try again later) and
+  `Err(GraphError::GraphViewHeld { .. })` for forbidden (drop the other view first; waiting would
+  never help).
+
+  ```rust
+  # use graphersal::prelude::*;
+  let graph = Graph::new(TraversalGraph::tinkerpop_modern());
+  let mark = graph.begin_unit().unwrap();
+  let view = graph.read();
+  assert!(matches!(graph.try_write_checked(), Err(GraphError::GraphViewHeld { .. })));
+  drop(view);
+  match graph.try_write_checked() {
+      Ok(Some(mut guard)) => {
+          GraphTraversalSource::new(&mut *guard).add_v("person").iterate().unwrap();
+      }
+      Ok(None) => { /* busy: try again later */ }
+      Err(err) => panic!("{err}"),
+  }
+  graph.commit_unit(mark).unwrap();
+  assert_eq!(graph.read().vertex_count(), 7);
+  ```
 
   ```rust
   # use graphersal::prelude::*;

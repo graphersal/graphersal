@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 
+use super::PersistError;
 use super::codec::{Reader, crc, crc_append, put_str, put_u32, put_u64, put_uvar};
 use super::dir::{
     DirCheck, DirCompaction, DirEntry, DirLockGuard, EntryKind, LockKind, SpaceUsage, StoreDir,
@@ -215,20 +216,21 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The free space of the file system holding `path`'s directory.
+/// The free space of the file system holding `path`'s directory (`Ok(None)`: not known on
+/// this platform); a failing `statvfs` is the error.
 #[cfg(unix)]
-fn free_space_at(path: &Path) -> Option<u64> {
+fn free_space_at(path: &Path) -> io::Result<Option<u64>> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let stat = rustix::fs::statvfs(parent).ok()?;
-    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+    let stat = rustix::fs::statvfs(parent).map_err(io::Error::from)?;
+    Ok(Some(stat.f_bavail.saturating_mul(stat.f_frsize)))
 }
 
 #[cfg(not(unix))]
-fn free_space_at(_: &Path) -> Option<u64> {
-    None
+fn free_space_at(_: &Path) -> io::Result<Option<u64>> {
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2144,13 +2146,25 @@ impl SingleFileDir {
     /// Whether `path` is an existing single-file store (its preamble is read). Bytes 1..8 of
     /// the magic are compared: on Windows the writer's OS lock covers byte 0 (`LockFileEx` of
     /// one byte at offset 0) and is mandatory, so another process cannot read it while the
-    /// store is open.
-    pub fn is_single_file(path: impl AsRef<Path>) -> bool {
-        let Ok(file) = File::open(path.as_ref()) else {
-            return false;
-        };
+    /// store is open. Nothing at `path`, a directory, or a file shorter than the preamble is
+    /// `Ok(false)`; a file that cannot be read (no permission, an I/O error) is
+    /// [`PersistError::Io`], never "not a store".
+    pub fn is_single_file(path: impl AsRef<Path>) -> Result<bool, PersistError> {
+        const CONTEXT: &str = "read the preamble of a single-file store";
+        let path = path.as_ref();
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(PersistError::io(CONTEXT, err)),
+        }
+        let file = File::open(path).map_err(|err| PersistError::io(CONTEXT, err))?;
         let mut magic = [0u8; 7];
-        read_at(&file, &mut magic, 1).is_ok() && magic == PREAMBLE_MAGIC[1..]
+        match read_at(&file, &mut magic, 1) {
+            Ok(()) => Ok(magic == PREAMBLE_MAGIC[1..]),
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+            Err(err) => Err(PersistError::io(CONTEXT, err)),
+        }
     }
 }
 
@@ -2493,7 +2507,10 @@ impl StoreDir for SingleFileDir {
     }
 
     fn free_space(&self) -> Option<u64> {
-        free_space_at(&self.inner.path)
+        // `StoreDir::free_space` answers `Option` until the trait itself returns a `Result`
+        // (its methods change separately, part B of the result alignment): until then an
+        // unknown free space is all the trait can say.
+        free_space_at(&self.inner.path).ok().flatten()
     }
 
     fn check(&self) -> DirCheck {
