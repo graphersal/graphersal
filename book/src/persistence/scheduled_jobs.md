@@ -100,10 +100,17 @@ feed and the history name the job), its queries count under the channel `job` of
 (a write outside its effects, a timeout, an error of the query) changes nothing and is recorded
 with its error; the job runs again at its next time. A job on a graph outside a store is kept but
 not run (there is no scheduler). In your own program, give the scheduler the store's user jobs
-and sync them whenever the catalog's jobs changed:
+and sync them whenever the catalog's jobs changed. `Store::user_jobs` lists the job definitions it
+does not schedule beside them, each with the reason (an action or `run_on` this version does not
+know, `run_on: "replica"` on a single instance, a stored schedule that does not parse), so none is
+dropped silently:
 
 ```rust,ignore
-scheduler.sync_user_jobs(store.user_jobs());
+let found = store.user_jobs()?;
+for skipped in &found.not_scheduled {
+    eprintln!("job {} is not scheduled: {}", skipped.name, skipped.reason);
+}
+scheduler.sync_user_jobs(found.jobs);
 ```
 
 **In the playground**, **Catalog ▸ Scheduled jobs** lists every job (the system jobs first) with

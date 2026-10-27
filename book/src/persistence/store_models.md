@@ -53,7 +53,8 @@ note: the schema names the embedding model model2vec/acme/gone@0123456789ab (doc
 ```
 
 A program asks for the same with `Store::stored_embedders(&registered)` (features `persist` and
-`model2vec`), which returns the registry to use, what it loaded and the notes. Models of other
+`model2vec`), which returns the registry to use, what it loaded and the notes (a model that does
+not load is a note; a `models/` directory that cannot be read is the call's error). Models of other
 kinds than Model2Vec are not kept in a store yet. The WebAssembly playground keeps the models of a
 store (in its copies and downloads) but cannot run them.
 

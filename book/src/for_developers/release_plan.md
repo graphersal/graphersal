@@ -44,6 +44,78 @@ cargo semver-checks --package graphersal --baseline-rev <previous release tag>
 
 From 0.1.0 on a reported break is a release blocker unless the version number says so.
 
+## Breaking changes in 0.4.0 (unreleased)
+
+Collected for the release notes of 0.4.0. One user decision (2026-10-28) drives them: a public
+method that touches shared state (the graph's lock, the storage, a Store, files, embedders)
+returns a `Result` with a `#[non_exhaustive]` error type, even where it cannot fail today, and
+never answers a failure with an empty or default value. The upgrade step for each is "handle the
+`Result`" (`?`, or `.unwrap()` where the caller knows better).
+
+`graphersal`:
+
+- `AnyGraph` (EXPERIMENTAL): `capabilities() -> Result<StorageCapabilities, GraphError>`,
+  `last_commit_seq() -> Result<u64, GraphError>`,
+  `statistics() -> Result<Option<GraphStatistics>, GraphError>`,
+  `memory_usage() -> Result<Option<MemoryStats>, GraphError>`,
+  `get_schema() -> Result<Option<GraphSchema>, GraphError>`,
+  `definitions(kind) -> Result<Vec<Definition>, GraphError>`,
+  `definition(kind, name) -> Result<Option<Definition>, GraphError>`,
+  `compression_stats(name) -> Result<Option<CompressionStats>, GraphError>`,
+  `property_indexes() -> Result<Vec<PropertyIndexInfo>, GraphError>` (were the plain values; a
+  read the current thread may not have was answered as "no data", now `GraphError::GraphViewHeld`).
+- `Graph::advise` fails when a compression estimate fails for another reason than
+  `GraphError::Unsupported` (was: advice without compression recommendations).
+- `Store`: `read_only_reason() -> Result<Option<String>, PersistError>`,
+  `stopped_reason() -> Result<Option<String>, PersistError>`,
+  `damage_policy() -> Result<DamagePolicy, PersistError>`,
+  `store_id() -> Result<u128, PersistError>`,
+  `damage_found() -> Result<Vec<FoundDamage>, PersistError>`,
+  `last_auto_checkpoint_error() -> Result<Option<Arc<PersistError>>, PersistError>` (was
+  `Option<String>`), `user_jobs() -> Result<UserJobs, PersistError>` (was `Vec<Job>`;
+  `UserJobs { jobs, not_scheduled }` lists the definitions it does not schedule with the reason),
+  `stored_embedders(&registered) -> Result<StoredEmbedders, PersistError>`,
+  `Store::is_store(dir) -> Result<bool, PersistError>` and
+  `SingleFileDir::is_single_file(path) -> Result<bool, PersistError>` (an unreadable directory or
+  file is `PersistError::Io`, not `false`). A poisoned internal lock is
+  `StoreFailure::LockPoisoned` (was a default answer).
+- `Store::info` (and `StoreInfo` everywhere) fails when the attic or the models directory cannot
+  be read (was an empty list); a fork or attic fork fails before writing when the marks it does not
+  carry cannot be listed.
+- Added (not breaking): `Graph::try_write_checked`, `UserJobs`, `NotScheduledJob`,
+  `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`.
+
+`graphersal-session` (internal, listed for the CLI and the wasm crate):
+
+- `SessionError` replaces `String` as the error of every public method that returned
+  `Result<_, String>` (session methods, `SessionGraph`, `GraphFactory`, the generic helpers of
+  `views`, `filter`, `selection`, `create`, `edit`, `queries`, `compression`, `layout`, `advisor`,
+  `store::parse_time`).
+- Now `Result<_, SessionError>`: `Session::info`, `statistics`, `get_schema`, `get_schema_text`,
+  `infer_schema`, `infer_schema_text`, `load_shared`, `attach_store`, `list_queries`, `get_query`,
+  `query_count`, `save_catalog_text`, `list_compressions`, `get_compression`,
+  `compression_count`, `list_indexes`, `get_index`, `index_count`, `jobs_view`, `job_entry`,
+  `workload_report`, `tick_jobs`, `read_only_reason`.
+- `SessionGraph`: `vertex_count`, `edge_count`, `inferred_schema`, `schema_view`,
+  `schema_view_of`, `graph_view`, `add_degrees`, `statistics_view`, `memory_view`, `element`,
+  `subgraph`, `element_view`, `drawn`, `incident_edges`, `queries`, `query`, `count_kind`,
+  `catalog_text`, `compressions`, `compression`, `indexes`, `index`, `run_changes`, `rollback_run`
+  return `Result<_, GraphError>`.
+- `SessionStore`: `read_only_reason`, `damage_found`, `damage_policy`,
+  `last_auto_checkpoint_error`, `user_jobs` return `Result<_, PersistError>` like `Store`.
+- `store::found_damage_value -> Result<Value, PersistError>`; `StoreError` is
+  `#[non_exhaustive]` (build it with `StoreError::new`, `bad_request`, `conflict`, `refused`,
+  `internal`, `with_data`, or `From` a `SessionError`, `PersistError` or `GraphError`).
+- The Store menu's JSON gains `compactionError` (beside `compaction: null` when the advice
+  cannot be computed).
+
+`graphersal-wasm` (internal JS API): `info`, `getSchema`, `inferSchema`, `schema`, `graphView`,
+`memoryUsage`, `statistics`, `tickJobs`, `jobs`, `listQueries`, `getQuery`, `saveCatalog`,
+`listCompressions`, `listIndexes` throw the error instead of answering an empty value.
+
+Python: `Store.close()` raises on a poisoned store lock (was "already closed"), `Graph.execute`
+raises on a poisoned limits lock (was the default limits).
+
 ## Release gates
 
 Before a version is tagged:

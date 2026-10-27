@@ -121,7 +121,8 @@ opened with more WAL than that checkpoints right away). It merges like a manual 
 do not wait for it. Without
 threads (WebAssembly) it runs when the host calls `store.run_due_checkpoint()` (the playground
 does after every run; the default threshold there is 4 MiB). `store.last_auto_checkpoint_error()`
-reports a failed background checkpoint; `store.wal_bytes_since_checkpoint()` the current amount.
+reports a failed background checkpoint as its own `PersistError` (shared, `Arc`);
+`store.wal_bytes_since_checkpoint()` the current amount.
 
 When it runs:
 

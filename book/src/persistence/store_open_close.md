@@ -72,7 +72,7 @@ None of these take the writer lock; all work while a writer has the store open:
 | `Store::snapshots_dir(dir)`, `Store::marks_dir(dir)` | the listings (`store list`, `store marks`) |
 | `Store::open_read_only(dir, target)` | the graph at any [point in time](store_point_in_time.md), as an unpublished `TraversalGraph` |
 | `Store::verify_dir(dir)` | the [scrub](store_verify.md) |
-| `Store::is_store(dir)` | whether `dir` holds a store |
+| `Store::is_store(dir)` | whether `dir` holds a store (`Ok(false)` for nothing there; a directory that cannot be read is an error) |
 
 ## Close
 
