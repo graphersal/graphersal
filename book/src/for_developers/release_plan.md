@@ -82,8 +82,29 @@ never answers a failure with an empty or default value. The upgrade step for eac
 - `Store::info` (and `StoreInfo` everywhere) fails when the attic or the models directory cannot
   be read (was an empty list); a fork or attic fork fails before writing when the marks it does not
   carry cannot be listed.
+- `GraphStorage` (EXPERIMENTAL; implementers and callers): the methods beyond single elements
+  return `Result<_, GraphError>` (defaults: `Ok` of the old default): `statistics`,
+  `infer_schema`, `get_schema`, `declared_property_schema`, `definitions` (`Result<impl
+  Iterator>`), `definition`, `compression_stats`, `property_indexes`, the four property index
+  lookups (`Result<Option<Box<dyn Iterator>>>`), `shrink_to_fit`, `memory_usage`,
+  `memory_structure`, `memory_footprint_bytes`, `execution_policy`, `begin_unit`,
+  `begin_unit_at`, `next_unit_started_at`, `rollback_unit`, `unit_changes`, `set_unit_metadata`,
+  `capabilities`, `last_commit_seq`. A failed `rollback_unit` still closes the unit; the engine
+  reports `GraphError::RollbackFailed`. The hot element reads and `unit_started_at` stay plain.
+- `PersistentStorage` (EXPERIMENTAL): `set_graph_id`, `raise_position`, `reserve_load`,
+  `finish_load`, `clear` return `Result<(), GraphError>`.
+- `StoreDir` (EXPERIMENTAL): `space_usage() -> io::Result<Option<SpaceUsage>>`,
+  `free_space() -> io::Result<Option<u64>>`, `check() -> io::Result<DirCheck>`. A failing
+  `free_space` fails the compaction advice (`PersistError::Io`) instead of reading as unknown; a
+  failing `check` opens the Store in maintenance mode with that damage (as `SingleFileDir` did
+  for an unreadable file).
+- `GraphTraversalSource::statistics() -> TraverserResult<Option<&GraphStatistics>>` and
+  `memory_usage() -> TraverserResult<Option<MemoryStats>>` (were the plain values).
+- `CreateContext::for_storage` is unchanged (it reads the plain `unit_started_at`).
 - Added (not breaking): `Graph::try_write_checked`, `UserJobs`, `NotScheduledJob`,
-  `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`.
+  `RepairReport::marks_unreadable`, `StoreFailure::AutoCheckpointFailed`,
+  `GraphError::StorageFailed` (`GraphError::storage_failed`), `GraphError::RollbackFailed`
+  (`GraphError::rollback_failed`), `graphersal-storage-tests`' `failing::Failing`.
 
 `graphersal-session` (internal, listed for the CLI and the wasm crate):
 
@@ -103,6 +124,10 @@ never answers a failure with an empty or default value. The upgrade step for eac
   return `Result<_, GraphError>`.
 - `SessionStore`: `read_only_reason`, `damage_found`, `damage_policy`,
   `last_auto_checkpoint_error`, `user_jobs` return `Result<_, PersistError>` like `Store`.
+- The generic helpers `compressions_in`, `compression_in`, `indexes_in`, `index_in`,
+  `queries_in`, `query_in`, `count_kind`, `catalog_text`, `views::schema_view`,
+  `schema_view_of`, `statistics_view`, `memory_usage` return `Result<_, GraphError>` (they read
+  through the `GraphStorage` methods that now return one).
 - `store::found_damage_value -> Result<Value, PersistError>`; `StoreError` is
   `#[non_exhaustive]` (build it with `StoreError::new`, `bad_request`, `conflict`, `refused`,
   `internal`, `with_data`, or `From` a `SessionError`, `PersistError` or `GraphError`).

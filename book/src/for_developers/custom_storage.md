@@ -63,6 +63,22 @@ a parameter means `Graph<TraversalGraph>`.
    lineage id, the commit position, a load sink outside units, `clear`, the journal slot and
    replay. See [Your Own Storage](../persistence/store_own_storage.md).
 
+**Errors of a backend.** Every trait method that reads or changes state beyond single elements
+returns a `Result` (since 0.4.0): the unit methods (`begin_unit`, `begin_unit_at`,
+`next_unit_started_at`, `rollback_unit`, `unit_changes`, `set_unit_metadata`), `capabilities`,
+`last_commit_seq`, `statistics`, the schema, catalog, compression, property index and memory
+methods, `shrink_to_fit`, `execution_policy`, and on `PersistentStorage` `clear`, `set_graph_id`,
+`raise_position`, `reserve_load` and `finish_load`. A storage whose state lives behind a backend
+(a file, a service, a lock of its own) returns `GraphError::storage_failed(operation, source)`
+instead of an empty or made-up answer; the defaults return `Ok` of what a storage without the
+feature reports. The engine reads these once per query or unit, never per traverser, and fails
+the query, import or transaction with the error, before anything executes where it can. A failed
+`rollback_unit` still closes the unit: the caller gets `GraphError::RollbackFailed` (naming the
+error that caused the rollback), the graph stays usable for the next operation, and what the
+backend holds afterwards is the storage's responsibility. The hot element reads (`vertices`,
+`out_edges`, `vertex_properties`, ...) stay infallible. The conformance suite has a storage that
+fails each of these on purpose (`graphersal-storage-tests`, `failing`).
+
 Units and transactions come for free: the `Transactional` extension trait (`transaction`,
 `transaction_with`, `dry_run`) is implemented for every `GraphStorage` on top of the trait's
 unit methods. `dry_run` needs `change_capture`.
