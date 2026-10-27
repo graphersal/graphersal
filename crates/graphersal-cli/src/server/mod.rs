@@ -296,12 +296,12 @@ pub fn run(cli: &Cli) -> i32 {
         },
         None => None,
     };
-    let presets = session_presets(cli);
-    let presets_json = presets.to_value();
     // The load time printed at start: Store open (snapshot load + WAL replay), file import
     // (with --schema) or sample build, up to the session holding the graph.
     let load_started = std::time::Instant::now();
-    // A Store directory is opened here (its lock held for the life of the server).
+    // A Store directory is opened here (its lock held for the life of the server); the open
+    // registers the embedding models the store keeps and its schema names, so the presets
+    // are built after it.
     let store = match &cli.graph {
         GraphSpec::Store(_) => match cli.graph.open(cli.create_store, cli.on_damage, None) {
             Ok(opened) => opened.store,
@@ -312,6 +312,8 @@ pub fn run(cli: &Cli) -> i32 {
         },
         _ => None,
     };
+    let presets = session_presets(cli);
+    let presets_json = presets.to_value();
     // With --schema the graph is loaded here, like the one-shot runner does (schema first,
     // then the data as one unit), so a violation stops the start with exit code 1.
     let preloaded = match &cli.schema {

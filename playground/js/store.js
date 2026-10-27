@@ -17,7 +17,7 @@ import { createBurst, burstAnnouncement } from './change-burst.js';
 import { LayoutJobs } from './graph/layout-jobs.js';
 import { ChatController } from './ai-chat.js';
 import { runText, mapErrorPosition } from './editor/run-selection.js';
-import { taskStartText, taskEndText } from './store-model.js';
+import { taskStartText, taskEndText, snapshotFileName } from './store-model.js';
 import { VALUE_MAX_CHARS } from './value-view.js';
 import { MAX_SHARE_ELEMENTS, isUnchangedSample, shareLink, encodeLinkData } from './link.js';
 import {
@@ -1103,12 +1103,15 @@ export function closeDatabase(id) {
   });
 }
 
-/** Downloads the stored snapshot at `commit` (the browser's store in memory) as `.gsnap`. */
-export async function downloadStoredSnapshot(commit) {
+/**
+ * Downloads the stored snapshot at `commit` (the browser's store in memory) as `.gsnap`, with the
+ * store's embedding models unless `withModels` is false.
+ */
+export async function downloadStoredSnapshot(commit, withModels = true) {
   if (!state.engine || !state.engine.snapshotBytes) return;
   try {
-    const bytes = await state.engine.snapshotBytes(commit);
-    downloadBlob(new Blob([bytes], { type: 'application/octet-stream' }), `graph-${commit}.gsnap`);
+    const bytes = await state.engine.snapshotBytes(commit, withModels);
+    downloadBlob(new Blob([bytes], { type: 'application/octet-stream' }), snapshotFileName(commit, withModels));
   } catch (err) {
     toast(`Download failed: ${err && err.message ? err.message : err}`, 'error', 9000);
   }

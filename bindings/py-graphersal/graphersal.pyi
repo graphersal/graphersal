@@ -812,6 +812,25 @@ class Store:
     def marks(self) -> list[dict[str, Any]]:
         """The marks a target can reach, in order (a mark before the oldest snapshot is left
         out: a prune removed its history)."""
+    def models(self) -> list[dict[str, Any]]:
+        """The embedding models the store keeps (``models/`` in the store), each ``{"id",
+        "identity", "repo", "revision", "commit", "license", "license_text", "gated",
+        "base_models", "bytes", "files", "used_by_schema", "problem"}``. ``license_text``:
+        ``"file"`` (the repository's licence file), ``"template"`` (the standard text of the
+        licence, written beside the model) or ``"none"``. Every copy of the store carries them:
+        handing the store on redistributes them. The store's models are registered
+        when the store is opened (an ``embedders=`` embedder of the same model wins; a model
+        neither provides is a ``UserWarning`` naming the command that adds it)."""
+    def export(
+        self,
+        path: str,
+        *,
+        commit_seq: Optional[int] = None,
+        without_models: bool = False,
+    ) -> dict[str, Any]:
+        """Writes the latest (or the given) stored snapshot as one packed file (``.gsnap``),
+        with the store's embedding models and their licences unless ``without_models=True``:
+        ``{"commit_seq", "models": [identity]}``."""
     def verify(self) -> dict[str, Any]:
         """Scrubs every checksum: ``{"ok", "problems", "notes"}``."""
     def fork(

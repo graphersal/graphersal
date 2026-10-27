@@ -866,6 +866,20 @@ pub trait SessionStore: Send + Sync {
         commit_seq: Option<u64>,
         writer: &mut dyn Write,
     ) -> Result<SnapshotInfo, PersistError>;
+    /// [`Store::export_packed_with`].
+    fn export_packed_with(
+        &self,
+        commit_seq: Option<u64>,
+        writer: &mut dyn Write,
+        models: graphersal::persist::ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError>;
+    /// [`Store::models`].
+    fn models(&self) -> Result<Vec<graphersal::persist::StoredModel>, PersistError>;
+    /// [`Store::import_models_from_packed`].
+    fn import_models_from_packed(
+        &self,
+        packed: &mut dyn Read,
+    ) -> Result<Vec<graphersal::persist::StoredModel>, PersistError>;
     /// [`Store::read_only_at`], served as a view (the session registers its refusal hook).
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError>;
     /// [`Store::fork`].
@@ -978,6 +992,23 @@ where
         writer: &mut dyn Write,
     ) -> Result<SnapshotInfo, PersistError> {
         Store::<S>::export_packed(self, commit_seq, writer)
+    }
+    fn export_packed_with(
+        &self,
+        commit_seq: Option<u64>,
+        writer: &mut dyn Write,
+        models: graphersal::persist::ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError> {
+        Store::<S>::export_packed_with(self, commit_seq, writer, models)
+    }
+    fn models(&self) -> Result<Vec<graphersal::persist::StoredModel>, PersistError> {
+        Store::<S>::models(self)
+    }
+    fn import_models_from_packed(
+        &self,
+        packed: &mut dyn Read,
+    ) -> Result<Vec<graphersal::persist::StoredModel>, PersistError> {
+        Store::<S>::import_models_from_packed(self, packed)
     }
     fn read_only_view(&self, target: RecoveryTarget) -> Result<StoreView, PersistError> {
         let recovered = Store::<S>::read_only_at(self, target)?;

@@ -505,16 +505,38 @@ impl<R: Read> CrcReader<R> {
 }
 
 impl<R: Read> CrcReader<R> {
-    /// Reads the named extra file of the segment-table row `entry` (section kind 5): its name
-    /// must be the row's path, its bytes the row's length and CRC. Returns the file's bytes.
-    fn extra_file(&mut self, entry: &SegmentEntry) -> Result<Vec<u8>, PersistError> {
+    /// Checks the named extra file of the segment-table row `entry` (section kind 5): its name
+    /// must be the row's path, its bytes the row's length and CRC. The bytes are streamed
+    /// through a bounded buffer, never held (a model file of a packed snapshot, format spec
+    /// 4.5, can be large).
+    fn extra_file(&mut self, entry: &SegmentEntry) -> Result<(), PersistError> {
         let prefix = extra_file_prefix(&entry.path);
-        let (start, bytes) = self.section(
-            SECTION_EXTRA_FILE,
-            entry.byte_len.saturating_add(prefix.len() as u64),
-            "named extra file",
-        )?;
-        if !bytes.starts_with(&prefix) {
+        let at = self.offset;
+        let [found] = self.fixed::<1>("section header")?;
+        if found != SECTION_EXTRA_FILE {
+            return Err(PersistError::corrupt(
+                PACKED,
+                at,
+                format!(
+                    "section kind {found} where the named extra file (kind \
+                     {SECTION_EXTRA_FILE}) belongs"
+                ),
+            ));
+        }
+        let len = u64::from_le_bytes(self.fixed::<8>("section header")?);
+        if len != entry.byte_len.saturating_add(prefix.len() as u64) {
+            return Err(PersistError::corrupt(
+                PACKED,
+                at + 1,
+                format!(
+                    "the named extra file {:?}: the section's length differs from the manifest",
+                    entry.path
+                ),
+            ));
+        }
+        let start = self.offset;
+        let name = self.take(prefix.len() as u64, "named extra file")?;
+        if name != prefix {
             return Err(PersistError::corrupt(
                 PACKED,
                 start,
@@ -524,8 +546,8 @@ impl<R: Read> CrcReader<R> {
                 ),
             ));
         }
-        let file = bytes[prefix.len()..].to_vec();
-        if file.len() as u64 != entry.byte_len || crc(&file) != entry.crc {
+        let file_crc = self.copy(entry.byte_len, &mut std::io::sink(), "named extra file")?;
+        if file_crc != entry.crc {
             return Err(PersistError::corrupt(
                 PACKED,
                 start,
@@ -535,7 +557,7 @@ impl<R: Read> CrcReader<R> {
                 ),
             ));
         }
-        Ok(file)
+        Ok(())
     }
 }
 

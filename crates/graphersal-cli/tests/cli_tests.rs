@@ -4529,6 +4529,347 @@ mod embed_models {
         );
         let _ = std::fs::remove_dir_all(&empty);
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Models inside a Store (format spec 4.5)
+    // -----------------------------------------------------------------------------------------
+
+    /// `good_routes` plus the Hub metadata (licence MIT, a base model, the file list), the
+    /// model card and a NOTICE file; the base model's own metadata says Apache-2.0.
+    fn routes_with_metadata(port: u16, model: Vec<u8>, gated: bool) -> Routes {
+        let sha = sha256(&model);
+        let mut routes = good_routes(port, model, &sha);
+        let api = serde_json::json!({
+            "id": "acme/tiny",
+            "gated": if gated { serde_json::json!("manual") } else { serde_json::json!(false) },
+            "cardData": {"license": "mit", "base_model": "acme/teacher"},
+            "siblings": [
+                {"rfilename": "README.md"}, {"rfilename": "NOTICE"},
+                {"rfilename": "config.json"}, {"rfilename": "tokenizer.json"},
+                {"rfilename": "model.safetensors"}, {"rfilename": "docs/LICENSE"}
+            ]
+        });
+        routes.insert(
+            "/api/models/acme/tiny/revision/main".to_string(),
+            Answer::ok(api.to_string().into_bytes()),
+        );
+        routes.insert(
+            "/api/models/acme/teacher".to_string(),
+            Answer::ok(br#"{"cardData": {"license": "apache-2.0"}}"#.to_vec()),
+        );
+        routes.insert(
+            "/acme/tiny/resolve/main/README.md".to_string(),
+            Answer::ok(b"---\nlicense: mit\n---\n# tiny\n".to_vec()),
+        );
+        routes.insert(
+            "/acme/tiny/resolve/main/NOTICE".to_string(),
+            Answer::ok(b"tiny, by acme".to_vec()),
+        );
+        routes
+    }
+
+    fn create_store(path: &Path) {
+        let path = path.display().to_string();
+        let res = run_env(&["store", "create", &path], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+    }
+
+    #[test]
+    fn download_into_a_store_keeps_the_licence_with_the_model() {
+        let mock = Mock::start(|port| routes_with_metadata(port, model_safetensors(), false));
+        let base = fresh_dir("m2v_into");
+        let models = base.join("models");
+        let store = base.join("store");
+        create_store(&store);
+        let (models_text, store_text) = (models.display().to_string(), store.display().to_string());
+        let endpoint = mock.endpoint();
+        let res = run_env(
+            &[
+                "embed-model",
+                "download",
+                "acme/tiny",
+                "--dir",
+                &models_text,
+                "--into",
+                &store_text,
+            ],
+            &[("GRAPHERSAL_HF_ENDPOINT", endpoint.as_str())],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("-> the store"), "{}", res.stdout);
+        assert!(
+            res.stdout.contains("identity model2vec/acme/tiny@"),
+            "{}",
+            res.stdout
+        );
+        // MIT without a licence file: the standard text is written beside the model.
+        assert!(res.stderr.contains("standard mit text"), "{}", res.stderr);
+        assert!(!res.stderr.contains("warning"), "{}", res.stderr);
+        // Nothing in the models directory.
+        assert!(!models.join("acme").join("tiny").exists());
+        assert!(leftovers(&models).is_empty(), "{:?}", leftovers(&models));
+
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        assert_eq!(listed.code, 0, "{}", listed.stderr);
+        assert!(
+            listed.stdout.contains("model2vec/acme/tiny@"),
+            "{}",
+            listed.stdout
+        );
+        assert!(
+            listed.stdout.contains("licence mit (standard text"),
+            "{}",
+            listed.stdout
+        );
+        assert!(
+            listed.stdout.contains("not used by the schema"),
+            "{}",
+            listed.stdout
+        );
+        let models_dir = std::fs::read_dir(store.join("models"))
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path();
+        for file in ["README.md", "NOTICE", "LICENSE", "model.safetensors"] {
+            assert!(models_dir.join(file).is_file(), "{file}");
+        }
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(models_dir.join("graphersal-embed-model.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["license"], "mit");
+        assert_eq!(manifest["license_text"], "template");
+        assert_eq!(manifest["base_models"][0]["repo"], "acme/teacher");
+        assert_eq!(manifest["base_models"][0]["license"], "apache-2.0");
+        assert_eq!(manifest["gated"], false);
+
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert!(info.stdout.contains("models      1"), "{}", info.stdout);
+        assert!(info.stdout.contains("licence mit"), "{}", info.stdout);
+
+        // The shareable copies name the models they carry, or leave them out.
+        let gsnap = base.join("x.gsnap").display().to_string();
+        let res = run_env(&["store", "export", &store_text, &gsnap], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(res.stdout.contains("embedding model(s)"), "{}", res.stdout);
+        let bare = base.join("bare.gsnap").display().to_string();
+        let res = run_env(
+            &["store", "export", &store_text, &bare, "--without-models"],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(!res.stdout.contains("embedding model"), "{}", res.stdout);
+        assert!(std::fs::metadata(&bare).unwrap().len() < std::fs::metadata(&gsnap).unwrap().len());
+        let zip = base.join("b.zip").display().to_string();
+        let res = run_env(&["store", "backup", &store_text, &zip, "--zip"], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(res.stdout.contains("licence mit"), "{}", res.stdout);
+        let bare_zip = base.join("bare.zip").display().to_string();
+        let res = run_env(
+            &[
+                "store",
+                "backup",
+                &store_text,
+                &bare_zip,
+                "--zip",
+                "--without-models",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(!res.stdout.contains("licence"), "{}", res.stdout);
+        let res = run_env(
+            &[
+                "store",
+                "backup",
+                &store_text,
+                &base.join("dir").display().to_string(),
+                "--without-models",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 2, "{}", res.stderr);
+        // A store from the packed file has the model again.
+        let copy = base.join("copy").display().to_string();
+        let res = run_env(&["store", "create", &copy, "--from", &gsnap], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let listed = run_env(&["store", "models", &copy], &[]);
+        assert!(
+            listed.stdout.contains("model2vec/acme/tiny@"),
+            "{}",
+            listed.stdout
+        );
+
+        // Removing it.
+        let identity = listed
+            .stdout
+            .split_whitespace()
+            .find(|word| word.starts_with("model2vec/"))
+            .unwrap()
+            .to_string();
+        let res = run_env(&["store", "models", "remove", &copy, &identity], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(&["store", "models", "remove", &copy, &identity], &[]);
+        assert_eq!(res.code, 1, "{}", res.stderr);
+        assert!(res.stderr.contains("store models"), "{}", res.stderr);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_gated_repository_and_an_unknown_licence_are_warned_about() {
+        let mock = Mock::start(|port| routes_with_metadata(port, model_safetensors(), true));
+        let base = fresh_dir("m2v_gated");
+        let store = base.join("store");
+        create_store(&store);
+        let endpoint = mock.endpoint();
+        let res = run_env(
+            &[
+                "embed-model",
+                "download",
+                "acme/tiny",
+                "--dir",
+                &base.join("models").display().to_string(),
+                "--into",
+                &store.display().to_string(),
+            ],
+            &[("GRAPHERSAL_HF_ENDPOINT", endpoint.as_str())],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(res.stderr.contains("GATED"), "{}", res.stderr);
+        // Without metadata (the plain mock): the licence is unknown.
+        let model = model_safetensors();
+        let sha = sha256(&model);
+        let plain = Mock::start(|port| good_routes(port, model.clone(), &sha));
+        let endpoint = plain.endpoint();
+        let models = base.join("plain").display().to_string();
+        let res = run_env(
+            &["embed-model", "download", "acme/tiny", "--dir", &models],
+            &[("GRAPHERSAL_HF_ENDPOINT", endpoint.as_str())],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("licence of acme/tiny is unknown"),
+            "{}",
+            res.stderr
+        );
+        let list = run_env(&["embed-model", "list", "--dir", &models], &[]);
+        assert!(list.stdout.contains("LICENCE"), "{}", list.stdout);
+        assert!(list.stdout.contains("unknown"), "{}", list.stdout);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_imported_model_the_schema_names_is_loaded_when_the_store_opens() {
+        let base = fresh_dir("m2v_autoload");
+        let model = base.join("model");
+        write_model(&model);
+        // A download's manifest names the repository: the identity is model2vec/acme/tiny@...
+        std::fs::write(
+            model.join("graphersal-embed-model.json"),
+            r#"{"format": 1, "repo": "acme/tiny", "revision": "main", "files": []}"#,
+        )
+        .unwrap();
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "apache-2.0",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert!(res.stdout.contains("licence apache-2.0"), "{}", res.stdout);
+        let res = run_env(&["embed-model", "import", &model_text], &[]);
+        assert_eq!(res.code, 2, "{}", res.stderr);
+
+        // Vectors made with the model through --embedder record its identity in the schema.
+        let spec = format!("t={model_text}");
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "--embedder",
+                &spec,
+                "-e",
+                r#"g.set_schema(#{mode: "open", vertices: #{doc: #{schema: #{type: "object", properties: #{text: #{type: "string"}}}}}})"#,
+                "-e",
+                r#"g.add_v("doc").property("text", "graph vector").to_list()"#,
+                "-e",
+                r#"g.embed_property(#{label: "doc", from: "text", to: "emb", embedder: "t"})"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        // Opened again WITHOUT --embedder: the stored model serves the text query.
+        let res = run_env(
+            &[
+                "--graph",
+                &store_text,
+                "-e",
+                r#"g.v().has_label("doc").nearest("emb", "graph", 1).count().next()"#,
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+        assert_eq!(res.stdout.trim(), "1");
+        assert!(
+            res.stderr
+                .contains("loaded the embedding model model2vec/acme/tiny@"),
+            "{}",
+            res.stderr
+        );
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert!(
+            info.stdout.contains("used by the schema"),
+            "{}",
+            info.stdout
+        );
+
+        // An explicit --embedder of the same model wins: nothing is loaded from the store.
+        let res = run_env(
+            &["--graph", &store_text, "--embedder", &spec, "-e", "1"],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            !res.stderr.contains("loaded the embedding model"),
+            "{}",
+            res.stderr
+        );
+
+        // Without the model in the store: a note naming the command that adds it.
+        let listed = run_env(&["store", "models", &store_text], &[]);
+        let identity = listed
+            .stdout
+            .split_whitespace()
+            .find(|word| word.starts_with("model2vec/"))
+            .unwrap()
+            .to_string();
+        let res = run_env(&["store", "models", "remove", &store_text, &identity], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        let res = run_env(&["--graph", &store_text, "-e", "1"], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stderr
+                .contains("graphersal embed-model download acme/tiny --into"),
+            "{}",
+            res.stderr
+        );
+        let info = run_env(&["store", "info", &store_text], &[]);
+        assert!(info.stdout.contains("missing"), "{}", info.stdout);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
 
 #[test]

@@ -51,7 +51,9 @@ download is the only network access, a model runs locally):
 ```bash
 graphersal embed-model download minishlab/potion-base-8M          # into $GRAPHERSAL_EMBED_MODELS or ~/.cache/graphersal/embed-models
 graphersal embed-model download minishlab/potion-base-8M --revision v1.0 --dir ./models   # a pinned revision, another directory
-graphersal embed-model list                                        # repository, size, model identity
+graphersal embed-model list                                        # repository, size, licence, model identity
+graphersal embed-model download minishlab/potion-base-8M --into data/   # into the Store data/ (loaded whenever it opens)
+graphersal embed-model import ./my-model --into data/ --repo acme/my-model   # a local model directory into a Store
 graphersal --embedder potion=minishlab/potion-base-8M --default-embedder potion -e 'embed("graph databases")'
 graphersal --embedder mine=./models/my-model -e 'g.v().embed("name", #{embedder: "mine"}).to_list()'   # a model directory
 ```
@@ -221,9 +223,13 @@ graphersal store fork data/ branch2/ --at-time 2026-10-08T02:43:00Z  # or --at-c
 graphersal store backup data/ /mnt/backup/data       # full the first time, incremental afterwards
 graphersal store backup data/ weekly/ --full         # always full (the directory must be empty)
 graphersal store backup data/ data.zip --zip         # a full backup as one ZIP archive
+graphersal store backup data/ data.zip --zip --without-models   # ... without the embedding models
 # every backup checks every checksum in the store and in the copy; damage stops it (repair the STORE)
 # a damaged store open in the dev server: Store menu > Back up from memory (POST /api/store/backup {"from_memory": true})
 graphersal store export data/ data.gsnap             # the latest snapshot as a .gsnap (--commit N: another)
+graphersal store export data/ data.gsnap --without-models   # ... without the store's embedding models
+graphersal store models data/                        # the embedding models the store keeps, with licences
+graphersal store models remove data/ <identity>      # remove one
 graphersal store rollback data/ --at-mark before-import   # back IN PLACE; the rest goes to the attic
 graphersal store attic data/                         # the attic entries (rolled-back history), with their <ID>
 graphersal store attic data/ changes <ID>            # the commits of an entry

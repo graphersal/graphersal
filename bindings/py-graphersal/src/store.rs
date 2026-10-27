@@ -3,7 +3,9 @@
 //! store's write-ahead log before it returns; checkpoints, marks, listing, verify, fork, full and
 //! incremental backups (a backup opens read-only until it is restored; every checksum is read
 //! in the store and in the copy), backups from memory of a damaged store, the damage policy
-//! fixed at creation, in-place rollback with the attic, maintenance mode and repair.
+//! fixed at creation, in-place rollback with the attic, maintenance mode and repair, and the
+//! embedding models the store keeps (listed with their licences, exported or left out, loaded
+//! at open for the models the schema names: format spec 4.5).
 
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +79,53 @@ fn marks_list<'py>(py: Python<'py>, marks: &[Mark]) -> PyResult<Bound<'py, PyLis
     Ok(list)
 }
 
+/// One stored model as ``store.models()`` returns it.
+fn model_dict<'py>(
+    py: Python<'py>,
+    model: &persist::StoredModel,
+    used: &[String],
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", &model.id)?;
+    dict.set_item("identity", &model.identity)?;
+    dict.set_item("repo", &model.repo)?;
+    dict.set_item("revision", &model.revision)?;
+    dict.set_item("commit", &model.commit)?;
+    dict.set_item("license", &model.license)?;
+    dict.set_item("license_text", &model.license_text)?;
+    dict.set_item("gated", model.gated)?;
+    let bases = PyList::empty(py);
+    for base in &model.base_models {
+        let entry = PyDict::new(py);
+        entry.set_item("repo", &base.repo)?;
+        entry.set_item("license", &base.license)?;
+        bases.append(entry)?;
+    }
+    dict.set_item("base_models", bases)?;
+    dict.set_item("bytes", model.bytes)?;
+    let files = PyList::empty(py);
+    for file in &model.files {
+        let entry = PyDict::new(py);
+        entry.set_item("name", &file.name)?;
+        entry.set_item("role", &file.role)?;
+        entry.set_item("bytes", file.bytes)?;
+        entry.set_item("sha256", &file.sha256)?;
+        files.append(entry)?;
+    }
+    dict.set_item("files", files)?;
+    let hex = model.id.strip_prefix("model2vec-").unwrap_or_default();
+    let in_use = used.iter().any(|named| {
+        named
+            .split('?')
+            .next()
+            .and_then(|base| base.rsplit_once('@'))
+            .is_some_and(|(_, h)| h == hex)
+    });
+    dict.set_item("used_by_schema", in_use)?;
+    dict.set_item("problem", &model.problem)?;
+    Ok(dict)
+}
+
 fn marker_dict<'py>(py: Python<'py>, m: &BackupMarker) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("commit_seq", m.commit_seq)?;
@@ -140,6 +189,33 @@ impl Store {
             embedders,
         }
     }
+
+    /// [`Store::wrap`] of an opened store: the models it keeps that its schema names are
+    /// registered beside the ``embedders=`` ones (which win); a model the schema names that
+    /// neither provides is a ``UserWarning`` naming the command that adds it.
+    fn wrap_opened(
+        py: Python<'_>,
+        store: persist::Store,
+        embedders: RegistryCell,
+    ) -> PyResult<Self> {
+        #[cfg(feature = "model2vec")]
+        {
+            let registered = embedders.current();
+            let found = py.detach(|| store.stored_embedders(&registered));
+            if !found.loaded.is_empty() {
+                embedders.replace(found.embedders);
+            }
+            for note in &found.notes {
+                let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+                let message = std::ffi::CString::new(note.replace('\0', " "))
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                PyErr::warn(py, &category, &message, 1)?;
+            }
+        }
+        #[cfg(not(feature = "model2vec"))]
+        let _ = py;
+        Ok(Store::wrap(store, embedders))
+    }
 }
 
 #[pymethods]
@@ -182,7 +258,7 @@ impl Store {
         let store = py
             .detach(move || persist::Store::open(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Ok(Store::wrap(store, registry))
+        Store::wrap_opened(py, store, registry)
     }
 
     /// ``Store.create_file(path)``: creates a SINGLE-FILE store (the whole store in the one
@@ -221,7 +297,7 @@ impl Store {
         let store = py
             .detach(move || persist::Store::open_file(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Ok(Store::wrap(store, registry))
+        Store::wrap_opened(py, store, registry)
     }
 
     /// ``Store.convert(source, target, *, single_file=False)``: copies the closed store in
@@ -327,7 +403,7 @@ impl Store {
         let store = py
             .detach(move || persist::Store::open_backup(&path, StoreOptions::new()))
             .map_err(|err| store_error(py, err))?;
-        Ok(Store::wrap(store, registry))
+        Store::wrap_opened(py, store, registry)
     }
 
     /// ``Store.restore_backup(path)``: makes the backup in ``path`` the LIVE store, in place
@@ -521,6 +597,71 @@ impl Store {
         dict.set_item("space_needed", a.space_needed)?;
         dict.set_item("free_space", a.free_space)?;
         dict.set_item("marks_unreachable", a.prune.marks_unreachable.clone())?;
+        Ok(dict.into_any().unbind())
+    }
+
+    /// ``store.models()``: the embedding models the store keeps (format spec 4.5), each
+    /// ``{"id", "identity", "repo", "revision", "commit", "license", "license_text", "gated",
+    /// "base_models": [{"repo", "license"}], "bytes", "files": [{"name", "role", "bytes",
+    /// "sha256"}], "used_by_schema", "problem"}``. ``license_text`` says where the licence text
+    /// comes from: ``"file"`` (the repository's), ``"template"`` (the standard text of the
+    /// licence, written beside the model) or ``"none"``. Every copy of the store carries them:
+    /// handing the store on redistributes them.
+    fn models(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (models, used) = self.with(py, |store| {
+            Ok((store.models()?, store.info()?.schema_models))
+        })?;
+        let list = PyList::empty(py);
+        for model in &models {
+            list.append(model_dict(py, model, &used)?)?;
+        }
+        Ok(list.into_any().unbind())
+    }
+
+    /// ``store.export(path, *, commit_seq=None, without_models=False)``: writes the latest
+    /// stored snapshot (or the one at ``commit_seq``) as one packed file (``.gsnap``), with the
+    /// store's embedding models and their licences unless ``without_models=True``. Returns
+    /// ``{"commit_seq", "models": [identity]}`` (the models the file carries).
+    #[pyo3(signature = (path, *, commit_seq=None, without_models=false))]
+    fn export(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        commit_seq: Option<u64>,
+        without_models: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let path = path.to_string();
+        let copy = if without_models {
+            persist::ModelCopy::Exclude
+        } else {
+            persist::ModelCopy::Include
+        };
+        let file = std::fs::File::create(&path).map_err(|err| {
+            pyo3::exceptions::PyOSError::new_err(format!("cannot create {path}: {err}"))
+        })?;
+        let (info, models) = self.with(py, move |store| {
+            let mut writer = std::io::BufWriter::new(file);
+            let result = store.export_packed_with(commit_seq, &mut writer, copy);
+            drop(writer);
+            if result.is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+            let models = if without_models {
+                Vec::new()
+            } else {
+                store.models()?
+            };
+            Ok((result?, models))
+        })?;
+        let dict = PyDict::new(py);
+        dict.set_item("commit_seq", info.commit_seq)?;
+        dict.set_item(
+            "models",
+            models
+                .iter()
+                .map(|m| m.identity.clone())
+                .collect::<Vec<_>>(),
+        )?;
         Ok(dict.into_any().unbind())
     }
 

@@ -14,6 +14,7 @@ export const EXPLAIN = Object.freeze({
   mark: 'Mark: a name for a position in the history; any commit can be restored, not only snapshots.',
   attic: 'Attic: the history a rollback moved aside. Restore it while nothing new was committed or marked; fork it any time.',
   database: 'Database: the store you loaded and the forks made from it, each in memory with its own history. Switch to one to query it.',
+  model: 'Embedding models kept in the store with their licences: every copy carries them, so handing the store or a snapshot on redistributes them.',
 });
 
 /** The line that says where the store lives (memory: lost on reload; disk: durable). */
@@ -332,6 +333,44 @@ export function changesModel(summary) {
     prevOffset: offset > 0 ? Math.max(0, offset - limit) : null,
     nextOffset: summary && summary.hasMore ? offset + commits.length : null,
   };
+}
+
+/**
+ * The embedding models of the store (`store.models`, format spec 4.5) as the Store menu lists
+ * them: `{id, identity, size, licence, licenceText, gated, used, problem}`; then one row per model
+ * the schema names that the store does not keep (`missing: true`). Empty without models.
+ */
+export function modelRows(store) {
+  const rows = ((store && store.models) || []).map((m) => ({
+    id: m.id,
+    identity: m.identity || m.id,
+    size: m.bytesText || '',
+    licence: m.license || 'unknown',
+    licenceText: m.licenseText === 'file' ? 'licence text from the repository'
+      : m.licenseText === 'template' ? 'standard licence text, written by Graphersal'
+        : 'no licence text',
+    gated: !!m.gated,
+    used: !!m.usedBySchema,
+    problem: m.problem || null,
+    missing: false,
+  }));
+  for (const identity of (store && store.missingModels) || []) {
+    rows.push({
+      id: identity, identity, size: '', licence: '', licenceText: '', gated: false, used: true,
+      problem: 'the schema names it, the store does not keep it', missing: true,
+    });
+  }
+  return rows;
+}
+
+/** Whether the snapshot downloads offer a copy without the models (the store keeps some). */
+export function offersWithoutModels(store) {
+  return !!(store && store.models && store.models.length);
+}
+
+/** The file name of a snapshot download (`graph-N.gsnap`, `graph-N-without-models.gsnap`). */
+export function snapshotFileName(commitSeq, withModels = true) {
+  return withModels ? `graph-${commitSeq}.gsnap` : `graph-${commitSeq}-without-models.gsnap`;
 }
 
 /**

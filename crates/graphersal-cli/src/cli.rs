@@ -25,18 +25,27 @@ pub fn authorizer() -> Arc<dyn graphersal::auth::Authorizer> {
     Arc::new(graphersal::auth::AllowAll)
 }
 
-/// The registry [`install_embedders`] built at start.
-static EMBEDDERS: std::sync::OnceLock<Arc<graphersal::vector::Embedders>> =
-    std::sync::OnceLock::new();
+/// The registry [`install_embedders`] built at start, with the models of an opened Store added
+/// ([`GraphSpec::open`]).
+static EMBEDDERS: std::sync::RwLock<Option<Arc<graphersal::vector::Embedders>>> =
+    std::sync::RwLock::new(None);
 
 /// The embedders the CLI's scripts and its dev server call: the registry of the command line's
-/// `--embedder`/`--default-embedder` ([`install_embedders`]), else the default registry, which
-/// holds the built-in `hash-ngram/1`.
+/// `--embedder`/`--default-embedder` ([`install_embedders`]) plus the models an opened Store
+/// keeps for its schema, else the default registry, which holds the built-in `hash-ngram/1`.
 pub fn embedders() -> Arc<graphersal::vector::Embedders> {
     EMBEDDERS
-        .get()
-        .cloned()
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
         .unwrap_or_else(|| Arc::new(graphersal::vector::Embedders::default()))
+}
+
+/// Replaces the registry [`embedders`] answers.
+fn set_embedders(embedders: Arc<graphersal::vector::Embedders>) {
+    if let Ok(mut current) = EMBEDDERS.write() {
+        *current = Some(embedders);
+    }
 }
 
 /// Loads the models of `--embedder NAME=PATH|REPO` (once, at start) and registers them with
@@ -70,8 +79,43 @@ pub fn install_embedders(cli: &Cli) -> Result<(), String> {
             .default_name(name)
             .map_err(|err| format!("--default-embedder {name}: {}", registry_error(err)))?;
     }
-    let _ = EMBEDDERS.set(Arc::new(builder.build()));
+    set_embedders(Arc::new(builder.build()));
     Ok(())
+}
+
+/// Registers the embedding models the opened `store` keeps and its schema names (format spec
+/// 4.5) beside the `--embedder` ones, which win; prints what it loaded and every model the
+/// schema names that neither provides as a note on stderr.
+#[cfg(feature = "model2vec")]
+fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
+    let found = store.stored_embedders(&embedders());
+    for (name, identity) in &found.loaded {
+        errln!("note: loaded the embedding model {identity} from the store {path} as {name}");
+    }
+    for note in &found.notes {
+        errln!("note: {note}");
+    }
+    if !found.loaded.is_empty() {
+        set_embedders(found.embedders);
+    }
+}
+
+/// Without the `model2vec` feature no stored model can be loaded: the schema's models are
+/// named in a note.
+#[cfg(not(feature = "model2vec"))]
+fn register_stored_models(path: &str, store: &graphersal::persist::Store) {
+    let registered = embedders();
+    if let Ok(info) = store.info() {
+        for identity in info.schema_models {
+            if registered.by_model(&identity).is_none() {
+                errln!(
+                    "note: the schema names the embedding model {identity}; this graphersal \
+                     was built without the `model2vec` feature and cannot load it (from {path} \
+                     or elsewhere)"
+                );
+            }
+        }
+    }
 }
 
 /// The IANA name of the local time zone of this machine, for the scheduled jobs: the `TZ`
@@ -693,6 +737,7 @@ impl GraphSpec {
         for warning in &report.warnings {
             errln!("warning: {warning}");
         }
+        register_stored_models(path, &store);
         Ok(Opened {
             graph: store.graph().clone(),
             store: Some(Arc::new(store)),

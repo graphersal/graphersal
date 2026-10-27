@@ -49,7 +49,15 @@ pub(super) fn backup_from_memory<S: PersistentStorage + ?Sized>(
             target.display()
         )));
     }
-    increment(store, graph, graph_file, write, target)
+    let mut report = increment(store, graph, graph_file, write, target)?;
+    // The models follow the store's, best effort (see `full`).
+    if let Err(err) = super::models::sync_models(store, target) {
+        report
+            .warnings
+            .push(format!("the models were not brought up to date: {err}"));
+    }
+    report.models = super::models::list(target).unwrap_or_default();
+    Ok(report)
 }
 
 /// The `GRAPH` file of a backup from memory at commit `seq`: the store's identity, lineage and
@@ -172,6 +180,9 @@ fn full<S: PersistentStorage + ?Sized>(
         let seq = graph.last_commit_seq();
         let taken_at = crate::graph::undo::now_micros();
         let mut files_written = write_files(store, graph, graph_file, write, target)?;
+        // The models are files of the store, copied as they are; a damaged one is skipped
+        // with a warning (this backup exists because the store's files are damaged).
+        let (models, model_warnings) = super::models::copy_all_lenient(store, target);
         let file = backup_graph_file(graph_file, seq, taken_at);
         write_graph_file(target, &file)?;
         files::sync_dir(target)?;
@@ -191,6 +202,8 @@ fn full<S: PersistentStorage + ?Sized>(
             bytes: files_written.iter().map(|(_, len)| len).sum(),
             files: files_written,
             from_memory: true,
+            models,
+            warnings: model_warnings,
             ..BackupReport::default()
         })
     })();

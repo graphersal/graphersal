@@ -85,6 +85,10 @@ pub struct VerifyReport {
     /// independent donor. Checkpoints never write such a snapshot; the next checkpoint writes
     /// copies. Each one is also in [`Self::notes`].
     pub without_donor: Vec<String>,
+    /// Embedding models checked (every file against its manifest's SHA-256, format spec 4.5).
+    /// A damaged model is a problem with a path under `models/`; it does not make an open
+    /// store read-only (it is no graph data).
+    pub models_checked: usize,
 }
 
 impl VerifyReport {
@@ -129,6 +133,9 @@ pub struct BackupReport {
     /// Whether the backup was written from the graph in memory
     /// ([`Store::backup_from_memory`](super::Store::backup_from_memory)).
     pub from_memory: bool,
+    /// The embedding models the backup holds (format spec 4.5) with their licences: who hands
+    /// the backup on redistributes them.
+    pub models: Vec<super::StoredModel>,
 }
 
 fn relative(dir: &DirPath, path: &DirPath) -> String {
@@ -487,12 +494,21 @@ pub(super) fn last_commit_in_files(
 /// snapshot's definitions table (names only, no payload decoded), then the catalog changes of
 /// every later commit in the WAL. A WAL segment that cannot be read is skipped, like
 /// [`last_commit_in_files`] does.
+/// The definitions per kind and the model identities the schema names (format spec 4.5), read
+/// from the files: the latest snapshot's definitions table and `schema.json` with the WAL's
+/// catalog and schema changes after it applied (one pass over the WAL). A schema that does
+/// not parse names no model.
 pub(super) fn definitions_in_files(
     dir: &DirPath,
-) -> Result<std::collections::BTreeMap<String, u64>, PersistError> {
+) -> Result<(std::collections::BTreeMap<String, u64>, Vec<String>), PersistError> {
     let mut names = std::collections::BTreeSet::new();
     let mut base = 0;
+    let mut schema: Option<crate::graph::schema::GraphSchema> = None;
     if let Some((commit_seq, path)) = list_snapshots(dir)?.last() {
+        schema = read_bounded(&path.join(super::snapshot_dir::SCHEMA_FILE), 256 << 20)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| crate::graph::schema::GraphSchema::from_json(&text).ok());
         let (_, manifest) = super::snapshot_dir::read_manifest(path)?;
         names.extend(
             manifest
@@ -517,23 +533,42 @@ pub(super) fn definitions_in_files(
                 continue;
             }
             for mutation in changes.mutations() {
-                if let crate::graph::Mutation::SetDefinition {
-                    kind, name, after, ..
-                } = mutation
-                {
-                    let key = (kind.code(), name.clone());
-                    if after.is_some() {
-                        names.insert(key);
-                    } else {
-                        names.remove(&key);
+                match mutation {
+                    crate::graph::Mutation::SetDefinition {
+                        kind, name, after, ..
+                    } => {
+                        let key = (kind.code(), name.clone());
+                        if after.is_some() {
+                            names.insert(key);
+                        } else {
+                            names.remove(&key);
+                        }
                     }
+                    crate::graph::Mutation::SetSchema { after, .. } => {
+                        schema = Some((**after).clone());
+                    }
+                    _ => {}
                 }
             }
         }
     }
-    Ok(super::count_by_kind(names.iter().map(|(kind, _)| {
-        crate::graph::DefinitionKind::from_code(*kind)
-    })))
+    let models = schema
+        .as_ref()
+        .map(|schema| {
+            crate::value::vector::embed::provenance::schema_models(schema)
+                .into_iter()
+                .map(|(model, _)| model)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((
+        super::count_by_kind(
+            names
+                .iter()
+                .map(|(kind, _)| crate::graph::DefinitionKind::from_code(*kind)),
+        ),
+        models,
+    ))
 }
 
 pub(super) fn verify(
@@ -643,6 +678,23 @@ pub(super) fn verify(
                 }
             }
             Err(err) => problem(&mut report, &rel, None, err.to_string()),
+        }
+    }
+
+    // The embedding models (format spec 4.5): every file against its manifest's SHA-256.
+    for (path, reason) in super::models::stray_entries(dir) {
+        problem(&mut report, &path, None, reason);
+    }
+    for id in super::models::model_ids(dir)? {
+        report.models_checked += 1;
+        let (model, problems) = super::models::check(dir, &id);
+        for (path, reason) in problems {
+            problem(&mut report, &path, None, reason);
+        }
+        if let Some(note) = model.and_then(|m| m.problem) {
+            report
+                .notes
+                .push(format!("{}/{id}: {note}", super::models::MODELS_DIR));
         }
     }
 
@@ -910,6 +962,9 @@ pub(super) struct BackupPlan {
     segments: Vec<(u64, SegmentCheck)>,
     taken_at: i64,
     warnings: Vec<String>,
+    /// The models copied (format spec 4.5) with their manifests' bytes; their files are in
+    /// `files`.
+    models: Vec<(super::StoredModel, Vec<u8>)>,
 }
 
 /// Plans a full backup of the store in `dir` and checks every checksum of what it would copy
@@ -919,6 +974,7 @@ pub(super) struct BackupPlan {
 fn plan_backup(
     dir: &DirPath,
     durable: Option<DurablePosition>,
+    with_models: bool,
     findings: &mut Findings,
 ) -> Result<Option<BackupPlan>, PersistError> {
     let marks = check_marks(dir, findings).unwrap_or_default();
@@ -989,6 +1045,38 @@ fn plan_backup(
             format!("{snapshot_rel}/{}", entry.path)
         };
         add(&mut files, relative, source)?;
+    }
+    // The models (format spec 4.5): every file checked against its manifest, then copied as
+    // it is, the manifest as read.
+    let mut models = Vec::new();
+    if with_models {
+        for id in super::models::model_ids(dir)? {
+            let (model, problems) = super::models::check(dir, &id);
+            for (path, reason) in problems {
+                findings.problem(path, None, reason);
+            }
+            let Some(model) = model else { continue };
+            let Ok((manifest, _)) = super::models::read_model_manifest(dir, &id) else {
+                continue;
+            };
+            let base = super::models::models_dir(dir).join(&id);
+            let rel = format!("{}/{id}", super::models::MODELS_DIR);
+            for file in &model.files {
+                files.push(BackupFile {
+                    relative: format!("{rel}/{}", file.name),
+                    source: base.join(&file.name),
+                    len: file.bytes,
+                    bytes: None,
+                });
+            }
+            files.push(BackupFile {
+                relative: format!("{rel}/{}", super::models::MODEL_MANIFEST),
+                source: base.join(super::models::MODEL_MANIFEST),
+                len: manifest.len() as u64,
+                bytes: Some(manifest.clone()),
+            });
+            models.push((model, manifest));
+        }
     }
     let mut commit_seq = snapshot_seq;
     let mut segments = list_wal(dir)?;
@@ -1082,6 +1170,7 @@ fn plan_backup(
         segments: checked,
         taken_at,
         warnings: std::mem::take(&mut findings.warnings),
+        models,
     }))
 }
 
@@ -1090,9 +1179,10 @@ fn checked_plan(
     dir: &DirPath,
     durable: Option<DurablePosition>,
     backup: &str,
+    with_models: bool,
 ) -> Result<BackupPlan, PersistError> {
     let mut findings = Findings::default();
-    match plan_backup(dir, durable, &mut findings)? {
+    match plan_backup(dir, durable, with_models, &mut findings)? {
         Some(plan) if findings.is_ok() => Ok(plan),
         _ => Err(findings.into_error(DamageSide::Store, dir, backup.to_string(), false)),
     }
@@ -1127,6 +1217,11 @@ fn check_copy(target: &DirPath, plan: &BackupPlan) -> Findings {
         .join(SNAPSHOTS_DIR)
         .join(super::files::snapshot_name(plan.snapshot_commit_seq));
     check_snapshot(target, &snapshot, false, &mut findings);
+    for (model, _) in &plan.models {
+        for (path, reason) in super::models::check(target, &model.id).1 {
+            findings.problem(path, None, reason);
+        }
+    }
     let graph_file = GraphFile::decode(&plan.graph).ok();
     for (first, source) in &plan.segments {
         let path = target.join(WAL_DIR).join(super::files::wal_name(*first));
@@ -1165,9 +1260,10 @@ fn copy_damage(
     durable: Option<DurablePosition>,
     backup: String,
     copy: Findings,
+    with_models: bool,
 ) -> PersistError {
     let mut again = Findings::default();
-    match plan_backup(dir, durable, &mut again) {
+    match plan_backup(dir, durable, with_models, &mut again) {
         Ok(Some(_)) if again.is_ok() => copy.into_error(DamageSide::Backup, dir, backup, false),
         Ok(_) => again.into_error(DamageSide::Store, dir, backup, false),
         Err(err) => err,
@@ -1183,6 +1279,7 @@ fn full_report(plan: &BackupPlan) -> BackupReport {
         segments_copied: plan.segments.iter().map(|(first, _)| *first).collect(),
         taken_at: plan.taken_at,
         warnings: plan.warnings.clone(),
+        models: plan.models.iter().map(|(model, _)| model.clone()).collect(),
         ..BackupReport::default()
     }
 }
@@ -1220,7 +1317,7 @@ pub(super) fn backup_to_dir(
         });
     }
     let _pin = BackupPin::shared(dir)?;
-    let plan = checked_plan(dir, durable, &target.display())?;
+    let plan = checked_plan(dir, durable, &target.display(), true)?;
     let existed = target.exists();
     let result = (|| {
         let mut report = full_report(&plan);
@@ -1287,7 +1384,7 @@ pub(super) fn backup_to_dir(
         // Every checksum again, where the copy landed.
         let copy = check_copy(target, &plan);
         if !copy.is_ok() {
-            return Err(copy_damage(dir, durable, target.display(), copy));
+            return Err(copy_damage(dir, durable, target.display(), copy, true));
         }
         Ok(report)
     })();
@@ -1305,13 +1402,15 @@ pub(super) fn backup_to_zip<W>(
     dir: &DirPath,
     durable: Option<DurablePosition>,
     archive: &mut W,
+    models: super::ModelCopy,
 ) -> Result<BackupReport, PersistError>
 where
     W: Read + Write + std::io::Seek + Send,
 {
     super::files::refuse_other_version(dir)?;
     let _pin = BackupPin::shared(dir)?;
-    let plan = checked_plan(dir, durable, "the ZIP archive")?;
+    let with_models = models == super::ModelCopy::Include;
+    let plan = checked_plan(dir, durable, "the ZIP archive", with_models)?;
     let start = archive
         .stream_position()
         .map_err(|err| PersistError::io("writing the backup archive", err))?;
@@ -1346,7 +1445,13 @@ where
         .map_err(|err| PersistError::io("reading the backup archive back", err))?;
     let copy = check_archive(&mut *archive, &plan);
     if !copy.is_ok() {
-        return Err(copy_damage(dir, durable, "the ZIP archive".into(), copy));
+        return Err(copy_damage(
+            dir,
+            durable,
+            "the ZIP archive".into(),
+            copy,
+            with_models,
+        ));
     }
     Ok(report)
 }
@@ -1380,6 +1485,18 @@ fn check_archive(reader: impl Read, plan: &BackupPlan) -> Findings {
         }
         if name == MARKS_FILE {
             return expect(read_all(data), &plan.marks);
+        }
+        if let Some(rest) = name.strip_prefix(&format!("{}/", super::models::MODELS_DIR)) {
+            let Some((id, file)) = rest.split_once('/') else {
+                return vec!["not a file of a store backup".into()];
+            };
+            let Some((model, manifest)) = plan.models.iter().find(|(m, _)| m.id == id) else {
+                return vec!["a model the backup did not copy".into()];
+            };
+            if file == super::models::MODEL_MANIFEST {
+                return expect(read_all(data), manifest);
+            }
+            return super::models::check_stream(model, file, data);
         }
         if let Some(file) = name.strip_prefix(&format!("{WAL_DIR}/")) {
             let first = file

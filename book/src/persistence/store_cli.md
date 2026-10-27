@@ -65,6 +65,7 @@ graphersal store rollback --help      # the same (-h works too)
 | [`backup`](#backup) | full, incremental or ZIP backup |
 | [`restore`](#restore) | a backup (or ZIP) as the live store |
 | [`export`](#export) | a stored snapshot as a `.gsnap` |
+| [`models`](#models) | the embedding models the store keeps; remove one |
 | [`prune`](#prune) | remove old history |
 | [`compact`](#compact) | prune to now; give a single file's free space back |
 | [`compact-advice`](#compact-advice) | is `compact` worth it? |
@@ -132,7 +133,10 @@ fixed at creation (never changed):
 ```
 
 Also printed when they apply: `parent` and `branched at` (a fork, a rolled-back store), `backup
-up to commit N, taken T` (a backup), `attic  N entr(y/ies)`, and for a single file
+up to commit N, taken T` (a backup), `attic  N entr(y/ies)`, the embedding models the store keeps
+(a `models` block: one line per model with its identity, size, licence and where the licence text
+comes from, `used by the schema`; a model the schema names but the store lacks as `missing`, see
+[`models`](#models)), and for a single file
 `file  single file, 23.0 KiB (23.0 KiB live, 0 B free space inside: ...)`. `state` is `open (in
 use, or not closed cleanly)` while a writer has it (or after a crash).
 
@@ -280,7 +284,7 @@ does (and lists the marks of the entry's history it does not carry, like `store 
 
 ```text
 graphersal store backup <DIR> <BACKUP_DIR> [--full]
-graphersal store backup <DIR> <FILE.zip> --zip
+graphersal store backup <DIR> <FILE.zip> --zip [--without-models]
 ```
 
 A consistent copy up to the last durable commit; works while a server has the store open. Into an
@@ -298,6 +302,12 @@ The backup is read-only (graphersal --graph backup/ opens it so); `graphersal st
 $ graphersal store backup data/ data.zip --zip
 Full backup of snapshot 3 and the WAL up to commit 4: 8 file(s), 9688 bytes, in data.zip; every checksum read back.
 ```
+
+The store's [embedding models](store_models.md) are copied too, with their cards and licence
+files, and the report lists them (`It carries 1 embedding model(s) with their licences (handing it
+on redistributes them):` and one line per model): who hands a backup on redistributes them.
+`--without-models` (with `--zip` only; a usage error otherwise) leaves them out: such an archive is
+also restored by Graphersal 0.3.0, which refuses one with models as written by a newer version.
 
 Every checksum of what is copied is read in `DIR` first and again in the copy (a ZIP archive is
 read back). **Damage** stops the backup (exit 1): nothing of it is kept (a new directory or archive
@@ -346,12 +356,41 @@ Restored into restored/ (the live store). Use it: graphersal --graph restored/
 ### export
 
 ```text
-graphersal store export <DIR> <FILE.gsnap> [--commit <N>]
+graphersal store export <DIR> <FILE.gsnap> [--commit <N>] [--without-models]
 ```
 
 Writes the latest stored snapshot (or the one at commit `N`, which must be a snapshot's commit:
 `store list`) as one packed file (`Exported the snapshot at commit 3 to data.gsnap.`). Load it
 with `--graph FILE.gsnap`, `store create --from FILE.gsnap`, or the playground.
+
+The file carries the store's [embedding models](store_models.md) with their cards and licences
+(listed after the first line), unless `--without-models`. `store create --from FILE.gsnap` and the
+playground put them back into a store; Graphersal 0.3.0 loads such a file and ignores them. A
+damaged model stops the export (exit 1; export `--without-models`, or remove the model).
+
+### models
+
+```text
+graphersal store models <DIR>
+graphersal store models remove <DIR> <IDENTITY>
+```
+
+Lists the [embedding models](store_models.md) the store keeps, one line each: the identity a
+schema's `embedder` records (`model2vec/<repo>@<12 hex>`), the size, the licence and where its text
+comes from (`text from the repository`, `standard text, written by Graphersal`, `no licence
+text`), `gated repository` when it applies, and whether the schema uses it; then every model the
+schema names that the store does not keep (`missing`). Works while a server has the store open.
+
+```text
+$ graphersal store models data/
+model2vec/minishlab/potion-base-8M@fac4fa854e68  29.5 MiB  licence mit (standard text, written by Graphersal)  used by the schema
+```
+
+`remove` deletes one model, by its identity or its id `model2vec-<12 hex>` (refused while a writer
+has the store open, and on a backup; an unknown model exits 1). It is the only way a model leaves a
+store. Models enter a store by `graphersal embed-model download <REPO> --into <DIR>` and
+`graphersal embed-model import <MODEL_DIR> --into <DIR>` (see
+[Embedding Models in a Store](store_models.md)).
 
 ### prune
 

@@ -52,6 +52,8 @@ pub(crate) trait LiveRead {
     fn graph_id(&self) -> u128;
     /// The kind of every definition of the catalog.
     fn definition_kinds(&self) -> Vec<DefinitionKind>;
+    /// The model identities the schema's `embedder` keywords name (format spec 4.5).
+    fn schema_models(&self) -> Vec<String>;
     /// Why the state must not be written by this version: a critical definition of a kind it
     /// does not know (format spec 16 rule 3).
     fn critical_definition(&self) -> Option<String>;
@@ -123,6 +125,18 @@ where
 
     fn definition_kinds(&self) -> Vec<DefinitionKind> {
         self.0.definitions().map(|d| d.kind()).collect()
+    }
+
+    fn schema_models(&self) -> Vec<String> {
+        self.0
+            .get_schema()
+            .map(|schema| {
+                crate::value::vector::embed::provenance::schema_models(&schema)
+                    .into_iter()
+                    .map(|(model, _)| model)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn critical_definition(&self) -> Option<String> {

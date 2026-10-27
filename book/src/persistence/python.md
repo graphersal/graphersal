@@ -62,6 +62,8 @@ with graphersal.Store.create("data") as store:            # or Store.open("data"
 | `Store.restore_backup(path)` | make a backup the live store (same graph id) | |
 | `store.prune(up_to)`, `store.compact()`, `store.compaction_advice(min_ratio=, min_reclaimable=, min_size=)` | retention and disk space | [Prune, Compact](store_prune.md) |
 | `store.verify()` | the scrub: `{"ok", "problems", "notes"}` | [Verify](store_verify.md) |
+| `store.models()` | the [embedding models](store_models.md) the store keeps, with their licences (`license`, `license_text`), files and `used_by_schema`; the ones the schema names are registered when the store is opened (an `embedders=` embedder of the same model wins; a missing model is a `UserWarning`) | [Embedding Models in a Store](store_models.md) |
+| `store.export(path, commit_seq=None, without_models=False)` | the latest (or the given) stored snapshot as a `.gsnap`, with the store's models and their licences unless `without_models=True`: `{"commit_seq", "models"}` | [Packed Snapshots](packed_snapshots.md) |
 | `store.maintenance` | `None`, or the damage report of a store that opened read-only in maintenance mode | [Damage](store_damage.md) |
 | `store.repair_to(path)` | a repaired copy: `{"commit_seq", "lossless", "marks_not_carried", "lineage_approximate_before", "report"}` | [Damage](store_damage.md) |
 | `Store.convert(source, target, single_file=False)` | copy a closed store between a directory and a single file | [Single-File Store](single_file_store.md) |

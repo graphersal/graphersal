@@ -659,6 +659,26 @@ impl Playground {
             .map_err(|e| JsError::new(&e.message))
     }
 
+    /// [`Self::store_snapshot`] with the store's embedding models (`withModels` true, what
+    /// `storeSnapshot` does) or without them: the Store menu's two downloads.
+    #[wasm_bindgen(js_name = storeSnapshotWith)]
+    pub fn store_snapshot_with(
+        &self,
+        commit: Option<f64>,
+        with_models: bool,
+    ) -> Result<Vec<u8>, JsError> {
+        let commit = commit.map(|c| c.max(0.0) as u64);
+        let models = if with_models {
+            graphersal::persist::ModelCopy::Include
+        } else {
+            graphersal::persist::ModelCopy::Exclude
+        };
+        self.session
+            .store_snapshot_with(commit, models)
+            .map(|(bytes, _)| bytes)
+            .map_err(|e| JsError::new(&e.message))
+    }
+
     /// Opens a read-only view of the state at `{target}` (JSON text): `{view, graph}`.
     #[wasm_bindgen(js_name = openView)]
     pub fn open_view(&mut self, body: &str) -> Result<String, JsError> {

@@ -7,6 +7,11 @@ Every checksum of what it copies is read in the store first and again in the cop
 copies damage silently, and never leaves a copy that does not read back (see
 [Every checksum, twice](#every-checksum-twice)).
 
+A backup also holds the store's [embedding models](store_models.md) with their licence files
+(checked like the rest; `BackupReport::models` lists them), so a restored store opens with its
+models. `Store::backup_zip_with(archive, ModelCopy::Exclude)` (CLI `store backup --zip
+--without-models`) leaves them out of a ZIP archive meant to be handed on.
+
 ```rust,no_run
 use graphersal::persist::{BackupMode, RecoveryTarget, Store, StoreOptions};
 

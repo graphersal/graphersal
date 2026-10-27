@@ -18,7 +18,8 @@ use std::sync::Arc;
 use graphersal::changes::{ChangeSet, CommitHook, HookError, HookRefusal, Mutation};
 use graphersal::persist::{
     BackupMarker, BackupMode, CompactionAdvice, DamageReport, ForkReport, FoundDamage, MemDir,
-    PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir, StoreInfo, StoreOptions,
+    ModelCopy, PersistError, RecoveryTarget, RollbackMode, SnapshotInfo, StoreDir, StoreInfo,
+    StoreOptions, StoredModel,
 };
 use serde_json::{Value, json};
 
@@ -415,16 +416,44 @@ impl Session {
     /// The packed snapshot (`.gsnap`) of the stored snapshot at `commit` (`None`: the latest):
     /// `(bytes, its commit)`; a stored snapshot is copied as it is (404 when there is none).
     pub fn store_snapshot(&self, commit: Option<u64>) -> Result<(Vec<u8>, u64), StoreError> {
+        self.store_snapshot_with(commit, ModelCopy::Include)
+    }
+
+    /// [`Self::store_snapshot`] with the store's embedding models ([`ModelCopy::Include`], what
+    /// `store_snapshot` does) or without them ([`ModelCopy::Exclude`]): the Store menu's two
+    /// downloads (format spec 4.5). A damaged model refuses the download with the models (422).
+    pub fn store_snapshot_with(
+        &self,
+        commit: Option<u64>,
+        models: ModelCopy,
+    ) -> Result<(Vec<u8>, u64), StoreError> {
         let store = self.store_or_409()?;
         let mut bytes = Vec::new();
         let info = store
-            .export_packed(commit, &mut bytes as &mut dyn std::io::Write)
-            .map_err(|err| StoreError {
-                status: 404,
-                message: graphersal::error::format_diagnostic(&err),
-                data: None,
+            .export_packed_with(commit, &mut bytes as &mut dyn std::io::Write, models)
+            .map_err(|err| match err {
+                PersistError::Corrupt { .. } => StoreError::refused(err),
+                err => StoreError {
+                    status: 404,
+                    message: graphersal::error::format_diagnostic(&err),
+                    data: None,
+                },
             })?;
         Ok((bytes, info.commit_seq))
+    }
+
+    /// The embedding models of the active store (format spec 4.5), as the Store menu lists
+    /// them: `{models: [model_value...], missing: [identity...]}` (`missing`: the identities
+    /// the schema names that the store does not keep).
+    pub fn store_models(&self) -> Result<Value, StoreError> {
+        let store = self.store_or_409()?;
+        let info = store
+            .info()
+            .map_err(|err| StoreError::internal(err.to_string()))?;
+        Ok(json!({
+            "models": models_value(&info),
+            "missing": missing_models(&info),
+        }))
     }
 
     /// Opens a read-only view of the state at `target` (the `target` of `body`): the session
@@ -1055,6 +1084,10 @@ pub fn store_value(info: &StoreInfo) -> Value {
         // Why the store stopped after a failed in-place rollback or restore (`null`: not).
         "stopped": info.stopped,
         "damageText": found_damage_text(&info.location, &info.damage_found, info.frozen_by_damage),
+        // The embedding models the store keeps, with their licences (format spec 4.5), and the
+        // identities the schema names that it does not keep.
+        "models": models_value(info),
+        "missingModels": missing_models(info),
         "attic": info.attic.iter().map(|a| json!({
             "id": a.id,
             "target": a.target,
@@ -1068,6 +1101,65 @@ pub fn store_value(info: &StoreInfo) -> Value {
             "bytesText": bytes_text(a.bytes),
         })).collect::<Vec<_>>(),
     })
+}
+
+/// One stored model as the Store menu shows it.
+pub fn model_value(model: &StoredModel, used: bool) -> Value {
+    json!({
+        "id": model.id,
+        "identity": model.identity,
+        "family": model.family,
+        "repo": model.repo,
+        "revision": model.revision,
+        "commit": model.commit,
+        "license": model.license,
+        "licenseText": model.license_text,
+        "baseModels": model.base_models.iter().map(|b| json!({
+            "repo": b.repo, "license": b.license,
+        })).collect::<Vec<_>>(),
+        "gated": model.gated,
+        "addedAt": model.added_at,
+        "bytes": model.bytes,
+        "bytesText": bytes_text(model.bytes),
+        "files": model.files.iter().map(|f| json!({
+            "name": f.name, "role": f.role, "bytes": f.bytes,
+        })).collect::<Vec<_>>(),
+        "usedBySchema": used,
+        "problem": model.problem,
+    })
+}
+
+/// Whether the schema's model identity `named` (with or without a `?normalize=` suffix) is the
+/// stored model `model` (the same files: the same 12 hex digits).
+fn names_model(named: &str, model: &StoredModel) -> bool {
+    named
+        .split('?')
+        .next()
+        .and_then(|base| base.rsplit_once('@'))
+        .is_some_and(|(_, hex)| model.id.strip_prefix("model2vec-") == Some(hex))
+}
+
+/// The models of `info`, each with whether the schema names it.
+fn models_value(info: &StoreInfo) -> Vec<Value> {
+    info.models
+        .iter()
+        .map(|model| {
+            let used = info
+                .schema_models
+                .iter()
+                .any(|named| names_model(named, model));
+            model_value(model, used)
+        })
+        .collect()
+}
+
+/// The model identities the schema of `info` names that the store does not keep.
+fn missing_models(info: &StoreInfo) -> Vec<String> {
+    info.schema_models
+        .iter()
+        .filter(|named| !info.models.iter().any(|model| names_model(named, model)))
+        .cloned()
+        .collect()
 }
 
 /// The damage found on disk while `store` is open, as the UI's banner reads it (cheap: no file
@@ -1455,6 +1547,71 @@ mod tests {
             session,
             &format!("g.add_v(\"person\").property(\"name\", \"{name}\").next()"),
         );
+    }
+
+    /// A `.gsnap` carrying one embedding model (format spec 4.5), and that model.
+    fn packed_with_a_model() -> (Vec<u8>, graphersal::persist::StoredModel) {
+        use graphersal::persist::{ModelRole, NewModel, Store};
+        use std::io::Cursor;
+        let store = Store::create(MemDir::new(), StoreOptions::new()).unwrap();
+        let model = store
+            .add_model(
+                NewModel::new()
+                    .with_file(
+                        "config.json",
+                        ModelRole::Config,
+                        Cursor::new(b"{}".to_vec()),
+                    )
+                    .with_file(
+                        "tokenizer.json",
+                        ModelRole::Tokenizer,
+                        Cursor::new(vec![1; 50]),
+                    )
+                    .with_file(
+                        "model.safetensors",
+                        ModelRole::Weights,
+                        Cursor::new(vec![2; 4000]),
+                    )
+                    .with_repo("acme/tiny")
+                    .with_license("mit"),
+            )
+            .unwrap()
+            .model;
+        let mut bytes = Vec::new();
+        store.export_packed(None, &mut bytes).unwrap();
+        (bytes, model)
+    }
+
+    #[test]
+    fn the_models_of_a_loaded_snapshot_stay_with_the_store_and_its_downloads() {
+        let (packed, model) = packed_with_a_model();
+        let mut s = memory_session();
+        s.load_snapshot(&packed, "with-model.gsnap").unwrap();
+        let info = s.store_info().unwrap();
+        assert_eq!(
+            info["models"][0]["identity"],
+            model.identity.as_str(),
+            "{info}"
+        );
+        assert_eq!(info["models"][0]["license"], "mit");
+        assert_eq!(info["models"][0]["licenseText"], "template");
+        assert_eq!(info["models"][0]["usedBySchema"], false);
+        assert_eq!(info["missingModels"], json!([]));
+        let models = s.store_models().unwrap();
+        assert_eq!(models["models"][0]["id"], model.id.as_str());
+
+        let commit = info["snapshots"][0]["commitSeq"].as_u64();
+        let (with, _) = s.store_snapshot(commit).unwrap();
+        let (without, _) = s.store_snapshot_with(commit, ModelCopy::Exclude).unwrap();
+        assert!(without.len() + 4000 < with.len());
+        // The download with models loads into a new store with the model again.
+        s.load_snapshot(&with, "again.gsnap").unwrap();
+        assert_eq!(
+            s.store_info().unwrap()["models"][0]["id"],
+            model.id.as_str()
+        );
+        s.load_snapshot(&without, "bare.gsnap").unwrap();
+        assert_eq!(s.store_info().unwrap()["models"], json!([]));
     }
 
     #[test]

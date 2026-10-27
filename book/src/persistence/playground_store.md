@@ -13,7 +13,9 @@ top bar works on it exactly as the [dev server's](dev_server.md#on-a-store) does
   to the graph's own footprint;
 - **Checkpoint** (a snapshot of the current state; one is also written automatically after 4 MiB
   of log since the last one) and **Mark** (a name for the current position);
-- the marks and the snapshots (each with a `.gsnap` download), the newest five of each; **Calendar…**
+- the marks and the snapshots (each with a `.gsnap` download; when the store keeps
+  [embedding models](store_models.md), a second download **.gsnap without models** leaves them
+  out, the first one carries them with their licences), the newest five of each; **Calendar…**
   (or **See all…** when there are more) opens the [history calendar](dev_server.md#the-history-calendar);
 - on every snapshot and mark, and through **Go to commit** / **Go to time**: **Open read-only
   here** (queries read that past state, writes are refused, a banner offers **Back to the live
@@ -30,6 +32,11 @@ top bar works on it exactly as the [dev server's](dev_server.md#on-a-store) does
   always enabled (not while another store action runs); when the
   [compaction advice](store_prune.md#is-it-worth-it-the-compaction-advice) does not recommend it,
   it asks first, showing what it would free and why it is not recommended;
+- **Models** (when the store keeps embedding models, or its schema names one it lacks): each
+  model's identity, size, licence and where its text comes from, whether the repository is gated
+  and whether the schema uses it. Handing the store or a snapshot with models on redistributes
+  them. A `.gsnap` with models loaded on the start page keeps them in its store in memory (the
+  browser cannot run them, but its copies and downloads carry them);
 - **Verify the store** checks every checksum, and **Download current state (.gsnap)** saves the
   state on screen.
 

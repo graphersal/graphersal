@@ -400,8 +400,8 @@ files with their sizes and SHA-256). A failed or interrupted download leaves no 
 repositories. `graphersal embed-model list` shows what is there:
 
 ```text
-REPO                           SIZE  IDENTITY
-minishlab/potion-base-8M   29.5 MiB  model2vec/minishlab/potion-base-8M@fac4fa854e68
+REPO                           SIZE  LICENCE  IDENTITY
+minishlab/potion-base-8M   29.5 MiB  mit      model2vec/minishlab/potion-base-8M@fac4fa854e68
 ```
 
 **2. Register it under a name.** `--embedder NAME=REPO` (a downloaded repository) or
@@ -450,7 +450,14 @@ vectors with the old ones.
 
 **Licences.** A model's licence is the model's own, set by whoever published it (see its
 Hugging Face page); Graphersal downloads and runs it but does not license it. `potion-base-8M`
-is MIT licensed.
+is MIT licensed. A download keeps the model card (`README.md`), the repository's licence files
+and the licence id beside the model, and warns about an unknown or non-commercial licence or a
+gated repository; `embed-model list` shows the licences.
+
+**A model inside a store.** `graphersal embed-model download minishlab/potion-base-8M --into
+data/` puts the model into the Store `data/` instead: whenever the store is opened, its models
+are loaded without `--embedder`, and every copy of the store carries them with
+their licences (see [Embedding Models in a Store](../persistence/store_models.md)).
 
 The Rust library has the same embedder as `graphersal::vector::Model2Vec` (feature
 `model2vec`, native targets; it loads from a local directory only), see

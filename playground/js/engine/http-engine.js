@@ -211,9 +211,13 @@ export class HttpEngine extends Engine {
     return res.mark;
   }
 
-  /** The download URL of the stored snapshot at `commit` (packed `.gsnap`). */
-  snapshotUrl(commit) {
-    return new URL(`store/snapshot?commit=${encodeURIComponent(String(commit))}`, this.base).href;
+  /**
+   * The download URL of the stored snapshot at `commit` (packed `.gsnap`), with the store's
+   * embedding models unless `withModels` is false.
+   */
+  snapshotUrl(commit, withModels = true) {
+    const without = withModels ? '' : '&models=without';
+    return new URL(`store/snapshot?commit=${encodeURIComponent(String(commit))}${without}`, this.base).href;
   }
 
   /**

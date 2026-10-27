@@ -29,11 +29,15 @@ mod backup;
 mod backup_check;
 mod compaction;
 mod damage;
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+mod embedders;
 mod files;
 mod from_memory;
 mod graph;
+mod licenses;
 mod maintenance;
 mod merge;
+mod models;
 mod rollback;
 mod snapshot_dir;
 mod upgrade;
@@ -61,8 +65,13 @@ use graph::{GraphMaker, JournalCell, LiveWrite, LoadPlan, StoreGraph, TraversalG
 pub use backup::BackupMode;
 pub use compaction::{AdviceRule, CompactReport, CompactionAdvice, CompactionPolicy};
 pub use damage::{Damage, DamageKind, DamageReport, Diverged, Donor, IdRange, RepairReport};
+#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
+pub use embedders::StoredEmbedders;
 pub use files::{BackupMarker, DamagePolicy, LineageEntry};
 pub use maintenance::{BackupReport, ChangesSince, PruneReport, VerifyProblem, VerifyReport};
+pub use models::{
+    AddModelReport, BaseModel, ModelCopy, ModelFile, ModelRole, NewModel, StoredModel,
+};
 pub use rollback::{AtticEntry, ForkReport, RollbackMode, RollbackReport};
 pub use upgrade::UpgradeReport;
 pub(crate) use upgrade::upgradable_from;
@@ -376,6 +385,13 @@ pub struct StoreInfo {
     /// Why the store stopped after an in-place rollback or attic restore failed part-way
     /// ([`Store::stopped_reason`]); `None`: not stopped (always from [`Store::inspect`]).
     pub stopped: Option<String>,
+    /// The embedding models the store keeps (format spec 4.5), with their licences
+    /// ([`Store::models`]).
+    pub models: Vec<StoredModel>,
+    /// The model identities the schema's `embedder` keywords name (of the open graph, or from
+    /// the files for [`Store::inspect`]): a stored model whose identity is among them is in
+    /// use; one named here but not stored nor registered is missing.
+    pub schema_models: Vec<String>,
 }
 
 /// Damage found ON DISK while the store was open (by a backup, a checkpoint, a verification):
@@ -790,7 +806,7 @@ impl Store {
         let (commit_seq, time) = maintenance::last_commit_in_files(dir, &info.snapshots)?;
         info.commit_seq = commit_seq;
         info.last_commit_at = time;
-        info.definitions_by_kind = maintenance::definitions_in_files(dir)?;
+        (info.definitions_by_kind, info.schema_models) = maintenance::definitions_in_files(dir)?;
         info.definitions = info.definitions_by_kind.values().sum();
         Ok(info)
     }
@@ -880,7 +896,30 @@ impl Store {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        maintenance::backup_to_zip(&DirPath::root(dir.into_store_dir()), None, &mut archive)
+        maintenance::backup_to_zip(
+            &DirPath::root(dir.into_store_dir()),
+            None,
+            &mut archive,
+            ModelCopy::Include,
+        )
+    }
+
+    /// [`Store::backup_zip_with`] of the store in `dir` by another process.
+    #[cfg(feature = "persist-zip")]
+    pub fn backup_zip_dir_with<W>(
+        dir: impl IntoStoreDir,
+        mut archive: W,
+        models: ModelCopy,
+    ) -> Result<BackupReport, PersistError>
+    where
+        W: std::io::Read + std::io::Write + std::io::Seek + Send,
+    {
+        maintenance::backup_to_zip(
+            &DirPath::root(dir.into_store_dir()),
+            None,
+            &mut archive,
+            models,
+        )
     }
 
     /// Unpacks a backup ZIP ([`Store::backup_zip`]) into `dir` (which must not exist or be
@@ -897,6 +936,17 @@ impl Store {
         let dir = DirPath::root(dir.into_store_dir());
         let existed = dir.exists();
         zip::restore(reader, &dir)?;
+        // The models' files against their manifests (the archive's CRCs passed already).
+        for id in models::model_ids(&dir)? {
+            if let Some((path, reason)) = models::check(&dir, &id).1.into_iter().next() {
+                files::undo_new_dir(&dir, existed);
+                return Err(PersistError::corrupt(
+                    format!("backup archive entry {path}"),
+                    0,
+                    reason,
+                ));
+            }
+        }
         // A backup of a NEWER format (format spec 15): nothing of it is left behind.
         if let Err(err) = files::refuse_newer_version(&dir) {
             files::undo_new_dir(&dir, existed);
@@ -1230,7 +1280,76 @@ impl<S: PersistentStorage + Default> Store<S> {
         commit_seq: Option<u64>,
         writer: impl std::io::Write,
     ) -> Result<SnapshotInfo, PersistError> {
-        self.core.export_packed(commit_seq, writer)
+        self.core
+            .export_packed(commit_seq, writer, ModelCopy::Include)
+    }
+
+    /// [`Store::export_packed`] that carries the store's embedding models
+    /// ([`ModelCopy::Include`], what [`Store::export_packed`] does) or leaves them out
+    /// ([`ModelCopy::Exclude`]). The models travel as named extra files of an ignorable kind
+    /// (format spec 4.5, 8): a Graphersal without models (0.3.0) loads such a snapshot and
+    /// ignores them. Every model file is checked against its manifest first; a damaged one
+    /// stops the export (export without models then).
+    pub fn export_packed_with(
+        &self,
+        commit_seq: Option<u64>,
+        writer: impl std::io::Write,
+        models: ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError> {
+        self.core.export_packed(commit_seq, writer, models)
+    }
+
+    /// The embedding models this store keeps (format spec 4.5): identity, origin, licence and
+    /// files of each, from their manifests (nothing else is read; [`Store::verify`] checks the
+    /// files). Book page "Embedding Models in a Store".
+    pub fn models(&self) -> Result<Vec<StoredModel>, PersistError> {
+        models::list(&self.core.shared.dir)
+    }
+
+    /// Adds an embedding model to this open store (the explicit command a model enters a store
+    /// by, format spec 4.5): its files are streamed into `models/<id>/` with their SHA-256,
+    /// the standard licence text is written when the model has no licence file and its
+    /// licence is MIT or Apache-2.0, the manifest last; the directory appears at once (a
+    /// rename). The same model stored already is not written again
+    /// ([`AddModelReport::already_stored`]). The files are checked for their roles and names,
+    /// not loaded: a host that can load the model (feature `model2vec`) checks it first.
+    /// Refused on a read-only store (a backup, maintenance mode, ...).
+    pub fn add_model(&self, model: NewModel) -> Result<AddModelReport, PersistError> {
+        self.core.writable("add a model")?;
+        let (model, added) = models::add(&self.core.shared.dir, model, models::now_text())?;
+        Ok(AddModelReport {
+            model,
+            already_stored: !added,
+        })
+    }
+
+    /// Removes the embedding model `key` names (its identity `model2vec/<repo>@<12 hex>` or
+    /// its id `model2vec-<12 hex>`) from this open store: the only way a model leaves a store.
+    /// The schema keeps its `embedder` identity; a later open notes the missing model. Refused
+    /// while a backup copies the store's files, and on a read-only store.
+    pub fn remove_model(&self, key: &str) -> Result<StoredModel, PersistError> {
+        self.core.writable("remove a model")?;
+        remove_model_at(&self.core.shared.dir, key)
+    }
+
+    /// Puts the embedding models a packed snapshot carries (format spec 4.5, 8) into this open
+    /// store, leaving its graph alone: a host that loaded a `.gsnap` into a new store through
+    /// its graph ([`Store::create_with`]) keeps the file's models this way
+    /// ([`Store::create_from_packed`] does it itself). Every model file is checked against its
+    /// manifest; a model the store holds already stays as it is. Returns the models of the
+    /// file. Refused on a read-only store.
+    pub fn import_models_from_packed(
+        &self,
+        packed: impl std::io::Read,
+    ) -> Result<Vec<StoredModel>, PersistError> {
+        self.core.writable("add the models of a packed snapshot")?;
+        snapshot_dir::import_packed_models(&self.core.shared.dir, packed)
+    }
+
+    /// The bytes of the file `name` of the stored model `key` names (identity or id), checked
+    /// against the model's manifest (size and SHA-256).
+    pub fn read_model_file(&self, key: &str, name: &str) -> Result<Vec<u8>, PersistError> {
+        read_model_file_at(&self.core.shared.dir, key, name)
     }
 
     /// Branches the state at `target` into a NEW store in `new_dir` (format spec 12.5): a new
@@ -1406,7 +1525,24 @@ impl<S: PersistentStorage + Default> Store<S> {
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        self.core.backup_zip(archive)
+        self.core.backup_zip(archive, ModelCopy::Include)
+    }
+
+    /// [`Store::backup_zip`] that carries the store's embedding models ([`ModelCopy::Include`],
+    /// what [`Store::backup_zip`] does) or leaves them out ([`ModelCopy::Exclude`]: an archive
+    /// to hand on without the models, which Graphersal 0.3.0 also restores; one with models
+    /// it refuses as written by a newer version). Every model file is checked against its
+    /// manifest in the store and again in the archive.
+    #[cfg(feature = "persist-zip")]
+    pub fn backup_zip_with<W>(
+        &self,
+        archive: W,
+        models: ModelCopy,
+    ) -> Result<BackupReport, PersistError>
+    where
+        W: std::io::Read + std::io::Write + std::io::Seek + Send,
+    {
+        self.core.backup_zip(archive, models)
     }
 
     /// The backup marker when this store is a backup opened read-only ([`Store::open_backup`]).
@@ -1983,6 +2119,7 @@ impl StoreCore {
         files::refuse_newer_version(dir)?;
         // A store of a released older format is read as upgraded (format spec 15.1): the
         // repaired store is of the current format.
+        let models_from = dir.clone();
         let older = upgrade::older_view(dir);
         let dir = older.as_ref().unwrap_or(dir);
         if dir.join(files::GRAPH_FILE).exists() || dir.join(files::GRAPH_COPY).exists() {
@@ -2020,6 +2157,8 @@ impl StoreCore {
                 .with_name("repaired"),
             &options,
         )?;
+        // The intact models are carried; a damaged one is reported (format spec 4.5).
+        let (models, models_not_carried) = models::copy_all_lenient(&models_from, new_dir);
         let verified = maintenance::verify(new_dir, None)?;
         if !verified.is_ok() {
             return Err(PersistError::store(
@@ -2043,6 +2182,8 @@ impl StoreCore {
             lost_elements: salvage.lost_elements,
             diverged: salvage.diverged,
             marks_not_carried: marks_up_to(dir, commit_seq),
+            models,
+            models_not_carried,
         })
     }
 
@@ -2226,6 +2367,7 @@ impl StoreCore {
         info.definitions_by_kind =
             count_by_kind(self.shared.graph.read().definition_kinds().into_iter());
         info.definitions = info.definitions_by_kind.values().sum();
+        info.schema_models = self.shared.graph.read().schema_models();
         info.damage_found = self.damage_found();
         info.frozen_by_damage = self.is_frozen_by_damage();
         info.stopped = self.stopped_reason();
@@ -2236,8 +2378,9 @@ impl StoreCore {
         &self,
         commit_seq: Option<u64>,
         writer: impl std::io::Write,
+        models: ModelCopy,
     ) -> Result<SnapshotInfo, PersistError> {
-        export_packed_from(&self.shared.dir, commit_seq, writer)
+        export_packed_from(&self.shared.dir, commit_seq, writer, models)
     }
 
     pub fn fork(
@@ -2272,6 +2415,7 @@ impl StoreCore {
             time: now(),
         }];
         lineage.extend(parent.lineage.iter().copied());
+        let existed = new_dir.exists();
         Self::create_lineage(
             new_dir,
             &graph,
@@ -2279,6 +2423,7 @@ impl StoreCore {
             WriteOptions::new().with_parent(parent_id, branched_at),
             &options,
         )?;
+        let models = models::carry_into_new(dir, new_dir, existed)?;
         let (_, path) = list_snapshots(new_dir)?.pop().ok_or_else(|| {
             PersistError::store(
                 "fork the store",
@@ -2289,6 +2434,7 @@ impl StoreCore {
         Ok(ForkReport {
             snapshot: read_listing(&path)?,
             marks_not_carried: marks_up_to(dir, branched_at),
+            models,
         })
     }
 
@@ -2493,12 +2639,20 @@ impl StoreCore {
     }
 
     #[cfg(feature = "persist-zip")]
-    pub fn backup_zip<W>(&self, mut archive: W) -> Result<BackupReport, PersistError>
+    pub fn backup_zip<W>(
+        &self,
+        mut archive: W,
+        models: ModelCopy,
+    ) -> Result<BackupReport, PersistError>
     where
         W: std::io::Read + std::io::Write + std::io::Seek + Send,
     {
-        let result =
-            maintenance::backup_to_zip(&self.shared.dir, self.durable_position(), &mut archive);
+        let result = maintenance::backup_to_zip(
+            &self.shared.dir,
+            self.durable_position(),
+            &mut archive,
+            models,
+        );
         self.after_backup(result)
     }
 
@@ -3055,7 +3209,9 @@ impl Shared {
     fn report_damage(&self, found_by: &str, problems: Vec<VerifyProblem>) {
         let problems: Vec<VerifyProblem> = problems
             .into_iter()
+            // Neither the attic nor a model (format spec 4.5) is graph data the store writes.
             .filter(|p| p.path != "attic" && !p.path.starts_with("attic/"))
+            .filter(|p| p.path != models::MODELS_DIR && !p.path.starts_with("models/"))
             .collect();
         if problems.is_empty() {
             return;
@@ -3946,6 +4102,7 @@ fn remove_tmp(dir: &DirPath) -> Result<usize, PersistError> {
         }
     }
     removed += rollback::remove_interrupted(dir);
+    removed += models::remove_tmp(dir);
     if removed > 0 {
         files::sync_dir(&dir.join(SNAPSHOTS_DIR))?;
         files::sync_dir(dir)?;
@@ -4030,6 +4187,8 @@ fn info_of(dir: &DirPath, file: &GraphFile) -> Result<StoreInfo, PersistError> {
         damage_found: Vec::new(),
         frozen_by_damage: false,
         stopped: None,
+        models: models::list(dir).unwrap_or_default(),
+        schema_models: Vec::new(),
     })
 }
 
@@ -4037,6 +4196,7 @@ fn export_packed_from(
     dir: &DirPath,
     commit_seq: Option<u64>,
     mut writer: impl std::io::Write,
+    models: ModelCopy,
 ) -> Result<SnapshotInfo, PersistError> {
     let snapshots = list_snapshots(dir)?;
     let found = match commit_seq {
@@ -4053,13 +4213,42 @@ fn export_packed_from(
             },
         ));
     };
-    let mut reader = DirSnapshotReader::open(path)?;
+    let model_files = match models {
+        ModelCopy::Include => models::packed_files(dir)?.0,
+        ModelCopy::Exclude => Vec::new(),
+    };
+    let mut reader = DirSnapshotReader::open_with_models(path, model_files)?;
     std::io::copy(&mut reader, &mut writer)
         .map_err(|err| PersistError::io("exporting a packed snapshot", err))?;
     writer
         .flush()
         .map_err(|err| PersistError::io("exporting a packed snapshot", err))?;
     read_listing(path)
+}
+
+/// [`Store::remove_model`] in the store at `dir` (its writer holds the lock): refused while a
+/// backup copies the store's files.
+fn remove_model_at(dir: &DirPath, key: &str) -> Result<StoredModel, PersistError> {
+    let _pin = match dir.store_dir().lock(super::dir::LockKind::BackupExclusive) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return Err(PersistError::store(
+                "remove a model",
+                StoreFailure::BackupRunning,
+                "a backup is copying the store's files; remove the model when it has finished",
+            ));
+        }
+        Err(err) => return Err(PersistError::io("opening the store's BACKUP file", err)),
+    };
+    models::remove(dir, key)
+}
+
+/// [`Store::read_model_file`] in the store at `dir`.
+fn read_model_file_at(dir: &DirPath, key: &str, name: &str) -> Result<Vec<u8>, PersistError> {
+    let Some(model) = models::find(dir, key)? else {
+        return Err(models::unknown_model("read a model file", key));
+    };
+    models::read_file(dir, &model.id, name)
 }
 
 impl Store {
@@ -4071,7 +4260,85 @@ impl Store {
     ) -> Result<SnapshotInfo, PersistError> {
         let dir = DirPath::root(dir.into_store_dir());
         files::refuse_older_format(&dir)?;
-        export_packed_from(&dir, commit_seq, writer)
+        export_packed_from(&dir, commit_seq, writer, ModelCopy::Include)
+    }
+
+    /// [`Store::export_packed_with`] of the store in `dir`, without a lock.
+    pub fn export_packed_dir_with(
+        dir: impl IntoStoreDir,
+        commit_seq: Option<u64>,
+        writer: impl std::io::Write,
+        models: ModelCopy,
+    ) -> Result<SnapshotInfo, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        files::refuse_older_format(&dir)?;
+        export_packed_from(&dir, commit_seq, writer, models)
+    }
+
+    /// [`Store::models`] of the store in `dir`, without a lock.
+    pub fn models_dir(dir: impl IntoStoreDir) -> Result<Vec<StoredModel>, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        files::refuse_other_version(&dir)?;
+        read_graph_file(&dir)?;
+        models::list(&dir)
+    }
+
+    /// [`Store::add_model`] to the CLOSED store in `dir` (CLI:
+    /// `graphersal embed-model download <repo> --into <dir>`): takes the writer lock (a store open elsewhere is refused with
+    /// [`PersistError::Locked`]); refused on a backup.
+    pub fn add_model_dir(
+        dir: impl IntoStoreDir,
+        model: NewModel,
+    ) -> Result<AddModelReport, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        let _lock = Self::closed_store_lock(&dir)?;
+        let (model, added) = models::add(&dir, model, models::now_text())?;
+        Ok(AddModelReport {
+            model,
+            already_stored: !added,
+        })
+    }
+
+    /// [`Store::remove_model`] from the CLOSED store in `dir` (CLI:
+    /// `graphersal store models remove <dir> <identity>`): takes the writer lock; refused on a backup and while a backup copies
+    /// the store's files.
+    pub fn remove_model_dir(
+        dir: impl IntoStoreDir,
+        key: &str,
+    ) -> Result<StoredModel, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        let _lock = Self::closed_store_lock(&dir)?;
+        remove_model_at(&dir, key)
+    }
+
+    /// [`Store::read_model_file`] of the store in `dir`, without a lock.
+    pub fn read_model_file_dir(
+        dir: impl IntoStoreDir,
+        key: &str,
+        name: &str,
+    ) -> Result<Vec<u8>, PersistError> {
+        let dir = DirPath::root(dir.into_store_dir());
+        files::refuse_other_version(&dir)?;
+        read_model_file_at(&dir, key, name)
+    }
+
+    /// The writer lock of a closed store that is no backup (a model add or removal).
+    fn closed_store_lock(dir: &DirPath) -> Result<DirLock, PersistError> {
+        files::refuse_other_version(dir)?;
+        if !Self::is_store(dir.store_dir()) {
+            return Err(PersistError::NotAStore {
+                path: dir.display(),
+                reason: "it has no GRAPH file".into(),
+            });
+        }
+        let lock = DirLock::exclusive(dir)?;
+        if let Some(marker) = read_graph_file(dir)?.file.backup {
+            return Err(PersistError::IsBackup {
+                path: dir.display(),
+                commit_seq: marker.commit_seq,
+            });
+        }
+        Ok(lock)
     }
 
     /// The snapshots of the store in `dir`, without a lock.

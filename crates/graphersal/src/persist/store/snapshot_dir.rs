@@ -245,7 +245,11 @@ pub(crate) fn import_packed(
 ) -> Result<(DirPath, SnapshotInfo), PersistError> {
     let mut reader = PackedReader::open(packed)?;
     let snapshot = NewSnapshotDir::begin(store, reader.manifest.fixed.commit_seq)?;
-    for entry in reader.manifest.segments.clone() {
+    // Model files (format spec 4.5, 8) go to a staging directory per model under models/, not
+    // into the snapshot; the snapshot's manifest is written without their rows.
+    let mut staged: Vec<(String, DirPath)> = Vec::new();
+    let mut model_rows = Vec::new();
+    for (number, entry) in reader.manifest.segments.clone().into_iter().enumerate() {
         if entry.path.contains('/') {
             return Err(PersistError::corrupt(
                 "packed snapshot",
@@ -253,18 +257,109 @@ pub(crate) fn import_packed(
                 "an incremental segment reference cannot be imported",
             ));
         }
+        if entry.kind == super::models::PACKED_MODEL_KIND
+            && let Some((id, file)) = super::models::parse_packed_name(&entry.path)
+        {
+            let dir = match staged.iter().find(|(staged_id, _)| staged_id == id) {
+                Some((_, dir)) => dir.clone(),
+                None => {
+                    let dir = super::models::models_dir(store)
+                        .join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7()));
+                    dir.create_dir_all()
+                        .map_err(|err| PersistError::io("creating a model directory", err))?;
+                    staged.push((id.to_string(), dir.clone()));
+                    dir
+                }
+            };
+            write_file(&dir.join(file), |out| reader.copy_segment(out).map(|_| ()))?;
+            model_rows.push(number);
+            continue;
+        }
         let path = safe_relative(snapshot.tmp(), &entry.path)
             .ok_or_else(|| PersistError::corrupt("packed snapshot", 0, "unsafe segment path"))?;
         write_file(&path, |out| reader.copy_segment(out).map(|_| ()))?;
     }
     let schema = std::mem::take(&mut reader.schema);
-    let manifest = std::mem::take(&mut reader.manifest_bytes);
+    let mut manifest = std::mem::take(&mut reader.manifest_bytes);
+    if !model_rows.is_empty() {
+        let mut without = reader.manifest.clone();
+        let mut number = 0;
+        without.segments.retain(|_| {
+            number += 1;
+            !model_rows.contains(&(number - 1))
+        });
+        manifest = without.encode();
+    }
     reader.finish()?;
     write_file(&snapshot.tmp().join(SCHEMA_FILE), |out| out.put(&schema))?;
     write_file(&snapshot.tmp().join(MANIFEST_FILE), |out| {
         out.put(&manifest)
     })?;
-    snapshot.finish()
+    let result = (|| {
+        for (id, dir) in &staged {
+            super::models::install_staged(store, id, dir)?;
+        }
+        snapshot.finish()
+    })();
+    if result.is_err() {
+        for (_, dir) in &staged {
+            let _ = super::files::remove_path(dir);
+        }
+    }
+    result
+}
+
+/// The models a packed stream carries (format spec 4.5, 8), put into the store at `store`
+/// (its other sections are checked and skipped): each model staged under `models/tmp-*`,
+/// checked against its manifest and renamed into place; a model the store holds already is
+/// kept as it is. Returns the models of the stream.
+pub(crate) fn import_packed_models(
+    store: &DirPath,
+    packed: impl Read,
+) -> Result<Vec<super::models::StoredModel>, PersistError> {
+    let mut reader = PackedReader::open(packed)?;
+    let mut staged: Vec<(String, DirPath)> = Vec::new();
+    let result = (|| {
+        for entry in reader.manifest.segments.clone() {
+            if entry.kind == super::models::PACKED_MODEL_KIND
+                && let Some((id, file)) = super::models::parse_packed_name(&entry.path)
+            {
+                let dir = match staged.iter().find(|(staged_id, _)| staged_id == id) {
+                    Some((_, dir)) => dir.clone(),
+                    None => {
+                        let dir = super::models::models_dir(store)
+                            .join(format!("{TMP_PREFIX}{:032x}", crate::value::uuid::new_v7()));
+                        dir.create_dir_all()
+                            .map_err(|err| PersistError::io("creating a model directory", err))?;
+                        staged.push((id.to_string(), dir.clone()));
+                        dir
+                    }
+                };
+                write_file(&dir.join(file), |out| reader.copy_segment(out).map(|_| ()))?;
+            } else {
+                reader.copy_segment(&mut std::io::sink())?;
+            }
+        }
+        let models = std::mem::take(&mut staged);
+        reader.finish()?;
+        let mut installed = Vec::new();
+        for (index, (id, dir)) in models.iter().enumerate() {
+            match super::models::install_staged(store, id, dir) {
+                Ok(model) => installed.push(model),
+                Err(err) => {
+                    for (_, rest) in &models[index..] {
+                        let _ = super::files::remove_path(rest);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(installed)
+    })();
+    for (_, dir) in &staged {
+        let _ = super::files::remove_path(dir);
+    }
+    result
 }
 
 /// Reads a snapshot's manifest file.
@@ -410,6 +505,10 @@ pub(crate) fn check_snapshot_file(
 enum Part {
     Bytes(Vec<u8>),
     File(DirPath),
+    /// A file of which exactly this many bytes are read (its length was checked when the
+    /// manifest row was made; a file that grew since is cut there, one that shrank fails the
+    /// trailer).
+    Sized(DirPath, u64),
 }
 
 /// A snapshot directory read as the packed snapshot it is equivalent to (format spec 8: the
@@ -425,10 +524,49 @@ pub(crate) struct DirSnapshotReader {
 
 impl DirSnapshotReader {
     pub(crate) fn open(snapshot: &DirPath) -> Result<Self, PersistError> {
+        Self::open_with_models(snapshot, Vec::new())
+    }
+
+    /// The packed stream of `snapshot` carrying `models` (the store's model files, format spec
+    /// 4.5) as named extra files of the ignorable segment kind
+    /// [`PACKED_MODEL_KIND`](super::models::PACKED_MODEL_KIND), after the snapshot's own rows.
+    pub(crate) fn open_with_models(
+        snapshot: &DirPath,
+        models: Vec<super::models::PackedModelFile>,
+    ) -> Result<Self, PersistError> {
         let (manifest_bytes, manifest) = read_manifest(snapshot)?;
         // A packed snapshot is self-contained: references become plain names (the segment
         // sections are the referenced files' bytes).
         let manifest_bytes = self_contained_manifest(manifest_bytes, &manifest);
+        let (manifest_bytes, manifest, models) = if models.is_empty() {
+            (manifest_bytes, manifest, models)
+        } else {
+            let mut with = Manifest::decode(&manifest_bytes)
+                .map_err(|err| err.at(format!("{}/{MANIFEST_FILE}", snapshot.display()), 0))?;
+            // A snapshot imported from a packed file by a Graphersal without models keeps their
+            // files as its own rows (format spec 4.5): those names are not added twice.
+            let own: std::collections::HashSet<String> =
+                with.segments.iter().map(|s| s.path.clone()).collect();
+            let models: Vec<super::models::PackedModelFile> = models
+                .into_iter()
+                .filter(|f| !own.contains(&f.name))
+                .collect();
+            for file in &models {
+                with.segments.push(super::super::manifest::SegmentEntry {
+                    kind: super::models::PACKED_MODEL_KIND,
+                    path: file.name.clone(),
+                    first_id: file.id.as_str().into(),
+                    last_id: file.file.as_str().into(),
+                    count: 0,
+                    byte_len: file.len,
+                    crc: file.crc,
+                });
+            }
+            let bytes = with.encode();
+            (bytes, with, models)
+        };
+        let own_rows = manifest.segments.len() - models.len();
+        let mut models = models.into_iter();
         let mut parts = VecDeque::new();
         let mut head = Vec::with_capacity(16);
         head.extend_from_slice(PACKED_MAGIC);
@@ -449,7 +587,20 @@ impl DirSnapshotReader {
             .map_err(|err| PersistError::io("reading a snapshot's schema.json", err))?;
         parts.push_back(Part::Bytes(section(SECTION_SCHEMA, schema_len)));
         parts.push_back(Part::File(schema_path));
-        for entry in &manifest.segments {
+        for (number, entry) in manifest.segments.iter().enumerate() {
+            if number >= own_rows {
+                // A model file (format spec 4.5): its bytes from the store's models/.
+                let Some(file) = models.next() else { break };
+                let prefix = extra_file_prefix(&entry.path);
+                let mut bytes = section(section_kind(entry.kind), prefix.len() as u64 + file.len);
+                bytes.extend_from_slice(&prefix);
+                parts.push_back(Part::Bytes(bytes));
+                parts.push_back(match file.source {
+                    super::models::PackedSource::Bytes(bytes) => Part::Bytes(bytes),
+                    super::models::PackedSource::File(path) => Part::Sized(path, file.len),
+                });
+                continue;
+            }
             let location = format!("{}/{}", snapshot.display(), entry.path);
             let path = segment_path(snapshot, &entry.path)
                 .ok_or_else(|| PersistError::corrupt(&location, 0, "unsafe segment path"))?;
@@ -499,6 +650,9 @@ impl Read for DirSnapshotReader {
                     self.current = Some(Box::new(std::io::Cursor::new(bytes)))
                 }
                 Some(Part::File(path)) => self.current = Some(path.open_read()?),
+                Some(Part::Sized(path, len)) => {
+                    self.current = Some(Box::new(path.open_read()?.take(len)))
+                }
                 None => {
                     self.done = true;
                     self.trailer = Some(std::io::Cursor::new(self.crc.to_le_bytes()));

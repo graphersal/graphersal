@@ -346,6 +346,12 @@ pub struct RepairReport {
     /// store starts a new lineage without marks, so these names stay targets of the damaged
     /// store only (best effort: what its `marks` file or WAL still yields).
     pub marks_not_carried: Vec<Mark>,
+    /// The embedding models the repaired store holds: every model of the damaged store whose
+    /// files check against its manifest (format spec 4.5).
+    pub models: Vec<super::StoredModel>,
+    /// The models that were NOT carried because their files are damaged, with the reason:
+    /// add them to the repaired store again.
+    pub models_not_carried: Vec<String>,
 }
 
 impl RepairReport {
@@ -397,7 +403,12 @@ impl std::fmt::Display for RepairReport {
                 diverged.reason
             )?;
         }
-        super::rollback::write_marks_not_carried(f, &self.marks_not_carried)
+        super::rollback::write_marks_not_carried(f, &self.marks_not_carried)?;
+        super::rollback::write_models_carried(f, &self.models)?;
+        for reason in &self.models_not_carried {
+            writeln!(f, "  model not carried: {reason}")?;
+        }
+        Ok(())
     }
 }
 

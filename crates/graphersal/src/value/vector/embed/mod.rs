@@ -12,10 +12,18 @@ mod hash_ngram;
 mod job;
 pub(crate) mod provenance;
 
+#[cfg(any(
+    feature = "persist",
+    all(feature = "model2vec", not(target_arch = "wasm32"))
+))]
+pub(crate) mod identity;
 #[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
 mod model2vec;
-#[cfg(all(feature = "model2vec", not(target_arch = "wasm32")))]
-mod sha256;
+#[cfg(any(
+    feature = "persist",
+    all(feature = "model2vec", not(target_arch = "wasm32"))
+))]
+pub(crate) mod sha256;
 
 pub use hash_ngram::HashNgram;
 pub use job::{EmbedJob, EmbedJobError, EmbedReport};
@@ -689,6 +697,15 @@ impl Embedders {
         }
     }
 
+    /// A builder that starts from this registry's content and default, to register more
+    /// embedders beside them (a host adding the models a Store keeps to the ones it registered
+    /// itself).
+    pub fn to_builder(&self) -> EmbeddersBuilder {
+        EmbeddersBuilder {
+            embedders: self.clone(),
+        }
+    }
+
     /// The embedder registered as `name`.
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Embedder>> {
         self.entries.iter().find(|e| e.info().name == name)
@@ -844,6 +861,19 @@ impl EmbeddersBuilder {
         };
         self.embedders.default = position;
         Ok(self)
+    }
+
+    /// Whether `name` cannot be registered: taken or reserved.
+    #[cfg_attr(
+        not(all(
+            feature = "persist",
+            feature = "model2vec",
+            not(target_arch = "wasm32")
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn is_taken(&self, name: &str) -> bool {
+        is_reserved(name) || self.embedders.get(name).is_some()
     }
 
     /// The registry.
