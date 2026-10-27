@@ -35,25 +35,55 @@ graphersal --graph g.graphml --schema schema.json --server        # a graph file
   UI); a file missing there comes from the embedded copy. Without `--ui-dir`, `./playground` is
   used that way when it exists (a repository checkout), else the embedded UI alone. An explicit
   `--ui-dir` that does not exist is a usage error. The stderr banner says where the UI comes from:
-  `UI: embedded` or `UI: <dir> (embedded fallback)`. A path leaving the UI root (`..`) is a 404.
-- After the graph is in memory, stderr shows **how long loading took and what was loaded**, from
-  the same data as the playground's Profile -> Statistics tab: the load time (sample build, file
-  import with `--schema`, `.gsnap` load, or Store open = snapshot load + WAL replay, with the
-  number of WAL commits replayed), the vertex and edge totals, the ten largest vertex and edge
-  labels (`+N more` for the rest), the graph's memory (structure, indexes, properties, and the
-  [property indexes](../users_guide/property_indexes.md) when there are any, as
-  `..., property indexes 2.0 KiB)`) with the process heap, and the compressed values when there
-  are any:
+  `UI: embedded` or `UI: <dir> (embedded fallback)` (in its Server section). A path leaving the UI root (`..`) is a 404.
+- After the graph is in memory, stderr shows **what was loaded and how the server runs**, in
+  sections under the warning box, one `key: value` row per fact (long values wrap under their
+  column; the `claude mcp add` command never wraps, so it copies in one piece):
+  - **Store** (a Store only): its path, the commit and the number of snapshots, its state
+    (durable, a read-only backup, or maintenance mode), and the load time (snapshot load + WAL
+    replay, with the number of WAL commits replayed);
+  - **Graph**: for a sample or a file its source and load time; the vertex and edge totals, the
+    ten largest vertex and edge labels (`+N more` for the rest), the graph's memory (structure,
+    indexes, properties, and the [property indexes](../users_guide/property_indexes.md) when
+    there are any) with the process heap, and the compressed and deduplicated values when there
+    are any (the same data as the playground's Profile -> Statistics tab);
+  - **Embedding models** (when there are any): every model besides the built-in `hash-ngram/1`,
+    with the name queries call it by, its repository and licence, and where it comes from
+    (`--embedder`, stored in the Store, or both), and every model the schema names that nobody
+    provides ([Embedding Models in a Store](store_models.md));
+  - **Server**: the limits of every query, where the UI comes from, the MCP endpoint and the
+    command that connects Claude Code, the AI Chat, and the addresses it listens on.
 
   ```text
-  Loaded in 34.3 ms: 6 vertices, 6 edges
-  Vertex labels (2): person 4, software 2
-  Edge labels (2): created 4, knows 2
-  Memory: graph 5.5 KiB (structure 2.2 KiB, indexes 1.1 KiB, properties 2.2 KiB); process heap 1.9 MiB
-  Limits: none (start with --timeout, --memory-limit, --safe-limits, --max-* to bound queries)
-  ```
+  ── Store ─────────────────────────────────────────────────────────────────────
+    path:      data
+    commit:    7021, 1 snapshot
+    state:     durable: every commit is in the write-ahead log before the query
+               answers; Ctrl+C stops the server and closes the store cleanly
+    loaded:    2.02 s (snapshot, no WAL commits to replay)
 
-  On a Store the first line reads `Loaded in 53.6 ms (snapshot + 2 WAL commits replayed): ...`.
+  ── Graph ─────────────────────────────────────────────────────────────────────
+    size:      193,947 vertices, 923,752 edges
+    vertices:  45 labels: Method 91,098, Field 39,155, Type 16,306, DocChunk
+               13,018, File 12,814, Bean 3,293, LogMessage 3,129, ConfigKey 2,989,
+               Package 2,602, ExternalArtifact 1,278, +35 more
+    edges:     78 labels: CALLS 251,991, USES_TYPE 142,362, DECLARES 122,073, ...
+    memory:    graph 703.2 MiB (structure 144.7 MiB, indexes 64.0 MiB, properties
+               486.8 MiB, property indexes 7.6 MiB)
+               process heap 1.6 GiB
+
+  ── Embedding models ──────────────────────────────────────────────────────────
+    model:     potion = minishlab/potion-multilingual-128M, licence MIT
+               --embedder; also stored in data
+
+  ── Server ────────────────────────────────────────────────────────────────────
+    limits:    none (start with --timeout, --memory-limit, --safe-limits,
+               --max-* to bound queries)
+    UI:        embedded
+    MCP:       http://127.0.0.1:9010/mcp
+    connect:   claude mcp add --transport http graphersal http://127.0.0.1:9010/mcp
+    listening: http://127.0.0.1:9010/ and http://[::1]:9010/ (IPv6 loopback)
+  ```
 - The **limit options** of the CLI apply to every query of the server (see [Limits](#limits)).
   The display options (`--format`, `--max-rows`, `--max-items`, `--no-limit`, `--spelling`) are
   refused with a usage error, because the UI sets the display per query; `-e`/`--in` cannot be
@@ -127,7 +157,8 @@ page explains each limit).
 
 A query overrides a traversal option with `g.with(..)` (for example
 `g.with("evaluationTimeout", 0)`), as in the CLI. The values in force are listed on stderr at
-start ("Limits of every query: ...", or "Limits: none (...)" without limit options) and in
+start (the `limits` row of the Server section: "of every query: ...", or "none (...)" without
+limit options) and in
 `GET /api/info` (`presets`). Without limit options the
 server runs like the playground: no script limits, the engine's traversal defaults, no time
 budget; Stop is the way to end a runaway query.
@@ -188,8 +219,8 @@ graphersal --graph data/ --server --mcp --embedder potion=minishlab/potion-base-
 ## Safety
 
 The server is a local development tool: it binds the loopback only, `127.0.0.1` and, when the
-system has IPv6, `[::1]` on the same port (stderr then says `Also listening on
-http://[::1]:<port>/ (IPv6 loopback)`; if that bind fails the server stays on IPv4, silently;
+system has IPv6, `[::1]` on the same port (the `listening` row on stderr then names both
+addresses; if that bind fails the server stays on IPv4, silently;
 the URL on stdout is always `http://127.0.0.1:<port>/`). There is no option to bind elsewhere. It
 has no authentication, and refuses requests whose `Host` (`127.0.0.1`, `localhost` or `[::1]` with
 the server's port) is not the server itself or
@@ -330,7 +361,8 @@ browser's [Store menu](#on-a-store), so the agent's tool list stays short.
 ```bash
 graphersal --graph modern --server --port 9000 --mcp
 # Graphersal dev server: http://127.0.0.1:9000/        (stdout)
-# MCP endpoint: http://127.0.0.1:9000/mcp              (stderr, with the claude mcp add command)
+#   MCP:       http://127.0.0.1:9000/mcp               (stderr, Server section; the next row,
+#   connect:   claude mcp add --transport http ...      is the command that connects Claude Code)
 ```
 
 Any `--graph` source works, a Store directory too (the agent gets the same graph tools; the

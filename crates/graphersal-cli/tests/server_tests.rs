@@ -940,7 +940,7 @@ fn the_start_banner_prints_the_load_time_and_the_statistics() {
     let mut lines = BufReader::new(stderr).lines();
     for line in lines.by_ref() {
         let line = line.unwrap();
-        let last = line.starts_with("Limits");
+        let last = line.starts_with("  listening:");
         banner.push(line);
         if last {
             break;
@@ -964,21 +964,25 @@ fn the_start_banner_prints_the_load_time_and_the_statistics() {
     let banner = banner.join("\n");
     let loaded = banner
         .lines()
-        .find(|line| line.starts_with("Loaded in "))
+        .find(|line| line.starts_with("  loaded:"))
         .unwrap_or_else(|| panic!("no load line: {banner}"));
     assert!(
-        loaded.ends_with(" ms: 6 vertices, 6 edges") || loaded.ends_with(" s: 6 vertices, 6 edges"),
+        loaded.ends_with(" ms") || loaded.ends_with(" s"),
         "{loaded}"
     );
     assert!(
-        banner.contains("\nVertex labels (2): person 4, software 2\n"),
+        banner.contains("\n  size:      6 vertices, 6 edges\n"),
         "{banner}"
     );
     assert!(
-        banner.contains("\nEdge labels (2): created 4, knows 2\n"),
+        banner.contains("\n  vertices:  2 labels: person 4, software 2\n"),
         "{banner}"
     );
-    assert!(banner.contains("\nMemory: graph "), "{banner}");
+    assert!(
+        banner.contains("\n  edges:     2 labels: created 4, knows 2\n"),
+        "{banner}"
+    );
+    assert!(banner.contains("\n  memory:    graph "), "{banner}");
 }
 
 #[test]
@@ -998,7 +1002,8 @@ fn a_missing_ui_dir_is_a_usage_error_with_a_hint() {
     assert!(stderr.contains("--ui-dir"), "{stderr}");
 }
 
-/// Starts the server in the directory `cwd` and returns it with its `UI: ...` banner line.
+/// Starts the server in the directory `cwd` and returns it with the value of its `UI:` banner
+/// row.
 fn start_in(cwd: &std::path::Path, args: &[&str]) -> (DevServer, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
         .current_dir(cwd)
@@ -1013,8 +1018,8 @@ fn start_in(cwd: &std::path::Path, args: &[&str]) -> (DevServer, String) {
     let mut lines = BufReader::new(stderr).lines();
     for line in lines.by_ref() {
         let line = line.unwrap();
-        if line.starts_with("UI: ") {
-            banner = line;
+        if let Some(value) = line.strip_prefix("  UI:") {
+            banner = value.trim().to_string();
             break;
         }
     }
@@ -1048,7 +1053,7 @@ fn without_a_ui_directory_the_embedded_ui_is_served() {
     std::fs::create_dir_all(&cwd).unwrap();
     let (server, banner) = start_in(&cwd, &["--graph", "modern"]);
     let port = server.port;
-    assert_eq!(banner, "UI: embedded");
+    assert_eq!(banner, "embedded");
 
     let index = get(port, "/");
     assert_eq!(index.status, 200);

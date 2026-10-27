@@ -60,6 +60,7 @@ use crate::cli::{Cli, DEFAULT_UI_DIR, EXIT_OK, EXIT_USAGE_ERROR, GraphSpec, Scri
 mod ai;
 mod layout;
 mod mcp;
+mod start_banner;
 mod start_stats;
 mod store;
 mod ui;
@@ -82,13 +83,11 @@ const BANNER: &str = "\
  The HTTP API is internal to the playground and changes without notice.
 ==============================================================================";
 
-/// The stderr banner of a server on a Store directory.
+/// The stderr banner of a server on a Store (its durability is a row of the Store section).
 const STORE_BANNER: &str = "\
 ==============================================================================
  graphersal DEV SERVER - dev mode, unstable, local only, NOT for production
- No authentication. Loopback only. The graph is a Store (a directory or a
- single file): every commit is written to its write-ahead log before the query
- answers, and it survives a restart (or a crash) of the server.
+ No authentication. Loopback only. The graph is a Store on disk.
  The HTTP API is internal to the playground and changes without notice.
 ==============================================================================";
 
@@ -302,6 +301,9 @@ pub fn run(cli: &Cli) -> i32 {
     // A Store directory is opened here (its lock held for the life of the server); the open
     // registers the embedding models the store keeps and its schema names, so the presets
     // are built after it.
+    // The models the open loads (and the ones the schema names that nobody provides) are
+    // listed in the start banner's own section, not as `note:` lines before it.
+    crate::cli::defer_model_notes();
     let store = match &cli.graph {
         GraphSpec::Store(_) => match cli.graph.open(cli.create_store, cli.on_damage, None) {
             Ok(opened) => opened.store,
@@ -369,45 +371,72 @@ pub fn run(cli: &Cli) -> i32 {
             BANNER
         }
     );
-    if let Some(store) = &store {
-        if let Some(marker) = store.backup_marker() {
-            errln!(
-                "Store {} is a BACKUP (up to commit {}): READ-ONLY, writes are refused; make it \
-                 the live store with `graphersal store restore {}` (after stopping the server)",
-                store.location(),
-                marker.commit_seq,
-                store.location()
-            );
-        } else if store.maintenance().is_some() {
-            errln!(
-                "Store {} in MAINTENANCE MODE (damage found; read-only): the UI shows the damage \
-                 report; repair with `graphersal store repair {} --to <new_dir>`",
-                store.location(),
-                store.location()
-            );
-        } else {
-            errln!(
-                "Store {} at commit {} ({} snapshot(s)); Ctrl+C stops the server and closes the \
-                 store cleanly (every commit is already durable)",
-                store.location(),
-                store.open_report().commit_seq,
-                store.snapshots().map(|s| s.len()).unwrap_or(0)
-            );
-        }
-    }
-    errln!("{}", ui.banner());
     let replayed = store
         .as_ref()
         .map(|store| store.open_report().commits_replayed);
-    for line in start_stats::lines(
-        &statistics,
-        load_time,
-        replayed,
-        graphersal::alloc_tracking::global_live_bytes(),
-    ) {
-        errln!("{line}");
+    let loaded = start_stats::loaded(load_time, replayed);
+    let mut store_section = start_banner::Section::new("Store");
+    let mut graph_section = start_banner::Section::new("Graph");
+    if let Some(store) = &store {
+        let location = store.location();
+        store_section.row("path", location.clone());
+        let snapshots = store.snapshots().map(|s| s.len()).unwrap_or(0);
+        store_section.row(
+            "commit",
+            format!(
+                "{}, {snapshots} snapshot{}",
+                store.open_report().commit_seq,
+                if snapshots == 1 { "" } else { "s" }
+            ),
+        );
+        let state = if let Some(marker) = store.backup_marker() {
+            format!(
+                "a BACKUP (up to commit {}): READ-ONLY, writes are refused; make it the live \
+                 store with `graphersal store restore {location}` (after stopping the server)",
+                marker.commit_seq
+            )
+        } else if store.maintenance().is_some() {
+            format!(
+                "MAINTENANCE MODE (damage found; read-only): the UI shows the damage report; \
+                 repair with `graphersal store repair {location} --to <new_dir>`"
+            )
+        } else {
+            "durable: every commit is in the write-ahead log before the query answers; \
+             Ctrl+C stops the server and closes the store cleanly"
+                .to_string()
+        };
+        store_section.row("state", state);
+        store_section.row("loaded", loaded);
+    } else {
+        graph_section.row("source", graph_title(&cli.graph));
+        graph_section.row("loaded", loaded);
     }
-    errln!("{}", presets_summary(&presets_json));
+    graph_section.rows(start_stats::rows(
+        &statistics,
+        graphersal::alloc_tracking::global_live_bytes(),
+    ));
+    let mut models_section = start_banner::Section::new("Embedding models");
+    let (models, notes) = crate::cli::served_models();
+    for model in models {
+        // The registry name queries call it by, when it is not the repository itself.
+        let name = if model.name == model.label {
+            String::new()
+        } else {
+            format!("{} = ", model.name)
+        };
+        models_section.row(
+            "model",
+            format!(
+                "{name}{}, licence {}\n{}",
+                model.label,
+                crate::cli::license_text(&model.license),
+                model.source
+            ),
+        );
+    }
+    for note in notes {
+        models_section.row("missing", note);
+    }
     let mcp = cli.mcp.then(|| {
         mcp::Mcp::new(
             cli.mcp_read_only,
@@ -417,16 +446,30 @@ pub fn run(cli: &Cli) -> i32 {
         .with_operator_notes(cli.mcp_instructions.clone())
         .with_max_chars(cli.mcp_max_chars)
     });
+    let mut server_section = start_banner::Section::new("Server");
+    server_section.row("limits", presets_summary(&presets_json));
+    server_section.unwrapped("UI", ui.banner());
     if let Some(mcp) = &mcp {
-        errln!("{}", mcp.banner(port));
+        let (endpoint, connect) = mcp.banner(port);
+        server_section.row("MCP", endpoint);
+        server_section.unwrapped("connect", connect);
     }
     #[cfg(feature = "ai")]
     if let Some(ai) = &ai {
-        errln!("{}", ai.banner());
+        server_section.row("AI Chat", ai.banner());
     }
-    if server_v6.is_some() {
-        errln!("Also listening on http://[::1]:{port}/ (IPv6 loopback)");
-    }
+    server_section.row(
+        "listening",
+        if server_v6.is_some() {
+            format!("http://127.0.0.1:{port}/ and http://[::1]:{port}/ (IPv6 loopback)")
+        } else {
+            format!("http://127.0.0.1:{port}/")
+        },
+    );
+    errln!(
+        "\n{}\n",
+        start_banner::render(&[store_section, graph_section, models_section, server_section])
+    );
     // The address is the only line on stdout (tests and scripts read it).
     // `outln!` flushes; a closed stdout loses the line and the server keeps serving.
     outln!("Graphersal dev server: http://127.0.0.1:{port}/");
@@ -532,7 +575,7 @@ pub fn session_presets(cli: &Cli) -> SessionPresets {
     presets
 }
 
-/// The stderr line that says which limits the server applies.
+/// The `limits` row of the start banner: which limits the server applies.
 fn presets_summary(presets: &Value) -> String {
     let mut parts = Vec::new();
     for section in ["options", "scriptLimits"] {
@@ -541,11 +584,10 @@ fn presets_summary(presets: &Value) -> String {
         }
     }
     if parts.is_empty() {
-        "Limits: none (start with --timeout, --memory-limit, --safe-limits, --max-* to bound \
-         queries)"
+        "none (start with --timeout, --memory-limit, --safe-limits, --max-* to bound queries)"
             .to_string()
     } else {
-        format!("Limits of every query: {}", parts.join(", "))
+        format!("of every query: {}", parts.join(", "))
     }
 }
 

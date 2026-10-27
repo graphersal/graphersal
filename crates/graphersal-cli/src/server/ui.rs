@@ -46,11 +46,11 @@ impl Ui {
         Ok(Self { dir: Some(path) })
     }
 
-    /// The start banner line: where the UI comes from.
+    /// The start banner's `UI` row: where the UI comes from.
     pub(super) fn banner(&self) -> String {
         match &self.dir {
-            None => "UI: embedded".to_string(),
-            Some(dir) => format!("UI: {} (embedded fallback)", dir.display()),
+            None => "embedded".to_string(),
+            Some(dir) => format!("{} (embedded fallback)", dir.display()),
         }
     }
 

@@ -4761,6 +4761,68 @@ mod embed_models {
     }
 
     #[test]
+    fn the_start_output_names_the_stored_models_with_their_licences() {
+        let base = fresh_dir("m2v_banner");
+        let model = base.join("model");
+        write_model(&model);
+        let store = base.join("store");
+        create_store(&store);
+        let (model_text, store_text) = (model.display().to_string(), store.display().to_string());
+        let res = run_env(
+            &[
+                "embed-model",
+                "import",
+                &model_text,
+                "--into",
+                &store_text,
+                "--repo",
+                "acme/tiny",
+                "--license",
+                "apache-2.0",
+            ],
+            &[],
+        );
+        assert_eq!(res.code, 0, "{} {}", res.stdout, res.stderr);
+
+        // A one-shot run: one note per loaded model, with its licence.
+        let res = run_env(&["--graph", &store_text, "-e", "1"], &[]);
+        assert_eq!(res.code, 0, "{}", res.stderr);
+        assert!(
+            res.stderr.contains("(licence Apache-2.0)"),
+            "{}",
+            res.stderr
+        );
+
+        // The dev server: the Embedding models section of the start banner, no loose note.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_graphersal"))
+            .args(["--graph", &store_text, "--server", "--port", "0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("graphersal starts");
+        let stderr = child.stderr.take().expect("stderr");
+        let mut banner = Vec::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line.unwrap();
+            let last = line.starts_with("  listening:");
+            banner.push(line);
+            if last {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let banner = banner.join("\n");
+        assert!(banner.contains("\n── Embedding models ──"), "{banner}");
+        assert!(
+            banner.contains("\n  model:     acme/tiny, licence Apache-2.0\n"),
+            "{banner}"
+        );
+        assert!(banner.contains("stored in"), "{banner}");
+        assert!(!banner.contains("note: loaded"), "{banner}");
+    }
+
+    #[test]
     fn an_imported_model_the_schema_names_is_loaded_when_the_store_opens() {
         let base = fresh_dir("m2v_autoload");
         let model = base.join("model");

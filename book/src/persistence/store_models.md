@@ -42,10 +42,13 @@ graphersal --graph data/ -e 'g.v().has_label("doc").nearest("emb", "connected da
  An embedder you register yourself for the same model wins (`--embedder
 potion=...`, Python `embedders=[...]`): the stored copy is not loaded then. A model the schema
 names that neither you nor the store provides is a note on stderr (Python: a `UserWarning`)
-naming the command that adds it:
+naming the command that adds it. The REPL and a one-shot run print one note per model, with its
+licence; the dev server lists the models (name, repository, licence, where each comes from) and
+these notes in the Embedding models section of its start banner instead
+([Dev Server](dev_server.md)):
 
 ```text
-note: loaded the embedding model model2vec/minishlab/potion-base-8M@fac4fa854e68 from the store data/ as minishlab/potion-base-8M
+note: loaded the embedding model model2vec/minishlab/potion-base-8M@fac4fa854e68 from the store data/ as minishlab/potion-base-8M (licence MIT)
 note: the schema names the embedding model model2vec/acme/gone@0123456789ab (doc.emb), which is neither registered nor stored in data/: add it with `graphersal embed-model download acme/gone --into data/`, or pass it with --embedder NAME=<model_dir>
 ```
 

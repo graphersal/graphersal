@@ -305,7 +305,7 @@ impl Ai {
         self.llm.config()
     }
 
-    /// The stderr line that says the AI Chat is on and where its data goes.
+    /// The start banner's `AI Chat` row: the AI Chat is on, and where its data goes.
     pub(super) fn banner(&self) -> String {
         let config = self.config();
         format!(
